@@ -1,0 +1,5 @@
+tmp/
+app/build/
+.dart_tool/
+.DS_Store
+*.log

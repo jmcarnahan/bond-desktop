@@ -1,0 +1,7 @@
+name: local_agent
+description: Minimal tool-calling agent loop against a local llama-server.
+publish_to: none
+environment:
+  sdk: ^3.5.0
+dependencies:
+  http: ^1.2.0

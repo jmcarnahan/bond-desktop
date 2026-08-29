@@ -1,0 +1,320 @@
+# bond-desktop — local orchestration for the on-device model server.
+# Runs a llama.cpp OpenAI-compatible server (Qwen 3.8 27B, Q4_K_M) on
+# :8080 and drives the Dart agent in agent/ against it. Coexists with the
+# sibling stacks: the-crm (:8001 / :3001), bond-ai (:8000 / :8002) and
+# bond-mcps (:18000-18005). Nothing here starts or stops those.
+
+# These comments sit ABOVE their assignment, never trailing after the value:
+# make keeps the whitespace between a value and a trailing `#`, so
+# `MODEL_PORT ?= 8080   # free` yields "8080          " and every
+# http://localhost:$(MODEL_PORT)/v1/... below would expand with a space in it.
+
+# Free locally; sibling stacks use 8000-8002, 18000-18005, 3001.
+MODEL_PORT   ?= 8080
+MODEL_HF     ?= ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
+# ~2GB KV cache; raise later for long agent trajectories.
+CTX_SIZE     ?= 32768
+LOG_DIR      := tmp/logs
+WAIT_TIMEOUT ?= 120
+# Total seconds `make setup` waits for the first-run ~19GB download + model load.
+SETUP_WAIT   ?= 1800
+
+# Where llama-server's -hf flag parks the weights. Hardcodes the repo half of
+# MODEL_HF (the part before the ':') — keep it in sync if MODEL_HF changes.
+MODEL_CACHE  := $(HOME)/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF
+
+GREEN  := \033[32m
+RED    := \033[31m
+YELLOW := \033[33m
+BLUE   := \033[34m
+RESET  := \033[0m
+
+.DEFAULT_GOAL := help
+.NOTPARALLEL:
+.PHONY: help install model stop status logs smoke smoke-tools chat clean \
+        setup verify clean-model _wait-model
+
+help:
+	@printf "bond-desktop — local model + agent\n\n"
+	@printf "  make setup        → install + model + wait + verify + smoke (start here)\n"
+	@printf "  make install      → brew install llama.cpp + dart pub get in agent/\n"
+	@printf "  make model        → start llama-server :$(MODEL_PORT) ($(MODEL_HF))\n"
+	@printf "  make stop         → stop the model server on :$(MODEL_PORT)\n"
+	@printf "  make status       → is the model up? [up]/[down] + pid\n"
+	@printf "  make logs         → tail $(LOG_DIR)/model.log\n"
+	@printf "  make smoke        → one chat completion against :$(MODEL_PORT)\n"
+	@printf "  make smoke-tools  → prove the model emits OpenAI tool_calls\n"
+	@printf "  make chat         → interactive Dart agent (foreground)\n"
+	@printf "  make verify       → SHA256 the downloaded weights against the HF cache\n"
+	@printf "  make clean-model  → delete the cached weights for a re-download\n"
+	@printf "  make clean        → rm $(LOG_DIR)\n\n"
+	@printf "First run downloads ~19GB of weights before the port binds —\n"
+	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
+
+install:
+	@brew list llama.cpp >/dev/null 2>&1 || brew install llama.cpp
+	@if [ -f agent/pubspec.yaml ]; then \
+	   cd agent && dart pub get; \
+	 else \
+	   printf "  $(YELLOW)[skip]$(RESET) no agent/pubspec.yaml yet — dart pub get skipped\n"; \
+	 fi
+
+# One command from a bare machine to a verified, answering model. Everything
+# it calls is idempotent, so re-running it on a live server is a no-op plus
+# two smoke tests.
+#
+# The `-` on the model line is load-bearing: on a first run `make model`
+# launches llama-server and then exits NON-ZERO after WAIT_TIMEOUT seconds
+# because the ~19GB download has not finished and the port is not bound yet.
+# That is the expected first-run outcome, not a failure — the download keeps
+# going in the background and the poll below is what actually waits for it.
+setup:
+	@printf "$(BLUE)==>$(RESET) [1/5] installing prerequisites\n"
+	@$(MAKE) --no-print-directory install
+	@printf "$(BLUE)==>$(RESET) [2/5] model server on :$(MODEL_PORT)\n"
+	-@if curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health; then \
+	   printf "  $(GREEN)✓$(RESET) model already up — skipping launch\n"; \
+	 else \
+	   $(MAKE) --no-print-directory model; \
+	 fi
+	@printf "$(BLUE)==>$(RESET) [3/5] waiting for /health (up to $(SETUP_WAIT)s)\n"
+	@waited=0; \
+	 while [ $$waited -lt $(SETUP_WAIT) ]; do \
+	   if curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health; then \
+	     printf "  $(GREEN)✓$(RESET) /health answering after %ss\n" "$$waited"; \
+	     exit 0; \
+	   fi; \
+	   sleep 10; \
+	   waited=$$((waited + 10)); \
+	   if [ $$((waited % 60)) -eq 0 ]; then \
+	     printf "  $(YELLOW)…$(RESET) still downloading/loading — %ss elapsed (watch: make logs)\n" "$$waited"; \
+	   fi; \
+	 done; \
+	 printf "  $(RED)✗$(RESET) model never answered /health in $(SETUP_WAIT)s\n"; \
+	 printf "    check the server log:  make logs\n"; \
+	 exit 1
+	@printf "$(BLUE)==>$(RESET) [4/5] verifying the downloaded weights\n"
+	@$(MAKE) --no-print-directory verify
+	@printf "$(BLUE)==>$(RESET) [5/5] smoke test\n"
+	@$(MAKE) --no-print-directory smoke
+	@printf "$(GREEN)setup complete — try: make chat$(RESET)\n"
+
+# -ngl 99 offloads every layer to Metal; --jinja is required for the model's
+# own chat template (and therefore for tool calling — see `make smoke-tools`).
+# The weights live in llama.cpp's HF cache, not this repo, so `make clean`
+# never touches them.
+#
+# The launch and the wait are SEPARATE recipe lines on purpose. make executes
+# any line containing $(MAKE) even under `make -n`, so folding both into one
+# shell command would make a dry run actually start the server (and the ~19GB
+# download). Split like this, `make -n model` only dry-runs.
+#
+# Line 1 is therefore silent when the server is already up: it just skips the
+# launch and falls through to _wait-model, which finds the port bound on its
+# first probe and prints the single "✓ model bound" line. One status line for
+# both the already-up and the fresh-start case.
+#
+# A foreign process on :$(MODEL_PORT) is a hard error, not an "already up" —
+# exiting non-zero here also stops make before line 2, so _wait-model never
+# gets to report someone else's listener as our model.
+model:
+	@pid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -n "$$pid" ]; then \
+	   cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	   case "$$cmd" in \
+	     *llama-server*) exit 0 ;; \
+	     *) printf "  $(YELLOW)!$(RESET) :$(MODEL_PORT) is held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd"; \
+	        printf "    not ours to reuse — free it, or: make model MODEL_PORT=<other>\n"; \
+	        exit 1 ;; \
+	   esac; \
+	 fi; \
+	 mkdir -p $(LOG_DIR); \
+	 printf "→ llama-server on :$(MODEL_PORT)  ($(MODEL_HF), ctx $(CTX_SIZE))\n"; \
+	 nohup llama-server -hf $(MODEL_HF) --jinja -ngl 99 -c $(CTX_SIZE) --port $(MODEL_PORT) \
+	   > $(LOG_DIR)/model.log 2>&1 &
+	@$(MAKE) --no-print-directory _wait-model
+
+# Port-based, and command-matched rather than cwd-matched: the binary lives
+# in /opt/homebrew and is launched via nohup, so neither its command line nor
+# its cwd mentions this checkout. Matching on "llama-server" is what keeps us
+# from killing a sibling stack that happens to hold :$(MODEL_PORT).
+#
+# The port is not enough on its own, though: on a first run llama-server
+# spends many minutes pulling ~19GB of weights BEFORE it opens the port, so a
+# purely port-based stop cannot cancel exactly the case a user most wants to
+# cancel. Hence the pgrep -x fallback below — reached only when nothing holds
+# :$(MODEL_PORT), so it can never pre-empt the foreign-process check.
+stop:
+	@pid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -z "$$pid" ]; then \
+	   dl=$$(pgrep -x llama-server 2>/dev/null | tr '\n' ' '); \
+	   if [ -z "$$dl" ]; then \
+	     printf "  $(RED)[down]$(RESET) nothing to stop on :$(MODEL_PORT)\n"; \
+	     exit 0; \
+	   fi; \
+	   for p in $$dl; do kill -TERM $$p 2>/dev/null || true; done; \
+	   for i in 1 2 3 4 5 6 7 8 9 10; do \
+	     alive=""; \
+	     for p in $$dl; do kill -0 $$p 2>/dev/null && alive="$$alive $$p"; done; \
+	     [ -z "$$alive" ] && break; \
+	     sleep 1; \
+	   done; \
+	   alive=""; \
+	   for p in $$dl; do kill -0 $$p 2>/dev/null && alive="$$alive $$p"; done; \
+	   if [ -n "$$alive" ]; then \
+	     printf "  $(RED)✗$(RESET) llama-server still alive after 10s (pid%s)\n" "$$alive"; \
+	     exit 1; \
+	   fi; \
+	   for p in $$dl; do \
+	     printf "  $(YELLOW)!$(RESET) stopped llama-server (pid %s) — it had not bound :$(MODEL_PORT) yet (downloading/loading)\n" "$$p"; \
+	   done; \
+	   exit 0; \
+	 fi; \
+	 cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	 case "$$cmd" in \
+	   *llama-server*) ;; \
+	   *) printf "  $(YELLOW)[skip]$(RESET) :$(MODEL_PORT) held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd" >&2; \
+	      exit 0 ;; \
+	 esac; \
+	 printf "  stopping llama-server :$(MODEL_PORT) (pid %s)\n" "$$pid"; \
+	 kill -TERM $$pid 2>/dev/null || true; \
+	 for i in 1 2 3 4 5 6 7 8 9 10; do \
+	   rem=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	   [ -z "$$rem" ] && break; \
+	   sleep 1; \
+	 done; \
+	 rem=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	 if [ -n "$$rem" ]; then \
+	   printf "  $(RED)✗$(RESET) :$(MODEL_PORT) still held after 10s (pid %s)\n" "$$rem"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) :$(MODEL_PORT) free\n"
+
+# pgrep -x, NOT `ps ax | grep llama-server`: this recipe's own /bin/sh -c
+# command line contains the literal string "llama-server" (in the printf
+# below), and ps shows that shell, so a full-command-line grep matches the
+# recipe that is running it — the "loading" warning then fires on every
+# `make status`, even with no server anywhere. -x matches the executable
+# name only, which is the thing we actually mean.
+status:
+	@printf "$(BLUE)=== bond-desktop ===$(RESET)\n"
+	@pid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -n "$$pid" ]; then \
+	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "model" "$(MODEL_PORT)" "$$pid"; \
+	 else \
+	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "model" "$(MODEL_PORT)"; \
+	   lpid=$$(pgrep -x llama-server 2>/dev/null | head -1); \
+	   if [ -n "$$lpid" ]; then \
+	     printf "  $(YELLOW)[..]$(RESET)   llama-server (pid %s) is loading/downloading — watch: make logs\n" "$$lpid"; \
+	   fi; \
+	 fi
+
+logs:
+	@test -f $(LOG_DIR)/model.log || { \
+	   printf "$(RED)✗$(RESET) no $(LOG_DIR)/model.log — run: make model\n"; exit 1; }
+	@tail -f $(LOG_DIR)/model.log
+
+smoke:
+	@resp=$$(curl -sf -X POST http://localhost:$(MODEL_PORT)/v1/chat/completions \
+	   -H 'Content-Type: application/json' \
+	   -d '{"model":"qwen3.8","messages":[{"role":"user","content":"Reply with one short sentence confirming you are running locally."}],"reasoning_effort":"low","max_tokens":256}') \
+	 || { printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }; \
+	 printf '%s' "$$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"])'
+
+# Tool calling is the whole point of the local model, so this is a gate, not a
+# demo: it exits non-zero when the model answers in prose instead of emitting
+# an OpenAI tool_calls block. Needs llama-server's --jinja (see `model:`).
+smoke-tools:
+	@resp=$$(curl -sf -X POST http://localhost:$(MODEL_PORT)/v1/chat/completions \
+	   -H 'Content-Type: application/json' \
+	   -d '{"model":"qwen3.8","messages":[{"role":"user","content":"What time is it right now? Use the tool."}],"tools":[{"type":"function","function":{"name":"get_current_time","description":"Get the current local time as an ISO 8601 timestamp","parameters":{"type":"object","properties":{},"required":[]}}}],"tool_choice":"auto","reasoning_effort":"low","max_tokens":512}') \
+	 || { printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }; \
+	 printf '%s' "$$resp" | python3 -c 'import json,sys; m=json.load(sys.stdin)["choices"][0]["message"]; tc=m.get("tool_calls") or []; print("TOOL_CALLS OK\n"+json.dumps(tc,indent=2)) if tc else (print("NO TOOL_CALLS\n"+(m.get("content") or "")), sys.exit(1))'
+
+chat:
+	@test -f agent/bin/chat.dart || { \
+	   printf "$(RED)✗$(RESET) agent/bin/chat.dart not found — the Dart agent isn't in place yet\n"; exit 1; }
+	@cd agent && dart run bin/chat.dart
+
+clean:
+	@rm -rf $(LOG_DIR)
+	@printf "removed $(LOG_DIR)\n"
+
+# This exists because a corrupt download does NOT announce itself. A
+# concurrent writer once clobbered the 19GB blob mid-pull and every cheap
+# check passed afterwards: the file was full length, llama-server mmap'd it
+# and loaded without an error, the port bound, /health returned 200 — and the
+# model emitted endless '0's. Hashing is the only reliable detector.
+#
+# It is also nearly free to do: HF's cache is content-addressed, so each file
+# in blobs/ is named by its own SHA256 and the expected hash is the basename.
+# No manifest to fetch, no network.
+verify:
+	@test -d $(MODEL_CACHE)/blobs || { \
+	   printf "$(RED)✗$(RESET) no model downloaded yet — run: make setup\n"; exit 1; }
+	@printf "  hashing %s of blobs, takes a minute…\n" \
+	   "$$(du -sh $(MODEL_CACHE)/blobs 2>/dev/null | cut -f1)"
+	@bad=0; n=0; \
+	 for f in $(MODEL_CACHE)/blobs/*; do \
+	   [ -f "$$f" ] || continue; \
+	   n=$$((n + 1)); \
+	   want=$$(basename "$$f"); \
+	   got=$$(shasum -a 256 "$$f" | awk '{print $$1}'); \
+	   size=$$(du -h "$$f" | cut -f1); \
+	   if [ "$$got" = "$$want" ]; then \
+	     printf "  $(GREEN)✓$(RESET) %6s  %s\n" "$$size" "$$want"; \
+	   else \
+	     printf "  $(RED)✗$(RESET) %6s  %s\n" "$$size" "$$want"; \
+	     printf "        got %s\n" "$$got"; \
+	     bad=1; \
+	   fi; \
+	 done; \
+	 if [ $$n -eq 0 ]; then \
+	   printf "$(RED)✗$(RESET) no model downloaded yet — run: make setup\n"; exit 1; \
+	 fi; \
+	 if [ $$bad -ne 0 ]; then \
+	   printf "  $(RED)corrupt download — run: make clean-model && make model$(RESET)\n"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) %s blob(s) match their SHA256\n" "$$n"
+
+# Refuses to run while llama-server is alive, and not just out of tidiness:
+# the weights are mmap'd, so rm-ing them under a live server unlinks the
+# directory entries while the process keeps the inodes pinned — the ~19GB
+# stays consumed until it exits, and a re-download racing the still-open old
+# file is precisely how you manufacture the silent corruption `make verify`
+# exists to catch.
+clean-model:
+	@if pgrep -x llama-server >/dev/null 2>&1; then \
+	   printf "  $(RED)✗$(RESET) llama-server is running — make stop first\n"; \
+	   exit 1; \
+	 fi
+	@if [ ! -d $(MODEL_CACHE) ]; then \
+	   printf "  nothing to remove — no $(MODEL_CACHE)\n"; \
+	   exit 0; \
+	 fi; \
+	 printf "  removing %s (%s)\n" "$(MODEL_CACHE)" \
+	   "$$(du -sh $(MODEL_CACHE) 2>/dev/null | cut -f1)"; \
+	 rm -rf $(MODEL_CACHE); \
+	 printf "  $(GREEN)✓$(RESET) removed — the next 'make model' re-downloads ~19GB\n"
+
+# Not a plain timeout: on a cold machine llama-server spends many minutes
+# pulling ~19GB of weights BEFORE it opens the port, so failing here is the
+# expected first-run outcome and the message says so rather than reading as
+# a crash.
+_wait-model:
+	@for i in $$(seq 1 $(WAIT_TIMEOUT)); do \
+	   pid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	   if [ -n "$$pid" ]; then \
+	     printf "  $(GREEN)✓$(RESET) model bound :$(MODEL_PORT) (pid $$pid)\n"; \
+	     exit 0; \
+	   fi; \
+	   sleep 1; \
+	 done; \
+	 printf "  $(YELLOW)!$(RESET) model has not bound :$(MODEL_PORT) after $(WAIT_TIMEOUT)s\n"; \
+	 printf "    On the FIRST run this is EXPECTED, not a failure: llama-server\n"; \
+	 printf "    downloads ~19GB of weights for $(MODEL_HF)\n"; \
+	 printf "    before it binds the port.\n"; \
+	 printf "    Watch it:   make logs\n"; \
+	 printf "    'make status' flips to [up] once loading finishes.\n"; \
+	 exit 1
