@@ -30,7 +30,13 @@ class _EmailBubbleState extends State<EmailBubble> {
   static final _cidToken = RegExp(r'[ \t]*\[cid:[^\]]+\][ \t]*');
 
   String get _body {
-    final raw = widget.message.bodyText ?? '';
+    // The preview stands in until the body arrives: bodies are fetched per
+    // thread on open, and a bubble with nothing in it reads as an empty
+    // message rather than as one still loading.
+    final bodyText = widget.message.bodyText;
+    final raw = (bodyText == null || bodyText.isEmpty)
+        ? (widget.message.bodyPreview ?? '')
+        : bodyText;
     if (!raw.contains('[cid:')) return raw;
     return raw
         .replaceAll(_cidToken, '')

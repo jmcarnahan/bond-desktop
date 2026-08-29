@@ -1,13 +1,28 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'data/db.dart';
 import 'providers/app_providers.dart';
 import 'screens/inbox_screen.dart';
 import 'screens/sign_in_screen.dart';
 import 'theme/bond_theme.dart';
 
-void main() {
-  runApp(const ProviderScope(child: BondInboxApp()));
+Future<void> main() async {
+  // Required before path_provider's platform channel can be called, which
+  // openAppDb does.
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Opened once, here, rather than lazily behind a provider: the open is
+  // async, every screen needs it, and a database that cannot be opened is a
+  // launch failure, not something to discover three screens in.
+  final db = await openAppDb();
+
+  runApp(
+    ProviderScope(
+      overrides: [dbProvider.overrideWithValue(db)],
+      child: const BondInboxApp(),
+    ),
+  );
 }
 
 class BondInboxApp extends StatelessWidget {

@@ -32,6 +32,11 @@ class MessageStore {
   /// lighter payload (a delta that carries no body) cannot erase a body
   /// already stored, and it never touches the triage columns — those belong
   /// to [writeTriage], and a re-sync must not undo a completed triage.
+  ///
+  /// `triage_status` / `gate_reason` are honoured on INSERT only, which is
+  /// what makes the sync's backlog rule ("everything older than a week
+  /// arrives already skipped") safe to evaluate on every page: a message
+  /// seen again — or already triaged — keeps whatever it has.
   void upsertMessage(Map<String, Object?> row) {
     final now = _nowIso();
     db.execute(
@@ -40,8 +45,9 @@ INSERT INTO messages (
   source, source_message_id, internet_message_id, conversation_key, direction,
   subject, from_name, from_address, to_json, received_at, is_read,
   body_preview, body_text, has_attachments, source_meta_json,
+  triage_status, gate_reason,
   created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(source, source_message_id) DO UPDATE SET
   is_read = excluded.is_read,
   subject = COALESCE(excluded.subject, messages.subject),
@@ -65,8 +71,52 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
         row['body_text'],
         row['has_attachments'] ?? 0,
         row['source_meta_json'],
+        row['triage_status'] ?? 'pending',
+        row['gate_reason'],
         row['created_at'] ?? now,
         row['updated_at'] ?? now,
+      ],
+    );
+  }
+
+  /// Whether this `(source, id)` is already stored.
+  ///
+  /// Asked BEFORE the upsert, because afterwards there is no way to tell an
+  /// insert from a conflict — and the sync needs to know, since a message
+  /// must be folded into its conversation exactly once no matter how many
+  /// times a delta feed replays it.
+  bool hasMessage(String source, String sourceMessageId) {
+    final result = db.select(
+      'SELECT 1 FROM messages WHERE source = ? AND source_message_id = ? LIMIT 1',
+      [source, sourceMessageId],
+    );
+    return result.isNotEmpty;
+  }
+
+  /// Writes what only the per-message detail fetch knows. Every column
+  /// COALESCEs against itself, so a detail call that came back thin cannot
+  /// blank a body, a header set, or an attachment flag already stored.
+  void updateMessageDetail(
+    String source,
+    String sourceMessageId, {
+    String? bodyText,
+    bool? hasAttachments,
+    String? sourceMetaJson,
+  }) {
+    db.execute(
+      'UPDATE messages SET '
+      'body_text = COALESCE(?, body_text), '
+      'has_attachments = COALESCE(?, has_attachments), '
+      'source_meta_json = COALESCE(?, source_meta_json), '
+      'updated_at = ? '
+      'WHERE source = ? AND source_message_id = ?',
+      [
+        bodyText,
+        hasAttachments == null ? null : (hasAttachments ? 1 : 0),
+        sourceMetaJson,
+        _nowIso(),
+        source,
+        sourceMessageId,
       ],
     );
   }
@@ -132,6 +182,46 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
         row['created_at'] ?? now,
         row['updated_at'] ?? now,
       ],
+    );
+  }
+
+  /// One conversation row as stored, or null. The sync reads this before it
+  /// folds a message so the state machine can see the thread's own history —
+  /// including a `done` a human set, which no incoming message may quietly
+  /// overwrite.
+  Map<String, Object?>? getConversationRow(String source, String conversationKey) {
+    final result = db.select(
+      'SELECT * FROM conversations WHERE source = ? AND conversation_key = ?',
+      [source, conversationKey],
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first);
+  }
+
+  /// Recounts one thread from the messages table.
+  ///
+  /// Counts are derived, never incremented: a delta page can replay messages
+  /// already stored, and an incremented counter would drift a little further
+  /// on every replay with nothing to correct it.
+  void recomputeConversationCounts(String source, String conversationKey) {
+    db.execute(
+      '''
+UPDATE conversations SET
+  message_count = (
+    SELECT COUNT(*) FROM messages
+    WHERE messages.source = conversations.source
+      AND messages.conversation_key = conversations.conversation_key
+  ),
+  inbound_count = (
+    SELECT COUNT(*) FROM messages
+    WHERE messages.source = conversations.source
+      AND messages.conversation_key = conversations.conversation_key
+      AND messages.direction = 'inbound'
+  ),
+  updated_at = ?
+WHERE source = ? AND conversation_key = ?
+''',
+      [_nowIso(), source, conversationKey],
     );
   }
 
@@ -227,6 +317,30 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
     );
     if (result.isEmpty) return null;
     return Map<String, Object?>.from(result.first);
+  }
+
+  /// Demotes every pending inbound message except the newest [cap] to
+  /// `skipped` / `backlog`.
+  ///
+  /// A first sync of a real mailbox lands thousands of messages at once.
+  /// Triaging all of them would burn hours of model time on mail the LO
+  /// stopped caring about weeks ago, so only the freshest slice stays in the
+  /// queue. Nothing is deleted — a skipped message still renders, it just
+  /// never reaches the model.
+  void capPendingTriage(int cap, {String source = 'email'}) {
+    db.execute(
+      '''
+UPDATE messages SET triage_status = 'skipped', gate_reason = 'backlog',
+  updated_at = ?
+WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
+  AND source_message_id NOT IN (
+    SELECT source_message_id FROM messages
+    WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
+    ORDER BY received_at DESC LIMIT ?
+  )
+''',
+      [_nowIso(), source, source, cap],
+    );
   }
 
   /// Records the outcome of one triage attempt. Only the fields this call

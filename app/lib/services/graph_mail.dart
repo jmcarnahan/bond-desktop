@@ -1,0 +1,223 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:http/http.dart' as http;
+
+import 'graph_auth.dart';
+
+/// The Microsoft Graph mail reads this app makes: a delta drain per folder,
+/// and a per-message body fetch. Nothing here touches sqlite — [SyncService]
+/// owns the writes.
+///
+/// Auth failures pass through UNWRAPPED. [NotSignedIn] and [ReconsentRequired]
+/// mean the session is over and the UI must route to sign-in; a plain
+/// [AuthException] is transient. Wrapping any of them in a
+/// [GraphMailException] here would erase that distinction.
+
+/// Graph refused the delta cursor (HTTP 410): the token is older than the
+/// server's change history and only a fresh drain can recover.
+class DeltaResyncRequired implements Exception {
+  const DeltaResyncRequired();
+
+  @override
+  String toString() => 'The mail sync cursor expired and must be rebuilt.';
+}
+
+/// Any other failed Graph mail call. [message] is safe to show a user.
+class GraphMailException implements Exception {
+  final String message;
+  final int? statusCode;
+
+  const GraphMailException(this.message, [this.statusCode]);
+
+  @override
+  String toString() => message;
+}
+
+/// One page of a delta drain. Exactly one of [nextLink] / [deltaLink] is set
+/// in practice: more pages to walk, or the cursor to store for next time.
+class DeltaPage {
+  final List<Map<String, dynamic>> messages;
+  final String? nextLink;
+  final String? deltaLink;
+
+  const DeltaPage({
+    this.messages = const [],
+    this.nextLink,
+    this.deltaLink,
+  });
+}
+
+class GraphMail {
+  static const String _base = 'https://graph.microsoft.com/v1.0';
+
+  /// Tier one of the two-tier fetch: enough to list, sort, and thread a
+  /// message, and no body. Delta pages carry hundreds of messages, so the
+  /// bodies stay behind [getMessageDetail] and are fetched only for threads
+  /// the user actually opens.
+  static const String _deltaSelect = 'id,internetMessageId,conversationId,'
+      'subject,from,toRecipients,receivedDateTime,isRead,isDraft,bodyPreview';
+
+  /// Tier two. `uniqueBody` is the part of the message that is NOT quoted
+  /// thread — Graph computes it server-side, and with the Prefer header
+  /// below it arrives as plain text already converted from HTML. That is the
+  /// entire reason this app never parses mail HTML itself.
+  static const String _detailSelect =
+      'id,uniqueBody,internetMessageHeaders,hasAttachments';
+
+  static const Map<String, String> _plainTextBody = {
+    'Prefer': 'outlook.body-content-type="text"',
+  };
+
+  /// A 429 with no parseable Retry-After waits this long; anything Graph
+  /// asks for above [_maxBackoff] is clamped, since a sync that sleeps for
+  /// minutes is indistinguishable from a hung app.
+  static const Duration _defaultBackoff = Duration(seconds: 5);
+  static const Duration _maxBackoff = Duration(seconds: 60);
+
+  final GraphAuth _auth;
+  final http.Client _http;
+
+  GraphMail(this._auth, {http.Client? httpClient})
+      : _http = httpClient ?? http.Client();
+
+  /// One page of `/messages/delta` for [folder] ('inbox', 'sentitems').
+  ///
+  /// [link] is an opaque `@odata.nextLink` or `@odata.deltaLink` from a
+  /// previous page and is fetched VERBATIM — it already carries the select
+  /// and filter the drain started with, and rebuilding it would silently
+  /// change the query mid-drain. [minReceivedIso] applies only to a drain
+  /// starting from scratch.
+  Future<DeltaPage> deltaPage(
+    String folder, {
+    String? link,
+    String? minReceivedIso,
+  }) async {
+    final uri = link != null
+        ? Uri.parse(link)
+        : _deltaUri(folder, minReceivedIso);
+
+    final response = await _send(uri);
+
+    if (response.statusCode == 410) throw const DeltaResyncRequired();
+    if (response.statusCode != 200) {
+      throw _describe(response, 'Could not read mail from Microsoft Graph');
+    }
+
+    final json = _decodeObject(response);
+    final value = json['value'];
+    return DeltaPage(
+      messages: [
+        for (final item in value is List ? value : const [])
+          if (item is Map<String, dynamic>) item,
+      ],
+      nextLink: json['@odata.nextLink'] as String?,
+      deltaLink: json['@odata.deltaLink'] as String?,
+    );
+  }
+
+  /// The full body and headers for one message.
+  Future<Map<String, dynamic>> getMessageDetail(String id) async {
+    final uri = Uri.parse('$_base/me/messages/${Uri.encodeComponent(id)}')
+        .replace(query: '\$select=${Uri.encodeComponent(_detailSelect)}');
+
+    final response = await _send(uri, headers: _plainTextBody);
+    if (response.statusCode != 200) {
+      throw _describe(response, 'Could not read a message from Microsoft Graph');
+    }
+    return _decodeObject(response);
+  }
+
+  /// Built by hand rather than through `queryParameters`, which encodes a
+  /// space as `+`. Graph's OData parser wants `%20` in a `$filter`.
+  Uri _deltaUri(String folder, String? minReceivedIso) {
+    final query = StringBuffer(
+      '\$select=${Uri.encodeComponent(_deltaSelect)}',
+    );
+    if (minReceivedIso != null && minReceivedIso.isNotEmpty) {
+      final filter = 'receivedDateTime ge $minReceivedIso';
+      query.write('&\$filter=${Uri.encodeComponent(filter)}');
+    }
+    return Uri.parse('$_base/me/mailFolders/$folder/messages/delta')
+        .replace(query: query.toString());
+  }
+
+  /// A GET with the bearer token attached, retrying at most once for a
+  /// throttle and once for a 401.
+  Future<http.Response> _send(
+    Uri uri, {
+    Map<String, String> headers = const {},
+  }) async {
+    var retriedThrottle = false;
+    var retriedAuth = false;
+
+    while (true) {
+      // Outside the try: an AuthException from here is not a transport
+      // failure and must reach the caller as itself.
+      final token = await _auth.getValidAccessToken();
+
+      final http.Response response;
+      try {
+        response = await _http.get(uri, headers: {
+          'Authorization': 'Bearer $token',
+          ...headers,
+        });
+      } on http.ClientException catch (e) {
+        throw GraphMailException('Could not reach Microsoft Graph: ${e.message}');
+      } on SocketException catch (e) {
+        throw GraphMailException('Could not reach Microsoft Graph: ${e.message}');
+      }
+
+      if (response.statusCode == 429 && !retriedThrottle) {
+        retriedThrottle = true;
+        await Future.delayed(_retryAfter(response));
+        continue;
+      }
+      // A token that was valid when it was minted can still be rejected —
+      // a revoked session, a changed password. One more pass gives the
+      // refresh a chance to have happened on another caller's behalf; a
+      // second 401 is a real answer, not a race.
+      if (response.statusCode == 401 && !retriedAuth) {
+        retriedAuth = true;
+        continue;
+      }
+      return response;
+    }
+  }
+
+  static Duration _retryAfter(http.Response response) {
+    final raw = response.headers['retry-after'];
+    final seconds = raw == null ? null : int.tryParse(raw.trim());
+    if (seconds == null || seconds < 0) return _defaultBackoff;
+    final asked = Duration(seconds: seconds);
+    return asked > _maxBackoff ? _maxBackoff : asked;
+  }
+
+  /// Graph puts the useful part of a failure in the body, so a snippet of it
+  /// goes in the message — an HTTP number alone has never been enough to
+  /// tell a bad filter from an expired consent.
+  static GraphMailException _describe(http.Response response, String prefix) {
+    final body = utf8.decode(response.bodyBytes, allowMalformed: true);
+    final snippet = body.length > 300 ? '${body.substring(0, 300)}…' : body;
+    return GraphMailException(
+      '$prefix (HTTP ${response.statusCode}).'
+      '${snippet.isEmpty ? '' : ' $snippet'}',
+      response.statusCode,
+    );
+  }
+
+  /// Graph answers `application/json` with no charset, which makes `http`'s
+  /// `body` getter fall back to latin-1 and mangle non-ASCII names and
+  /// bodies. Decoding the bytes is the only correct read — same reason as
+  /// the identical helper in graph_auth.dart.
+  static Map<String, dynamic> _decodeObject(http.Response response) {
+    try {
+      final decoded =
+          jsonDecode(utf8.decode(response.bodyBytes, allowMalformed: true));
+      return decoded is Map<String, dynamic> ? decoded : const {};
+    } on FormatException {
+      return const {};
+    }
+  }
+}

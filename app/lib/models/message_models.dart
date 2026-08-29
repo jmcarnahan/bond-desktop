@@ -215,6 +215,11 @@ class Message {
   final String? subject;
   final String? bodyText;
 
+  /// The sender-side snippet a delta page carries. Bodies are fetched one
+  /// thread at a time, so this is what a message has to show for itself
+  /// between landing in the list and being opened.
+  final String? bodyPreview;
+
   /// Why the triage gate skipped this message (bulk sender, no body, …).
   final String? gateReason;
 
@@ -239,6 +244,7 @@ class Message {
     this.receivedAt,
     this.subject,
     this.bodyText,
+    this.bodyPreview,
     this.gateReason,
     this.urgency,
     this.category,
@@ -266,6 +272,7 @@ class Message {
       receivedAt: json['received_at'] as String?,
       subject: json['subject'] as String?,
       bodyText: json['body_text'] as String?,
+      bodyPreview: json['body_preview'] as String?,
       gateReason: json['gate_reason'] as String?,
       urgency: json['urgency'] as String?,
       category: json['category'] as String?,
@@ -294,6 +301,7 @@ class Message {
       receivedAt: row['received_at'] as String?,
       subject: row['subject'] as String?,
       bodyText: row['body_text'] as String?,
+      bodyPreview: row['body_preview'] as String?,
       gateReason: row['gate_reason'] as String?,
       urgency: row['urgency'] as String?,
       category: row['category'] as String?,
