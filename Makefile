@@ -23,6 +23,12 @@ SETUP_WAIT   ?= 1800
 # MODEL_HF (the part before the ':') — keep it in sync if MODEL_HF changes.
 MODEL_CACHE  := $(HOME)/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF
 
+APP_DIR := app
+# Overridable because flutter is often absent from make's PATH even when the
+# user's interactive shell has it (e.g. a PATH export in ~/.zshrc that a
+# non-interactive /bin/sh never reads): make app-test FLUTTER=/path/to/flutter
+FLUTTER ?= flutter
+
 GREEN  := \033[32m
 RED    := \033[31m
 YELLOW := \033[33m
@@ -32,7 +38,8 @@ RESET  := \033[0m
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
-        setup verify clean-model _wait-model
+        setup verify clean-model _wait-model \
+        app-install app-run app-test app-analyze app-build
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -48,6 +55,9 @@ help:
 	@printf "  make verify       → SHA256 the downloaded weights against the HF cache\n"
 	@printf "  make clean-model  → delete the cached weights for a re-download\n"
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
+	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
+	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
+	@printf "  make app-build    → release build of the macOS app\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
 
@@ -239,6 +249,26 @@ chat:
 clean:
 	@rm -rf $(LOG_DIR)
 	@printf "removed $(LOG_DIR)\n"
+
+# ── $(APP_DIR)/ — the Flutter desktop inbox ────────────────────────────
+# Independent of the model server above: the app runs on fixtures and does
+# not talk to :$(MODEL_PORT) yet.
+
+app-install:
+	@cd $(APP_DIR) && $(FLUTTER) pub get
+
+app-run:
+	@cd $(APP_DIR) && $(FLUTTER) run -d macos
+
+app-test:
+	@cd $(APP_DIR) && $(FLUTTER) test
+
+app-analyze:
+	@cd $(APP_DIR) && $(FLUTTER) analyze
+
+app-build:
+	@cd $(APP_DIR) && $(FLUTTER) build macos --release
+	@printf "  $(GREEN)✓$(RESET) $(APP_DIR)/build/macos/Build/Products/Release/bond_inbox.app\n"
 
 # This exists because a corrupt download does NOT announce itself. A
 # concurrent writer once clobbered the 19GB blob mid-pull and every cheap
