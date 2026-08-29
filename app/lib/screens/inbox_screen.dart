@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/fixtures.dart';
 import '../models/message_models.dart';
+import '../providers/app_providers.dart';
+import '../services/graph_auth.dart';
 import '../theme/tokens.dart';
 import '../widgets/chips.dart';
 import '../widgets/conversation_list_pane.dart';
@@ -15,7 +17,11 @@ import '../widgets/thread_detail_panel.dart';
 /// copy so Mark done has something to change. Phase 3 swaps this for the
 /// sqlite-backed providers; nothing below the screen changes when it does.
 class InboxScreen extends ConsumerStatefulWidget {
-  const InboxScreen({super.key});
+  /// Fired after the stored credentials are cleared, so the gate above can
+  /// swap back to the sign-in screen.
+  final VoidCallback? onSignedOut;
+
+  const InboxScreen({super.key, this.onSignedOut});
 
   @override
   ConsumerState<InboxScreen> createState() => _InboxScreenState();
@@ -31,6 +37,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   late List<Conversation> _conversations = List.of(fixtureConversations);
   InboxFilter _filter = InboxFilter.open;
   String? _selectedId;
+
+  late final Future<AccountInfo?> _account =
+      ref.read(graphAuthProvider).storedAccount;
+
+  Future<void> _signOut() async {
+    await ref.read(graphAuthProvider).signOut();
+    widget.onSignedOut?.call();
+  }
 
   Conversation? get _selected {
     for (final c in _conversations) {
@@ -93,6 +107,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
           onPressed: null,
           icon: Icon(Icons.refresh),
           tooltip: 'Refresh (not connected yet)',
+        ),
+        FutureBuilder<AccountInfo?>(
+          future: _account,
+          builder: (context, snapshot) {
+            final name = snapshot.data?.displayName ?? '';
+            if (name.isEmpty) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(left: BondSpacing.s8),
+              child: Text(name, style: BondType.caption),
+            );
+          },
+        ),
+        const SizedBox(width: BondSpacing.s8),
+        TextButton(
+          onPressed: _signOut,
+          child: Text('Sign out', style: BondType.caption),
         ),
       ],
     );
