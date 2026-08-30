@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';

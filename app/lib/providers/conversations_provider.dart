@@ -8,7 +8,7 @@ import '../models/message_models.dart';
 import '../services/ai_worker.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
-import '../services/graph_auth.dart';
+import '../services/backend/backend_types.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
@@ -527,7 +527,7 @@ final conversationsProvider =
     attention: ref.watch(attentionServiceProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
-    userAddress: ref.watch(graphAuthProvider).storedAccount.then(
+    userAddress: ref.watch(authSessionProvider).storedAccount.then(
           (account) => account?.mail ?? account?.userPrincipalName,
         ),
   ),

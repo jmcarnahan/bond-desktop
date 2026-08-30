@@ -2,7 +2,7 @@ import 'dart:async';
 
 import '../data/message_store.dart';
 import 'drain_gate.dart';
-import 'graph_auth.dart';
+import 'backend/backend_types.dart';
 import 'llm/llm_client.dart';
 
 /// How much work of one kind is left, as of the last item the worker

@@ -10,7 +10,7 @@ import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
-import '../services/graph_auth.dart';
+import '../services/backend/backend_types.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/app_rail.dart';
@@ -104,13 +104,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   bool _leaving = false;
 
   late final Future<AccountInfo?> _account =
-      ref.read(graphAuthProvider).storedAccount;
+      ref.read(authSessionProvider).storedAccount;
 
   /// Whether the tenant granted `Chat.Read`. Read once — it is a keychain
   /// read, and the answer cannot change without a fresh sign-in, which
   /// rebuilds this screen.
   late final Future<bool> _teamsGranted =
-      ref.read(graphAuthProvider).hasScope('chat.read');
+      ref.read(authSessionProvider).hasScope('chat.read');
 
   @override
   void initState() {
@@ -186,7 +186,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   Future<void> _signOut() async {
-    await ref.read(graphAuthProvider).signOut();
+    await ref.read(authSessionProvider).signOut();
     // The keychain is not the only thing holding this account: the sqlite
     // file holds its mailbox, and the providers hold that in memory. A
     // different account signing in next must find neither — mail from two
@@ -578,7 +578,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Future<void> _openSettings() async {
     final prefs = ref.read(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
-    final auth = ref.read(graphAuthProvider);
+    final auth = ref.read(authSessionProvider);
     await showDialog<void>(
       context: context,
       builder: (context) => SettingsDialog(

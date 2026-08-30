@@ -4,6 +4,9 @@ import 'package:sqlite3/sqlite3.dart';
 import '../data/message_store.dart';
 import '../services/ai_worker.dart';
 import '../services/attention_service.dart';
+import '../services/backend/auth_session.dart';
+import '../services/backend/mail_backend.dart';
+import '../services/backend/teams_backend.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
 import '../services/extract_handler.dart';
@@ -20,8 +23,18 @@ import '../services/triage_queue.dart';
 
 /// One [GraphAuth] for the whole app. Sharing the instance is what makes the
 /// in-memory access token and the single-flight refresh guard mean anything —
-/// a second instance would hold its own copy of both.
+/// a second instance would hold its own copy of both, and the three SDK
+/// backends below are built from this one.
+///
+/// Typed concretely on purpose: this is the override point for a test that
+/// wants a real [GraphAuth] over a faked socket. Nothing in the app reads it —
+/// the app consumes [authSessionProvider], [mailBackendProvider] and
+/// [teamsBackendProvider], which is what makes swapping the backend a change to
+/// those three bodies and nothing else.
 final graphAuthProvider = Provider<GraphAuth>((ref) => GraphAuth());
+
+final authSessionProvider =
+    Provider<AuthSession>((ref) => ref.watch(graphAuthProvider));
 
 /// The open database. Overridden in `main()` after the async open, and in
 /// tests with an in-memory one.
@@ -38,8 +51,8 @@ final dbProvider = Provider<Database>(
 final messageStoreProvider =
     Provider<MessageStore>((ref) => MessageStore(ref.watch(dbProvider)));
 
-final graphMailProvider =
-    Provider<GraphMail>((ref) => GraphMail(ref.watch(graphAuthProvider)));
+final mailBackendProvider =
+    Provider<MailBackend>((ref) => GraphMail(ref.watch(graphAuthProvider)));
 
 /// Ranking and deferral. Stateless beyond its store, and cheap enough to run
 /// on every list load — see [AttentionService] for why it runs there rather
@@ -52,13 +65,13 @@ final attentionServiceProvider = Provider<AttentionService>(
 /// stand-in that never touches the network.
 final syncServiceProvider = Provider<MailSync>(
   (ref) => SyncService(
-    ref.watch(graphMailProvider),
+    ref.watch(mailBackendProvider),
     ref.watch(messageStoreProvider),
   ),
 );
 
-final graphTeamsProvider =
-    Provider<GraphTeams>((ref) => GraphTeams(ref.watch(graphAuthProvider)));
+final teamsBackendProvider =
+    Provider<TeamsBackend>((ref) => GraphTeams(ref.watch(graphAuthProvider)));
 
 /// The Teams connector, refreshed only by something the user did.
 ///
@@ -71,9 +84,9 @@ final graphTeamsProvider =
 /// [TeamsSync.syncNow] returns immediately when `Chat.Read` was not granted,
 /// so a tenant that refused consent costs zero requests and shows no error.
 final teamsSyncProvider = Provider<TeamsSync>((ref) {
-  final auth = ref.watch(graphAuthProvider);
+  final auth = ref.watch(authSessionProvider);
   return TeamsSync(
-    ref.watch(graphTeamsProvider),
+    ref.watch(teamsBackendProvider),
     ref.watch(messageStoreProvider),
     canSync: () => auth.hasScope('chat.read'),
   );

@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
+import 'backend/backend_types.dart';
+import 'backend/mail_backend.dart';
 import 'graph_auth.dart';
 
 /// The Microsoft Graph mail reads this app makes: a delta drain per folder,
@@ -14,15 +16,6 @@ import 'graph_auth.dart';
 /// mean the session is over and the UI must route to sign-in; a plain
 /// [AuthException] is transient. Wrapping any of them in a
 /// [GraphMailException] here would erase that distinction.
-
-/// Graph refused the delta cursor (HTTP 410): the token is older than the
-/// server's change history and only a fresh drain can recover.
-class DeltaResyncRequired implements Exception {
-  const DeltaResyncRequired();
-
-  @override
-  String toString() => 'The mail sync cursor expired and must be rebuilt.';
-}
 
 /// Any other failed Graph mail call. [message] is safe to show a user.
 class GraphMailException implements Exception {
@@ -35,21 +28,7 @@ class GraphMailException implements Exception {
   String toString() => message;
 }
 
-/// One page of a delta drain. Exactly one of [nextLink] / [deltaLink] is set
-/// in practice: more pages to walk, or the cursor to store for next time.
-class DeltaPage {
-  final List<Map<String, dynamic>> messages;
-  final String? nextLink;
-  final String? deltaLink;
-
-  const DeltaPage({
-    this.messages = const [],
-    this.nextLink,
-    this.deltaLink,
-  });
-}
-
-class GraphMail {
+class GraphMail implements MailBackend {
   static const String _base = 'https://graph.microsoft.com/v1.0';
 
   /// Tier one of the two-tier fetch: enough to list, sort, and thread a
@@ -89,6 +68,7 @@ class GraphMail {
   /// and filter the drain started with, and rebuilding it would silently
   /// change the query mid-drain. [minReceivedIso] applies only to a drain
   /// starting from scratch.
+  @override
   Future<DeltaPage> deltaPage(
     String folder, {
     String? link,
@@ -118,6 +98,7 @@ class GraphMail {
   }
 
   /// The full body and headers for one message.
+  @override
   Future<Map<String, dynamic>> getMessageDetail(String id) async {
     final uri = Uri.parse('$_base/me/messages/${Uri.encodeComponent(id)}')
         .replace(query: '\$select=${Uri.encodeComponent(_detailSelect)}');
@@ -149,6 +130,7 @@ class GraphMail {
   /// generally accepts too. When it does not, the call is retried once WITHOUT
   /// the header: a draft whose quoted timestamps are in UTC is worth far more
   /// than no draft at all.
+  @override
   Future<Map<String, dynamic>> createReplyDraft(String messageId) async {
     final uri = Uri.parse(
       '$_base/me/messages/${Uri.encodeComponent(messageId)}/createReply',
@@ -169,6 +151,7 @@ class GraphMail {
   ///
   /// Plain text, always: the composer is a plain-text field, and sending its
   /// contents as HTML would turn every `<` a person typed into markup.
+  @override
   Future<void> updateDraftBody(String draftId, String text) async {
     final response = await _request(
       'PATCH',
@@ -185,6 +168,7 @@ class GraphMail {
   /// Sends an existing draft. Graph answers 202 with no body.
   ///
   /// Nothing in this app calls this except a Send button the user pressed.
+  @override
   Future<void> sendDraft(String draftId) async {
     final response = await _request(
       'POST',

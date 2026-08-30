@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/app_providers.dart';
-import '../services/graph_auth.dart';
+import '../services/backend/backend_types.dart';
 import '../theme/tokens.dart';
 
 /// The gate in front of the inbox: one button that hands off to the system
@@ -27,7 +27,7 @@ class _SignInScreenState extends ConsumerState<SignInScreen> {
       _error = null;
     });
     try {
-      await ref.read(graphAuthProvider).signIn();
+      await ref.read(authSessionProvider).signIn();
       if (!mounted) return;
       widget.onSignedIn();
     } on AuthException catch (e) {

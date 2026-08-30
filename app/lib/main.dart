@@ -62,11 +62,11 @@ class AuthGate extends ConsumerStatefulWidget {
 }
 
 class _AuthGateState extends ConsumerState<AuthGate> {
-  late Future<bool> _signedIn = ref.read(graphAuthProvider).isSignedIn;
+  late Future<bool> _signedIn = ref.read(authSessionProvider).isSignedIn;
 
   void _reload() {
     setState(() {
-      _signedIn = ref.read(graphAuthProvider).isSignedIn;
+      _signedIn = ref.read(authSessionProvider).isSignedIn;
     });
   }
 

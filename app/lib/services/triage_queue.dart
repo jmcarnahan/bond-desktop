@@ -4,7 +4,7 @@ import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'drain_gate.dart';
 import 'gates.dart';
-import 'graph_auth.dart';
+import 'backend/backend_types.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/triage_task.dart';
