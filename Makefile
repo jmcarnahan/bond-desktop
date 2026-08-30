@@ -323,18 +323,24 @@ clean:
 # intelligent. Override the URLs with --dart-define=LLAMA_URL=... /
 # --dart-define=EMBED_URL=... .
 
-# Dev-stage Microsoft auth: the shared Azure registration has no
-# public-client platform (and no one can reach the portal to add one), so
-# sign-in needs the registration's client secret — the same one the-crm's
-# backend uses. It is read from the-crm's .env at LAUNCH time and injected
-# as a build define; it is never committed and never echoed. A build made
-# this way carries the secret and must not be distributed.
+# Dev-stage Microsoft auth: the app registration's client id, tenant id, and
+# (because the shared Azure registration has no public-client platform, and
+# no one can reach the portal to add one) the client secret the-crm's
+# backend uses. All three are read from the-crm's .env at LAUNCH time and
+# injected as build defines; none is committed and none is echoed. A build
+# made this way carries the secret and must not be distributed.
 MS_ENV ?= $(HOME)/projects/the-crm/.env
 
-# Emits --dart-define=MS_CLIENT_SECRET=... when the secret can be read;
-# emits nothing (public-client behavior) when it cannot.
+# Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
+# value that can be read; emits nothing for any that cannot (sign-in then
+# refuses with a config error; a missing secret alone means public-client
+# behavior).
 define APP_SECRET_DEFINE
-$$(SECRET=$$(grep -m1 '^MICROSOFT_CLIENT_SECRET=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+$$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   TID=$$(grep -m1 '^MICROSOFT_TENANT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   SECRET=$$(grep -m1 '^MICROSOFT_CLIENT_SECRET=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   if [ -n "$$CID" ]; then printf -- '--dart-define=MS_CLIENT_ID=%s ' "$$CID"; fi; \
+   if [ -n "$$TID" ]; then printf -- '--dart-define=MS_TENANT_ID=%s ' "$$TID"; fi; \
    if [ -n "$$SECRET" ]; then printf -- '--dart-define=MS_CLIENT_SECRET=%s' "$$SECRET"; fi)
 endef
 

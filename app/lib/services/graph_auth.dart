@@ -119,11 +119,15 @@ class _TokenResponse {
 
 class GraphAuth {
   // ── Azure app registration (public client) ────────────────────────────
-  static const String clientId = '[MS_CLIENT_ID]';
+  /// Arrives at BUILD time via --dart-define=MS_CLIENT_ID=… (`make app-run`
+  /// injects it from the-crm's .env, same as the client secret below).
+  /// Empty means "not configured" — [signIn] refuses with a clear error
+  /// rather than sending Entra a request it can only 400.
+  static const String clientId = String.fromEnvironment('MS_CLIENT_ID');
 
   /// Tenant-specific endpoints, not `/common`: this registration is
   /// single-tenant, and `/common` fails at the authorize step for it.
-  static const String tenantId = '[MS_TENANT_ID]';
+  static const String tenantId = String.fromEnvironment('MS_TENANT_ID');
 
   /// Must match the portal's redirect URI byte for byte in BOTH the
   /// authorize and token requests — a trailing slash is a mismatch.
@@ -407,6 +411,13 @@ class GraphAuth {
     required String challenge,
     required String state,
   }) async {
+    if (clientId.isEmpty || tenantId.isEmpty) {
+      throw const AuthException(
+        'Microsoft sign-in is not configured: build with '
+        '--dart-define=MS_CLIENT_ID=… and --dart-define=MS_TENANT_ID=… '
+        "(`make app-run` injects both from the-crm's .env).",
+      );
+    }
     final HttpServer server;
     try {
       server = await HttpServer.bind(InternetAddress.loopbackIPv4, redirectPort);
