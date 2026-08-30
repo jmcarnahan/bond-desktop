@@ -193,7 +193,10 @@ void main() {
 
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
-      expect(find.text('Teams chats'), findsOneWidget);
+      expect(
+        find.text('Teams chats — awaiting admin approval'),
+        findsOneWidget,
+      );
       expect(find.byIcon(Icons.check), findsNWidgets(3));
       expect(find.byIcon(Icons.close), findsNothing);
       // A tenant that granted everything has nothing to be nagged about.
@@ -219,6 +222,24 @@ void main() {
       expect(find.byIcon(Icons.check), findsOneWidget);
       expect(find.byIcon(Icons.close), findsNWidgets(2));
       expect(find.text('Sign in again to enable'), findsOneWidget);
+    });
+
+    testWidgets('a missing admin-gated scope alone offers no sign-in',
+        (tester) async {
+      // Chat.Read is not in the requested set (tenant admin-gates it), so a
+      // fresh sign-in cannot deliver it — offering one would be a permanent
+      // nag pointing at a round that cannot succeed.
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        hasScope: (scope) async => scope != 'chat.read',
+        onSignInAgain: () {},
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.close), findsOneWidget);
+      expect(find.text('Sign in again to enable'), findsNothing);
     });
 
     testWidgets('the sign-in offer fires its callback', (tester) async {

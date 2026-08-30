@@ -169,18 +169,25 @@ class GraphAuth {
 
   /// What the app asks for on top, and can do without.
   ///
-  /// All three are requested in ONE consent round, `Chat.Read` included even
-  /// though nothing reads Teams yet: a second round later would mean a second
-  /// consent prompt, and the point of asking now is that the user sees one.
-  ///
   /// A tenant that refuses these does not cost the user the session — the
   /// sign-in retries with [coreScopes] alone and the features that need them
   /// report themselves unavailable through [hasScope].
   static const List<String> extendedScopes = [
     'Mail.ReadWrite',
     'Mail.Send',
-    'Chat.Read',
   ];
+
+  /// Wanted, but not requested: scopes this tenant admin-gates.
+  ///
+  /// `Chat.Read` needs admin consent at this tenant (observed 2026-08-30:
+  /// the authorize round dead-ends at an "Approval required" wall), and one
+  /// admin-gated scope in the bundle walls off the WHOLE request — including
+  /// the mail scopes the user could have granted alone. So it sits out of
+  /// [scopes] until the admin approves the app; moving it back into
+  /// [extendedScopes] is the entire re-enable. Teams features key off the
+  /// stored grant via [hasScope], so while it lives here they report
+  /// unavailable rather than break.
+  static const List<String> pendingAdminScopes = ['Chat.Read'];
 
   /// What an interactive sign-in requests: everything, required and optional
   /// alike.

@@ -144,7 +144,16 @@ void main() {
         ...GraphAuth.coreScopes,
         ...GraphAuth.extendedScopes,
       ]);
-      expect(GraphAuth.extendedScopes, contains('Chat.Read'));
+    });
+
+    test('admin-gated scopes are wanted but never requested', () {
+      // Chat.Read needs admin consent at this tenant, and one admin-gated
+      // scope in the authorize bundle walls off the whole request behind an
+      // "Approval required" page — including the mail scopes the user could
+      // have granted alone. It must sit out of the request until approved.
+      expect(GraphAuth.pendingAdminScopes, contains('Chat.Read'));
+      expect(GraphAuth.scopes, isNot(contains('Chat.Read')));
+      expect(GraphAuth.extendedScopes, isNot(contains('Chat.Read')));
     });
   });
 

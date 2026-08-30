@@ -43,12 +43,16 @@ class SettingsDialog extends StatefulWidget {
     this.onSignInAgain,
   });
 
-  /// The three extended permissions, in the order they matter to the LO, with
-  /// the bare scope each one is really asking about.
-  static const List<(String, String)> permissions = [
-    ('Send mail', 'mail.send'),
-    ('Save drafts', 'mail.readwrite'),
-    ('Teams chats', 'chat.read'),
+  /// The three extended permissions, in the order they matter to the LO:
+  /// label, the bare scope each one is really asking about, and whether a
+  /// fresh sign-in can actually obtain it. Teams cannot — the tenant
+  /// admin-gates `Chat.Read`, so the sign-in no longer requests it (see
+  /// GraphAuth.pendingAdminScopes) and offering "sign in again" for it would
+  /// send the user through a round that cannot deliver.
+  static const List<(String, String, bool)> permissions = [
+    ('Send mail', 'mail.send', true),
+    ('Save drafts', 'mail.readwrite', true),
+    ('Teams chats — awaiting admin approval', 'chat.read', false),
   ];
 
   @override
@@ -70,7 +74,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
   late final Future<List<bool>>? _granted = widget.hasScope == null
       ? null
       : Future.wait([
-          for (final (_, scope) in SettingsDialog.permissions)
+          for (final (_, scope, _) in SettingsDialog.permissions)
             widget.hasScope!(scope),
         ]);
 
@@ -176,7 +180,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
           // disagree on screen.
           final answers = snapshot.data ??
               List.filled(SettingsDialog.permissions.length, false);
-          final missing = answers.contains(false);
+          // Only a scope a fresh sign-in can deliver counts as fixable —
+          // an admin-gated row must not turn the offer into a permanent nag.
+          var missing = false;
+          for (var i = 0; i < SettingsDialog.permissions.length; i++) {
+            missing = missing ||
+                (SettingsDialog.permissions[i].$3 && !answers[i]);
+          }
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             mainAxisSize: MainAxisSize.min,
