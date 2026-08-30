@@ -19,6 +19,7 @@ import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
 import '../widgets/settings_dialog.dart';
+import '../widgets/source_filter.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
@@ -41,17 +42,31 @@ class InboxScreen extends ConsumerStatefulWidget {
   ConsumerState<InboxScreen> createState() => _InboxScreenState();
 }
 
-class _InboxScreenState extends ConsumerState<InboxScreen> {
+class _InboxScreenState extends ConsumerState<InboxScreen>
+    with WidgetsBindingObserver {
   /// Below this the rail and a readable transcript cannot share the width, so
   /// the rail becomes an overlay the hamburger opens.
   static const double _twoPaneBreakpoint = 960;
 
-  static const List<String> _sources = ['email'];
+  static const List<String> _sources = inboxSources;
 
   /// Slow enough to be invisible on a metered connection, fast enough that a
   /// reply that arrived while the LO was reading feels like it just showed
   /// up. Graph delta calls with nothing new are cheap.
+  ///
+  /// **Mail only.** [_refresh] is what this fires and it does not touch Teams:
+  /// Microsoft's terms for the Teams messaging endpoints forbid polling them,
+  /// so a chat refresh has to trace back to a button press or to the window
+  /// coming back to the front.
   static const Duration _pollInterval = Duration(seconds: 60);
+
+  /// The shortest gap between two Teams pulls the app makes on its own.
+  ///
+  /// A resume is the user turning their attention back to this window, which
+  /// is a real signal — but alt-tabbing away and back three times in a minute
+  /// is the same one signal, and answering each one would be polling with
+  /// extra steps.
+  static const Duration _teamsResumeInterval = Duration(minutes: 10);
 
   /// The section overview showing when no thread is open. Never null in
   /// practice — the type only carries the "no explicit choice yet" case.
@@ -76,6 +91,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   /// Narrow layouts only: whether the rail overlay is up.
   bool _railOpen = false;
 
+  /// Which connector the list is showing: null for all, or a source name.
+  String? _sourceFilter;
+
+  /// When Teams was last pulled, by any route. Null until the first one.
+  DateTime? _lastTeamsRefresh;
+
   Timer? _poll;
 
   /// Set once the sign-out route is under way, so a second notification
@@ -85,19 +106,45 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   late final Future<AccountInfo?> _account =
       ref.read(graphAuthProvider).storedAccount;
 
+  /// Whether the tenant granted `Chat.Read`. Read once — it is a keychain
+  /// read, and the answer cannot change without a fresh sign-in, which
+  /// rebuilds this screen.
+  late final Future<bool> _teamsGranted =
+      ref.read(graphAuthProvider).hasScope('chat.read');
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     // A microtask, not a direct call: a provider must not be written to
     // while the first frame's widgets are still being built.
-    Future.microtask(_refresh);
+    //
+    // Teams included, and the launch is what stamps [_lastTeamsRefresh]:
+    // opening the app is the strongest form of the app-focus signal, and
+    // stamping it here is what stops the resume path firing again seconds
+    // later when the window takes focus.
+    Future.microtask(_refreshAll);
     _poll = Timer.periodic(_pollInterval, (_) => _refresh());
   }
 
   @override
   void dispose() {
     _poll?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
+  }
+
+  /// The app came back to the front. The one automatic path to Teams, and it
+  /// is rate limited to [_teamsResumeInterval] — see that constant.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    final last = _lastTeamsRefresh;
+    if (last != null &&
+        DateTime.now().difference(last) < _teamsResumeInterval) {
+      return;
+    }
+    unawaited(_refreshTeams());
   }
 
   /// The list AND whatever thread is open. Refreshing only the list is the
@@ -115,6 +162,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
     if (storyline != null) {
       ref.read(storylineTimelineProvider(storyline).notifier).load();
     }
+  }
+
+  /// What the refresh button does: the mail refresh the timer also runs, plus
+  /// the Teams pull the timer must never run.
+  Future<void> _refreshAll() async {
+    _refresh();
+    await _refreshTeams();
+  }
+
+  /// The Teams pull, and the stamp that keeps the resume path from repeating
+  /// it. Every route to Teams goes through here, so there is exactly one place
+  /// the stamp can be forgotten and it is not forgotten.
+  Future<void> _refreshTeams() async {
+    if (!mounted) return;
+    _lastTeamsRefresh = DateTime.now();
+    await ref.read(conversationsProvider.notifier).refreshTeams();
   }
 
   Future<void> _signOut() async {
@@ -235,11 +298,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
         );
 
       case ConversationsLoaded(:final conversations, :final loadError):
+        // Filtered ONCE, here, before anything downstream sees a list — the
+        // rail's badges, the Later day rows and the overviews all derive their
+        // counts from what they are handed, and filtering some of them would
+        // put a badge over a section showing fewer rows than it claims.
+        final rows = bySource(conversations, _sourceFilter);
         return LayoutBuilder(
           builder: (context, constraints) =>
               constraints.maxWidth >= _twoPaneBreakpoint
-                  ? _wide(conversations, loadError)
-                  : _narrow(conversations, loadError),
+                  ? _wide(rows, loadError)
+                  : _narrow(rows, loadError),
         );
     }
   }
@@ -404,13 +472,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   /// Account, refresh, sign-out — everything the old header row carried,
   /// parked at the foot of the rail where it stops competing with the mail.
   Widget _railFooter() {
-    // SEAM: source filter chips land in the rail footer (phase 10).
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
+          _sourceFilterBar(),
           _triageProgress(),
           Row(
             children: [
@@ -431,11 +499,56 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
                 ),
               ),
               _railAction(Icons.settings, 'Settings', _openSettings),
-              _railAction(Icons.refresh, 'Refresh', _refresh),
+              // The ONE button that pulls Teams. Every other refresh in this
+              // screen — the timer, the retry links on the error banners — is
+              // mail only.
+              _railAction(Icons.refresh, 'Refresh', () => unawaited(_refreshAll())),
               _railAction(Icons.logout, 'Sign out', _signOut),
             ],
           ),
+          _teamsFreshness(),
         ],
+      ),
+    );
+  }
+
+  /// The three source pills.
+  ///
+  /// The Teams pill goes disabled-with-a-tooltip rather than absent when the
+  /// tenant refused `Chat.Read`: a user who expected Teams and finds nothing
+  /// has no way to learn why, and this is the only surface that can tell them.
+  /// Until the keychain read lands it is treated as available — a moment of an
+  /// extra tappable pill costs nothing, while a moment of a greyed-out one
+  /// reads as a refusal that has not happened.
+  Widget _sourceFilterBar() {
+    return FutureBuilder<bool>(
+      future: _teamsGranted,
+      builder: (context, snapshot) => Padding(
+        padding: const EdgeInsets.only(bottom: BondSpacing.s12),
+        child: SourceFilterBar(
+          selected: _sourceFilter,
+          teamsAvailable: snapshot.data ?? true,
+          onSelected: (source) => setState(() => _sourceFilter = source),
+        ),
+      ),
+    );
+  }
+
+  /// How old the Teams side of the inbox is, and nothing at all before the
+  /// first pull.
+  ///
+  /// It sits under the refresh button because that is the one control that
+  /// changes it — chats do not arrive on their own here, and a caption saying
+  /// so is the difference between "quiet" and "stale".
+  Widget _teamsFreshness() {
+    final label =
+        relativeTime(ref.read(teamsSyncProvider).lastSyncedAt, DateTime.now());
+    if (label == null) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: BondSpacing.s4),
+      child: Text(
+        'Teams updated $label',
+        style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
       ),
     );
   }
@@ -586,7 +699,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
       onOpenThread: (_, key) => _select(key),
     );
 
-    final replyKey = _replyTargetFor(messages, keys, subjects);
+    // Chats are not reply targets — see [_replyElsewhere] for why. A storyline
+    // of only chats therefore offers the caption instead of a dropdown, and a
+    // mixed one offers its mail threads.
+    final targets = _emailTargets(messages, keys, subjects);
+    final replyKey = _replyTargetFor(messages, keys, targets);
 
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -604,13 +721,39 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
           Expanded(child: panel),
           if (replyKey != null) ...[
             const SizedBox(height: BondSpacing.s12),
-            _replyTargetPicker(replyKey, subjects),
+            _replyTargetPicker(replyKey, targets),
             const SizedBox(height: BondSpacing.s8),
             _composer(replyKey),
+          ] else if (subjects.isNotEmpty) ...[
+            const SizedBox(height: BondSpacing.s12),
+            _replyElsewhere(),
           ],
         ],
       ),
     );
+  }
+
+  /// The member threads a reply can actually go to: the mail ones.
+  ///
+  /// Derived from the messages rather than from a source column on the
+  /// subject map, because that is where the source lives — the timeline
+  /// carries `conversation_key` and `subject` per thread and the source per
+  /// message.
+  Map<String, String> _emailTargets(
+    List<Message> messages,
+    Map<String, String> keyByMessageId,
+    Map<String, String> subjectByKey,
+  ) {
+    final mailKeys = <String>{};
+    for (final message in messages) {
+      if (message.source != 'email') continue;
+      final key = keyByMessageId[message.id];
+      if (key != null) mailKeys.add(key);
+    }
+    return {
+      for (final entry in subjectByKey.entries)
+        if (mailKeys.contains(entry.key)) entry.key: entry.value,
+    };
   }
 
   /// Which member thread a storyline's composer answers.
@@ -773,11 +916,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
           ],
           Expanded(child: panel),
           const SizedBox(height: BondSpacing.s12),
-          _composer(selected.id),
+          // Drafting and sending are EMAIL ONLY. A reply to a chat is not a
+          // reply to an email: Graph builds a mail reply for this app through
+          // `createReply`, which knows the recipients, the subject and the
+          // threading headers, and none of that exists for a chat. A composer
+          // here would be a box that cannot send.
+          if (selected.source == 'email')
+            _composer(selected.id)
+          else
+            _replyElsewhere(),
         ],
       ),
     );
   }
+
+  /// What stands where the reply box would be on a chat thread. Quiet and
+  /// one line: it is an answer to "where do I reply?", not a feature.
+  Widget _replyElsewhere() => Padding(
+        padding: const EdgeInsets.symmetric(vertical: BondSpacing.s8),
+        child: Text('Reply in Microsoft Teams', style: BondType.caption),
+      );
 
   // ── the reply box ──────────────────────────────────────────────────────
 

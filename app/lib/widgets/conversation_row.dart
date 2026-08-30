@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
+import 'source_glyph.dart';
 import 'time_format.dart';
 
 /// One row per thread: a state dot, the primary participant, the subject, a
@@ -101,10 +102,17 @@ class ConversationRow extends StatelessWidget {
                         ],
                       ),
                       const SizedBox(height: 2),
+                      // The subject line carries the source mark, not the
+                      // name above it: the name is the loudest thing on the
+                      // card and a glyph in front of it would compete with
+                      // the state dot for the same job.
                       Text(
-                        c.subject?.isNotEmpty == true
-                            ? c.subject!
-                            : '(no subject)',
+                        withSourceGlyph(
+                          c.source,
+                          c.subject?.isNotEmpty == true
+                              ? c.subject!
+                              : '(no subject)',
+                        ),
                         style: BondType.small.copyWith(color: BondColors.ink),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,

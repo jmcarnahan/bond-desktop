@@ -10,6 +10,7 @@ import '../services/ai_worker.dart';
 import '../services/conversation_state.dart';
 import '../services/storyline_service.dart';
 import 'app_providers.dart';
+import 'conversations_provider.dart' show inboxSources;
 
 /// The storylines read model.
 ///
@@ -244,7 +245,10 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
 
     final List<Map<String, Object?>> rows;
     try {
-      rows = _store.storylineTimeline(storylineId, sources: const ['email']);
+      // Every connector, not just mail: a chat thread can join a storyline
+      // through the assignment pass, and a timeline that dropped its messages
+      // would show a member strip listing a thread with nothing in it.
+      rows = _store.storylineTimeline(storylineId, sources: inboxSources);
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;

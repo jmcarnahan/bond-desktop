@@ -59,7 +59,10 @@ abstract class WorkHandler {
 /// The worker owns no timer. [pump] is called after each sync, is a no-op
 /// while a drain is running, and stops on its own when nothing is pending.
 class AiWorker {
-  static const String _source = 'email';
+  /// Every source whose work this worker drains. Handlers are already
+  /// per-item source-aware (they read `item['source']`), so widening this
+  /// list is all a new connector needs.
+  static const List<String> _sources = ['email', 'teams'];
 
   /// One retry, then the item is left alone. Same trade triage makes: a local
   /// model that answered unparseably often gets it right on a second pass, and
@@ -114,7 +117,7 @@ class AiWorker {
         while (!_stopped) {
           final item = _store.nextPendingWork(
             handler.kind,
-            sources: const [_source],
+            sources: _sources,
           );
           if (item == null) break;
           carryOn = await _runOne(handler, item);
@@ -132,7 +135,7 @@ class AiWorker {
   /// One item. Returns false when the whole drain should stop rather than move
   /// on.
   Future<bool> _runOne(WorkHandler handler, Map<String, Object?> item) async {
-    final source = item['source'] as String? ?? _source;
+    final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
 
     // Claimed before the first await. A crash mid-model-call therefore leaves
@@ -177,7 +180,7 @@ class AiWorker {
     Object error,
     int? statusCode,
   ) {
-    final source = item['source'] as String? ?? _source;
+    final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
     final attempts = ((item['attempts'] as num?)?.toInt() ?? 0) + 1;
     // A 400 from a json_schema request is this app's schema being wrong, not
@@ -199,7 +202,7 @@ class AiWorker {
   void _emit(String kind) {
     if (_progress.isClosed) return;
     _progress.add(
-      WorkProgress(kind, _store.workCounts(kind, sources: const [_source])),
+      WorkProgress(kind, _store.workCounts(kind, sources: _sources)),
     );
   }
 }

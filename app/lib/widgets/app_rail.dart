@@ -4,6 +4,7 @@ import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../theme/tokens.dart';
+import 'source_glyph.dart';
 import 'time_format.dart';
 
 /// The rail's four stops.
@@ -142,14 +143,33 @@ List<Storyline> storylineRows(List<Storyline> all) => [
         if (!s.isSuggested) s,
     ];
 
+/// Only the threads from [source], or all of them when it is null.
+///
+/// Applied by the screen ONCE, before the rail and the overviews are handed a
+/// list, rather than by each of them: every count on the rail — Needs You's
+/// badge, Later's day rows — is derived from the list it is given, and a
+/// filter applied in some places and not others would put a badge over a
+/// section that renders fewer rows than it claims.
+List<Conversation> bySource(List<Conversation> all, String? source) {
+  if (source == null) return all;
+  return [
+    for (final c in all)
+      if (c.source == source) c,
+  ];
+}
+
 /// The one line a rail row has room for. Who it is beats what it is about:
 /// at 260px a subject truncates to nothing useful, a name does not.
+///
+/// A chat is marked with a leading glyph and mail is not — see
+/// `withSourceGlyph`. At this width the participant's name is often all the
+/// two have to tell them apart, and the same colleague can be on both.
 String railTitleFor(Conversation c) {
   final who = c.primaryParticipant?.display ?? '';
-  if (who.isNotEmpty) return who;
+  if (who.isNotEmpty) return withSourceGlyph(c.source, who);
   final subject = _stripReplyPrefixes(c.subject ?? '');
-  if (subject.isNotEmpty) return subject;
-  return '(no subject)';
+  if (subject.isNotEmpty) return withSourceGlyph(c.source, subject);
+  return withSourceGlyph(c.source, '(no subject)');
 }
 
 /// The dark left rail: sections, one line per thread, and whatever account

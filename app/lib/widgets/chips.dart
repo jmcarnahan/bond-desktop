@@ -96,33 +96,55 @@ class BondFilterPill extends StatelessWidget {
   final bool selected;
   final VoidCallback? onTap;
 
+  /// True when the pill sits on the dark rail. The light styling inverts
+  /// there — an unselected pill's `surface` fill reads as a white blob on
+  /// `ink` — so the dark variant paints with the onDark alpha set instead.
+  final bool onDark;
+
   const BondFilterPill({
     super.key,
     required this.label,
     this.selected = false,
     required this.onTap,
+    this.onDark = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final fg = selected ? BondColors.surface : BondColors.inkSecondary;
+    final Color fg;
+    final Color fill;
+    final Color hover;
+    Color? outline = selected ? null : BondColors.border;
+    if (onDark) {
+      final disabled = onTap == null;
+      fg = selected
+          ? BondColors.onDarkPrimary
+          : (disabled ? BondColors.onDarkMuted : BondColors.onDarkSecondary);
+      fill = selected ? BondColors.onDarkTint : BondColors.ink;
+      hover = BondColors.onDarkFaint;
+      outline = selected ? null : BondColors.onDarkBorder;
+    } else {
+      fg = selected ? BondColors.surface : BondColors.inkSecondary;
+      fill = selected ? BondColors.ink : BondColors.surface;
+      hover = selected ? BondColors.darkTileAlt : BondColors.faintGround;
+    }
 
     return Material(
-      color: selected ? BondColors.ink : BondColors.surface,
+      color: fill,
       borderRadius: BondRadii.fullAll,
       child: InkWell(
         onTap: onTap,
         borderRadius: BondRadii.fullAll,
-        hoverColor: selected ? BondColors.darkTileAlt : BondColors.faintGround,
+        hoverColor: hover,
         child: Container(
           height: 32,
           alignment: Alignment.center,
           padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
-          decoration: selected
+          decoration: outline == null
               ? null
               : BoxDecoration(
                   borderRadius: BondRadii.fullAll,
-                  border: Border.all(color: BondColors.border),
+                  border: Border.all(color: outline),
                 ),
           child: Text(
             label,

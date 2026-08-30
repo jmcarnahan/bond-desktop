@@ -8,11 +8,13 @@ import '../services/draft_handler.dart';
 import '../services/extract_handler.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
+import '../services/graph_teams.dart';
 import '../services/llm/embeddings_client.dart';
 import '../services/llm/llm_client.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
+import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
 
 /// One [GraphAuth] for the whole app. Sharing the instance is what makes the
@@ -53,6 +55,28 @@ final syncServiceProvider = Provider<MailSync>(
     ref.watch(messageStoreProvider),
   ),
 );
+
+final graphTeamsProvider =
+    Provider<GraphTeams>((ref) => GraphTeams(ref.watch(graphAuthProvider)));
+
+/// The Teams connector, refreshed only by something the user did.
+///
+/// Deliberately NOT folded into [syncServiceProvider]: that one is driven by a
+/// sixty-second timer, and Microsoft's terms for the Teams messaging endpoints
+/// forbid polling them in the background. Keeping the two providers apart is
+/// what makes "the timer cannot reach Teams" a fact about the wiring rather
+/// than a rule someone has to remember.
+///
+/// [TeamsSync.syncNow] returns immediately when `Chat.Read` was not granted,
+/// so a tenant that refused consent costs zero requests and shows no error.
+final teamsSyncProvider = Provider<TeamsSync>((ref) {
+  final auth = ref.watch(graphAuthProvider);
+  return TeamsSync(
+    ref.watch(graphTeamsProvider),
+    ref.watch(messageStoreProvider),
+    canSync: () => auth.hasScope('chat.read'),
+  );
+});
 
 /// The local model. Constructing it opens nothing — the first call is what
 /// discovers whether a server is listening.

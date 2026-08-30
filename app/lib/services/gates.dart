@@ -56,8 +56,29 @@ const Set<String> _bulkPrecedence = {'bulk', 'list', 'junk', 'auto_reply'};
 String? gateFor(Message message, {required String? userAddress}) =>
     switch (message.source) {
       'email' => _emailGate(message, userAddress),
+      'teams' => _teamsGate(message),
       _ => null,
     };
+
+/// One check, and that is the honest size of it.
+///
+/// Everything the email gates work out from an address or a header is already
+/// decided by the time a chat message is stored: `TeamsSync` knows who the
+/// user is (so `self` is the message's own `direction`) and knows a bot from a
+/// person (`from.application`), and it writes both as the row's `gate_reason`
+/// at ingest. What is left is the case nothing upstream can see — a message
+/// whose body stripped down to nothing, which is what a lone emoji reaction or
+/// an image-only post leaves behind.
+///
+/// It is currently reached by nobody: chat messages never enter triage, and
+/// extraction is queued straight from SQL that already filters on
+/// `gate_reason`. It exists so the dispatch above has a real arm rather than
+/// falling through to "no gate", which is the answer for a source this app has
+/// never heard of and should not be the answer for one it has.
+String? _teamsGate(Message message) {
+  final body = message.bodyText ?? message.bodyPreview ?? '';
+  return body.trim().isEmpty ? 'empty' : null;
+}
 
 /// First match wins, and the order is the order of confidence: who sent it
 /// beats what it claims about itself.

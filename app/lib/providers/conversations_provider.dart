@@ -10,6 +10,7 @@ import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/graph_auth.dart';
 import '../services/sync_service.dart';
+import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
 import 'app_providers.dart';
 import 'prefs_provider.dart' show attentionThresholdKey;
@@ -33,6 +34,17 @@ const String _staleInboxMessage =
     "Couldn't refresh just now — showing the last inbox.";
 const String _staleThreadMessage =
     "Couldn't refresh just now — showing the last version.";
+
+/// Its own sentence, and not the inbox one. A Teams refresh failing while the
+/// mail sync is fine is a partial outage, and a banner that said "couldn't
+/// refresh" would have the user doubting mail that is perfectly current.
+const String _staleTeamsMessage = "Couldn't refresh Teams just now.";
+
+/// Every connector the inbox reads. One list, because the list read, the
+/// scoring pass and the thread transcript must agree about what is in the
+/// inbox — three separately-maintained copies would drift, and the symptom
+/// would be a thread that ranks but does not render.
+const List<String> inboxSources = ['email', 'teams'];
 
 @immutable
 sealed class ConversationsState {
@@ -78,6 +90,14 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   final MessageStore _store;
   final MailSync _sync;
 
+  /// The Teams connector, or null where there is none.
+  ///
+  /// Reached ONLY from [refreshTeams], which only ever runs off the rail's
+  /// refresh button or an app-focus resume. Nothing on the timer path so much
+  /// as reads this field — Microsoft's terms for the Teams messaging endpoints
+  /// forbid polling them, and `teams_poll_test.dart` holds that line.
+  final TeamsSync? _teamsSync;
+
   /// Null in tests that exercise only the read model. When present, every sync
   /// kicks it and every result it lands reloads the list.
   final TriageQueue? _triage;
@@ -100,11 +120,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   ConversationsNotifier(
     this._store,
     this._sync, {
+    TeamsSync? teamsSync,
     TriageQueue? triage,
     AiWorker? aiWorker,
     AttentionService? attention,
     Future<String?>? userAddress,
-  })  : _triage = triage,
+  })  : _teamsSync = teamsSync,
+        _triage = triage,
         _aiWorker = aiWorker,
         _attention = attention,
         super(const ConversationsInitial()) {
@@ -201,8 +223,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       // computed against a sender rule the user has since changed. Inside the
       // same try as the read because both are the same database — a failure in
       // either is "could not read the local inbox".
-      _attention?.recomputeAll(sources: const ['email']);
-      rows = _store.loadConversations(sources: const ['email']);
+      _attention?.recomputeAll(sources: inboxSources);
+      rows = _store.loadConversations(sources: inboxSources);
       _enqueueDrafts();
     } catch (e) {
       // The database itself failed. There is no stale-but-valid answer to
@@ -226,6 +248,48 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
 
     state = ConversationsLoaded(rows, loadError);
+  }
+
+  /// Pulls Teams chats, then re-reads the list.
+  ///
+  /// **The only entry point to Teams, and it is only ever called from
+  /// something the user did** — the rail's refresh button, or the app coming
+  /// back to the foreground after long enough. [load] never calls it, which is
+  /// what keeps the sixty-second poll timer off endpoints Microsoft's terms say
+  /// must not be polled.
+  ///
+  /// It reloads even when the pull failed: the mail rows and whatever Teams
+  /// managed to store before it stopped are still the freshest thing there is,
+  /// and the banner goes on afterwards so [load]'s own clean result cannot
+  /// erase it.
+  ///
+  /// A build with no Teams connector, and a tenant that never granted
+  /// `Chat.Read`, both do nothing at all — the second inside
+  /// [TeamsSync.syncNow], before any request.
+  Future<void> refreshTeams() async {
+    final teams = _teamsSync;
+    if (teams == null) return;
+
+    String? error;
+    try {
+      await teams.syncNow();
+    } on AuthException {
+      // Deliberately the same banner as any other failure: the inbox load is
+      // what routes a dead session to sign-in, and a second opinion from the
+      // Teams path would mean two banners saying different things about one
+      // sign-out.
+      error = _staleTeamsMessage;
+    } catch (_) {
+      error = _staleTeamsMessage;
+    }
+
+    await load(syncFirst: false);
+    if (error == null) return;
+
+    final current = state;
+    if (current is ConversationsLoaded) {
+      state = current.withRows(current.conversations, error);
+    }
   }
 
   /// Queues a suggested reply for the threads that have earned one.
@@ -266,6 +330,15 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     final current = state;
     if (current is! ConversationsLoaded) return;
 
+    // The row's own source, not a literal: with a second connector in the list
+    // a hard-coded `'email'` would write the done flag against a thread that
+    // does not exist and leave the chat open behind an optimistic tick.
+    String? source;
+    for (final c in current.conversations) {
+      if (c.id == conversationKey) source = c.source;
+    }
+    if (source == null) return;
+
     state = current.withRows([
       for (final c in current.conversations)
         if (c.id == conversationKey)
@@ -276,7 +349,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
     try {
       _store.setConversationState(
-        'email',
+        source,
         conversationKey,
         ConversationState.done,
       );
@@ -439,6 +512,7 @@ final conversationsProvider =
   (ref) => ConversationsNotifier(
     ref.watch(messageStoreProvider),
     ref.watch(syncServiceProvider),
+    teamsSync: ref.watch(teamsSyncProvider),
     triage: ref.watch(triageQueueProvider),
     aiWorker: ref.watch(aiWorkerProvider),
     attention: ref.watch(attentionServiceProvider),
@@ -497,6 +571,10 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
     String? loadError;
     if (fetchBodies) {
       try {
+        // Inert for a Teams thread rather than special-cased: [MailSync]
+        // resolves the messages to fetch by loading the thread for source
+        // `email`, and a chat id matches none of them. A chat message's body
+        // arrives whole with the message, so there is nothing to fill in.
         await _sync.ensureBodies(conversationKey);
       } catch (_) {
         if (seq != _fetchSeq) return;
@@ -511,7 +589,7 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
 
     final List<Message> messages;
     try {
-      messages = _store.loadThread(conversationKey, sources: const ['email']);
+      messages = _store.loadThread(conversationKey, sources: inboxSources);
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;

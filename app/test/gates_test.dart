@@ -201,14 +201,54 @@ void main() {
       expect(gateFor(broken, userAddress: null), isNull);
     });
 
-    test('a non-email source has no gates of its own yet', () {
+    test('a source this app has never heard of has no gates', () {
       expect(
         gateFor(
-          message(source: 'teams', from: 'noreply@x.com'),
+          message(source: 'slack', from: 'noreply@x.com'),
           userAddress: null,
         ),
         isNull,
       );
+    });
+  });
+
+  group('teams', () {
+    Message chat({String? body, String? preview}) => Message(
+          id: 'c1',
+          source: 'teams',
+          outbound: false,
+          fromAddress: 'teams:user-1',
+          bodyText: body,
+          bodyPreview: preview,
+        );
+
+    test('a message with words in it passes', () {
+      expect(gateFor(chat(body: 'can you send the CD?'), userAddress: null),
+          isNull);
+    });
+
+    test('a body that stripped down to nothing gates', () {
+      expect(gateFor(chat(body: '   '), userAddress: null), 'empty');
+      expect(gateFor(chat(), userAddress: null), 'empty');
+    });
+
+    test('the preview stands in when no body is stored', () {
+      expect(gateFor(chat(preview: 'a snippet'), userAddress: null), isNull);
+    });
+
+    test('none of the email gates apply — a chat has no headers and no '
+        'no-reply mailboxes', () {
+      final noreply = Message(
+        id: 'c2',
+        source: 'teams',
+        outbound: false,
+        fromAddress: 'teams:noreply@x.com',
+        bodyText: 'a real sentence',
+        sourceMetaJson: jsonEncode({
+          'headers': {'list-unsubscribe': '<mailto:x@y.com>'},
+        }),
+      );
+      expect(gateFor(noreply, userAddress: null), isNull);
     });
   });
 }

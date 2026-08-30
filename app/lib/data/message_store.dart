@@ -309,6 +309,37 @@ WHERE source = ? AND conversation_key = ?
     );
   }
 
+  /// Stamps when a source last finished a sync, without touching its cursor.
+  ///
+  /// [setDeltaLink] also writes `synced_at`, and for the mail drains that is
+  /// the right shape: the cursor and the stamp advance together. A connector
+  /// with no cursor at all — Teams walks the chat list from the top every time
+  /// — has nothing to hand that method but null, and passing null would erase
+  /// a cursor rather than record a sync. Hence a write that says only what it
+  /// means.
+  ///
+  /// [iso] is passed rather than taken from the clock so the caller can stamp
+  /// the moment the sync actually reached, and so a test can pin it.
+  void setSyncedAt(String folder, String iso, {String source = 'email'}) {
+    db.execute(
+      'INSERT INTO sync_state (source, folder, delta_link, synced_at) '
+      'VALUES (?, ?, NULL, ?) '
+      'ON CONFLICT(source, folder) DO UPDATE SET '
+      'synced_at = excluded.synced_at',
+      [source, folder, iso],
+    );
+  }
+
+  /// When this source last finished a sync, or null when it never has.
+  String? getSyncedAt(String folder, {String source = 'email'}) {
+    final result = db.select(
+      'SELECT synced_at FROM sync_state WHERE source = ? AND folder = ?',
+      [source, folder],
+    );
+    if (result.isEmpty) return null;
+    return result.first['synced_at'] as String?;
+  }
+
   // ── triage ───────────────────────────────────────────────────────────
 
   /// `triage_status` → count. Statuses with no rows are simply absent.
@@ -511,11 +542,26 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// newest mail first — the same promise triage makes. (One-off
   /// [enqueueWork] rows stamp wall-clock time instead; for freshly synced
   /// mail the two orderings agree.)
+  ///
+  /// [triageStatuses] and [gateReasons] exist for the second connector, and
+  /// their defaults are exactly the email behaviour described above. Teams
+  /// messages never enter triage at all — they are stored `skipped` with a
+  /// `teams_source` reason — so the mail filter would exclude every one of
+  /// them. A caller that widens the statuses should narrow the reasons to
+  /// match, or a `skipped` status would also drag in the bulk senders and
+  /// backlog the mail path deliberately leaves out.
   int enqueueExtractBacklog({
     int cap = 150,
     required String sinceIso,
     String source = 'email',
+    List<String> triageStatuses = const ['pending', 'processing', 'triaged'],
+    List<String>? gateReasons,
   }) {
+    // An empty list would render as `IN ()`, which sqlite rejects. Nothing is
+    // queued because nothing was asked for.
+    if (triageStatuses.isEmpty) return 0;
+    if (gateReasons != null && gateReasons.isEmpty) return 0;
+
     final now = _nowIso();
     db.execute(
       '''
@@ -527,12 +573,21 @@ SELECT 'extract', source, source_message_id, 'pending', 0, NULL, NULL,
   COALESCE(received_at, ?), ?
 FROM messages
 WHERE source = ? AND direction = 'inbound'
-  AND triage_status IN ('pending', 'processing', 'triaged')
+  AND triage_status IN (${_placeholders(triageStatuses.length)})
+  ${gateReasons == null ? '' : 'AND gate_reason IN (${_placeholders(gateReasons.length)})'}
   AND received_at >= ?
 ORDER BY received_at DESC
 LIMIT ?
 ''',
-      [now, now, source, sinceIso, cap],
+      [
+        now,
+        now,
+        source,
+        ...triageStatuses,
+        ...?gateReasons,
+        sinceIso,
+        cap,
+      ],
     );
     return db.updatedRows;
   }

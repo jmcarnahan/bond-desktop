@@ -5,6 +5,7 @@ import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'message_row.dart';
+import 'source_glyph.dart';
 import 'time_format.dart';
 
 /// One storyline as a single merged transcript.
@@ -164,7 +165,11 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
             maxWidth: StorylineTimelinePanel._chipMaxWidth,
           ),
           child: BondFilterPill(
-            label: '✉ ${_labelFor(conversationKey)}',
+            // Both sources are marked here, mail included: a storyline merges
+            // threads and chats into one transcript, and a seam that only
+            // named the exception would leave the reader guessing what the
+            // unmarked ones were.
+            label: '${sourceChipPrefix(source)}${_labelFor(conversationKey)}',
             selected: false,
             onTap: () => widget.onOpenThread(source, conversationKey),
           ),
