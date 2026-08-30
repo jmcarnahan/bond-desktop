@@ -254,11 +254,26 @@ clean:
 # Independent of the model server above: the app runs on fixtures and does
 # not talk to :$(MODEL_PORT) yet.
 
+# Dev-stage Microsoft auth: the shared Azure registration has no
+# public-client platform (and no one can reach the portal to add one), so
+# sign-in needs the registration's client secret — the same one the-crm's
+# backend uses. It is read from the-crm's .env at LAUNCH time and injected
+# as a build define; it is never committed and never echoed. A build made
+# this way carries the secret and must not be distributed.
+MS_ENV ?= $(HOME)/projects/the-crm/.env
+
+# Emits --dart-define=MS_CLIENT_SECRET=... when the secret can be read;
+# emits nothing (public-client behavior) when it cannot.
+define APP_SECRET_DEFINE
+$$(SECRET=$$(grep -m1 '^MICROSOFT_CLIENT_SECRET=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   if [ -n "$$SECRET" ]; then printf -- '--dart-define=MS_CLIENT_SECRET=%s' "$$SECRET"; fi)
+endef
+
 app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get
 
 app-run:
-	@cd $(APP_DIR) && $(FLUTTER) run -d macos
+	@cd $(APP_DIR) && $(FLUTTER) run -d macos $(APP_SECRET_DEFINE)
 
 app-test:
 	@cd $(APP_DIR) && $(FLUTTER) test
@@ -267,7 +282,7 @@ app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
 
 app-build:
-	@cd $(APP_DIR) && $(FLUTTER) build macos --release
+	@cd $(APP_DIR) && $(FLUTTER) build macos --release $(APP_SECRET_DEFINE)
 	@printf "  $(GREEN)✓$(RESET) $(APP_DIR)/build/macos/Build/Products/Release/bond_inbox.app\n"
 
 # This exists because a corrupt download does NOT announce itself. A

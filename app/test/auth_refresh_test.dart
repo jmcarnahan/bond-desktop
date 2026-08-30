@@ -202,4 +202,24 @@ void main() {
     expect(await auth.needsReconsent, isFalse);
     await expectLater(auth.getValidAccessToken(), throwsA(isA<NotSignedIn>()));
   });
+
+  test('a supplied dev-stage client secret rides on the refresh POST',
+      () async {
+    // The counterpart of countingClient's no-secret assertion above: this
+    // registration is confidential in dev, and BOTH grant types fail with
+    // AADSTS7000218 unless the secret is present when one was supplied.
+    String? seenSecret;
+    final client = MockClient((request) async {
+      seenSecret = request.bodyFields['client_secret'];
+      return ok(tokenJson(accessToken: 'at', refreshToken: 'rt-2'));
+    });
+    final auth = GraphAuth(
+      httpClient: client,
+      store: store,
+      clientSecret: 'shhh',
+    );
+
+    await auth.getValidAccessToken();
+    expect(seenSecret, 'shhh');
+  });
 }

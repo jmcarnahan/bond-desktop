@@ -9,9 +9,13 @@ import 'package:url_launcher/url_launcher.dart';
 import 'pkce.dart';
 import 'token_store.dart';
 
-/// OAuth 2.0 authorization-code + PKCE sign-in against Microsoft Entra as a
-/// PUBLIC client: there is no client secret anywhere in this file, and adding
-/// one makes Entra reject every request the app sends.
+/// OAuth 2.0 authorization-code + PKCE sign-in against Microsoft Entra.
+///
+/// Designed as a PUBLIC client, but currently running in a dev-stage
+/// confidential mode: the shared Azure registration has no public-client
+/// platform, so token POSTs carry the registration's secret when a build
+/// supplies one (see [_definedClientSecret]). No secret appears in this
+/// source and none is ever persisted by the app.
 ///
 /// The access token lives in memory only. Only the rotating refresh token,
 /// the granted scope string, and the account summary are persisted.
@@ -110,6 +114,21 @@ class GraphAuth {
   /// sign in at the same time.
   static const int redirectPort = 8001;
 
+  /// Dev-stage escape hatch. This registration has no public-client platform
+  /// and nobody on the team can currently reach the Azure portal to add one,
+  /// so the token exchange must authenticate the way the-crm's backend does:
+  /// with the shared registration's client secret (Entra accepts secret +
+  /// PKCE together — a confidential client with PKCE is valid).
+  ///
+  /// The secret arrives at BUILD time via --dart-define=MS_CLIENT_SECRET=…
+  /// (`make app-run` injects it from the-crm's .env). It is never committed
+  /// and never stored by this app — but it IS baked into the local binary,
+  /// so a build made this way must not be distributed. Empty means "behave
+  /// as a true public client", which is what this should return to the day
+  /// the registration gains a Mobile and desktop platform.
+  static const String _definedClientSecret =
+      String.fromEnvironment('MS_CLIENT_SECRET');
+
   /// A list because Teams support later appends `Chat.Read` here. Any
   /// addition needs interactive re-consent — see [needsReconsent].
   static const List<String> scopes = ['Mail.Read', 'User.Read', 'offline_access'];
@@ -147,9 +166,21 @@ class GraphAuth {
     http.Client? httpClient,
     TokenStore? store,
     List<String>? scopeOverride,
+    String? clientSecret,
   })  : _http = httpClient ?? http.Client(),
         _store = store ?? const SecureTokenStore(),
-        _scopes = scopeOverride ?? scopes;
+        _scopes = scopeOverride ?? scopes,
+        _clientSecret = clientSecret ?? _definedClientSecret;
+
+  final String _clientSecret;
+
+  /// The secret rides on every token POST when present — Entra treats this
+  /// registration as confidential, and both the code exchange AND the
+  /// refresh fail with AADSTS7000218 without it.
+  Map<String, String> _withClientAuth(Map<String, String> form) => {
+        ...form,
+        if (_clientSecret.isNotEmpty) 'client_secret': _clientSecret,
+      };
 
   String get _scopeParam => _scopes.join(' ');
 
@@ -242,14 +273,14 @@ class GraphAuth {
       await server.close(force: true);
     }
 
-    final response = await _postToken({
+    final response = await _postToken(_withClientAuth({
       'client_id': clientId,
       'scope': _scopeParam,
       'code': code,
       'redirect_uri': redirectUri,
       'grant_type': 'authorization_code',
       'code_verifier': verifier,
-    });
+    }));
     if (response.statusCode != 200) {
       throw AuthException(_describeTokenError(response));
     }
@@ -361,12 +392,12 @@ class GraphAuth {
       throw const NotSignedIn();
     }
 
-    final response = await _postToken({
+    final response = await _postToken(_withClientAuth({
       'client_id': clientId,
       'scope': _scopeParam,
       'refresh_token': refreshToken,
       'grant_type': 'refresh_token',
-    });
+    }));
 
     if (response.statusCode != 200) {
       if (response.json['error'] == 'invalid_grant') {
