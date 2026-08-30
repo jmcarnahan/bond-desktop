@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../services/ai_worker.dart';
+import '../services/attention_service.dart';
 import '../services/graph_auth.dart';
 import '../services/sync_service.dart';
 import '../services/triage_queue.dart';
@@ -83,6 +84,11 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// Nothing on screen listens to its progress yet.
   final AiWorker? _aiWorker;
 
+  /// Scores and re-files the mailbox immediately before every read. Null in
+  /// tests that only exercise the read model; the list then renders whatever
+  /// scores and buckets were last written.
+  final AttentionService? _attention;
+
   StreamSubscription<TriageProgress>? _triageProgress;
   Timer? _triageReload;
 
@@ -94,9 +100,11 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     this._sync, {
     TriageQueue? triage,
     AiWorker? aiWorker,
+    AttentionService? attention,
     Future<String?>? userAddress,
   })  : _triage = triage,
         _aiWorker = aiWorker,
+        _attention = attention,
         super(const ConversationsInitial()) {
     final queue = triage;
     if (queue == null) return;
@@ -185,6 +193,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
     final List<Conversation> rows;
     try {
+      // Synchronous, and immediately before the read rather than on a timer of
+      // its own: it is four indexed queries and some arithmetic, and running it
+      // anywhere else would mean the rows about to render could carry scores
+      // computed against a sender rule the user has since changed. Inside the
+      // same try as the read because both are the same database — a failure in
+      // either is "could not read the local inbox".
+      _attention?.recomputeAll(sources: const ['email']);
       rows = _store.loadConversations(sources: const ['email']);
     } catch (e) {
       // The database itself failed. There is no stale-but-valid answer to
@@ -233,6 +248,11 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         conversationKey,
         ConversationState.done,
       );
+      // On the success path only. Closing a thread is the quietest "I am done
+      // with this" the LO ever gives, and it is worth recording — but recording
+      // one for a write that failed would teach the app from something that
+      // never happened.
+      _logImplicit('thread', conversationKey, 'down');
     } catch (_) {
       final latest = state;
       if (latest is! ConversationsLoaded) return;
@@ -242,6 +262,144 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       );
     }
   }
+
+  // ── corrections ──────────────────────────────────────────────────────
+  //
+  // Every explicit correction does the same three things in the same order:
+  // record what the person said, apply it, then reload so the list agrees with
+  // them in the same frame. The record comes first because it is the part that
+  // must survive — an event with no effect is recoverable, an effect nobody
+  // wrote down is not.
+
+  /// One sender's mail belongs in the inbox. Returns how many of their threads
+  /// came back out of Later.
+  Future<int> keepSenderInInbox(String address) async {
+    _store.recordFeedback(
+      scope: 'sender',
+      scopeKey: address.toLowerCase(),
+      direction: 'up',
+      origin: 'explicit',
+    );
+    _store.setSenderPref(address, 'keep');
+    final affected = _store.rebucketSender(address, bucket: null);
+    await load(syncFirst: false);
+    return affected;
+  }
+
+  /// One sender's mail belongs in Later. Returns how many of their threads
+  /// moved.
+  Future<int> sendSenderToLater(String address) async {
+    _store.recordFeedback(
+      scope: 'sender',
+      scopeKey: address.toLowerCase(),
+      direction: 'down',
+      origin: 'explicit',
+    );
+    _store.setSenderPref(address, 'later');
+    final affected = _store.rebucketSender(address, bucket: 'later');
+    await load(syncFirst: false);
+    return affected;
+  }
+
+  /// Puts one sender's rule back where it was, and re-files their threads from
+  /// the restored rule. What UNDO calls.
+  ///
+  /// Approximate, deliberately: it restores the RULE, then re-derives every
+  /// affected thread's bucket from it. A thread that was individually deferred
+  /// before the correction and then swept up by it comes back to whatever the
+  /// restored rule says, not to the bucket it personally had. Undoing a
+  /// sender-wide action by replaying a sender-wide action is the only inverse
+  /// that stays one statement; remembering per-thread state to restore would
+  /// mean a second history table for a button pressed seconds ago.
+  Future<void> restoreSenderPref(String address, String? disposition) async {
+    _store.recordFeedback(
+      scope: 'sender',
+      scopeKey: address.toLowerCase(),
+      // An undo is itself a correction, in the opposite direction of whatever
+      // it is undoing. Recording it keeps the event log honest: the history
+      // says what the person actually did, mistakes included.
+      direction: disposition == 'later' ? 'down' : 'up',
+      origin: 'explicit',
+    );
+    _store.setSenderPref(address, disposition);
+    _store.rebucketSender(
+      address,
+      bucket: disposition == 'later' ? 'later' : null,
+    );
+    await load(syncFirst: false);
+  }
+
+  /// This one thread belongs in the inbox, whatever its sender's rule says.
+  ///
+  /// The `user` reason is written on a NULL bucket, which is what makes the
+  /// exemption stick: without it the very next load would see the sender rule
+  /// still in force and defer the thread again, and the button would look
+  /// broken. A later explicit sender-wide correction still overrides it — that
+  /// is a newer instruction about a wider set, and the person giving it means
+  /// all of that sender's mail.
+  Future<void> keepThreadInInbox(String source, String conversationKey) async {
+    _store.recordFeedback(
+      scope: 'thread',
+      scopeKey: conversationKey,
+      direction: 'up',
+      origin: 'explicit',
+    );
+    _store.setConversationBucket(
+      source,
+      conversationKey,
+      bucket: null,
+      reason: 'user',
+    );
+    await load(syncFirst: false);
+  }
+
+  /// This one thread belongs in Later. The `user` reason is what tells the
+  /// scoring sweep to leave it alone in both directions.
+  Future<void> sendThreadToLater(String source, String conversationKey) async {
+    _store.recordFeedback(
+      scope: 'thread',
+      scopeKey: conversationKey,
+      direction: 'down',
+      origin: 'explicit',
+    );
+    _store.setConversationBucket(
+      source,
+      conversationKey,
+      bucket: 'later',
+      reason: 'user',
+    );
+    await load(syncFirst: false);
+  }
+
+  /// The sender's rule as it stands, so a caller can capture it before
+  /// overwriting and hand it back to [restoreSenderPref].
+  String? senderPref(String address) => _store.getSenderPref(address);
+
+  /// Records something the LO did rather than something they said — opening a
+  /// thread, closing one. Fire-and-forget and never reloads: these fire on
+  /// every click, and a list read behind each one would make the app feel
+  /// slower for a signal nothing on screen reads yet.
+  ///
+  /// It swallows its own failures for the same reason. A correction that fails
+  /// is worth telling someone about; a background signal that fails is not
+  /// worth interrupting them mid-click.
+  void _logImplicit(String scope, String scopeKey, String direction) {
+    try {
+      _store.recordFeedback(
+        scope: scope,
+        scopeKey: scopeKey,
+        direction: direction,
+        origin: 'implicit',
+      );
+    } catch (_) {
+      // Deliberately silent.
+    }
+  }
+
+  /// The LO opened this thread. The weakest positive signal there is, and the
+  /// most plentiful.
+  void noteThreadOpened(String conversationKey) =>
+      _logImplicit('thread', conversationKey, 'up');
 }
 
 final conversationsProvider =
@@ -251,6 +409,7 @@ final conversationsProvider =
     ref.watch(syncServiceProvider),
     triage: ref.watch(triageQueueProvider),
     aiWorker: ref.watch(aiWorkerProvider),
+    attention: ref.watch(attentionServiceProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
     userAddress: ref.watch(graphAuthProvider).storedAccount.then(

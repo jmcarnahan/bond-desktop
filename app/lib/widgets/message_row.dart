@@ -73,14 +73,7 @@ bool sameRun(Message a, Message b) {
 
 /// The local calendar day a message landed on, as `yyyy-mm-dd`. Null when the
 /// timestamp does not parse, which reads as "no day divider" upstream.
-String? dayKeyOf(Message m) {
-  final parsed = DateTime.tryParse(m.receivedAt ?? '');
-  if (parsed == null) return null;
-  final local = parsed.toLocal();
-  final month = local.month.toString().padLeft(2, '0');
-  final day = local.day.toString().padLeft(2, '0');
-  return '${local.year}-$month-$day';
-}
+String? dayKeyOf(Message m) => dayKeyOfIso(m.receivedAt);
 
 /// One message in a thread, flat and left-aligned whichever way it went.
 ///

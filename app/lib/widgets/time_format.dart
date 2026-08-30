@@ -11,6 +11,23 @@ String? formatTimestamp(String? iso) {
   return DateFormat('MMM d, h:mm a').format(parsed.toLocal());
 }
 
+/// The local calendar day an ISO timestamp falls on, as `yyyy-mm-dd`. Null
+/// when it does not parse, which reads as "no day" upstream — a transcript
+/// drops the divider, a digest drops the group.
+///
+/// Local, not UTC: the day a message belongs to is the day the reader was
+/// living in when it arrived, and grouping by UTC puts an evening's mail under
+/// tomorrow for anyone west of Greenwich.
+String? dayKeyOfIso(String? iso) {
+  if (iso == null || iso.isEmpty) return null;
+  final parsed = DateTime.tryParse(iso);
+  if (parsed == null) return null;
+  final local = parsed.toLocal();
+  final month = local.month.toString().padLeft(2, '0');
+  final day = local.day.toString().padLeft(2, '0');
+  return '${local.year}-$month-$day';
+}
+
 /// The day-divider label for a transcript: "Today" and "Yesterday" for the
 /// two days a reader thinks of by name, a weekday-qualified date for the rest.
 /// Null for anything unparseable, so a bad timestamp drops the divider rather

@@ -160,4 +160,27 @@ CREATE TABLE IF NOT EXISTS storyline_member_blocks (
   blocked_at TEXT NOT NULL,
   PRIMARY KEY (storyline_id, source, conversation_key)
 ) STRICT;
+-- `INTEGER PRIMARY KEY` and not `AUTOINCREMENT`: the two behave identically
+-- for a table nothing is ever deleted from, and AUTOINCREMENT would add
+-- sqlite's own `sqlite_sequence` table to the schema — which is not STRICT,
+-- and every table here is.
+CREATE TABLE IF NOT EXISTS feedback_events (
+  id INTEGER PRIMARY KEY,
+  scope TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_feedback_scope
+  ON feedback_events(scope, scope_key, created_at DESC);
+CREATE TABLE IF NOT EXISTS sender_prefs (
+  address TEXT PRIMARY KEY,
+  disposition TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS app_prefs (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
 ''';

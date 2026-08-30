@@ -7,6 +7,7 @@ import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
+import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/graph_auth.dart';
 import '../services/triage_queue.dart';
@@ -14,8 +15,11 @@ import '../theme/tokens.dart';
 import '../widgets/app_rail.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
+import '../widgets/later_digest.dart';
+import '../widgets/settings_dialog.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
+import '../widgets/time_format.dart';
 
 /// The whole app, for now: a dark rail of sections beside one main pane that
 /// shows either a section's threads or the open thread's transcript.
@@ -53,9 +57,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   String? _selectedId;
 
   /// The open storyline. Never set at the same time as [_selectedId] — the
-  /// main pane shows exactly one thing, and the two selections clear each
+  /// main pane shows exactly one thing, and the three selections clear each
   /// other rather than racing to be rendered.
   String? _selectedStorylineId;
+
+  /// The open Later day, as a `yyyy-mm-dd` key. Exclusive with the two above
+  /// for the same reason they are exclusive with each other.
+  String? _selectedLaterDay;
 
   /// Narrow layouts only: whether the rail overlay is up.
   bool _railOpen = false;
@@ -110,8 +118,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
     setState(() {
       _selectedId = id;
       _selectedStorylineId = null;
+      _selectedLaterDay = null;
       _railOpen = false;
     });
+    // The quietest signal the app collects: opening a thread is the LO saying
+    // this one was worth their time. Fire-and-forget, and nothing on screen
+    // reads it yet.
+    ref.read(conversationsProvider.notifier).noteThreadOpened(id);
     ref.read(threadProvider(id).notifier).load();
   }
 
@@ -119,6 +132,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
     setState(() {
       _selectedStorylineId = id;
       _selectedId = null;
+      _selectedLaterDay = null;
       _railOpen = false;
     });
     ref.read(storylineTimelineProvider(id).notifier).load();
@@ -127,6 +141,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   void _selectSection(RailSection section) {
     setState(() {
       _section = section;
+      _selectedId = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
+      _railOpen = false;
+    });
+  }
+
+  /// Opens one day's Later digest. The section moves with it, so backing out of
+  /// the day lands on the whole pile rather than wherever the user was before.
+  void _selectLaterDay(String dayKey) {
+    setState(() {
+      _section = RailSection.later;
+      _selectedLaterDay = dayKey;
       _selectedId = null;
       _selectedStorylineId = null;
       _railOpen = false;
@@ -261,20 +288,89 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
     );
   }
 
+  // ── corrections ────────────────────────────────────────────────────────
+  //
+  // Every explicit correction lands the same way: it happens immediately, and
+  // it says so in a bar with an UNDO on it. Confirming first would put a modal
+  // in front of a one-click gesture the LO is going to make dozens of times;
+  // an undo costs nothing when it is not used.
+
+  /// How long the undo stays reachable. Long enough to notice the bar and
+  /// react, short enough not to sit over the mail.
+  static const Duration _undoDuration = Duration(seconds: 5);
+
+  void _toast(String message, {VoidCallback? onUndo}) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    // The previous bar goes now rather than queueing: correcting three senders
+    // in a row should leave the third one's undo reachable, not the first's.
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: _undoDuration,
+        action: onUndo == null
+            ? null
+            : SnackBarAction(label: 'Undo', onPressed: onUndo),
+      ),
+    );
+  }
+
+  static String _threads(int n) => n == 1 ? '1 thread' : '$n threads';
+
+  Future<void> _keepSender(String address) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    // Captured BEFORE the write. The undo restores this exact value, including
+    // "there was no rule", which is a different state from "the rule was keep".
+    final previous = notifier.senderPref(address);
+    final affected = await notifier.keepSenderInInbox(address);
+    _toast(
+      'Keeping $address in your inbox — ${_threads(affected)} moved back.',
+      onUndo: () => notifier.restoreSenderPref(address, previous),
+    );
+  }
+
+  Future<void> _laterSender(String address) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    final previous = notifier.senderPref(address);
+    final affected = await notifier.sendSenderToLater(address);
+    _toast(
+      '$address goes to Later — ${_threads(affected)} moved.',
+      onUndo: () => notifier.restoreSenderPref(address, previous),
+    );
+  }
+
+  Future<void> _keepThread(String source, String key) async {
+    final notifier = ref.read(conversationsProvider.notifier);
+    await notifier.keepThreadInInbox(source, key);
+    _toast(
+      'Thread kept in your inbox.',
+      onUndo: () => notifier.sendThreadToLater(source, key),
+    );
+  }
+
   Widget _rail(List<Conversation> conversations) {
+    final later = laterRows(conversations);
     return AppRail(
       conversations: conversations,
       storylines: _storylines(),
       selectedId: _selectedId,
       selectedStorylineId: _selectedStorylineId,
-      // A thread or a storyline being open means no section overview is
-      // showing, so the rail must not highlight one.
-      selectedSection: (_selectedId == null && _selectedStorylineId == null)
+      selectedLaterDay: _selectedLaterDay,
+      laterCount: later.length,
+      laterDays: laterDayCounts(conversations),
+      attentionThreshold: ref.watch(appPrefsProvider).attentionThreshold,
+      // A thread, a storyline or a Later day being open means no section
+      // overview is showing, so the rail must not highlight one.
+      selectedSection: (_selectedId == null &&
+              _selectedStorylineId == null &&
+              _selectedLaterDay == null)
           ? _section
           : null,
       onSelectConversation: _select,
       onSelectSection: _selectSection,
       onSelectStoryline: _selectStoryline,
+      onSelectLaterDay: _selectLaterDay,
       onKeepSuggestion: (id) =>
           ref.read(storylinesProvider.notifier).keep(id),
       onDismissSuggestion: (id) {
@@ -319,11 +415,32 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
                   },
                 ),
               ),
+              _railAction(Icons.settings, 'Settings', _openSettings),
               _railAction(Icons.refresh, 'Refresh', _refresh),
               _railAction(Icons.logout, 'Sign out', _signOut),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  /// The two tuning controls. The threshold reloads the list as it changes —
+  /// the whole point of the slider is watching Needs You grow and shrink under
+  /// it — while the "about me" text is only saved.
+  Future<void> _openSettings() async {
+    final prefs = ref.read(appPrefsProvider);
+    final notifier = ref.read(appPrefsProvider.notifier);
+    await showDialog<void>(
+      context: context,
+      builder: (context) => SettingsDialog(
+        threshold: prefs.attentionThreshold,
+        aboutMe: prefs.aboutMe,
+        onThresholdChanged: (value) {
+          notifier.setAttentionThreshold(value);
+          ref.read(conversationsProvider.notifier).load(syncFirst: false);
+        },
+        onAboutMeChanged: notifier.setAboutMe,
       ),
     );
   }
@@ -375,6 +492,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   /// Exactly one view, never two: the thread transcript, then the storyline
   /// timeline, then the section overview. The order is the priority — a thread
   /// selection is the most specific thing the user asked for.
+  ///
+  /// A selected Later day is not a case here: it is a section overview with a
+  /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
     final selected = _selected(conversations);
     if (selected != null) return _thread(selected);
@@ -541,6 +661,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
           .read(storylinesProvider.notifier)
           .addThread(id, selected.source, selected.id),
       onNewStoryline: () => _promptNewStoryline(selected.id),
+      // Sender-scoped, because the screen is the layer that knows the address
+      // behind the row. A thread with no address to key a rule on gets no item
+      // rather than a rule keyed on the empty string, which would apply to
+      // every anonymous sender at once.
+      onSendToLater: selected.primaryEmail?.isNotEmpty == true
+          ? () => _laterSender(selected.primaryEmail!)
+          : null,
+      onKeepInInbox: () => _keepThread(selected.source, selected.id),
     );
 
     return Padding(
@@ -563,14 +691,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   }
 
   Widget _overview(List<Conversation> conversations, String? loadError) {
-    final section = _section ?? RailSection.needsYou;
+    final section = _selectedLaterDay != null
+        ? RailSection.later
+        : (_section ?? RailSection.needsYou);
+    final day = _selectedLaterDay;
+    final title = (section == RailSection.later && day != null)
+        ? 'Later · ${formatDayLabel(day) ?? day}'
+        : section.label;
 
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(section.label, style: BondType.title),
+          Text(title, style: BondType.title),
           const SizedBox(height: BondSpacing.s16),
           if (loadError != null) ...[
             InlineAlert(
@@ -592,12 +726,34 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
 
   Widget _overviewBody(RailSection section, List<Conversation> conversations) {
     if (section == RailSection.storylines) return _storylinesOverview();
+    if (section == RailSection.later) {
+      return LaterDigestPanel(
+        conversations: conversations,
+        dayFilter: _selectedLaterDay,
+        onOpen: _select,
+        onKeepSender: _keepSender,
+        onKeepThread: _keepThread,
+      );
+    }
 
     final sections = switch (section) {
-      RailSection.needsYou => [('NEEDS YOU', needsYouRows(conversations))],
+      // Same threshold and the same ordering as the rail, so the "+N more" row
+      // opens the list it promised rather than a longer one. Anything the
+      // threshold cut is still in Conversations below — that is what makes the
+      // slider safe to turn all the way down.
+      RailSection.needsYou => [
+          (
+            'NEEDS YOU',
+            needsYouRows(
+              conversations,
+              threshold: ref.watch(appPrefsProvider).attentionThreshold,
+            ),
+          ),
+        ],
       RailSection.conversations => [('OPEN', conversationRows(conversations))],
-      RailSection.later => const [('LATER', <Conversation>[])],
-      RailSection.storylines => const <(String, List<Conversation>)>[],
+      RailSection.later ||
+      RailSection.storylines =>
+        const <(String, List<Conversation>)>[],
     };
 
     return ConversationListPane(

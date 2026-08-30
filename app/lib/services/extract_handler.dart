@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'ai_worker.dart';
+import 'attention.dart';
 import 'conversation_state.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/extract_task.dart';
@@ -49,7 +50,70 @@ class ExtractHandler implements WorkHandler {
     );
     _store.writeExtraction(source, id, jsonEncode(result.toJson()));
 
+    _fileBucket(source, row, result);
     await _refreshCard(source, row, result);
+  }
+
+  /// Files this message's thread into Later, or out of it, the moment the model
+  /// has read it.
+  ///
+  /// The scoring sweep would reach the same answer on the next list load, so
+  /// this is purely about when: extraction runs behind a queue that can be
+  /// minutes deep, and without this a message would appear in the inbox, sit
+  /// there, and then jump to Later while the LO was reading the list. Filing it
+  /// as the fact lands means the row is only ever drawn once, where it belongs.
+  ///
+  /// It shares [bucketFor] with the sweep rather than reimplementing the rule —
+  /// two copies would drift, and the symptom would be a thread that changes
+  /// bucket depending on which pass ran last.
+  void _fileBucket(
+    String source,
+    Map<String, Object?> row,
+    ExtractionResult result,
+  ) {
+    final key = row['conversation_key'] as String?;
+    if (key == null || key.isEmpty) return;
+    final conversation = _store.getConversationRow(source, key);
+    if (conversation == null) return;
+
+    // Only the thread's newest inbound message gets to file it. The queue
+    // drains newest-first but a backlog can still hand this handler a month-old
+    // message, and letting that one decide would file the thread on what its
+    // conversation stopped being about.
+    final receivedAt = row['received_at'] as String?;
+    if (receivedAt == null ||
+        receivedAt != conversation['last_inbound_at'] as String?) {
+      return;
+    }
+
+    // A bucket a person asked for is never re-decided here. `sender_pref` and
+    // `user` are both written by an explicit correction, and the automatic pass
+    // does not get to overrule someone by arriving later.
+    final stored = _store.getConversationAi(source, key);
+    final reason = stored?['bucket_reason'] as String?;
+    if (reason == 'user' || reason == 'sender_pref') return;
+
+    final senderPref =
+        _store.getSenderPref(row['from_address'] as String? ?? '');
+    final bucket = bucketFor(
+      senderPref: senderPref,
+      intent: result.intent,
+      importance: result.importance,
+      needsReply: (conversation['state'] as String?) == 'needs_reply',
+    );
+
+    if (bucket != null) {
+      _store.setConversationBucket(
+        source,
+        key,
+        bucket: bucket,
+        reason: bucketReasonFor(senderPref),
+      );
+    } else if (reason == 'low_value') {
+      // The thread earned its way back: a message that is no longer low-value
+      // clears the guess this pass made last time, and nothing else.
+      _store.setConversationBucket(source, key, bucket: null);
+    }
   }
 
   /// Re-embeds this message's thread, if what the thread says about itself

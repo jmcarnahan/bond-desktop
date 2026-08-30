@@ -3,6 +3,7 @@ import 'package:sqlite3/sqlite3.dart';
 
 import '../data/message_store.dart';
 import '../services/ai_worker.dart';
+import '../services/attention_service.dart';
 import '../services/extract_handler.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
@@ -35,6 +36,13 @@ final messageStoreProvider =
 
 final graphMailProvider =
     Provider<GraphMail>((ref) => GraphMail(ref.watch(graphAuthProvider)));
+
+/// Ranking and deferral. Stateless beyond its store, and cheap enough to run
+/// on every list load — see [AttentionService] for why it runs there rather
+/// than on a schedule of its own.
+final attentionServiceProvider = Provider<AttentionService>(
+  (ref) => AttentionService(ref.watch(messageStoreProvider)),
+);
 
 /// Typed as [MailSync], not [SyncService], so a test can override it with a
 /// stand-in that never touches the network.

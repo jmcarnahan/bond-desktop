@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,6 +27,9 @@ Conversation _conv({
   String? subject,
   ConversationState state = ConversationState.waiting,
   String? cta,
+  String? bucket,
+  double? score,
+  String? lastMessageAt,
 }) {
   return Conversation(
     id: id,
@@ -33,6 +37,9 @@ Conversation _conv({
     participants: who == null ? const [] : [Participant(name: who)],
     state: state,
     ctaText: cta,
+    bucket: bucket,
+    attentionScore: score,
+    lastMessageAt: lastMessageAt,
   );
 }
 
@@ -75,13 +82,85 @@ void main() {
       expect(rows, isEmpty);
     });
 
-    test('preserves input order', () {
+    test('preserves input order among equals', () {
       final rows = needsYouRows([
         _conv(id: 'a', state: ConversationState.needsReply),
         _conv(id: 'b', state: ConversationState.waiting),
         _conv(id: 'c', state: ConversationState.needsReply),
       ]);
       expect(rows.map((c) => c.id), ['a', 'c']);
+    });
+
+    test('excludes anything deferred to Later', () {
+      final rows = needsYouRows([
+        _conv(id: 'a', state: ConversationState.needsReply, bucket: 'later'),
+        _conv(id: 'b', state: ConversationState.needsReply),
+      ]);
+      expect(rows.map((c) => c.id), ['b']);
+    });
+
+    test('sorts needs-reply first, then by score', () {
+      final rows = needsYouRows([
+        _conv(id: 'quiet', state: ConversationState.needsReply, score: 0.4),
+        _conv(
+          id: 'loud-waiting',
+          state: ConversationState.waiting,
+          cta: 'ask',
+          score: 1.9,
+        ),
+        _conv(id: 'loud', state: ConversationState.needsReply, score: 1.5),
+      ]);
+      // A waiting thread never outranks a reply the LO owes, however loudly
+      // it scores.
+      expect(rows.map((c) => c.id), ['loud', 'quiet', 'loud-waiting']);
+    });
+
+    test('ties keep input order rather than shuffling between reads', () {
+      final rows = needsYouRows([
+        for (final id in ['a', 'b', 'c', 'd', 'e'])
+          _conv(id: id, state: ConversationState.needsReply, score: 1),
+      ]);
+      expect(rows.map((c) => c.id), ['a', 'b', 'c', 'd', 'e']);
+    });
+
+    test('a missing score sorts as zero rather than throwing', () {
+      final rows = needsYouRows([
+        _conv(id: 'unscored', state: ConversationState.needsReply),
+        _conv(id: 'scored', state: ConversationState.needsReply, score: 1),
+      ]);
+      expect(rows.map((c) => c.id), ['scored', 'unscored']);
+    });
+
+    test('the threshold cuts anything below it, needs-reply included', () {
+      final rows = needsYouRows(
+        [
+          _conv(id: 'over', state: ConversationState.needsReply, score: 0.9),
+          _conv(id: 'under', state: ConversationState.needsReply, score: 0.1),
+        ],
+        threshold: 0.5,
+      );
+      expect(rows.map((c) => c.id), ['over']);
+    });
+
+    test('a row exactly at the threshold is in', () {
+      final rows = needsYouRows(
+        [_conv(id: 'a', state: ConversationState.needsReply, score: 0.5)],
+        threshold: 0.5,
+      );
+      expect(rows.map((c) => c.id), ['a']);
+    });
+  });
+
+  group('isWaitingRow', () {
+    test('is the second block of Needs You', () {
+      expect(
+        isWaitingRow(_conv(id: 'a', state: ConversationState.needsReply)),
+        isFalse,
+      );
+      expect(
+        isWaitingRow(_conv(id: 'a', state: ConversationState.waiting)),
+        isTrue,
+      );
     });
   });
 
@@ -93,6 +172,62 @@ void main() {
         _conv(id: 'c', state: ConversationState.waiting),
       ]);
       expect(rows.map((c) => c.id), ['a', 'c']);
+    });
+
+    test('drops deferred threads too — exactly one section claims each', () {
+      final rows = conversationRows([
+        _conv(id: 'a', state: ConversationState.needsReply),
+        _conv(id: 'b', state: ConversationState.waiting, bucket: 'later'),
+      ]);
+      expect(rows.map((c) => c.id), ['a']);
+    });
+  });
+
+  group('laterRows', () {
+    test('is everything deferred and still open', () {
+      final rows = laterRows([
+        _conv(id: 'a', bucket: 'later'),
+        _conv(id: 'b'),
+        _conv(id: 'c', bucket: 'later', state: ConversationState.done),
+      ]);
+      expect(rows.map((c) => c.id), ['a']);
+    });
+  });
+
+  group('laterDayCounts', () {
+    test('groups by local day, newest day first', () {
+      final rows = laterDayCounts([
+        _conv(id: 'a', bucket: 'later', lastMessageAt: '2026-08-28T10:00:00'),
+        _conv(id: 'b', bucket: 'later', lastMessageAt: '2026-08-28T18:00:00'),
+        _conv(id: 'c', bucket: 'later', lastMessageAt: '2026-08-27T10:00:00'),
+        _conv(id: 'd', lastMessageAt: '2026-08-28T10:00:00'),
+      ]);
+      expect(rows, [('2026-08-28', 2), ('2026-08-27', 1)]);
+    });
+
+    test('mail with an unreadable date is still counted, never dropped', () {
+      // Later must never lose anything. A bad timestamp gets its own group
+      // rather than an early return.
+      final rows = laterDayCounts([
+        _conv(id: 'a', bucket: 'later', lastMessageAt: 'wharrgarbl'),
+        _conv(id: 'b', bucket: 'later'),
+      ]);
+      expect(rows, [('', 2)]);
+    });
+
+    test('nothing deferred is no days', () {
+      expect(laterDayCounts([_conv(id: 'a')]), isEmpty);
+    });
+  });
+
+  group('laterDayLabel', () {
+    test('names the day and carries the count', () {
+      expect(laterDayLabel('2026-01-14', 3), 'Wed, Jan 14 — 3');
+    });
+
+    test('falls back rather than rendering an empty row', () {
+      expect(laterDayLabel('', 2), 'Undated — 2');
+      expect(laterDayLabel('nonsense', 1), 'nonsense — 1');
     });
   });
 
@@ -208,6 +343,213 @@ void main() {
 
       expect(find.text('Alice'), findsOneWidget);
       expect(sections, isEmpty);
+    });
+  });
+
+  group('AppRail Later', () {
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      required List<Conversation> conversations,
+      String? selectedLaterDay,
+      void Function(String)? onSelectLaterDay,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        conversations: conversations,
+        selectedId: null,
+        selectedSection: RailSection.later,
+        selectedLaterDay: selectedLaterDay,
+        laterCount: laterRows(conversations).length,
+        laterDays: laterDayCounts(conversations),
+        onSelectConversation: (_) {},
+        onSelectSection: (_) {},
+        onSelectLaterDay: onSelectLaterDay,
+      )));
+    }
+
+    testWidgets('an empty pile keeps the placeholder and no badge',
+        (tester) async {
+      await pumpRail(tester, conversations: [_conv(id: 'a')]);
+
+      expect(find.text('Nothing deferred yet'), findsOneWidget);
+    });
+
+    testWidgets('a day row per day, with the count in the label',
+        (tester) async {
+      await pumpRail(tester, conversations: [
+        _conv(
+          id: 'a',
+          who: 'Alice',
+          bucket: 'later',
+          lastMessageAt: '2026-01-14T10:00:00',
+        ),
+        _conv(
+          id: 'b',
+          who: 'Bruno',
+          bucket: 'later',
+          lastMessageAt: '2026-01-14T18:00:00',
+        ),
+        _conv(
+          id: 'c',
+          who: 'Cleo',
+          bucket: 'later',
+          lastMessageAt: '2026-01-13T10:00:00',
+        ),
+      ]);
+
+      expect(find.text('Wed, Jan 14 — 2'), findsOneWidget);
+      expect(find.text('Tue, Jan 13 — 1'), findsOneWidget);
+      expect(find.text('Nothing deferred yet'), findsNothing);
+      // The badge counts the whole pile, not the days.
+      expect(find.text('3'), findsOneWidget);
+    });
+
+    testWidgets('deferred threads appear in no other section', (tester) async {
+      await pumpRail(tester, conversations: [
+        _conv(
+          id: 'a',
+          who: 'Alice',
+          state: ConversationState.needsReply,
+          bucket: 'later',
+          lastMessageAt: '2026-01-14T10:00:00',
+        ),
+      ]);
+
+      // Its name is nowhere: not in Needs You, not in Conversations. Only the
+      // day row it was folded into.
+      expect(find.text('Alice'), findsNothing);
+      expect(find.text('Wed, Jan 14 — 1'), findsOneWidget);
+    });
+
+    testWidgets('tapping a day opens its digest', (tester) async {
+      final days = <String>[];
+      await pumpRail(
+        tester,
+        conversations: [
+          _conv(id: 'a', bucket: 'later', lastMessageAt: '2026-01-14T10:00:00'),
+        ],
+        onSelectLaterDay: days.add,
+      );
+
+      await tester.tap(find.text('Wed, Jan 14 — 1'));
+      expect(days, ['2026-01-14']);
+    });
+  });
+
+  group('AppRail Needs You ranking', () {
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      required List<Conversation> conversations,
+      double threshold = 0,
+      void Function(RailSection)? onSelectSection,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 1400));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        conversations: conversations,
+        selectedId: null,
+        selectedSection: RailSection.needsYou,
+        attentionThreshold: threshold,
+        onSelectConversation: (_) {},
+        onSelectSection: onSelectSection ?? (_) {},
+      )));
+    }
+
+    List<Conversation> manyNeedsReply(int n) => [
+          for (var i = 0; i < n; i++)
+            _conv(
+              id: 'c$i',
+              who: 'Person $i',
+              state: ConversationState.needsReply,
+              // Descending, so the rendered order is the seeded order.
+              score: 2 - i * 0.01,
+            ),
+        ];
+
+    testWidgets('shows at most the top seven, and says how many are left',
+        (tester) async {
+      await pumpRail(tester, conversations: manyNeedsReply(10));
+
+      expect(find.text('Person 0'), findsNWidgets(2)); // Needs You + open list
+      expect(find.text('Person 6'), findsNWidgets(2));
+      // Person 7..9 are past the cap: only the Conversations section has them.
+      expect(find.text('Person 7'), findsOneWidget);
+      expect(find.text('+3 more'), findsOneWidget);
+      // The badge still counts all ten. It must never flatter the workload.
+      expect(find.text('10'), findsOneWidget);
+    });
+
+    testWidgets('exactly seven needs no overflow row', (tester) async {
+      await pumpRail(tester, conversations: manyNeedsReply(7));
+      expect(find.textContaining('more'), findsNothing);
+    });
+
+    testWidgets('the overflow row opens the section, not a thread',
+        (tester) async {
+      final sections = <RailSection>[];
+      await pumpRail(
+        tester,
+        conversations: manyNeedsReply(9),
+        onSelectSection: sections.add,
+      );
+
+      await tester.tap(find.text('+2 more'));
+      expect(sections, [RailSection.needsYou]);
+    });
+
+    testWidgets('the threshold hides rows from Needs You but not the app',
+        (tester) async {
+      await pumpRail(
+        tester,
+        threshold: 0.5,
+        conversations: [
+          _conv(
+            id: 'a',
+            who: 'Loud',
+            state: ConversationState.needsReply,
+            score: 1.5,
+          ),
+          _conv(
+            id: 'b',
+            who: 'Quiet',
+            state: ConversationState.needsReply,
+            score: 0.1,
+          ),
+        ],
+      );
+
+      expect(find.text('Loud'), findsNWidgets(2));
+      // Cut from Needs You, still in Conversations. Nothing is ever hidden
+      // entirely by the slider.
+      expect(find.text('Quiet'), findsOneWidget);
+    });
+
+    testWidgets('a waiting row renders dimmed below the needs-reply block',
+        (tester) async {
+      await pumpRail(tester, conversations: [
+        _conv(
+          id: 'a',
+          who: 'Owed',
+          state: ConversationState.needsReply,
+          score: 1,
+        ),
+        _conv(
+          id: 'b',
+          who: 'Waiting',
+          state: ConversationState.waiting,
+          cta: 'Send the appraisal',
+          score: 1.9,
+        ),
+      ]);
+
+      // Present, and quieter than the row above it.
+      expect(find.text('Waiting'), findsNWidgets(2));
+      final dimmed = tester.widget<Text>(find.text('Waiting').first);
+      expect(dimmed.style?.color, BondColors.onDarkMuted);
+
+      final loud = tester.widget<Text>(find.text('Owed').first);
+      expect(loud.style?.color, BondColors.onDarkPrimary);
     });
   });
 

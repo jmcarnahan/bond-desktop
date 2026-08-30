@@ -303,6 +303,142 @@ void main() {
     });
   });
 
+  group('bucket at extraction time', () {
+    /// The same thread as [seedConversation], but with `last_inbound_at`
+    /// stamped — the handler only files a thread on its NEWEST inbound
+    /// message, and that is the column it checks against.
+    void seedCurrentConversation({
+      String state = 'waiting',
+      String lastInboundAt = '2026-08-29T10:00:00Z',
+    }) {
+      store.upsertConversation({
+        'conversation_key': 'conv-1',
+        'subject': 'Rate lock',
+        'state': state,
+        'last_message_at': lastInboundAt,
+        'last_inbound_at': lastInboundAt,
+      });
+    }
+
+    String? bucketOf() =>
+        store.getConversationAi('email', 'conv-1')?['bucket'] as String?;
+    String? reasonOf() =>
+        store.getConversationAi('email', 'conv-1')?['bucket_reason'] as String?;
+
+    ExtractHandler handlerFor(Map<String, dynamic> result) =>
+        ExtractHandler(store, FakeLlm([result]), FakeEmbeddings().client);
+
+    test('a low-value fyi is deferred as the fact lands', () async {
+      // Without this the row would appear in the inbox, sit there while the
+      // queue drained, and then jump to Later under the reader's eyes.
+      seedCurrentConversation();
+      seedMessage();
+
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+      expect(bucketOf(), 'later');
+      expect(reasonOf(), 'low_value');
+    });
+
+    test('a request is not', () async {
+      seedCurrentConversation();
+      seedMessage();
+
+      await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+      expect(bucketOf(), isNull);
+    });
+
+    test('a thread awaiting the LO is never deferred', () async {
+      seedCurrentConversation(state: 'needs_reply');
+      seedMessage();
+
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+      expect(bucketOf(), isNull);
+    });
+
+    test('a later sender rule defers whatever the model said', () async {
+      seedCurrentConversation();
+      seedMessage();
+      store.setSenderPref('sarah@x.com', 'later');
+
+      await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+      expect(bucketOf(), 'later');
+      expect(reasonOf(), 'sender_pref');
+    });
+
+    test('a keep sender rule beats a low-value verdict', () async {
+      seedCurrentConversation();
+      seedMessage();
+      store.setSenderPref('sarah@x.com', 'keep');
+
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+      expect(bucketOf(), isNull);
+    });
+
+    test('it never overrules a bucket a person asked for', () async {
+      seedCurrentConversation();
+      seedMessage();
+      store.setConversationBucket('email', 'conv-1',
+          bucket: 'later', reason: 'user');
+
+      await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+      expect(bucketOf(), 'later');
+      expect(reasonOf(), 'user');
+    });
+
+    test('nor an exemption a person asked for', () async {
+      seedCurrentConversation();
+      seedMessage();
+      store.setConversationBucket('email', 'conv-1',
+          bucket: null, reason: 'user');
+
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+      expect(bucketOf(), isNull);
+      expect(reasonOf(), 'user');
+    });
+
+    test('it withdraws its own earlier guess when the verdict changes',
+        () async {
+      seedCurrentConversation();
+      seedMessage();
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+      expect(bucketOf(), 'later');
+
+      await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
+
+      expect(bucketOf(), isNull);
+      expect(reasonOf(), isNull);
+    });
+
+    test('an older message does not get to file the thread', () async {
+      // The queue drains newest-first, but a backlog can still hand this
+      // handler a month-old message. Letting it decide would file the thread
+      // on what its conversation stopped being about.
+      seedCurrentConversation(lastInboundAt: '2026-09-01T10:00:00Z');
+      seedMessage();
+
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+      expect(bucketOf(), isNull);
+      // The extraction itself still landed — only the filing was declined.
+      expect(store.getExtraction('email', 'm1'), isNotNull);
+    });
+
+    test('a message with no conversation row files nothing', () async {
+      seedMessage(conversationKey: 'orphan');
+
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+      expect(store.getConversationAi('email', 'orphan'), isNull);
+    });
+  });
+
   group('buildConversationCard', () {
     test('is four segments, empty ones included', () {
       expect(

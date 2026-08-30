@@ -37,6 +37,17 @@ class ThreadDetailPanel extends StatelessWidget {
   /// used to.
   final VoidCallback? onNewStoryline;
 
+  /// Defers this thread's sender. Sender-scoped rather than thread-scoped
+  /// because that is the correction worth collecting: one thread going quiet
+  /// changes one row, a sender going quiet changes the shape of the inbox.
+  /// Null hides the item.
+  final VoidCallback? onSendToLater;
+
+  /// Brings a deferred thread back. Only shown when the thread is actually in
+  /// a bucket — an "undo" for something that never happened is a menu item
+  /// that reads as broken.
+  final VoidCallback? onKeepInInbox;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -46,6 +57,8 @@ class ThreadDetailPanel extends StatelessWidget {
     this.storylineChoices = const [],
     this.onAddToStoryline,
     this.onNewStoryline,
+    this.onSendToLater,
+    this.onKeepInInbox,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -231,21 +244,32 @@ class ThreadDetailPanel extends StatelessWidget {
               child: const Text('Mark done'),
             ),
           ],
-          ?_storylineMenu(),
+          ?_overflowMenu(),
         ],
       ),
     );
   }
 
-  /// Filing this thread into a storyline. An overflow menu rather than a
-  /// visible control: it is a correction, not part of reading mail, and the
-  /// automatic pass is supposed to get it right without being asked.
-  Widget? _storylineMenu() {
-    if (onAddToStoryline == null && onNewStoryline == null) return null;
+  /// Filing this thread — into a storyline, or out of the inbox. An overflow
+  /// menu rather than visible controls: these are corrections, not part of
+  /// reading mail, and the automatic passes are supposed to get them right
+  /// without being asked.
+  Widget? _overflowMenu() {
+    final bucketed = conversation.bucket != null;
+    final showKeep = onKeepInInbox != null && bucketed;
+    if (onAddToStoryline == null &&
+        onNewStoryline == null &&
+        onSendToLater == null &&
+        !showKeep) {
+      return null;
+    }
+    final hasStorylineItems =
+        storylineChoices.isNotEmpty || onNewStoryline != null;
+
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_horiz),
       iconSize: 20,
-      tooltip: 'Storylines',
+      tooltip: 'More',
       itemBuilder: (context) => [
         for (final (id, title) in storylineChoices)
           PopupMenuItem<String>(
@@ -259,17 +283,36 @@ class ThreadDetailPanel extends StatelessWidget {
             value: _newStorylineValue,
             child: Text('New storyline…'),
           ),
+        if (hasStorylineItems && (onSendToLater != null || showKeep))
+          const PopupMenuDivider(),
+        if (onSendToLater != null)
+          const PopupMenuItem<String>(
+            value: _sendToLaterValue,
+            child: Text('Send to Later'),
+          ),
+        if (showKeep)
+          const PopupMenuItem<String>(
+            value: _keepInInboxValue,
+            child: Text('Keep in inbox'),
+          ),
       ],
       onSelected: (value) {
-        if (value == _newStorylineValue) {
-          onNewStoryline?.call();
-          return;
+        switch (value) {
+          case _newStorylineValue:
+            onNewStoryline?.call();
+          case _sendToLaterValue:
+            onSendToLater?.call();
+          case _keepInInboxValue:
+            onKeepInInbox?.call();
+          default:
+            onAddToStoryline?.call(value);
         }
-        onAddToStoryline?.call(value);
       },
     );
   }
 
-  /// Namespaced so it cannot collide with a storyline id, which is `sl-…`.
+  /// Namespaced so they cannot collide with a storyline id, which is `sl-…`.
   static const String _newStorylineValue = '__new_storyline__';
+  static const String _sendToLaterValue = '__send_to_later__';
+  static const String _keepInInboxValue = '__keep_in_inbox__';
 }

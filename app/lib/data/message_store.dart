@@ -242,19 +242,32 @@ WHERE source = ? AND conversation_key = ?
   }
 
   /// The inbox list, newest thread first.
+  ///
+  /// The LEFT JOIN is what lets one read answer both "what mail is there" and
+  /// "where has the app filed it": bucket and attention score live on
+  /// `conversation_ai` (see [upsertConversationAi] for why they are not columns
+  /// on `conversations`), and a second query per thread to fetch them would be
+  /// a query per row on a list that renders thousands. LEFT, not inner — a
+  /// thread the AI has never looked at still belongs in the inbox, with both
+  /// columns null.
   List<Conversation> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
   }) {
     if (sources.isEmpty) return const [];
-    final where = StringBuffer('source IN (${_placeholders(sources.length)})');
+    final where =
+        StringBuffer('c.source IN (${_placeholders(sources.length)})');
     final args = <Object?>[...sources];
     if (state != null) {
-      where.write(' AND state = ?');
+      where.write(' AND c.state = ?');
       args.add(state.wire);
     }
     final result = db.select(
-      'SELECT * FROM conversations WHERE $where ORDER BY last_message_at DESC',
+      'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score '
+      'FROM conversations c '
+      'LEFT JOIN conversation_ai ai '
+      '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
+      'WHERE $where ORDER BY c.last_message_at DESC',
       args,
     );
     return [for (final row in result) Conversation.fromRow(row)];
@@ -701,6 +714,325 @@ LIMIT ?
     );
     if (result.isEmpty) return null;
     return Map<String, Object?>.from(result.first);
+  }
+
+  /// Files one thread into a bucket, or takes it out of every bucket.
+  ///
+  /// Targeted like [upsertConversationAi], and inserting the row first for the
+  /// same reason: a thread the embedder has never reached has no
+  /// `conversation_ai` row, and a bucket decision must not depend on whether
+  /// some other task got there first.
+  ///
+  /// The two columns move together, always, and either may be null.
+  ///
+  /// `bucket` is WHERE the thread went; `bucket_reason` is WHO decided. They
+  /// are independent because "a person decided this thread belongs in the
+  /// inbox" is a real decision that has to survive the next sweep, and it has
+  /// no bucket to hang off. `(null, 'user')` is exactly that state — see
+  /// `AttentionService`, which skips any thread carrying a `user` reason in
+  /// both directions.
+  ///
+  /// Passing neither returns the thread to "nobody has ever ruled on this",
+  /// which is what the sweep writes when it withdraws its own guess.
+  void setConversationBucket(
+    String source,
+    String conversationKey, {
+    required String? bucket,
+    String? reason,
+  }) {
+    final now = _nowIso();
+    db.execute(
+      'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
+      'VALUES (?, ?, ?) '
+      'ON CONFLICT(source, conversation_key) DO NOTHING',
+      [source, conversationKey, now],
+    );
+    db.execute(
+      'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, updated_at = ? '
+      'WHERE source = ? AND conversation_key = ?',
+      [bucket, reason, now, source, conversationKey],
+    );
+  }
+
+  /// Stores one thread's ranking score. Same targeted insert-then-update as
+  /// [setConversationBucket]: the score is recomputed on every list load and
+  /// must never disturb an embedding or a bucket sitting on the same row.
+  void writeAttentionScore(
+    String source,
+    String conversationKey,
+    double score,
+  ) {
+    final now = _nowIso();
+    db.execute(
+      'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
+      'VALUES (?, ?, ?) '
+      'ON CONFLICT(source, conversation_key) DO NOTHING',
+      [source, conversationKey, now],
+    );
+    db.execute(
+      'UPDATE conversation_ai SET attention_score = ?, updated_at = ? '
+      'WHERE source = ? AND conversation_key = ?',
+      [score, now, source, conversationKey],
+    );
+  }
+
+  /// `conversation_key` → who last decided where it goes, for every thread
+  /// anyone has decided about.
+  ///
+  /// Threads nobody has ruled on are absent. Note that a thread can be here
+  /// with no bucket: `(null, 'user')` means someone deliberately put it back in
+  /// the inbox, which the sweep must respect exactly as much as a deliberate
+  /// deferral — see [setConversationBucket].
+  Map<String, String?> bucketReasons({
+    List<String> sources = const ['email'],
+  }) {
+    if (sources.isEmpty) return const {};
+    final result = db.select(
+      'SELECT conversation_key, bucket_reason FROM conversation_ai '
+      'WHERE bucket_reason IS NOT NULL '
+      'AND source IN (${_placeholders(sources.length)})',
+      [...sources],
+    );
+    return {
+      for (final row in result)
+        (row['conversation_key'] as String? ?? ''):
+            row['bucket_reason'] as String?,
+    };
+  }
+
+  /// One row per conversation for its NEWEST INBOUND message, with that
+  /// message's extraction alongside it.
+  ///
+  /// "Newest" is `received_at DESC` with `source_message_id DESC` behind it as
+  /// a tie-break. Two messages stamped the same second are common in a mailbox,
+  /// and without the tie-break sqlite would be free to pick a different one on
+  /// every read — which would show up as a sender rule applying to a thread on
+  /// one pass and not the next.
+  ///
+  /// Keyed by `conversation_key` alone. Conversation keys are handed out by the
+  /// connector and are unique within a source; with two sources in play a key
+  /// that collided across them would keep only the row read last.
+  ///
+  /// The LEFT JOIN onto `message_ai` is what makes this one query rather than
+  /// two: the scorer needs the intent the extraction found, and a per-thread
+  /// lookup would be a query per row.
+  Map<String, Map<String, Object?>> latestInboundMeta({
+    List<String> sources = const ['email'],
+  }) {
+    if (sources.isEmpty) return const {};
+    final result = db.select(
+      'SELECT conversation_key, source, source_message_id, from_address, '
+      '  received_at, extraction_json FROM ('
+      '  SELECT m.conversation_key AS conversation_key, m.source AS source, '
+      '    m.source_message_id AS source_message_id, '
+      '    m.from_address AS from_address, m.received_at AS received_at, '
+      '    a.extraction_json AS extraction_json, '
+      '    ROW_NUMBER() OVER ('
+      '      PARTITION BY m.source, m.conversation_key '
+      '      ORDER BY m.received_at DESC, m.source_message_id DESC'
+      '    ) AS rn '
+      '  FROM messages m '
+      '  LEFT JOIN message_ai a '
+      '    ON a.source = m.source AND a.source_message_id = m.source_message_id '
+      "  WHERE m.direction = 'inbound' "
+      '    AND m.source IN (${_placeholders(sources.length)})'
+      ') WHERE rn = 1',
+      [...sources],
+    );
+    return {
+      for (final row in result)
+        (row['conversation_key'] as String? ?? ''):
+            Map<String, Object?>.from(row),
+    };
+  }
+
+  /// How often each sender gets answered, as a 0..1 fraction.
+  ///
+  /// A cheap approximation, and deliberately so: "replied" means the thread
+  /// contains at least one outbound message, not that the LO replied to THIS
+  /// message. A thread the LO started and a thread they answered look the same
+  /// here. The scorer uses it as a small nudge (see
+  /// `AttentionTuning.replyRateMax`), never as a decision, so the approximation
+  /// costs a fraction of a point on a thread rather than a wrong bucket.
+  ///
+  /// Computed in SQL rather than by loading messages: on a real mailbox this is
+  /// hundreds of thousands of rows, and it runs on every list load.
+  Map<String, double> senderReplyRates({String source = 'email'}) {
+    final result = db.select(
+      'SELECT LOWER(m.from_address) AS addr, '
+      '  COUNT(DISTINCT m.conversation_key) AS threads, '
+      '  COUNT(DISTINCT CASE WHEN EXISTS ('
+      '    SELECT 1 FROM messages o WHERE o.source = m.source '
+      '      AND o.conversation_key = m.conversation_key '
+      "      AND o.direction = 'outbound'"
+      '  ) THEN m.conversation_key END) AS replied '
+      'FROM messages m '
+      "WHERE m.source = ? AND m.direction = 'inbound' "
+      "  AND m.from_address IS NOT NULL AND m.from_address <> '' "
+      'GROUP BY LOWER(m.from_address)',
+      [source],
+    );
+    final rates = <String, double>{};
+    for (final row in result) {
+      final address = row['addr'] as String? ?? '';
+      if (address.isEmpty) continue;
+      final threads = (row['threads'] as num?)?.toInt() ?? 0;
+      if (threads == 0) continue;
+      final replied = (row['replied'] as num?)?.toInt() ?? 0;
+      rates[address] = replied / threads;
+    }
+    return rates;
+  }
+
+  /// Applies one sender-scoped decision to every thread that sender owns.
+  ///
+  /// **The latest inbound sender owns the thread.** A thread's sender is
+  /// whoever wrote its newest inbound message, not whoever started it: a
+  /// newsletter the LO forwarded to a colleague who replied is that colleague's
+  /// thread now, and "never show me mail from this newsletter again" must not
+  /// bury the colleague's answer. Ties break the same way [latestInboundMeta]
+  /// breaks them, so the two always agree on who that is.
+  ///
+  /// [bucket] null clears the bucket and its reason; a non-null bucket is
+  /// always written with reason `sender_pref`, which is what marks it as a
+  /// human's decision the automatic sweep may not undo.
+  ///
+  /// Returns how many conversation rows the rule touched — every thread that
+  /// sender owns, whether or not the write actually changed the value. It is
+  /// the number the UI reports back ("moved 12 threads"), and a user who does
+  /// this twice should see the same count both times.
+  int rebucketSender(
+    String address, {
+    required String? bucket,
+    String source = 'email',
+  }) {
+    final lowered = address.toLowerCase();
+    final now = _nowIso();
+
+    // The threads themselves. Repeated rather than factored into a CTE because
+    // the INSERT and the UPDATE need it in different positions, and a bucket
+    // has nowhere to live until the row exists.
+    const String owned = '''
+SELECT conversation_key FROM (
+  SELECT conversation_key, from_address,
+    ROW_NUMBER() OVER (
+      PARTITION BY source, conversation_key
+      ORDER BY received_at DESC, source_message_id DESC
+    ) AS rn
+  FROM messages WHERE source = ? AND direction = 'inbound'
+) WHERE rn = 1 AND LOWER(from_address) = ?''';
+
+    db.execute(
+      'INSERT OR IGNORE INTO conversation_ai '
+      '(source, conversation_key, updated_at) '
+      'SELECT ?, conversation_key, ? FROM ($owned)',
+      [source, now, source, lowered],
+    );
+    db.execute(
+      'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, updated_at = ? '
+      'WHERE source = ? AND conversation_key IN ($owned)',
+      [
+        bucket,
+        bucket == null ? null : 'sender_pref',
+        now,
+        source,
+        source,
+        lowered,
+      ],
+    );
+    return db.updatedRows;
+  }
+
+  // ── feedback, sender rules, app preferences ──────────────────────────
+
+  /// Appends one correction to the permanent record. INSERT only — there is no
+  /// update and no delete anywhere in this class.
+  ///
+  /// The events are the history and [sender_prefs] is the current answer
+  /// materialized from it. Keeping both means a rule can be re-derived, and a
+  /// later phase can weigh "corrected this sender down four times this month"
+  /// differently from "corrected once, a year ago" — neither of which survives
+  /// in a table that only remembers the latest value.
+  ///
+  /// [origin] separates `explicit` (a button the LO pressed) from `implicit`
+  /// (opening a thread, marking one done). Implicit signals are far noisier and
+  /// far more numerous, and anything that learns from these has to be able to
+  /// tell them apart.
+  void recordFeedback({
+    required String scope,
+    required String scopeKey,
+    required String direction,
+    required String origin,
+  }) {
+    db.execute(
+      'INSERT INTO feedback_events '
+      '(scope, scope_key, direction, origin, created_at) '
+      'VALUES (?, ?, ?, ?, ?)',
+      [scope, scopeKey, direction, origin, _nowIso()],
+    );
+  }
+
+  /// Sets, or with a null [disposition] removes, one sender's standing rule.
+  ///
+  /// Deleting rather than storing a third "no opinion" value: absent is
+  /// already the natural state of a sender nobody has ruled on, and two ways to
+  /// spell it would mean every reader has to handle both.
+  ///
+  /// Addresses are stored lowercased. Mail systems vary on whether they
+  /// preserve the case a sender typed, so the same person can arrive as
+  /// `Eric@x.com` and `eric@x.com`, and a rule that applied to only one of
+  /// those would look like it silently stopped working.
+  void setSenderPref(String address, String? disposition) {
+    final lowered = address.toLowerCase();
+    if (disposition == null) {
+      db.execute('DELETE FROM sender_prefs WHERE address = ?', [lowered]);
+      return;
+    }
+    db.execute(
+      'INSERT INTO sender_prefs (address, disposition, updated_at) '
+      'VALUES (?, ?, ?) '
+      'ON CONFLICT(address) DO UPDATE SET '
+      'disposition = excluded.disposition, updated_at = excluded.updated_at',
+      [lowered, disposition, _nowIso()],
+    );
+  }
+
+  /// One sender's rule, or null when there is none. Lowercases first, so a
+  /// caller may pass whatever casing the message carried.
+  String? getSenderPref(String address) {
+    final result = db.select(
+      'SELECT disposition FROM sender_prefs WHERE address = ?',
+      [address.toLowerCase()],
+    );
+    if (result.isEmpty) return null;
+    return result.first['disposition'] as String?;
+  }
+
+  /// Every sender rule at once — what the scoring pass wants, since it asks
+  /// about a rule for every thread in the inbox.
+  Map<String, String> allSenderPrefs() {
+    final result = db.select('SELECT address, disposition FROM sender_prefs');
+    return {
+      for (final row in result)
+        (row['address'] as String? ?? ''): (row['disposition'] as String? ?? ''),
+    };
+  }
+
+  /// One app-level setting, or null when it has never been set. Values are TEXT
+  /// whatever they mean — a threshold is stored as its `toString()` and parsed
+  /// back by the one reader that knows what it is.
+  String? getPref(String key) {
+    final result = db.select('SELECT value FROM app_prefs WHERE key = ?', [key]);
+    if (result.isEmpty) return null;
+    return result.first['value'] as String?;
+  }
+
+  void setPref(String key, String value) {
+    db.execute(
+      'INSERT INTO app_prefs (key, value) VALUES (?, ?) '
+      'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      [key, value],
+    );
   }
 
   // ── storylines ───────────────────────────────────────────────────────

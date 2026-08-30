@@ -108,6 +108,16 @@ class Conversation {
   final String? lastMessageAt;
   final String? lastMessagePreview;
 
+  /// Where the app has filed this thread — `'later'` or null for the inbox.
+  /// Lives on `conversation_ai`, not on the thread's own row: it is the app's
+  /// opinion about the mail, not a fact about the mail. Null on anything read
+  /// from a payload that does not carry it.
+  final String? bucket;
+
+  /// How loudly this thread is asking for the LO, 0..2. Written by the
+  /// scoring pass; null until one has run.
+  final double? attentionScore;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -123,6 +133,8 @@ class Conversation {
     this.lastOutboundAt,
     this.lastMessageAt,
     this.lastMessagePreview,
+    this.bucket,
+    this.attentionScore,
   });
 
   /// First participant — the row's primary sender. Null when a conversation
@@ -149,6 +161,33 @@ class Conversation {
       lastOutboundAt: lastOutboundAt,
       lastMessageAt: lastMessageAt,
       lastMessagePreview: lastMessagePreview,
+      bucket: bucket,
+      attentionScore: attentionScore,
+    );
+  }
+
+  /// The bucket, changed — including to null, which is the whole reason this is
+  /// its own method rather than another [copyWith] parameter. Clearing a bucket
+  /// and leaving one alone are opposite intentions, and an optional `String?`
+  /// spells them the same way.
+  Conversation withBucket(String? bucket) {
+    return Conversation(
+      id: id,
+      source: source,
+      subject: subject,
+      participants: participants,
+      category: category,
+      state: state,
+      ctaText: ctaText,
+      ctaUrgency: ctaUrgency,
+      messageCount: messageCount,
+      inboundCount: inboundCount,
+      lastInboundAt: lastInboundAt,
+      lastOutboundAt: lastOutboundAt,
+      lastMessageAt: lastMessageAt,
+      lastMessagePreview: lastMessagePreview,
+      bucket: bucket,
+      attentionScore: attentionScore,
     );
   }
 
@@ -196,6 +235,11 @@ class Conversation {
       lastOutboundAt: row['last_outbound_at'] as String?,
       lastMessageAt: row['last_message_at'] as String?,
       lastMessagePreview: row['last_message_preview'] as String?,
+      // Both come from the LEFT JOIN in `loadConversations`, so both are null
+      // on a thread with no `conversation_ai` row and on every read that did
+      // not join it.
+      bucket: row['bucket'] as String?,
+      attentionScore: (row['attention_score'] as num?)?.toDouble(),
     );
   }
 }
