@@ -60,6 +60,13 @@ class SyncService implements MailSync {
     await _syncFolder('inbox', 'inbound');
     await _syncFolder('sentitems', 'outbound');
 
+    // A transient failure — the model server mid-load, two timeouts in a row
+    // — must not remove mail from the AI pipeline forever. Errored rows get
+    // another chance on each sync until their attempt ceiling; the enqueue
+    // below is `OR IGNORE`, so nothing here double-queues.
+    _store.reviveErroredTriage(source: _source);
+    _store.reviveErroredWork();
+
     // After both drains, so the window it queues from is the mailbox as it
     // stands rather than as it stood mid-sync. `OR IGNORE` on the work table
     // makes this idempotent, which is what lets it run on every sync: new mail
@@ -92,16 +99,20 @@ class SyncService implements MailSync {
         minReceivedIso: firstRun ? _isoAgo(const Duration(days: syncFloorDays)) : null,
       );
     } on DeltaResyncRequired {
-      // The cursor is older than Graph's change history. Start over — but
-      // from 24 hours, not the 14-day floor: this is a recovery inside a
-      // running sync, and the mailbox behind it is already stored.
+      // The cursor is older than Graph's change history — which means an
+      // unknown stretch of changes is unreachable through it. The only floor
+      // that cannot lose mail is the same one a first run uses: anything
+      // shorter (a "recovery" window) silently drops whatever arrived between
+      // the dead cursor and that window's edge, and nothing ever fetches it
+      // again. Ingest is idempotent per page, so re-reading stored mail costs
+      // bandwidth once and corrupts nothing.
       _store.setDeltaLink(folder, null, source: _source);
       try {
         await _drain(
           folder,
           direction,
           startLink: null,
-          minReceivedIso: _isoAgo(const Duration(hours: 24)),
+          minReceivedIso: _isoAgo(const Duration(days: syncFloorDays)),
         );
       } on DeltaResyncRequired {
         // Twice in one drain is not an expired token, it is a loop.

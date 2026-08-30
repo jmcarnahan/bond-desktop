@@ -33,7 +33,7 @@ void main() {
     required List<Conversation> conversations,
     String? dayFilter,
     void Function(String)? onOpen,
-    void Function(String)? onKeepSender,
+    void Function(String, String)? onKeepSender,
     void Function(String, String)? onKeepThread,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
@@ -44,7 +44,7 @@ void main() {
           conversations: conversations,
           dayFilter: dayFilter,
           onOpen: onOpen ?? (_) {},
-          onKeepSender: onKeepSender ?? (_) {},
+          onKeepSender: onKeepSender ?? (_, _) {},
           onKeepThread: onKeepThread ?? (_, _) {},
         ),
       ),
@@ -178,23 +178,24 @@ void main() {
   });
 
   group('actions', () {
-    testWidgets('Keep in inbox fires with the sender ADDRESS, not the name',
+    testWidgets('Keep in inbox fires with the sender ADDRESS and its source',
         (tester) async {
-      final kept = <String>[];
+      final kept = <(String, String)>[];
       await pump(
         tester,
         conversations: [
           _conv(id: 'a', who: 'Alice', email: 'alice@x.com', subject: 'One'),
           _conv(id: 'b', who: 'Alice', email: 'alice@x.com', subject: 'Two'),
         ],
-        onKeepSender: kept.add,
+        onKeepSender: (address, source) => kept.add((address, source)),
       );
 
       // One button for the whole group: the correction is sender-scoped, and
-      // two rows from one sender is not two decisions.
+      // two rows from one sender is not two decisions. The source rides along
+      // so the rule re-files the rows it actually applies to.
       expect(find.text('Keep in inbox'), findsOneWidget);
       await tester.tap(find.text('Keep in inbox'));
-      expect(kept, ['alice@x.com']);
+      expect(kept, [('alice@x.com', 'email')]);
     });
 
     testWidgets('a sender with no address gets no sender-scoped button',

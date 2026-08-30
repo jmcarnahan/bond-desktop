@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../data/message_store.dart';
 import '../models/message_models.dart';
+import 'drain_gate.dart';
 import 'gates.dart';
 import 'graph_auth.dart';
 import 'llm/json_task.dart';
@@ -77,6 +78,7 @@ class TriageQueue {
 
   final MessageStore _store;
   final LlmClient _client;
+  final DrainGate _gate;
 
   /// Fetches one message's body and headers into the store — in the app,
   /// [MailSync.ensureMessageBody]. Null in tests that have no Graph at all,
@@ -95,8 +97,10 @@ class TriageQueue {
     this._client, {
     String? userAddress,
     Future<void> Function(String sourceMessageId)? ensureBody,
+    DrainGate? gate,
   })  : _userAddress = userAddress,
-        _ensureBody = ensureBody;
+        _ensureBody = ensureBody,
+        _gate = gate ?? DrainGate();
 
   /// The signed-in mailbox, for the gate that skips the loan officer's own
   /// mail. Set after sign-in resolves; until then that one gate is simply off.
@@ -120,7 +124,9 @@ class TriageQueue {
 
   /// Drains until nothing is pending, the queue is stopped, or the model
   /// server turns out to be down. Idempotent: a second call while a drain is
-  /// running returns immediately rather than starting a racing one.
+  /// running returns immediately rather than starting a racing one. The drain
+  /// itself runs under the shared [DrainGate], so it never interleaves model
+  /// calls with an AI-worker drain already at the server.
   Future<void> pump() async {
     if (_running) return;
     _running = true;
@@ -130,11 +136,13 @@ class TriageQueue {
     // is exactly when a user with a fresh backlog is looking for it.
     _emit();
     try {
-      while (!_stopped) {
-        final row = _store.nextPendingTriage(sources: const [_source]);
-        if (row == null) break;
-        if (!await _triageOne(row)) break;
-      }
+      await _gate.run(() async {
+        while (!_stopped) {
+          final row = _store.nextPendingTriage(sources: const [_source]);
+          if (row == null) break;
+          if (!await _triageOne(row)) break;
+        }
+      });
     } finally {
       _running = false;
     }

@@ -332,6 +332,30 @@ void main() {
       expect(store.nextPendingTriage(), isNull);
     });
 
+    test('reviveErroredTriage flips errors below the ceiling back to pending',
+        () {
+      store.upsertMessage(messageRow(id: 'healable'));
+      store.upsertMessage(messageRow(id: 'done-for'));
+      store.writeTriage('email', 'healable',
+          status: 'error', error: 'timeout', attempts: 2);
+      store.writeTriage('email', 'done-for',
+          status: 'error', error: 'timeout', attempts: 6);
+
+      expect(store.reviveErroredTriage(), 1);
+
+      final healed = store.db.select(
+          'SELECT triage_status, triage_attempts FROM messages '
+          "WHERE source_message_id = 'healable'").first;
+      expect(healed['triage_status'], 'pending');
+      // Kept, not reset — one more try per revival, permanent at the ceiling.
+      expect(healed['triage_attempts'], 2);
+
+      final capped = store.db.select(
+          'SELECT triage_status FROM messages '
+          "WHERE source_message_id = 'done-for'").first;
+      expect(capped['triage_status'], 'error');
+    });
+
     test('writeTriage records a result as columns, bools as 0/1', () {
       store.upsertMessage(messageRow(id: 'm1'));
       store.writeTriage(
@@ -419,6 +443,41 @@ void main() {
       expect(store.triageCounts(), {'pending': 1});
       expect(store.triageCounts(sources: ['email', 'teams']), {'pending': 2});
       expect(store.triageCounts(sources: const []), isEmpty);
+    });
+  });
+
+  group('wipeAll', () {
+    test('empties every table, cursors and prefs included', () {
+      store.upsertMessage(messageRow(id: 'm1'));
+      store.setDeltaLink('inbox', 'cursor-1');
+      store.setSenderPref('eric@x.com', 'later');
+      store.recordFeedback(
+        scope: 'thread',
+        scopeKey: 'c1',
+        direction: 'up',
+        origin: 'explicit',
+      );
+      store.enqueueWork('extract', 'email', 'm1');
+
+      store.wipeAll();
+
+      for (final table in [
+        'messages',
+        'conversations',
+        'sync_state',
+        'work_items',
+        'feedback_events',
+        'sender_prefs',
+      ]) {
+        expect(
+          store.db.select('SELECT COUNT(*) AS n FROM $table').first['n'],
+          0,
+          reason: '$table must not survive a sign-out — the next account '
+              'must find nothing of this one',
+        );
+      }
+      // The cursor read path agrees: a fresh sign-in starts a first-run sync.
+      expect(store.getDeltaLink('inbox', source: 'email'), isNull);
     });
   });
 

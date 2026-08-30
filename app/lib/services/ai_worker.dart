@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../data/message_store.dart';
+import 'drain_gate.dart';
 import 'graph_auth.dart';
 import 'llm/llm_client.dart';
 
@@ -71,15 +72,26 @@ class AiWorker {
 
   final MessageStore _store;
   final List<WorkHandler> _handlers;
+  final DrainGate _gate;
 
   final StreamController<WorkProgress> _progress =
       StreamController<WorkProgress>.broadcast();
 
-  bool _running = false;
+  /// The drain in flight, or null. Doubles as the "already running" guard and
+  /// as what a second [pump] returns, so a caller that pumped mid-drain still
+  /// awaits real completion instead of an instant no-op.
+  Future<void>? _draining;
+
+  /// Set when [pump] lands mid-drain: the active drain makes one more full
+  /// handler pass before finishing, picking up whatever that pump was for —
+  /// a kind it had already moved past would otherwise wait for the next sync.
+  bool _repump = false;
+
   bool _stopped = false;
 
-  AiWorker(this._store, {required List<WorkHandler> handlers})
-      : _handlers = List.unmodifiable(handlers);
+  AiWorker(this._store, {required List<WorkHandler> handlers, DrainGate? gate})
+      : _handlers = List.unmodifiable(handlers),
+        _gate = gate ?? DrainGate();
 
   Stream<WorkProgress> get progress => _progress.stream;
 
@@ -99,13 +111,29 @@ class AiWorker {
 
   /// Drains every handler's queue in order until nothing is pending, the
   /// worker is stopped, or something happens that would fail identically for
-  /// every item behind the current one. Idempotent: a second call while a
-  /// drain is running returns immediately rather than starting a racing one.
-  Future<void> pump() async {
-    if (_running) return;
-    _running = true;
+  /// every item behind the current one.
+  ///
+  /// Serialized two ways. Against ITSELF: a call while a drain is running does
+  /// not start a racing one — it schedules one more full pass on the active
+  /// drain and returns that drain's future, so the caller still awaits the
+  /// pass that will do its work. Against the OTHER queue: the whole drain runs
+  /// under the shared [DrainGate], so it can never interleave model calls with
+  /// a triage drain already at the server.
+  Future<void> pump() {
+    final inFlight = _draining;
+    if (inFlight != null) {
+      _repump = true;
+      return inFlight;
+    }
+    final drain = _gate.run(_drainAll);
+    _draining = drain.whenComplete(() => _draining = null);
+    return _draining!;
+  }
+
+  Future<void> _drainAll() async {
     _stopped = false;
-    try {
+    do {
+      _repump = false;
       for (final handler in _handlers) {
         if (_stopped) break;
         // Before the first item of each kind, not after it: a counter that
@@ -124,12 +152,11 @@ class AiWorker {
           if (!carryOn) break;
         }
         // A park is about the model server or the session, not about this
-        // kind, so the kinds behind it stop too.
-        if (!carryOn) break;
+        // kind, so the kinds behind it stop too — and so does any repump: it
+        // would park on the same server or the same session all over again.
+        if (!carryOn) return;
       }
-    } finally {
-      _running = false;
-    }
+    } while (_repump && !_stopped);
   }
 
   /// One item. Returns false when the whole drain should stop rather than move

@@ -146,7 +146,10 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
     final result = db.select(
       'SELECT * FROM messages '
       'WHERE conversation_key = ? AND source IN (${_placeholders(sources.length)}) '
-      'ORDER BY received_at ASC',
+      // The tie-break matters now that one thread can hold two sources: two
+      // messages sharing a second must render in ONE order, not whichever the
+      // query plan felt like — same rule as storylineTimeline.
+      'ORDER BY received_at ASC, source_message_id ASC',
       [conversationKey, ...sources],
     );
     return [for (final row in result) Message.fromRow(row)];
@@ -675,6 +678,71 @@ LIMIT ?
       "WHERE status = 'processing'",
       [_nowIso()],
     );
+  }
+
+  /// Flips errored work rows back to `pending` so a transient failure heals
+  /// on a later sync instead of removing the item from the pipeline forever.
+  ///
+  /// Attempts are deliberately NOT reset: the drain errors a row again at its
+  /// next failed attempt, so each revival buys exactly one more try, and the
+  /// [maxAttempts] ceiling is where a genuinely bad item stays down for good.
+  int reviveErroredWork({int maxAttempts = 6}) {
+    db.execute(
+      "UPDATE work_items SET status = 'pending', updated_at = ? "
+      "WHERE status = 'error' AND attempts < ?",
+      [_nowIso(), maxAttempts],
+    );
+    return db.updatedRows;
+  }
+
+  /// The triage half of [reviveErroredWork], with the same one-more-try
+  /// semantics per revival and the same permanent ceiling.
+  int reviveErroredTriage({String source = 'email', int maxAttempts = 6}) {
+    db.execute(
+      "UPDATE messages SET triage_status = 'pending', updated_at = ? "
+      "WHERE source = ? AND triage_status = 'error' AND triage_attempts < ?",
+      [_nowIso(), source, maxAttempts],
+    );
+    return db.updatedRows;
+  }
+
+  /// Empties every table, in one transaction. Sign-out calls this: the rows
+  /// are one account's mailbox, and a different account signing in must not
+  /// find them — mail, AI output, drafts, feedback, sender rules, and the
+  /// delta cursors that would otherwise resume the OLD account's sync
+  /// position against the new account's mailbox.
+  ///
+  /// `app_prefs` goes too. Its rows (attention threshold, volume slider) are
+  /// the previous user's calibration, and stale cursors hiding in a kept
+  /// table is exactly the class of bug this method exists to rule out —
+  /// everything or nothing is the only policy that stays correct as tables
+  /// are added.
+  void wipeAll() {
+    const tables = [
+      'messages',
+      'conversations',
+      'sync_state',
+      'work_items',
+      'message_ai',
+      'conversation_ai',
+      'storylines',
+      'storyline_members',
+      'storyline_member_blocks',
+      'feedback_events',
+      'sender_prefs',
+      'app_prefs',
+      'drafts',
+    ];
+    db.execute('BEGIN');
+    try {
+      for (final table in tables) {
+        db.execute('DELETE FROM $table');
+      }
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   // ── per-message AI output ────────────────────────────────────────────

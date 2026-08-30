@@ -229,6 +229,40 @@ void main() {
     });
   });
 
+  group('reviveErroredWork', () {
+    test('an errored row below the ceiling goes back to pending, attempts kept',
+        () {
+      store.enqueueWork('extract', 'email', 'a');
+      store.writeWork('extract', 'email', 'a', status: 'error', attempts: 2);
+
+      expect(store.reviveErroredWork(), 1);
+
+      final row = workRow('extract', 'a');
+      expect(row['status'], 'pending');
+      // NOT reset: the next failed attempt re-errors it, so each revival buys
+      // exactly one more try on the road to the permanent ceiling.
+      expect(row['attempts'], 2);
+    });
+
+    test('a row at the ceiling stays down for good', () {
+      store.enqueueWork('extract', 'email', 'a');
+      store.writeWork('extract', 'email', 'a', status: 'error', attempts: 6);
+
+      expect(store.reviveErroredWork(), 0);
+      expect(workRow('extract', 'a')['status'], 'error');
+    });
+
+    test('done and pending rows are untouched', () {
+      store.enqueueWork('extract', 'email', 'a');
+      store.enqueueWork('extract', 'email', 'b');
+      store.writeWork('extract', 'email', 'a', status: 'done');
+
+      expect(store.reviveErroredWork(), 0);
+      expect(workRow('extract', 'a')['status'], 'done');
+      expect(workRow('extract', 'b')['status'], 'pending');
+    });
+  });
+
   group('enqueueExtractBacklog', () {
     const since = '2026-08-25T00:00:00Z';
 

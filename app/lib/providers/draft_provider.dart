@@ -59,21 +59,31 @@ class DraftState {
   /// Shown above the composer. Cleared by the next action.
   final String? error;
 
+  /// Bumped once per SUCCESSFUL send, and only then. The screen keys the
+  /// composer on it, so a completed send rebuilds a fresh empty reply box —
+  /// the sent text must not sit there behind a re-enabled button, one stray
+  /// click from going out a second time.
+  final int sendEpoch;
+
   const DraftState({
     this.draft,
     this.generating = false,
     this.sending = false,
     this.capability = SendCapability.copyOnly,
     this.error,
+    this.sendEpoch = 0,
   });
 
   /// The draft's body, or null when there is none. A dismissed draft reads as
   /// no draft: the row survives so the enqueue does not immediately write
-  /// another, but the composer must show an empty box.
+  /// another, but the composer must show an empty box. A SENT draft reads the
+  /// same way — the reply is out, and offering its text again is how a
+  /// duplicate gets sent.
   String? get body {
     final row = draft;
     if (row == null) return null;
-    if ((row['status'] as String?) == 'dismissed') return null;
+    final status = row['status'] as String?;
+    if (status == 'dismissed' || status == 'sent') return null;
     final text = row['body'] as String? ?? '';
     return text.isEmpty ? null : text;
   }
@@ -95,6 +105,7 @@ class DraftState {
     bool? sending,
     SendCapability? capability,
     Object? error = _unset,
+    int? sendEpoch,
   }) =>
       DraftState(
         draft: identical(draft, _unset)
@@ -104,6 +115,7 @@ class DraftState {
         sending: sending ?? this.sending,
         capability: capability ?? this.capability,
         error: identical(error, _unset) ? this.error : error as String?,
+        sendEpoch: sendEpoch ?? this.sendEpoch,
       );
 
   /// Separates "not passed" from "passed as null" on [copyWith], where the two
@@ -254,6 +266,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// suggested.
   void markEdited(String body) {
     if (state.draft == null) return;
+    // A sent reply's record must never be rewritten to "edited" by the
+    // composer's trailing debounce — what reached the recipient is what the
+    // row has to keep saying was sent.
+    if ((state.draft?['status'] as String?) == 'sent') return;
     try {
       _store.updateDraftStatus(
         _source,
@@ -296,7 +312,16 @@ class DraftNotifier extends StateNotifier<DraftState> {
       return SendOutcome.copied;
     }
 
-    final replyTo = state.replyToMessageId;
+    // A thread only earns a generated draft when it ranks high enough, but
+    // the LO can reply to ANY thread — so a missing draft row falls back to
+    // the newest inbound message, which is exactly what the draft handler
+    // itself replies to.
+    var replyTo = state.replyToMessageId;
+    if (replyTo == null || replyTo.isEmpty) {
+      replyTo =
+          _store.newestInboundMessage(_source, conversationKey)?['source_message_id']
+              as String?;
+    }
     if (replyTo == null || replyTo.isEmpty) {
       state = state.copyWith(
         error: 'There is nothing to reply to in this thread yet.',
@@ -334,6 +359,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
       state = state.copyWith(
         sending: false,
         draft: _store.getDraft(_source, conversationKey),
+        sendEpoch: state.sendEpoch + 1,
       );
       // The sent message lands in `sentitems` and folds in normally, which is
       // what flips the thread out of "needs reply" — no optimistic row is

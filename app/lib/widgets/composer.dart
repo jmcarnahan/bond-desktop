@@ -286,7 +286,15 @@ class _ComposerState extends State<Composer> {
   Widget _sendButton(bool hasText, String body) {
     final enabled = hasText && !widget.sending;
     return ElevatedButton(
-      onPressed: enabled ? () => widget.onSend(body) : null,
+      onPressed: enabled
+          ? () {
+              // A pending edit-save must not fire while the send is in
+              // flight — the send is already carrying this exact text, and a
+              // trailing markEdited would rewrite the record of it.
+              _editDebounce?.cancel();
+              widget.onSend(body);
+            }
+          : null,
       child: widget.sending
           ? const SizedBox(
               width: 16,

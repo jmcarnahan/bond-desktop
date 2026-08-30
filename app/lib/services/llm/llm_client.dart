@@ -198,6 +198,18 @@ class LlmClient {
       );
     }
 
+    // A 5xx is the SERVER's condition, not this request's: llama-server
+    // answers 503 for every request while its weights load. Counting that
+    // against the item would burn the whole backlog's attempts against a
+    // server that was seconds from healthy — the drain must park instead,
+    // exactly as it does for a refused connection.
+    if (response.statusCode >= 500) {
+      throw LlmUnavailableException(
+        'The local model server is not ready '
+        '(HTTP ${response.statusCode}). ${_snippet(_text(response))}',
+      );
+    }
+
     if (response.statusCode != 200) {
       throw LlmException(
         'The local model rejected the request (HTTP ${response.statusCode}). '

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 
 import 'graph_auth.dart';
@@ -165,10 +166,19 @@ class GraphTeams {
   /// further back would spend a request per page on history the user has
   /// already read in Teams, and the conversation state machine only needs
   /// enough of a chat to know who spoke last.
+  ///
+  /// With a cursor the walk runs until the FILTERED set is exhausted. The
+  /// server-side `gt` filter means every returned message is newer than the
+  /// cursor, so the caller advances its cursor to the newest one — a page cap
+  /// that stopped the walk early would therefore advance that cursor over
+  /// messages never fetched, a permanent hole in the transcript. [maxPages]
+  /// exists only as a runaway bound (a chat would need [_pageSize]×[maxPages]
+  /// new messages between two user-triggered refreshes to hit it); hitting it
+  /// is logged, because it means exactly such a hole.
   Future<List<Map<String, dynamic>>> chatMessagesSince(
     String chatId,
     String? sinceIso, {
-    int maxPages = 4,
+    int maxPages = 40,
   }) async {
     final messages = <Map<String, dynamic>>[];
     final firstRun = sinceIso == null || sinceIso.isEmpty;
@@ -192,6 +202,13 @@ class GraphTeams {
 
       final next = json['@odata.nextLink'] as String?;
       uri = (next == null || next.isEmpty) ? null : Uri.parse(next);
+    }
+    if (uri != null && !firstRun) {
+      debugPrint(
+        'GraphTeams: chat $chatId had more than ${_pageSize * maxPages} new '
+        'messages in one pull — the walk stopped at the page bound, and the '
+        'messages behind it will not be fetched.',
+      );
     }
     return messages;
   }

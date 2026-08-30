@@ -31,7 +31,7 @@ class LaterDigestPanel extends StatelessWidget {
   final void Function(String conversationId) onOpen;
 
   /// "This sender belongs in my inbox", by address — the standing correction.
-  final void Function(String address) onKeepSender;
+  final void Function(String address, String source) onKeepSender;
 
   /// "This one thread belongs in my inbox", by `(source, key)` — the narrow
   /// one, for when the sender rule is right and this message is the exception.
@@ -129,7 +129,8 @@ class LaterDigestPanel extends StatelessWidget {
   /// rows beside it. Putting the button up here rather than on every line is
   /// what keeps a group of nine from reading as nine separate decisions.
   Widget _senderHeader(String who, List<Conversation> rows) {
-    final address = _addressOf(rows);
+    final owner = _addressRowOf(rows);
+    final address = owner?.primaryEmail;
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         BondSpacing.s4,
@@ -147,9 +148,12 @@ class LaterDigestPanel extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
-          if (address != null)
+          if (owner != null && address != null)
             TextButton.icon(
-              onPressed: () => onKeepSender(address),
+              // The source rides along with the address: a sender rule is
+              // applied to the rows of ONE source, and a Teams identity keyed
+              // against the email rows (or vice versa) would move nothing.
+              onPressed: () => onKeepSender(address, owner.source),
               icon: const Icon(Icons.arrow_upward, size: 14),
               label: const Text('Keep in inbox'),
               style: TextButton.styleFrom(
@@ -165,13 +169,13 @@ class LaterDigestPanel extends StatelessWidget {
     );
   }
 
-  /// The first address any of this sender's rows carries. Null when none does,
-  /// which hides the sender-scoped button — a rule keyed on an empty address
-  /// would apply to every anonymous sender at once.
-  static String? _addressOf(List<Conversation> rows) {
+  /// The first row of this sender's group that carries an address. Null when
+  /// none does, which hides the sender-scoped button — a rule keyed on an
+  /// empty address would apply to every anonymous sender at once.
+  static Conversation? _addressRowOf(List<Conversation> rows) {
     for (final c in rows) {
       final email = c.primaryEmail;
-      if (email != null && email.isNotEmpty) return email;
+      if (email != null && email.isNotEmpty) return c;
     }
     return null;
   }

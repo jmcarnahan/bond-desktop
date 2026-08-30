@@ -378,7 +378,12 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
   /// One sender's mail belongs in the inbox. Returns how many of their threads
   /// came back out of Later.
-  Future<int> keepSenderInInbox(String address) async {
+  ///
+  /// [source] is the source whose rows the rule re-files — a Teams sender's
+  /// threads live under `teams`, and re-filing the email rows for their
+  /// address would move nothing and report zero.
+  Future<int> keepSenderInInbox(String address,
+      {String source = 'email'}) async {
     _store.recordFeedback(
       scope: 'sender',
       scopeKey: address.toLowerCase(),
@@ -386,14 +391,15 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       origin: 'explicit',
     );
     _store.setSenderPref(address, 'keep');
-    final affected = _store.rebucketSender(address, bucket: null);
+    final affected = _store.rebucketSender(address, bucket: null, source: source);
     await load(syncFirst: false);
     return affected;
   }
 
   /// One sender's mail belongs in Later. Returns how many of their threads
-  /// moved.
-  Future<int> sendSenderToLater(String address) async {
+  /// moved. [source] as on [keepSenderInInbox].
+  Future<int> sendSenderToLater(String address,
+      {String source = 'email'}) async {
     _store.recordFeedback(
       scope: 'sender',
       scopeKey: address.toLowerCase(),
@@ -401,7 +407,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       origin: 'explicit',
     );
     _store.setSenderPref(address, 'later');
-    final affected = _store.rebucketSender(address, bucket: 'later');
+    final affected =
+        _store.rebucketSender(address, bucket: 'later', source: source);
     await load(syncFirst: false);
     return affected;
   }
@@ -416,7 +423,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// sender-wide action by replaying a sender-wide action is the only inverse
   /// that stays one statement; remembering per-thread state to restore would
   /// mean a second history table for a button pressed seconds ago.
-  Future<void> restoreSenderPref(String address, String? disposition) async {
+  Future<void> restoreSenderPref(String address, String? disposition,
+      {String source = 'email'}) async {
     _store.recordFeedback(
       scope: 'sender',
       scopeKey: address.toLowerCase(),
@@ -430,6 +438,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     _store.rebucketSender(
       address,
       bucket: disposition == 'later' ? 'later' : null,
+      source: source,
     );
     await load(syncFirst: false);
   }

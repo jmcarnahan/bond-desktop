@@ -149,6 +149,17 @@ A Flutter macOS app: sign in with Microsoft, and a live Outlook inbox threaded
 into conversations, each one read and annotated by the local model. `make
 app-run` starts it.
 
+**Sign-in needs an Azure app registration, injected at launch.** The client
+id, tenant id and (for a registration without a public-client platform) client
+secret are never committed; `make app-run` / `make app-build` read them from a
+dotenv-style file and pass them as `--dart-define`s. Point `MS_ENV` at any
+file carrying `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID` and
+`MICROSOFT_CLIENT_SECRET` lines — the default is a git-ignored `.env` next to
+the `Makefile`, and a git-ignored `local.mk` can pin `MS_ENV` somewhere else
+permanently. A build made without them runs fine but refuses sign-in with a
+message naming exactly these defines. A build made **with** the secret carries
+it in the binary — do not distribute one.
+
 **Two model servers, both optional.** `make model` is the chat model on `:8080`
 that triages, extracts, names storylines and drafts replies. `make embed` is a
 second, much smaller llama-server on `:8081` running `embeddinggemma-300M`,
@@ -206,7 +217,10 @@ on the row. Pills at the foot of the rail switch between **All**, **✉ Mail** a
 
 **Channel messages are out of scope.** Reading a team's channels needs
 tenant-wide admin consent this app does not ask for; chats need only the
-delegated `Chat.Read` the sign-in already requests.
+delegated `Chat.Read`. At a tenant that admin-gates `Chat.Read` (this one
+does, as of 2026-08-30) the sign-in leaves it out entirely — one admin-gated
+scope in the bundle walls off the whole request — and Teams features report
+themselves unavailable until the admin approves the app.
 
 **Teams refreshes only when you ask it to.** Microsoft's terms for the Teams
 messaging endpoints forbid polling them in the background, so the sixty-second
@@ -219,13 +233,14 @@ where the composer would be, and a storyline's reply dropdown offers its mail
 threads only — Graph builds a mail reply for this app from the message being
 answered, and there is no equivalent for a chat.
 
-**Consent degrades quietly.** The sign-in asks for everything in one round:
-`Mail.Read`, `User.Read`, `offline_access`, plus `Mail.ReadWrite`, `Mail.Send`
-and `Chat.Read`. A tenant that refuses the last three leaves a perfectly usable
-session — the sign-in retries with the core three — and each feature that needed
-one reports itself unavailable rather than broken. Without `Chat.Read` the Teams
-pill is present but disabled with a tooltip pointing at Settings, and the app
-makes no Teams request at all.
+**Consent degrades quietly.** The sign-in asks for everything it can use in
+one round: `Mail.Read`, `User.Read`, `offline_access`, plus `Mail.ReadWrite`
+and `Mail.Send` (`Chat.Read` sits out while the tenant admin-gates it — see
+above). A tenant that refuses the extended scopes leaves a perfectly usable
+session — the sign-in retries with the core three — and each feature that
+needed one reports itself unavailable rather than broken. Without `Chat.Read`
+the Teams pill is present but disabled with a tooltip pointing at Settings,
+and the app makes no Teams request at all.
 
 ## Operations
 

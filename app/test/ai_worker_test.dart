@@ -1,6 +1,7 @@
 import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -358,5 +359,67 @@ void main() {
 
     expect(handler.seen.length, 1);
     expect(store.workCounts('extract'), {'done': 1, 'pending': 1});
+  });
+
+  group('mid-drain pump', () {
+    test('work enqueued for a kind the drain already passed still runs, and '
+        'the second pump completes only when it has', () async {
+      // The user's Regenerate lands while a drain is busy on a LATER kind:
+      // its pump must not be a silent no-op that leaves the new work for the
+      // next sync.
+      store.enqueueWork('draft', 'email', 'd1');
+      late AiWorker worker;
+      Future<void>? repump;
+      final extractHandler = ScriptedHandler('extract');
+      final draftHandler = ScriptedHandler('draft', onRun: (_) {
+        // Mid-draft (the last kind), new extract work appears and someone
+        // pumps — exactly what DraftNotifier.generate does.
+        store.enqueueWork('extract', 'email', 'e-late');
+        repump = worker.pump();
+      });
+      worker = AiWorker(store, handlers: [extractHandler, draftHandler]);
+
+      await worker.pump();
+      await repump;
+
+      expect(extractHandler.seen, ['e-late']);
+      expect(store.workCounts('extract'), {'done': 1});
+      // One drain did both passes: at no point were two loops at the server.
+      expect(extractHandler.maxInFlight, 1);
+      expect(draftHandler.maxInFlight, 1);
+    });
+  });
+
+  group('the shared drain gate', () {
+    test('two drains on one gate run whole-drain-after-whole-drain', () async {
+      // Stands in for triage + AI worker: two independent serial queues that
+      // must never interleave model calls at the one llama-server.
+      final order = <String>[];
+      final gate = DrainGate();
+
+      final aHandler = ScriptedHandler('extract', onRun: (item) {
+        order.add('A:${item['entity_id']}');
+      });
+      final bHandler = ScriptedHandler('draft', onRun: (item) {
+        order.add('B:${item['entity_id']}');
+      });
+      final workerA = AiWorker(store, handlers: [aHandler], gate: gate);
+      final workerB = AiWorker(store, handlers: [bHandler], gate: gate);
+
+      store.enqueueWork('extract', 'email', 'a1');
+      store.enqueueWork('extract', 'email', 'a2');
+      store.enqueueWork('draft', 'email', 'b1');
+
+      final first = workerA.pump();
+      final second = workerB.pump();
+      await Future.wait([first, second]);
+
+      // a2 before a1: one batch shares a created_at, and the queue breaks the
+      // tie on entity_id descending. What matters here is the boundary — every
+      // A before any B.
+      expect(order, ['A:a2', 'A:a1', 'B:b1'],
+          reason: 'the second drain waits out the whole first drain rather '
+              'than interleaving with it');
+    });
   });
 }

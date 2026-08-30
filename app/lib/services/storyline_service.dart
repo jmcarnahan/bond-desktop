@@ -251,8 +251,16 @@ class StorylineService {
 
     if (rows.length < StorylineTuning.sweepMinUnassigned) return;
 
-    for (final cluster in _cluster(vectors).take(room)) {
-      await _propose([for (final index in cluster) rows[index]]);
+    // Room is spent on PROPOSALS, not on clusters considered: the pass is
+    // deterministic and largest-first, so a dismissed cluster that merely
+    // consumed a slot would consume that same slot on every future sweep and
+    // permanently starve the genuinely new clusters ranked behind it.
+    var proposed = 0;
+    for (final cluster in _cluster(vectors)) {
+      if (proposed >= room) break;
+      if (await _propose([for (final index in cluster) rows[index]])) {
+        proposed++;
+      }
     }
   }
 
@@ -303,13 +311,15 @@ class StorylineService {
     return kept;
   }
 
-  /// Names one cluster and stores it as a suggestion.
-  Future<void> _propose(List<Map<String, Object?>> rows) async {
+  /// Names one cluster and stores it as a suggestion. Returns whether a
+  /// suggestion was actually created, so the sweep can budget its room on
+  /// results rather than attempts.
+  Future<bool> _propose(List<Map<String, Object?>> rows) async {
     final keys = [
       for (final row in rows) row['conversation_key'] as String? ?? '',
     ]..sort();
     final memberHash = cardHash(keys.join('\n'));
-    if (_store.dismissedMemberHashExists(memberHash)) return;
+    if (_store.dismissedMemberHashExists(memberHash)) return false;
 
     final result = await runTask(
       _client,
@@ -345,6 +355,7 @@ class StorylineService {
         _store.touchStorylineActivity(id, lastMessageAt);
       }
     }
+    return true;
   }
 
   // ── user actions ───────────────────────────────────────────────────────

@@ -262,13 +262,73 @@ void main() {
       expect(notifier.state.error, contains('not signed in'));
     });
 
-    test('a draft with nothing to reply to refuses rather than guessing',
+    test('a thread with no inbound mail at all refuses rather than guessing',
         () async {
       final notifier = notifierFor();
       await notifier.load();
 
       expect(await notifier.send('Friday works.'), SendOutcome.failed);
       expect(mail.calls, isEmpty);
+    });
+
+    test('no draft row falls back to the newest inbound message', () async {
+      // Threads below the attention threshold never earn a generated draft,
+      // but the LO can still reply to them — the send targets exactly what
+      // the draft handler itself would have replied to.
+      store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'older-inbound',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+      store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'newest-inbound',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-30T10:00:00Z',
+      });
+      final notifier = notifierFor();
+      await notifier.load();
+
+      final outcome = await notifier.send('Typed from scratch.');
+
+      expect(outcome, SendOutcome.sent);
+      expect(mail.calls.first, 'createReply:newest-inbound');
+      expect(mail.bodies, ['Typed from scratch.']);
+    });
+
+    test('a completed send retires the composer text for good', () async {
+      seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      final epochBefore = notifier.state.sendEpoch;
+
+      await notifier.send('Friday works.');
+
+      // The epoch bump is what rebuilds the reply box empty — the sent text
+      // must not sit armed behind a re-enabled button.
+      expect(notifier.state.sendEpoch, epochBefore + 1);
+      // And the sent row reads as "no suggestion", so nothing re-offers it.
+      expect(notifier.state.body, isNull);
+
+      // The composer's trailing edit debounce can fire after the send lands;
+      // it must not rewrite the record of what was actually sent.
+      notifier.markEdited('Friday works. — but different now');
+      expect(store.getDraft('email', 'conv-1')!['status'], 'sent');
+    });
+
+    test('a failed send keeps the text on the table', () async {
+      seedDraft();
+      mail.failure = const GraphMailException('Graph said no.');
+      final notifier = notifierFor();
+      await notifier.load();
+
+      expect(await notifier.send('Friday works.'), SendOutcome.failed);
+      // No epoch bump: the composer keeps the words for the retry.
+      expect(notifier.state.sendEpoch, 0);
+      expect(notifier.state.body, 'Friday works.');
     });
 
     test('empty text never reaches Graph', () async {

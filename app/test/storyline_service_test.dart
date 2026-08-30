@@ -464,6 +464,56 @@ void main() {
       expect(llm.callsFor('storyline_name'), 1);
     });
 
+    test('a dismissed cluster does not consume the room a new one needs',
+        () async {
+      // Two distinct clusters: A (a1, a2) around vectorAt(1), B (b1, b2)
+      // around vectorAt(-0.9). A's rows are newer, so the deterministic pass
+      // builds A first and stable sorting keeps it ranked first.
+      seed(store, 'a1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      seed(store, 'a2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      seed(store, 'b1',
+          vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T02:00:00Z');
+      seed(store, 'b2',
+          vector: vectorAt(-0.95), lastMessageAt: '2026-08-29T01:00:00Z');
+      // Two unrelated pending suggestions squeeze the room down to one slot.
+      for (var i = 0; i < 2; i++) {
+        store.insertStoryline(
+          id: 'sl-pending-$i',
+          title: 'Pending $i',
+          status: 'suggested',
+          createdBy: 'auto',
+        );
+      }
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer(), nameAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      // Sweep #1: the single slot goes to A, the larger-ranked cluster.
+      await service.sweep();
+      final proposedA = store
+          .loadStorylines(statuses: const ['suggested'])
+          .where((s) => s.id.startsWith('sl-') && !s.id.startsWith('sl-pending'))
+          .single;
+      expect(store.membersOf(proposedA.id).map((m) => m.conversationKey).toSet(),
+          {'a1', 'a2'});
+      service.dismissSuggestion(proposedA.id);
+
+      // Sweep #2: A is ranked first again and its hash is dismissed. That
+      // must not eat the slot — B, which the user has never seen, gets it.
+      await service.sweep();
+
+      final proposedB = store
+          .loadStorylines(statuses: const ['suggested'])
+          .where((s) => s.id.startsWith('sl-') && !s.id.startsWith('sl-pending'))
+          .single;
+      expect(store.membersOf(proposedB.id).map((m) => m.conversationKey).toSet(),
+          {'b1', 'b2'});
+      expect(llm.callsFor('storyline_name'), 2);
+    });
+
     test('the pending-suggestion cap stops the sweep before it starts',
         () async {
       seedMailbox(store);

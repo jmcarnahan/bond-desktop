@@ -157,6 +157,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final selected = _selectedId;
     if (selected != null) {
       ref.read(threadProvider(selected).notifier).load();
+      // The sync deletes a draft whose thread just received new mail. The
+      // composer must find that out NOW, not on the next AI progress event —
+      // a stale suggestion left on screen gets sent as a reply to a message
+      // that is no longer the newest one.
+      ref.read(draftProvider(selected).notifier).load();
     }
     final storyline = _selectedStorylineId;
     if (storyline != null) {
@@ -182,6 +187,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Future<void> _signOut() async {
     await ref.read(graphAuthProvider).signOut();
+    // The keychain is not the only thing holding this account: the sqlite
+    // file holds its mailbox, and the providers hold that in memory. A
+    // different account signing in next must find neither — mail from two
+    // mailboxes interleaved in one inbox is the bug this line rules out.
+    ref.read(messageStoreProvider).wipeAll();
+    ref.invalidate(conversationsProvider);
+    ref.invalidate(storylinesProvider);
+    ref.invalidate(threadProvider);
+    ref.invalidate(draftProvider);
+    ref.invalidate(storylineTimelineProvider);
     widget.onSignedOut?.call();
   }
 
@@ -401,25 +416,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   static String _threads(int n) => n == 1 ? '1 thread' : '$n threads';
 
-  Future<void> _keepSender(String address) async {
+  Future<void> _keepSender(String address, String source) async {
     final notifier = ref.read(conversationsProvider.notifier);
     // Captured BEFORE the write. The undo restores this exact value, including
     // "there was no rule", which is a different state from "the rule was keep".
     final previous = notifier.senderPref(address);
-    final affected = await notifier.keepSenderInInbox(address);
+    final affected = await notifier.keepSenderInInbox(address, source: source);
     _toast(
       'Keeping $address in your inbox — ${_threads(affected)} moved back.',
-      onUndo: () => notifier.restoreSenderPref(address, previous),
+      onUndo: () => notifier.restoreSenderPref(address, previous, source: source),
     );
   }
 
-  Future<void> _laterSender(String address) async {
+  Future<void> _laterSender(String address, String source) async {
     final notifier = ref.read(conversationsProvider.notifier);
     final previous = notifier.senderPref(address);
-    final affected = await notifier.sendSenderToLater(address);
+    final affected = await notifier.sendSenderToLater(address, source: source);
     _toast(
       '$address goes to Later — ${_threads(affected)} moved.',
-      onUndo: () => notifier.restoreSenderPref(address, previous),
+      onUndo: () => notifier.restoreSenderPref(address, previous, source: source),
     );
   }
 
@@ -620,6 +635,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Conversation? _selected(List<Conversation> conversations) {
     for (final c in conversations) {
       if (c.id == _selectedId) return c;
+    }
+    // Not in the FILTERED list. An explicit selection is the most specific
+    // thing the user asked for and outranks the source filter — a storyline
+    // seam chip can open a chat while the filter shows Mail, and landing on a
+    // section overview instead would read as a broken click. The unfiltered
+    // list settles whether the thread still exists at all.
+    final state = ref.read(conversationsProvider);
+    if (state is ConversationsLoaded) {
+      for (final c in state.conversations) {
+        if (c.id == _selectedId) return c;
+      }
     }
     // A thread can leave the list between renders — a sync that moved it, or
     // a mark-done. The pane falls back to the overview rather than showing a
@@ -893,7 +919,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // rather than a rule keyed on the empty string, which would apply to
       // every anonymous sender at once.
       onSendToLater: selected.primaryEmail?.isNotEmpty == true
-          ? () => _laterSender(selected.primaryEmail!)
+          ? () => _laterSender(selected.primaryEmail!, selected.source)
           : null,
       onKeepInInbox: () => _keepThread(selected.source, selected.id),
     );
@@ -959,8 +985,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
     final composer = Composer(
       // Keyed on the conversation so switching threads builds a fresh field
-      // rather than carrying one thread's typed text into another's.
-      key: ValueKey('composer-$conversationKey'),
+      // rather than carrying one thread's typed text into another's — and on
+      // the send epoch, so a COMPLETED send builds a fresh empty one instead
+      // of leaving the sent text armed behind a re-enabled button.
+      key: ValueKey('composer-$conversationKey-${draft.sendEpoch}'),
       suggestedBody: draft.body,
       provenance: _provenance,
       generating: draft.generating,

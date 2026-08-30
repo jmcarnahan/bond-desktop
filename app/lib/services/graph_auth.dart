@@ -452,7 +452,7 @@ class GraphAuth {
           'Could not open a browser for the Microsoft sign-in page.',
         );
       }
-      return await _awaitCallbackCode(server, state);
+      return await awaitCallbackCode(server, state);
     } finally {
       // Unconditional: an abandoned or failed sign-in must not hold port
       // 8001 for the rest of the process's life — including between the two
@@ -463,64 +463,79 @@ class GraphAuth {
 
   /// Waits for the browser's redirect and returns its `code`, answering the
   /// browser in every outcome so the user never sees a connection reset.
-  Future<String> _awaitCallbackCode(HttpServer server, String expectedState) async {
-    final HttpRequest request;
+  /// Split from [authorizeRound] so the request-matching rules are testable
+  /// against a real socket without a browser.
+  ///
+  /// Any local process can reach this port — the backend that shares the
+  /// registration has clients of its own that poll it — so a request is only
+  /// THE callback when it carries this run's `state`. Everything else is
+  /// answered politely and the wait continues; a stray poll must not consume
+  /// the sign-in. That also means a forged callback cannot abort a real
+  /// sign-in in flight: without the state it is ignored, not fatal.
+  @visibleForTesting
+  Future<String> awaitCallbackCode(HttpServer server, String expectedState) async {
     try {
-      request = await server.first.timeout(_callbackTimeout);
+      return await _firstMatchingCallback(server, expectedState)
+          .timeout(_callbackTimeout);
     } on TimeoutException {
       throw const AuthException(
         'Sign-in timed out waiting for the browser. Try again.',
       );
     }
+  }
 
-    final params = request.uri.queryParameters;
+  Future<String> _firstMatchingCallback(
+      HttpServer server, String expectedState) async {
+    await for (final request in server) {
+      final params = request.uri.queryParameters;
 
-    // A denied consent is a normal HTTP 200 carrying `error`, not a
-    // transport failure.
-    final error = params['error'];
-    if (error != null) {
-      final description = params['error_description'] ?? '';
-      final detail = description.isEmpty ? error : description;
-      await _respond(request, 'Sign-in was not completed', detail);
-      throw AuthorizeDenied(
-        error,
-        description,
-        'Microsoft did not complete sign-in: $detail',
-      );
-    }
+      if (params['state'] != expectedState) {
+        await _respond(
+          request,
+          'Sign-in in progress',
+          'This request is not part of the sign-in — return to the browser '
+              'window Microsoft opened.',
+        );
+        continue;
+      }
 
-    // Any local process can reach this port; only the response carrying back
-    // this run's state is ours.
-    if (params['state'] != expectedState) {
+      // A denied consent is a normal HTTP 200 carrying `error`, not a
+      // transport failure.
+      final error = params['error'];
+      if (error != null) {
+        final description = params['error_description'] ?? '';
+        final detail = description.isEmpty ? error : description;
+        await _respond(request, 'Sign-in was not completed', detail);
+        throw AuthorizeDenied(
+          error,
+          description,
+          'Microsoft did not complete sign-in: $detail',
+        );
+      }
+
+      final code = params['code'];
+      if (code == null || code.isEmpty) {
+        await _respond(
+          request,
+          'Sign-in could not be completed',
+          'Microsoft redirected back without an authorization code.',
+        );
+        throw const AuthException(
+          'Microsoft redirected back without an authorization code.',
+        );
+      }
+
       await _respond(
         request,
-        'Sign-in could not be verified',
-        'This response did not come from the sign-in Bond Inbox started.',
+        'Signed in',
+        'Signed in — you can close this window and return to Bond Inbox.',
       );
-      throw const AuthException(
-        'The sign-in response failed its state check and was rejected. '
-        'Start sign-in again.',
-      );
+      return code;
     }
-
-    final code = params['code'];
-    if (code == null || code.isEmpty) {
-      await _respond(
-        request,
-        'Sign-in could not be completed',
-        'Microsoft redirected back without an authorization code.',
-      );
-      throw const AuthException(
-        'Microsoft redirected back without an authorization code.',
-      );
-    }
-
-    await _respond(
-      request,
-      'Signed in',
-      'Signed in — you can close this window and return to Bond Inbox.',
+    // The server was closed under the wait (sign-out, app shutdown).
+    throw const AuthException(
+      'Sign-in was interrupted before the browser returned.',
     );
-    return code;
   }
 
   Future<void> _respond(HttpRequest request, String heading, String detail) async {

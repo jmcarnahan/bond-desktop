@@ -245,6 +245,35 @@ void main() {
               'pages behind it are history the store already has');
     });
 
+    test('a backlog deeper than a handful of pages is drained, not truncated',
+        () async {
+      // Every returned message is newer than the cursor (the server-side `gt`
+      // filter guarantees it), so the caller will advance its cursor to the
+      // newest one. A walk that stopped at an arbitrary page cap would
+      // advance that cursor over messages never fetched — a permanent hole.
+      const pageCount = 8;
+      graph.messagePages['chat-1'] = [
+        for (var p = 0; p < pageCount; p++)
+          () => _jsonOk({
+                'value': [
+                  _chatMessage(
+                    id: 'm$p',
+                    lastModified: '2026-08-28T10:00:${(59 - p).toString().padLeft(2, '0')}Z',
+                  ),
+                ],
+                if (p < pageCount - 1)
+                  '@odata.nextLink':
+                      'https://graph.microsoft.com/v1.0/chats/chat-1/messages?p=${p + 2}',
+              }),
+      ];
+
+      final messages =
+          await build().chatMessagesSince('chat-1', '2026-08-20T00:00:00Z');
+
+      expect(messages.length, pageCount);
+      expect(graph.urls.length, pageCount);
+    });
+
     test('an empty page ends the walk', () async {
       graph.messagePages['chat-1'] = [
         () => _jsonOk({

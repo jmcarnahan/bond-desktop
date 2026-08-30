@@ -338,7 +338,7 @@ void main() {
   });
 
   group('recovery', () {
-    test('a 410 restarts the drain once, from a 24-hour floor', () async {
+    test('a 410 restarts the drain once, from the full 14-day floor', () async {
       graph.queue('inbox', [
         () => http.Response('{"error":{"code":"resyncRequired"}}', 410),
         () => jsonOk(deltaBody([graphMessage(id: 'm1')],
@@ -353,12 +353,15 @@ void main() {
       final filter = inboxRequests[1].queryParameters[r'$filter']!;
       final floor = DateTime.parse(
           filter.replaceFirst('receivedDateTime ge ', ''));
-      final expected = DateTime.now().toUtc().subtract(const Duration(hours: 24));
+      final expected =
+          DateTime.now().toUtc().subtract(const Duration(days: 14));
       expect(
         floor.difference(expected).abs(),
         lessThan(const Duration(minutes: 5)),
-        reason: 'the retry reaches back 24 hours, not the 14-day first-run '
-            'floor: the mailbox behind it is already stored',
+        reason: 'an expired cursor loses an UNKNOWN stretch of changes, so '
+            'the only safe restart is the full first-run floor — a shorter '
+            'window silently drops whatever fell between the dead cursor and '
+            'its edge, forever',
       );
 
       expect(messageRows().length, 1);

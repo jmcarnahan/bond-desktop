@@ -146,6 +146,10 @@ class AttentionService {
       return ExtractionResult.fromJson(decoded);
     } on FormatException {
       return null;
+    } on TypeError {
+      // Valid JSON, wrong shapes — a field stored as a number where a string
+      // belongs. Same verdict as unparseable: not extracted yet.
+      return null;
     }
   }
 }

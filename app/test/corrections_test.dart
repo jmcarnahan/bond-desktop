@@ -113,6 +113,41 @@ void main() {
       expect(events().single['scope_key'], 'eric@x.com');
     });
 
+    test('a teams sender re-files the TEAMS rows, and reports their count',
+        () async {
+      store.upsertConversation({
+        'source': 'teams',
+        'conversation_key': 'chat-1',
+        'subject': 'chat-1',
+        'state': 'waiting',
+        'last_message_at': '2026-08-28T10:00:00Z',
+        'last_inbound_at': '2026-08-28T10:00:00Z',
+      });
+      store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'chat-1-m1',
+        'conversation_key': 'chat-1',
+        'direction': 'inbound',
+        'from_address': 'teams:29:abc',
+        'received_at': '2026-08-28T10:00:00Z',
+      });
+      final n = notifier();
+      await n.load();
+
+      // Keyed against the email rows this would match nothing and the toast
+      // would report "0 threads moved" over a move that eventually happens
+      // anyway via the sweep.
+      final affected =
+          await n.sendSenderToLater('teams:29:abc', source: 'teams');
+
+      expect(affected, 1);
+      final bucket = db.select(
+        "SELECT bucket FROM conversation_ai WHERE source = 'teams' "
+        "AND conversation_key = 'chat-1'",
+      ).single['bucket'];
+      expect(bucket, 'later');
+    });
+
     test('deferred threads leave the rail sections they were in', () async {
       seed('c1', state: 'needs_reply');
       final n = notifier();

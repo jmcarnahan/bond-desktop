@@ -5,6 +5,7 @@ import '../data/message_store.dart';
 import '../services/ai_worker.dart';
 import '../services/attention_service.dart';
 import '../services/draft_handler.dart';
+import '../services/drain_gate.dart';
 import '../services/extract_handler.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
@@ -82,6 +83,10 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
 /// discovers whether a server is listening.
 final llmClientProvider = Provider<LlmClient>((ref) => LlmClient());
 
+/// The one gate both drains hold while at the model server. One instance for
+/// the app, or it would serialize nothing — see [DrainGate].
+final drainGateProvider = Provider<DrainGate>((ref) => DrainGate());
+
 /// The triage worker. Exactly one for the whole app: it is a serial queue over
 /// shared rows, and a second instance would claim the same messages.
 final triageQueueProvider = Provider<TriageQueue>((ref) {
@@ -92,6 +97,7 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     // the thread. Taken off [MailSync], so this stays typed to the interface
     // a test can override.
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+    gate: ref.watch(drainGateProvider),
   );
   ref.onDispose(queue.dispose);
   return queue;
@@ -136,6 +142,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(llmClientProvider),
       ),
     ],
+    gate: ref.watch(drainGateProvider),
   );
   ref.onDispose(worker.dispose);
   return worker;
