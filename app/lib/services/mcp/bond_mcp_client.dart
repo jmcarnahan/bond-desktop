@@ -25,8 +25,10 @@ import 'package:mcp_dart/mcp_dart.dart';
 class McpTransportException implements Exception {
   final String message;
 
-  /// The HTTP status when the failure carried one. 404 specifically means the
-  /// peer has forgotten the session; [BondMcpHttpClient] reads it.
+  /// The HTTP status when the failure carried one. Two are read by
+  /// [BondMcpHttpClient] as "reconnect and repeat": 404, the peer having
+  /// forgotten the session, and 401, the bearer this connection was opened
+  /// with having expired under it.
   final int? statusCode;
 
   const McpTransportException(this.message, {this.statusCode});
@@ -208,15 +210,39 @@ class BondMcpHttpClient implements BondMcpClient {
     Map<String, Object?> args,
   ) async {
     try {
+      return await _callOnce(name, args);
+    } on McpTransportException catch (e) {
+      // Two statuses mean the same thing — this connection is finished, a new
+      // one would work — and neither is a fault worth showing anyone. A 404 is
+      // the stateless server saying it has never heard of this session,
+      // expected after it restarts or load-balances elsewhere. A 401 is that
+      // same problem one layer up: the bearer is fixed at handshake time, so a
+      // session outliving its (24-hour) JWT can only pick up a refreshed one on
+      // a NEW connection — reconnecting re-asks for the token, and without this
+      // every later call on that session would fail until the app restarted.
+      //
+      // Both share ONE retry, deliberately: a second failure of either kind is
+      // a real fault and not a stale session.
+      if (e.statusCode != 404 && e.statusCode != 401) rethrow;
+      await _dropSession();
+      return _callOnce(name, args);
+    }
+  }
+
+  /// One attempt, with the missing-tool case named before anything upstream
+  /// can mistake it for the sort of failure that retrying would fix.
+  Future<Map<String, dynamic>> _callOnce(
+    String name,
+    Map<String, Object?> args,
+  ) async {
+    try {
       return decodeToolResult(await (await _liveSession()).callRaw(name, args));
     } on McpTransportException catch (e) {
-      // A 404 is the stateless server saying it has never heard of this
-      // session — expected after it restarts or load-balances elsewhere. Drop
-      // the connection and run the call once more on a fresh handshake. A
-      // second 404 is a real fault, not a stale session.
-      if (e.statusCode != 404) rethrow;
-      await _dropSession();
-      return decodeToolResult(await (await _liveSession()).callRaw(name, args));
+      if (_isUnknownTool(e.message)) throw _serverNeedsUpdating(name);
+      rethrow;
+    } on McpToolException catch (e) {
+      if (_isUnknownTool(e.message)) throw _serverNeedsUpdating(name);
+      rethrow;
     }
   }
 
@@ -261,7 +287,7 @@ Future<McpToolSession> _openStreamableHttpSession(Uri url, String? bearer) async
   try {
     await client.connect(transport);
   } on Object catch (e) {
-    throw _asTransportException(e);
+    throw asTransportException(e);
   }
   return _McpDartSession(client);
 }
@@ -282,7 +308,7 @@ class _McpDartSession implements McpToolSession {
       );
       return result.toJson();
     } on Object catch (e) {
-      throw _asTransportException(e);
+      throw asTransportException(e);
     }
   }
 
@@ -290,13 +316,44 @@ class _McpDartSession implements McpToolSession {
   Future<void> dispose() => _client.close();
 }
 
+/// Recognizes the one failure that means the SERVER is behind, not the call.
+///
+/// A deployment still running an older image answers a tool it does not have
+/// with `Unknown tool: <name>` — as a JSON-RPC error on some FastMCP builds and
+/// as an `isError` result on others, so both of this file's exception types are
+/// checked. The match is on the TEXT because the code that rides along is the
+/// generic invalid-params one, which says nothing about the cause.
+bool _isUnknownTool(String message) =>
+    message.toLowerCase().contains('unknown tool');
+
+/// The missing-tool failure, said so a person knows what to do about it.
+///
+/// Carries no status deliberately: this is the one transport failure that
+/// retrying cannot help, and a status here would send it round the reconnect.
+McpTransportException _serverNeedsUpdating(String tool) => McpTransportException(
+      'The Bond server does not offer this app\'s tools yet — it needs to be '
+      'updated (tool "$tool" is missing).',
+    );
+
+/// The HTTP status inside `mcp_dart`'s catch-all POST failure text.
+///
+/// A tool call that comes back non-2xx does NOT reach us as a
+/// [StreamableHttpError] — the package builds those for its GET stream and
+/// reduces a failed POST to `McpError(0, 'Error POSTing to endpoint (HTTP 401):
+/// …')`. Reading the number back out of that sentence is unlovely, and it is
+/// the only place the number survives: without it an expired bearer is
+/// indistinguishable from any other fault and never reaches the reconnect that
+/// would fix it.
+final RegExp _httpStatusInMessage = RegExp(r'\(HTTP (\d{3})\)');
+
 /// Translates every `mcp_dart` failure into this file's own vocabulary, so no
 /// package type escapes past [BondMcpClient].
 ///
-/// The status code matters in exactly one case — a stale session arrives as
-/// 404 and is the caller's cue to reconnect — so it is carried through rather
-/// than flattened into the message.
-McpTransportException _asTransportException(Object error) {
+/// The status code matters in exactly two cases — a stale session (404) and an
+/// expired bearer (401) are both the caller's cue to reconnect — so it is
+/// carried through rather than flattened into the message.
+@visibleForTesting
+McpTransportException asTransportException(Object error) {
   if (error is McpTransportException) return error;
   if (error is StaleSessionError) {
     return McpTransportException(error.message, statusCode: error.code ?? 404);
@@ -304,6 +361,12 @@ McpTransportException _asTransportException(Object error) {
   if (error is StreamableHttpError) {
     return McpTransportException(error.message, statusCode: error.code);
   }
-  if (error is McpError) return McpTransportException(error.message);
+  if (error is McpError) {
+    final match = _httpStatusInMessage.firstMatch(error.message);
+    return McpTransportException(
+      error.message,
+      statusCode: match == null ? null : int.tryParse(match.group(1)!),
+    );
+  }
   return McpTransportException(error.toString());
 }

@@ -215,6 +215,24 @@ void main() {
       expect(client.callCounts['connection_status'], 2);
     });
 
+    test('a cold-start stall never costs the user their session', () async {
+      // The platform's database wakes in 10-30s after an idle spell, so the
+      // first probe of the day can time out. Both halves are pinned together
+      // deliberately: the pair is what decides whether the app stays where it
+      // is or throws the user back to the sign-in screen.
+      final store = _Tokens()..values['mcp_refresh_token'] = 'rt';
+      final auth = _session(
+        _FakeBondMcpClient({
+          'connection_status': const McpTransportException('timed out'),
+        }),
+        store,
+      );
+
+      expect(await auth.needsReconsent, isFalse);
+      expect(await auth.isSignedIn, isTrue);
+      expect(store.values['mcp_refresh_token'], 'rt');
+    });
+
     test('a failed probe is not cached as an answer', () async {
       final client = _FakeBondMcpClient({
         'connection_status': const McpTransportException('reset'),

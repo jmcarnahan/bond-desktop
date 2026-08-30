@@ -330,6 +330,26 @@ void main() {
       );
     });
 
+    test('a cold-start stall is transient, and nothing latches', () async {
+      // The platform's database cold-starts for 10-30s after an idle spell, so
+      // the first call of the day can time out. That must read as one failed
+      // sync — a banner the next drain clears — and never as a session that has
+      // gone bad: the very next call has to work with no reset in between.
+      final backend = McpMailBackend(_FakeMcp({
+        'list_mail_delta': [
+          const McpTransportException('timed out'),
+          _delta(delta: 'd1'),
+        ],
+      }));
+
+      await expectLater(
+        backend.deltaPage('inbox'),
+        throwsA(isA<GraphMailException>()
+            .having((e) => e.statusCode, 'statusCode', isNull)),
+      );
+      expect((await backend.deltaPage('inbox')).deltaLink, 'd1');
+    });
+
     test('an auth failure passes through unwrapped', () async {
       // NotSignedIn is what routes the app to the sign-in screen. Wrapped in a
       // GraphMailException it would become a banner instead.
