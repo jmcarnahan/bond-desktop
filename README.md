@@ -149,11 +149,13 @@ A Flutter macOS app: sign in, and a live Outlook inbox threaded into
 conversations, each one read and annotated by the local model. `make app-run`
 starts it.
 
-**Signing in takes no setup at all, if your workspace already uses bond-mcps.**
-`make app-run`, then **Sign in** — the same login Claude Code uses for the
-platform — and the mail starts arriving. Where that mail comes from is a choice
-between two backends, and only the other one needs an Azure app registration on
-this machine: see [Microsoft backends](#microsoft-backends) below.
+**Signing in takes one line of setup, if your workspace already uses
+bond-mcps.** Put the platform's URL in your `MS_ENV` file
+(`BOND_MCP_SERVER_URL=…`), `make app-run`, then **Sign in** — the same login
+Claude Code uses for the platform — and the mail starts arriving. Where that
+mail comes from is a choice between two backends, and only the other one needs
+an Azure app registration on this machine: see
+[Microsoft backends](#microsoft-backends) below.
 
 **Two model servers, both optional.** `make model` is the chat model on `:8080`
 that triages, extracts, names storylines and drafts replies. `make embed` is a
@@ -219,18 +221,24 @@ prompt of its own.
 **This Mac.** The app holds the grant itself and calls Microsoft Graph directly
 from the machine.
 
-**The zero-config path.** `make app-run` — no `MS_ENV`, no `--dart-define`s —
-then **Sign in** with your bond-mcps login. Microsoft is already connected, so
-the inbox syncs straight away. The **Connect your Microsoft account** step
-appears only for a workspace that has never connected one: it hands you off to
-the platform's own consent page, and the app picks the connection up when you
-come back — on its own when the window regains focus, or on
+**The zero-config path.** `make app-run` with nothing configured talks to a
+local bond-mcps server (`http://localhost:18001/mcp`) and signs in with no
+browser round at all. To reach a deployed platform instead, add one line to
+your `MS_ENV` file — `BOND_MCP_SERVER_URL=https://…/mcp` — and that endpoint
+becomes the **Deployed** preset and the default; sign in with your bond-mcps
+login and, if the workspace already has a Microsoft connection, the inbox
+syncs straight away. The **Connect your Microsoft account** step appears only
+for a workspace that has never connected one: it hands you off to the
+platform's own consent page, and the app picks the connection up when you come
+back — on its own when the window regains focus, or on
 **I've connected — continue**.
 
-**Which server.** The deployed platform,
-`https://mcp.example.invalid/mcp`, is the default. The **Bond
-server** dropdown also offers **Local** — `http://localhost:18001/mcp` — and
-**Custom…** for anything else.
+**Which server.** The **Bond server** dropdown offers **Deployed** (the
+`BOND_MCP_SERVER_URL` endpoint, when the build carries one), **Local** —
+`http://localhost:18001/mcp` — and **Custom…** for anything else. The deployed
+hostname deliberately never appears in this repository: which cluster a
+company runs is environment configuration, and it rides the same git-ignored
+`MS_ENV` file as the Azure ids.
 
 **Working against a local server.** Start bond-mcps with its own `make dev`,
 then Settings → Bond server → **Local**, and sign in. The local server asks for

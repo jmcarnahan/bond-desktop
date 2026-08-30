@@ -85,13 +85,20 @@ void main() {
       expect(ref.read(teamsBackendProvider), isA<McpTeamsBackend>());
     });
 
-    test('pointed at the deployed server', () {
-      final ref = container();
+    test('pointed at the default server for this build', () {
+      // The deployed URL arrives ONLY as a --dart-define (public repo: which
+      // cluster a company runs is environment, not code). The test binary
+      // carries no define, so the compiled constant must be empty and the
+      // default must fall back to the local server — which is also the pin
+      // that no hostname has crept back into source.
+      expect(mcpDeployedUrl, isEmpty);
+      expect(defaultMcpServerUrl, mcpLocalUrl);
 
-      expect(ref.read(appPrefsProvider).mcpServerUrl, mcpDeployedUrl);
+      final ref = container();
+      expect(ref.read(appPrefsProvider).mcpServerUrl, defaultMcpServerUrl);
       expect(
         (ref.read(authSessionProvider) as McpAuthSession).mcpUrl.toString(),
-        mcpDeployedUrl,
+        defaultMcpServerUrl,
       );
     });
 
@@ -168,28 +175,33 @@ void main() {
   });
 
   group('pointing MCP mode at another server', () {
+    // A URL that is neither preset: with no dart-define the LOCAL server is
+    // already the default, so switching "to Local" would be a no-op and prove
+    // nothing about the rebuild.
+    const custom = 'http://127.0.0.1:9999/mcp';
+
     test('rebuilds the stack against the new URL', () {
       final ref = container();
       final before = ref.read(mcpStackProvider);
 
-      ref.read(appPrefsProvider.notifier).setMcpServerUrl(mcpLocalUrl);
+      ref.read(appPrefsProvider.notifier).setMcpServerUrl(custom);
 
       final after = ref.read(mcpStackProvider);
       expect(identical(after, before), isFalse);
-      expect(after.auth.mcpUrl.toString(), mcpLocalUrl);
-      expect(store.getPref(mcpServerUrlKey), mcpLocalUrl);
+      expect(after.auth.mcpUrl.toString(), custom);
+      expect(store.getPref(mcpServerUrlKey), custom);
     });
 
     test('and the session and backends follow it', () {
       final ref = container();
       final before = ref.read(mailBackendProvider);
 
-      ref.read(appPrefsProvider.notifier).setMcpServerUrl(mcpLocalUrl);
+      ref.read(appPrefsProvider.notifier).setMcpServerUrl(custom);
 
       expect(identical(ref.read(mailBackendProvider), before), isFalse);
       expect(
         (ref.read(authSessionProvider) as McpAuthSession).mcpUrl.toString(),
-        mcpLocalUrl,
+        custom,
       );
     });
 
@@ -199,7 +211,7 @@ void main() {
 
       ref.read(appPrefsProvider.notifier).setMcpServerUrl('   ');
 
-      expect(ref.read(appPrefsProvider).mcpServerUrl, mcpDeployedUrl);
+      expect(ref.read(appPrefsProvider).mcpServerUrl, defaultMcpServerUrl);
     });
   });
 

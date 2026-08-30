@@ -3,7 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../providers/prefs_provider.dart'
-    show backendModeMcp, backendModeSdk, mcpDeployedUrl, mcpLocalUrl;
+    show
+        backendModeMcp,
+        backendModeSdk,
+        defaultMcpServerUrl,
+        mcpDeployedUrl,
+        mcpLocalUrl;
 import '../theme/tokens.dart';
 
 /// What the LO gets to say about how the inbox behaves, plus what Microsoft
@@ -45,6 +50,12 @@ class SettingsDialog extends StatefulWidget {
   /// The `/mcp` endpoint MCP mode talks to.
   final String mcpServerUrl;
 
+  /// The deployed platform's URL, when this build knows one. Empty hides the
+  /// Deployed preset — a build with no `BOND_MCP_SERVER_URL` define has no
+  /// deployed endpoint to offer. A parameter rather than a direct read of the
+  /// compiled constant so tests can exercise the preset without a dart-define.
+  final String deployedUrl;
+
   /// Fired when the user picks the other backend. Null hides the whole
   /// Microsoft-connection section, which is what a host with no switch wired
   /// wants — the same discipline [hasScope] follows.
@@ -72,7 +83,8 @@ class SettingsDialog extends StatefulWidget {
     this.hasScope,
     this.onSignInAgain,
     this.backendMode = backendModeMcp,
-    this.mcpServerUrl = mcpDeployedUrl,
+    this.mcpServerUrl = defaultMcpServerUrl,
+    this.deployedUrl = mcpDeployedUrl,
     this.onBackendModeChanged,
     this.onMcpServerUrlChanged,
     this.connectionStatus,
@@ -134,11 +146,13 @@ class _SettingsDialogState extends State<SettingsDialog> {
 
   static const String _presetCustom = 'custom';
 
-  static String _presetFor(String url) => switch (url) {
-        mcpDeployedUrl => mcpDeployedUrl,
-        mcpLocalUrl => mcpLocalUrl,
-        _ => _presetCustom,
-      };
+  String _presetFor(String url) {
+    if (url == mcpLocalUrl) return mcpLocalUrl;
+    if (widget.deployedUrl.isNotEmpty && url == widget.deployedUrl) {
+      return widget.deployedUrl;
+    }
+    return _presetCustom;
+  }
 
   @override
   void dispose() {
@@ -269,10 +283,14 @@ class _SettingsDialogState extends State<SettingsDialog> {
       DropdownButtonFormField<String>(
         initialValue: _serverPreset,
         decoration: const InputDecoration(labelText: 'Bond server'),
-        items: const [
-          DropdownMenuItem(value: mcpDeployedUrl, child: Text('Deployed')),
-          DropdownMenuItem(value: mcpLocalUrl, child: Text('Local')),
-          DropdownMenuItem(value: _presetCustom, child: Text('Custom…')),
+        items: [
+          if (widget.deployedUrl.isNotEmpty)
+            DropdownMenuItem(
+              value: widget.deployedUrl,
+              child: const Text('Deployed'),
+            ),
+          const DropdownMenuItem(value: mcpLocalUrl, child: Text('Local')),
+          const DropdownMenuItem(value: _presetCustom, child: Text('Custom…')),
         ],
         onChanged: (value) {
           if (value == null) return;

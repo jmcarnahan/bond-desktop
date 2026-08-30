@@ -11,11 +11,17 @@ import 'package:flutter_test/flutter_test.dart';
 /// inside — so everything here is driven with closures, and what is pinned is
 /// which callback fires and what the connection status renders as.
 
+/// A stand-in for the compiled `BOND_MCP_SERVER_URL` define. The test binary
+/// carries no define (backend_switch_test pins that), so exercising the
+/// Deployed preset means injecting a URL through the widget's parameter.
+const String _deployed = 'https://mcp.example.test/mcp';
+
 void main() {
   Future<void> open(
     WidgetTester tester, {
     String backendMode = backendModeMcp,
-    String mcpServerUrl = mcpDeployedUrl,
+    String mcpServerUrl = _deployed,
+    String deployedUrl = _deployed,
     void Function(String mode)? onBackendModeChanged,
     void Function(String url)? onMcpServerUrlChanged,
     Future<Map<String, Object?>?> Function()? connectionStatus,
@@ -38,6 +44,7 @@ void main() {
                 onAboutMeChanged: (_) {},
                 backendMode: backendMode,
                 mcpServerUrl: mcpServerUrl,
+                deployedUrl: deployedUrl,
                 onBackendModeChanged: onBackendModeChanged,
                 onMcpServerUrlChanged: onMcpServerUrlChanged,
                 connectionStatus: connectionStatus,
@@ -87,6 +94,23 @@ void main() {
       expect(find.text('Deployed'), findsNothing);
     });
 
+    testWidgets('a build with no deployed endpoint offers no Deployed preset',
+        (tester) async {
+      // The deployed URL is a --dart-define, absent from most builds — the
+      // dropdown must not offer a preset that would commit an empty URL.
+      await open(
+        tester,
+        deployedUrl: '',
+        mcpServerUrl: mcpLocalUrl,
+        onBackendModeChanged: (_) {},
+      );
+
+      await tester.tap(find.text('Local'));
+      await tester.pumpAndSettle();
+      expect(find.text('Deployed'), findsNothing);
+      expect(find.text('Custom…'), findsWidgets);
+    });
+
     testWidgets('picking the local preset commits it', (tester) async {
       final urls = <String>[];
       await open(
@@ -116,7 +140,7 @@ void main() {
       await tester.tap(find.text('Custom…').last);
       await tester.pumpAndSettle();
 
-      final field = find.widgetWithText(TextField, mcpDeployedUrl);
+      final field = find.widgetWithText(TextField, _deployed);
       expect(field, findsOneWidget, reason: 'it opens on what is set now');
       expect(urls, isEmpty, reason: 'revealing the field commits nothing');
 

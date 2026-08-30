@@ -15,13 +15,26 @@ import 'app_providers.dart';
 const String backendModeMcp = 'mcp';
 const String backendModeSdk = 'sdk';
 
-/// The two MCP endpoints worth a preset: the deployed platform, and the one a
-/// `make dev` server listens on. Anything else is typed in by hand.
-///
-/// They live here rather than in the dialog because the provider that builds
-/// the client and the dialog that offers the choice must agree on the strings.
-const String mcpDeployedUrl = 'https://mcp.example.invalid/mcp';
+/// The deployed platform's `/mcp` URL, compiled in via
+/// `--dart-define=BOND_MCP_SERVER_URL=…` (`make app-run` injects it from the
+/// MS_ENV file, the same mechanism as the Azure ids). Deliberately NOT a
+/// hostname in source: this is a public repository, and which cluster a
+/// company runs is environment configuration, not code. Empty means "this
+/// build knows no deployed endpoint" — the Deployed preset disappears and the
+/// default falls back to the local server.
+const String mcpDeployedUrl = String.fromEnvironment('BOND_MCP_SERVER_URL');
+
+/// The endpoint a local bond-mcps `make dev` listens on. A localhost port is
+/// topology anyone's checkout shares, not an identity, so it may live in
+/// source — unlike the deployed hostname above.
 const String mcpLocalUrl = 'http://localhost:18001/mcp';
+
+/// What `mcp_server_url` means when nothing is stored: the deployed platform
+/// when the build carries one, else the local server. Lives here because the
+/// provider that builds the client and the dialog that offers the choice must
+/// agree on the strings.
+const String defaultMcpServerUrl =
+    mcpDeployedUrl != '' ? mcpDeployedUrl : mcpLocalUrl;
 
 /// The settings the LO controls, held in memory so the widgets that read them
 /// rebuild the moment one changes.
@@ -52,7 +65,7 @@ class AppPrefs {
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
     this.backendMode = backendModeMcp,
-    this.mcpServerUrl = mcpDeployedUrl,
+    this.mcpServerUrl = defaultMcpServerUrl,
   });
 
   AppPrefs copyWith({
@@ -101,11 +114,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   static String _mode(String? raw) =>
       raw == backendModeSdk ? backendModeSdk : backendModeMcp;
 
-  /// An empty server is the deployed one. A user who clears the field is
+  /// An empty server is the default one. A user who clears the field is
   /// asking for the default back, not for a client pointed at nothing.
   static String _serverUrl(String? raw) {
     final trimmed = raw?.trim();
-    return trimmed == null || trimmed.isEmpty ? mcpDeployedUrl : trimmed;
+    return trimmed == null || trimmed.isEmpty ? defaultMcpServerUrl : trimmed;
   }
 
   /// Clamped to the slider's own range, so a value that somehow arrived from
