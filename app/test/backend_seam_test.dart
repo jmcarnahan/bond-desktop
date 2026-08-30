@@ -1,4 +1,7 @@
+import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
@@ -10,6 +13,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:sqlite3/sqlite3.dart';
 
 /// The seam a second backend plugs into.
 ///
@@ -62,9 +66,26 @@ void main() {
   });
 
   group('the providers the app consumes', () {
-    test('are typed to the interfaces and default to the Graph backends', () {
-      final container = ProviderContainer();
+    /// A container in SDK mode.
+    ///
+    /// The mode has to be SAID now: the app's default is the MCP backend, and
+    /// what this group is about is the Graph half of the switch. Which one each
+    /// mode selects is `backend_switch_test.dart`'s subject.
+    ProviderContainer sdkContainer({List<Override> overrides = const []}) {
+      final db = sqlite3.openInMemory();
+      applySchema(db);
+      addTearDown(db.close);
+      MessageStore(db).setPref(backendModeKey, backendModeSdk);
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db), ...overrides],
+      );
       addTearDown(container.dispose);
+      return container;
+    }
+
+    test('are typed to the interfaces and are the Graph backends in SDK mode',
+        () {
+      final container = sdkContainer();
 
       // The static types are the point: each of these variables is declared as
       // the interface, so a provider that went back to a concrete type would
@@ -84,10 +105,9 @@ void main() {
       // built from it rather than from a GraphAuth of their own, which is what
       // makes that single override reach all three.
       final shared = GraphAuth(httpClient: client, store: _Tokens());
-      final container = ProviderContainer(
+      final container = sdkContainer(
         overrides: [graphAuthProvider.overrideWithValue(shared)],
       );
-      addTearDown(container.dispose);
 
       expect(identical(container.read(authSessionProvider), shared), isTrue);
       // These build at all only because the override supplied their session.

@@ -5,8 +5,26 @@ import '../data/message_store.dart';
 import '../services/attention.dart';
 import 'app_providers.dart';
 
-/// The two settings the LO controls, held in memory so the widgets that read
-/// them rebuild the moment one changes.
+/// Which Microsoft backend the app talks through.
+///
+/// [backendModeMcp] goes through the Bond MCP server, which holds the Microsoft
+/// grant server-side; [backendModeSdk] talks to Microsoft Graph directly from
+/// this machine. MCP is the default because it is the only one of the two that
+/// needs no build-time configuration — the direct mode cannot sign in at all
+/// without `MS_CLIENT_ID` and `MS_TENANT_ID` compiled in.
+const String backendModeMcp = 'mcp';
+const String backendModeSdk = 'sdk';
+
+/// The two MCP endpoints worth a preset: the deployed platform, and the one a
+/// `make dev` server listens on. Anything else is typed in by hand.
+///
+/// They live here rather than in the dialog because the provider that builds
+/// the client and the dialog that offers the choice must agree on the strings.
+const String mcpDeployedUrl = 'https://mcp.example.invalid/mcp';
+const String mcpLocalUrl = 'http://localhost:18001/mcp';
+
+/// The settings the LO controls, held in memory so the widgets that read them
+/// rebuild the moment one changes.
 ///
 /// They live in `app_prefs` as TEXT, which is the only shape that table has.
 /// Parsing back is this file's job and nobody else's — a threshold is a double
@@ -22,14 +40,32 @@ class AppPrefs {
   /// the next phase's prompts.
   final String aboutMe;
 
+  /// [backendModeMcp] or [backendModeSdk]. Nothing above here parses it: the
+  /// providers compare it against those two constants.
+  final String backendMode;
+
+  /// The `/mcp` endpoint MCP mode talks to. Read only in MCP mode, but stored
+  /// either way so switching back does not lose a hand-typed server.
+  final String mcpServerUrl;
+
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
+    this.backendMode = backendModeMcp,
+    this.mcpServerUrl = mcpDeployedUrl,
   });
 
-  AppPrefs copyWith({double? attentionThreshold, String? aboutMe}) => AppPrefs(
+  AppPrefs copyWith({
+    double? attentionThreshold,
+    String? aboutMe,
+    String? backendMode,
+    String? mcpServerUrl,
+  }) =>
+      AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
         aboutMe: aboutMe ?? this.aboutMe,
+        backendMode: backendMode ?? this.backendMode,
+        mcpServerUrl: mcpServerUrl ?? this.mcpServerUrl,
       );
 }
 
@@ -37,15 +73,17 @@ class AppPrefs {
 /// read below and the tests that assert what landed in the table.
 const String attentionThresholdKey = 'attention_threshold';
 const String aboutMeKey = 'about_me';
+const String backendModeKey = 'backend_mode';
+const String mcpServerUrlKey = 'mcp_server_url';
 
 class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   final MessageStore _store;
 
   AppPrefsNotifier(this._store) : super(_read(_store));
 
-  /// Reads both settings once, at construction. A stored threshold that does
-  /// not parse — hand-edited, or written by a build that meant something else
-  /// by the key — falls back to the default rather than throwing: a bad
+  /// Reads every setting once, at construction. A stored value that does not
+  /// parse — hand-edited, or written by a build that meant something else by
+  /// the key — falls back to the default rather than throwing: a bad
   /// preference must not be able to stop the app from starting.
   static AppPrefs _read(MessageStore store) {
     final raw = store.getPref(attentionThresholdKey);
@@ -53,7 +91,21 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       attentionThreshold: (raw == null ? null : double.tryParse(raw)) ??
           AttentionTuning.defaultThreshold,
       aboutMe: store.getPref(aboutMeKey) ?? '',
+      backendMode: _mode(store.getPref(backendModeKey)),
+      mcpServerUrl: _serverUrl(store.getPref(mcpServerUrlKey)),
     );
+  }
+
+  /// Anything that is not the direct-Graph mode reads as MCP — including an
+  /// unset key, which is the state every existing install is in.
+  static String _mode(String? raw) =>
+      raw == backendModeSdk ? backendModeSdk : backendModeMcp;
+
+  /// An empty server is the deployed one. A user who clears the field is
+  /// asking for the default back, not for a client pointed at nothing.
+  static String _serverUrl(String? raw) {
+    final trimmed = raw?.trim();
+    return trimmed == null || trimmed.isEmpty ? mcpDeployedUrl : trimmed;
   }
 
   /// Clamped to the slider's own range, so a value that somehow arrived from
@@ -67,6 +119,23 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   void setAboutMe(String value) {
     _store.setPref(aboutMeKey, value);
     state = state.copyWith(aboutMe: value);
+  }
+
+  /// Switches which backend the app talks through.
+  ///
+  /// The state change is the whole mechanism: the session and both backend
+  /// providers watch this field, so setting it rebuilds every one of them and
+  /// whatever was built on top.
+  void setBackendMode(String value) {
+    final mode = _mode(value);
+    _store.setPref(backendModeKey, mode);
+    state = state.copyWith(backendMode: mode);
+  }
+
+  void setMcpServerUrl(String value) {
+    final url = _serverUrl(value);
+    _store.setPref(mcpServerUrlKey, url);
+    state = state.copyWith(mcpServerUrl: url);
   }
 }
 

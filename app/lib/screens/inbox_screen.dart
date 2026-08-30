@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
@@ -11,6 +12,7 @@ import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
+import '../services/mcp/bond_mcp_client.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/app_rail.dart';
@@ -579,6 +581,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final prefs = ref.read(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
     final auth = ref.read(authSessionProvider);
+    final mcpMode = prefs.backendMode == backendModeMcp;
     await showDialog<void>(
       context: context,
       builder: (context) => SettingsDialog(
@@ -589,13 +592,69 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.read(conversationsProvider.notifier).load(syncFirst: false);
         },
         onAboutMeChanged: notifier.setAboutMe,
-        hasScope: auth.hasScope,
+        // Exactly one of these two answers the permissions section: in MCP mode
+        // the grant belongs to the workspace and the platform is the only thing
+        // that can report it.
+        hasScope: mcpMode ? null : auth.hasScope,
+        connectionStatus: mcpMode ? _connectionStatus : null,
+        onConnectMicrosoft:
+            mcpMode ? () => unawaited(_connectMicrosoft()) : null,
+        backendMode: prefs.backendMode,
+        mcpServerUrl: prefs.mcpServerUrl,
+        onBackendModeChanged: (mode) {
+          // Closed first: the switch replaces the session, and every answer in
+          // the dialog was given by the one being left behind.
+          Navigator.of(context).pop();
+          notifier.setBackendMode(mode);
+          _reloadAfterBackendChange();
+        },
+        onMcpServerUrlChanged: (url) {
+          notifier.setMcpServerUrl(url);
+          _reloadAfterBackendChange();
+        },
         onSignInAgain: () {
           Navigator.of(context).pop();
           _signOut();
         },
       ),
     );
+  }
+
+  /// Repaints the list after the backend under it was replaced.
+  ///
+  /// Changing the mode or the server rebuilds every provider below it, the
+  /// conversations notifier included — which comes back with an empty state.
+  /// This reads what is already stored, with no sync: the rows are the same
+  /// mailbox either way, and asking the brand-new session for mail before the
+  /// user has signed in to it would put an error where a list belongs.
+  void _reloadAfterBackendChange() =>
+      ref.read(conversationsProvider.notifier).load(syncFirst: false);
+
+  /// The platform's view of the workspace's Microsoft account.
+  ///
+  /// Every MCP failure answers null rather than throwing: this is a report on a
+  /// settings pane, and a server that cannot be reached is a row that says so,
+  /// not an exception on its way to a banner.
+  Future<Map<String, Object?>?> _connectionStatus() async {
+    try {
+      return await ref
+          .read(mcpStackProvider)
+          .client
+          .callTool('connection_status', const {});
+    } on McpToolException {
+      return null;
+    } on McpTransportException {
+      return null;
+    } on AuthException {
+      return null;
+    }
+  }
+
+  Future<void> _connectMicrosoft() async {
+    final url = await ref.read(mcpStackProvider).auth.microsoftConnectUrl();
+    final uri = url == null ? null : Uri.tryParse(url);
+    if (uri == null) return;
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   Widget _railAction(IconData icon, String tooltip, VoidCallback onPressed) {
