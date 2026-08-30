@@ -93,11 +93,22 @@ class GraphAuth {
 
   /// Must match the portal's redirect URI byte for byte in BOTH the
   /// authorize and token requests — a trailing slash is a mismatch.
-  static const String redirectUri = 'http://localhost:8400';
+  ///
+  /// This is the-crm's registered redirect, borrowed because it is the one
+  /// URI the shared Azure app actually has (http://localhost:8400 is not
+  /// registered — Entra answers AADSTS50011). The path is meaningless to the
+  /// loopback listener, which answers every request on the port; only the
+  /// byte-exact string matters to Entra. Once the portal gains a "Mobile and
+  /// desktop applications" entry for this app, switch back to a dedicated
+  /// port and URI.
+  static const String redirectUri =
+      'http://localhost:8001/connections/microsoft/callback';
 
   /// Fixed by the registration above. There is no fallback port: binding
-  /// anything else produces a redirect Entra will not accept.
-  static const int redirectPort = 8400;
+  /// anything else produces a redirect Entra will not accept. the-crm's
+  /// backend binds this same port when it is running, so the two cannot
+  /// sign in at the same time.
+  static const int redirectPort = 8001;
 
   /// A list because Teams support later appends `Chat.Read` here. Any
   /// addition needs interactive re-consent — see [needsReconsent].
@@ -195,7 +206,8 @@ class GraphAuth {
     } on SocketException {
       throw const AuthException(
         'Port $redirectPort is in use, so sign-in cannot start. This port is '
-        'fixed by the Azure app registration. Find the holder: '
+        'fixed by the Azure app registration — the-crm binds it too, so stop '
+        'the-crm before signing in here. Find the holder: '
         'lsof -nP -iTCP:$redirectPort -sTCP:LISTEN',
       );
     }
