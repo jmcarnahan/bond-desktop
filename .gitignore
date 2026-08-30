@@ -3,3 +3,14 @@ app/build/
 .dart_tool/
 .DS_Store
 *.log
+
+# local secrets/config — never commit
+.env
+.env.*
+*.env
+local.mk
+
+# Claude Code session/config files
+.claude/
+CLAUDE.md
+CLAUDE.local.md

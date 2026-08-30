@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  keychain-access-groups is deliberately ABSENT. It is a restricted
+  entitlement: Xcode refuses to build a target carrying it under the ad-hoc
+  signing this project uses (CODE_SIGN_IDENTITY = "-"), failing with
+  "has entitlements that require signing with a development certificate"
+  even when the array is empty and therefore grants nothing.
+
+  Add it back — as <key>keychain-access-groups</key><array/> — in the same
+  change that provisions a real development certificate, which storing OAuth
+  tokens in the keychain will require anyway.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

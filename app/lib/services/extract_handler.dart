@@ -1,0 +1,253 @@
+import 'dart:convert';
+
+import '../data/message_store.dart';
+import '../models/message_models.dart';
+import 'ai_worker.dart';
+import 'attention.dart';
+import 'conversation_state.dart';
+import 'llm/embeddings_client.dart';
+import 'llm/extract_task.dart';
+import 'llm/json_task.dart';
+import 'llm/llm_client.dart';
+
+/// Extracts structured facts from one message, then refreshes its thread's
+/// embedding if the thread now reads differently.
+///
+/// The two halves are deliberately unequal. The extraction is the work and its
+/// failure is the item's failure; the embedding is an optimisation on top, and
+/// an embedding server that is down must never cost a message the extraction
+/// that already succeeded.
+class ExtractHandler implements WorkHandler {
+  static const String _source = 'email';
+
+  final MessageStore _store;
+  final LlmClient _client;
+  final EmbeddingsClient _embeddings;
+
+  ExtractHandler(this._store, this._client, this._embeddings);
+
+  @override
+  String get kind => 'extract';
+
+  @override
+  Future<void> run(Map<String, Object?> item) async {
+    final source = item['source'] as String? ?? _source;
+    final id = item['entity_id'] as String? ?? '';
+
+    final row = _store.getMessageRow(source, id);
+    // Queued, then deleted before the worker reached it. Nothing to extract
+    // and nothing wrong — the item is done, not failed.
+    if (row == null) return;
+
+    // Queued, then GATED before the worker reached it. Extraction is enqueued
+    // at sync time, while every fresh message is still `pending`; triage runs
+    // first and flips newsletters, no-reply senders and auto-generated mail to
+    // `skipped`. Honouring that verdict here is what keeps a newsletter from
+    // costing a model call, growing an embedding, and — since one sender's
+    // newsletters are all alike — clustering into a junk storyline
+    // suggestion. Teams rows are the exception: they are born `skipped`
+    // (`teams_source`) because triage is email-only, not because anything
+    // judged them worthless.
+    if (row['triage_status'] == 'skipped' &&
+        row['gate_reason'] != 'teams_source') {
+      return;
+    }
+
+    final result = await runTask(
+      _client,
+      const ExtractTask(),
+      ExtractionInput(Message.fromRow(row), DateTime.now()),
+      // Zero, not the default: the same email must yield the same facts twice,
+      // or a re-extraction would move a conversation between clusters for no
+      // reason a human could see.
+      temperature: 0,
+    );
+    _store.writeExtraction(source, id, jsonEncode(result.toJson()));
+
+    _fileBucket(source, row, result);
+    await _refreshCard(source, row, result);
+  }
+
+  /// Files this message's thread into Later, or out of it, the moment the model
+  /// has read it.
+  ///
+  /// The scoring sweep would reach the same answer on the next list load, so
+  /// this is purely about when: extraction runs behind a queue that can be
+  /// minutes deep, and without this a message would appear in the inbox, sit
+  /// there, and then jump to Later while the LO was reading the list. Filing it
+  /// as the fact lands means the row is only ever drawn once, where it belongs.
+  ///
+  /// It shares [bucketFor] with the sweep rather than reimplementing the rule —
+  /// two copies would drift, and the symptom would be a thread that changes
+  /// bucket depending on which pass ran last.
+  void _fileBucket(
+    String source,
+    Map<String, Object?> row,
+    ExtractionResult result,
+  ) {
+    final key = row['conversation_key'] as String?;
+    if (key == null || key.isEmpty) return;
+    final conversation = _store.getConversationRow(source, key);
+    if (conversation == null) return;
+
+    // Only the thread's newest inbound message gets to file it. The queue
+    // drains newest-first but a backlog can still hand this handler a month-old
+    // message, and letting that one decide would file the thread on what its
+    // conversation stopped being about.
+    final receivedAt = row['received_at'] as String?;
+    if (receivedAt == null ||
+        receivedAt != conversation['last_inbound_at'] as String?) {
+      return;
+    }
+
+    // A bucket a person asked for is never re-decided here. `sender_pref` and
+    // `user` are both written by an explicit correction, and the automatic pass
+    // does not get to overrule someone by arriving later.
+    final stored = _store.getConversationAi(source, key);
+    final reason = stored?['bucket_reason'] as String?;
+    if (reason == 'user' || reason == 'sender_pref') return;
+
+    final senderPref =
+        _store.getSenderPref(row['from_address'] as String? ?? '');
+    final bucket = bucketFor(
+      senderPref: senderPref,
+      intent: result.intent,
+      importance: result.importance,
+      needsReply: (conversation['state'] as String?) == 'needs_reply',
+    );
+
+    if (bucket != null) {
+      _store.setConversationBucket(
+        source,
+        key,
+        bucket: bucket,
+        reason: bucketReasonFor(senderPref),
+      );
+    } else if (reason == 'low_value') {
+      // The thread earned its way back: a message that is no longer low-value
+      // clears the guess this pass made last time, and nothing else.
+      _store.setConversationBucket(source, key, bucket: null);
+    }
+  }
+
+  /// Re-embeds this message's thread, if what the thread says about itself
+  /// actually changed.
+  ///
+  /// Every way this can fail returns quietly. The extraction is already stored
+  /// by the time it runs, and an item marked failed here would be re-run —
+  /// spending a model call to redo work that succeeded — to retry an
+  /// optimisation.
+  Future<void> _refreshCard(
+    String source,
+    Map<String, Object?> row,
+    ExtractionResult result,
+  ) async {
+    final key = row['conversation_key'] as String?;
+    if (key == null || key.isEmpty) return;
+    final conversation = _store.getConversationRow(source, key);
+    if (conversation == null) return;
+
+    final card = buildConversationCard(
+      subject: stripReFw(conversation['subject'] as String?),
+      participants: _participants(conversation['participants_json']),
+      topics: result.topics,
+      // The triage summary, when there is one. It is the only sentence on the
+      // row written to describe the thread rather than to label it.
+      summary: row['summary'] as String?,
+    );
+    final hash = cardHash(card);
+
+    // The whole reason a hash is stored: re-extracting the same thread's tenth
+    // message must not spend an embedding call to arrive at the same vector.
+    final stored = _store.getConversationAi(source, key);
+    if (stored != null && stored['embedded_hash'] == hash) return;
+
+    final vector = await _embeddings.embed(card);
+    // Server down, or an answer that did not parse. Leave the old embedding
+    // and the old hash alone so the next pass tries again, and say nothing:
+    // this thread simply has no vector yet, which every reader of the column
+    // already has to handle.
+    if (vector == null) return;
+
+    _store.upsertConversationAi(
+      source,
+      key,
+      embedding: encodeEmbedding(vector),
+      embeddedHash: hash,
+      embedModel: EmbeddingsClient.modelTag,
+    );
+
+    // Only after a vector actually landed, and a REQUEUE rather than an
+    // enqueue: what a thread should be grouped with is a function of its
+    // embedding, so every time that changes the answer may change with it.
+    // `enqueueWork` would ignore the row after the first time it ran, which
+    // would mean each thread is only ever considered on its first message.
+    _store.requeueWork('storyline', source, key);
+  }
+
+  /// Display names, falling back to the address — what a human would call the
+  /// other people on the thread.
+  static List<String> _participants(Object? raw) {
+    if (raw is! String || raw.isEmpty) return const [];
+    final Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException {
+      return const [];
+    }
+    if (decoded is! List) return const [];
+    final names = <String>[];
+    for (final entry in decoded) {
+      if (entry is! Map) continue;
+      final name = entry['name'] as String?;
+      final display = (name != null && name.isNotEmpty)
+          ? name
+          : (entry['email'] as String? ?? '');
+      if (display.isNotEmpty) names.add(display);
+    }
+    return names;
+  }
+}
+
+/// The text a conversation is embedded from.
+///
+/// Always four segments joined by ` | `, empty ones included: the shape is
+/// fixed so the same thread produces the same card twice, which is what makes
+/// [cardHash] a usable "has anything changed" test. Order runs from most to
+/// least stable — subject, who is on it, what it is about, what was last said
+/// — so a passing remark moves the vector less than a change of topic.
+String buildConversationCard({
+  required String? subject,
+  required List<String> participants,
+  required List<String> topics,
+  required String? summary,
+}) =>
+    [
+      subject?.trim() ?? '',
+      participants.join(', '),
+      topics.join(', '),
+      summary?.trim() ?? '',
+    ].join(' | ');
+
+/// A cheap content hash: the card's length, then FNV-1a over its UTF-8 bytes.
+///
+/// FNV-1a and not SHA-256 because nothing adversarial rides on this. It is
+/// compared only against the previous card of the SAME conversation, and the
+/// cost of the one-in-2^64 collision is a stale embedding on one thread. The
+/// length prefix is free and catches the truncations a hash alone would not
+/// make obvious in a database dump.
+String cardHash(String card) {
+  const int prime = 0x100000001b3;
+  var hash = 0xcbf29ce484222325;
+  for (final byte in utf8.encode(card)) {
+    hash ^= byte;
+    // Dart's int is 64-bit two's complement on this platform and multiplication
+    // wraps, which is exactly the arithmetic FNV-1a specifies.
+    hash = hash * prime;
+  }
+  final high = (hash >> 32) & 0xFFFFFFFF;
+  final low = hash & 0xFFFFFFFF;
+  return '${card.length}-'
+      '${high.toRadixString(16).padLeft(8, '0')}'
+      '${low.toRadixString(16).padLeft(8, '0')}';
+}

@@ -14,8 +14,9 @@ There are three layers, two of which exist today:
    without asking for a tool. This is the seam where an MCP client plugs in
    later — register handlers in `toolHandlers` and their JSON schemas in
    `toolSchemas` and the loop itself needs no changes.
-3. **UI** — a Flutter desktop app. Not built yet. The Dart agent exists partly
-   so that layer can import it rather than reimplement it.
+3. **UI** — `app/`, a Flutter desktop app: a Microsoft-signed-in inbox of
+   Outlook mail and Teams chats, read and ranked by the model on layer 1. See
+   [The desktop inbox](#the-desktop-inbox-app).
 
 The point of the POC is layer 2: proving that a local model reliably emits
 well-formed OpenAI `tool_calls` and can be driven in a loop, which is the
@@ -142,16 +143,124 @@ There is also a web UI built into `llama-server` at <http://localhost:8080>.
 It supports drag-and-drop images, which is how to exercise the vision side —
 that is what the mmproj file is for.
 
+## The desktop inbox (app/)
+
+A Flutter macOS app: sign in with Microsoft, and a live Outlook inbox threaded
+into conversations, each one read and annotated by the local model. `make
+app-run` starts it.
+
+**Sign-in needs an Azure app registration, injected at launch.** The client
+id, tenant id and (for a registration without a public-client platform) client
+secret are never committed; `make app-run` / `make app-build` read them from a
+dotenv-style file and pass them as `--dart-define`s. Point `MS_ENV` at any
+file carrying `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID` and
+`MICROSOFT_CLIENT_SECRET` lines — the default is a git-ignored `.env` next to
+the `Makefile`, and a git-ignored `local.mk` can pin `MS_ENV` somewhere else
+permanently. A build made without them runs fine but refuses sign-in with a
+message naming exactly these defines. A build made **with** the secret carries
+it in the binary — do not distribute one.
+
+**Two model servers, both optional.** `make model` is the chat model on `:8080`
+that triages, extracts, names storylines and drafts replies. `make embed` is a
+second, much smaller llama-server on `:8081` running `embeddinggemma-300M`,
+which is what turns conversations into vectors so they can be clustered — it
+needs its own process because `--embeddings` puts a server in embedding mode
+and one server cannot both chat and embed. With neither running the inbox works
+fine and simply stays un-annotated; with only the chat model, everything except
+storyline clustering works.
+
+Nothing about the mail ever leaves the machine at inference time. Both servers
+are local, and the only network calls the app makes are to Microsoft Graph.
+
+The left rail has four sections:
+
+**Needs You** ranks what the LO is actually on the hook for. Every open thread
+gets an attention score from its state, how recently it moved, what the model
+found in it, and how often that sender gets answered; a slider in Settings sets
+how high a thread must score to appear. Threads awaiting a reply come first,
+then threads waiting on somebody else, dimmed.
+
+**Storylines** are groups of threads about the same thing — one property, one
+file, one deal — proposed by the model and kept or dismissed by the user. A
+clustering sweep compares conversation embeddings, a confirmation call decides
+whether a candidate really belongs, and the result opens as a single merged
+transcript with a chip at each seam naming the thread it just crossed into.
+Removing a thread by hand blocks it, so the model cannot put it straight back.
+
+**Later** is where low-value mail goes instead of the inbox. The model's read of
+a message decides it, a standing per-sender rule overrides that, and an explicit
+"keep this in my inbox" overrides both — nothing automatic ever overturns a
+person. It is grouped by day and nothing is hidden: the rail shows a count per
+day and one click opens all of it.
+
+**Drafts** are suggested replies. Threads that need an answer and score high
+enough get one written in the background, shown above the reply box with the
+model's own sentence about what it drew on. Nothing sends on its own: a draft is
+text in a box until somebody presses Send, and what gets sent is what is on
+screen. Depending on what the tenant granted, Send either sends, saves to
+Outlook Drafts, or copies to the clipboard.
+
+Triage's cheap gates (the user's own address, no-reply senders, list and
+auto-generated headers) skip what is not worth a model call; the rest go through
+one at a time, newest first. First run syncs 14 days of mail and queues the
+newest 7 days for triage, capped at 150 messages. At roughly 17 seconds an email
+that backlog annotates itself over about 45 minutes, in the background, with a
+`Triaging N remaining…` counter in the rail. It survives a restart: work in
+flight is re-queued at the next launch.
+
+### Microsoft Teams
+
+Teams **chats** — 1:1 and group — flow into the same conversations, the same
+state machine and the same Needs You / Later ranking as mail, marked with a 💬
+on the row. Pills at the foot of the rail switch between **All**, **✉ Mail** and
+**💬 Teams**.
+
+**Channel messages are out of scope.** Reading a team's channels needs
+tenant-wide admin consent this app does not ask for; chats need only the
+delegated `Chat.Read`. At a tenant that admin-gates `Chat.Read` (this one
+does, as of 2026-08-30) the sign-in leaves it out entirely — one admin-gated
+scope in the bundle walls off the whole request — and Teams features report
+themselves unavailable until the admin approves the app.
+
+**Teams refreshes only when you ask it to.** Microsoft's terms for the Teams
+messaging endpoints forbid polling them in the background, so the sixty-second
+timer that keeps mail current does not touch them. A chat pull happens when you
+press Refresh, when the app launches, and when the window comes back to the
+front after ten minutes or more. The rail says how long ago that was.
+
+**Replies are email-only.** A Teams thread shows "Reply in Microsoft Teams"
+where the composer would be, and a storyline's reply dropdown offers its mail
+threads only — Graph builds a mail reply for this app from the message being
+answered, and there is no equivalent for a chat.
+
+**Consent degrades quietly.** The sign-in asks for everything it can use in
+one round: `Mail.Read`, `User.Read`, `offline_access`, plus `Mail.ReadWrite`
+and `Mail.Send` (`Chat.Read` sits out while the tenant admin-gates it — see
+above). A tenant that refuses the extended scopes leaves a perfectly usable
+session — the sign-in retries with the core three — and each feature that
+needed one reports itself unavailable rather than broken. Without `Chat.Read`
+the Teams pill is present but disabled with a tooltip pointing at Settings,
+and the app makes no Teams request at all.
+
 ## Operations
 
 ```sh
 make status                 # up/down + pid
 make logs                   # tail the server log
-make stop                   # stop the server on :8080
+make stop                   # stop the chat server on :8080
+make embed                  # start the embedding server on :8081
+make embed-stop             # stop it
 make verify                 # SHA256 the downloaded weights (~1 min)
 make clean-model            # delete the cache, forcing a re-download
 make clean                  # rm tmp/logs
+make app-run                # the desktop inbox
+make app-test               # its test suite
+make app-analyze            # its analyzer
 ```
+
+`make stop` deliberately kills by PORT and never by process name: `make embed`
+is a second `llama-server`, and a name-based kill would take the embedding
+server down every time someone stopped the chat one.
 
 `make verify` is cheap insurance. The Hugging Face cache is content-addressed:
 every file in `blobs/` is named by its own SHA256, so the expected hash is the
@@ -233,6 +342,15 @@ Makefile          everything: install, model lifecycle, smoke tests, verify
 agent/            Dart package
   bin/chat.dart   the tool-calling loop — the whole agent, one file
   pubspec.yaml    one dependency: package:http
+app/              Flutter macOS app — the desktop inbox
+  lib/data/       sqlite schema and every SQL statement in the app
+  lib/services/   Graph auth, the mail and Teams syncs, the gates and queues
+  lib/services/llm/  the local-model client, prompts and validators
+  lib/providers/  the read models the screens watch
+  lib/screens/    inbox and sign-in
+  lib/widgets/    rail, thread list, transcript, composer, chips
+  lib/theme/      the design tokens every widget draws from
+  test/           unit tests; llm_live_test.dart needs a running model
 tmp/logs/         runtime logs; make clean removes it, keep it out of git
 ```
 
