@@ -128,4 +128,36 @@ CREATE TABLE IF NOT EXISTS conversation_ai (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (source, conversation_key)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS storylines (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  summary TEXT,
+  status TEXT NOT NULL DEFAULT 'suggested',
+  created_by TEXT NOT NULL DEFAULT 'auto',
+  title_locked INTEGER NOT NULL DEFAULT 0,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  member_hash TEXT,
+  last_activity_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_storylines_status ON storylines(status, last_activity_at DESC);
+CREATE TABLE IF NOT EXISTS storyline_members (
+  storyline_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  added_by TEXT NOT NULL DEFAULT 'auto',
+  evidence TEXT,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (storyline_id, source, conversation_key)
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_storyline_members_conv
+  ON storyline_members(source, conversation_key);
+CREATE TABLE IF NOT EXISTS storyline_member_blocks (
+  storyline_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  blocked_at TEXT NOT NULL,
+  PRIMARY KEY (storyline_id, source, conversation_key)
+) STRICT;
 ''';

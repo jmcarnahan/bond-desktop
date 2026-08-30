@@ -70,6 +70,12 @@ class SyncService implements MailSync {
       sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
       source: _source,
     );
+
+    // The clustering pass over everything not in a storyline yet. One row, not
+    // one per thread — there is one mailbox to sweep — and a requeue rather
+    // than an enqueue, so the sweep that ran after the last sync runs again
+    // after this one instead of staying `done` forever.
+    _store.requeueWork('storyline_sweep', _source, 'sweep');
   }
 
   /// One folder, including the single permitted recovery from an expired

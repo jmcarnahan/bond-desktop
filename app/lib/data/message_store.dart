@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:sqlite3/sqlite3.dart';
 
 import '../models/message_models.dart';
+import '../models/storyline_models.dart';
 
 /// Every SQL statement in the app except the schema itself lives here. Screens
 /// and providers call methods; they never build a query.
@@ -700,5 +701,336 @@ LIMIT ?
     );
     if (result.isEmpty) return null;
     return Map<String, Object?>.from(result.first);
+  }
+
+  // ── storylines ───────────────────────────────────────────────────────
+
+  /// The storyline row plus its two derived counts.
+  ///
+  /// Correlated subqueries rather than two GROUP BY joins: `open_count` counts
+  /// a strict subset of what `member_count` counts, and expressing that as one
+  /// join would need a conditional aggregate over an outer join whose empty
+  /// case reads as one member rather than none.
+  static const String _storylineSelect = '''
+SELECT s.*,
+  (SELECT COUNT(*) FROM storyline_members m WHERE m.storyline_id = s.id)
+    AS member_count,
+  (SELECT COUNT(*) FROM storyline_members m
+     JOIN conversations c
+       ON c.source = m.source AND c.conversation_key = m.conversation_key
+     WHERE m.storyline_id = s.id AND c.state = 'needs_reply')
+    AS open_count
+FROM storylines s''';
+
+  void insertStoryline({
+    required String id,
+    required String title,
+    String? summary,
+    required String status,
+    required String createdBy,
+    String? memberHash,
+  }) {
+    final now = _nowIso();
+    db.execute(
+      'INSERT INTO storylines '
+      '(id, title, summary, status, created_by, title_locked, pinned, '
+      'member_hash, last_activity_at, created_at, updated_at) '
+      'VALUES (?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?)',
+      [id, title, summary, status, createdBy, memberHash, now, now],
+    );
+  }
+
+  /// Writes only the fields this call actually names.
+  ///
+  /// Targeted for the reason [upsertConversationAi] is: the columns here are
+  /// written by four different callers — the sweep names it, the user renames
+  /// it, the keep/dismiss buttons move its status, an assignment touches its
+  /// activity — and a whole-row write from any one of them would quietly
+  /// reset the other three.
+  ///
+  /// [summary] uses the [_unset] sentinel because null means something: a
+  /// storyline whose summary should be cleared is a different write from one
+  /// whose summary is simply not this call's business.
+  void updateStoryline(
+    String id, {
+    String? title,
+    Object? summary = _unset,
+    String? status,
+    bool? titleLocked,
+    bool? pinned,
+    String? lastActivityAt,
+    String? memberHash,
+  }) {
+    final sets = <String>['updated_at = ?'];
+    final args = <Object?>[_nowIso()];
+
+    if (title != null) {
+      sets.add('title = ?');
+      args.add(title);
+    }
+    if (!identical(summary, _unset)) {
+      sets.add('summary = ?');
+      args.add(summary as String?);
+    }
+    if (status != null) {
+      sets.add('status = ?');
+      args.add(status);
+    }
+    if (titleLocked != null) {
+      sets.add('title_locked = ?');
+      args.add(titleLocked ? 1 : 0);
+    }
+    if (pinned != null) {
+      sets.add('pinned = ?');
+      args.add(pinned ? 1 : 0);
+    }
+    if (lastActivityAt != null) {
+      sets.add('last_activity_at = ?');
+      args.add(lastActivityAt);
+    }
+    if (memberHash != null) {
+      sets.add('member_hash = ?');
+      args.add(memberHash);
+    }
+
+    args.add(id);
+    db.execute('UPDATE storylines SET ${sets.join(', ')} WHERE id = ?', args);
+  }
+
+  /// The rail's list: suggestions first, newest proposal at the top, then
+  /// everything live by how recently it moved.
+  ///
+  /// Suggestions lead because they are the only rows that ask the user for
+  /// something. `rowid DESC` is the final tie-break — two storylines written in
+  /// the same microsecond would otherwise be free to swap places between
+  /// reads, which reads on screen as the list shuffling itself.
+  List<Storyline> loadStorylines({
+    List<String> statuses = const ['suggested', 'active'],
+  }) {
+    if (statuses.isEmpty) return const [];
+    final result = db.select(
+      '$_storylineSelect '
+      'WHERE s.status IN (${_placeholders(statuses.length)}) '
+      "ORDER BY (CASE WHEN s.status = 'suggested' THEN 0 ELSE 1 END), "
+      "CASE WHEN s.status = 'suggested' THEN s.created_at END DESC, "
+      "CASE WHEN s.status = 'suggested' THEN NULL ELSE s.last_activity_at END DESC, "
+      's.rowid DESC',
+      [...statuses],
+    );
+    return [for (final row in result) Storyline.fromRow(row)];
+  }
+
+  Storyline? getStoryline(String id) {
+    final result = db.select('$_storylineSelect WHERE s.id = ?', [id]);
+    if (result.isEmpty) return null;
+    return Storyline.fromRow(result.first);
+  }
+
+  /// Adds a thread to a storyline, and un-blocks it.
+  ///
+  /// The un-block is the point: a block is a record of "the user took this out
+  /// of here", and putting it back explicitly is the user changing their mind.
+  /// Leaving the block behind would let the assignment pass silently refuse a
+  /// membership a person just asked for.
+  void addStorylineMember(
+    String storylineId,
+    String source,
+    String conversationKey, {
+    required String addedBy,
+    String? evidence,
+  }) {
+    db.execute(
+      'INSERT OR IGNORE INTO storyline_members '
+      '(storyline_id, source, conversation_key, added_by, evidence, added_at) '
+      'VALUES (?, ?, ?, ?, ?, ?)',
+      [storylineId, source, conversationKey, addedBy, evidence, _nowIso()],
+    );
+    db.execute(
+      'DELETE FROM storyline_member_blocks '
+      'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+      [storylineId, source, conversationKey],
+    );
+  }
+
+  /// Takes a thread out of a storyline. [block] records that the user meant
+  /// it, so the next clustering pass cannot put it straight back — the model
+  /// is not allowed to overrule a person by being confident twice.
+  void removeStorylineMember(
+    String storylineId,
+    String source,
+    String conversationKey, {
+    required bool block,
+  }) {
+    db.execute(
+      'DELETE FROM storyline_members '
+      'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+      [storylineId, source, conversationKey],
+    );
+    if (!block) return;
+    db.execute(
+      'INSERT OR IGNORE INTO storyline_member_blocks '
+      '(storyline_id, source, conversation_key, blocked_at) '
+      'VALUES (?, ?, ?, ?)',
+      [storylineId, source, conversationKey, _nowIso()],
+    );
+  }
+
+  bool isMemberBlocked(
+    String storylineId,
+    String source,
+    String conversationKey,
+  ) {
+    final result = db.select(
+      'SELECT 1 FROM storyline_member_blocks '
+      'WHERE storyline_id = ? AND source = ? AND conversation_key = ? LIMIT 1',
+      [storylineId, source, conversationKey],
+    );
+    return result.isNotEmpty;
+  }
+
+  List<StorylineMember> membersOf(String storylineId) {
+    final result = db.select(
+      'SELECT * FROM storyline_members WHERE storyline_id = ? '
+      'ORDER BY added_at ASC, conversation_key ASC',
+      [storylineId],
+    );
+    return [for (final row in result) StorylineMember.fromRow(row)];
+  }
+
+  /// Which live storylines one thread belongs to. Dismissed and archived ones
+  /// are excluded: their member rows survive only as the record behind
+  /// [dismissedMemberHashExists], and a thread is not "in" a suggestion the
+  /// user threw away.
+  List<String> storylineIdsFor(String source, String conversationKey) {
+    final result = db.select(
+      'SELECT m.storyline_id FROM storyline_members m '
+      'JOIN storylines s ON s.id = m.storyline_id '
+      'WHERE m.source = ? AND m.conversation_key = ? '
+      "AND s.status IN ('suggested', 'active') "
+      'ORDER BY m.added_at ASC',
+      [source, conversationKey],
+    );
+    return [
+      for (final row in result) row['storyline_id'] as String? ?? '',
+    ];
+  }
+
+  /// Every conversation with a comparable vector.
+  ///
+  /// [embedModel] is required rather than defaulted: two vectors are only
+  /// comparable when they came from the same model under the same task prefix,
+  /// and a query that quietly mixed generations would return cosines that mean
+  /// nothing. The caller passes `EmbeddingsClient.modelTag`.
+  List<Map<String, Object?>> conversationsWithEmbeddings({
+    required String embedModel,
+    List<String> sources = const ['email'],
+  }) {
+    if (sources.isEmpty) return const [];
+    final result = db.select(
+      'SELECT a.source AS source, a.conversation_key AS conversation_key, '
+      'a.embedding AS embedding, c.subject AS subject, '
+      'c.participants_json AS participants_json, c.state AS state, '
+      'c.last_message_at AS last_message_at '
+      'FROM conversation_ai a '
+      'JOIN conversations c '
+      '  ON c.source = a.source AND c.conversation_key = a.conversation_key '
+      'WHERE a.embedding IS NOT NULL AND a.embed_model = ? '
+      'AND a.source IN (${_placeholders(sources.length)}) '
+      'ORDER BY c.last_message_at DESC, a.conversation_key ASC',
+      [embedModel, ...sources],
+    );
+    return [for (final row in result) Map<String, Object?>.from(row)];
+  }
+
+  /// Every thread the sweep must leave alone: already in a live storyline, or
+  /// explicitly kept out of one. Blocks count because a thread the user pulled
+  /// out of a group is not a thread to propose a new group around.
+  Set<String> assignedOrBlockedKeys(String source) {
+    final result = db.select(
+      'SELECT m.conversation_key AS conversation_key FROM storyline_members m '
+      'JOIN storylines s ON s.id = m.storyline_id '
+      "WHERE m.source = ? AND s.status IN ('suggested', 'active') "
+      'UNION '
+      'SELECT b.conversation_key AS conversation_key '
+      'FROM storyline_member_blocks b '
+      'JOIN storylines s ON s.id = b.storyline_id '
+      "WHERE b.source = ? AND s.status IN ('suggested', 'active')",
+      [source, source],
+    );
+    return {
+      for (final row in result) row['conversation_key'] as String? ?? '',
+    };
+  }
+
+  /// Whether this exact set of threads has already been proposed and thrown
+  /// away. The sweep is deterministic, so without this a dismissed suggestion
+  /// would be re-proposed identically on the very next sync.
+  bool dismissedMemberHashExists(String memberHash) {
+    final result = db.select(
+      "SELECT 1 FROM storylines WHERE status = 'dismissed' "
+      'AND member_hash = ? LIMIT 1',
+      [memberHash],
+    );
+    return result.isNotEmpty;
+  }
+
+  /// Moves a storyline's activity stamp forward, never back. Threads are
+  /// assigned in whatever order the queue drains them, so an older thread
+  /// joining must not make a live storyline look stale.
+  void touchStorylineActivity(String id, String lastMessageAt) {
+    db.execute(
+      'UPDATE storylines SET last_activity_at = ?, updated_at = ? '
+      'WHERE id = ? AND (last_activity_at IS NULL OR last_activity_at < ?)',
+      [lastMessageAt, _nowIso(), id, lastMessageAt],
+    );
+  }
+
+  /// Queues work, and revives it when it has already run.
+  ///
+  /// The difference from [enqueueWork] is the whole reason this exists:
+  /// storyline assignment must run AGAIN every time a thread's embedding
+  /// changes, and `INSERT OR IGNORE` against a row already marked `done` would
+  /// mean a thread is only ever considered once, on the first message that
+  /// ever reached it.
+  ///
+  /// The `WHERE` clause is what keeps that safe. Only `done` and `error` rows
+  /// are revived: resetting a `pending` row would lose its place in the drain
+  /// order, and resetting a `processing` one would hand an item a worker is
+  /// holding to a second drain.
+  void requeueWork(String kind, String source, String entityId) {
+    final now = _nowIso();
+    db.execute(
+      'INSERT INTO work_items '
+      '(task_kind, source, entity_id, status, attempts, error, payload_json, '
+      'created_at, updated_at) '
+      "VALUES (?, ?, ?, 'pending', 0, NULL, NULL, ?, ?) "
+      'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
+      "status = 'pending', updated_at = excluded.updated_at "
+      "WHERE work_items.status IN ('done', 'error')",
+      [kind, source, entityId, now, now],
+    );
+  }
+
+  /// Every message of every member thread, merged into one chronology.
+  ///
+  /// Rows come back as raw `messages` rows — `conversation_key` and `subject`
+  /// included — because the timeline needs both: the key to know when the
+  /// transcript crosses from one thread into another, and the subject to name
+  /// the thread it crossed into.
+  List<Map<String, Object?>> storylineTimeline(
+    String storylineId, {
+    List<String> sources = const ['email'],
+  }) {
+    if (sources.isEmpty) return const [];
+    final result = db.select(
+      'SELECT m.* FROM messages m '
+      'JOIN storyline_members sm '
+      '  ON sm.source = m.source AND sm.conversation_key = m.conversation_key '
+      'WHERE sm.storyline_id = ? '
+      'AND m.source IN (${_placeholders(sources.length)}) '
+      'ORDER BY m.received_at ASC, m.source_message_id ASC',
+      [storylineId, ...sources],
+    );
+    return [for (final row in result) Map<String, Object?>.from(row)];
   }
 }

@@ -4,14 +4,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/message_models.dart';
+import '../models/storyline_models.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
+import '../providers/storylines_provider.dart';
 import '../services/graph_auth.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/app_rail.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
+import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 
 /// The whole app, for now: a dark rail of sections beside one main pane that
@@ -49,6 +52,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   RailSection? _section = RailSection.needsYou;
   String? _selectedId;
 
+  /// The open storyline. Never set at the same time as [_selectedId] — the
+  /// main pane shows exactly one thing, and the two selections clear each
+  /// other rather than racing to be rendered.
+  String? _selectedStorylineId;
+
   /// Narrow layouts only: whether the rail overlay is up.
   bool _railOpen = false;
 
@@ -82,9 +90,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   void _refresh() {
     if (!mounted) return;
     ref.read(conversationsProvider.notifier).load();
+    ref.read(storylinesProvider.notifier).load();
     final selected = _selectedId;
     if (selected != null) {
       ref.read(threadProvider(selected).notifier).load();
+    }
+    final storyline = _selectedStorylineId;
+    if (storyline != null) {
+      ref.read(storylineTimelineProvider(storyline).notifier).load();
     }
   }
 
@@ -96,17 +109,45 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   void _select(String id) {
     setState(() {
       _selectedId = id;
+      _selectedStorylineId = null;
       _railOpen = false;
     });
     ref.read(threadProvider(id).notifier).load();
+  }
+
+  void _selectStoryline(String id) {
+    setState(() {
+      _selectedStorylineId = id;
+      _selectedId = null;
+      _railOpen = false;
+    });
+    ref.read(storylineTimelineProvider(id).notifier).load();
   }
 
   void _selectSection(RailSection section) {
     setState(() {
       _section = section;
       _selectedId = null;
+      _selectedStorylineId = null;
       _railOpen = false;
     });
+  }
+
+  /// The storylines as of this build. Empty until the first load lands, and
+  /// empty on a read failure — the rail's own placeholder is the right thing
+  /// to show for both.
+  List<Storyline> _storylines() {
+    final state = ref.watch(storylinesProvider);
+    return state is StorylinesLoaded ? state.storylines : const [];
+  }
+
+  Storyline? _storylineById(String id) {
+    for (final storyline in _storylines()) {
+      if (storyline.id == id) return storyline;
+    }
+    // Kept or dismissed from under the selection, or gone in a reload. The
+    // pane falls back to the overview rather than showing a stale copy.
+    return null;
   }
 
   @override
@@ -223,12 +264,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   Widget _rail(List<Conversation> conversations) {
     return AppRail(
       conversations: conversations,
+      storylines: _storylines(),
       selectedId: _selectedId,
-      // A thread being open means no section overview is showing, so the rail
-      // must not highlight one.
-      selectedSection: _selectedId == null ? _section : null,
+      selectedStorylineId: _selectedStorylineId,
+      // A thread or a storyline being open means no section overview is
+      // showing, so the rail must not highlight one.
+      selectedSection: (_selectedId == null && _selectedStorylineId == null)
+          ? _section
+          : null,
       onSelectConversation: _select,
       onSelectSection: _selectSection,
+      onSelectStoryline: _selectStoryline,
+      onKeepSuggestion: (id) =>
+          ref.read(storylinesProvider.notifier).keep(id),
+      onDismissSuggestion: (id) {
+        // The dismissed storyline leaves the list, so a selection pointing at
+        // it would render nothing. Clearing it here returns the pane to the
+        // overview in the same frame the row disappears.
+        if (_selectedStorylineId == id) {
+          setState(() => _selectedStorylineId = null);
+        }
+        ref.read(storylinesProvider.notifier).dismiss(id);
+      },
       footer: _railFooter(),
     );
   }
@@ -315,12 +372,132 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
     return null;
   }
 
-  /// Exactly one of the two views, never both: the transcript when a thread
-  /// is open, the section overview otherwise.
+  /// Exactly one view, never two: the thread transcript, then the storyline
+  /// timeline, then the section overview. The order is the priority — a thread
+  /// selection is the most specific thing the user asked for.
   Widget _main(List<Conversation> conversations, String? loadError) {
     final selected = _selected(conversations);
     if (selected != null) return _thread(selected);
+
+    final storylineId = _selectedStorylineId;
+    if (storylineId != null) {
+      final storyline = _storylineById(storylineId);
+      if (storyline != null) return _storyline(storyline);
+    }
+
     return _overview(conversations, loadError);
+  }
+
+  Widget _storyline(Storyline storyline) {
+    final timeline = ref.watch(storylineTimelineProvider(storyline.id));
+
+    if (timeline is StorylineTimelineInitial ||
+        timeline is StorylineTimelineLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    final (
+      List<Message> messages,
+      Map<String, String> keys,
+      Map<String, String> subjects,
+      String? error,
+    ) = switch (timeline) {
+      StorylineTimelineLoaded(
+        :final messages,
+        :final keyByMessageId,
+        :final subjectByKey,
+        :final loadError,
+      ) =>
+        (messages, keyByMessageId, subjectByKey, loadError),
+      StorylineTimelineError(:final message) => (
+          const <Message>[],
+          const <String, String>{},
+          const <String, String>{},
+          message,
+        ),
+      _ => (
+          const <Message>[],
+          const <String, String>{},
+          const <String, String>{},
+          null,
+        ),
+    };
+
+    final notifier = ref.read(storylinesProvider.notifier);
+    final panel = StorylineTimelinePanel(
+      key: ValueKey(storyline.id),
+      storyline: storyline,
+      messages: messages,
+      keyByMessageId: keys,
+      subjectByKey: subjects,
+      members: ref.read(messageStoreProvider).membersOf(storyline.id),
+      onBack: () => setState(() => _selectedStorylineId = null),
+      onRename: (title) => notifier.rename(storyline.id, title),
+      onRemoveThread: (source, key) async {
+        await notifier.removeThread(storyline.id, source, key);
+        if (!mounted) return;
+        ref.read(storylineTimelineProvider(storyline.id).notifier).load();
+      },
+      onOpenThread: (_, key) => _select(key),
+    );
+
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: error == null
+          ? panel
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                InlineAlert(
+                  severity: InlineAlertSeverity.error,
+                  text: error,
+                  maxLines: 2,
+                ),
+                const SizedBox(height: BondSpacing.s12),
+                Expanded(child: panel),
+              ],
+            ),
+    );
+  }
+
+  /// Files [conversationKey] into a storyline the user names now.
+  ///
+  /// A dialog rather than an inline field: it is the one storyline action that
+  /// creates something, and it is reached from a thread, where there is no
+  /// obvious place to put a text field that would not be mistaken for a
+  /// composer.
+  Future<void> _promptNewStoryline(String conversationKey) async {
+    final controller = TextEditingController();
+    final title = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('New storyline'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Name this storyline'),
+          onSubmitted: (value) => Navigator.of(context).pop(value),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Create'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+
+    final trimmed = (title ?? '').trim();
+    if (trimmed.isEmpty || !mounted) return;
+    await ref.read(storylinesProvider.notifier).create(
+          trimmed,
+          conversationKey: conversationKey,
+        );
   }
 
   Widget _thread(Conversation selected) {
@@ -345,6 +522,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
       onMarkDone: () =>
           ref.read(conversationsProvider.notifier).markDone(selected.id),
       onBack: () => setState(() => _selectedId = null),
+      // Suggestions are deliberately absent: filing a thread into a group the
+      // user has not accepted yet would be answering the suggestion for them.
+      // So are the storylines this thread is already in — an "Add to" that
+      // does nothing reads as a broken menu item.
+      storylineChoices: () {
+        final already = ref
+            .read(messageStoreProvider)
+            .storylineIdsFor(selected.source, selected.id)
+            .toSet();
+        return [
+          for (final storyline in _storylines())
+            if (!storyline.isSuggested && !already.contains(storyline.id))
+              (storyline.id, storyline.title),
+        ];
+      }(),
+      onAddToStoryline: (id) => ref
+          .read(storylinesProvider.notifier)
+          .addThread(id, selected.source, selected.id),
+      onNewStoryline: () => _promptNewStoryline(selected.id),
     );
 
     return Padding(
@@ -395,15 +591,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   }
 
   Widget _overviewBody(RailSection section, List<Conversation> conversations) {
-    if (section == RailSection.storylines) {
-      return Center(
-        child: Text(
-          'Storylines arrive in a later phase.',
-          style: BondType.small,
-          textAlign: TextAlign.center,
-        ),
-      );
-    }
+    if (section == RailSection.storylines) return _storylinesOverview();
 
     final sections = switch (section) {
       RailSection.needsYou => [('NEEDS YOU', needsYouRows(conversations))],
@@ -419,6 +607,93 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
       selectedId: _selectedId,
       onSelect: _select,
       sectionsOverride: sections,
+    );
+  }
+
+  /// Every storyline as a card. Suggestions carry their two answers on the
+  /// row, so the whole section can be cleared without opening anything.
+  Widget _storylinesOverview() {
+    final storylines = storylineRows(_storylines());
+    if (storylines.isEmpty) {
+      return Center(
+        child: Text(
+          'Storylines appear once the local model has grouped enough mail.',
+          style: BondType.small,
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
+
+    final notifier = ref.read(storylinesProvider.notifier);
+    return ListView.separated(
+      itemCount: storylines.length,
+      separatorBuilder: (_, _) => const SizedBox(height: BondSpacing.s8),
+      itemBuilder: (context, index) {
+        final storyline = storylines[index];
+        final summary = storyline.summary ?? '';
+        return Material(
+          color: BondColors.surface,
+          borderRadius: BondRadii.mdAll,
+          child: InkWell(
+            onTap: () => _selectStoryline(storyline.id),
+            borderRadius: BondRadii.mdAll,
+            child: Container(
+              padding: const EdgeInsets.all(BondSpacing.s12),
+              decoration: BoxDecoration(
+                borderRadius: BondRadii.mdAll,
+                border: Border.all(color: BondColors.border),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          storyline.title.isEmpty
+                              ? '(untitled)'
+                              : storyline.title,
+                          style: BondType.body
+                              .copyWith(fontWeight: FontWeight.w600),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        if (summary.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            summary,
+                            style: BondType.caption,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                        const SizedBox(height: 2),
+                        Text(
+                          '${storyline.memberCount} threads · '
+                          '${storyline.openCount} open',
+                          style: BondType.caption,
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (storyline.isSuggested) ...[
+                    const SizedBox(width: BondSpacing.s8),
+                    TextButton(
+                      onPressed: () => notifier.keep(storyline.id),
+                      child: const Text('Keep'),
+                    ),
+                    TextButton(
+                      onPressed: () => notifier.dismiss(storyline.id),
+                      child: const Text('Dismiss'),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

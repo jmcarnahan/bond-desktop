@@ -1,7 +1,24 @@
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+Storyline _storyline({
+  required String id,
+  String title = 'Willow St purchase',
+  String status = 'active',
+  int memberCount = 2,
+  int openCount = 0,
+}) {
+  return Storyline(
+    id: id,
+    title: title,
+    status: status,
+    memberCount: memberCount,
+    openCount: openCount,
+  );
+}
 
 Conversation _conv({
   required String id,
@@ -191,6 +208,119 @@ void main() {
 
       expect(find.text('Alice'), findsOneWidget);
       expect(sections, isEmpty);
+    });
+  });
+
+  group('storylineRows', () {
+    test('puts suggestions first and keeps each half in input order', () {
+      final rows = storylineRows([
+        _storyline(id: 'a', status: 'active'),
+        _storyline(id: 'b', status: 'suggested'),
+        _storyline(id: 'c', status: 'active'),
+        _storyline(id: 'd', status: 'suggested'),
+      ]);
+
+      expect(rows.map((s) => s.id), ['b', 'd', 'a', 'c']);
+    });
+  });
+
+  group('AppRail storylines', () {
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      required List<Storyline> storylines,
+      String? selectedStorylineId,
+      void Function(String)? onSelectStoryline,
+      void Function(String)? onKeepSuggestion,
+      void Function(String)? onDismissSuggestion,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        conversations: const [],
+        storylines: storylines,
+        selectedId: null,
+        selectedStorylineId: selectedStorylineId,
+        selectedSection: RailSection.storylines,
+        onSelectConversation: (_) {},
+        onSelectSection: (_) {},
+        onSelectStoryline: onSelectStoryline ?? (_) {},
+        onKeepSuggestion: onKeepSuggestion ?? (_) {},
+        onDismissSuggestion: onDismissSuggestion ?? (_) {},
+      )));
+    }
+
+    testWidgets('an empty list keeps the placeholder', (tester) async {
+      await pumpRail(tester, storylines: const []);
+
+      expect(find.text('Suggestions arrive after processing'), findsOneWidget);
+    });
+
+    testWidgets('rows replace the placeholder', (tester) async {
+      await pumpRail(tester, storylines: [_storyline(id: 'sl-1')]);
+
+      expect(find.text('Willow St purchase'), findsOneWidget);
+      expect(find.text('Suggestions arrive after processing'), findsNothing);
+    });
+
+    testWidgets('a suggestion carries Keep and Dismiss; an active row does not',
+        (tester) async {
+      await pumpRail(tester, storylines: [
+        _storyline(id: 'sl-1', title: 'Proposed', status: 'suggested'),
+        _storyline(id: 'sl-2', title: 'Live', status: 'active'),
+      ]);
+
+      expect(find.byIcon(Icons.check), findsOneWidget);
+      expect(find.byIcon(Icons.close), findsOneWidget);
+    });
+
+    testWidgets('Keep and Dismiss fire for the row they sit on',
+        (tester) async {
+      final kept = <String>[];
+      final dismissed = <String>[];
+      await pumpRail(
+        tester,
+        storylines: [
+          _storyline(id: 'sl-1', title: 'Proposed', status: 'suggested'),
+        ],
+        onKeepSuggestion: kept.add,
+        onDismissSuggestion: dismissed.add,
+      );
+
+      await tester.tap(find.byIcon(Icons.check));
+      await tester.tap(find.byIcon(Icons.close));
+
+      expect(kept, ['sl-1']);
+      expect(dismissed, ['sl-1']);
+    });
+
+    testWidgets('an active row badges its open count, and nothing when zero',
+        (tester) async {
+      await pumpRail(tester, storylines: [
+        _storyline(id: 'sl-1', title: 'Busy', openCount: 3),
+        _storyline(id: 'sl-2', title: 'Quiet'),
+      ]);
+
+      expect(find.text('3'), findsOneWidget);
+      expect(find.text('0'), findsNothing);
+    });
+
+    testWidgets('tapping a row selects that storyline', (tester) async {
+      final selected = <String>[];
+      await pumpRail(
+        tester,
+        storylines: [_storyline(id: 'sl-1')],
+        onSelectStoryline: selected.add,
+      );
+
+      await tester.tap(find.text('Willow St purchase'));
+
+      expect(selected, ['sl-1']);
+    });
+
+    testWidgets('an untitled storyline still renders a row', (tester) async {
+      await pumpRail(tester, storylines: [_storyline(id: 'sl-1', title: '')]);
+
+      expect(find.text('(untitled)'), findsOneWidget);
     });
   });
 }

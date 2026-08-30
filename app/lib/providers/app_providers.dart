@@ -8,6 +8,8 @@ import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
 import '../services/llm/embeddings_client.dart';
 import '../services/llm/llm_client.dart';
+import '../services/storyline_handler.dart';
+import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
 import '../services/triage_queue.dart';
 
@@ -75,16 +77,37 @@ final embeddingsClientProvider =
 /// Its handlers drain in list order, so the order here is the order the work
 /// happens in.
 final aiWorkerProvider = Provider<AiWorker>((ref) {
+  final storylines = ref.watch(storylineServiceProvider);
   final worker = AiWorker(
     ref.watch(messageStoreProvider),
     handlers: [
+      // Extraction first, and it drains completely before either storyline
+      // handler starts. That order is the point: extraction is what writes the
+      // embeddings both storyline passes compare, so running them alongside it
+      // would have them clustering a mailbox half of which has no vector yet.
       ExtractHandler(
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
         ref.watch(embeddingsClientProvider),
       ),
+      // Assignment before the sweep: a thread that joins an existing storyline
+      // is one fewer unassigned thread for the sweep to propose a new group
+      // around.
+      StorylineAssignHandler(storylines),
+      StorylineSweepHandler(storylines),
     ],
   );
   ref.onDispose(worker.dispose);
   return worker;
 });
+
+/// The storyline logic, shared by the two work handlers and by the UI's user
+/// actions. Stateless beyond its store and client, so a second instance would
+/// be harmless — it is a provider because the handlers and the notifier must
+/// agree on the same store.
+final storylineServiceProvider = Provider<StorylineService>(
+  (ref) => StorylineService(
+    ref.watch(messageStoreProvider),
+    ref.watch(llmClientProvider),
+  ),
+);

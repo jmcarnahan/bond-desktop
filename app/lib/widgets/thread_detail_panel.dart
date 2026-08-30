@@ -25,12 +25,27 @@ class ThreadDetailPanel extends StatelessWidget {
   /// layouts where the thread is not something you navigated into.
   final VoidCallback? onBack;
 
+  /// `(id, title)` for every storyline this thread could be filed into. Empty
+  /// leaves the menu with nothing but "New storyline…".
+  final List<(String, String)> storylineChoices;
+
+  final void Function(String storylineId)? onAddToStoryline;
+
+  /// Opens the name prompt for a storyline built around this thread. The whole
+  /// overflow menu is hidden when this and [onAddToStoryline] are both null,
+  /// so a host that knows nothing about storylines renders exactly what it
+  /// used to.
+  final VoidCallback? onNewStoryline;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
     required this.messages,
     required this.onMarkDone,
     this.onBack,
+    this.storylineChoices = const [],
+    this.onAddToStoryline,
+    this.onNewStoryline,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -216,8 +231,45 @@ class ThreadDetailPanel extends StatelessWidget {
               child: const Text('Mark done'),
             ),
           ],
+          ?_storylineMenu(),
         ],
       ),
     );
   }
+
+  /// Filing this thread into a storyline. An overflow menu rather than a
+  /// visible control: it is a correction, not part of reading mail, and the
+  /// automatic pass is supposed to get it right without being asked.
+  Widget? _storylineMenu() {
+    if (onAddToStoryline == null && onNewStoryline == null) return null;
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.more_horiz),
+      iconSize: 20,
+      tooltip: 'Storylines',
+      itemBuilder: (context) => [
+        for (final (id, title) in storylineChoices)
+          PopupMenuItem<String>(
+            value: id,
+            child: Text('Add to $title', overflow: TextOverflow.ellipsis),
+          ),
+        if (storylineChoices.isNotEmpty && onNewStoryline != null)
+          const PopupMenuDivider(),
+        if (onNewStoryline != null)
+          const PopupMenuItem<String>(
+            value: _newStorylineValue,
+            child: Text('New storyline…'),
+          ),
+      ],
+      onSelected: (value) {
+        if (value == _newStorylineValue) {
+          onNewStoryline?.call();
+          return;
+        }
+        onAddToStoryline?.call(value);
+      },
+    );
+  }
+
+  /// Namespaced so it cannot collide with a storyline id, which is `sl-…`.
+  static const String _newStorylineValue = '__new_storyline__';
 }

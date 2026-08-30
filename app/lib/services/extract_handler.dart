@@ -98,6 +98,13 @@ class ExtractHandler implements WorkHandler {
       embeddedHash: hash,
       embedModel: EmbeddingsClient.modelTag,
     );
+
+    // Only after a vector actually landed, and a REQUEUE rather than an
+    // enqueue: what a thread should be grouped with is a function of its
+    // embedding, so every time that changes the answer may change with it.
+    // `enqueueWork` would ignore the row after the first time it ran, which
+    // would mean each thread is only ever considered on its first message.
+    _store.requeueWork('storyline', source, key);
   }
 
   /// Display names, falling back to the address — what a human would call the

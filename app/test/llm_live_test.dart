@@ -6,6 +6,7 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -113,6 +114,49 @@ void main() {
             'transactional', 'social'),
       );
       expect(result.importance, anyOf('low', 'normal', 'high'));
+    },
+    timeout: const Timeout(Duration(minutes: 3)),
+  );
+
+  test(
+    'two related threads come back named as one storyline',
+    () async {
+      final client = LlmClient();
+
+      // Two cards in the shape `buildConversationCard` produces:
+      // subject | participants | topics | summary. Both are the same deal,
+      // which is the thing the naming prompt has to notice.
+      const cards = [
+        'Rate lock expires Thursday | Sarah Chen | rate lock | '
+            'Sarah is asking whether to extend the lock on Willow Street.',
+        'Willow St appraisal came in | Dana Ruiz, Sarah Chen | appraisal | '
+            'The appraisal on Willow Street came in at value.',
+      ];
+
+      final stopwatch = Stopwatch()..start();
+      final result = await runTask(
+        client,
+        const NameStorylineTask(),
+        const NameInput(cards),
+        temperature: 0,
+      );
+      stopwatch.stop();
+
+      // ignore: avoid_print
+      print(
+        'evidence: ${result.evidence}\n'
+        'title:    ${result.title}\n'
+        'summary:  ${result.summary}\n'
+        'elapsed:  ${stopwatch.elapsed.inMilliseconds} ms',
+      );
+
+      // The shape is the grammar's job. What a live run proves is that this
+      // build accepts the schema and that the name means something — a model
+      // that fell back to the placeholder named nothing.
+      expect(result.evidence, isNotEmpty);
+      expect(result.title, isNotEmpty);
+      expect(result.title, isNot(NameStorylineTask.fallbackTitle));
+      expect(result.summary, isNotEmpty);
     },
     timeout: const Timeout(Duration(minutes: 3)),
   );

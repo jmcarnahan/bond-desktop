@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
 
-/// The rail's four stops. [storylines] and [later] are placeholders this
-/// phase — they exist so the shape of the product is on screen before the
-/// features that fill them land.
+/// The rail's four stops. [later] is still a placeholder — it exists so the
+/// shape of the product is on screen before the feature that fills it lands.
 enum RailSection { needsYou, storylines, conversations, later }
 
 extension RailSectionLabel on RailSection {
@@ -47,6 +47,20 @@ List<Conversation> conversationRows(List<Conversation> all) => [
         if (c.state != ConversationState.done) c,
     ];
 
+/// Storylines in rail order: everything still waiting on an answer first,
+/// then everything live. Input order is preserved within each half — the store
+/// already sorts proposals newest-first and live ones by recent activity, and
+/// re-sorting here would be a second opinion about the same thing.
+///
+/// Dismissed and archived storylines never reach the rail; the store's default
+/// query does not return them.
+List<Storyline> storylineRows(List<Storyline> all) => [
+      for (final s in all)
+        if (s.isSuggested) s,
+      for (final s in all)
+        if (!s.isSuggested) s,
+    ];
+
 /// The one line a rail row has room for. Who it is beats what it is about:
 /// at 260px a subject truncates to nothing useful, a name does not.
 String railTitleFor(Conversation c) {
@@ -66,14 +80,29 @@ String railTitleFor(Conversation c) {
 class AppRail extends StatefulWidget {
   final List<Conversation> conversations;
 
+  /// Suggestions and live storylines together, suggestions first. Empty is
+  /// the normal state before the clustering pass has run, and the section
+  /// says so rather than going blank.
+  final List<Storyline> storylines;
+
   /// The open thread, when one is open.
   final String? selectedId;
+
+  /// The open storyline, when one is open. Never set at the same time as
+  /// [selectedId] — the main pane shows one thing.
+  final String? selectedStorylineId;
 
   /// The section whose overview is showing. Null while a thread is open.
   final RailSection? selectedSection;
 
   final void Function(String conversationId) onSelectConversation;
   final void Function(RailSection section) onSelectSection;
+
+  /// Null hides the storyline affordances entirely, which is what a host that
+  /// does not carry storylines wants.
+  final void Function(String storylineId)? onSelectStoryline;
+  final void Function(String storylineId)? onKeepSuggestion;
+  final void Function(String storylineId)? onDismissSuggestion;
 
   /// Account block, refresh, sign-out — built by the screen, pinned to the
   /// bottom by the rail.
@@ -86,6 +115,11 @@ class AppRail extends StatefulWidget {
     required this.selectedSection,
     required this.onSelectConversation,
     required this.onSelectSection,
+    this.storylines = const [],
+    this.selectedStorylineId,
+    this.onSelectStoryline,
+    this.onKeepSuggestion,
+    this.onDismissSuggestion,
     this.footer,
   });
 
@@ -129,19 +163,22 @@ class _AppRailState extends State<AppRail> {
                 children: [
                   ..._section(
                     RailSection.needsYou,
-                    rows: needsYou,
+                    rows: [for (final c in needsYou) _item(c)],
                     badge: needsYou.isEmpty
                         ? null
                         : _badge(needsYou.length, attention: true),
                   ),
                   ..._section(
                     RailSection.storylines,
-                    rows: const [],
+                    rows: [
+                      for (final s in storylineRows(widget.storylines))
+                        _storylineItem(s),
+                    ],
                     placeholder: 'Suggestions arrive after processing',
                   ),
                   ..._section(
                     RailSection.conversations,
-                    rows: open,
+                    rows: [for (final c in open) _item(c)],
                   ),
                   ..._section(
                     RailSection.later,
@@ -163,7 +200,7 @@ class _AppRailState extends State<AppRail> {
 
   List<Widget> _section(
     RailSection section, {
-    required List<Conversation> rows,
+    required List<Widget> rows,
     Widget? badge,
     String? placeholder,
   }) {
@@ -171,7 +208,7 @@ class _AppRailState extends State<AppRail> {
     return [
       _header(section, badge: badge, collapsed: collapsed),
       if (!collapsed) ...[
-        for (final c in rows) _item(c),
+        ...rows,
         if (rows.isEmpty && placeholder != null) _placeholder(placeholder),
       ],
       const SizedBox(height: BondSpacing.s12),
@@ -299,6 +336,111 @@ class _AppRailState extends State<AppRail> {
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+
+  /// One storyline. A suggestion reads as a question — it carries the two
+  /// answers rather than a count — and a live storyline reads like a thread,
+  /// with the same dot-and-bold grammar the conversation rows use.
+  Widget _storylineItem(Storyline storyline) {
+    final selected = widget.selectedStorylineId == storyline.id;
+    final suggested = storyline.isSuggested;
+    final open = storyline.openCount > 0;
+
+    final color = (selected || (!suggested && open))
+        ? BondColors.onDarkPrimary
+        : BondColors.onDarkSecondary;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
+      child: Material(
+        color: selected ? BondColors.onDarkTint : BondColors.ink,
+        borderRadius: BondRadii.smAll,
+        child: InkWell(
+          onTap: widget.onSelectStoryline == null
+              ? null
+              : () => widget.onSelectStoryline!(storyline.id),
+          borderRadius: BondRadii.smAll,
+          hoverColor: BondColors.onDarkFaint,
+          child: SizedBox(
+            height: _rowHeight,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+              child: Row(
+                children: [
+                  Container(
+                    width: BondSpacing.s8,
+                    height: BondSpacing.s8,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      // A suggestion is always live-coloured: it is the one
+                      // row in the rail that is asking for something.
+                      color: (suggested || open)
+                          ? BondColors.seaGlassOnDark
+                          : BondColors.onDarkBorder,
+                    ),
+                  ),
+                  const SizedBox(width: BondSpacing.s8),
+                  Expanded(
+                    child: Text(
+                      storyline.title.isEmpty
+                          ? '(untitled)'
+                          : storyline.title,
+                      style: BondType.small.copyWith(
+                        color: color,
+                        fontWeight: (!suggested && open)
+                            ? FontWeight.w600
+                            : FontWeight.w500,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (suggested) ...[
+                    _storylineAction(
+                      Icons.check,
+                      'Keep',
+                      widget.onKeepSuggestion == null
+                          ? null
+                          : () => widget.onKeepSuggestion!(storyline.id),
+                    ),
+                    _storylineAction(
+                      Icons.close,
+                      'Dismiss',
+                      widget.onDismissSuggestion == null
+                          ? null
+                          : () => widget.onDismissSuggestion!(storyline.id),
+                    ),
+                  ] else if (open)
+                    _badge(storyline.openCount, attention: false),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Keep / Dismiss. Small and quiet: they sit inside a row whose main target
+  /// is opening the storyline, and a pair of buttons loud enough to compete
+  /// with that would get mis-tapped.
+  Widget _storylineAction(
+    IconData icon,
+    String tooltip,
+    VoidCallback? onTap,
+  ) {
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BondRadii.fullAll,
+        hoverColor: BondColors.onDarkTint,
+        child: Padding(
+          padding: const EdgeInsets.all(BondSpacing.s4),
+          child: Icon(icon, size: 16, color: BondColors.onDarkMuted),
         ),
       ),
     );
