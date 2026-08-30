@@ -9,13 +9,13 @@ import '../providers/conversations_provider.dart';
 import '../services/graph_auth.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
-import '../widgets/chips.dart';
+import '../widgets/app_rail.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/thread_detail_panel.dart';
 
-/// The whole app, for now: a filtered thread list beside the selected
-/// thread's transcript.
+/// The whole app, for now: a dark rail of sections beside one main pane that
+/// shows either a section's threads or the open thread's transcript.
 ///
 /// Every row on screen comes from sqlite, which the Graph delta sync fills in
 /// behind it. The screen never waits on the network to render: it reads what
@@ -33,8 +33,8 @@ class InboxScreen extends ConsumerStatefulWidget {
 }
 
 class _InboxScreenState extends ConsumerState<InboxScreen> {
-  /// Below this the thread panel cannot hold a 560px bubble beside a
-  /// readable list, so the layout stacks instead.
+  /// Below this the rail and a readable transcript cannot share the width, so
+  /// the rail becomes an overlay the hamburger opens.
   static const double _twoPaneBreakpoint = 960;
 
   static const List<String> _sources = ['email'];
@@ -44,8 +44,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   /// up. Graph delta calls with nothing new are cheap.
   static const Duration _pollInterval = Duration(seconds: 60);
 
-  InboxFilter _filter = InboxFilter.open;
+  /// The section overview showing when no thread is open. Never null in
+  /// practice — the type only carries the "no explicit choice yet" case.
+  RailSection? _section = RailSection.needsYou;
   String? _selectedId;
+
+  /// Narrow layouts only: whether the rail overlay is up.
+  bool _railOpen = false;
+
   Timer? _poll;
 
   /// Set once the sign-out route is under way, so a second notification
@@ -88,8 +94,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   }
 
   void _select(String id) {
-    setState(() => _selectedId = id);
+    setState(() {
+      _selectedId = id;
+      _railOpen = false;
+    });
     ref.read(threadProvider(id).notifier).load();
+  }
+
+  void _selectSection(RailSection section) {
+    setState(() {
+      _section = section;
+      _selectedId = null;
+      _railOpen = false;
+    });
   }
 
   @override
@@ -110,21 +127,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
 
     final state = ref.watch(conversationsProvider);
 
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(BondSpacing.s24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _header(),
-              const SizedBox(height: BondSpacing.s16),
-              Expanded(child: _body(state)),
-            ],
-          ),
-        ),
-      ),
-    );
+    return Scaffold(body: SafeArea(child: _body(state)));
   }
 
   Widget _body(ConversationsState state) {
@@ -149,71 +152,135 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
         );
 
       case ConversationsLoaded(:final conversations, :final loadError):
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (loadError != null) ...[
-              InlineAlert(
-                severity: InlineAlertSeverity.error,
-                text: loadError,
-                maxLines: 2,
-                action: TextButton(
-                  onPressed: _refresh,
-                  child: const Text('Retry'),
-                ),
-              ),
-              const SizedBox(height: BondSpacing.s12),
-            ],
-            Expanded(
-              child: LayoutBuilder(
-                builder: (context, constraints) =>
-                    constraints.maxWidth >= _twoPaneBreakpoint
-                        ? _wide(conversations)
-                        : _narrow(conversations),
-              ),
-            ),
-          ],
+        return LayoutBuilder(
+          builder: (context, constraints) =>
+              constraints.maxWidth >= _twoPaneBreakpoint
+                  ? _wide(conversations, loadError)
+                  : _narrow(conversations, loadError),
         );
     }
   }
 
-  Widget _header() {
+  Widget _wide(List<Conversation> conversations, String? loadError) {
     return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Inbox', style: BondType.title),
-        const SizedBox(width: BondSpacing.s24),
-        Expanded(
-          child: BondFilterPillRow<InboxFilter>(
-            options: InboxFilter.values,
-            selected: _filter,
-            labelOf: (f) => f.label,
-            onSelected: (f) => setState(() => _filter = f),
-          ),
-        ),
-        _triageProgress(),
-        IconButton(
-          onPressed: _refresh,
-          icon: const Icon(Icons.refresh),
-          tooltip: 'Refresh',
-        ),
-        FutureBuilder<AccountInfo?>(
-          future: _account,
-          builder: (context, snapshot) {
-            final name = snapshot.data?.displayName ?? '';
-            if (name.isEmpty) return const SizedBox.shrink();
-            return Padding(
-              padding: const EdgeInsets.only(left: BondSpacing.s8),
-              child: Text(name, style: BondType.caption),
-            );
-          },
-        ),
-        const SizedBox(width: BondSpacing.s8),
-        TextButton(
-          onPressed: _signOut,
-          child: Text('Sign out', style: BondType.caption),
-        ),
+        _rail(conversations),
+        const SizedBox(width: 1, child: ColoredBox(color: BondColors.border)),
+        Expanded(child: _main(conversations, loadError)),
       ],
+    );
+  }
+
+  /// The rail lifts off the page instead of shoving it aside: at this width
+  /// the main pane has nothing to spare.
+  Widget _narrow(List<Conversation> conversations, String? loadError) {
+    return Stack(
+      children: [
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.only(
+                  left: BondSpacing.s8,
+                  top: BondSpacing.s8,
+                ),
+                child: IconButton(
+                  onPressed: () => setState(() => _railOpen = !_railOpen),
+                  icon: const Icon(Icons.menu),
+                  tooltip: 'Sections',
+                ),
+              ),
+            ),
+            Expanded(child: _main(conversations, loadError)),
+          ],
+        ),
+        if (_railOpen) ...[
+          // The rail covers the hamburger that opened it, so the scrim has to
+          // be the way back out.
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => setState(() => _railOpen = false),
+              child: const ColoredBox(color: BondColors.inkScrim),
+            ),
+          ),
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            child: DecoratedBox(
+              decoration: const BoxDecoration(boxShadow: BondShadows.overlay),
+              child: _rail(conversations),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _rail(List<Conversation> conversations) {
+    return AppRail(
+      conversations: conversations,
+      selectedId: _selectedId,
+      // A thread being open means no section overview is showing, so the rail
+      // must not highlight one.
+      selectedSection: _selectedId == null ? _section : null,
+      onSelectConversation: _select,
+      onSelectSection: _selectSection,
+      footer: _railFooter(),
+    );
+  }
+
+  /// Account, refresh, sign-out — everything the old header row carried,
+  /// parked at the foot of the rail where it stops competing with the mail.
+  Widget _railFooter() {
+    // SEAM: source filter chips land in the rail footer (phase 10).
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _triageProgress(),
+          Row(
+            children: [
+              Expanded(
+                child: FutureBuilder<AccountInfo?>(
+                  future: _account,
+                  builder: (context, snapshot) {
+                    final name = snapshot.data?.displayName ?? '';
+                    if (name.isEmpty) return const SizedBox.shrink();
+                    return Text(
+                      name,
+                      style: BondType.caption
+                          .copyWith(color: BondColors.onDarkSecondary),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    );
+                  },
+                ),
+              ),
+              _railAction(Icons.refresh, 'Refresh', _refresh),
+              _railAction(Icons.logout, 'Sign out', _signOut),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _railAction(IconData icon, String tooltip, VoidCallback onPressed) {
+    return IconButton(
+      onPressed: onPressed,
+      icon: Icon(icon),
+      iconSize: 18,
+      color: BondColors.onDarkSecondary,
+      tooltip: tooltip,
+      padding: const EdgeInsets.all(BondSpacing.s4),
+      constraints: const BoxConstraints(),
+      visualDensity: VisualDensity.compact,
     );
   }
 
@@ -228,34 +295,35 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
         final remaining = snapshot.data?.remaining ?? 0;
         if (remaining == 0) return const SizedBox.shrink();
         return Padding(
-          padding: const EdgeInsets.only(right: BondSpacing.s8),
-          child: Text('Triaging $remaining remaining…', style: BondType.caption),
+          padding: const EdgeInsets.only(bottom: BondSpacing.s8),
+          child: Text(
+            'Triaging $remaining remaining…',
+            style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
+          ),
         );
       },
     );
   }
 
-  Widget _list(List<Conversation> conversations) => ConversationListPane(
-        sources: _sources,
-        filter: _filter,
-        conversations: conversations,
-        selectedId: _selectedId,
-        onSelect: _select,
-      );
-
   Conversation? _selected(List<Conversation> conversations) {
     for (final c in conversations) {
       if (c.id == _selectedId) return c;
     }
-    // A thread can leave the list between renders — a filter change, or a
-    // sync that moved it. The panel closes rather than showing a stale copy.
+    // A thread can leave the list between renders — a sync that moved it, or
+    // a mark-done. The pane falls back to the overview rather than showing a
+    // stale copy.
     return null;
   }
 
-  Widget? _panel(List<Conversation> conversations) {
+  /// Exactly one of the two views, never both: the transcript when a thread
+  /// is open, the section overview otherwise.
+  Widget _main(List<Conversation> conversations, String? loadError) {
     final selected = _selected(conversations);
-    if (selected == null) return null;
+    if (selected != null) return _thread(selected);
+    return _overview(conversations, loadError);
+  }
 
+  Widget _thread(Conversation selected) {
     final thread = ref.watch(threadProvider(selected.id));
 
     // The transcript is a sqlite read, so it is only ever genuinely absent
@@ -276,50 +344,81 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
       messages: messages,
       onMarkDone: () =>
           ref.read(conversationsProvider.notifier).markDone(selected.id),
+      onBack: () => setState(() => _selectedId = null),
     );
 
-    if (error == null) return panel;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        InlineAlert(
-          severity: InlineAlertSeverity.error,
-          text: error,
-          maxLines: 2,
-        ),
-        const SizedBox(height: BondSpacing.s12),
-        Expanded(child: panel),
-      ],
-    );
-  }
-
-  Widget _wide(List<Conversation> conversations) {
-    final panel = _panel(conversations);
-    // SEAM: a future source rail (Email / Teams channels) inserts HERE as a
-    // fixed-width sibling.
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(child: _list(conversations)),
-        if (panel != null) ...[
-          const SizedBox(width: BondSpacing.s16),
-          SizedBox(width: 420, child: panel),
-        ],
-      ],
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: error == null
+          ? panel
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                InlineAlert(
+                  severity: InlineAlertSeverity.error,
+                  text: error,
+                  maxLines: 2,
+                ),
+                const SizedBox(height: BondSpacing.s12),
+                Expanded(child: panel),
+              ],
+            ),
     );
   }
 
-  Widget _narrow(List<Conversation> conversations) {
-    final panel = _panel(conversations);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(child: _list(conversations)),
-        if (panel != null) ...[
+  Widget _overview(List<Conversation> conversations, String? loadError) {
+    final section = _section ?? RailSection.needsYou;
+
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(section.label, style: BondType.title),
           const SizedBox(height: BondSpacing.s16),
-          Expanded(child: panel),
+          if (loadError != null) ...[
+            InlineAlert(
+              severity: InlineAlertSeverity.error,
+              text: loadError,
+              maxLines: 2,
+              action: TextButton(
+                onPressed: _refresh,
+                child: const Text('Retry'),
+              ),
+            ),
+            const SizedBox(height: BondSpacing.s12),
+          ],
+          Expanded(child: _overviewBody(section, conversations)),
         ],
-      ],
+      ),
+    );
+  }
+
+  Widget _overviewBody(RailSection section, List<Conversation> conversations) {
+    if (section == RailSection.storylines) {
+      return Center(
+        child: Text(
+          'Storylines arrive in a later phase.',
+          style: BondType.small,
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
+
+    final sections = switch (section) {
+      RailSection.needsYou => [('NEEDS YOU', needsYouRows(conversations))],
+      RailSection.conversations => [('OPEN', conversationRows(conversations))],
+      RailSection.later => const [('LATER', <Conversation>[])],
+      RailSection.storylines => const <(String, List<Conversation>)>[],
+    };
+
+    return ConversationListPane(
+      sources: _sources,
+      filter: InboxFilter.open,
+      conversations: conversations,
+      selectedId: _selectedId,
+      onSelect: _select,
+      sectionsOverride: sections,
     );
   }
 }

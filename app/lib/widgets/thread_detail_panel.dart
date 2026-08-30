@@ -3,26 +3,39 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
-import 'email_bubble.dart';
 import 'inline_alert.dart';
+import 'message_row.dart';
+import 'time_format.dart';
 
-/// The thread view: right column on wide layouts, stacked below the list on
-/// narrow ones. It fills whatever box the parent gives it.
+/// The thread view: the main pane's whole content once a thread is open.
+///
+/// The transcript reads as one flat column — day dividers, left-aligned
+/// messages, runs collapsed under one header — rather than as a chat of
+/// facing bubbles.
 ///
 /// No composer yet — this phase reads mail, it does not send it.
 class ThreadDetailPanel extends StatelessWidget {
   final Conversation conversation;
   final List<Message> messages;
 
-  /// Flips the thread to done. Phase 1 mutates the in-memory fixture list.
+  /// Flips the thread to done.
   final VoidCallback onMarkDone;
+
+  /// Returns to the section overview. Null hides the back affordance, for
+  /// layouts where the thread is not something you navigated into.
+  final VoidCallback? onBack;
 
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
     required this.messages,
     required this.onMarkDone,
+    this.onBack,
   });
+
+  /// Wide enough for a long paragraph, narrow enough that an ultrawide window
+  /// does not turn every message into one unreadable line.
+  static const double _maxContentWidth = 900;
 
   static String _stateLabel(ConversationState state) => switch (state) {
         ConversationState.needsReply => 'Needs reply',
@@ -35,6 +48,37 @@ class ThreadDetailPanel extends StatelessWidget {
         ConversationState.waiting => BondTone.neutral,
         ConversationState.done => BondTone.success,
       };
+
+  /// The transcript, flattened: a divider each time the calendar day turns
+  /// over, then one row per message with its header suppressed when it
+  /// continues the run above it.
+  List<Widget> _transcript() {
+    final items = <Widget>[];
+    String? previousDay;
+    Message? previous;
+    var first = true;
+
+    for (final message in messages) {
+      final day = dayKeyOf(message);
+      final label = formatDayLabel(message.receivedAt);
+      if (label != null && (first || day != previousDay)) {
+        items.add(DayDivider(label: label));
+        // A new day always opens with a full header, however close in time
+        // the previous message was.
+        previous = null;
+      }
+      previousDay = day;
+      first = false;
+
+      items.add(MessageRow(
+        key: ValueKey(message.id),
+        message: message,
+        showHeader: previous == null || !sameRun(previous, message),
+      ));
+      previous = message;
+    }
+    return items;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -83,13 +127,22 @@ class ThreadDetailPanel extends StatelessWidget {
                     child: Text('No messages in this thread.',
                         style: BondType.small),
                   )
-                : ListView.separated(
-                    padding: const EdgeInsets.all(BondSpacing.s16),
-                    itemCount: messages.length,
-                    separatorBuilder: (_, _) =>
-                        const SizedBox(height: BondSpacing.s16),
-                    itemBuilder: (context, i) =>
-                        EmailBubble(message: messages[i]),
+                : Align(
+                    alignment: Alignment.topCenter,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(
+                        maxWidth: _maxContentWidth,
+                      ),
+                      child: ListView(
+                        padding: const EdgeInsets.fromLTRB(
+                          BondSpacing.s24,
+                          0,
+                          BondSpacing.s24,
+                          BondSpacing.s24,
+                        ),
+                        children: _transcript(),
+                      ),
+                    ),
                   ),
           ),
         ],
@@ -104,51 +157,65 @@ class ThreadDetailPanel extends StatelessWidget {
         .join(', ');
 
     return Padding(
-      padding: const EdgeInsets.all(BondSpacing.s16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.symmetric(
+        horizontal: BondSpacing.s16,
+        vertical: BondSpacing.s12,
+      ),
+      child: Row(
         children: [
-          Text(
-            conversation.subject?.isNotEmpty == true
-                ? conversation.subject!
-                : '(no subject)',
-            style: BondType.titleSm,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
+          if (onBack != null) ...[
+            IconButton(
+              onPressed: onBack,
+              icon: const Icon(Icons.arrow_back),
+              iconSize: 20,
+              tooltip: 'Back',
+            ),
+            const SizedBox(width: BondSpacing.s4),
+          ],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  conversation.subject?.isNotEmpty == true
+                      ? conversation.subject!
+                      : '(no subject)',
+                  style: BondType.titleSm,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (participants.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    participants,
+                    style: BondType.caption,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
+            ),
           ),
-          if (participants.isNotEmpty) ...[
-            const SizedBox(height: BondSpacing.s4),
-            Text(
-              participants,
-              style: BondType.small,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+          const SizedBox(width: BondSpacing.s12),
+          BondChip.semantic(
+            _stateLabel(conversation.state),
+            _stateTone(conversation.state),
+          ),
+          if (conversation.state != ConversationState.done) ...[
+            const SizedBox(width: BondSpacing.s4),
+            TextButton(
+              onPressed: onMarkDone,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: BondSpacing.s8,
+                ),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text('Mark done'),
             ),
           ],
-          const SizedBox(height: BondSpacing.s12),
-          Wrap(
-            spacing: BondSpacing.s12,
-            runSpacing: BondSpacing.s4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              BondChip.semantic(
-                _stateLabel(conversation.state),
-                _stateTone(conversation.state),
-              ),
-              if (conversation.state != ConversationState.done)
-                TextButton(
-                  onPressed: onMarkDone,
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: BondSpacing.s8,
-                    ),
-                    minimumSize: const Size(0, 32),
-                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                  child: const Text('Mark done'),
-                ),
-            ],
-          ),
         ],
       ),
     );

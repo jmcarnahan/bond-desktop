@@ -37,6 +37,12 @@ class ConversationListPane extends StatelessWidget {
   final String? selectedId;
   final void Function(String) onSelect;
 
+  /// Sections the caller has already bucketed, rendered instead of anything
+  /// this pane would compute. The rail's sections do not line up with the
+  /// filter enum, and forcing them to would mean inventing filter values
+  /// nothing else uses. Null leaves [filter] in charge.
+  final List<(String, List<Conversation>)>? sectionsOverride;
+
   const ConversationListPane({
     super.key,
     required this.sources,
@@ -44,6 +50,7 @@ class ConversationListPane extends StatelessWidget {
     required this.conversations,
     required this.selectedId,
     required this.onSelect,
+    this.sectionsOverride,
   });
 
   List<Conversation> _inState(ConversationState state) => [
@@ -65,7 +72,10 @@ class ConversationListPane extends StatelessWidget {
 
   /// (label, rows) in render order. `open` is the only filter that produces
   /// two sections.
-  List<(String, List<Conversation>)> get _sections => switch (filter) {
+  List<(String, List<Conversation>)> get _sections =>
+      sectionsOverride ?? _byFilter;
+
+  List<(String, List<Conversation>)> get _byFilter => switch (filter) {
         InboxFilter.open => [
             ('NEEDS REPLY', _inState(ConversationState.needsReply)),
             ('WAITING', _inState(ConversationState.waiting)),
