@@ -1,6 +1,7 @@
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/widgets/settings_dialog.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The settings dialog's backend half: which server the app talks through, and
@@ -266,4 +267,83 @@ void main() {
       expect(find.text('Connect Microsoft'), findsNothing);
     });
   });
+
+  group('the dialog being unmounted by its own callback', () {
+    testWidgets('a backend switch does not throw from the dispose-time save',
+        (tester) async {
+      // The crash this pins: the mode callback pops the dialog and mutates the
+      // prefs; the mutation rebuilds the watching host, which unmounts the
+      // dialog INSIDE that frame; the dialog's dispose then saved the about-me
+      // text straight into the notifier — a provider write in a locked tree,
+      // an exception on every switch. The save must land, just not inline.
+      await tester.binding.setSurfaceSize(const Size(900, 1000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(ProviderScope(
+        child: MaterialApp(
+          home: Consumer(builder: (context, ref, _) {
+            final mode = ref.watch(_prefsProvider);
+            return Scaffold(
+              body: Column(children: [
+                Text('mode:$mode'),
+                Builder(
+                  builder: (context) => TextButton(
+                    onPressed: () => showDialog<void>(
+                      context: context,
+                      builder: (dialogContext) => SettingsDialog(
+                        threshold: 0.5,
+                        aboutMe: 'who I am',
+                        onThresholdChanged: (_) {},
+                        onAboutMeChanged: (text) => ref
+                            .read(_prefsProvider.notifier)
+                            .saveAboutMe(text),
+                        backendMode: ref.read(_prefsProvider),
+                        onBackendModeChanged: (picked) {
+                          Navigator.of(dialogContext).pop();
+                          ref.read(_prefsProvider.notifier).setMode(picked);
+                        },
+                        connectionStatus: () async => null,
+                      ),
+                    ),
+                    child: const Text('open'),
+                  ),
+                ),
+              ]),
+            );
+          }),
+        ),
+      ));
+
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('This Mac'));
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('mode:$backendModeSdk'), findsOneWidget);
+      final prefs = ProviderScope.containerOf(
+        tester.element(find.text('mode:$backendModeSdk')),
+      ).read(_prefsProvider.notifier);
+      expect(prefs.aboutMeSaves, ['who I am']);
+    });
+  });
 }
+
+/// The regression shape behind the backend-switch crash: the host WATCHES a
+/// notifier, the mode callback pops the dialog and then mutates that notifier
+/// — which rebuilds the host and unmounts the dialog inside the same frame —
+/// and the dialog's dispose-time about-me save writes to the notifier too.
+/// Duplicated minimal rather than wired through the real prefs provider, so
+/// this file needs no database.
+class _RecordingPrefs extends StateNotifier<String> {
+  final List<String> aboutMeSaves = [];
+
+  _RecordingPrefs() : super(backendModeMcp);
+
+  void setMode(String mode) => state = mode;
+
+  void saveAboutMe(String text) => aboutMeSaves.add(text);
+}
+
+final _prefsProvider =
+    StateNotifierProvider<_RecordingPrefs, String>((ref) => _RecordingPrefs());
+

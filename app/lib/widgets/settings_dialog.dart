@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../providers/prefs_provider.dart'
@@ -143,7 +145,15 @@ class _SettingsDialogState extends State<SettingsDialog> {
     // On the way out, whichever way the dialog was dismissed — the Done button,
     // the scrim, or Escape. A save wired to the button alone would quietly lose
     // the text of anyone who clicks outside, which is most people.
-    widget.onAboutMeChanged(_aboutMe.text);
+    //
+    // Deferred out of the frame, not called inline: the backend toggle mutates
+    // the prefs, which rebuilds the provider graph, which can unmount THIS
+    // dialog in the middle of that same build — and a dispose that writes to
+    // the notifier inside a locked tree is an exception on every unmount. A
+    // microtask rather than a Future so no timer outlives the tree; the text
+    // is captured now, before the controller dies under the callback.
+    final aboutMe = _aboutMe.text;
+    scheduleMicrotask(() => widget.onAboutMeChanged(aboutMe));
     _aboutMe.dispose();
     _serverUrl.dispose();
     super.dispose();
