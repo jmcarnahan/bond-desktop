@@ -43,6 +43,11 @@ dependencies:
   url_launcher: ^6.3.2
   flutter_secure_storage: ^11.0.0
   crypto: ^3.0.3
+  # Pinned exactly, not a caret range: this package is young and the wire
+  # dialect it speaks (legacy vs. stable MCP handshake) has moved between
+  # minor versions. bond_mcp_client.dart is the only file allowed to import
+  # it, so a bump is a one-file review.
+  mcp_dart: 2.4.1
 
 dev_dependencies:
   flutter_test:

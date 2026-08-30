@@ -1,6 +1,7 @@
 import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
@@ -161,6 +162,11 @@ void main() {
       GraphTeams(auth, httpClient: client),
       store,
     );
+    // This screen is pumped over a faked GraphAuth, which is the SDK backend —
+    // and the app's default is now the MCP one, whose session would answer the
+    // scope question by asking a server that is not there. Said in the store
+    // because that is where the app reads it, once, at construction.
+    store.setPref(backendModeKey, backendModeSdk);
 
     await tester.pumpWidget(ProviderScope(
       overrides: [

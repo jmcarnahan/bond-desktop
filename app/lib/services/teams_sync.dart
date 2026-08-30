@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import '../data/message_store.dart';
 import 'conversation_state.dart';
-import 'graph_teams.dart';
+import 'backend/teams_backend.dart';
 
 /// What a Teams message carries instead of a triage decision.
 ///
@@ -75,7 +75,7 @@ class TeamsSync {
   /// back for `bodyPreview`.
   static const int _previewChars = 160;
 
-  final GraphTeams _teams;
+  final TeamsBackend _teams;
   final MessageStore _store;
 
   /// Whether Teams may be touched at all — in production, whether the tenant

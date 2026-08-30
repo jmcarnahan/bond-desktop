@@ -2,6 +2,7 @@ import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/sync_service.dart';

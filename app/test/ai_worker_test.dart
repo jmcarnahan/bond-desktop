@@ -2,7 +2,7 @@ import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
-import 'package:bond_inbox/services/graph_auth.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite3/sqlite3.dart';

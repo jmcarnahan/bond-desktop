@@ -7,6 +7,8 @@ import 'package:flutter/foundation.dart'
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
+import 'backend/auth_session.dart';
+import 'backend/backend_types.dart';
 import 'pkce.dart';
 import 'token_store.dart';
 
@@ -21,91 +23,6 @@ import 'token_store.dart';
 /// The access token lives in memory only. Only the rotating refresh token,
 /// the granted scope string, and the account summary are persisted.
 
-/// Anything the caller can show the user verbatim. [message] is written for a
-/// person, not a log line.
-class AuthException implements Exception {
-  final String message;
-
-  const AuthException(this.message);
-
-  @override
-  String toString() => message;
-}
-
-/// There is no usable refresh token — the user must sign in interactively.
-class NotSignedIn extends AuthException {
-  const NotSignedIn([super.message = 'You are not signed in.']);
-}
-
-/// The stored grant is missing a scope this build now asks for. Refreshing
-/// cannot fix it; only an interactive sign-in with the new consent can.
-class ReconsentRequired extends AuthException {
-  const ReconsentRequired([
-    super.message =
-        'This version needs additional Microsoft permissions. Sign in again '
-            'to grant them.',
-  ]);
-}
-
-/// The browser came back carrying an OAuth `error` instead of a code.
-///
-/// Held apart from a plain [AuthException] because [GraphAuth.signIn] has to
-/// read the raw parameters to tell two very different things apart: a user who
-/// clicked Cancel, and a tenant that refuses one of the scopes this build asks
-/// for. Only the second is worth retrying with less.
-class AuthorizeDenied extends AuthException {
-  /// Entra's `error` parameter, e.g. `access_denied`, `consent_required`.
-  final String error;
-
-  /// Entra's `error_description`, which is where the AADSTS code lives.
-  final String errorDescription;
-
-  const AuthorizeDenied(this.error, this.errorDescription, String message)
-      : super(message);
-
-  /// True when this reads as "the tenant will not grant that consent" rather
-  /// than "the person said no".
-  ///
-  /// AADSTS90094 is admin consent required; AADSTS65001 is consent not
-  /// granted. Both arrive as `access_denied` in the `error` parameter, which is
-  /// the same code a Cancel click produces — the description is the only thing
-  /// that separates them.
-  bool get isConsentProblem =>
-      error == 'consent_required' ||
-      errorDescription.contains('AADSTS90094') ||
-      errorDescription.contains('AADSTS65001');
-}
-
-/// The signed-in user, as Graph's `/me` describes them. Only [displayName] is
-/// guaranteed — a mailbox-less account has no `mail`, and both fields are
-/// tolerated as absent so a thin `/me` payload cannot break the header.
-@immutable
-class AccountInfo {
-  final String displayName;
-  final String? mail;
-  final String? userPrincipalName;
-
-  const AccountInfo({
-    required this.displayName,
-    this.mail,
-    this.userPrincipalName,
-  });
-
-  factory AccountInfo.fromJson(Map<String, dynamic> json) {
-    return AccountInfo(
-      displayName: json['displayName'] as String? ?? '',
-      mail: json['mail'] as String?,
-      userPrincipalName: json['userPrincipalName'] as String?,
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'displayName': displayName,
-        'mail': mail,
-        'userPrincipalName': userPrincipalName,
-      };
-}
-
 /// One token exchange's outcome. Kept as a pair because `invalid_grant` has
 /// to be told apart from every other non-200 — the first means signed out,
 /// the rest must leave the stored refresh token alone.
@@ -117,7 +34,7 @@ class _TokenResponse {
   const _TokenResponse(this.statusCode, this.json);
 }
 
-class GraphAuth {
+class GraphAuth implements AuthSession {
   // ── Azure app registration (public client) ────────────────────────────
   /// Arrives at BUILD time via --dart-define=MS_CLIENT_ID=… (`make app-run`
   /// injects it from the MS_ENV file, same as the client secret below).
@@ -276,6 +193,7 @@ class GraphAuth {
 
   // ── State ─────────────────────────────────────────────────────────────
 
+  @override
   Future<bool> get isSignedIn async {
     final token = await _store.read(_keyRefreshToken);
     return token != null && token.isNotEmpty;
@@ -289,6 +207,7 @@ class GraphAuth {
   /// missing: a tenant that refuses them leaves a perfectly usable session, and
   /// treating that as re-consent would put the user in a sign-in loop over a
   /// consent nobody in the loop can grant.
+  @override
   Future<bool> get needsReconsent async {
     final grantedSet = await _grantedBareScopes();
     if (grantedSet.isEmpty) return false;
@@ -310,6 +229,7 @@ class GraphAuth {
   /// gave. False when nothing is stored, which is also the right answer for a
   /// signed-out app. `offline_access` is not answerable here — it never appears
   /// in a granted scope string.
+  @override
   Future<bool> hasScope(String bareScope) async {
     final grantedSet = await _grantedBareScopes();
     if (grantedSet.isEmpty) return false;
@@ -333,6 +253,7 @@ class GraphAuth {
       grantedSet.contains(wantedBare) ||
       (_subsumedBy[wantedBare]?.any(grantedSet.contains) ?? false);
 
+  @override
   Future<AccountInfo?> get storedAccount async {
     final raw = await _store.read(_keyAccountJson);
     if (raw == null || raw.isEmpty) return null;
@@ -345,6 +266,7 @@ class GraphAuth {
     }
   }
 
+  @override
   Future<void> signOut() => _clear();
 
   // ── Interactive sign-in ───────────────────────────────────────────────
@@ -359,6 +281,7 @@ class GraphAuth {
   ///
   /// `prompt=consent` is deliberately never sent: it would re-prompt a user
   /// whose consent is already on file, every single sign-in.
+  @override
   Future<AccountInfo> signIn() async {
     try {
       return await _signInWith(_requestedScopes);

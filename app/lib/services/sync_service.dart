@@ -1,6 +1,8 @@
 import 'dart:convert';
 
 import '../data/message_store.dart';
+import 'backend/backend_types.dart';
+import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
 import 'graph_mail.dart';
 
@@ -50,7 +52,7 @@ class SyncService implements MailSync {
   /// it should be greppable.
   static const String _source = 'email';
 
-  final GraphMail _mail;
+  final MailBackend _mail;
   final MessageStore _store;
 
   SyncService(this._mail, this._store);

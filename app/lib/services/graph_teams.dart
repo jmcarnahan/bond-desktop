@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 
+import 'backend/teams_backend.dart';
 import 'graph_auth.dart';
 
 /// The Microsoft Graph chat reads this app makes: the chat list, one chat's
@@ -40,7 +41,7 @@ class GraphTeamsException implements Exception {
   String toString() => message;
 }
 
-class GraphTeams {
+class GraphTeams implements TeamsBackend {
   static const String _base = 'https://graph.microsoft.com/v1.0';
 
   /// Chats and messages per page. Fifty is Graph's comfortable page for both
@@ -90,6 +91,7 @@ class GraphTeams {
   /// is the one field that decides whether a chat message is the user's own,
   /// and the account record graph_auth.dart persists is not this file's to
   /// extend.
+  @override
   Future<String> myUserId() async {
     final response = await _send(Uri.parse('$_base/me'));
     if (response.statusCode != 200) {
@@ -112,6 +114,7 @@ class GraphTeams {
   /// expanded preview is the only per-chat timestamp that can be sorted. The
   /// preview is also what lets [TeamsSync] skip a chat without fetching its
   /// messages at all.
+  @override
   Future<List<Map<String, dynamic>>> listChats({int maxPages = 4}) async {
     final chats = <Map<String, dynamic>>[];
     Uri? uri = _chatsUri();
@@ -137,6 +140,7 @@ class GraphTeams {
   /// One request, no paging: this is called once per chat the app has never
   /// seen, purely to name the thread and its participants, and a group chat
   /// with more than [_pageSize] members has a name of its own anyway.
+  @override
   Future<List<Map<String, dynamic>>> chatMembers(String chatId) async {
     await _throttleChat(chatId);
     final response = await _send(
@@ -175,6 +179,7 @@ class GraphTeams {
   /// exists only as a runaway bound (a chat would need [_pageSize]×[maxPages]
   /// new messages between two user-triggered refreshes to hit it); hitting it
   /// is logged, because it means exactly such a hole.
+  @override
   Future<List<Map<String, dynamic>>> chatMessagesSince(
     String chatId,
     String? sinceIso, {

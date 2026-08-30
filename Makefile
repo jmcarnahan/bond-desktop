@@ -334,7 +334,9 @@ clean:
 # MS_ENV names that file — any file with MICROSOFT_CLIENT_ID,
 # MICROSOFT_TENANT_ID and MICROSOFT_CLIENT_SECRET lines. The default is a
 # .env next to this Makefile; a git-ignored local.mk may point it at
-# wherever those values already live.
+# wherever those values already live. The same file may carry
+# BOND_MCP_SERVER_URL — the deployed bond-mcps endpoint, kept out of source
+# for the same public-repo reason as the ids.
 -include local.mk
 MS_ENV ?= $(CURDIR)/.env
 
@@ -346,8 +348,10 @@ define APP_SECRET_DEFINE
 $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
    TID=$$(grep -m1 '^MICROSOFT_TENANT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
    SECRET=$$(grep -m1 '^MICROSOFT_CLIENT_SECRET=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
+   MCPURL=$$(grep -m1 '^BOND_MCP_SERVER_URL=' $(MS_ENV) 2>/dev/null | cut -d= -f2-); \
    if [ -n "$$CID" ]; then printf -- '--dart-define=MS_CLIENT_ID=%s ' "$$CID"; fi; \
    if [ -n "$$TID" ]; then printf -- '--dart-define=MS_TENANT_ID=%s ' "$$TID"; fi; \
+   if [ -n "$$MCPURL" ]; then printf -- '--dart-define=BOND_MCP_SERVER_URL=%s ' "$$MCPURL"; fi; \
    if [ -n "$$SECRET" ]; then printf -- '--dart-define=MS_CLIENT_SECRET=%s' "$$SECRET"; fi)
 endef
 

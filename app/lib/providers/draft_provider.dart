@@ -7,7 +7,9 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart';
 import '../services/ai_worker.dart';
-import '../services/graph_auth.dart';
+import '../services/backend/auth_session.dart';
+import '../services/backend/backend_types.dart';
+import '../services/backend/mail_backend.dart';
 import '../services/graph_mail.dart';
 import '../widgets/composer.dart' show SendCapability;
 import 'app_providers.dart';
@@ -132,8 +134,8 @@ class DraftNotifier extends StateNotifier<DraftState> {
   static const Duration _reloadDelay = Duration(milliseconds: 400);
 
   final MessageStore _store;
-  final GraphAuth _auth;
-  final GraphMail _mail;
+  final AuthSession _auth;
+  final MailBackend _mail;
   final AiWorker? _worker;
 
   /// Called after a successful send, so the sent message folds in from
@@ -425,8 +427,8 @@ final draftProvider =
     StateNotifierProvider.family<DraftNotifier, DraftState, String>(
   (ref, conversationKey) => DraftNotifier(
     ref.watch(messageStoreProvider),
-    ref.watch(graphAuthProvider),
-    ref.watch(graphMailProvider),
+    ref.watch(authSessionProvider),
+    ref.watch(mailBackendProvider),
     conversationKey,
     worker: ref.watch(aiWorkerProvider),
     onSent: () => ref.read(conversationsProvider.notifier).load(),

@@ -145,20 +145,17 @@ that is what the mmproj file is for.
 
 ## The desktop inbox (app/)
 
-A Flutter macOS app: sign in with Microsoft, and a live Outlook inbox threaded
-into conversations, each one read and annotated by the local model. `make
-app-run` starts it.
+A Flutter macOS app: sign in, and a live Outlook inbox threaded into
+conversations, each one read and annotated by the local model. `make app-run`
+starts it.
 
-**Sign-in needs an Azure app registration, injected at launch.** The client
-id, tenant id and (for a registration without a public-client platform) client
-secret are never committed; `make app-run` / `make app-build` read them from a
-dotenv-style file and pass them as `--dart-define`s. Point `MS_ENV` at any
-file carrying `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID` and
-`MICROSOFT_CLIENT_SECRET` lines — the default is a git-ignored `.env` next to
-the `Makefile`, and a git-ignored `local.mk` can pin `MS_ENV` somewhere else
-permanently. A build made without them runs fine but refuses sign-in with a
-message naming exactly these defines. A build made **with** the secret carries
-it in the binary — do not distribute one.
+**Signing in takes one line of setup, if your workspace already uses
+bond-mcps.** Put the platform's URL in your `MS_ENV` file
+(`BOND_MCP_SERVER_URL=…`), `make app-run`, then **Sign in** — the same login
+Claude Code uses for the platform — and the mail starts arriving. Where that
+mail comes from is a choice between two backends, and only the other one needs
+an Azure app registration on this machine: see
+[Microsoft backends](#microsoft-backends) below.
 
 **Two model servers, both optional.** `make model` is the chat model on `:8080`
 that triages, extracts, names storylines and drafts replies. `make embed` is a
@@ -170,7 +167,9 @@ fine and simply stays un-annotated; with only the chat model, everything except
 storyline clustering works.
 
 Nothing about the mail ever leaves the machine at inference time. Both servers
-are local, and the only network calls the app makes are to Microsoft Graph.
+are local, and the only network calls the app makes are the ones that fetch the
+mail in the first place — to Microsoft Graph, or to the Bond server that holds
+the Microsoft grant on your behalf.
 
 The left rail has four sections:
 
@@ -207,6 +206,55 @@ newest 7 days for triage, capped at 150 messages. At roughly 17 seconds an email
 that backlog annotates itself over about 45 minutes, in the background, with a
 `Triaging N remaining…` counter in the rail. It survives a restart: work in
 flight is re-queued at the next launch.
+
+### Microsoft backends
+
+Where the Microsoft data comes from is a choice, made under Settings →
+Microsoft connection, and nothing above it changes: the same inbox, the same
+triage, the same storylines and drafts either way.
+
+**Bond server**, the default. The app talks to the bond-mcps platform over MCP,
+and the platform holds the Microsoft grant server-side. Nothing Microsoft-shaped
+has to exist on this machine — no app registration, no secret, no consent
+prompt of its own.
+
+**This Mac.** The app holds the grant itself and calls Microsoft Graph directly
+from the machine.
+
+**The zero-config path.** `make app-run` with nothing configured talks to a
+local bond-mcps server (`http://localhost:18001/mcp`) and signs in with no
+browser round at all. To reach a deployed platform instead, add one line to
+your `MS_ENV` file — `BOND_MCP_SERVER_URL=https://…/mcp` — and that endpoint
+becomes the **Deployed** preset and the default; sign in with your bond-mcps
+login and, if the workspace already has a Microsoft connection, the inbox
+syncs straight away. The **Connect your Microsoft account** step appears only
+for a workspace that has never connected one: it hands you off to the
+platform's own consent page, and the app picks the connection up when you come
+back — on its own when the window regains focus, or on
+**I've connected — continue**.
+
+**Which server.** The **Bond server** dropdown offers **Deployed** (the
+`BOND_MCP_SERVER_URL` endpoint, when the build carries one), **Local** —
+`http://localhost:18001/mcp` — and **Custom…** for anything else. The deployed
+hostname deliberately never appears in this repository: which cluster a
+company runs is environment configuration, and it rides the same git-ignored
+`MS_ENV` file as the Azure ids.
+
+**Working against a local server.** Start bond-mcps with its own `make dev`,
+then Settings → Bond server → **Local**, and sign in. The local server asks for
+no token at all, so that sign-in is instant — no browser round trip.
+
+**An Azure app registration is needed only by "This Mac".** The client id,
+tenant id and (for a registration without a public-client platform) client
+secret are never committed; `make app-run` / `make app-build` read them from a
+dotenv-style file and pass them as `--dart-define`s. Point `MS_ENV` at any file
+carrying `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID` and
+`MICROSOFT_CLIENT_SECRET` lines — the default is a git-ignored `.env` next to
+the `Makefile`, and a git-ignored `local.mk` can pin `MS_ENV` somewhere else
+permanently. A build made without them runs fine and is unaffected in Bond
+server mode; it is the **This Mac** sign-in that refuses, with a message naming
+exactly these defines. A build made **with** the secret carries it in the
+binary — do not distribute one.
 
 ### Microsoft Teams
 
@@ -345,6 +393,8 @@ agent/            Dart package
 app/              Flutter macOS app — the desktop inbox
   lib/data/       sqlite schema and every SQL statement in the app
   lib/services/   Graph auth, the mail and Teams syncs, the gates and queues
+  lib/services/backend/  the two backends' shared interfaces
+  lib/services/mcp/  the Bond-server backend: MCP client, sign-in, reshapes
   lib/services/llm/  the local-model client, prompts and validators
   lib/providers/  the read models the screens watch
   lib/screens/    inbox and sign-in

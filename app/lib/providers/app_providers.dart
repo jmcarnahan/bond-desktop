@@ -4,6 +4,9 @@ import 'package:sqlite3/sqlite3.dart';
 import '../data/message_store.dart';
 import '../services/ai_worker.dart';
 import '../services/attention_service.dart';
+import '../services/backend/auth_session.dart';
+import '../services/backend/mail_backend.dart';
+import '../services/backend/teams_backend.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
 import '../services/extract_handler.dart';
@@ -12,16 +15,64 @@ import '../services/graph_mail.dart';
 import '../services/graph_teams.dart';
 import '../services/llm/embeddings_client.dart';
 import '../services/llm/llm_client.dart';
+import '../services/mcp/bond_mcp_client.dart';
+import '../services/mcp/mcp_auth.dart';
+import '../services/mcp/mcp_mail_backend.dart';
+import '../services/mcp/mcp_teams_backend.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
+import 'prefs_provider.dart';
 
 /// One [GraphAuth] for the whole app. Sharing the instance is what makes the
 /// in-memory access token and the single-flight refresh guard mean anything —
-/// a second instance would hold its own copy of both.
+/// a second instance would hold its own copy of both, and the three SDK
+/// backends below are built from this one.
+///
+/// Typed concretely on purpose: this is the override point for a test that
+/// wants a real [GraphAuth] over a faked socket. Nothing in the app reads it —
+/// the app consumes [authSessionProvider], [mailBackendProvider] and
+/// [teamsBackendProvider], which is what makes swapping the backend a change to
+/// those three bodies and nothing else.
 final graphAuthProvider = Provider<GraphAuth>((ref) => GraphAuth());
+
+/// The MCP session and the wire client under it, built together because they
+/// are circular: the client asks the session for a bearer token at every
+/// connect, and the session makes its `connection_status` and profile calls
+/// through the client. `late final` is what ties that knot — the callback is
+/// only ever invoked on a connect, which is long after this body returns.
+///
+/// One per (mode, server URL). Rebuilt when either changes, which is why the
+/// client is closed on dispose: the old connection points at the old server.
+final mcpStackProvider = Provider<({McpAuthSession auth, BondMcpClient client})>(
+  (ref) {
+    final url = Uri.parse(
+      ref.watch(appPrefsProvider.select((p) => p.mcpServerUrl)),
+    );
+    late final McpAuthSession auth;
+    final client = BondMcpHttpClient(url, getBearer: () => auth.validJwt());
+    auth = McpAuthSession(mcpUrl: url, mcpClient: client);
+    ref.onDispose(client.close);
+    return (auth: auth, client: client);
+  },
+);
+
+/// The three providers the app consumes, and the one switch between the two
+/// backends.
+///
+/// They WATCH the mode rather than reading it once, so `setBackendMode` and
+/// `setMcpServerUrl` rebuild this whole graph on their own — the sync service,
+/// the Teams connector, the draft notifier and the screens all watch down to
+/// here, and every one of them follows. That is the entire mechanism; nothing
+/// invalidates anything by hand.
+final authSessionProvider = Provider<AuthSession>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? ref.watch(graphAuthProvider)
+      : ref.watch(mcpStackProvider).auth;
+});
 
 /// The open database. Overridden in `main()` after the async open, and in
 /// tests with an in-memory one.
@@ -38,8 +89,12 @@ final dbProvider = Provider<Database>(
 final messageStoreProvider =
     Provider<MessageStore>((ref) => MessageStore(ref.watch(dbProvider)));
 
-final graphMailProvider =
-    Provider<GraphMail>((ref) => GraphMail(ref.watch(graphAuthProvider)));
+final mailBackendProvider = Provider<MailBackend>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? GraphMail(ref.watch(graphAuthProvider))
+      : McpMailBackend(ref.watch(mcpStackProvider).client);
+});
 
 /// Ranking and deferral. Stateless beyond its store, and cheap enough to run
 /// on every list load — see [AttentionService] for why it runs there rather
@@ -52,13 +107,17 @@ final attentionServiceProvider = Provider<AttentionService>(
 /// stand-in that never touches the network.
 final syncServiceProvider = Provider<MailSync>(
   (ref) => SyncService(
-    ref.watch(graphMailProvider),
+    ref.watch(mailBackendProvider),
     ref.watch(messageStoreProvider),
   ),
 );
 
-final graphTeamsProvider =
-    Provider<GraphTeams>((ref) => GraphTeams(ref.watch(graphAuthProvider)));
+final teamsBackendProvider = Provider<TeamsBackend>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? GraphTeams(ref.watch(graphAuthProvider))
+      : McpTeamsBackend(ref.watch(mcpStackProvider).client);
+});
 
 /// The Teams connector, refreshed only by something the user did.
 ///
@@ -71,9 +130,9 @@ final graphTeamsProvider =
 /// [TeamsSync.syncNow] returns immediately when `Chat.Read` was not granted,
 /// so a tenant that refused consent costs zero requests and shows no error.
 final teamsSyncProvider = Provider<TeamsSync>((ref) {
-  final auth = ref.watch(graphAuthProvider);
+  final auth = ref.watch(authSessionProvider);
   return TeamsSync(
-    ref.watch(graphTeamsProvider),
+    ref.watch(teamsBackendProvider),
     ref.watch(messageStoreProvider),
     canSync: () => auth.hasScope('chat.read'),
   );
