@@ -17,6 +17,7 @@ class FakeSync implements MailSync {
   final List<Completer<void>> gates = [];
   final List<Completer<void>> bodyGates = [];
   final List<String> bodiesFetched = [];
+  final List<String> messageBodiesFetched = [];
   bool manual = false;
   bool manualBodies = false;
   Object? syncError;
@@ -45,6 +46,13 @@ class FakeSync implements MailSync {
     }
     final error = bodiesError;
     if (error != null) throw error;
+  }
+
+  /// The triage worker's per-message fetch. Recorded rather than exercised —
+  /// these tests are about the read model, and none of them run a queue.
+  @override
+  Future<void> ensureMessageBody(String sourceMessageId) async {
+    messageBodiesFetched.add(sourceMessageId);
   }
 }
 

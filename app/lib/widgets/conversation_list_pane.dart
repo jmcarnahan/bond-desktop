@@ -6,15 +6,20 @@ import 'conversation_row.dart';
 
 /// Which threads the list shows. [open] is the working view — everything not
 /// yet resolved, split into what needs the LO and what is waiting on someone
-/// else; the other three are single-bucket views of one state.
+/// else; the rest are single-bucket views.
+///
+/// [needsAction] is the model's view rather than the thread state machine's:
+/// it cuts across `needs_reply` and `waiting` and shows only what triage left
+/// an ask on.
 ///
 /// It lives beside the bucketing that consumes it rather than on the screen
 /// that renders the pills, so the pane does not have to import its parent.
-enum InboxFilter { open, needsReply, waiting, done }
+enum InboxFilter { open, needsAction, needsReply, waiting, done }
 
 extension InboxFilterLabel on InboxFilter {
   String get label => switch (this) {
         InboxFilter.open => 'Open',
+        InboxFilter.needsAction => 'Needs action',
         InboxFilter.needsReply => 'Needs reply',
         InboxFilter.waiting => 'Waiting',
         InboxFilter.done => 'Done',
@@ -46,12 +51,27 @@ class ConversationListPane extends StatelessWidget {
           if (sources.contains(c.source) && c.state == state) c,
       ];
 
+  /// Threads triage left an ask on, in any state but done. A CTA on a thread
+  /// the LO already closed is history, not work — and `cta_text` is set only
+  /// from a result that either named an action item or said the message needs
+  /// one, so its presence IS the model's needs-action answer folded up.
+  List<Conversation> get _needsAction => [
+        for (final c in conversations)
+          if (sources.contains(c.source) &&
+              c.state != ConversationState.done &&
+              c.ctaText?.isNotEmpty == true)
+            c,
+      ];
+
   /// (label, rows) in render order. `open` is the only filter that produces
   /// two sections.
   List<(String, List<Conversation>)> get _sections => switch (filter) {
         InboxFilter.open => [
             ('NEEDS REPLY', _inState(ConversationState.needsReply)),
             ('WAITING', _inState(ConversationState.waiting)),
+          ],
+        InboxFilter.needsAction => [
+            ('NEEDS ACTION', _needsAction),
           ],
         InboxFilter.needsReply => [
             ('NEEDS REPLY', _inState(ConversationState.needsReply)),

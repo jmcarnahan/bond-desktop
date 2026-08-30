@@ -4,7 +4,9 @@ import 'package:sqlite3/sqlite3.dart';
 import '../data/message_store.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
+import '../services/llm/llm_client.dart';
 import '../services/sync_service.dart';
+import '../services/triage_queue.dart';
 
 /// One [GraphAuth] for the whole app. Sharing the instance is what makes the
 /// in-memory access token and the single-flight refresh guard mean anything —
@@ -37,3 +39,22 @@ final syncServiceProvider = Provider<MailSync>(
     ref.watch(messageStoreProvider),
   ),
 );
+
+/// The local model. Constructing it opens nothing — the first call is what
+/// discovers whether a server is listening.
+final llmClientProvider = Provider<LlmClient>((ref) => LlmClient());
+
+/// The triage worker. Exactly one for the whole app: it is a serial queue over
+/// shared rows, and a second instance would claim the same messages.
+final triageQueueProvider = Provider<TriageQueue>((ref) {
+  final queue = TriageQueue(
+    ref.watch(messageStoreProvider),
+    ref.watch(llmClientProvider),
+    // Triage fetches its own bodies rather than waiting for a human to open
+    // the thread. Taken off [MailSync], so this stays typed to the interface
+    // a test can override.
+    ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+  );
+  ref.onDispose(queue.dispose);
+  return queue;
+});

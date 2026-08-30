@@ -223,6 +223,12 @@ class Message {
   /// Why the triage gate skipped this message (bulk sender, no body, …).
   final String? gateReason;
 
+  /// The connector-specific blob stored alongside the message — for email,
+  /// `{"headers": {...}}` from the per-message detail fetch. Held as raw JSON
+  /// rather than decoded eagerly: the inbox renders thousands of messages and
+  /// reads this on none of them.
+  final String? sourceMetaJson;
+
   // ── Triage output ────────────────────────────────────────────────────
   final String? urgency;
   final String? category;
@@ -246,6 +252,7 @@ class Message {
     this.bodyText,
     this.bodyPreview,
     this.gateReason,
+    this.sourceMetaJson,
     this.urgency,
     this.category,
     this.summary,
@@ -256,6 +263,32 @@ class Message {
   });
 
   bool get inbound => !outbound;
+
+  /// The message's wire headers, lowercase-keyed. Empty when there are none
+  /// stored — which is the normal state for a message whose thread has never
+  /// been opened, since headers arrive with the per-message detail fetch and
+  /// not with a delta page. Readers must treat "no headers" as "unknown",
+  /// never as "not a newsletter".
+  ///
+  /// Decoded on each read rather than cached: this class is immutable and
+  /// const-constructible, and the only caller is the triage gate, which runs
+  /// once per message.
+  Map<String, String> get headers {
+    final raw = sourceMetaJson;
+    if (raw == null || raw.isEmpty) return const {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return const {};
+      final headers = decoded['headers'];
+      if (headers is! Map) return const {};
+      return {
+        for (final entry in headers.entries)
+          entry.key.toString().toLowerCase(): entry.value?.toString() ?? '',
+      };
+    } on FormatException {
+      return const {};
+    }
+  }
 
   factory Message.fromJson(Map<String, dynamic> json) {
     final rawTo = json['to'] as List<dynamic>?;
@@ -303,6 +336,7 @@ class Message {
       bodyText: row['body_text'] as String?,
       bodyPreview: row['body_preview'] as String?,
       gateReason: row['gate_reason'] as String?,
+      sourceMetaJson: row['source_meta_json'] as String?,
       urgency: row['urgency'] as String?,
       category: row['category'] as String?,
       summary: row['summary'] as String?,

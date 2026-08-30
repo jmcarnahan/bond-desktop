@@ -121,6 +121,20 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
     );
   }
 
+  /// One message row as stored, or null.
+  ///
+  /// The triage worker re-reads through this after it fetches a message's
+  /// detail: the row it was handed predates that fetch, and the body and
+  /// headers it is about to gate and classify on only exist on the new one.
+  Map<String, Object?>? getMessageRow(String source, String sourceMessageId) {
+    final result = db.select(
+      'SELECT * FROM messages WHERE source = ? AND source_message_id = ?',
+      [source, sourceMessageId],
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first);
+  }
+
   /// One thread, oldest first — the order the chat transcript renders in.
   List<Message> loadThread(
     String conversationKey, {
@@ -340,6 +354,47 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   )
 ''',
       [_nowIso(), source, source, cap],
+    );
+  }
+
+  /// Flips every message the last run left mid-flight back to `pending`.
+  ///
+  /// `processing` is a claim the worker takes before it calls the model and
+  /// clears when it writes a result. Nothing else clears it, so a message the
+  /// app was triaging when it quit would otherwise sit claimed forever —
+  /// never retried, never surfaced. Called once at startup, before any worker
+  /// can take a new claim.
+  void resetInterruptedTriage({String source = 'email'}) {
+    db.execute(
+      "UPDATE messages SET triage_status = 'pending', updated_at = ? "
+      'WHERE source = ? AND triage_status = ?',
+      [_nowIso(), source, 'processing'],
+    );
+  }
+
+  /// Folds one message's triage result up onto its conversation.
+  ///
+  /// A targeted UPDATE rather than [upsertConversation] on purpose: that
+  /// statement's conflict clause overwrites participants, state and every
+  /// count unconditionally, so reaching it from the triage worker would mean
+  /// carrying a whole conversation row through just to write three fields —
+  /// and getting one of them wrong would quietly reset a thread.
+  ///
+  /// `cta_text` is written unconditionally, null included: when the newest
+  /// inbound message asks for nothing, the thread's ask is gone, and leaving
+  /// the previous one on screen would be worse than showing none.
+  void updateConversationTriage(
+    String source,
+    String conversationKey, {
+    String? ctaText,
+    required String ctaUrgency,
+    String? category,
+  }) {
+    db.execute(
+      'UPDATE conversations SET cta_text = ?, cta_urgency = ?, '
+      'category = COALESCE(?, category), updated_at = ? '
+      'WHERE source = ? AND conversation_key = ?',
+      [ctaText, ctaUrgency, category, _nowIso(), source, conversationKey],
     );
   }
 

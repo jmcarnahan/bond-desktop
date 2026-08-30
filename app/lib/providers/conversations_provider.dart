@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -5,6 +7,7 @@ import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../services/graph_auth.dart';
 import '../services/sync_service.dart';
+import '../services/triage_queue.dart';
 import 'app_providers.dart';
 
 /// The inbox's read model.
@@ -63,14 +66,62 @@ class ConversationsError extends ConversationsState {
 }
 
 class ConversationsNotifier extends StateNotifier<ConversationsState> {
+  /// Triage annotates roughly one message every seventeen seconds and reports
+  /// each one. The debounce is what keeps a burst — a gated run skips messages
+  /// in milliseconds — from turning into a burst of full list reads.
+  static const Duration _triageReloadDelay = Duration(milliseconds: 400);
+
   final MessageStore _store;
   final MailSync _sync;
+
+  /// Null in tests that exercise only the read model. When present, every sync
+  /// kicks it and every result it lands reloads the list.
+  final TriageQueue? _triage;
+
+  StreamSubscription<TriageProgress>? _triageProgress;
+  Timer? _triageReload;
 
   /// Incremented per [load]; a load whose number is stale writes nothing.
   int _fetchSeq = 0;
 
-  ConversationsNotifier(this._store, this._sync)
-      : super(const ConversationsInitial());
+  ConversationsNotifier(
+    this._store,
+    this._sync, {
+    TriageQueue? triage,
+    Future<String?>? userAddress,
+  })  : _triage = triage,
+        super(const ConversationsInitial()) {
+    final queue = triage;
+    if (queue == null) return;
+    if (userAddress != null) {
+      // Fire-and-forget, and a failure is survivable: without the address the
+      // self gate is off, which costs a few model calls on the LO's own mail
+      // and nothing else.
+      unawaited(
+        userAddress.then<void>((address) {
+          queue.userAddress = address;
+        }).catchError((Object _) {}),
+      );
+    }
+    _triageProgress = queue.progress.listen((_) => _scheduleReload());
+  }
+
+  /// Re-reads the list from sqlite alone — no sync — so a CTA appears under
+  /// the row it belongs to as soon as the model writes it.
+  void _scheduleReload() {
+    _triageReload?.cancel();
+    _triageReload = Timer(_triageReloadDelay, () {
+      if (!mounted) return;
+      load(syncFirst: false);
+    });
+  }
+
+  @override
+  void dispose() {
+    _triageReload?.cancel();
+    _triageProgress?.cancel();
+    super.dispose();
+  }
 
   Future<void> load({bool syncFirst = true}) async {
     // Stamped before the first await, so a load started later always wins
@@ -87,6 +138,11 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     if (syncFirst) {
       try {
         await _sync.syncNow();
+        // Started, never awaited: triage takes about seventeen seconds a
+        // message, and the mail that just synced must render now. Results
+        // arrive later through the progress stream.
+        final pump = _triage?.pump();
+        if (pump != null) unawaited(pump);
       } on AuthException catch (e) {
         if (seq != _fetchSeq) return;
         // Only these two mean "sign in again". A generic AuthException is a
@@ -168,6 +224,12 @@ final conversationsProvider =
   (ref) => ConversationsNotifier(
     ref.watch(messageStoreProvider),
     ref.watch(syncServiceProvider),
+    triage: ref.watch(triageQueueProvider),
+    // A future, not a value: the account is a keychain read, and the inbox
+    // must not wait on it to render. Until it resolves the self gate is off.
+    userAddress: ref.watch(graphAuthProvider).storedAccount.then(
+          (account) => account?.mail ?? account?.userPrincipalName,
+        ),
   ),
 );
 

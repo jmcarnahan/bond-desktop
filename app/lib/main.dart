@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'data/db.dart';
+import 'data/message_store.dart';
 import 'providers/app_providers.dart';
 import 'screens/inbox_screen.dart';
 import 'screens/sign_in_screen.dart';
@@ -16,6 +17,11 @@ Future<void> main() async {
   // async, every screen needs it, and a database that cannot be opened is a
   // launch failure, not something to discover three screens in.
   final db = await openAppDb();
+
+  // Anything the last run was triaging when it quit is still claimed. Clearing
+  // the claim here — before a screen exists to start a new drain — is what
+  // keeps a crash from stranding those messages permanently.
+  MessageStore(db).resetInterruptedTriage();
 
   runApp(
     ProviderScope(

@@ -28,6 +28,12 @@ abstract class MailSync {
   Future<void> syncNow();
 
   Future<void> ensureBodies(String conversationKey);
+
+  /// One message's body and headers, for a caller that has a message rather
+  /// than a thread — the triage worker, which needs the real body to classify
+  /// and the headers to gate on, and cannot wait for a human to open the
+  /// thread first.
+  Future<void> ensureMessageBody(String sourceMessageId);
 }
 
 /// Drains Graph's delta feeds into sqlite and folds the result into
@@ -306,33 +312,48 @@ class SyncService implements MailSync {
     ]..sort((a, b) => (b.receivedAt ?? '').compareTo(a.receivedAt ?? ''));
 
     for (final message in missing.take(_bodyFetchBatch)) {
-      final Map<String, dynamic> detail;
-      try {
-        detail = await _mail.getMessageDetail(message.id);
-      } on GraphMailException catch (e) {
-        // A message deleted between the delta page and this fetch should not
-        // cost the rest of the thread its bodies. Anything else is a real
-        // failure and belongs on the banner.
-        if (e.statusCode == 404 || e.statusCode == 410) continue;
-        rethrow;
-      }
-
-      final uniqueBody = detail['uniqueBody'];
-      final bodyText =
-          uniqueBody is Map<String, dynamic> ? uniqueBody['content'] as String? : null;
-      final headers = _headers(detail['internetMessageHeaders']);
-
-      _store.updateMessageDetail(
-        _source,
-        message.id,
-        bodyText: bodyText,
-        hasAttachments: detail['hasAttachments'] as bool?,
-        // Under a 'headers' key rather than at the top level: source_meta_json
-        // is the whole connector-specific blob, and headers are one thing in
-        // it.
-        sourceMetaJson: headers.isEmpty ? null : jsonEncode({'headers': headers}),
-      );
+      await _fetchDetailInto(message.id);
     }
+  }
+
+  /// The tier-two fetch for one message.
+  ///
+  /// Everything the triage worker needs that a delta page does not carry: the
+  /// unquoted body it classifies from, and the headers its bulk-mail gates
+  /// read. Triage calls this per message rather than per thread, which is why
+  /// it is factored out of [ensureBodies] rather than living inside its loop.
+  @override
+  Future<void> ensureMessageBody(String sourceMessageId) =>
+      _fetchDetailInto(sourceMessageId);
+
+  /// Fetches one message's detail and stores it. A message that vanished
+  /// between the delta page and this call is skipped rather than thrown over:
+  /// it must not cost the rest of a thread its bodies, nor park a triage
+  /// queue. Anything else is a real failure and belongs on the banner.
+  Future<void> _fetchDetailInto(String sourceMessageId) async {
+    final Map<String, dynamic> detail;
+    try {
+      detail = await _mail.getMessageDetail(sourceMessageId);
+    } on GraphMailException catch (e) {
+      if (e.statusCode == 404 || e.statusCode == 410) return;
+      rethrow;
+    }
+
+    final uniqueBody = detail['uniqueBody'];
+    final bodyText =
+        uniqueBody is Map<String, dynamic> ? uniqueBody['content'] as String? : null;
+    final headers = _headers(detail['internetMessageHeaders']);
+
+    _store.updateMessageDetail(
+      _source,
+      sourceMessageId,
+      bodyText: bodyText,
+      hasAttachments: detail['hasAttachments'] as bool?,
+      // Under a 'headers' key rather than at the top level: source_meta_json
+      // is the whole connector-specific blob, and headers are one thing in
+      // it.
+      sourceMetaJson: headers.isEmpty ? null : jsonEncode({'headers': headers}),
+    );
   }
 
   /// `internetMessageHeaders` as a lowercase-keyed map. Header names are

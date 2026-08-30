@@ -7,6 +7,7 @@ import '../models/message_models.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../services/graph_auth.dart';
+import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/chips.dart';
 import '../widgets/conversation_list_pane.dart';
@@ -190,6 +191,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
             onSelected: (f) => setState(() => _filter = f),
           ),
         ),
+        _triageProgress(),
         IconButton(
           onPressed: _refresh,
           icon: const Icon(Icons.refresh),
@@ -212,6 +214,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
           child: Text('Sign out', style: BondType.caption),
         ),
       ],
+    );
+  }
+
+  /// How much mail the local model still has to look at, and nothing when
+  /// there is none. Deliberately a quiet caption: triage is a background
+  /// annotator, not something the LO waits on, and the first sync of a real
+  /// mailbox leaves it counting down for the better part of an hour.
+  Widget _triageProgress() {
+    return StreamBuilder<TriageProgress>(
+      stream: ref.watch(triageQueueProvider).progress,
+      builder: (context, snapshot) {
+        final remaining = snapshot.data?.remaining ?? 0;
+        if (remaining == 0) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(right: BondSpacing.s8),
+          child: Text('Triaging $remaining remaining…', style: BondType.caption),
+        );
+      },
     );
   }
 

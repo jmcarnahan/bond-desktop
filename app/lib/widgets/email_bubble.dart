@@ -84,6 +84,14 @@ class _EmailBubbleState extends State<EmailBubble> {
             message.receivedAt,
           );
 
+    // Only inbound mail is ever queued, so the suffix says "the model has not
+    // reached this one yet" rather than appearing on every bubble in a thread.
+    final triaging = !pending &&
+        message.inbound &&
+        (message.triageStatus == 'pending' ||
+            message.triageStatus == 'processing');
+    final summary = message.summary;
+
     final bubble = Container(
       constraints: const BoxConstraints(maxWidth: 560),
       padding: const EdgeInsets.all(BondSpacing.s12),
@@ -113,7 +121,17 @@ class _EmailBubbleState extends State<EmailBubble> {
             ),
           ],
           const SizedBox(height: BondSpacing.s8),
-          Text(caption, style: BondType.caption),
+          Text(
+            triaging ? '$caption · triaging' : caption,
+            style: BondType.caption,
+          ),
+          // The model's one-line read of this message, labelled as the
+          // model's: it sits under mail the LO can see for themselves, and it
+          // must never be mistaken for something the sender wrote.
+          if (summary != null && summary.isNotEmpty) ...[
+            const SizedBox(height: 2),
+            Text('AI: $summary', style: BondType.caption),
+          ],
         ],
       ),
     );

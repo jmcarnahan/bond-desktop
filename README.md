@@ -14,8 +14,9 @@ There are three layers, two of which exist today:
    without asking for a tool. This is the seam where an MCP client plugs in
    later — register handlers in `toolHandlers` and their JSON schemas in
    `toolSchemas` and the loop itself needs no changes.
-3. **UI** — a Flutter desktop app. Not built yet. The Dart agent exists partly
-   so that layer can import it rather than reimplement it.
+3. **UI** — `app/`, a Flutter desktop app: a Microsoft-signed-in Outlook inbox
+   whose mail is triaged by the model on layer 1. See
+   [The desktop inbox](#the-desktop-inbox-app).
 
 The point of the POC is layer 2: proving that a local model reliably emits
 well-formed OpenAI `tool_calls` and can be driven in a loop, which is the
@@ -142,6 +143,29 @@ There is also a web UI built into `llama-server` at <http://localhost:8080>.
 It supports drag-and-drop images, which is how to exercise the vision side —
 that is what the mmproj file is for.
 
+## The desktop inbox (app/)
+
+A Flutter macOS app: sign in with Microsoft, and a live Outlook inbox threaded
+into conversations, each one annotated by the local model. `make app-run`
+starts it. Triage additionally needs `make model` running — without it the
+inbox works fine and simply stays un-annotated.
+
+The list is filtered by five pills: **Open**, **Needs action**, **Needs
+reply**, **Waiting**, **Done**. *Needs action* is the model's view rather than
+the thread state machine's — it shows the threads triage left a concrete ask
+on, cutting across the others.
+
+Triage runs 100% locally: every email is classified by `llama-server` on
+`:8080` and nothing about the mail leaves the machine. Cheap gates (the user's
+own address, no-reply senders, list and auto-generated headers) skip what is
+not worth a model call; the rest go through one at a time, newest first.
+
+First run syncs 14 days of mail and queues the newest 7 days for triage, capped
+at 150 messages. At roughly 17 seconds an email that backlog annotates itself
+over about 45 minutes, in the background, with a `Triaging N remaining…`
+counter in the header. It survives a restart: work in flight is re-queued at
+the next launch.
+
 ## Operations
 
 ```sh
@@ -233,6 +257,13 @@ Makefile          everything: install, model lifecycle, smoke tests, verify
 agent/            Dart package
   bin/chat.dart   the tool-calling loop — the whole agent, one file
   pubspec.yaml    one dependency: package:http
+app/              Flutter macOS app — the desktop inbox
+  lib/data/       sqlite schema and every SQL statement in the app
+  lib/services/   Graph auth + mail sync, the triage gates and queue
+  lib/services/llm/  the local-model client, prompts and validators
+  lib/screens/    inbox and sign-in
+  lib/widgets/    thread list, transcript, chips
+  test/           unit tests; llm_live_test.dart needs a running model
 tmp/logs/         runtime logs; make clean removes it, keep it out of git
 ```
 
