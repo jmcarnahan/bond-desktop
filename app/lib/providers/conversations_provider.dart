@@ -6,11 +6,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../services/ai_worker.dart';
+import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/graph_auth.dart';
 import '../services/sync_service.dart';
 import '../services/triage_queue.dart';
 import 'app_providers.dart';
+import 'prefs_provider.dart' show attentionThresholdKey;
 
 /// The inbox's read model.
 ///
@@ -201,6 +203,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       // either is "could not read the local inbox".
       _attention?.recomputeAll(sources: const ['email']);
       rows = _store.loadConversations(sources: const ['email']);
+      _enqueueDrafts();
     } catch (e) {
       // The database itself failed. There is no stale-but-valid answer to
       // fall back to beyond whatever is already on screen.
@@ -223,6 +226,35 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
 
     state = ConversationsLoaded(rows, loadError);
+  }
+
+  /// Queues a suggested reply for the threads that have earned one.
+  ///
+  /// Immediately after the scoring pass, because it reads the scores that pass
+  /// just wrote. On EVERY load rather than only after a sync, and that is
+  /// cheap: [MessageStore.needsDraftKeys] excludes any thread that already has
+  /// a draft, so a thread appears here exactly once, and `requeueWork` only
+  /// revives rows that are already `done` or `error`. The queue itself does not
+  /// drain until something pumps it, which is the sync path.
+  ///
+  /// Nothing here sends anything. It writes work rows; the handler behind them
+  /// writes text into sqlite.
+  ///
+  /// It swallows its own failures. The rows are already read by the time this
+  /// runs, and letting a failed queue write fall into the "could not read the
+  /// local inbox" path would cost the user the mail they can see over a
+  /// suggestion they have not asked for yet.
+  void _enqueueDrafts() {
+    try {
+      final stored = _store.getPref(attentionThresholdKey);
+      final threshold = (stored == null ? null : double.tryParse(stored)) ??
+          AttentionTuning.defaultThreshold;
+      for (final key in _store.needsDraftKeys(threshold: threshold)) {
+        _store.requeueWork('draft', 'email', key);
+      }
+    } catch (e) {
+      debugPrint('draft enqueue failed: $e');
+    }
   }
 
   /// Flips a thread to done, on screen first.

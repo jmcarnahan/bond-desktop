@@ -1343,6 +1343,192 @@ FROM storylines s''';
     );
   }
 
+  // ── drafts ───────────────────────────────────────────────────────────
+
+  /// Writes the one draft a conversation is allowed, replacing whatever was
+  /// there.
+  ///
+  /// A full replace rather than a merge because that is what regenerating
+  /// means: the new draft answers a possibly different message, and keeping
+  /// the old `graph_draft_id` would leave the Send button pointing at an
+  /// Outlook draft holding text nobody can see any more. `created_at` survives
+  /// — it says when this conversation first got a suggestion, which is the one
+  /// fact a regenerate does not change.
+  void upsertDraft({
+    required String source,
+    required String conversationKey,
+    required String replyToMessageId,
+    required String body,
+    String? evidence,
+    String status = 'suggested',
+  }) {
+    final now = _nowIso();
+    db.execute(
+      '''
+INSERT INTO drafts (
+  source, conversation_key, reply_to_message_id, body, evidence, status,
+  graph_draft_id, web_link, created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+ON CONFLICT(source, conversation_key) DO UPDATE SET
+  reply_to_message_id = excluded.reply_to_message_id,
+  body = excluded.body,
+  evidence = excluded.evidence,
+  status = excluded.status,
+  graph_draft_id = NULL,
+  web_link = NULL,
+  updated_at = excluded.updated_at
+''',
+      [
+        source,
+        conversationKey,
+        replyToMessageId,
+        body,
+        evidence,
+        status,
+        now,
+        now,
+      ],
+    );
+  }
+
+  Map<String, Object?>? getDraft(String source, String conversationKey) {
+    final result = db.select(
+      'SELECT * FROM drafts WHERE source = ? AND conversation_key = ?',
+      [source, conversationKey],
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first);
+  }
+
+  /// Moves a draft along its lifecycle — `suggested` → `edited` → `sent`, or
+  /// `dismissed` — writing only the fields this call carries.
+  ///
+  /// Targeted like [writeTriage]: the edit that marks a draft touched must not
+  /// blank the Outlook ids a save-to-drafts wrote, and a send must not rewrite
+  /// the body the user is looking at.
+  void updateDraftStatus(
+    String source,
+    String conversationKey, {
+    required String status,
+    String? body,
+    String? graphDraftId,
+    String? webLink,
+  }) {
+    final sets = <String>['status = ?', 'updated_at = ?'];
+    final args = <Object?>[status, _nowIso()];
+
+    if (body != null) {
+      sets.add('body = ?');
+      args.add(body);
+    }
+    if (graphDraftId != null) {
+      sets.add('graph_draft_id = ?');
+      args.add(graphDraftId);
+    }
+    if (webLink != null) {
+      sets.add('web_link = ?');
+      args.add(webLink);
+    }
+
+    args.addAll([source, conversationKey]);
+    db.execute(
+      'UPDATE drafts SET ${sets.join(', ')} '
+      'WHERE source = ? AND conversation_key = ?',
+      args,
+    );
+  }
+
+  void deleteDraft(String source, String conversationKey) {
+    db.execute(
+      'DELETE FROM drafts WHERE source = ? AND conversation_key = ?',
+      [source, conversationKey],
+    );
+  }
+
+  /// The message a reply would answer: the thread's newest inbound one.
+  ///
+  /// Ties break on `source_message_id DESC`, the same way [latestInboundMeta]
+  /// breaks them, so the draft is written against the message the rest of the
+  /// app agrees is the latest.
+  Map<String, Object?>? newestInboundMessage(
+    String source,
+    String conversationKey,
+  ) {
+    final result = db.select(
+      'SELECT * FROM messages '
+      "WHERE source = ? AND conversation_key = ? AND direction = 'inbound' "
+      'ORDER BY received_at DESC, source_message_id DESC LIMIT 1',
+      [source, conversationKey],
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first);
+  }
+
+  /// The LO's own recent replies to one address, newest first — the tone the
+  /// draft model is asked to match.
+  ///
+  /// `to_json LIKE '%address%'` is an APPROXIMATION and knowingly so. The
+  /// recipients are a JSON array in a TEXT column, so this can match an address
+  /// that merely contains the one asked for (`eric@x.com` inside
+  /// `noteric@x.com`) and it matches a message the address was CC'd on as
+  /// readily as one addressed to them. Both are fine for what this feeds: a
+  /// handful of the LO's own sentences shown to the model as a writing sample.
+  /// A wrong sample costs a slightly-off tone, never a wrong recipient — the
+  /// address a reply actually goes to comes from Graph's own `createReply`.
+  List<Map<String, Object?>> recentOutboundToSender(
+    String source,
+    String senderAddress, {
+    int limit = 2,
+  }) {
+    if (senderAddress.isEmpty) return const [];
+    final result = db.select(
+      'SELECT * FROM messages '
+      "WHERE source = ? AND direction = 'outbound' AND to_json LIKE ? "
+      'ORDER BY received_at DESC, source_message_id DESC LIMIT ?',
+      [source, '%${senderAddress.toLowerCase()}%', limit],
+    );
+    return [for (final row in result) Map<String, Object?>.from(row)];
+  }
+
+  /// The threads worth spending a model call drafting a reply for.
+  ///
+  /// Four filters, and each one is there to stop a specific waste: the thread
+  /// must actually be waiting on the LO, it must not be filed away in Later, it
+  /// must have scored high enough to be worth answering, and it must not have a
+  /// draft already. That last one is what makes this safe to call on every list
+  /// load — a thread drops out of the list the moment it has a suggestion, so
+  /// the queue fills once rather than on every pass.
+  ///
+  /// A thread with no attention score at all is excluded: `NULL >= ?` is NULL,
+  /// which is not true. That is the wanted behaviour — a thread the scorer has
+  /// never reached has not earned a model call yet.
+  List<String> needsDraftKeys({
+    required double threshold,
+    int limit = 7,
+    List<String> sources = const ['email'],
+  }) {
+    if (sources.isEmpty) return const [];
+    final result = db.select(
+      'SELECT c.conversation_key AS conversation_key FROM conversations c '
+      'LEFT JOIN conversation_ai ai '
+      '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
+      'LEFT JOIN drafts d '
+      '  ON d.source = c.source AND d.conversation_key = c.conversation_key '
+      "WHERE c.state = 'needs_reply' "
+      'AND c.source IN (${_placeholders(sources.length)}) '
+      // `IS NOT`, not `<>`: a thread with no bucket at all belongs here, and
+      // `NULL <> 'later'` would drop every one of them.
+      "AND ai.bucket IS NOT 'later' "
+      'AND ai.attention_score >= ? '
+      'AND d.conversation_key IS NULL '
+      'ORDER BY ai.attention_score DESC, c.conversation_key ASC LIMIT ?',
+      [...sources, threshold, limit],
+    );
+    return [
+      for (final row in result) row['conversation_key'] as String? ?? '',
+    ];
+  }
+
   /// Every message of every member thread, merged into one chronology.
   ///
   /// Rows come back as raw `messages` rows — `conversation_key` and `subject`

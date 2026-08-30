@@ -235,6 +235,12 @@ class SyncService implements MailSync {
 
         if (!firstSighting) continue;
 
+        // A draft answers the message that was newest when the model wrote it.
+        // The moment a newer inbound message lands, that draft is a reply to
+        // the wrong thing — so it goes, and the enqueue on the next list load
+        // writes a fresh one against what the sender actually just said.
+        if (!outbound) _store.deleteDraft(_source, key);
+
         final entry = work.putIfAbsent(
           key,
           () => _ConversationWork.from(

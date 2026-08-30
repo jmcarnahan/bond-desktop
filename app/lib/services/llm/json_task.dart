@@ -32,11 +32,16 @@ abstract class JsonTask<T> {
 /// [temperature] is per call rather than per task: the same task can want a
 /// deterministic answer in a batch job and a slightly varied one behind a
 /// button, and the schema does not change either way.
+///
+/// [maxTokens] is per call for a blunter reason: a label fits in a fraction of
+/// the default and a drafted reply does not, and a budget that runs out mid-
+/// string comes back as a grammar-valid answer that was simply cut off.
 Future<T> runTask<T>(
   LlmClient client,
   JsonTask<T> task,
   Object input, {
   double temperature = 0.2,
+  int maxTokens = 512,
 }) async {
   final json = await client.completeJson(
     system: task.systemPrompt,
@@ -44,6 +49,7 @@ Future<T> runTask<T>(
     schema: task.schema,
     schemaName: task.schemaName,
     temperature: temperature,
+    maxTokens: maxTokens,
   );
   return task.validate(json);
 }

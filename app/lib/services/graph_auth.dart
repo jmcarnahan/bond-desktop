@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart' show immutable;
+import 'package:flutter/foundation.dart'
+    show debugPrint, immutable, protected, visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -44,6 +45,35 @@ class ReconsentRequired extends AuthException {
         'This version needs additional Microsoft permissions. Sign in again '
             'to grant them.',
   ]);
+}
+
+/// The browser came back carrying an OAuth `error` instead of a code.
+///
+/// Held apart from a plain [AuthException] because [GraphAuth.signIn] has to
+/// read the raw parameters to tell two very different things apart: a user who
+/// clicked Cancel, and a tenant that refuses one of the scopes this build asks
+/// for. Only the second is worth retrying with less.
+class AuthorizeDenied extends AuthException {
+  /// Entra's `error` parameter, e.g. `access_denied`, `consent_required`.
+  final String error;
+
+  /// Entra's `error_description`, which is where the AADSTS code lives.
+  final String errorDescription;
+
+  const AuthorizeDenied(this.error, this.errorDescription, String message)
+      : super(message);
+
+  /// True when this reads as "the tenant will not grant that consent" rather
+  /// than "the person said no".
+  ///
+  /// AADSTS90094 is admin consent required; AADSTS65001 is consent not
+  /// granted. Both arrive as `access_denied` in the `error` parameter, which is
+  /// the same code a Cancel click produces — the description is the only thing
+  /// that separates them.
+  bool get isConsentProblem =>
+      error == 'consent_required' ||
+      errorDescription.contains('AADSTS90094') ||
+      errorDescription.contains('AADSTS65001');
 }
 
 /// The signed-in user, as Graph's `/me` describes them. Only [displayName] is
@@ -129,9 +159,42 @@ class GraphAuth {
   static const String _definedClientSecret =
       String.fromEnvironment('MS_CLIENT_SECRET');
 
-  /// A list because Teams support later appends `Chat.Read` here. Any
-  /// addition needs interactive re-consent — see [needsReconsent].
-  static const List<String> scopes = ['Mail.Read', 'User.Read', 'offline_access'];
+  /// What the app cannot run without. Missing any of these means the stored
+  /// grant is unusable and the user must sign in again — see [needsReconsent].
+  static const List<String> coreScopes = [
+    'Mail.Read',
+    'User.Read',
+    'offline_access',
+  ];
+
+  /// What the app asks for on top, and can do without.
+  ///
+  /// All three are requested in ONE consent round, `Chat.Read` included even
+  /// though nothing reads Teams yet: a second round later would mean a second
+  /// consent prompt, and the point of asking now is that the user sees one.
+  ///
+  /// A tenant that refuses these does not cost the user the session — the
+  /// sign-in retries with [coreScopes] alone and the features that need them
+  /// report themselves unavailable through [hasScope].
+  static const List<String> extendedScopes = [
+    'Mail.ReadWrite',
+    'Mail.Send',
+    'Chat.Read',
+  ];
+
+  /// What an interactive sign-in requests: everything, required and optional
+  /// alike.
+  static const List<String> scopes = [...coreScopes, ...extendedScopes];
+
+  /// Which granted scopes stand in for a scope this app wants.
+  ///
+  /// Exactly one pair, and deliberately not a general lattice: Entra's own
+  /// consent hierarchy makes `Mail.ReadWrite` include `Mail.Read`, so a grant
+  /// carrying only the former satisfies a build asking for the latter. Nothing
+  /// else here subsumes anything.
+  static const Map<String, Set<String>> _subsumedBy = {
+    'mail.read': {'mail.readwrite'},
+  };
 
   static const String _authority =
       'https://login.microsoftonline.com/$tenantId/oauth2/v2.0';
@@ -150,7 +213,13 @@ class GraphAuth {
 
   final http.Client _http;
   final TokenStore _store;
-  final List<String> _scopes;
+
+  /// Absent any of these, the grant is unusable — [needsReconsent] iterates
+  /// this set and nothing else.
+  final List<String> _requiredScopes;
+
+  /// Asked for, and survivable when refused.
+  final List<String> _extendedScopes;
 
   /// In memory only, deliberately: a leaked access token is short-lived,
   /// while a leaked refresh token is not.
@@ -162,14 +231,21 @@ class GraphAuth {
   /// exchange would race on an already-consumed one.
   Future<String>? _refreshInFlight;
 
+  /// [scopeOverride] keeps the meaning it has always had: it replaces the
+  /// REQUIRED set, and — unless [extendedScopeOverride] says otherwise — turns
+  /// the extended set off entirely, so a test that names three scopes gets a
+  /// sign-in that asks for exactly those three.
   GraphAuth({
     http.Client? httpClient,
     TokenStore? store,
     List<String>? scopeOverride,
+    List<String>? extendedScopeOverride,
     String? clientSecret,
   })  : _http = httpClient ?? http.Client(),
         _store = store ?? const SecureTokenStore(),
-        _scopes = scopeOverride ?? scopes,
+        _requiredScopes = scopeOverride ?? coreScopes,
+        _extendedScopes = extendedScopeOverride ??
+            (scopeOverride == null ? extendedScopes : const []),
         _clientSecret = clientSecret ?? _definedClientSecret;
 
   final String _clientSecret;
@@ -182,7 +258,10 @@ class GraphAuth {
         if (_clientSecret.isNotEmpty) 'client_secret': _clientSecret,
       };
 
-  String get _scopeParam => _scopes.join(' ');
+  /// Everything an interactive sign-in asks for, required first.
+  List<String> get _requestedScopes => [..._requiredScopes, ..._extendedScopes];
+
+  String get _scopeParam => _requestedScopes.join(' ');
 
   // ── State ─────────────────────────────────────────────────────────────
 
@@ -191,24 +270,57 @@ class GraphAuth {
     return token != null && token.isNotEmpty;
   }
 
-  /// True when a scope this build asks for is absent from what Entra
-  /// actually granted. Null storage means "not signed in", not "missing
-  /// consent" — the sign-in screen handles that case.
+  /// True when a scope this build REQUIRES is absent from what Entra actually
+  /// granted. Null storage means "not signed in", not "missing consent" — the
+  /// sign-in screen handles that case.
+  ///
+  /// The extended scopes are deliberately not checked. They are allowed to be
+  /// missing: a tenant that refuses them leaves a perfectly usable session, and
+  /// treating that as re-consent would put the user in a sign-in loop over a
+  /// consent nobody in the loop can grant.
   Future<bool> get needsReconsent async {
-    final granted = await _store.read(_keyGrantedScopes);
-    if (granted == null || granted.isEmpty) return false;
-    final grantedSet = {
-      for (final scope in granted.split(RegExp(r'\s+')))
-        if (scope.isNotEmpty) _bareScope(scope),
-    };
-    for (final wanted in _scopes) {
+    final grantedSet = await _grantedBareScopes();
+    if (grantedSet.isEmpty) return false;
+    for (final wanted in _requiredScopes) {
       // offline_access never appears in a granted scope string; its presence
       // is proven by the refresh token itself.
-      if (_bareScope(wanted) == 'offline_access') continue;
-      if (!grantedSet.contains(_bareScope(wanted))) return true;
+      final bare = _bareScope(wanted);
+      if (bare == 'offline_access') continue;
+      if (!_isGranted(grantedSet, bare)) return true;
     }
     return false;
   }
+
+  /// Whether the stored grant carries [bareScope] — what the UI asks before it
+  /// offers to send mail, save a draft, or read Teams.
+  ///
+  /// Reads the GRANT, never the request: a degraded sign-in asked for
+  /// `Mail.Send` and did not get it, and the honest answer is the one Entra
+  /// gave. False when nothing is stored, which is also the right answer for a
+  /// signed-out app. `offline_access` is not answerable here — it never appears
+  /// in a granted scope string.
+  Future<bool> hasScope(String bareScope) async {
+    final grantedSet = await _grantedBareScopes();
+    if (grantedSet.isEmpty) return false;
+    return _isGranted(grantedSet, _bareScope(bareScope));
+  }
+
+  /// What Entra granted, reduced to bare lowercase names. Empty when nothing
+  /// is stored.
+  Future<Set<String>> _grantedBareScopes() async {
+    final granted = await _store.read(_keyGrantedScopes);
+    if (granted == null || granted.isEmpty) return const {};
+    return {
+      for (final scope in granted.split(RegExp(r'\s+')))
+        if (scope.isNotEmpty) _bareScope(scope),
+    };
+  }
+
+  /// Subsumption-aware membership: a wanted scope counts as granted when the
+  /// grant names it, or names something that includes it — see [_subsumedBy].
+  static bool _isGranted(Set<String> grantedSet, String wantedBare) =>
+      grantedSet.contains(wantedBare) ||
+      (_subsumedBy[wantedBare]?.any(grantedSet.contains) ?? false);
 
   Future<AccountInfo?> get storedAccount async {
     final raw = await _store.read(_keyAccountJson);
@@ -226,11 +338,68 @@ class GraphAuth {
 
   // ── Interactive sign-in ───────────────────────────────────────────────
 
+  /// The full interactive sign-in, including the one permitted retry with less.
+  ///
+  /// Asking for everything at once is what keeps this to a single consent
+  /// prompt in the normal case. When the tenant refuses the extended set the
+  /// round is run again with [coreScopes] alone — ONCE, and only when the
+  /// refusal reads as a consent problem rather than a Cancel click, so a user
+  /// who backed out is not handed a second browser window.
+  ///
+  /// `prompt=consent` is deliberately never sent: it would re-prompt a user
+  /// whose consent is already on file, every single sign-in.
   Future<AccountInfo> signIn() async {
-    final verifier = randomUrlSafe(64);
-    final challenge = pkceChallengeFor(verifier);
-    final state = randomUrlSafe(32);
+    try {
+      return await _signInWith(_requestedScopes);
+    } on AuthorizeDenied catch (e) {
+      if (_extendedScopes.isEmpty || !e.isConsentProblem) rethrow;
+      debugPrint(
+        'GraphAuth: retrying sign-in without the extended scopes — '
+        'Entra said: ${e.errorDescription}',
+      );
+      return _signInWith(_requiredScopes);
+    }
+  }
 
+  /// One complete sign-in: authorize, exchange, fetch the account.
+  Future<AccountInfo> _signInWith(List<String> roundScopes) async {
+    final verifier = randomUrlSafe(64);
+    final scopeParam = roundScopes.join(' ');
+
+    final code = await authorizeRound(
+      scopeParam: scopeParam,
+      challenge: pkceChallengeFor(verifier),
+      state: randomUrlSafe(32),
+    );
+
+    final response = await _postToken(_withClientAuth({
+      'client_id': clientId,
+      'scope': scopeParam,
+      'code': code,
+      'redirect_uri': redirectUri,
+      'grant_type': 'authorization_code',
+      'code_verifier': verifier,
+    }));
+    if (response.statusCode != 200) {
+      throw AuthException(_describeTokenError(response));
+    }
+    final accessToken = await _adoptTokens(response.json);
+    return _fetchAccount(accessToken);
+  }
+
+  /// One browser round trip: open the authorize page, wait on the loopback
+  /// redirect, return its `code`.
+  ///
+  /// Overridable so the consent-degrade path above can be tested without a
+  /// browser and without binding a port. Production has exactly one
+  /// implementation — this one.
+  @protected
+  @visibleForTesting
+  Future<String> authorizeRound({
+    required String scopeParam,
+    required String challenge,
+    required String state,
+  }) async {
     final HttpServer server;
     try {
       server = await HttpServer.bind(InternetAddress.loopbackIPv4, redirectPort);
@@ -243,14 +412,13 @@ class GraphAuth {
       );
     }
 
-    final String code;
     try {
       final authorizeUrl =
           Uri.parse('$_authority/authorize').replace(queryParameters: {
         'response_type': 'code',
         'client_id': clientId,
         'redirect_uri': redirectUri,
-        'scope': _scopeParam,
+        'scope': scopeParam,
         'state': state,
         'code_challenge': challenge,
         'code_challenge_method': 'S256',
@@ -266,26 +434,13 @@ class GraphAuth {
           'Could not open a browser for the Microsoft sign-in page.',
         );
       }
-      code = await _awaitCallbackCode(server, state);
+      return await _awaitCallbackCode(server, state);
     } finally {
       // Unconditional: an abandoned or failed sign-in must not hold port
-      // 8400 for the rest of the process's life.
+      // 8001 for the rest of the process's life — including between the two
+      // rounds of a consent degrade, which would otherwise fail to bind.
       await server.close(force: true);
     }
-
-    final response = await _postToken(_withClientAuth({
-      'client_id': clientId,
-      'scope': _scopeParam,
-      'code': code,
-      'redirect_uri': redirectUri,
-      'grant_type': 'authorization_code',
-      'code_verifier': verifier,
-    }));
-    if (response.statusCode != 200) {
-      throw AuthException(_describeTokenError(response));
-    }
-    final accessToken = await _adoptTokens(response.json);
-    return _fetchAccount(accessToken);
   }
 
   /// Waits for the browser's redirect and returns its `code`, answering the
@@ -309,7 +464,11 @@ class GraphAuth {
       final description = params['error_description'] ?? '';
       final detail = description.isEmpty ? error : description;
       await _respond(request, 'Sign-in was not completed', detail);
-      throw AuthException('Microsoft did not complete sign-in: $detail');
+      throw AuthorizeDenied(
+        error,
+        description,
+        'Microsoft did not complete sign-in: $detail',
+      );
     }
 
     // Any local process can reach this port; only the response carrying back
@@ -394,7 +553,7 @@ class GraphAuth {
 
     final response = await _postToken(_withClientAuth({
       'client_id': clientId,
-      'scope': _scopeParam,
+      'scope': await _refreshScopeParam(),
       'refresh_token': refreshToken,
       'grant_type': 'refresh_token',
     }));
@@ -410,6 +569,31 @@ class GraphAuth {
     }
 
     return _adoptTokens(response.json);
+  }
+
+  /// What a refresh asks for: the requested set, minus anything Entra did not
+  /// actually grant.
+  ///
+  /// This exists because of the consent degrade. A session that fell back to
+  /// the core scopes has no consent for `Mail.Send`, and a refresh that asked
+  /// for it anyway comes back `invalid_grant` / AADSTS65001 — which
+  /// [_doRefresh] reads as "the session is over" and acts on by clearing the
+  /// keychain. Narrowing to the grant means a degraded session stays signed in
+  /// instead of being logged out on its first token refresh.
+  ///
+  /// `offline_access` is always kept: it never appears in a granted scope
+  /// string, and dropping it is what stops Entra handing back a rotated
+  /// refresh token. With nothing stored the full request stands.
+  Future<String> _refreshScopeParam() async {
+    final grantedSet = await _grantedBareScopes();
+    if (grantedSet.isEmpty) return _scopeParam;
+    final kept = [
+      for (final scope in _requestedScopes)
+        if (_bareScope(scope) == 'offline_access' ||
+            _isGranted(grantedSet, _bareScope(scope)))
+          scope,
+    ];
+    return kept.isEmpty ? _scopeParam : kept.join(' ');
   }
 
   /// Persists what must survive a relaunch, keeps the access token in memory,

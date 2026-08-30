@@ -7,12 +7,14 @@ import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
+import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/graph_auth.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/app_rail.dart';
+import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
@@ -64,6 +66,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
   /// The open Later day, as a `yyyy-mm-dd` key. Exclusive with the two above
   /// for the same reason they are exclusive with each other.
   String? _selectedLaterDay;
+
+  /// Which member thread a storyline's composer replies to, when the user has
+  /// picked one. Null means "the thread the newest message is in", which is
+  /// what the dropdown shows by default — a storyline has no inbox of its own
+  /// to reply to, so the composer always answers exactly one real thread.
+  String? _storylineReplyKey;
 
   /// Narrow layouts only: whether the rail overlay is up.
   bool _railOpen = false;
@@ -126,6 +134,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
     // reads it yet.
     ref.read(conversationsProvider.notifier).noteThreadOpened(id);
     ref.read(threadProvider(id).notifier).load();
+    // Reads what the queue has already written for this thread. It never asks
+    // for a new one — a draft is written by the background queue or by the
+    // user's own button, never by opening a thread.
+    ref.read(draftProvider(id).notifier).load();
   }
 
   void _selectStoryline(String id) {
@@ -134,6 +146,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
       _selectedId = null;
       _selectedLaterDay = null;
       _railOpen = false;
+      // The reply target belongs to the storyline that was open, not to this
+      // one; the default below picks the newest thread in the new timeline.
+      _storylineReplyKey = null;
     });
     ref.read(storylineTimelineProvider(id).notifier).load();
   }
@@ -425,12 +440,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
     );
   }
 
-  /// The two tuning controls. The threshold reloads the list as it changes —
-  /// the whole point of the slider is watching Needs You grow and shrink under
-  /// it — while the "about me" text is only saved.
+  /// The tuning controls, plus what Microsoft granted. The threshold reloads
+  /// the list as it changes — the whole point of the slider is watching Needs
+  /// You grow and shrink under it — while the "about me" text is only saved.
+  ///
+  /// "Sign in again" signs OUT and lets the gate above take over. That is the
+  /// only way a missing consent is ever fixed: a refresh cannot add a scope
+  /// nobody consented to, and the fresh sign-in asks for the whole list.
   Future<void> _openSettings() async {
     final prefs = ref.read(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
+    final auth = ref.read(graphAuthProvider);
     await showDialog<void>(
       context: context,
       builder: (context) => SettingsDialog(
@@ -441,6 +461,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
           ref.read(conversationsProvider.notifier).load(syncFirst: false);
         },
         onAboutMeChanged: notifier.setAboutMe,
+        hasScope: auth.hasScope,
+        onSignInAgain: () {
+          Navigator.of(context).pop();
+          _signOut();
+        },
       ),
     );
   }
@@ -561,22 +586,81 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
       onOpenThread: (_, key) => _select(key),
     );
 
+    final replyKey = _replyTargetFor(messages, keys, subjects);
+
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
-      child: error == null
-          ? panel
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                InlineAlert(
-                  severity: InlineAlertSeverity.error,
-                  text: error,
-                  maxLines: 2,
-                ),
-                const SizedBox(height: BondSpacing.s12),
-                Expanded(child: panel),
-              ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (error != null) ...[
+            InlineAlert(
+              severity: InlineAlertSeverity.error,
+              text: error,
+              maxLines: 2,
             ),
+            const SizedBox(height: BondSpacing.s12),
+          ],
+          Expanded(child: panel),
+          if (replyKey != null) ...[
+            const SizedBox(height: BondSpacing.s12),
+            _replyTargetPicker(replyKey, subjects),
+            const SizedBox(height: BondSpacing.s8),
+            _composer(replyKey),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// Which member thread a storyline's composer answers.
+  ///
+  /// The user's pick when they made one and it is still a member; otherwise the
+  /// thread the newest message in the merged timeline belongs to, which is
+  /// nearly always the one that is actually waiting on an answer.
+  String? _replyTargetFor(
+    List<Message> messages,
+    Map<String, String> keyByMessageId,
+    Map<String, String> subjectByKey,
+  ) {
+    final picked = _storylineReplyKey;
+    if (picked != null && subjectByKey.containsKey(picked)) return picked;
+    for (final message in messages.reversed) {
+      final key = keyByMessageId[message.id];
+      if (key != null && subjectByKey.containsKey(key)) return key;
+    }
+    return subjectByKey.keys.isEmpty ? null : subjectByKey.keys.first;
+  }
+
+  Widget _replyTargetPicker(String selected, Map<String, String> subjects) {
+    return Row(
+      children: [
+        Text('Reply to', style: BondType.caption),
+        const SizedBox(width: BondSpacing.s8),
+        Expanded(
+          child: DropdownButton<String>(
+            value: selected,
+            isExpanded: true,
+            underline: const SizedBox.shrink(),
+            items: [
+              for (final entry in subjects.entries)
+                DropdownMenuItem<String>(
+                  value: entry.key,
+                  child: Text(
+                    entry.value.isEmpty ? '(no subject)' : entry.value,
+                    style: BondType.small,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+            ],
+            onChanged: (key) {
+              if (key == null) return;
+              setState(() => _storylineReplyKey = key);
+            },
+          ),
+        ),
+      ],
     );
   }
 
@@ -671,23 +755,104 @@ class _InboxScreenState extends ConsumerState<InboxScreen> {
       onKeepInInbox: () => _keepThread(selected.source, selected.id),
     );
 
+    // The composer sits OUTSIDE the panel, in this column: the panel renders a
+    // transcript and knows nothing about drafts or sending, and it stays that
+    // way.
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
-      child: error == null
-          ? panel
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                InlineAlert(
-                  severity: InlineAlertSeverity.error,
-                  text: error,
-                  maxLines: 2,
-                ),
-                const SizedBox(height: BondSpacing.s12),
-                Expanded(child: panel),
-              ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (error != null) ...[
+            InlineAlert(
+              severity: InlineAlertSeverity.error,
+              text: error,
+              maxLines: 2,
             ),
+            const SizedBox(height: BondSpacing.s12),
+          ],
+          Expanded(child: panel),
+          const SizedBox(height: BondSpacing.s12),
+          _composer(selected.id),
+        ],
+      ),
     );
+  }
+
+  // ── the reply box ──────────────────────────────────────────────────────
+
+  /// What the provenance caption says above an untouched suggestion.
+  ///
+  /// A CONSTANT, and knowingly less specific than it could be. The `drafts`
+  /// table stores the model's evidence sentence but no inventory of what went
+  /// into the prompt, so a line naming "2 past emails with Eric" would be
+  /// assembled at render time out of guesses. The evidence sentence — which IS
+  /// what the model said it was doing — rides along as the tooltip instead.
+  static const String _provenance =
+      '✨ Suggested reply — drafted from this thread and your past mail';
+
+  /// One conversation's reply box.
+  ///
+  /// Every argument that can reach a send is a callback the user's own click
+  /// invokes. Nothing on this path runs on a timer or on a state change.
+  Widget _composer(String conversationKey) {
+    final draft = ref.watch(draftProvider(conversationKey));
+    final notifier = ref.read(draftProvider(conversationKey).notifier);
+
+    final composer = Composer(
+      // Keyed on the conversation so switching threads builds a fresh field
+      // rather than carrying one thread's typed text into another's.
+      key: ValueKey('composer-$conversationKey'),
+      suggestedBody: draft.body,
+      provenance: _provenance,
+      generating: draft.generating,
+      sending: draft.sending,
+      capability: draft.capability,
+      onSend: (body) => _send(conversationKey, body),
+      onGenerate: notifier.generate,
+      onDismiss: notifier.dismiss,
+      onEdited: notifier.markEdited,
+    );
+
+    final evidence = draft.evidence;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (draft.error != null) ...[
+          InlineAlert(
+            severity: InlineAlertSeverity.error,
+            text: draft.error!,
+            maxLines: 2,
+          ),
+          const SizedBox(height: BondSpacing.s8),
+        ],
+        if (evidence == null)
+          composer
+        else
+          Tooltip(message: evidence, child: composer),
+      ],
+    );
+  }
+
+  /// The one place a click becomes a send. It says what happened, including
+  /// when what happened was a copy.
+  Future<void> _send(String conversationKey, String body) async {
+    final outcome =
+        await ref.read(draftProvider(conversationKey).notifier).send(body);
+    if (!mounted) return;
+    switch (outcome) {
+      case SendOutcome.sent:
+        _toast('Reply sent.');
+      case SendOutcome.savedToOutlook:
+        _toast('Saved to your Outlook drafts.');
+      case SendOutcome.copied:
+        _toast('Copied. Paste it into your mail app to send.');
+      case SendOutcome.failed:
+        // The reason is already on the inline alert above the composer, where
+        // it stays put rather than timing out under the user.
+        break;
+    }
   }
 
   Widget _overview(List<Conversation> conversations, String? loadError) {

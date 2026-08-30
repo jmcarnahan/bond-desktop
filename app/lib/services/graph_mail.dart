@@ -129,6 +129,79 @@ class GraphMail {
     return _decodeObject(response);
   }
 
+  // ── Drafts and sending ───────────────────────────────────────────────
+  //
+  // Three calls, in the order the send flow makes them: create the reply
+  // shell, fill in its body, send it. Graph builds the reply itself, which is
+  // the whole reason it is done this way — the recipients, the subject, the
+  // In-Reply-To and References headers and the quoted thread all come from the
+  // message being replied to, and none of them are this app's to reconstruct.
+
+  /// Creates a draft reply to [messageId] in the user's Drafts folder.
+  ///
+  /// The response carries the fields the caller needs: `id` to fill in and
+  /// send, `webLink` to hand to Outlook when this app may only save drafts.
+  ///
+  /// The `Prefer: outlook.timezone` header sets the zone Graph renders the
+  /// quoted thread's timestamps in. Graph accepts Windows names
+  /// ("Pacific Standard Time") and IANA names ("America/Los_Angeles"); macOS's
+  /// [DateTime.timeZoneName] hands back an abbreviation like `PST`, which Graph
+  /// generally accepts too. When it does not, the call is retried once WITHOUT
+  /// the header: a draft whose quoted timestamps are in UTC is worth far more
+  /// than no draft at all.
+  Future<Map<String, dynamic>> createReplyDraft(String messageId) async {
+    final uri = Uri.parse(
+      '$_base/me/messages/${Uri.encodeComponent(messageId)}/createReply',
+    );
+
+    var response = await _request('POST', uri, headers: _preferTimeZone());
+    if (response.statusCode == 400) {
+      response = await _request('POST', uri);
+    }
+
+    if (response.statusCode != 200 && response.statusCode != 201) {
+      throw _describe(response, 'Could not start a reply in Microsoft Graph');
+    }
+    return _decodeObject(response);
+  }
+
+  /// Replaces a draft's body with [text].
+  ///
+  /// Plain text, always: the composer is a plain-text field, and sending its
+  /// contents as HTML would turn every `<` a person typed into markup.
+  Future<void> updateDraftBody(String draftId, String text) async {
+    final response = await _request(
+      'PATCH',
+      Uri.parse('$_base/me/messages/${Uri.encodeComponent(draftId)}'),
+      jsonBody: {
+        'body': {'contentType': 'text', 'content': text},
+      },
+    );
+    if (response.statusCode != 200) {
+      throw _describe(response, 'Could not save the draft to Microsoft Graph');
+    }
+  }
+
+  /// Sends an existing draft. Graph answers 202 with no body.
+  ///
+  /// Nothing in this app calls this except a Send button the user pressed.
+  Future<void> sendDraft(String draftId) async {
+    final response = await _request(
+      'POST',
+      Uri.parse('$_base/me/messages/${Uri.encodeComponent(draftId)}/send'),
+    );
+    if (response.statusCode != 202 && response.statusCode != 200) {
+      throw _describe(response, 'Microsoft Graph could not send the reply');
+    }
+  }
+
+  /// The local zone, as a `Prefer` header. Rebuilt per call rather than held
+  /// as a constant: a laptop that crosses a time zone should not keep quoting
+  /// timestamps in the one it left.
+  static Map<String, String> _preferTimeZone() => {
+        'Prefer': 'outlook.timezone="${DateTime.now().timeZoneName}"',
+      };
+
   /// Built by hand rather than through `queryParameters`, which encodes a
   /// space as `+`. Graph's OData parser wants `%20` in a `$filter`.
   Uri _deltaUri(String folder, String? minReceivedIso) {
@@ -148,21 +221,42 @@ class GraphMail {
   Future<http.Response> _send(
     Uri uri, {
     Map<String, String> headers = const {},
+  }) =>
+      _request('GET', uri, headers: headers);
+
+  /// One authenticated request of any method, retrying at most once for a
+  /// throttle and once for a 401.
+  ///
+  /// [jsonBody] is encoded and sent with the JSON content type; omitting it
+  /// sends no body at all, which is what `/send` and `/createReply` want —
+  /// both take their entire input from the URL.
+  Future<http.Response> _request(
+    String method,
+    Uri uri, {
+    Map<String, String> headers = const {},
+    Object? jsonBody,
   }) async {
     var retriedThrottle = false;
     var retriedAuth = false;
+    final body = jsonBody == null ? null : jsonEncode(jsonBody);
 
     while (true) {
       // Outside the try: an AuthException from here is not a transport
       // failure and must reach the caller as itself.
       final token = await _auth.getValidAccessToken();
+      final sent = {
+        'Authorization': 'Bearer $token',
+        if (body != null) 'Content-Type': 'application/json',
+        ...headers,
+      };
 
       final http.Response response;
       try {
-        response = await _http.get(uri, headers: {
-          'Authorization': 'Bearer $token',
-          ...headers,
-        });
+        response = switch (method) {
+          'POST' => await _http.post(uri, headers: sent, body: body),
+          'PATCH' => await _http.patch(uri, headers: sent, body: body),
+          _ => await _http.get(uri, headers: sent),
+        };
       } on http.ClientException catch (e) {
         throw GraphMailException('Could not reach Microsoft Graph: ${e.message}');
       } on SocketException catch (e) {

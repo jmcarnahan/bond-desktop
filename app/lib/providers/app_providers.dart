@@ -4,6 +4,7 @@ import 'package:sqlite3/sqlite3.dart';
 import '../data/message_store.dart';
 import '../services/ai_worker.dart';
 import '../services/attention_service.dart';
+import '../services/draft_handler.dart';
 import '../services/extract_handler.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
@@ -103,6 +104,13 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // around.
       StorylineAssignHandler(storylines),
       StorylineSweepHandler(storylines),
+      // Last, and after both storyline passes: a draft reads the storyline
+      // summary as background, so drafting before the sweep has run would
+      // write the one reply for this thread without it.
+      DraftHandler(
+        ref.watch(messageStoreProvider),
+        ref.watch(llmClientProvider),
+      ),
     ],
   );
   ref.onDispose(worker.dispose);

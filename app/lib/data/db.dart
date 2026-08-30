@@ -183,4 +183,26 @@ CREATE TABLE IF NOT EXISTS app_prefs (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 ) STRICT;
+-- One draft per conversation, and the message it answers.
+--
+-- `reply_to_message_id` is what makes a draft falsifiable: a reply written
+-- against a message that is no longer the newest inbound one is stale, and the
+-- sync deletes it rather than letting the user send an answer to the
+-- second-to-last thing that was said.
+--
+-- `graph_draft_id` / `web_link` are null until the draft has been pushed to
+-- Outlook, which only happens on the user's own click.
+CREATE TABLE IF NOT EXISTS drafts (
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  reply_to_message_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  evidence TEXT,
+  status TEXT NOT NULL DEFAULT 'suggested',
+  graph_draft_id TEXT,
+  web_link TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, conversation_key)
+) STRICT;
 ''';

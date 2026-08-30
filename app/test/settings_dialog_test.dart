@@ -17,6 +17,8 @@ void main() {
     String aboutMe = '',
     required void Function(double) onThresholdChanged,
     required void Function(String) onAboutMeChanged,
+    Future<bool> Function(String)? hasScope,
+    VoidCallback? onSignInAgain,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -31,6 +33,8 @@ void main() {
                 aboutMe: aboutMe,
                 onThresholdChanged: onThresholdChanged,
                 onAboutMeChanged: onAboutMeChanged,
+                hasScope: hasScope,
+                onSignInAgain: onSignInAgain,
               ),
             ),
             child: const Text('open'),
@@ -163,5 +167,97 @@ void main() {
     expect(store.getPref(aboutMeKey), 'I am a loan officer.');
     expect(double.parse(store.getPref(attentionThresholdKey)!), 1.0);
     expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
+  });
+
+  group('Microsoft permissions', () {
+    testWidgets('the section is absent when no auth is wired', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+
+      expect(find.text('Microsoft permissions'), findsNothing);
+    });
+
+    testWidgets('a full grant ticks all three and offers no sign-in',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        hasScope: (_) async => true,
+        onSignInAgain: () {},
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Send mail'), findsOneWidget);
+      expect(find.text('Save drafts'), findsOneWidget);
+      expect(find.text('Teams chats'), findsOneWidget);
+      expect(find.byIcon(Icons.check), findsNWidgets(3));
+      expect(find.byIcon(Icons.close), findsNothing);
+      // A tenant that granted everything has nothing to be nagged about.
+      expect(find.text('Sign in again to enable'), findsNothing);
+    });
+
+    testWidgets('a degraded grant crosses what is missing and offers a re-sign',
+        (tester) async {
+      final asked = <String>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        hasScope: (scope) async {
+          asked.add(scope);
+          return scope == 'mail.readwrite';
+        },
+        onSignInAgain: () {},
+      );
+      await tester.pumpAndSettle();
+
+      expect(asked, ['mail.send', 'mail.readwrite', 'chat.read']);
+      expect(find.byIcon(Icons.check), findsOneWidget);
+      expect(find.byIcon(Icons.close), findsNWidgets(2));
+      expect(find.text('Sign in again to enable'), findsOneWidget);
+    });
+
+    testWidgets('the sign-in offer fires its callback', (tester) async {
+      var asked = 0;
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        hasScope: (_) async => false,
+        onSignInAgain: () => asked++,
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Sign in again to enable'));
+      await tester.pumpAndSettle();
+
+      expect(asked, 1);
+    });
+
+    testWidgets('the keychain is read once, not once per rebuild',
+        (tester) async {
+      // A FutureBuilder handed a future built inside build re-runs the whole
+      // read on every rebuild — including the ones the slider causes.
+      var reads = 0;
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        hasScope: (_) async {
+          reads++;
+          return true;
+        },
+        onSignInAgain: () {},
+      );
+      await tester.pumpAndSettle();
+      await tester.drag(find.byType(Slider), const Offset(-100, 0));
+      await tester.pumpAndSettle();
+
+      expect(reads, 3, reason: 'three scopes, asked once each');
+    });
   });
 }
