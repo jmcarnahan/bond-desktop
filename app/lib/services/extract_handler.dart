@@ -39,6 +39,20 @@ class ExtractHandler implements WorkHandler {
     // and nothing wrong — the item is done, not failed.
     if (row == null) return;
 
+    // Queued, then GATED before the worker reached it. Extraction is enqueued
+    // at sync time, while every fresh message is still `pending`; triage runs
+    // first and flips newsletters, no-reply senders and auto-generated mail to
+    // `skipped`. Honouring that verdict here is what keeps a newsletter from
+    // costing a model call, growing an embedding, and — since one sender's
+    // newsletters are all alike — clustering into a junk storyline
+    // suggestion. Teams rows are the exception: they are born `skipped`
+    // (`teams_source`) because triage is email-only, not because anything
+    // judged them worthless.
+    if (row['triage_status'] == 'skipped' &&
+        row['gate_reason'] != 'teams_source') {
+      return;
+    }
+
     final result = await runTask(
       _client,
       const ExtractTask(),

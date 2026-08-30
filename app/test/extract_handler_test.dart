@@ -145,6 +145,56 @@ void main() {
       handler.run({'task_kind': 'extract', 'source': 'email', 'entity_id': id});
 
   group('extraction', () {
+    test('a message triage gated after enqueue costs no model call', () async {
+      // The race this pins: extraction is enqueued at sync time while the
+      // message is still `pending`; triage then gates it. The handler must
+      // honour the verdict, or every newsletter gets an embedding and the
+      // sweep clusters them into junk storyline suggestions.
+      seedMessage();
+      seedConversation();
+      store.writeTriage('email', 'm1',
+          status: 'skipped', gateReason: 'newsletter');
+      final llm = FakeLlm([answer()]);
+      final embeddings = FakeEmbeddings();
+
+      await runOne(ExtractHandler(store, llm, embeddings.client));
+
+      expect(llm.userMessages, isEmpty, reason: 'gated mail is not extracted');
+      expect(store.getExtraction('email', 'm1'), isNull);
+      expect(embeddings.inputs, isEmpty);
+    });
+
+    test('a teams row is skipped-by-birth, not gated — it still extracts',
+        () async {
+      store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 't1',
+        'conversation_key': 'chat-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'from_address': 'teams:u-1',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'Legal wants a look at the DPA.',
+        'triage_status': 'skipped',
+        'gate_reason': 'teams_source',
+      });
+      store.upsertConversation({
+        'source': 'teams',
+        'conversation_key': 'chat-1',
+        'subject': 'Acme renewal',
+        'state': 'needs_reply',
+        'last_message_at': '2026-08-29T10:00:00Z',
+      });
+      final llm = FakeLlm([answer()]);
+
+      await ExtractHandler(store, llm, FakeEmbeddings().client).run(
+        {'task_kind': 'extract', 'source': 'teams', 'entity_id': 't1'},
+      );
+
+      expect(llm.userMessages, hasLength(1));
+      expect(store.getExtraction('teams', 't1'), isNotNull);
+    });
+
     test('stores the model answer as JSON', () async {
       seedMessage();
       final llm = FakeLlm([answer()]);
