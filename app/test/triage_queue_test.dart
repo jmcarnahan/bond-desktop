@@ -31,6 +31,7 @@ class FakeLlm extends LlmClient {
     required Map<String, dynamic> schema,
     String schemaName = 'result',
     int maxTokens = 512,
+    double temperature = 0.2,
     bool think = false,
   }) async {
     userMessages.add(user);
@@ -738,6 +739,7 @@ class _InspectingLlm extends FakeLlm {
     required Map<String, dynamic> schema,
     String schemaName = 'result',
     int maxTokens = 512,
+    double temperature = 0.2,
     bool think = false,
   }) {
     onCall();
@@ -747,6 +749,7 @@ class _InspectingLlm extends FakeLlm {
       schema: schema,
       schemaName: schemaName,
       maxTokens: maxTokens,
+      temperature: temperature,
       think: think,
     );
   }

@@ -19,9 +19,17 @@ WAIT_TIMEOUT ?= 120
 # Total seconds `make setup` waits for the first-run ~19GB download + model load.
 SETUP_WAIT   ?= 1800
 
-# Where llama-server's -hf flag parks the weights. Hardcodes the repo half of
-# MODEL_HF (the part before the ':') — keep it in sync if MODEL_HF changes.
-MODEL_CACHE  := $(HOME)/.cache/huggingface/hub/models--ggml-org--Qwen3.8-27B-GGUF
+# The second server: a 300M embedding model the app uses to cluster
+# conversations. Its own llama-server on its own port, because --embeddings is
+# a whole-server mode — one process cannot serve chat completions and
+# embeddings at once. The app degrades quietly when it is not running.
+EMBED_PORT   ?= 8081
+EMBED_HF     ?= ggml-org/embeddinggemma-300M-GGUF
+
+# Where llama-server's -hf flag parks the weights: the repo half of MODEL_HF
+# (everything before the ':'), with '/' turned into '--' the way huggingface's
+# cache names its directories.
+MODEL_CACHE  := $(HOME)/.cache/huggingface/hub/models--$(subst /,--,$(word 1,$(subst :, ,$(MODEL_HF))))
 
 APP_DIR := app
 # Overridable because flutter is often absent from make's PATH even when the
@@ -38,7 +46,8 @@ RESET  := \033[0m
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
-        setup verify clean-model _wait-model \
+        setup verify clean-model _wait-model _wait-embed \
+        embed embed-stop \
         app-install app-run app-test app-analyze app-build
 
 help:
@@ -47,8 +56,10 @@ help:
 	@printf "  make install      → brew install llama.cpp + dart pub get in agent/\n"
 	@printf "  make model        → start llama-server :$(MODEL_PORT) ($(MODEL_HF))\n"
 	@printf "  make stop         → stop the model server on :$(MODEL_PORT)\n"
-	@printf "  make status       → is the model up? [up]/[down] + pid\n"
-	@printf "  make logs         → tail $(LOG_DIR)/model.log\n"
+	@printf "  make embed        → start the embedding server :$(EMBED_PORT) ($(EMBED_HF))\n"
+	@printf "  make embed-stop   → stop the embedding server on :$(EMBED_PORT)\n"
+	@printf "  make status       → are the servers up? [up]/[down] + pid\n"
+	@printf "  make logs         → tail $(LOG_DIR)/model-$(MODEL_PORT).log\n"
 	@printf "  make smoke        → one chat completion against :$(MODEL_PORT)\n"
 	@printf "  make smoke-tools  → prove the model emits OpenAI tool_calls\n"
 	@printf "  make chat         → interactive Dart agent (foreground)\n"
@@ -141,7 +152,7 @@ model:
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(MODEL_PORT)  ($(MODEL_HF), ctx $(CTX_SIZE))\n"; \
 	 nohup llama-server -hf $(MODEL_HF) --jinja -ngl 99 -c $(CTX_SIZE) --port $(MODEL_PORT) \
-	   > $(LOG_DIR)/model.log 2>&1 &
+	   > $(LOG_DIR)/model-$(MODEL_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-model
 
 # Port-based, and command-matched rather than cwd-matched: the binary lives
@@ -149,35 +160,22 @@ model:
 # its cwd mentions this checkout. Matching on "llama-server" is what keeps us
 # from killing a sibling stack that happens to hold :$(MODEL_PORT).
 #
-# The port is not enough on its own, though: on a first run llama-server
-# spends many minutes pulling ~19GB of weights BEFORE it opens the port, so a
-# purely port-based stop cannot cancel exactly the case a user most wants to
-# cancel. Hence the pgrep -x fallback below — reached only when nothing holds
-# :$(MODEL_PORT), so it can never pre-empt the foreign-process check.
+# STRICTLY the port, with no pgrep fallback: `make embed` runs a SECOND
+# llama-server on :$(EMBED_PORT), and a fallback that killed llama-server by
+# name would take the embedding server down every time someone stopped the
+# chat model. The case that costs us — cancelling a first run that is still
+# downloading and has not bound the port yet — is now a message rather than a
+# kill, because guessing which of two servers the user meant is worse than
+# telling them what to do.
 stop:
 	@pid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 if [ -z "$$pid" ]; then \
-	   dl=$$(pgrep -x llama-server 2>/dev/null | tr '\n' ' '); \
-	   if [ -z "$$dl" ]; then \
-	     printf "  $(RED)[down]$(RESET) nothing to stop on :$(MODEL_PORT)\n"; \
-	     exit 0; \
+	   printf "  $(RED)[down]$(RESET) nothing holds :$(MODEL_PORT)\n"; \
+	   if pgrep -x llama-server >/dev/null 2>&1; then \
+	     printf "    a llama-server is alive but has not bound it — either the\n"; \
+	     printf "    embedding server (make embed-stop) or a first run still\n"; \
+	     printf "    downloading (watch: make logs; kill it by pid to cancel)\n"; \
 	   fi; \
-	   for p in $$dl; do kill -TERM $$p 2>/dev/null || true; done; \
-	   for i in 1 2 3 4 5 6 7 8 9 10; do \
-	     alive=""; \
-	     for p in $$dl; do kill -0 $$p 2>/dev/null && alive="$$alive $$p"; done; \
-	     [ -z "$$alive" ] && break; \
-	     sleep 1; \
-	   done; \
-	   alive=""; \
-	   for p in $$dl; do kill -0 $$p 2>/dev/null && alive="$$alive $$p"; done; \
-	   if [ -n "$$alive" ]; then \
-	     printf "  $(RED)✗$(RESET) llama-server still alive after 10s (pid%s)\n" "$$alive"; \
-	     exit 1; \
-	   fi; \
-	   for p in $$dl; do \
-	     printf "  $(YELLOW)!$(RESET) stopped llama-server (pid %s) — it had not bound :$(MODEL_PORT) yet (downloading/loading)\n" "$$p"; \
-	   done; \
 	   exit 0; \
 	 fi; \
 	 cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
@@ -200,29 +198,96 @@ stop:
 	 fi; \
 	 printf "  $(GREEN)✓$(RESET) :$(MODEL_PORT) free\n"
 
+# The embedding server. Same port guard as `model:`, same split between the
+# launch line and the wait line so `make -n embed` stays a dry run.
+#
+# No --jinja and no -ngl: /v1/embeddings runs no chat template, and a 300M
+# model needs no persuading onto the GPU. --embeddings is what puts the server
+# in embedding mode, which is also why this cannot share the chat model's
+# process — one llama-server serves one mode.
+embed:
+	@pid=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -n "$$pid" ]; then \
+	   cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	   case "$$cmd" in \
+	     *llama-server*) exit 0 ;; \
+	     *) printf "  $(YELLOW)!$(RESET) :$(EMBED_PORT) is held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd"; \
+	        printf "    not ours to reuse — free it, or: make embed EMBED_PORT=<other>\n"; \
+	        exit 1 ;; \
+	   esac; \
+	 fi; \
+	 mkdir -p $(LOG_DIR); \
+	 printf "→ llama-server on :$(EMBED_PORT)  ($(EMBED_HF), embeddings)\n"; \
+	 nohup llama-server -hf $(EMBED_HF) --embeddings --port $(EMBED_PORT) \
+	   > $(LOG_DIR)/model-$(EMBED_PORT).log 2>&1 &
+	@$(MAKE) --no-print-directory _wait-embed
+
+# Port-based only, for the reason `stop:` is: killing by name would take the
+# chat model down with it.
+embed-stop:
+	@pid=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -z "$$pid" ]; then \
+	   printf "  $(RED)[down]$(RESET) nothing holds :$(EMBED_PORT)\n"; \
+	   exit 0; \
+	 fi; \
+	 cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	 case "$$cmd" in \
+	   *llama-server*) ;; \
+	   *) printf "  $(YELLOW)[skip]$(RESET) :$(EMBED_PORT) held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd" >&2; \
+	      exit 0 ;; \
+	 esac; \
+	 printf "  stopping llama-server :$(EMBED_PORT) (pid %s)\n" "$$pid"; \
+	 kill -TERM $$pid 2>/dev/null || true; \
+	 for i in 1 2 3 4 5 6 7 8 9 10; do \
+	   rem=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	   [ -z "$$rem" ] && break; \
+	   sleep 1; \
+	 done; \
+	 rem=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	 if [ -n "$$rem" ]; then \
+	   printf "  $(RED)✗$(RESET) :$(EMBED_PORT) still held after 10s (pid %s)\n" "$$rem"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) :$(EMBED_PORT) free\n"
+
 # pgrep -x, NOT `ps ax | grep llama-server`: this recipe's own /bin/sh -c
 # command line contains the literal string "llama-server" (in the printf
 # below), and ps shows that shell, so a full-command-line grep matches the
 # recipe that is running it — the "loading" warning then fires on every
 # `make status`, even with no server anywhere. -x matches the executable
 # name only, which is the thing we actually mean.
+#
+# The loading hint is reported only when NEITHER port is bound. With two
+# servers a live llama-server is no longer evidence that something is still
+# loading — it is usually just the other one.
 status:
 	@printf "$(BLUE)=== bond-desktop ===$(RESET)\n"
-	@pid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
-	 if [ -n "$$pid" ]; then \
-	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "model" "$(MODEL_PORT)" "$$pid"; \
+	@mpid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 epid=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -n "$$mpid" ]; then \
+	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "model" "$(MODEL_PORT)" "$$mpid"; \
 	 else \
 	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "model" "$(MODEL_PORT)"; \
+	 fi; \
+	 if [ -n "$$epid" ]; then \
+	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "embed" "$(EMBED_PORT)" "$$epid"; \
+	 else \
+	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "embed" "$(EMBED_PORT)"; \
+	 fi; \
+	 if [ -z "$$mpid" ] && [ -z "$$epid" ]; then \
 	   lpid=$$(pgrep -x llama-server 2>/dev/null | head -1); \
 	   if [ -n "$$lpid" ]; then \
 	     printf "  $(YELLOW)[..]$(RESET)   llama-server (pid %s) is loading/downloading — watch: make logs\n" "$$lpid"; \
 	   fi; \
 	 fi
 
+# The chat model's log. The embedding server writes its own,
+# $(LOG_DIR)/model-$(EMBED_PORT).log — tail that one directly when `make embed`
+# is the thing misbehaving.
 logs:
-	@test -f $(LOG_DIR)/model.log || { \
-	   printf "$(RED)✗$(RESET) no $(LOG_DIR)/model.log — run: make model\n"; exit 1; }
-	@tail -f $(LOG_DIR)/model.log
+	@test -f $(LOG_DIR)/model-$(MODEL_PORT).log || { \
+	   printf "$(RED)✗$(RESET) no $(LOG_DIR)/model-$(MODEL_PORT).log — run: make model\n"; exit 1; }
+	@tail -f $(LOG_DIR)/model-$(MODEL_PORT).log
 
 smoke:
 	@resp=$$(curl -sf -X POST http://localhost:$(MODEL_PORT)/v1/chat/completions \
@@ -251,8 +316,12 @@ clean:
 	@printf "removed $(LOG_DIR)\n"
 
 # ── $(APP_DIR)/ — the Flutter desktop inbox ────────────────────────────
-# Independent of the model server above: the app runs on fixtures and does
-# not talk to :$(MODEL_PORT) yet.
+# The app talks to BOTH servers above: :$(MODEL_PORT) for triage and
+# extraction, :$(EMBED_PORT) for conversation embeddings. Neither is required
+# to run it — with a server down the work queues simply park and retry on the
+# next sync — but `make model` and `make embed` are what make it do anything
+# intelligent. Override the URLs with --dart-define=LLAMA_URL=... /
+# --dart-define=EMBED_URL=... .
 
 # Dev-stage Microsoft auth: the shared Azure registration has no
 # public-client platform (and no one can reach the portal to add one), so
@@ -362,4 +431,22 @@ _wait-model:
 	 printf "    before it binds the port.\n"; \
 	 printf "    Watch it:   make logs\n"; \
 	 printf "    'make status' flips to [up] once loading finishes.\n"; \
+	 exit 1
+
+# The embedding model is ~600MB rather than ~19GB, so unlike _wait-model a
+# timeout here really is a failure worth reading the log over.
+_wait-embed:
+	@for i in $$(seq 1 $(WAIT_TIMEOUT)); do \
+	   pid=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	   if [ -n "$$pid" ]; then \
+	     printf "  $(GREEN)✓$(RESET) embed bound :$(EMBED_PORT) (pid $$pid)\n"; \
+	     exit 0; \
+	   fi; \
+	   sleep 1; \
+	 done; \
+	 printf "  $(YELLOW)!$(RESET) embed has not bound :$(EMBED_PORT) after $(WAIT_TIMEOUT)s\n"; \
+	 printf "    On the FIRST run it is downloading $(EMBED_HF)\n"; \
+	 printf "    (~600MB) — much smaller than the chat model, so give it a\n"; \
+	 printf "    moment and re-run. Otherwise the log has the reason:\n"; \
+	 printf "    tail -f $(LOG_DIR)/model-$(EMBED_PORT).log\n"; \
 	 exit 1

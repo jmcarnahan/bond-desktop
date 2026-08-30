@@ -28,12 +28,22 @@ abstract class JsonTask<T> {
 }
 
 /// Runs [task] over [input]. The only place the two halves meet.
-Future<T> runTask<T>(LlmClient client, JsonTask<T> task, Object input) async {
+///
+/// [temperature] is per call rather than per task: the same task can want a
+/// deterministic answer in a batch job and a slightly varied one behind a
+/// button, and the schema does not change either way.
+Future<T> runTask<T>(
+  LlmClient client,
+  JsonTask<T> task,
+  Object input, {
+  double temperature = 0.2,
+}) async {
   final json = await client.completeJson(
     system: task.systemPrompt,
     user: task.buildUserMessage(input),
     schema: task.schema,
     schemaName: task.schemaName,
+    temperature: temperature,
   );
   return task.validate(json);
 }

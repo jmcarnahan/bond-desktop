@@ -59,6 +59,17 @@ class SyncService implements MailSync {
   Future<void> syncNow() async {
     await _syncFolder('inbox', 'inbound');
     await _syncFolder('sentitems', 'outbound');
+
+    // After both drains, so the window it queues from is the mailbox as it
+    // stands rather than as it stood mid-sync. `OR IGNORE` on the work table
+    // makes this idempotent, which is what lets it run on every sync: new mail
+    // is queued, finished work stays finished, and a queue that a crash left
+    // short refills itself without anyone tracking that it did.
+    _store.enqueueExtractBacklog(
+      cap: firstRunTriageCap,
+      sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+      source: _source,
+    );
   }
 
   /// One folder, including the single permitted recovery from an expired

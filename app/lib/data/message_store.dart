@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:sqlite3/sqlite3.dart';
 
@@ -450,5 +451,254 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       'WHERE source = ? AND source_message_id = ?',
       args,
     );
+  }
+
+  // ── work queue ───────────────────────────────────────────────────────
+
+  /// Distinguishes "this argument was not passed" from "this argument was
+  /// passed as null" on the targeted upserts below, where the two mean
+  /// opposite things: leave the column alone, versus clear it.
+  static const Object _unset = Object();
+
+  /// Queues one unit of AI work. Idempotent on `(kind, source, entityId)`:
+  /// re-queueing something already pending, already running, or already done
+  /// changes nothing, which is what lets every caller enqueue freely rather
+  /// than track what it has enqueued before.
+  void enqueueWork(
+    String kind,
+    String source,
+    String entityId, {
+    String? payloadJson,
+  }) {
+    final now = _nowIso();
+    db.execute(
+      'INSERT OR IGNORE INTO work_items '
+      '(task_kind, source, entity_id, status, attempts, error, payload_json, '
+      'created_at, updated_at) '
+      "VALUES (?, ?, ?, 'pending', 0, NULL, ?, ?, ?)",
+      [kind, source, entityId, payloadJson, now, now],
+    );
+  }
+
+  /// Queues extraction for the newest [cap] inbound messages received since
+  /// [sinceIso], and returns how many rows that actually added.
+  ///
+  /// The ONLY enqueue path for extraction. It is idempotent — `OR IGNORE`
+  /// against the primary key means finished work stays finished and in-flight
+  /// work is not re-queued — so calling it after every sync both picks up new
+  /// mail and self-heals a queue that a crash or an old build left short.
+  ///
+  /// Messages that triage skipped (outbound, bulk senders, backlog) are
+  /// deliberately absent: extraction costs the same model time triage does,
+  /// and mail not worth classifying is not worth extracting facts from.
+  ///
+  /// Rows queued here carry the MESSAGE's `received_at` as their
+  /// `created_at`, so the worker's `created_at DESC` drain order means
+  /// newest mail first — the same promise triage makes. (One-off
+  /// [enqueueWork] rows stamp wall-clock time instead; for freshly synced
+  /// mail the two orderings agree.)
+  int enqueueExtractBacklog({
+    int cap = 150,
+    required String sinceIso,
+    String source = 'email',
+  }) {
+    final now = _nowIso();
+    db.execute(
+      '''
+INSERT OR IGNORE INTO work_items (
+  task_kind, source, entity_id, status, attempts, error, payload_json,
+  created_at, updated_at
+)
+SELECT 'extract', source, source_message_id, 'pending', 0, NULL, NULL,
+  COALESCE(received_at, ?), ?
+FROM messages
+WHERE source = ? AND direction = 'inbound'
+  AND triage_status IN ('pending', 'processing', 'triaged')
+  AND received_at >= ?
+ORDER BY received_at DESC
+LIMIT ?
+''',
+      [now, now, source, sinceIso, cap],
+    );
+    return db.updatedRows;
+  }
+
+  /// The next item of one [kind] for the worker.
+  ///
+  /// Newest first, like triage — and with `entity_id` behind it purely as a
+  /// tie-break, since a batch enqueue stamps every row it inserts with the
+  /// same `created_at` and an unordered LIMIT 1 would be free to hand the same
+  /// drain a different row on every call.
+  Map<String, Object?>? nextPendingWork(
+    String kind, {
+    List<String> sources = const ['email'],
+  }) {
+    if (sources.isEmpty) return null;
+    final result = db.select(
+      'SELECT * FROM work_items '
+      "WHERE task_kind = ? AND status = 'pending' "
+      'AND source IN (${_placeholders(sources.length)}) '
+      'ORDER BY created_at DESC, entity_id DESC LIMIT 1',
+      [kind, ...sources],
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first);
+  }
+
+  /// Records the outcome of one work item. Like [writeTriage], only the
+  /// fields this call carries are written, so claiming an item does not blank
+  /// the error a previous attempt left behind.
+  void writeWork(
+    String kind,
+    String source,
+    String entityId, {
+    required String status,
+    String? error,
+    int? attempts,
+  }) {
+    final sets = <String>['status = ?', 'updated_at = ?'];
+    final args = <Object?>[status, _nowIso()];
+
+    if (error != null) {
+      sets.add('error = ?');
+      args.add(error);
+    }
+    if (attempts != null) {
+      sets.add('attempts = ?');
+      args.add(attempts);
+    }
+
+    args.addAll([kind, source, entityId]);
+    db.execute(
+      'UPDATE work_items SET ${sets.join(', ')} '
+      'WHERE task_kind = ? AND source = ? AND entity_id = ?',
+      args,
+    );
+  }
+
+  /// `status` → count for one kind. Statuses with no rows are simply absent.
+  Map<String, int> workCounts(
+    String kind, {
+    List<String> sources = const ['email'],
+  }) {
+    if (sources.isEmpty) return const {};
+    final result = db.select(
+      'SELECT status, COUNT(*) AS n FROM work_items '
+      'WHERE task_kind = ? AND source IN (${_placeholders(sources.length)}) '
+      'GROUP BY status',
+      [kind, ...sources],
+    );
+    return {
+      for (final row in result)
+        (row['status'] as String? ?? 'pending'): (row['n'] as num?)?.toInt() ?? 0,
+    };
+  }
+
+  /// Frees every claim a previous run left behind, across every kind.
+  ///
+  /// `processing` is taken before the worker's first await and cleared when it
+  /// writes a result; nothing else clears it, so an item the app was working
+  /// on when it quit would sit claimed forever. Startup only — running this
+  /// while a worker holds a claim would hand its item to a second drain.
+  void resetInterruptedWork() {
+    db.execute(
+      "UPDATE work_items SET status = 'pending', updated_at = ? "
+      "WHERE status = 'processing'",
+      [_nowIso()],
+    );
+  }
+
+  // ── per-message AI output ────────────────────────────────────────────
+
+  /// Stores one message's extraction as JSON.
+  ///
+  /// A separate table rather than columns on `messages`: the shape of what the
+  /// model extracts is still moving, and a JSON blob absorbs a new field
+  /// without a migration. Nothing queries inside it.
+  void writeExtraction(
+    String source,
+    String sourceMessageId,
+    String extractionJson,
+  ) {
+    db.execute(
+      'INSERT INTO message_ai '
+      '(source, source_message_id, extraction_json, extracted_at) '
+      'VALUES (?, ?, ?, ?) '
+      'ON CONFLICT(source, source_message_id) DO UPDATE SET '
+      'extraction_json = excluded.extraction_json, '
+      'extracted_at = excluded.extracted_at',
+      [source, sourceMessageId, extractionJson, _nowIso()],
+    );
+  }
+
+  String? getExtraction(String source, String sourceMessageId) {
+    final result = db.select(
+      'SELECT extraction_json FROM message_ai '
+      'WHERE source = ? AND source_message_id = ?',
+      [source, sourceMessageId],
+    );
+    if (result.isEmpty) return null;
+    return result.first['extraction_json'] as String?;
+  }
+
+  // ── per-conversation AI state ────────────────────────────────────────
+
+  /// Writes only the AI columns this call actually names, inserting the row
+  /// first when the thread has none yet.
+  ///
+  /// Targeted for the same reason [updateConversationTriage] is: this table
+  /// will hold a bucket, a reason and an attention score written by a
+  /// different task on a different schedule, and an embedding write that
+  /// carried a whole row through would quietly reset all three.
+  ///
+  /// [embedding] takes a [Uint8List] to store, null to clear, and is left
+  /// alone when omitted. [embeddedHash] and [embedModel] are left alone when
+  /// null — there is no "clear the hash" case, since a row with an embedding
+  /// and no hash would re-embed on every pass.
+  void upsertConversationAi(
+    String source,
+    String conversationKey, {
+    Object? embedding = _unset,
+    String? embeddedHash,
+    String? embedModel,
+  }) {
+    final now = _nowIso();
+    db.execute(
+      'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
+      'VALUES (?, ?, ?) '
+      'ON CONFLICT(source, conversation_key) DO NOTHING',
+      [source, conversationKey, now],
+    );
+
+    final sets = <String>['updated_at = ?'];
+    final args = <Object?>[now];
+    if (!identical(embedding, _unset)) {
+      sets.add('embedding = ?');
+      args.add(embedding as Uint8List?);
+    }
+    if (embeddedHash != null) {
+      sets.add('embedded_hash = ?');
+      args.add(embeddedHash);
+    }
+    if (embedModel != null) {
+      sets.add('embed_model = ?');
+      args.add(embedModel);
+    }
+
+    args.addAll([source, conversationKey]);
+    db.execute(
+      'UPDATE conversation_ai SET ${sets.join(', ')} '
+      'WHERE source = ? AND conversation_key = ?',
+      args,
+    );
+  }
+
+  Map<String, Object?>? getConversationAi(String source, String conversationKey) {
+    final result = db.select(
+      'SELECT * FROM conversation_ai WHERE source = ? AND conversation_key = ?',
+      [source, conversationKey],
+    );
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first);
   }
 }

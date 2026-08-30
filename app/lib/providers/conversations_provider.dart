@@ -1,10 +1,11 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart' show immutable;
+import 'package:flutter/foundation.dart' show debugPrint, immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
 import '../models/message_models.dart';
+import '../services/ai_worker.dart';
 import '../services/graph_auth.dart';
 import '../services/sync_service.dart';
 import '../services/triage_queue.dart';
@@ -78,6 +79,10 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// kicks it and every result it lands reloads the list.
   final TriageQueue? _triage;
 
+  /// The AI queue, kicked after triage rather than beside it — see [load].
+  /// Nothing on screen listens to its progress yet.
+  final AiWorker? _aiWorker;
+
   StreamSubscription<TriageProgress>? _triageProgress;
   Timer? _triageReload;
 
@@ -88,8 +93,10 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     this._store,
     this._sync, {
     TriageQueue? triage,
+    AiWorker? aiWorker,
     Future<String?>? userAddress,
   })  : _triage = triage,
+        _aiWorker = aiWorker,
         super(const ConversationsInitial()) {
     final queue = triage;
     if (queue == null) return;
@@ -141,8 +148,26 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         // Started, never awaited: triage takes about seventeen seconds a
         // message, and the mail that just synced must render now. Results
         // arrive later through the progress stream.
+        //
+        // The AI queue is CHAINED behind triage rather than started beside it.
+        // Both are serial queues in front of the same single-threaded model
+        // server, so running them together would not finish either sooner — it
+        // would halve the speed of both and throw away the prompt cache
+        // between every pair of requests. Triage goes first because its output
+        // is what the user is looking at.
         final pump = _triage?.pump();
-        if (pump != null) unawaited(pump);
+        if (pump != null) {
+          unawaited(
+            pump.then<void>((_) => _aiWorker?.pump()).catchError(
+              // Both pumps handle their own failures; anything reaching here
+              // is a bug worth a trace, not worth crashing the zone over.
+              (Object e) => debugPrint('queue pump chain failed: $e'),
+            ),
+          );
+        } else {
+          final ai = _aiWorker?.pump();
+          if (ai != null) unawaited(ai);
+        }
       } on AuthException catch (e) {
         if (seq != _fetchSeq) return;
         // Only these two mean "sign in again". A generic AuthException is a
@@ -225,6 +250,7 @@ final conversationsProvider =
     ref.watch(messageStoreProvider),
     ref.watch(syncServiceProvider),
     triage: ref.watch(triageQueueProvider),
+    aiWorker: ref.watch(aiWorkerProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
     userAddress: ref.watch(graphAuthProvider).storedAccount.then(

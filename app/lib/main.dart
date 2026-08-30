@@ -18,10 +18,13 @@ Future<void> main() async {
   // launch failure, not something to discover three screens in.
   final db = await openAppDb();
 
-  // Anything the last run was triaging when it quit is still claimed. Clearing
-  // the claim here — before a screen exists to start a new drain — is what
-  // keeps a crash from stranding those messages permanently.
-  MessageStore(db).resetInterruptedTriage();
+  // Anything the last run was working on when it quit is still claimed —
+  // triage on the message row, everything else on the work queue. Clearing
+  // both here, before a screen exists to start a new drain, is what keeps a
+  // crash from stranding that work permanently.
+  MessageStore(db)
+    ..resetInterruptedTriage()
+    ..resetInterruptedWork();
 
   runApp(
     ProviderScope(

@@ -95,4 +95,37 @@ CREATE TABLE IF NOT EXISTS sync_state (
   synced_at TEXT,
   PRIMARY KEY (source, folder)
 ) STRICT;
+CREATE TABLE IF NOT EXISTS work_items (
+  task_kind TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'email',
+  entity_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  payload_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (task_kind, source, entity_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_work_pending ON work_items(task_kind, status, created_at DESC);
+CREATE TABLE IF NOT EXISTS message_ai (
+  source TEXT NOT NULL DEFAULT 'email',
+  source_message_id TEXT NOT NULL,
+  extraction_json TEXT,
+  extracted_at TEXT,
+  PRIMARY KEY (source, source_message_id)
+) STRICT;
+CREATE TABLE IF NOT EXISTS conversation_ai (
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  embedding BLOB,
+  embedded_hash TEXT,
+  embed_model TEXT,
+  bucket TEXT,
+  bucket_reason TEXT,
+  attention_score REAL,
+  snoozed_until TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, conversation_key)
+) STRICT;
 ''';

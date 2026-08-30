@@ -99,6 +99,10 @@ class LlmClient {
 
   /// A completion constrained to [schema].
   ///
+  /// [temperature] defaults to the same low-but-not-zero value free-text
+  /// completions use. A task whose answer should be reproducible — extraction,
+  /// where the same email must yield the same facts twice — passes 0.
+  ///
   /// This llama-server build converts the schema into a grammar and enforces
   /// it, which means a malformed schema fails the request outright with a 400
   /// rather than being ignored — that 400 is always a bug on this side, never
@@ -111,13 +115,14 @@ class LlmClient {
     required Map<String, dynamic> schema,
     String schemaName = 'result',
     int maxTokens = 512,
+    double temperature = 0.2,
     bool think = false,
   }) async {
     final body = _body(
       system: system,
       user: user,
       maxTokens: maxTokens,
-      temperature: 0.2,
+      temperature: temperature,
       think: think,
     );
     body['response_format'] = {
