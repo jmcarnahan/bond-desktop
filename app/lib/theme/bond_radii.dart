@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// BOND design tokens — corner radii. Mirrors Paper `--radius-*`.
+/// Bond design tokens — corner radii. Mirrors Paper `--radius-*`.
 abstract final class BondRadii {
   static const double sm = 6;
   static const double md = 10;
@@ -13,7 +13,7 @@ abstract final class BondRadii {
   static const BorderRadius fullAll = BorderRadius.all(Radius.circular(full));
 }
 
-/// BOND design tokens — shadows. Exactly two exist:
+/// Bond design tokens — shadows. Exactly two exist:
 ///
 /// - Cards rest at elevation 0 (border only).
 /// - [overlay] is for overlay-class surfaces (panels lifted above the page).

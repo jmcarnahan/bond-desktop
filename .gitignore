@@ -8,6 +8,7 @@ app/build/
 .env
 .env.*
 *.env
+local.mk
 
 # Claude Code session/config files
 .claude/

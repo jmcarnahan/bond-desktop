@@ -1,7 +1,7 @@
 # bond-desktop — local orchestration for the on-device model server.
 # Runs a llama.cpp OpenAI-compatible server (Qwen 3.8 27B, Q4_K_M) on
 # :8080 and drives the Dart agent in agent/ against it. Coexists with the
-# sibling stacks: the-crm (:8001 / :3001), bond-ai (:8000 / :8002) and
+# sibling stacks: a local CRM app (:8001 / :3001), bond-ai (:8000 / :8002) and
 # bond-mcps (:18000-18005). Nothing here starts or stops those.
 
 # These comments sit ABOVE their assignment, never trailing after the value:
@@ -325,11 +325,18 @@ clean:
 
 # Dev-stage Microsoft auth: the app registration's client id, tenant id, and
 # (because the shared Azure registration has no public-client platform, and
-# no one can reach the portal to add one) the client secret the-crm's
-# backend uses. All three are read from the-crm's .env at LAUNCH time and
-# injected as build defines; none is committed and none is echoed. A build
-# made this way carries the secret and must not be distributed.
-MS_ENV ?= $(HOME)/projects/the-crm/.env
+# no one can reach the portal to add one) the client secret its owning
+# backend uses. All three are read at LAUNCH time from a git-ignored
+# dotenv-style file and injected as build defines; none is committed and
+# none is echoed. A build made this way carries the secret and must not be
+# distributed.
+#
+# MS_ENV names that file — any file with MICROSOFT_CLIENT_ID,
+# MICROSOFT_TENANT_ID and MICROSOFT_CLIENT_SECRET lines. The default is a
+# .env next to this Makefile; a git-ignored local.mk may point it at
+# wherever those values already live.
+-include local.mk
+MS_ENV ?= $(CURDIR)/.env
 
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then

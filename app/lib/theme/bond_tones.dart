@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 
 import 'bond_colors.dart';
 
-/// BOND tones — the ONE central value→color mapping. Screens pass values;
+/// Bond tones — the ONE central value→color mapping. Screens pass values;
 /// only this file resolves them to colors. Feeds `BondChip` and any tinted
 /// indicator.
 ///
-/// Ported from the-crm's `ui/tokens/bond_tones.dart` with the CRM-specific
+/// Ported from a sibling CRM app's tone tokens with the CRM-specific
 /// resolvers (stage, contact type, loan status, chart series) dropped — this
 /// app has no pipeline to tint.
 enum BondTone {

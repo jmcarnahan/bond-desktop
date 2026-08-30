@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'bond_colors.dart';
 
-/// BOND design tokens — type scale. Mirrors the Paper `--text-*` tokens.
+/// Bond design tokens — type scale. Mirrors the Paper `--text-*` tokens.
 ///
 /// Rule of voice (design-plans/01-component-library.md): Fraunces for page
 /// titles, greetings, and headline numbers only — the moments the product

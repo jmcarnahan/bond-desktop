@@ -8,7 +8,7 @@ import 'package:flutter/foundation.dart' show immutable;
 /// render. Timestamps stay ISO [String]s — they are displayed and sorted,
 /// never arithmetic'd.
 ///
-/// Ported from the-crm's `data/models/conversation_models.dart`, minus the
+/// Ported from a sibling CRM app's conversation models, minus the
 /// CRM-only fields (campaign, relevance, suggestions, attachments).
 
 /// Decodes a JSON-encoded TEXT column into a list, tolerating null, empty

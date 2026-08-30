@@ -1,4 +1,4 @@
-/// BOND design tokens — barrel. Import this, not the individual files.
+/// Bond design tokens — barrel. Import this, not the individual files.
 library;
 
 export 'bond_colors.dart';

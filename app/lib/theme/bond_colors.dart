@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// BOND design tokens — colors. 1:1 with the Paper `--color-*` tokens
+/// Bond design tokens — colors. 1:1 with the Paper `--color-*` tokens
 /// (design-plans/00-overview.md) plus the Phase 0 expansion mandated by
 /// design-plans/23-evaluation.md §14 (blocking prerequisite for the
 /// no-raw-hex grep gate).

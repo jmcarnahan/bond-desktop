@@ -1,4 +1,4 @@
-/// BOND design tokens — spacing. The 4-based scale; off-grid paddings
+/// Bond design tokens — spacing. The 4-based scale; off-grid paddings
 /// (14/18/22) snap to this scale (23-evaluation.md decision 12).
 /// No raw px paddings in `presentation/`.
 abstract final class BondSpacing {

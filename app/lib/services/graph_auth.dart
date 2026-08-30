@@ -120,7 +120,7 @@ class _TokenResponse {
 class GraphAuth {
   // ── Azure app registration (public client) ────────────────────────────
   /// Arrives at BUILD time via --dart-define=MS_CLIENT_ID=… (`make app-run`
-  /// injects it from the-crm's .env, same as the client secret below).
+  /// injects it from the MS_ENV file, same as the client secret below).
   /// Empty means "not configured" — [signIn] refuses with a clear error
   /// rather than sending Entra a request it can only 400.
   static const String clientId = String.fromEnvironment('MS_CLIENT_ID');
@@ -132,8 +132,8 @@ class GraphAuth {
   /// Must match the portal's redirect URI byte for byte in BOTH the
   /// authorize and token requests — a trailing slash is a mismatch.
   ///
-  /// This is the-crm's registered redirect, borrowed because it is the one
-  /// URI the shared Azure app actually has (http://localhost:8400 is not
+  /// This is the shared registration's one existing redirect, borrowed
+  /// because it is the only URI the Azure app actually has (http://localhost:8400 is not
   /// registered — Entra answers AADSTS50011). The path is meaningless to the
   /// loopback listener, which answers every request on the port; only the
   /// byte-exact string matters to Entra. Once the portal gains a "Mobile and
@@ -143,19 +143,19 @@ class GraphAuth {
       'http://localhost:8001/connections/microsoft/callback';
 
   /// Fixed by the registration above. There is no fallback port: binding
-  /// anything else produces a redirect Entra will not accept. the-crm's
-  /// backend binds this same port when it is running, so the two cannot
-  /// sign in at the same time.
+  /// anything else produces a redirect Entra will not accept. The backend
+  /// that owns this registration binds the same port when it is running, so
+  /// the two cannot sign in at the same time.
   static const int redirectPort = 8001;
 
   /// Dev-stage escape hatch. This registration has no public-client platform
   /// and nobody on the team can currently reach the Azure portal to add one,
-  /// so the token exchange must authenticate the way the-crm's backend does:
+  /// so the token exchange must authenticate the way the owning backend does:
   /// with the shared registration's client secret (Entra accepts secret +
   /// PKCE together — a confidential client with PKCE is valid).
   ///
   /// The secret arrives at BUILD time via --dart-define=MS_CLIENT_SECRET=…
-  /// (`make app-run` injects it from the-crm's .env). It is never committed
+  /// (`make app-run` injects it from the MS_ENV file). It is never committed
   /// and never stored by this app — but it IS baked into the local binary,
   /// so a build made this way must not be distributed. Empty means "behave
   /// as a true public client", which is what this should return to the day
@@ -415,7 +415,7 @@ class GraphAuth {
       throw const AuthException(
         'Microsoft sign-in is not configured: build with '
         '--dart-define=MS_CLIENT_ID=… and --dart-define=MS_TENANT_ID=… '
-        "(`make app-run` injects both from the-crm's .env).",
+        '(`make app-run` injects both from the MS_ENV file).',
       );
     }
     final HttpServer server;
@@ -424,8 +424,8 @@ class GraphAuth {
     } on SocketException {
       throw const AuthException(
         'Port $redirectPort is in use, so sign-in cannot start. This port is '
-        'fixed by the Azure app registration — the-crm binds it too, so stop '
-        'the-crm before signing in here. Find the holder: '
+        'fixed by the Azure app registration — the backend that shares it '
+        'binds this port too; stop that app before signing in here. Find the holder: '
         'lsof -nP -iTCP:$redirectPort -sTCP:LISTEN',
       );
     }

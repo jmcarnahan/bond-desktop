@@ -5,7 +5,7 @@
 /// Graph: everything here is exercised by unit tests that construct
 /// snapshots directly.
 ///
-/// Ported from the-crm. Its asymmetry is deliberate and is the whole point
+/// Ported from a sibling CRM app. Its asymmetry is deliberate and is the whole point
 /// of the file — see [foldMessage].
 library;
 
