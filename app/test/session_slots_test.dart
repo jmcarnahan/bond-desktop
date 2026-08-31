@@ -82,7 +82,9 @@ class _FakeBondMcpClient implements BondMcpClient {
 }
 
 /// An [AuthSession] that answers from a constant, and records what it was
-/// asked to do. Enough for the gate, which only ever asks [isSignedIn].
+/// asked to do. Enough for the gate, which only asks [isSignedIn], and for the
+/// settings dialog's session block, which also asks [storedAccount] — a
+/// session with no account to name reports the state without a name.
 class _FakeSession implements AuthSession {
   _FakeSession({required this.signedIn});
 
@@ -301,7 +303,7 @@ void main() {
     });
   });
 
-  group('the gate follows the session', () {
+  group('the gate decides at launch', () {
     late Database db;
     late MessageStore store;
 
@@ -318,9 +320,9 @@ void main() {
     ///
     /// The session is faked rather than seeded into a keychain because the
     /// production stack constructs its own [SecureTokenStore] and there is no
-    /// seam to hand it another — and what this group is about is the GATE
-    /// noticing a new session, which a fake keyed on the URL reproduces
-    /// exactly. The slots themselves are pinned above, against a real store.
+    /// seam to hand it another — and what this group is about is WHEN the gate
+    /// asks, which a fake keyed on the URL reproduces exactly. The slots
+    /// themselves are pinned above, against a real store.
     Future<Map<String, _FakeSession>> pumpGate(
       WidgetTester tester, {
       required Set<String> signedInAt,
@@ -349,8 +351,33 @@ void main() {
       return built;
     }
 
-    testWidgets('switching servers re-asks, and switching back resumes',
+    testWidgets('a signed-in slot opens the inbox', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      store.setPref(mcpServerUrlKey, _serverA);
+
+      await pumpGate(tester, signedInAt: {'$backendModeMcp:$_serverA'});
+
+      expect(find.byType(InboxScreen), findsOneWidget);
+    });
+
+    testWidgets('an unsigned slot opens the sign-in screen', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      store.setPref(mcpServerUrlKey, _serverA);
+
+      await pumpGate(tester, signedInAt: const {});
+
+      expect(find.byType(SignInScreen), findsOneWidget);
+    });
+
+    testWidgets('a server change mid-session does not swap the screen',
         (tester) async {
+      // The gate used to listen to the session provider and re-decide on every
+      // preference change, which meant a click in Settings could replace the
+      // whole screen under the open dialog. Sessions are managed IN the dialog
+      // now; the screen behind it stays put, and the list under it is simply
+      // empty until the new server is signed in to.
       await tester.binding.setSurfaceSize(const Size(1400, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       store.setPref(mcpServerUrlKey, _serverA);
@@ -365,18 +392,8 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(
-        find.byType(SignInScreen),
-        findsOneWidget,
-        reason: 'the new server has no session, and the gate must say so now '
-            'rather than at the next launch',
-      );
-
-      container.read(appPrefsProvider.notifier).setMcpServerUrl(_serverA);
-      await tester.pump();
-      await tester.pump();
-
       expect(find.byType(InboxScreen), findsOneWidget);
+      expect(find.byType(SignInScreen), findsNothing);
       expect(
         sessions.values.every((s) => s.signOuts == 0),
         isTrue,
@@ -385,12 +402,13 @@ void main() {
       );
     });
 
-    testWidgets('a switch to an unsigned backend closes the open settings',
+    testWidgets('a switch to an unsigned backend leaves the settings open',
         (tester) async {
-      // The dialog is a route above the inbox, so nothing dismisses it when
-      // the gate swaps the inbox for a sign-in screen — it would sit there
-      // over the wrong screen, holding a ref whose element is gone, and
-      // answer the next question with a crash.
+      // The dialog is a route above the inbox, and it used to be popped from
+      // under the user because the gate was about to replace the screen it sat
+      // on. Nothing replaces anything now: the switch lands, the dialog says
+      // the new target has no session, and the Sign in… beside that is the way
+      // out.
       await tester.binding.setSurfaceSize(const Size(1400, 1000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       store.setPref(mcpServerUrlKey, _serverA);
@@ -404,8 +422,17 @@ void main() {
       await tester.tap(find.text('This Mac'));
       await tester.pumpAndSettle();
 
-      expect(find.byType(SettingsDialog), findsNothing);
-      expect(find.byType(SignInScreen), findsOneWidget);
+      expect(find.byType(SettingsDialog), findsOneWidget);
+      expect(find.text('Not signed in to this server.'), findsOneWidget);
+      expect(find.byType(InboxScreen), findsOneWidget);
+      expect(find.byType(SignInScreen), findsNothing);
+
+      // Closed by hand before the tree comes down: the dialog defers its
+      // about-me save out of the frame, and a tear-down that disposes the
+      // provider scope first would have that save land on a dead notifier.
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+
       expect(tester.takeException(), isNull);
     });
   });

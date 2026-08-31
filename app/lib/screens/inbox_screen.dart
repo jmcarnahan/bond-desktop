@@ -573,9 +573,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// the list as it changes — the whole point of the slider is watching Needs
   /// You grow and shrink under it — while the "about me" text is only saved.
   ///
-  /// "Sign in again" signs OUT and lets the gate above take over. That is the
-  /// only way a missing consent is ever fixed: a refresh cannot add a scope
-  /// nobody consented to, and the fresh sign-in asks for the whole list.
+  /// It is also where SESSIONS are managed. The dialog shows whether the
+  /// backend it is currently pointing at is signed in, and signs in and out of
+  /// it in place — the gate above never swaps the screen for a settings change,
+  /// so this is the only place that work can happen.
+  ///
+  /// "Sign in again" is kept wired for the SDK permissions table, where it
+  /// signs OUT and lets the gate take over. It is not rendered while the
+  /// session block is on screen — that block's Sign in… is the same action,
+  /// beside the state it fixes.
   Future<void> _openSettings() async {
     final prefs = ref.read(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
@@ -597,10 +603,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // dialog's re-ask lands on the session the switch just built.
         //
         // Every closure that touches `ref` starts with a mounted check. The
-        // dialog lives in the ROOT overlay and can outlive this screen —
-        // switching to a server with no session swaps the inbox out for the
-        // gate's sign-in screen underneath it — and a dead host must answer
-        // with nothing, never with "ref after dispose".
+        // dialog lives in the ROOT overlay and can outlive this screen — a
+        // sign-out from the rail behind it, for one — and a dead host must
+        // answer with nothing, never with "ref after dispose".
         hasScope: (scope) async {
           if (!mounted) return false;
           return ref.read(authSessionProvider).hasScope(scope);
@@ -621,6 +626,50 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Navigator.of(context).pop();
           _signOut();
         },
+        isTargetSignedIn: () async {
+          if (!mounted) return false;
+          return ref.read(authSessionProvider).isSignedIn;
+        },
+        targetAccountLabel: () async {
+          if (!mounted) return null;
+          final account = await ref.read(authSessionProvider).storedAccount;
+          return account?.mail ?? account?.displayName;
+        },
+        onSignIn: () async {
+          if (!mounted) return;
+          final account = await ref.read(authSessionProvider).signIn();
+          if (!mounted) return;
+          // Before anything syncs: if the rows in this file belong to a
+          // different person, the sign-in that just succeeded is the moment
+          // they stop being reachable. Two mailboxes must never be in the
+          // database at once, and after the first sync is too late.
+          final wiped = await ref.read(identityGuardProvider).adopt(account);
+          if (!mounted) return;
+          if (wiped) {
+            // The same list `SignInScreen._invalidateAfterWipe` drops, and
+            // duplicated for the same reason it is duplicated there: it is
+            // "everything holding mail rows in memory", and a shared helper
+            // would hide that from whichever screen gains a provider next.
+            // Keep them in step.
+            ref.invalidate(conversationsProvider);
+            ref.invalidate(storylinesProvider);
+            ref.invalidate(threadProvider);
+            ref.invalidate(draftProvider);
+            ref.invalidate(storylineTimelineProvider);
+          }
+          _reloadAfterBackendChange();
+        },
+        onSignOutOfServer: () async {
+          if (!mounted) return;
+          await ref.read(authSessionProvider).signOut();
+          if (!mounted) return;
+          // NO database wipe here, deliberately. Leaving one server is not
+          // "remove this account from this machine" — the rail's Sign out is,
+          // and it keeps its explicit wipe. If a different identity signs in
+          // next, the IdentityGuard wipes then, which is the moment the rows
+          // actually stop being this user's.
+          _reloadAfterBackendChange();
+        },
       ),
     );
   }
@@ -633,22 +682,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// mailbox either way, and asking the brand-new session for mail before the
   /// user has signed in to it would put an error where a list belongs.
   ///
-  /// And when the target server has no session, this screen is about to be
-  /// replaced by the gate's sign-in screen — so the settings dialog has to go
-  /// with it. A dialog that outlives its host keeps a ref to a disposed
-  /// element and answers every later question with a crash.
+  /// A target with no session is NOT a reason to take anything off screen: the
+  /// gate above decides at launch only, this screen stays where it is, and the
+  /// settings dialog reports "not signed in to this server" with a Sign in…
+  /// beside it. The list underneath is simply empty until that happens, which
+  /// is the truth about a server nobody has signed in to.
   void _reloadAfterBackendChange() {
-    // The previous switch may already have replaced this screen; a second
-    // change made from the still-open dialog then arrives on a dead host.
+    // The dialog outlives nothing here any more, but it can still be closed
+    // and reopened around an in-flight change; a dead host must answer with
+    // nothing rather than with "ref after dispose".
     if (!mounted) return;
     ref.read(conversationsProvider.notifier).load(syncFirst: false);
-    unawaited(ref.read(authSessionProvider).isSignedIn.then((signedIn) {
-      if (signedIn || !mounted) return;
-      // canPop, because the user may have closed it themselves while the
-      // answer was in flight — popping then would take the inbox down.
-      final navigator = Navigator.of(context, rootNavigator: true);
-      if (navigator.canPop()) navigator.pop();
-    }));
   }
 
   /// The platform's view of the workspace's Microsoft account.
@@ -656,9 +700,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// EVERY failure answers null rather than throwing: this is a report on a
   /// settings pane, and a server that cannot be reached is a row that says so,
   /// not an exception on its way to a banner. The catch-all covers the rest —
-  /// a switch to an unsigned server tears this screen down under the dialog,
-  /// and the ask that was already in flight must render "no answer" rather
-  /// than crash on a ref whose element is gone.
+  /// an ask still in flight when this screen goes away must render "no answer"
+  /// rather than crash on a ref whose element is gone.
   Future<Map<String, Object?>?> _connectionStatus() async {
     try {
       return await ref
