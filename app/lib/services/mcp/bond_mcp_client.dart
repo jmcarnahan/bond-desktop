@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import 'package:mcp_dart/mcp_dart.dart';
 
 /// The app's one door onto the MCP wire.
@@ -91,6 +91,49 @@ const Implementation _clientInfo = Implementation(
   name: 'bond-inbox',
   version: '1.0.0',
 );
+
+/// Reroutes `mcp_dart`'s own runtime logs, once per process.
+///
+/// The package writes straight to stderr by default, where a signed-out sync
+/// against an auth-walled server prints an ERROR per attempt — a wall of red
+/// for a condition every caller in this app already handles as transient.
+/// Rerouted instead of silenced: warnings and errors still reach the console
+/// through [debugPrint], but the package's debug/info chatter is dropped and
+/// a message identical to the one before it is folded, because the first
+/// occurrence tells the story and the fortieth is noise.
+bool _mcpLogHandlerInstalled = false;
+String? _lastMcpLogLine;
+bool _mcpLogFoldNoted = false;
+
+void _installMcpLogHandler() {
+  if (_mcpLogHandlerInstalled) return;
+  _mcpLogHandlerInstalled = true;
+  setMcpLogHandler(handleMcpLog);
+}
+
+@visibleForTesting
+void handleMcpLog(String loggerName, LogLevel level, String message) {
+  if (level == LogLevel.debug || level == LogLevel.info) return;
+  final line = '$loggerName/$message';
+  if (line == _lastMcpLogLine) {
+    if (!_mcpLogFoldNoted) {
+      _mcpLogFoldNoted = true;
+      debugPrint('mcp_dart: repeating — identical lines folded');
+    }
+    return;
+  }
+  _lastMcpLogLine = line;
+  _mcpLogFoldNoted = false;
+  debugPrint('mcp_dart ${level.name}: $message');
+}
+
+/// Undoes what [handleMcpLog] remembers, so one test's fold cannot leak into
+/// the next.
+@visibleForTesting
+void resetMcpLogFolding() {
+  _lastMcpLogLine = null;
+  _mcpLogFoldNoted = false;
+}
 
 /// The handshake dialect to speak.
 ///
@@ -197,7 +240,9 @@ class BondMcpHttpClient implements BondMcpClient {
     @visibleForTesting McpSessionFactory? sessionFactory,
   })  : baseUrl = _stripTrailingSlash(baseUrl),
         _getBearer = getBearer,
-        _sessionFactory = sessionFactory ?? _openStreamableHttpSession;
+        _sessionFactory = sessionFactory ?? _openStreamableHttpSession {
+    _installMcpLogHandler();
+  }
 
   static Uri _stripTrailingSlash(Uri url) {
     final text = url.toString();

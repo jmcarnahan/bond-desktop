@@ -1,8 +1,9 @@
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mcp_dart/mcp_dart.dart'
-    show McpError, McpProtocol, StaleSessionError;
+    show LogLevel, McpError, McpProtocol, StaleSessionError;
 
 /// The MCP wire client: how a tool result is read, and how a connection that
 /// the stateless server has forgotten is recovered.
@@ -117,6 +118,55 @@ void main() {
         () => decodeToolResult({'content': <dynamic>[], 'isError': false}),
         throwsA(isA<McpTransportException>()),
       );
+    });
+  });
+
+  group('the rerouted mcp_dart log stream', () {
+    List<String> captured() {
+      final lines = <String>[];
+      final previous = debugPrint;
+      debugPrint = (message, {wrapWidth}) {
+        if (message != null) lines.add(message);
+      };
+      addTearDown(() => debugPrint = previous);
+      resetMcpLogFolding();
+      return lines;
+    }
+
+    test('drops the package chatter, keeps warnings and errors', () {
+      final lines = captured();
+      handleMcpLog('mcp_dart.client', LogLevel.debug, 'initialized');
+      handleMcpLog('mcp_dart.client', LogLevel.info, 'ping handler set');
+      handleMcpLog('mcp_dart.client', LogLevel.error, 'it broke');
+      handleMcpLog('mcp_dart.client', LogLevel.warn, 'it wobbled');
+      expect(lines, ['mcp_dart error: it broke', 'mcp_dart warn: it wobbled']);
+    });
+
+    test('a repeating line is folded after one occurrence and one note', () {
+      // The wall-of-red scenario: the same 401 initialization failure on
+      // every sync attempt. The first tells the story; the rest are noise.
+      final lines = captured();
+      for (var i = 0; i < 5; i++) {
+        handleMcpLog('mcp_dart.client', LogLevel.error, 'HTTP 401 again');
+      }
+      expect(lines, [
+        'mcp_dart error: HTTP 401 again',
+        'mcp_dart: repeating — identical lines folded',
+      ]);
+    });
+
+    test('a different line resumes printing, and folding resets', () {
+      final lines = captured();
+      handleMcpLog('c', LogLevel.error, 'first');
+      handleMcpLog('c', LogLevel.error, 'first');
+      handleMcpLog('c', LogLevel.error, 'second');
+      handleMcpLog('c', LogLevel.error, 'first');
+      expect(lines, [
+        'mcp_dart error: first',
+        'mcp_dart: repeating — identical lines folded',
+        'mcp_dart error: second',
+        'mcp_dart error: first',
+      ]);
     });
   });
 
