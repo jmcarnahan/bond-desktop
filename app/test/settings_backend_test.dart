@@ -84,6 +84,71 @@ void main() {
       expect(picked, [backendModeSdk]);
     });
 
+    testWidgets('the toggle swaps the permissions in place, without closing',
+        (tester) async {
+      // The UX bug this pins: the dialog used to be closed on a switch (and
+      // kept a stale answer on reopen-before-the-fix), so a user never saw
+      // what their own click did. Now the switch re-asks the OTHER source
+      // and renders its answer in the still-open dialog.
+      var statusAsks = 0;
+      var scopeAsks = 0;
+      await open(
+        tester,
+        onBackendModeChanged: (_) {},
+        connectionStatus: () async {
+          statusAsks++;
+          return {'connected': true, 'scopes': <Object?>[]};
+        },
+        hasScope: (_) async {
+          scopeAsks++;
+          return true;
+        },
+      );
+
+      // Opened in MCP mode: the platform answered, the keychain was not
+      // asked at all.
+      expect(statusAsks, 1);
+      expect(scopeAsks, 0);
+      expect(find.byIcon(Icons.check), findsWidgets);
+
+      await tester.tap(find.text('This Mac'));
+      await tester.pumpAndSettle();
+
+      // Still open, and the static table answered from the keychain.
+      expect(find.text('Settings'), findsOneWidget);
+      expect(scopeAsks, SettingsDialog.permissions.length);
+      expect(find.byIcon(Icons.check), findsWidgets);
+
+      await tester.tap(find.text('Bond server').first);
+      await tester.pumpAndSettle();
+
+      // And back: the platform is asked FRESH, not remembered.
+      expect(statusAsks, 2);
+    });
+
+    testWidgets('picking another server re-asks the platform', (tester) async {
+      // A committed server is a new connection; rows answering for the one
+      // just left were the other half of the same UX bug.
+      var statusAsks = 0;
+      await open(
+        tester,
+        onBackendModeChanged: (_) {},
+        onMcpServerUrlChanged: (_) {},
+        connectionStatus: () async {
+          statusAsks++;
+          return {'connected': false};
+        },
+      );
+      expect(statusAsks, 1);
+
+      await tester.tap(find.text('Deployed'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Local').last);
+      await tester.pumpAndSettle();
+
+      expect(statusAsks, 2);
+    });
+
     testWidgets('the server picker is MCP-only', (tester) async {
       await open(
         tester,

@@ -116,20 +116,49 @@ class _SettingsDialogState extends State<SettingsDialog> {
   /// that the same drag lands on the same value twice.
   static const int _divisions = 10;
 
-  /// Asked once, at construction, rather than on every build: a [FutureBuilder]
-  /// handed a future built inside `build` re-runs the whole keychain read on
-  /// every rebuild, including the ones the slider causes as it is dragged.
-  late final Future<List<bool>>? _granted = widget.hasScope == null
-      ? null
-      : Future.wait([
-          for (final (_, scope, _) in SettingsDialog.permissions)
-            widget.hasScope!(scope),
-        ]);
+  /// Which backend the dialog is showing. Starts as what the host passed and
+  /// follows the toggle WITHOUT the dialog closing: the permissions below
+  /// answer for whichever backend is selected, and making the user close and
+  /// reopen to see the switch take was a bug, not a design.
+  late String _backendMode = widget.backendMode;
 
-  /// MCP mode's answer to the same question, and asked once for the same
-  /// reason: it is a round trip to the platform, not a local read.
-  late final Future<Map<String, Object?>?>? _connection =
-      widget.connectionStatus?.call();
+  /// Asked when the connection changes, never on every build: a
+  /// [FutureBuilder] handed a future built inside `build` re-runs the whole
+  /// read on every rebuild, including the ones the slider causes as it is
+  /// dragged. Refreshed by [_refreshPermissions] — the toggle, a preset pick,
+  /// and a committed custom URL all change what the answers below mean.
+  Future<List<bool>>? _granted;
+  Future<Map<String, Object?>?>? _connection;
+
+  @override
+  void initState() {
+    super.initState();
+    _askPermissions();
+  }
+
+  void _askPermissions() {
+    // Only the source the selected backend will DISPLAY is asked: querying
+    // the platform while showing This Mac would be network chatter, and
+    // vice versa a wasted keychain read. A host that wires only hasScope
+    // keeps the static table whatever the mode says — that is also what the
+    // pre-switch dialogs did.
+    final wantsPlatform =
+        _backendMode == backendModeMcp && widget.connectionStatus != null;
+    _connection = wantsPlatform ? widget.connectionStatus!.call() : null;
+    _granted = wantsPlatform || widget.hasScope == null
+        ? null
+        : Future.wait([
+            for (final (_, scope, _) in SettingsDialog.permissions)
+              widget.hasScope!(scope),
+          ]);
+  }
+
+  /// Re-asks whichever source answers the permissions section.
+  ///
+  /// Both closures read the CURRENT backend at call time, so calling this
+  /// right after a mode or server commit picks up the session the host just
+  /// rebuilt — which is the entire point.
+  void _refreshPermissions() => setState(_askPermissions);
 
   /// Which of the three server choices is showing. Held rather than derived on
   /// every build so that picking "Custom…" keeps the field open while the text
@@ -267,11 +296,19 @@ class _SettingsDialogState extends State<SettingsDialog> {
             ButtonSegment(value: backendModeMcp, label: Text('Bond server')),
             ButtonSegment(value: backendModeSdk, label: Text('This Mac')),
           ],
-          selected: {widget.backendMode},
-          onSelectionChanged: (selection) => onModeChanged(selection.first),
+          selected: {_backendMode},
+          // The dialog stays OPEN across the switch: the host swaps the
+          // session underneath, and the re-ask below renders the new
+          // backend's answers in place. Closing here made the user reopen
+          // to learn what their own click did.
+          onSelectionChanged: (selection) {
+            setState(() => _backendMode = selection.first);
+            onModeChanged(selection.first);
+            _refreshPermissions();
+          },
         ),
       ),
-      if (widget.backendMode == backendModeMcp) ..._serverPicker(),
+      if (_backendMode == backendModeMcp) ..._serverPicker(),
     ];
   }
 
@@ -326,6 +363,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
     if (value == _committedUrl) return;
     _committedUrl = value;
     widget.onMcpServerUrlChanged?.call(value);
+    // A committed server IS a new connection — the rows below must answer
+    // for it, not for the one just left.
+    _refreshPermissions();
   }
 
   /// What the WORKSPACE'S Microsoft account can do, as the platform reports it.
@@ -406,6 +446,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
   /// grant these is a tenant nobody in this dialog can argue with, so nagging
   /// about it every time the dialog opens would be noise.
   List<Widget> _permissionsSection() {
+    // Routed on the mode the dialog is SHOWING, not on which closures the
+    // host wired: with the toggle live inside the open dialog, both sources
+    // can be wired and the selected backend decides which one answers.
+    // [_askPermissions] holds the matching rule — exactly one future exists.
     if (_connection != null) return _platformPermissions();
     final granted = _granted;
     if (granted == null) return const [];

@@ -580,8 +580,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Future<void> _openSettings() async {
     final prefs = ref.read(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
-    final auth = ref.read(authSessionProvider);
-    final mcpMode = prefs.backendMode == backendModeMcp;
     await showDialog<void>(
       context: context,
       builder: (context) => SettingsDialog(
@@ -592,19 +590,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.read(conversationsProvider.notifier).load(syncFirst: false);
         },
         onAboutMeChanged: notifier.setAboutMe,
-        // Exactly one of these two answers the permissions section: in MCP mode
-        // the grant belongs to the workspace and the platform is the only thing
-        // that can report it.
-        hasScope: mcpMode ? null : auth.hasScope,
-        connectionStatus: mcpMode ? _connectionStatus : null,
-        onConnectMicrosoft:
-            mcpMode ? () => unawaited(_connectMicrosoft()) : null,
+        // BOTH sources are wired, and deliberately not bound to the mode the
+        // dialog OPENED in: the toggle now switches backends without closing
+        // the dialog, so which one answers is the dialog's live choice. Each
+        // closure reads the providers at CALL time — after a switch, the
+        // dialog's re-ask lands on the session the switch just built.
+        hasScope: (scope) => ref.read(authSessionProvider).hasScope(scope),
+        connectionStatus: _connectionStatus,
+        onConnectMicrosoft: () => unawaited(_connectMicrosoft()),
         backendMode: prefs.backendMode,
         mcpServerUrl: prefs.mcpServerUrl,
         onBackendModeChanged: (mode) {
-          // Closed first: the switch replaces the session, and every answer in
-          // the dialog was given by the one being left behind.
-          Navigator.of(context).pop();
           notifier.setBackendMode(mode);
           _reloadAfterBackendChange();
         },
