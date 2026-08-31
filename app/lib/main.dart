@@ -72,6 +72,15 @@ class _AuthGateState extends ConsumerState<AuthGate> {
 
   @override
   Widget build(BuildContext context) {
+    // The provider's identity IS the session's identity: switching the backend
+    // mode, or the MCP server URL, builds a new AuthSession here. The gate has
+    // to ask that new session who is signed in, immediately — otherwise it
+    // keeps showing the inbox of a session that no longer exists until the
+    // next launch. Listened from build because that is where ref.listen is
+    // legal on a ConsumerState.
+    ref.listen(authSessionProvider, (previous, next) {
+      if (!identical(previous, next)) _reload();
+    });
     return FutureBuilder<bool>(
       future: _signedIn,
       builder: (context, snapshot) {

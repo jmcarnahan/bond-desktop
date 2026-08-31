@@ -614,10 +614,18 @@ class GraphAuth implements AuthSession {
     return _TokenResponse(response.statusCode, _decodeJsonObject(response));
   }
 
+  /// Ends this session, and only this one.
+  ///
+  /// The three keys are deleted by name rather than with `deleteAll`: the
+  /// keychain is shared with the MCP sessions, which keep one slot per server,
+  /// and ending one session must not execute the others. A user signed out of
+  /// the direct-Graph backend still has whatever workspace sessions they had.
   Future<void> _clear() async {
     _accessToken = null;
     _accessTokenExpiry = null;
-    await _store.deleteAll();
+    await _store.write(_keyRefreshToken, null);
+    await _store.write(_keyGrantedScopes, null);
+    await _store.write(_keyAccountJson, null);
   }
 }
 

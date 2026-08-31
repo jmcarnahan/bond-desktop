@@ -68,6 +68,14 @@ final Uri _mcpUrl = Uri.parse('https://mcp.example.test/mcp');
 McpAuthSession _session(BondMcpClient client, TokenStore store) =>
     McpAuthSession(mcpUrl: _mcpUrl, mcpClient: client, store: store);
 
+/// The three key names [_mcpUrl]'s session reads and writes.
+///
+/// Read off a throwaway session rather than spelled out: sessions are stored
+/// per server now, under keys carrying a digest of the URL, and a test that
+/// hardcoded that digest would be pinning the derivation instead of the
+/// behaviour it is actually about.
+final McpAuthSession _keys = _session(_FakeBondMcpClient(const {}), _Tokens());
+
 void main() {
   group('resourceMetadataUrlFrom', () {
     test('reads the metadata URL out of the challenge', () {
@@ -106,12 +114,12 @@ void main() {
 
   group('isSignedIn', () {
     test('a stored refresh token is a session', () async {
-      final store = _Tokens()..values['mcp_refresh_token'] = 'rt';
+      final store = _Tokens()..values[_keys.refreshTokenKey] = 'rt';
       expect(await _session(_FakeBondMcpClient(const {}), store).isSignedIn, isTrue);
     });
 
     test('the local-mode flag is a session with no token at all', () async {
-      final store = _Tokens()..values['mcp_local_mode'] = '1';
+      final store = _Tokens()..values[_keys.localModeKey] = '1';
       expect(await _session(_FakeBondMcpClient(const {}), store).isSignedIn, isTrue);
     });
 
@@ -220,7 +228,7 @@ void main() {
       // first probe of the day can time out. Both halves are pinned together
       // deliberately: the pair is what decides whether the app stays where it
       // is or throws the user back to the sign-in screen.
-      final store = _Tokens()..values['mcp_refresh_token'] = 'rt';
+      final store = _Tokens()..values[_keys.refreshTokenKey] = 'rt';
       final auth = _session(
         _FakeBondMcpClient({
           'connection_status': const McpTransportException('timed out'),
@@ -230,7 +238,7 @@ void main() {
 
       expect(await auth.needsReconsent, isFalse);
       expect(await auth.isSignedIn, isTrue);
-      expect(store.values['mcp_refresh_token'], 'rt');
+      expect(store.values[_keys.refreshTokenKey], 'rt');
     });
 
     test('a failed probe is not cached as an answer', () async {
@@ -310,7 +318,7 @@ void main() {
   group('storedAccount', () {
     test('reads the stored summary', () async {
       final store = _Tokens()
-        ..values['mcp_account_json'] = jsonEncode(const AccountInfo(
+        ..values[_keys.accountJsonKey] = jsonEncode(const AccountInfo(
           displayName: 'Ada Lovelace',
           mail: 'ada@example.test',
         ).toJson());
@@ -322,7 +330,7 @@ void main() {
     });
 
     test('unreadable storage is null, not a crash', () async {
-      final store = _Tokens()..values['mcp_account_json'] = 'not json at all';
+      final store = _Tokens()..values[_keys.accountJsonKey] = 'not json at all';
       expect(
         await _session(_FakeBondMcpClient(const {}), store).storedAccount,
         isNull,
@@ -389,18 +397,18 @@ void main() {
   group('signOut', () {
     test('clears the MCP keys and leaves the Graph session alone', () async {
       final store = _Tokens()
-        ..values['mcp_refresh_token'] = 'mcp-rt'
-        ..values['mcp_account_json'] = '{"displayName":"Ada"}'
-        ..values['mcp_local_mode'] = '1'
+        ..values[_keys.refreshTokenKey] = 'mcp-rt'
+        ..values[_keys.accountJsonKey] = '{"displayName":"Ada"}'
+        ..values[_keys.localModeKey] = '1'
         ..values['refresh_token'] = 'graph-rt'
         ..values['granted_scopes'] = 'Mail.Read User.Read'
         ..values['account_json'] = '{"displayName":"Graph User"}';
 
       await _session(_FakeBondMcpClient(const {}), store).signOut();
 
-      expect(store.values.containsKey('mcp_refresh_token'), isFalse);
-      expect(store.values.containsKey('mcp_account_json'), isFalse);
-      expect(store.values.containsKey('mcp_local_mode'), isFalse);
+      expect(store.values.containsKey(_keys.refreshTokenKey), isFalse);
+      expect(store.values.containsKey(_keys.accountJsonKey), isFalse);
+      expect(store.values.containsKey(_keys.localModeKey), isFalse);
       expect(store.values['refresh_token'], 'graph-rt');
       expect(store.values['granted_scopes'], 'Mail.Read User.Read');
       expect(store.values['account_json'], '{"displayName":"Graph User"}');
@@ -408,7 +416,7 @@ void main() {
     });
 
     test('leaves the session signed out', () async {
-      final store = _Tokens()..values['mcp_refresh_token'] = 'mcp-rt';
+      final store = _Tokens()..values[_keys.refreshTokenKey] = 'mcp-rt';
       final auth = _session(_FakeBondMcpClient(const {}), store);
       await auth.signOut();
       expect(await auth.isSignedIn, isFalse);

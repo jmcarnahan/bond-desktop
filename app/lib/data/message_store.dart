@@ -6,6 +6,13 @@ import 'package:sqlite3/sqlite3.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 
+/// Which Microsoft identity the mail rows in this database belong to, stored in
+/// `app_prefs` alongside the settings but emphatically not one of them: it is
+/// ownership metadata, written by `IdentityGuard` and cleared by [wipeAll],
+/// never something a user sets. Declared here because [wipeAll] is what has to
+/// clear it, and this layer imports nothing above itself.
+const String dbOwnerKey = 'db_owner';
+
 /// Every SQL statement in the app except the schema itself lives here. Screens
 /// and providers call methods; they never build a query.
 ///
@@ -712,11 +719,15 @@ LIMIT ?
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` goes too. Its rows (attention threshold, volume slider) are
-  /// the previous user's calibration, and stale cursors hiding in a kept
-  /// table is exactly the class of bug this method exists to rule out —
-  /// everything or nothing is the only policy that stays correct as tables
-  /// are added.
+  /// `app_prefs` SURVIVES, with one exception. What this method isolates is
+  /// mail: which backend the app talks through, which server it points at, and
+  /// where the slider sits are the machine's configuration, not the previous
+  /// account's data, and wiping them turned every account switch into a
+  /// re-setup. The exception is [dbOwnerKey] — the identity claim on these
+  /// rows, which must not outlive the rows it describes, or the next sign-in
+  /// would read the wiped mailbox as still owned. Both callers depend on that:
+  /// sign-out leaves the database unclaimed, and `IdentityGuard` writes the new
+  /// owner immediately after.
   void wipeAll() {
     const tables = [
       'messages',
@@ -730,7 +741,6 @@ LIMIT ?
       'storyline_member_blocks',
       'feedback_events',
       'sender_prefs',
-      'app_prefs',
       'drafts',
     ];
     db.execute('BEGIN');
@@ -738,6 +748,7 @@ LIMIT ?
       for (final table in tables) {
         db.execute('DELETE FROM $table');
       }
+      db.execute('DELETE FROM app_prefs WHERE key = ?', [dbOwnerKey]);
       db.execute('COMMIT');
     } catch (_) {
       db.execute('ROLLBACK');

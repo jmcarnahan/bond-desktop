@@ -447,7 +447,7 @@ void main() {
   });
 
   group('wipeAll', () {
-    test('empties every table, cursors and prefs included', () {
+    test('empties every mail table, cursors included', () {
       store.upsertMessage(messageRow(id: 'm1'));
       store.setDeltaLink('inbox', 'cursor-1');
       store.setSenderPref('eric@x.com', 'later');
@@ -478,6 +478,24 @@ void main() {
       }
       // The cursor read path agrees: a fresh sign-in starts a first-run sync.
       expect(store.getDeltaLink('inbox', source: 'email'), isNull);
+    });
+
+    test('settings survive it, and the ownership claim does not', () {
+      // Deliberately changed from "everything goes": what a wipe isolates is
+      // MAIL. Which backend this machine talks through and which server it
+      // points at are the machine's configuration, and taking them out made
+      // every account switch a re-setup — while the identity claim on the rows
+      // must not outlive the rows, or the next sign-in reads a wiped mailbox
+      // as still owned and never claims it.
+      store.setPref('backend_mode', 'sdk');
+      store.setPref('about_me', 'An LO in Denver');
+      store.setPref(dbOwnerKey, 'ada@example.test');
+
+      store.wipeAll();
+
+      expect(store.getPref('backend_mode'), 'sdk');
+      expect(store.getPref('about_me'), 'An LO in Denver');
+      expect(store.getPref(dbOwnerKey), isNull);
     });
   });
 

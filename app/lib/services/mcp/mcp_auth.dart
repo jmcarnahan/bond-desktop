@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/foundation.dart' show immutable, visibleForTesting;
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
@@ -29,9 +30,13 @@ import 'bond_mcp_client.dart';
 /// having connected nothing yet.
 ///
 /// The JWT lives in memory only. Only the rotating refresh token, the account
-/// summary, and the local-mode flag are persisted — under `mcp_`-prefixed keys
-/// that no other session touches, so switching between this backend and the
-/// direct-Graph one does not sign the user out of the other.
+/// summary, and the local-mode flag are persisted — and they are persisted PER
+/// SERVER, under keys derived from the canonical MCP URL (see [slotFor]). A
+/// session belongs to the endpoint it was obtained from: pointing the app at
+/// another server switches to that server's own slot, which either holds a
+/// session or does not, and destroys neither. Switching between this backend
+/// and the direct-Graph one is likewise lossless — those keys are the SDK
+/// session's and are never touched here.
 
 /// One token exchange's outcome. `invalid_grant` has to be told apart from
 /// every other non-200: the first means the session is over, the rest are
@@ -87,11 +92,19 @@ class McpAuthSession implements AuthSession {
   /// Fixed by the redirect above — there is no fallback port.
   static const int redirectPort = 8766;
 
-  // Deliberately `mcp_`-prefixed and deliberately NOT the Graph session's
-  // keys. A user who switches backends must not be signed out of the other.
-  static const String _keyRefreshToken = 'mcp_refresh_token';
-  static const String _keyAccountJson = 'mcp_account_json';
-  static const String _keyLocalMode = 'mcp_local_mode';
+  /// The pre-slot global keys. Read by no code path any more — kept only so
+  /// [_retireLegacyKeys] can name them.
+  ///
+  /// Deliberately NOT migrated into a slot. Whichever server they came from is
+  /// exactly what they do not record, and a local-mode flag adopted into a
+  /// deployed server's slot recreates the half-state this scheme exists to
+  /// kill. One sign-in per server after this update is the entire migration
+  /// cost.
+  static const List<String> _legacyKeys = [
+    'mcp_refresh_token',
+    'mcp_account_json',
+    'mcp_local_mode',
+  ];
 
   /// A token this close to expiry is treated as already expired, so a request
   /// started now cannot arrive after it dies.
@@ -154,7 +167,64 @@ class McpAuthSession implements AuthSession {
         _mcp = mcpClient,
         _http = httpClient ?? http.Client(),
         _store = store ?? const SecureTokenStore(),
-        _openBrowser = openBrowser ?? _launchInSystemBrowser;
+        _openBrowser = openBrowser ?? _launchInSystemBrowser {
+    // Fire-and-forget: nothing waits on the old keys going away, and a
+    // keychain that refuses the write leaves three dead entries behind rather
+    // than failing a session that is otherwise fine.
+    unawaited(_retireLegacyKeys());
+  }
+
+  /// Which keychain slot this server's session lives in.
+  ///
+  /// A digest rather than the URL itself: keychain items are named, not
+  /// escaped, and a URL carries characters and a length no key format should
+  /// have to promise to survive. Sixteen hex chars is 64 bits — collisions
+  /// between the two or three endpoints one install ever sees are not a
+  /// concern, and a collision would cost a sign-in, not correctness.
+  ///
+  /// Takes the CANONICAL url ([mcpUrl]), so `…/mcp` and `…/mcp/` are one
+  /// server with one session rather than two.
+  @visibleForTesting
+  static String slotFor(Uri canonicalUrl) => sha256
+      .convert(utf8.encode(canonicalUrl.toString()))
+      .toString()
+      .substring(0, 16);
+
+  late final String _slot = slotFor(mcpUrl);
+
+  String get _keyRefreshToken => 'mcp_rt_$_slot';
+  String get _keyAccountJson => 'mcp_account_$_slot';
+  String get _keyLocalMode => 'mcp_local_$_slot';
+
+  @visibleForTesting
+  String get refreshTokenKey => _keyRefreshToken;
+
+  @visibleForTesting
+  String get accountJsonKey => _keyAccountJson;
+
+  @visibleForTesting
+  String get localModeKey => _keyLocalMode;
+
+  /// Deletes the pre-slot global keys, once per session construction.
+  ///
+  /// They are retired rather than migrated because they do not say which
+  /// server they belong to — see [_legacyKeys].
+  ///
+  /// Swallows everything, because nobody is awaiting it: this is housekeeping
+  /// running unwatched off a constructor, and a store that cannot be written
+  /// (a locked keychain, a test with no platform channel) must leave three
+  /// dead entries behind rather than raise an unhandled error into whatever
+  /// happened to be running.
+  Future<void> _retireLegacyKeys() async {
+    try {
+      for (final key in _legacyKeys) {
+        await _store.write(key, null);
+      }
+    } on Object {
+      // Nothing reads these keys any more; failing to delete them costs
+      // nothing but the bytes.
+    }
+  }
 
   /// The canonical resource string: one trailing slash removed, nothing else
   /// touched. `aud` is compared byte for byte, so this must be stable between
@@ -245,8 +315,9 @@ class McpAuthSession implements AuthSession {
 
   /// Ends the session.
   ///
-  /// Clears the three `mcp_` keys ONE BY ONE rather than wiping the store: a
-  /// `deleteAll` here would take the direct-Graph session's tokens with it.
+  /// Clears THIS server's three keys one by one rather than wiping the store:
+  /// a `deleteAll` here would take the direct-Graph session and every other
+  /// server's slot with it.
   /// Wiping the local mail database is not done here either — that belongs to
   /// the sign-out call site, which runs it for whichever session is active.
   @override
@@ -312,10 +383,13 @@ class McpAuthSession implements AuthSession {
   /// the user from whatever the server already knows.
   Future<AccountInfo> _signInLocal() async {
     await _store.write(_keyLocalMode, '1');
-    // The two markers are mutually exclusive states of ONE session. A refresh
-    // token left over from a deployed sign-in would win over the local-mode
-    // flag in [validJwt] and send a refresh at a server with no token
-    // endpoint to discover — breaking every call until a sign-out.
+    // The two markers are mutually exclusive states of ONE session within this
+    // server's slot — and one server can change nature between restarts, a
+    // local dev box rebooted with auth on being the everyday case. A refresh
+    // token left over from an earlier deployed-shaped sign-in AT THIS SAME URL
+    // would win over the local-mode flag in [validJwt] and send a refresh at a
+    // server with no token endpoint to discover — breaking every call until a
+    // sign-out.
     _jwt = null;
     _jwtExpiry = null;
     await _store.write(_keyRefreshToken, null);
@@ -350,9 +424,10 @@ class McpAuthSession implements AuthSession {
       throw AuthException(_describeTokenError(response));
     }
     final jwt = await _adoptTokens(response.json);
-    // The mirror of the clearing in [_signInLocal]: a stale local-mode flag
-    // would let [validJwt] answer "no bearer needed" the day the refresh
-    // token is gone, instead of the honest NotSignedIn.
+    // The mirror of the clearing in [_signInLocal], and for the same reason
+    // within this server's slot: a stale local-mode flag would let [validJwt]
+    // answer "no bearer needed" the day the refresh token is gone, instead of
+    // the honest NotSignedIn.
     await _store.write(_keyLocalMode, null);
 
     // A profile the platform cannot give us is not a failed sign-in: the user

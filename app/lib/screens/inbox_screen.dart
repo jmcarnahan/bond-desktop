@@ -12,7 +12,6 @@ import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
-import '../services/mcp/bond_mcp_client.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/app_rail.dart';
@@ -623,25 +622,37 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// This reads what is already stored, with no sync: the rows are the same
   /// mailbox either way, and asking the brand-new session for mail before the
   /// user has signed in to it would put an error where a list belongs.
-  void _reloadAfterBackendChange() =>
-      ref.read(conversationsProvider.notifier).load(syncFirst: false);
+  ///
+  /// And when the target server has no session, this screen is about to be
+  /// replaced by the gate's sign-in screen — so the settings dialog has to go
+  /// with it. A dialog that outlives its host keeps a ref to a disposed
+  /// element and answers every later question with a crash.
+  void _reloadAfterBackendChange() {
+    ref.read(conversationsProvider.notifier).load(syncFirst: false);
+    unawaited(ref.read(authSessionProvider).isSignedIn.then((signedIn) {
+      if (signedIn || !mounted) return;
+      // canPop, because the user may have closed it themselves while the
+      // answer was in flight — popping then would take the inbox down.
+      final navigator = Navigator.of(context, rootNavigator: true);
+      if (navigator.canPop()) navigator.pop();
+    }));
+  }
 
   /// The platform's view of the workspace's Microsoft account.
   ///
-  /// Every MCP failure answers null rather than throwing: this is a report on a
+  /// EVERY failure answers null rather than throwing: this is a report on a
   /// settings pane, and a server that cannot be reached is a row that says so,
-  /// not an exception on its way to a banner.
+  /// not an exception on its way to a banner. The catch-all covers the rest —
+  /// a switch to an unsigned server tears this screen down under the dialog,
+  /// and the ask that was already in flight must render "no answer" rather
+  /// than crash on a ref whose element is gone.
   Future<Map<String, Object?>?> _connectionStatus() async {
     try {
       return await ref
           .read(mcpStackProvider)
           .client
           .callTool('connection_status', const {});
-    } on McpToolException {
-      return null;
-    } on McpTransportException {
-      return null;
-    } on AuthException {
+    } on Object {
       return null;
     }
   }
