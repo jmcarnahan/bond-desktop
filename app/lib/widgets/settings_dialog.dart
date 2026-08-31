@@ -392,7 +392,21 @@ class _SettingsDialogState extends State<SettingsDialog> {
             );
           }
           final status = snapshot.data;
-          if (status == null || status['connected'] != true) {
+          if (status == null) {
+            // The question went UNANSWERED — which is not the same claim as
+            // "nothing is connected". The usual cause is having no session
+            // with this server yet (a fresh endpoint the user has not signed
+            // in to), where offering Connect Microsoft is a lie twice over:
+            // the state it names is unknown, and the button would have no
+            // session to fetch a connect link with.
+            return Text(
+              'This server did not answer. If you have not signed in to it '
+              'yet, sign out and sign in again — the permissions here belong '
+              'to a session this app does not have.',
+              style: BondType.small,
+            );
+          }
+          if (status['connected'] != true) {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               mainAxisSize: MainAxisSize.min,

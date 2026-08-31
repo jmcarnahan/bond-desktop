@@ -307,10 +307,12 @@ void main() {
       expect(asked, 1);
     });
 
-    testWidgets('a status that could not be read reads the same way',
+    testWidgets('a status that could not be read says so, and offers no button',
         (tester) async {
-      // This section reports; "we could not ask" is closer to nothing-connected
-      // than to a row of ticks nobody verified.
+      // "We could not ask" is a different claim from "nothing is connected":
+      // the usual cause is having no session with this server yet, where a
+      // Connect Microsoft button is a dead click — it needs a session to
+      // fetch the connect link with. Say what to do instead.
       await open(
         tester,
         onBackendModeChanged: (_) {},
@@ -319,7 +321,8 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Connect Microsoft'), findsOneWidget);
+      expect(find.text('Connect Microsoft'), findsNothing);
+      expect(find.textContaining('sign out and sign in'), findsOneWidget);
     });
 
     testWidgets('the platform is asked once, not once per rebuild',
