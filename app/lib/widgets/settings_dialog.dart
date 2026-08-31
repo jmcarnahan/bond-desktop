@@ -35,6 +35,15 @@ class SettingsDialog extends StatefulWidget {
   /// keystroke, and there is nothing on screen waiting to read it.
   final void Function(String value) onAboutMeChanged;
 
+  /// Whether the rail is currently offering the activity log.
+  final bool showActivityLog;
+
+  /// Fired the instant the switch moves, not on the way out like the text
+  /// above: the thing it changes is a rail icon sitting behind this dialog,
+  /// and a toggle whose effect only appears after Done reads as broken. Null
+  /// hides the row entirely — the same discipline [hasScope] follows.
+  final void Function(bool value)? onShowActivityLogChanged;
+
   /// Answers "did Microsoft grant this bare scope". Null hides the whole
   /// permissions section, which is what a host with no auth wired wants — and
   /// what MCP mode passes, where [connectionStatus] answers instead.
@@ -110,6 +119,8 @@ class SettingsDialog extends StatefulWidget {
     required this.aboutMe,
     required this.onThresholdChanged,
     required this.onAboutMeChanged,
+    this.showActivityLog = false,
+    this.onShowActivityLogChanged,
     this.hasScope,
     this.onSignInAgain,
     this.backendMode = backendModeMcp,
@@ -143,6 +154,7 @@ class SettingsDialog extends StatefulWidget {
 
 class _SettingsDialogState extends State<SettingsDialog> {
   late double _threshold = widget.threshold.clamp(0.0, 1.0);
+  late bool _showActivityLog = widget.showActivityLog;
   late final TextEditingController _aboutMe =
       TextEditingController(text: widget.aboutMe);
 
@@ -338,6 +350,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                     'closing dates, my processor handles document chasing.',
               ),
             ),
+            ..._activityLogSwitch(),
             ..._connectionSection(),
             ..._permissionsSection(),
           ],
@@ -350,6 +363,37 @@ class _SettingsDialogState extends State<SettingsDialog> {
         ),
       ],
     );
+  }
+
+  /// Whether the rail carries the door to the machine room.
+  ///
+  /// Reported to the host on the spot rather than at dispose: the icon this
+  /// controls is on screen behind the dialog, and a switch that only takes
+  /// effect once the dialog is closed cannot be checked by the person who
+  /// flipped it.
+  List<Widget> _activityLogSwitch() {
+    final onChanged = widget.onShowActivityLogChanged;
+    if (onChanged == null) return const [];
+    return [
+      const SizedBox(height: BondSpacing.s8),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        value: _showActivityLog,
+        title: Text(
+          'Show activity log',
+          style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Text(
+          'Adds a link in the sidebar to what has synced and what the AI did.',
+          style: BondType.caption,
+        ),
+        onChanged: (value) {
+          setState(() => _showActivityLog = value);
+          onChanged(value);
+        },
+      ),
+    ];
   }
 
   /// Which backend the app talks through, and where.

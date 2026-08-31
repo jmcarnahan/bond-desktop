@@ -11,9 +11,11 @@ import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
+import '../services/activity_log.dart';
 import '../services/backend/backend_types.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
+import '../widgets/activity_log_panel.dart';
 import '../widgets/app_rail.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
@@ -82,6 +84,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The open Later day, as a `yyyy-mm-dd` key. Exclusive with the two above
   /// for the same reason they are exclusive with each other.
   String? _selectedLaterDay;
+
+  /// Whether the main pane is showing the activity log. Exclusive with the
+  /// three selections above for the same reason they are exclusive with each
+  /// other: the pane shows exactly one thing, and every setter clears the rest
+  /// rather than racing to be rendered.
+  bool _showingActivityLog = false;
 
   /// Which member thread a storyline's composer replies to, when the user has
   /// picked one. Null means "the thread the newest message is in", which is
@@ -206,6 +214,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedId = id;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _showingActivityLog = false;
       _railOpen = false;
     });
     // The quietest signal the app collects: opening a thread is the LO saying
@@ -224,6 +233,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = id;
       _selectedId = null;
       _selectedLaterDay = null;
+      _showingActivityLog = false;
       _railOpen = false;
       // The reply target belongs to the storyline that was open, not to this
       // one; the default below picks the newest thread in the new timeline.
@@ -238,6 +248,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedId = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _showingActivityLog = false;
       _railOpen = false;
     });
   }
@@ -250,6 +261,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = dayKey;
       _selectedId = null;
       _selectedStorylineId = null;
+      _showingActivityLog = false;
+      _railOpen = false;
+    });
+  }
+
+  /// Opens the activity log, which is a pane and not a section: it belongs to
+  /// the app rather than to the mail, so it is reached from the rail's footer
+  /// and clears whatever the user was reading.
+  void _openActivityLog() {
+    setState(() {
+      _showingActivityLog = true;
+      _selectedId = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
       _railOpen = false;
     });
   }
@@ -463,7 +488,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // overview is showing, so the rail must not highlight one.
       selectedSection: (_selectedId == null &&
               _selectedStorylineId == null &&
-              _selectedLaterDay == null)
+              _selectedLaterDay == null &&
+              !_showingActivityLog)
           ? _section
           : null,
       onSelectConversation: _select,
@@ -514,6 +540,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                   },
                 ),
               ),
+              if (ref.watch(appPrefsProvider).showActivityLog)
+                _railAction(
+                  Icons.receipt_long,
+                  'Activity log',
+                  _openActivityLog,
+                ),
               _railAction(Icons.settings, 'Settings', _openSettings),
               // The ONE button that pulls Teams. Every other refresh in this
               // screen — the timer, the retry links on the error banners — is
@@ -596,6 +628,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.read(conversationsProvider.notifier).load(syncFirst: false);
         },
         onAboutMeChanged: notifier.setAboutMe,
+        showActivityLog: prefs.showActivityLog,
+        onShowActivityLogChanged: notifier.setShowActivityLog,
         // BOTH sources are wired, and deliberately not bound to the mode the
         // dialog OPENED in: the toggle now switches backends without closing
         // the dialog, so which one answers is the dialog's live choice. Each
@@ -779,13 +813,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
-  /// Exactly one view, never two: the thread transcript, then the storyline
-  /// timeline, then the section overview. The order is the priority — a thread
-  /// selection is the most specific thing the user asked for.
+  /// Exactly one view, never two: the activity log, then the thread
+  /// transcript, then the storyline timeline, then the section overview. The
+  /// order is the priority — the log is first because it is the only one of
+  /// the four that is not about the mail at all, so nothing under it can be
+  /// what the user meant.
   ///
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
+    if (_showingActivityLog) return _activityLog();
+
     final selected = _selected(conversations);
     if (selected != null) return _thread(selected);
 
@@ -1165,6 +1203,48 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // it stays put rather than timing out under the user.
         break;
     }
+  }
+
+  /// What the sync and the local model have been doing, over the last week.
+  ///
+  /// The [StreamBuilder] ticks once per recorded event, so a sync landing while
+  /// the panel is open appears without a refresh. Each tick costs two indexed
+  /// reads against a synchronous database on the UI isolate — at rest that is
+  /// roughly once a minute, and even a first sync of a large mailbox records
+  /// one row per drained item, not per message. If a future drain ever ticks
+  /// fast enough to be felt here, the debounce in `conversations_provider` is
+  /// the documented pattern to copy.
+  Widget _activityLog() {
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('Activity', style: BondType.title),
+          const SizedBox(height: BondSpacing.s16),
+          Expanded(
+            child: StreamBuilder<ActivityEvent>(
+              stream: ref.watch(activityLogProvider).events,
+              builder: (context, _) {
+                final store = ref.watch(messageStoreProvider);
+                final sinceIso = DateTime.now()
+                    .toUtc()
+                    .subtract(const Duration(days: 7))
+                    .toIso8601String();
+                return ActivityLogPanel(
+                  stats: store.activityStats(sinceIso: sinceIso),
+                  events: [
+                    for (final row in store.recentActivity(limit: 300))
+                      ActivityEvent.fromRow(row),
+                  ],
+                  now: DateTime.now(),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _overview(List<Conversation> conversations, String? loadError) {
