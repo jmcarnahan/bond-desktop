@@ -586,6 +586,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         aboutMe: prefs.aboutMe,
         onThresholdChanged: (value) {
           notifier.setAttentionThreshold(value);
+          if (!mounted) return;
           ref.read(conversationsProvider.notifier).load(syncFirst: false);
         },
         onAboutMeChanged: notifier.setAboutMe,
@@ -594,7 +595,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // the dialog, so which one answers is the dialog's live choice. Each
         // closure reads the providers at CALL time — after a switch, the
         // dialog's re-ask lands on the session the switch just built.
-        hasScope: (scope) => ref.read(authSessionProvider).hasScope(scope),
+        //
+        // Every closure that touches `ref` starts with a mounted check. The
+        // dialog lives in the ROOT overlay and can outlive this screen —
+        // switching to a server with no session swaps the inbox out for the
+        // gate's sign-in screen underneath it — and a dead host must answer
+        // with nothing, never with "ref after dispose".
+        hasScope: (scope) async {
+          if (!mounted) return false;
+          return ref.read(authSessionProvider).hasScope(scope);
+        },
         connectionStatus: _connectionStatus,
         onConnectMicrosoft: () => unawaited(_connectMicrosoft()),
         backendMode: prefs.backendMode,
@@ -628,6 +638,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// with it. A dialog that outlives its host keeps a ref to a disposed
   /// element and answers every later question with a crash.
   void _reloadAfterBackendChange() {
+    // The previous switch may already have replaced this screen; a second
+    // change made from the still-open dialog then arrives on a dead host.
+    if (!mounted) return;
     ref.read(conversationsProvider.notifier).load(syncFirst: false);
     unawaited(ref.read(authSessionProvider).isSignedIn.then((signedIn) {
       if (signedIn || !mounted) return;
@@ -658,6 +671,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   Future<void> _connectMicrosoft() async {
+    if (!mounted) return;
     final url = await ref.read(mcpStackProvider).auth.microsoftConnectUrl();
     final uri = url == null ? null : Uri.tryParse(url);
     if (uri == null) return;

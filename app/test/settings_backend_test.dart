@@ -322,7 +322,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Connect Microsoft'), findsNothing);
-      expect(find.textContaining('sign out and sign in'), findsOneWidget);
+      expect(find.textContaining('close Settings'), findsOneWidget);
     });
 
     testWidgets('the platform is asked once, not once per rebuild',

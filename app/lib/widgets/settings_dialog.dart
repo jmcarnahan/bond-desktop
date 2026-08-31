@@ -401,8 +401,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
             // session to fetch a connect link with.
             return Text(
               'This server did not answer. If you have not signed in to it '
-              'yet, sign out and sign in again — the permissions here belong '
-              'to a session this app does not have.',
+              'yet, close Settings — it will ask you to sign in.',
               style: BondType.small,
             );
           }
