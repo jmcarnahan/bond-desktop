@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../data/message_store.dart';
+import 'activity_log.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
@@ -54,47 +55,82 @@ class SyncService implements MailSync {
 
   final MailBackend _mail;
   final MessageStore _store;
+  final ActivityLog _log;
 
-  SyncService(this._mail, this._store);
+  SyncService(this._mail, this._store, {ActivityLog? activityLog})
+      : _log = activityLog ?? ActivityLog.disabled();
 
   @override
   Future<void> syncNow() async {
-    await _syncFolder('inbox', 'inbound');
-    await _syncFolder('sentitems', 'outbound');
+    final sw = Stopwatch()..start();
+    try {
+      final (inbox, inboxResync) = await _syncFolder('inbox', 'inbound');
+      final (sent, sentResync) = await _syncFolder('sentitems', 'outbound');
 
-    // A transient failure — the model server mid-load, two timeouts in a row
-    // — must not remove mail from the AI pipeline forever. Errored rows get
-    // another chance on each sync until their attempt ceiling; the enqueue
-    // below is `OR IGNORE`, so nothing here double-queues.
-    _store.reviveErroredTriage(source: _source);
-    _store.reviveErroredWork();
+      // A transient failure — the model server mid-load, two timeouts in a row
+      // — must not remove mail from the AI pipeline forever. Errored rows get
+      // another chance on each sync until their attempt ceiling; the enqueue
+      // below is `OR IGNORE`, so nothing here double-queues.
+      final revivedTriage = _store.reviveErroredTriage(source: _source);
+      final revivedWork = _store.reviveErroredWork();
 
-    // After both drains, so the window it queues from is the mailbox as it
-    // stands rather than as it stood mid-sync. `OR IGNORE` on the work table
-    // makes this idempotent, which is what lets it run on every sync: new mail
-    // is queued, finished work stays finished, and a queue that a crash left
-    // short refills itself without anyone tracking that it did.
-    _store.enqueueExtractBacklog(
-      cap: firstRunTriageCap,
-      sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
-      source: _source,
-    );
+      // After both drains, so the window it queues from is the mailbox as it
+      // stands rather than as it stood mid-sync. `OR IGNORE` on the work table
+      // makes this idempotent, which is what lets it run on every sync: new mail
+      // is queued, finished work stays finished, and a queue that a crash left
+      // short refills itself without anyone tracking that it did.
+      final queued = _store.enqueueExtractBacklog(
+        cap: firstRunTriageCap,
+        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        source: _source,
+      );
 
-    // The clustering pass over everything not in a storyline yet. One row, not
-    // one per thread — there is one mailbox to sweep — and a requeue rather
-    // than an enqueue, so the sweep that ran after the last sync runs again
-    // after this one instead of staying `done` forever.
-    _store.requeueWork('storyline_sweep', _source, 'sweep');
+      // The clustering pass over everything not in a storyline yet. One row, not
+      // one per thread — there is one mailbox to sweep — and a requeue rather
+      // than an enqueue, so the sweep that ran after the last sync runs again
+      // after this one instead of staying `done` forever.
+      _store.requeueWork('storyline_sweep', _source, 'sweep');
+
+      _log.record(
+        'sync_mail',
+        source: _source,
+        count: inbox + sent,
+        durationMs: sw.elapsedMilliseconds,
+        detail: {
+          'inbox': inbox,
+          'sent': sent,
+          'queued_extract': queued,
+          'revived_triage': revivedTriage,
+          'revived_work': revivedWork,
+          if (inboxResync || sentResync) 'resync': true,
+        },
+      );
+    } catch (e) {
+      // The last frame in which the exception object still exists: the load
+      // that called this collapses it into a banner string. Recorded, then
+      // rethrown so that banner still appears.
+      _log.record(
+        'sync_mail',
+        status: 'error',
+        source: _source,
+        durationMs: sw.elapsedMilliseconds,
+        detail: {'error': '$e'},
+      );
+      rethrow;
+    }
   }
 
   /// One folder, including the single permitted recovery from an expired
-  /// cursor.
-  Future<void> _syncFolder(String folder, String direction) async {
+  /// cursor. Returns `(messages seen for the first time, whether the 410
+  /// recovery fired)`.
+  Future<(int, bool)> _syncFolder(String folder, String direction) async {
     final storedLink = _store.getDeltaLink(folder, source: _source);
     final firstRun = storedLink == null;
+    var newMessages = 0;
+    var resynced = false;
 
     try {
-      await _drain(
+      newMessages += await _drain(
         folder,
         direction,
         startLink: storedLink,
@@ -109,8 +145,11 @@ class SyncService implements MailSync {
       // again. Ingest is idempotent per page, so re-reading stored mail costs
       // bandwidth once and corrupts nothing.
       _store.setDeltaLink(folder, null, source: _source);
+      resynced = true;
       try {
-        await _drain(
+        // Re-reading stored mail is not "new": firstSighting inside the
+        // ingest already keeps the replay out of the count.
+        newMessages += await _drain(
           folder,
           direction,
           startLink: null,
@@ -131,10 +170,12 @@ class SyncService implements MailSync {
     if (firstRun && folder == 'inbox') {
       _store.capPendingTriage(firstRunTriageCap, source: _source);
     }
+    return (newMessages, resynced);
   }
 
-  /// Walks every page of one delta drain, committing as it goes.
-  Future<void> _drain(
+  /// Walks every page of one delta drain, committing as it goes. Returns how
+  /// many messages were seen for the first time.
+  Future<int> _drain(
     String folder,
     String direction, {
     required String? startLink,
@@ -142,6 +183,7 @@ class SyncService implements MailSync {
   }) async {
     var link = startLink;
     var firstRequest = true;
+    var newMessages = 0;
 
     while (true) {
       final page = await _mail.deltaPage(
@@ -153,7 +195,7 @@ class SyncService implements MailSync {
       );
       firstRequest = false;
 
-      _ingestPage(page.messages, direction);
+      newMessages += _ingestPage(page.messages, direction);
 
       final next = page.nextLink;
       if (next != null && next.isNotEmpty) {
@@ -168,22 +210,27 @@ class SyncService implements MailSync {
       if (delta != null && delta.isNotEmpty) {
         _store.setDeltaLink(folder, delta, source: _source);
       }
-      return;
+      return newMessages;
     }
   }
 
   /// Stores one page's messages and folds their conversations, all or
-  /// nothing.
+  /// nothing. Returns how many were seen for the first time.
   ///
   /// The transaction is what makes the page the unit of resumability: a
   /// failure part way through leaves the cursor where it was AND leaves no
-  /// half-folded conversation whose counts disagree with its messages.
-  void _ingestPage(List<Map<String, dynamic>> raw, String direction) {
-    if (raw.isEmpty) return;
+  /// half-folded conversation whose counts disagree with its messages. The
+  /// count is RETURNED rather than recorded here for the same reason: an
+  /// activity row written inside the transaction would roll back with the
+  /// page, and one that somehow survived would count messages that never
+  /// landed.
+  int _ingestPage(List<Map<String, dynamic>> raw, String direction) {
+    if (raw.isEmpty) return 0;
     final outbound = direction == 'outbound';
     final backlogCutoff = _isoAgo(const Duration(days: triageWindowDays));
 
     _store.db.execute('BEGIN');
+    var newMessages = 0;
     try {
       final work = <String, _ConversationWork>{};
 
@@ -247,6 +294,7 @@ class SyncService implements MailSync {
         });
 
         if (!firstSighting) continue;
+        newMessages++;
 
         // A draft answers the message that was newest when the model wrote it.
         // The moment a newer inbound message lands, that draft is a reply to
@@ -284,6 +332,7 @@ class SyncService implements MailSync {
       _store.db.execute('ROLLBACK');
       rethrow;
     }
+    return newMessages;
   }
 
   void _writeConversation(String key, _ConversationWork entry) {

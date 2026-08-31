@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../data/message_store.dart';
+import 'activity_log.dart';
 import 'conversation_state.dart';
 import 'backend/teams_backend.dart';
 
@@ -86,8 +87,15 @@ class TeamsSync {
   /// no leaves this feature quietly absent, never broken.
   final Future<bool> Function() _canSync;
 
-  TeamsSync(this._teams, this._store, {Future<bool> Function()? canSync})
-      : _canSync = canSync ?? _alwaysAllowed;
+  final ActivityLog _log;
+
+  TeamsSync(
+    this._teams,
+    this._store, {
+    Future<bool> Function()? canSync,
+    ActivityLog? activityLog,
+  })  : _canSync = canSync ?? _alwaysAllowed,
+        _log = activityLog ?? ActivityLog.disabled();
 
   static Future<bool> _alwaysAllowed() async => true;
 
@@ -97,77 +105,123 @@ class TeamsSync {
 
   /// One pass over the chat list. Silent and free when Teams is unavailable.
   Future<void> syncNow() async {
-    if (!await _canSync()) return;
-
-    final floor = _isoAgo(const Duration(days: syncFloorDays));
-    // Once per sync, held in memory. It is the one fact that decides whether a
-    // chat message is the user's own, and the account record graph_auth.dart
-    // persists is not this file's to extend.
-    final myId = await _teams.myUserId();
-    final chats = await _teams.listChats();
-
-    for (final chat in chats) {
-      final key = chat['id'] as String?;
-      if (key == null || key.isEmpty) continue;
-
-      final stored = _store.getConversationRow(source, key);
-      final previewAt = _previewTimestamp(chat['lastMessagePreview']);
-
-      // The whole reason the chat list expands its preview: a chat whose
-      // newest message is one the store already has costs nothing at all.
-      if (_alreadyCurrent(previewAt, stored)) continue;
-      // A chat that has been quiet since before the floor and that this app
-      // has never seen is history, not backlog.
-      if (stored == null &&
-          previewAt != null &&
-          previewAt.compareTo(floor) < 0) {
-        continue;
-      }
-
-      final firstSight = stored == null;
-      final messages = await _teams.chatMessagesSince(
-        key,
-        stored?['last_message_at'] as String?,
+    if (!await _canSync()) {
+      // Recorded rather than returned silently, and safe to record on every
+      // call: a Teams refresh only ever happens because the user asked for
+      // one, so a tenant without `Chat.Read` gets one row per button press
+      // instead of one per poll tick.
+      _log.record(
+        'sync_teams',
+        status: 'skipped',
+        source: source,
+        detail: {'reason': 'no_scope'},
       );
-      // Once per chat, ever. Members are what name an unnamed group chat and
-      // who the thread header lists, and re-reading them on every refresh
-      // would be a request per chat for an answer that almost never changes.
-      final members =
-          firstSight ? await _teams.chatMembers(key) : const <Map<String, dynamic>>[];
-
-      _ingestChat(
-        chat,
-        key,
-        messages,
-        members,
-        myId: myId,
-        firstSight: firstSight,
-      );
+      return;
     }
 
-    _store.setSyncedAt(folder, _nowIso(), source: source);
+    final sw = Stopwatch()..start();
+    try {
+      final floor = _isoAgo(const Duration(days: syncFloorDays));
+      // Once per sync, held in memory. It is the one fact that decides whether
+      // a chat message is the user's own, and the account record
+      // graph_auth.dart persists is not this file's to extend.
+      final myId = await _teams.myUserId();
+      final chats = await _teams.listChats();
 
-    // Extraction, for the chat messages a person actually wrote. `OR IGNORE`
-    // makes it idempotent, so it both picks up what just arrived and refills a
-    // queue a crash left short.
-    //
-    // The statuses and reasons are spelled out because the defaults are the
-    // mail ones: chat messages never enter triage, so the default
-    // `pending/processing/triaged` filter would match none of them, and a bare
-    // `skipped` filter would drag the bots back in.
-    _store.enqueueExtractBacklog(
-      cap: _extractCap,
-      sinceIso: floor,
-      source: source,
-      triageStatuses: const ['skipped'],
-      gateReasons: const [teamsSourceGate],
-    );
+      var chatsSeen = 0;
+      var chatsFetched = 0;
+      var newMessages = 0;
 
-    // NO `storyline_sweep` requeue. The sweep is email-scoped by construction
-    // (`StorylineService._source`), so seeding a new storyline from a chat is
-    // out of scope this phase. Chats still JOIN existing storylines —
-    // extraction requeues per-conversation `storyline` work, and
-    // `assignConversation` takes a source — they simply never start one.
+      for (final chat in chats) {
+        final key = chat['id'] as String?;
+        if (key == null || key.isEmpty) continue;
+        chatsSeen++;
+
+        final stored = _store.getConversationRow(source, key);
+        final previewAt = _previewTimestamp(chat['lastMessagePreview']);
+
+        // The whole reason the chat list expands its preview: a chat whose
+        // newest message is one the store already has costs nothing at all.
+        if (_alreadyCurrent(previewAt, stored)) continue;
+        // A chat that has been quiet since before the floor and that this app
+        // has never seen is history, not backlog.
+        if (stored == null &&
+            previewAt != null &&
+            previewAt.compareTo(floor) < 0) {
+          continue;
+        }
+
+        final firstSight = stored == null;
+        final messages = await _teams.chatMessagesSince(
+          key,
+          stored?['last_message_at'] as String?,
+        );
+        // Once per chat, ever. Members are what name an unnamed group chat and
+        // who the thread header lists, and re-reading them on every refresh
+        // would be a request per chat for an answer that almost never changes.
+        final members = firstSight
+            ? await _teams.chatMembers(key)
+            : const <Map<String, dynamic>>[];
+
+        chatsFetched++;
+        newMessages += _ingestChat(
+          chat,
+          key,
+          messages,
+          members,
+          myId: myId,
+          firstSight: firstSight,
+        );
+      }
+
+      _store.setSyncedAt(folder, _nowIso(), source: source);
+
+      // Extraction, for the chat messages a person actually wrote. `OR IGNORE`
+      // makes it idempotent, so it both picks up what just arrived and refills
+      // a queue a crash left short.
+      //
+      // The statuses and reasons are spelled out because the defaults are the
+      // mail ones: chat messages never enter triage, so the default
+      // `pending/processing/triaged` filter would match none of them, and a
+      // bare `skipped` filter would drag the bots back in.
+      final queued = _store.enqueueExtractBacklog(
+        cap: _extractCap,
+        sinceIso: floor,
+        source: source,
+        triageStatuses: const ['skipped'],
+        gateReasons: const [teamsSourceGate],
+      );
+
+      // NO `storyline_sweep` requeue. The sweep is email-scoped by
+      // construction (`StorylineService._source`), so seeding a new storyline
+      // from a chat is out of scope this phase. Chats still JOIN existing
+      // storylines — extraction requeues per-conversation `storyline` work,
+      // and `assignConversation` takes a source — they simply never start one.
+
+      _log.record(
+        'sync_teams',
+        source: source,
+        count: newMessages,
+        durationMs: sw.elapsedMilliseconds,
+        detail: {
+          'chats_seen': chatsSeen,
+          'chats_fetched': chatsFetched,
+          'queued_extract': queued,
+        },
+      );
+    } catch (e) {
+      // The last frame in which the exception object still exists — the caller
+      // collapses it into a banner string. Recorded, then rethrown so that
+      // banner still appears.
+      _log.record(
+        'sync_teams',
+        status: 'error',
+        source: source,
+        durationMs: sw.elapsedMilliseconds,
+        detail: {'error': '$e'},
+      );
+      rethrow;
+    }
   }
 
   /// Whether the chat list says this chat has nothing the store lacks.
@@ -186,12 +240,17 @@ class TeamsSync {
       raw is Map ? raw['createdDateTime'] as String? : null;
 
   /// Stores one chat's messages and folds its conversation, all or nothing.
+  /// Returns how many messages were seen for the first time.
   ///
   /// The transaction is what makes the CHAT the unit of resumability — see the
   /// class comment. Every network call this needs has already happened by the
   /// time it starts: sqlite is synchronous here, and a transaction held open
   /// across an await is a transaction held open across a stalled socket.
-  void _ingestChat(
+  ///
+  /// The count is RETURNED rather than recorded here, for the same reason the
+  /// mail drain returns its own: an activity row written inside this
+  /// transaction would roll back with the chat.
+  int _ingestChat(
     Map<String, dynamic> chat,
     String key,
     List<Map<String, dynamic>> raw,
@@ -200,6 +259,7 @@ class TeamsSync {
     required bool firstSight,
   }) {
     _store.db.execute('BEGIN');
+    var newMessages = 0;
     try {
       final work = _ChatWork.from(_store.getConversationRow(source, key));
 
@@ -227,6 +287,7 @@ class TeamsSync {
 
         _store.upsertMessage(row);
         if (!firstSighting) continue;
+        newMessages++;
 
         work.snapshot = foldMessage(
           work.snapshot,
@@ -242,6 +303,7 @@ class TeamsSync {
       _store.db.execute('ROLLBACK');
       rethrow;
     }
+    return newMessages;
   }
 
   /// One Graph chat message as a `messages` row, or null when it is not one.

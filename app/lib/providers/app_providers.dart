@@ -2,6 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:sqlite3/sqlite3.dart';
 
 import '../data/message_store.dart';
+import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
 import '../services/attention_service.dart';
 import '../services/backend/auth_session.dart';
@@ -96,6 +97,16 @@ final identityGuardProvider = Provider<IdentityGuard>(
   (ref) => IdentityGuard(ref.watch(messageStoreProvider)),
 );
 
+/// One recorder for the app. It watches ONLY the store, so a backend switch —
+/// which rebuilds the session, both backends, the sync service and the queues
+/// — leaves the log and its stream standing, and a panel open across the
+/// switch keeps its subscription.
+final activityLogProvider = Provider<ActivityLog>((ref) {
+  final log = ActivityLog(ref.watch(messageStoreProvider));
+  ref.onDispose(log.dispose);
+  return log;
+});
+
 final mailBackendProvider = Provider<MailBackend>((ref) {
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
@@ -116,6 +127,7 @@ final syncServiceProvider = Provider<MailSync>(
   (ref) => SyncService(
     ref.watch(mailBackendProvider),
     ref.watch(messageStoreProvider),
+    activityLog: ref.watch(activityLogProvider),
   ),
 );
 
@@ -142,12 +154,20 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
     ref.watch(teamsBackendProvider),
     ref.watch(messageStoreProvider),
     canSync: () => auth.hasScope('chat.read'),
+    activityLog: ref.watch(activityLogProvider),
   );
 });
 
 /// The local model. Constructing it opens nothing — the first call is what
 /// discovers whether a server is listening.
-final llmClientProvider = Provider<LlmClient>((ref) => LlmClient());
+///
+/// Every round trip it makes is reported to the activity log, which holds the
+/// tally until the queue that made the calls records the item they were for —
+/// so the panel shows "three model calls, nine seconds" on one extraction row
+/// rather than three rows nobody can attribute.
+final llmClientProvider = Provider<LlmClient>(
+  (ref) => LlmClient(onCall: ref.watch(activityLogProvider).noteLlmCall),
+);
 
 /// The one gate both drains hold while at the model server. One instance for
 /// the app, or it would serialize nothing — see [DrainGate].
@@ -164,6 +184,7 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     // a test can override.
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
     gate: ref.watch(drainGateProvider),
+    activityLog: ref.watch(activityLogProvider),
   );
   ref.onDispose(queue.dispose);
   return queue;
@@ -173,8 +194,18 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
 /// `make embed` — and, unlike the model above, entirely optional at runtime:
 /// with nothing listening, every call returns null and the app is exactly what
 /// it was before this phase.
-final embeddingsClientProvider =
-    Provider<EmbeddingsClient>((ref) => EmbeddingsClient());
+final embeddingsClientProvider = Provider<EmbeddingsClient>(
+  (ref) => EmbeddingsClient(
+    // One row per distinct reason, which is what the client's own dedupe
+    // already guarantees. `read` and not `watch`: the callback outlives this
+    // body and must not make the client depend on the log's lifetime.
+    onFail: (reason) => ref.read(activityLogProvider).record(
+          'embed_fail',
+          status: 'error',
+          detail: {'reason': reason},
+        ),
+  ),
+);
 
 /// The AI work queue. One for the whole app, for the same reason there is one
 /// [triageQueueProvider]: it is a serial queue over shared rows.
@@ -194,6 +225,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
         ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
       ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
@@ -206,9 +238,11 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       DraftHandler(
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
+        activityLog: ref.watch(activityLogProvider),
       ),
     ],
     gate: ref.watch(drainGateProvider),
+    activityLog: ref.watch(activityLogProvider),
   );
   ref.onDispose(worker.dispose);
   return worker;
