@@ -151,8 +151,18 @@ const String _serverB = 'http://127.0.0.1:10/mcp';
 
 /// A server that wants no token: the local `make dev` shape, and the sign-in
 /// path that needs neither a browser nor an authorization server.
-MockClient _openServer() =>
-    MockClient((request) async => http.Response('Method Not Allowed', 405));
+///
+/// It ANSWERS the initialize POST the sign-in probe sends. Nothing less counts:
+/// a server is only taken as open when it grants access outright, because the
+/// statuses a bare GET produces are the same either side of an auth wall.
+MockClient _openServer() => MockClient((request) async =>
+    request.method == 'POST'
+        ? http.Response(
+            jsonEncode({'jsonrpc': '2.0', 'id': 0, 'result': <String, Object?>{}}),
+            200,
+            headers: {'content-type': 'application/json'},
+          )
+        : http.Response('Method Not Allowed', 405));
 
 McpAuthSession _sessionAt(String url, TokenStore store) => McpAuthSession(
       mcpUrl: Uri.parse(url),

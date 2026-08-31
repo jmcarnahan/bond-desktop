@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 import 'package:mcp_dart/mcp_dart.dart';
 
+import '../backend/backend_types.dart';
+
 /// The app's one door onto the MCP wire.
 ///
 /// Every `mcp_dart` import in this app lives in this file, deliberately: the
@@ -230,6 +232,13 @@ class BondMcpHttpClient implements BondMcpClient {
 
   McpToolSession? _session;
 
+  /// Whether the connection now in hand was opened WITHOUT a bearer.
+  ///
+  /// Recorded at connect time because that is the only moment the answer is
+  /// known, and read in [callTool] to tell an expired token apart from no
+  /// token at all — two conditions that arrive as the identical 401.
+  bool _lastBearerWasEmpty = false;
+
   /// Single-flight guard: two calls racing on a cold client must share one
   /// handshake, not open two connections.
   Future<McpToolSession>? _connecting;
@@ -269,8 +278,25 @@ class BondMcpHttpClient implements BondMcpClient {
       // Both share ONE retry, deliberately: a second failure of either kind is
       // a real fault and not a stale session.
       if (e.statusCode != 404 && e.statusCode != 401) rethrow;
+      final refusedWithoutBearer = e.statusCode == 401 && _lastBearerWasEmpty;
       await _dropSession();
-      return _callOnce(name, args);
+      try {
+        return await _callOnce(name, args);
+      } on McpTransportException catch (retry) {
+        // A client carrying no bearer, refused 401 twice — once on the
+        // connection it had and once on a freshly opened one that still had no
+        // token to offer — is not suffering a transport fault. It is the
+        // local-mode premise being disproven: this server does want a sign-in,
+        // and NotSignedIn is the one exception the app routes on to say so. A
+        // bearer WAS present on either attempt means something else entirely
+        // (an expired or rejected token), and that stays a transport error.
+        if (refusedWithoutBearer &&
+            retry.statusCode == 401 &&
+            _lastBearerWasEmpty) {
+          throw const NotSignedIn('This server requires a sign-in.');
+        }
+        rethrow;
+      }
     }
   }
 
@@ -300,6 +326,7 @@ class BondMcpHttpClient implements BondMcpClient {
 
   Future<McpToolSession> _connect() async {
     final bearer = await _getBearer?.call();
+    _lastBearerWasEmpty = bearer == null || bearer.isEmpty;
     final session = await _sessionFactory(baseUrl, bearer);
     _session = session;
     return session;

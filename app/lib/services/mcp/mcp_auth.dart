@@ -350,33 +350,66 @@ class McpAuthSession implements AuthSession {
         : _signInWithAuthServer(resourceMetadataUrl);
   }
 
-  /// Asks the MCP endpoint whether it wants a token.
+  /// Asks the MCP endpoint whether it wants a token, by making the request a
+  /// real client would make.
   ///
-  /// Returns the protected-resource-metadata URL from the 401 challenge, or
-  /// null when the server answered anything else — 200, 405 and 406 are all
-  /// normal for a bare GET at an endpoint that expects POSTs, and all of them
-  /// mean the same thing here: no auth wall.
+  /// A bare GET is the wrong instrument, and the reason is specific: FastMCP
+  /// refuses a GET at `/mcp` with 405 BEFORE its authentication layer ever
+  /// runs, so the deployed platform — which challenges every real request —
+  /// answers a GET exactly as an unprotected server would. Read as "no auth
+  /// wall", that 405 stamped a live deployment as a local dev box and left the
+  /// app "signed in" with no bearer and a 401 behind every call. The probe is
+  /// therefore the initialize POST itself, which every MCP server has to route
+  /// through whatever guards it.
+  ///
+  /// Fail closed. Local mode is entered ONLY on a definitive 2xx, and a 401
+  /// carrying a challenge is the other definitive answer; every other status
+  /// is an error, because a server that neither granted access nor asked for a
+  /// sign-in has told us nothing, and guessing is what produced the bug above.
+  /// Ambiguity is an error here, never an answer.
   Future<Uri?> _probeAuthChallenge() async {
     final http.Response response;
     try {
-      response = await _http.get(
+      response = await _http.post(
         mcpUrl,
-        headers: const {'Accept': 'application/json, text/event-stream'},
+        headers: const {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json, text/event-stream',
+        },
+        body: jsonEncode(const {
+          'jsonrpc': '2.0',
+          'id': 0,
+          'method': 'initialize',
+          'params': {
+            'protocolVersion': '2025-03-26',
+            'capabilities': <String, Object?>{},
+            'clientInfo': {'name': 'bond-inbox-probe', 'version': '1.0.0'},
+          },
+        }),
       );
     } on http.ClientException catch (e) {
       throw AuthException('Could not reach the MCP server: ${e.message}');
     } on SocketException catch (e) {
       throw AuthException('Could not reach the MCP server: ${e.message}');
     }
-    if (response.statusCode != HttpStatus.unauthorized) return null;
 
-    final url = resourceMetadataUrlFrom(response.headers['www-authenticate']);
-    if (url == null) {
-      throw const AuthException(
-        'The MCP server asked for a sign-in but did not say where to get one.',
-      );
+    if (response.statusCode == HttpStatus.unauthorized) {
+      final url = resourceMetadataUrlFrom(response.headers['www-authenticate']);
+      if (url == null) {
+        throw const AuthException(
+          'The MCP server asked for a sign-in but did not say where to get one.',
+        );
+      }
+      return url;
     }
-    return url;
+
+    if (response.statusCode >= 200 && response.statusCode < 300) return null;
+
+    throw AuthException(
+      'The Bond server at $mcpUrl answered HTTP ${response.statusCode} to the '
+      'sign-in probe — it neither granted access nor asked for a sign-in. '
+      'Check the server URL.',
+    );
   }
 
   /// The dev-server path: nothing to authorize, so record that and try to name

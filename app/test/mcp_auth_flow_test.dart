@@ -105,7 +105,15 @@ String _liveJwt({String? email}) => _jwt({
 /// Records what the scripted authorization server was asked.
 class _Server {
   final List<Map<String, String>> tokenPosts = [];
+
+  /// Every non-token URL asked for, in order. The sign-in probe is among them
+  /// and is a POST — the endpoint is what these assertions are about, not the
+  /// verb.
   final List<Uri> gets = [];
+
+  /// The sign-in probes, whole: the request that pins the probe's shape reads
+  /// its method and body back out of here.
+  final List<http.Request> probes = [];
 
   /// Replies for the token endpoint, one per POST; the last one repeats.
   List<http.Response> tokenReplies = [];
@@ -119,7 +127,10 @@ class _Server {
               : tokenReplies.removeAt(0);
         }
         gets.add(request.url);
+        if (request.method == 'POST' && url == _mcp) probes.add(request);
         switch (url) {
+          // The deployed shape: the initialize POST is challenged, and the
+          // challenge is where the discovery chain starts.
           case _mcp:
             return http.Response(
               'unauthorized',
@@ -391,9 +402,22 @@ void main() {
   });
 
   group('signIn against a server that wants no token', () {
-    /// The local `make dev` server: a bare GET is answered, not challenged.
+    /// The local `make dev` server: it ANSWERS the initialize POST, which is
+    /// the only thing that means "no auth wall" now. A bare GET at the same
+    /// path still gets the 405 a real one gives — and that 405 is precisely
+    /// what must no longer read as an open server.
     MockClient localServer() => MockClient((request) async =>
-        http.Response('Method Not Allowed', 405));
+        request.method == 'POST' && request.url.path == '/mcp'
+            ? http.Response(
+                jsonEncode({
+                  'jsonrpc': '2.0',
+                  'id': 0,
+                  'result': {'protocolVersion': '2025-03-26'},
+                }),
+                200,
+                headers: {'content-type': 'application/json'},
+              )
+            : http.Response('Method Not Allowed', 405));
 
     test('records local mode and needs no browser', () async {
       final store = _Tokens();
@@ -469,6 +493,92 @@ void main() {
         store: store,
       );
       expect(await auth.validJwt(), isNull);
+    });
+  });
+
+  group('the sign-in probe', () {
+    /// A server whose only answer is [status] — the shape of an endpoint this
+    /// app was never meant to be pointed at, and of a real one answering the
+    /// wrong question.
+    McpAuthSession answering(int status) => McpAuthSession(
+          mcpUrl: Uri.parse(_mcp),
+          mcpClient: _FakeBondMcpClient(const {}),
+          httpClient: MockClient((_) async => http.Response('nope', status)),
+          store: _Tokens(),
+          openBrowser: (_) async =>
+              fail('an unreadable answer must not open a browser'),
+        );
+
+    Matcher namesStatus(int status) => throwsA(isA<AuthException>()
+        .having((e) => e.message, 'message', contains('$status')));
+
+    test('a 405 is an error, not an open server', () async {
+      // The regression this whole probe exists for: FastMCP refuses a GET at
+      // /mcp with 405 BEFORE its auth layer runs, so a bare GET made the
+      // deployed platform look exactly like an open dev box — "signed in" with
+      // no bearer, and a 401 behind every call after it.
+      await expectLater(answering(405).signIn(), namesStatus(405));
+    });
+
+    test('a 403 is an error naming the status', () async {
+      await expectLater(answering(403).signIn(), namesStatus(403));
+    });
+
+    test('a 400 is an error naming the status', () async {
+      // What the local dev server answers a bare GET. Ambiguity is an error
+      // whichever end it comes from.
+      await expectLater(answering(400).signIn(), namesStatus(400));
+    });
+
+    test('a 401 with no challenge to follow is its own error', () async {
+      await expectLater(
+        answering(401).signIn(),
+        throwsA(isA<AuthException>().having((e) => e.message, 'message',
+            contains('did not say where'))),
+      );
+    });
+
+    test('a 401 carrying a challenge still starts discovery', () async {
+      // The deployed path is unchanged by the switch to a POST: the challenge
+      // is read exactly as before.
+      final server = _Server();
+      final auth = McpAuthSession(
+        mcpUrl: Uri.parse(_mcp),
+        mcpClient: _FakeBondMcpClient(const {}),
+        httpClient: server.client,
+        store: _Tokens(),
+        openBrowser: (_) async =>
+            throw const AuthException('stop here — discovery is the point'),
+      );
+
+      await expectLater(auth.signIn(), throwsA(isA<AuthException>()));
+      expect(server.gets.map((u) => u.toString()),
+          containsAllInOrder([_mcp, _prm, _asMetadata]));
+      expect(jsonDecode(server.probes.single.body)['method'], 'initialize');
+    });
+
+    test('is an initialize POST, not a bare GET', () async {
+      final seen = <http.Request>[];
+      final auth = McpAuthSession(
+        mcpUrl: Uri.parse(_localMcp),
+        mcpClient: _FakeBondMcpClient(const {}),
+        httpClient: MockClient((request) async {
+          seen.add(request);
+          return http.Response(jsonEncode({'jsonrpc': '2.0', 'id': 0}), 200);
+        }),
+        store: _Tokens(),
+        openBrowser: (_) async => fail('an open server must not open a browser'),
+      );
+
+      await auth.signIn();
+
+      final probe = seen.single;
+      expect(probe.method, 'POST');
+      expect(probe.url.toString(), _localMcp);
+      final body = jsonDecode(probe.body) as Map<String, dynamic>;
+      expect(body['jsonrpc'], '2.0');
+      expect(body['method'], 'initialize');
+      expect((body['params'] as Map)['clientInfo'], isNotNull);
     });
   });
 
