@@ -322,10 +322,37 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
   final MessageStore _store;
   final String storylineId;
 
+  StreamSubscription<WorkProgress>? _progress;
+  Timer? _reload;
+
   int _fetchSeq = 0;
 
-  StorylineTimelineNotifier(this._store, this.storylineId)
-      : super(const StorylineTimelineInitial());
+  /// Listens to the same worker kinds the list does, for the same reason: an
+  /// assignment or recruit pass filing a thread into THIS storyline must move
+  /// the spine, not just the member strip — the strip's providers refresh on
+  /// progress and a spine on a 60s poll would disagree with it for up to a
+  /// minute. Same debounce, so both surfaces move together.
+  StorylineTimelineNotifier(this._store, this.storylineId,
+      {AiWorker? aiWorker})
+      : super(const StorylineTimelineInitial()) {
+    final worker = aiWorker;
+    if (worker == null) return;
+    _progress = worker.progress.listen((progress) {
+      if (!StorylinesNotifier._kinds.contains(progress.kind)) return;
+      _reload?.cancel();
+      _reload = Timer(StorylinesNotifier._reloadDelay, () {
+        if (!mounted) return;
+        load();
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _reload?.cancel();
+    _progress?.cancel();
+    super.dispose();
+  }
 
   Future<void> load() async {
     final seq = ++_fetchSeq;
@@ -408,6 +435,9 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
 /// over a read that already ran this session.
 final storylineTimelineProvider = StateNotifierProvider.family<
     StorylineTimelineNotifier, StorylineTimelineState, String>(
-  (ref, storylineId) =>
-      StorylineTimelineNotifier(ref.watch(messageStoreProvider), storylineId),
+  (ref, storylineId) => StorylineTimelineNotifier(
+    ref.watch(messageStoreProvider),
+    storylineId,
+    aiWorker: ref.watch(aiWorkerProvider),
+  ),
 );

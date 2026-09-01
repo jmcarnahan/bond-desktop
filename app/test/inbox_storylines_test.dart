@@ -191,6 +191,42 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('a removed thread is not offered back by Add thread',
+      (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await seedThread('c2', 'Launch date');
+    await store.insertStoryline(
+      id: 'sl-1',
+      title: 'Website redesign',
+      status: 'active',
+      createdBy: 'auto',
+    );
+    await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+    await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+
+    await openStoryline(tester, 'Website redesign');
+
+    // Removal writes a block in the same transaction as the delete: the user
+    // said no to this pairing, and the picker must not ask again.
+    await container
+        .read(storylinesProvider.notifier)
+        .removeThread('sl-1', 'email', 'c2');
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.text('Add thread'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(AddThreadToStorylinePane), findsOneWidget);
+    // c2 is no longer a member — but it is blocked, so it is not on offer;
+    // c1 is still a member, so it is not on offer either.
+    expect(find.text('✉ Launch date'), findsNothing);
+    expect(find.text('✉ Homepage copy'), findsNothing);
+    expect(find.text('No threads to add.'), findsOneWidget);
+    await settleQueues(tester);
+  });
+
   testWidgets('Open thread on a card opens it, whatever the source filter says',
       (tester) async {
     // One key, two connectors — which is legal, since a conversation key is

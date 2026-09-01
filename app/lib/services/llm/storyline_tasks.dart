@@ -105,6 +105,7 @@ class ConfirmMembershipTask implements JsonTask<ConfirmResult> {
   static const int _summaryCap = 400;
   static const int _charterCap = 400;
   static const int _participantsCap = 400;
+  static const int _titleCap = 120;
 
   static const Set<String> _confidences = {'low', 'medium', 'high'};
 
@@ -149,7 +150,11 @@ class ConfirmMembershipTask implements JsonTask<ConfirmResult> {
     final description = charter.isNotEmpty
         ? 'Charter: ${_clamp(charter, _charterCap)}'
         : 'Summary: ${_clamp(storyline.summary ?? '', _summaryCap)}';
-    final storylineText = 'Title: ${storyline.title}\n'
+    // Clamped like everything else here: user text is stored unbounded and
+    // bounded only at prompt time. An overlong title would otherwise ride
+    // along on EVERY confirm call for this storyline, and a prompt the server
+    // refuses parks the whole assignment kind.
+    final storylineText = 'Title: ${_clamp(storyline.title, _titleCap)}\n'
         '$description\n'
         'People: ${_clamp(input.storylineParticipants.join(', '), _participantsCap)}';
 

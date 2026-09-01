@@ -58,6 +58,36 @@ class FakeLlm extends LlmClient {
   }
 }
 
+/// A [FakeLlm] that runs [onCall] before answering — how a test lands a user
+/// action in the middle of a model call.
+class HookedFakeLlm extends FakeLlm {
+  final Future<void> Function(String schemaName) onCall;
+
+  HookedFakeLlm(super.scripts, this.onCall);
+
+  @override
+  Future<Map<String, dynamic>> completeJson({
+    required String system,
+    required String user,
+    required Map<String, dynamic> schema,
+    String schemaName = 'result',
+    int maxTokens = 512,
+    double temperature = 0.2,
+    bool think = false,
+  }) async {
+    await onCall(schemaName);
+    return super.completeJson(
+      system: system,
+      user: user,
+      schema: schema,
+      schemaName: schemaName,
+      maxTokens: maxTokens,
+      temperature: temperature,
+      think: think,
+    );
+  }
+}
+
 /// A unit vector whose cosine against `[1, 0]` is exactly [c]. Two dimensions
 /// is all these tests need — the gates are cosine thresholds, and a 768-wide
 /// vector would only make the arithmetic harder to read.
@@ -524,6 +554,30 @@ void main() {
       // still refreshed the summary. The charter is the user's.
       expect(storyline.summary, 'The studio is reviewing the homepage copy.');
       expect(storyline.charter, 'Only the homepage copy. Not the photography.');
+      expect(storyline.charterLocked, isTrue);
+    });
+
+    test('a charter saved while naming is in flight is not overwritten',
+        () async {
+      // The backfill's naming call takes seconds against a real server. A
+      // user who opens About and saves their own charter in that window has
+      // set the lock — and the write that lands after the model returns must
+      // honor the lock as it is NOW, not as it was when the call started.
+      await seedStoryline(store, charter: null);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = HookedFakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      }, (schemaName) async {
+        if (schemaName != 'storyline_name') return;
+        await store.updateStoryline('sl-1',
+            charter: 'Only the launch.', charterLocked: true);
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, 'Only the launch.');
       expect(storyline.charterLocked, isTrue);
     });
 

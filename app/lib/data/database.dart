@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:drift/drift.dart';
+import 'package:drift/internal/versioned_schema.dart';
 import 'package:drift/native.dart';
 import 'package:sqlite3/sqlite3.dart' as raw;
 
@@ -40,35 +41,61 @@ class BondDatabase extends _$BondDatabase {
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) => m.createAll(),
-        onUpgrade: stepByStep(
-          // v2 — the generalize round: triage gains a free-text `label`, and
-          // the category taxonomy narrows from the eight domain-specific
-          // buckets to work|personal|notification|other. `personal` and
-          // `other` carry over; every other old value described the same
-          // thing — mail about the user's work — so it becomes `work`.
-          // `notification` only ever comes from fresh triage. NULL (never
-          // triaged, or gated) stays NULL.
-          from1To2: (m, schema) async {
-            await m.addColumn(schema.messages, schema.messages.label);
-            for (final table in ['messages', 'conversations']) {
-              await customStatement(
-                "UPDATE $table SET category = 'work' "
-                'WHERE category IS NOT NULL '
-                "AND category NOT IN ('personal', 'other')",
-              );
-            }
-          },
-          // v3 — storylines gain a charter: one or two sentences of membership
-          // criteria the confirm task judges candidates against.
-          // `charter_locked` is set when the user edits it, so later naming
-          // passes keep their hands off.
-          from2To3: (m, schema) async {
-            await m.addColumn(schema.storylines, schema.storylines.charter);
-            await m.addColumn(
-              schema.storylines,
-              schema.storylines.charterLocked,
-            );
-          },
+        // One transaction around the whole step walk. The bare `stepByStep`
+        // helper runs the steps outside any transaction and drift stamps
+        // `user_version` afterwards in a statement of its own — so a process
+        // killed mid-migration (force-quit during the category remap of a
+        // large mailbox) would leave columns added but the version unstamped,
+        // and every later open would replay the ALTER into "duplicate column"
+        // and never launch again. The transaction shrinks that exposure to
+        // the COMMIT-to-stamp gap, and the column guards make a replay across
+        // that residual gap a no-op instead of a crash.
+        onUpgrade: (m, from, to) => transaction(
+          () => VersionedSchema.runMigrationSteps(
+            migrator: m,
+            from: from,
+            to: to,
+            steps: migrationSteps(
+              // v2 — the generalize round: triage gains a free-text `label`,
+              // and the category taxonomy narrows from the eight
+              // domain-specific buckets to work|personal|notification|other.
+              // `personal` and `other` carry over; every other old value
+              // described the same thing — mail about the user's work — so it
+              // becomes `work`. `notification` only ever comes from fresh
+              // triage. NULL (never triaged, or gated) stays NULL. The remap
+              // is idempotent by construction, so only the ALTER is guarded.
+              from1To2: (m, schema) async {
+                if (!await _columnExists('messages', 'label')) {
+                  await m.addColumn(schema.messages, schema.messages.label);
+                }
+                for (final table in ['messages', 'conversations']) {
+                  await customStatement(
+                    "UPDATE $table SET category = 'work' "
+                    'WHERE category IS NOT NULL '
+                    "AND category NOT IN ('personal', 'other')",
+                  );
+                }
+              },
+              // v3 — storylines gain a charter: one or two sentences of
+              // membership criteria the confirm task judges candidates
+              // against. `charter_locked` is set when the user edits it, so
+              // later naming passes keep their hands off.
+              from2To3: (m, schema) async {
+                if (!await _columnExists('storylines', 'charter')) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.charter,
+                  );
+                }
+                if (!await _columnExists('storylines', 'charter_locked')) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.charterLocked,
+                  );
+                }
+              },
+            ),
+          ),
         ),
         beforeOpen: (details) async {
           // WAL is a no-op on an in-memory database (sqlite reports back
@@ -77,6 +104,17 @@ class BondDatabase extends _$BondDatabase {
           await customStatement('PRAGMA foreign_keys=ON;');
         },
       );
+
+  /// Whether [table] already carries [column] — how a migration step tells a
+  /// first run from a replay over a torn state (steps committed, version
+  /// stamp lost).
+  Future<bool> _columnExists(String table, String column) async {
+    final rows = await customSelect(
+      'SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2',
+      variables: [Variable<String>(table), Variable<String>(column)],
+    ).get();
+    return rows.isNotEmpty;
+  }
 }
 
 /// Claims a pre-drift database as schema version 1.

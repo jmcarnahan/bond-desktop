@@ -552,6 +552,14 @@ ab-membership:
 	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_membership_live_test.dart --run-skipped
 
+# The drain race live: K=1 vs K=3 over the same backlog on the fast server,
+# which needs parallel slots to show anything (FAST_SLOTS=4 at `make fast`).
+# The check that re-verified the atomic-claim redesign against real inference.
+drain:
+	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
+	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_drain_live_test.dart --run-skipped
+
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
 

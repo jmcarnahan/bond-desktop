@@ -355,6 +355,30 @@ void main() {
       expect(await store.nextPendingTriage(), isNull);
     });
 
+    test('claimPendingTriage claims exactly the row the peek shows', () async {
+      await store.upsertMessage(
+          messageRow(id: 'a', receivedAt: '2026-08-28T10:00:00Z'));
+      await store.upsertMessage(
+          messageRow(id: 'b', receivedAt: '2026-08-27T10:00:00Z'));
+
+      // The claim's ORDER BY mirrors the peek's — the documented contract,
+      // and the only thing keeping the two from silently disagreeing.
+      final peeked = await store.nextPendingTriage();
+      final claimed = await store.claimPendingTriage();
+      expect(claimed?['source_message_id'], peeked?['source_message_id']);
+
+      // The returned row is the POST-update state: processing, with the
+      // attempt count untouched — failures are what spend attempts.
+      expect(claimed?['triage_status'], 'processing');
+      expect(claimed?['triage_attempts'], 0);
+
+      expect((await store.claimPendingTriage())?['source_message_id'], 'b');
+      expect(await store.claimPendingTriage(), isNull,
+          reason: 'both rows are claimed; nothing is pending');
+      expect(await store.claimPendingTriage(sources: []), isNull,
+          reason: 'no sources means no queue, never every queue');
+    });
+
     test('reviveErroredTriage flips errors below the ceiling back to pending',
         () async {
       await store.upsertMessage(messageRow(id: 'healable'));
@@ -391,10 +415,10 @@ void main() {
         status: 'done',
         result: const TriageResult(
           urgency: 'high',
-          category: 'rate_lock',
-          summary: 'Extend or float',
+          category: 'work',
+          summary: 'Approve or push the date',
           needsAction: true,
-          actionItems: ['Quote the extension', 'Submit the lock'],
+          actionItems: ['Confirm the venue', 'Send the invite'],
         ),
         attempts: 1,
       );
@@ -402,14 +426,14 @@ void main() {
       final row = (await db.customSelect('SELECT * FROM messages').get()).single;
       expect(row.data['triage_status'], 'done');
       expect(row.data['urgency'], 'high');
-      expect(row.data['category'], 'rate_lock');
-      expect(row.data['summary'], 'Extend or float');
+      expect(row.data['category'], 'work');
+      expect(row.data['summary'], 'Approve or push the date');
       expect(row.data['needs_action'], 1);
       expect(row.data['triage_attempts'], 1);
 
       final m = (await store.loadThread('conv-1')).single;
       expect(m.needsAction, isTrue);
-      expect(m.actionItems, ['Quote the extension', 'Submit the lock']);
+      expect(m.actionItems, ['Confirm the venue', 'Send the invite']);
       expect(m.triageStatus, 'done');
     });
 

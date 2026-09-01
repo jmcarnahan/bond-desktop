@@ -91,6 +91,20 @@ void main() {
       expect(user, isNot(contains('c' * 401)));
       expect('z'.allMatches(user).length, 1200);
     });
+
+    test('a pasted-paragraph title is clamped like everything else', () {
+      // The title is user text with no length bound at the store — the prompt
+      // is where it gets one, or every confirm call for this storyline
+      // carries the paragraph.
+      final user = confirm.buildUserMessage(ConfirmInput(
+        storyline: _storyline(title: 't' * 500),
+        storylineParticipants: const [],
+        candidateCard: 'card',
+      ));
+
+      expect(user, contains('t' * 120));
+      expect(user, isNot(contains('t' * 121)));
+    });
   });
 
   group('the naming task drafts a charter', () {

@@ -251,8 +251,9 @@ void main() {
         'triaged');
 
     // Adoption stamps 1, and the open then walks the step migrations to the
-    // current version — drift must never have run onCreate.
-    expect(userVersionOf(path), 3);
+    // current version — drift must never have run onCreate. Compared against
+    // the database's own version so a bump cannot orphan this assertion.
+    expect(userVersionOf(path), db.schemaVersion);
   });
 
   test('a fresh path is created by drift and round-trips', () async {
@@ -277,7 +278,7 @@ void main() {
     final row = await store.getMessageRow('email', 'm1');
     expect(row!['subject'], 'Hello');
     expect(row['triage_status'], 'pending');
-    expect(userVersionOf(path), 3);
+    expect(userVersionOf(path), db.schemaVersion);
   });
 
   test(
@@ -339,6 +340,53 @@ void main() {
             r['name'] as String,
         ];
     expect(indexesOf(fresh), indexesOf(legacy));
+
+    // Same names is not enough — an index whose column list drifts would give
+    // adopted and fresh installs different query plans while the name list
+    // stays identical.
+    for (final index in indexesOf(legacy)) {
+      List<String> indexColumnsOf(raw.Database db) => [
+            for (final r in db.select('PRAGMA index_xinfo($index)'))
+              '${r['name']}|${r['desc']}|${r['coll']}|${r['key']}',
+          ];
+      expect(indexColumnsOf(fresh), indexColumnsOf(legacy),
+          reason: 'definition of $index');
+    }
+  });
+
+  test('a torn migration — steps committed, version stamp lost — recovers',
+      () async {
+    // The window the transaction around the step walk cannot close: sqlite
+    // COMMITs the migration, the process dies before drift stamps
+    // `user_version`. The file then has every migrated column but still says
+    // version 1, and the next open replays the steps. Without the
+    // column-exists guards that replay dies on "duplicate column name" —
+    // permanently, on every launch.
+    final path = '${dir.path}/torn.db';
+    writeLegacyDb(path, messageCount: 1);
+    final torn = raw.sqlite3.open(path);
+    // An old-taxonomy category, to prove the remap re-runs harmlessly.
+    torn.execute("UPDATE messages SET category = 'underwriting'");
+    torn.execute('ALTER TABLE messages ADD COLUMN label TEXT');
+    torn.execute('ALTER TABLE storylines ADD COLUMN charter TEXT');
+    torn.execute(
+        'ALTER TABLE storylines ADD COLUMN charter_locked INTEGER NOT NULL '
+        'DEFAULT 0');
+    torn.execute('PRAGMA user_version = 1');
+    torn.close();
+
+    await adoptLegacyDatabase(path); // no-op: version is already stamped
+    final db = BondDatabase.open(path);
+    addTearDown(db.close);
+
+    // The open must survive the replay and land at the current version...
+    final row = await db
+        .customSelect('SELECT category, label FROM messages')
+        .getSingle();
+    expect(userVersionOf(path), db.schemaVersion);
+    // ...with the remap applied and the row intact.
+    expect(row.data['category'], 'work');
+    expect(row.data['label'], null);
   });
 
   test('sqlite is at least 3.35, which UPDATE ... RETURNING needs', () async {

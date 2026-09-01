@@ -464,6 +464,33 @@ void main() {
       final state = notifier.state as StorylineTimelineLoaded;
       expect(state.episodes, isEmpty);
     });
+
+    test('a storyline-kind report reloads the spine too', () async {
+      // The member strip's providers refresh on worker progress; a spine that
+      // waited for the 60s poll would disagree with the strip for up to a
+      // minute — "3 threads" in the header over two cards.
+      final worker = AiWorker(store, handlers: [SilentHandler('storyline')]);
+      addTearDown(worker.dispose);
+      await seedTwoThreads();
+      final notifier =
+          StorylineTimelineNotifier(store, 'sl-1', aiWorker: worker);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      expect(
+          (notifier.state as StorylineTimelineLoaded).episodes, hasLength(2));
+
+      // What an assignment landing looks like from the outside: a member row
+      // appears and the worker reports.
+      await seedConversation('c3', subject: 'Photography');
+      await seedMessage('c3', 'm4',
+          receivedAt: '2026-08-01T12:00:00Z', subject: 'Photography');
+      await store.addStorylineMember('sl-1', 'email', 'c3', addedBy: 'auto');
+      await worker.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+
+      expect(
+          (notifier.state as StorylineTimelineLoaded).episodes, hasLength(3));
+    });
   });
 
   group('provider wiring', () {

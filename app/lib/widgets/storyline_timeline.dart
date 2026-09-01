@@ -118,12 +118,15 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   /// A member thread's name, taken from its episode. A member whose thread
   /// holds no messages has no episode and so no subject, which reads as a
   /// thread with nothing in it rather than as an error.
-  String _labelFor(String conversationKey) {
+  ///
+  /// Keyed by source AND key: two connectors can carry the same conversation
+  /// key, and a lookup on the key alone would label one member row with the
+  /// other connector's subject.
+  String _labelFor(String source, String conversationKey) {
     final subjects = {
-      for (final episode in widget.episodes)
-        episode.conversationKey: episode.subject,
+      for (final episode in widget.episodes) episode.threadKey: episode.subject,
     };
-    final subject = subjects[conversationKey] ?? '';
+    final subject = subjects['$source\n$conversationKey'] ?? '';
     return subject.isEmpty ? '(no subject)' : subject;
   }
 
@@ -589,7 +592,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            _labelFor(member.conversationKey),
+            _labelFor(member.source, member.conversationKey),
             style: BondType.caption,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,

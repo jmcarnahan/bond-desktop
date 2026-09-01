@@ -143,6 +143,28 @@ void main() {
       expect((await store.nextPendingWork('extract'))?['entity_id'], 'b');
     });
 
+    test('claimPendingWork claims exactly the row the peek shows', () async {
+      await store.enqueueWork('extract', 'email', 'old');
+      await store.enqueueWork('extract', 'email', 'new');
+      await stampCreated('extract', 'old', '2026-08-20T10:00:00Z');
+      await stampCreated('extract', 'new', '2026-08-28T10:00:00Z');
+
+      // Peek and claim share an ORDER BY — the contract that keeps the peeks
+      // (which only tests use now) honest about what a drain would take.
+      final peeked = await store.nextPendingWork('extract');
+      final claimed = await store.claimPendingWork('extract');
+      expect(claimed?['entity_id'], peeked?['entity_id']);
+
+      // Post-update state, attempts untouched — failures spend those.
+      expect(claimed?['status'], 'processing');
+      expect(claimed?['attempts'], 0);
+
+      expect((await store.claimPendingWork('extract'))?['entity_id'], 'old');
+      expect(await store.claimPendingWork('extract'), isNull);
+      expect(await store.claimPendingWork('extract', sources: []), isNull,
+          reason: 'no sources means no queue, never every queue');
+    });
+
     test('only pending rows of the asked-for kind, in the asked-for source',
         () async {
       await store.enqueueWork('extract', 'email', 'done-1');

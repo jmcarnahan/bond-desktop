@@ -243,12 +243,20 @@ class StorylineService {
       temperature: 0,
     );
 
+    // Re-read before writing: the naming call takes seconds, and a user who
+    // renamed the storyline or saved a charter while it ran has set a lock
+    // this pass must honor. Deciding from the pre-call snapshot would
+    // overwrite their text with the model's — and leave the lock set, so no
+    // later pass would ever re-draft over the damage.
+    final fresh = await _store.getStoryline(storylineId);
+    if (fresh == null) return;
+
     await _store.updateStoryline(
       storylineId,
       // A locked title is the user's, and no later pass may take it back. The
       // summary is refreshed either way — it describes where the storyline
       // stands, which is not something a rename claimed ownership of.
-      title: storyline.titleLocked ? null : result.title,
+      title: fresh.titleLocked ? null : result.title,
       summary: result.summary,
     );
 
@@ -256,7 +264,7 @@ class StorylineService {
     // contract `title_locked` gives the title. An empty answer is not written
     // either — a storyline whose charter was never drafted is judged against
     // its summary, which is strictly better than judging it against nothing.
-    if (!storyline.charterLocked && result.charter.isNotEmpty) {
+    if (!fresh.charterLocked && result.charter.isNotEmpty) {
       await _store.updateStoryline(storylineId, charter: result.charter);
     }
   }
@@ -285,8 +293,9 @@ class StorylineService {
     final context = await _memberContext(storylineId);
     final centroid = context.centroid;
     if (centroid == null) {
-      // No member vectors means no ranking, and a recruit that considered
-      // nothing is still an answer to the user's save.
+      // No member vectors means no ranking. The all-zero note is quiet on
+      // purpose — the log's quiet-kind check suppresses it as the genuine
+      // nothing it is (see the note at the end of this method).
       _log.note({'recruited': 0, 'considered': 0});
       return;
     }
@@ -358,14 +367,14 @@ class StorylineService {
       if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
         await _store.touchStorylineActivity(storylineId, lastMessageAt);
       }
-      recruited++;
-    }
-
-    if (recruited > 0) {
+      // In the same breath as the membership write, like every other add
+      // path: a park on a later candidate must not leave the hash describing
+      // a set that no longer exists. At most eight extra writes.
       await _store.updateStoryline(
         storylineId,
         memberHash: await _memberHashOf(storylineId),
       );
+      recruited++;
     }
     // Always, zeroes included — the log is what decides what a person sees.
     // "Recruited 0 of 5" survives its quiet-kind check and shows: the model

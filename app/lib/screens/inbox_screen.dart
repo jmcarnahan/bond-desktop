@@ -538,9 +538,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onDismissSuggestion: (id) {
         // The dismissed storyline leaves the list, so a selection pointing at
         // it would render nothing. Clearing it here returns the pane to the
-        // overview in the same frame the row disappears.
-        if (_selectedStorylineId == id) {
-          setState(() => _selectedStorylineId = null);
+        // overview in the same frame the row disappears — and the add-thread
+        // overlay goes with it, since its pane belongs to the same storyline.
+        if (_selectedStorylineId == id || _addingToStorylineId == id) {
+          setState(() {
+            _selectedStorylineId = null;
+            _addingToStorylineId = null;
+          });
         }
         ref.read(storylinesProvider.notifier).dismiss(id);
       },
@@ -669,14 +673,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       builder: (context) => SettingsDialog(
         threshold: prefs.attentionThreshold,
         aboutMe: prefs.aboutMe,
+        // The prefs setters update state first and persist behind the
+        // caller's back on purpose (see AppPrefsNotifier) — `unawaited` says
+        // the discard is that contract, not an oversight.
         onThresholdChanged: (value) {
-          notifier.setAttentionThreshold(value);
+          unawaited(notifier.setAttentionThreshold(value));
           if (!mounted) return;
           ref.read(conversationsProvider.notifier).load(syncFirst: false);
         },
-        onAboutMeChanged: notifier.setAboutMe,
+        onAboutMeChanged: (text) => unawaited(notifier.setAboutMe(text)),
         showActivityLog: prefs.showActivityLog,
-        onShowActivityLogChanged: notifier.setShowActivityLog,
+        onShowActivityLogChanged: (on) =>
+            unawaited(notifier.setShowActivityLog(on)),
         // BOTH sources are wired, and deliberately not bound to the mode the
         // dialog OPENED in: the toggle now switches backends without closing
         // the dialog, so which one answers is the dialog's live choice. Each
@@ -696,11 +704,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         backendMode: prefs.backendMode,
         mcpServerUrl: prefs.mcpServerUrl,
         onBackendModeChanged: (mode) {
-          notifier.setBackendMode(mode);
+          unawaited(notifier.setBackendMode(mode));
           _reloadAfterBackendChange();
         },
         onMcpServerUrlChanged: (url) {
-          notifier.setMcpServerUrl(url);
+          unawaited(notifier.setMcpServerUrl(url));
           _reloadAfterBackendChange();
         },
         onSignInAgain: () {
@@ -739,7 +747,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ref.invalidate(storylineTimelineProvider);
             // And the previous person's about-me text, which the notifier
             // still holds in memory — same reason SignInScreen clears it.
-            ref.read(appPrefsProvider.notifier).setAboutMe('');
+            unawaited(ref.read(appPrefsProvider.notifier).setAboutMe(''));
           }
           _reloadAfterBackendChange();
         },
@@ -1112,7 +1120,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         return episode.conversationKey;
       }
     }
-    return targets.keys.isEmpty ? null : targets.keys.first;
+    // Unreachable while targets is built from these episodes; null, not a
+    // fake fallback, so a future divergence surfaces as "no reply bar".
+    return null;
   }
 
   Widget _replyTargetPicker(String selected, Map<String, String> subjects) {

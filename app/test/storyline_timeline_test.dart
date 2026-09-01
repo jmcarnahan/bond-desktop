@@ -107,6 +107,7 @@ void main() {
     WidgetTester tester, {
     Storyline storyline = _storyline,
     List<StorylineEpisode>? only,
+    List<StorylineMember>? withMembers,
     void Function(String title)? onRename,
     void Function(String charter)? onSetCharter,
     void Function(String source, String key)? onRemoveThread,
@@ -121,7 +122,7 @@ void main() {
         body: StorylineTimelinePanel(
           storyline: storyline,
           episodes: only ?? episodes,
-          members: members,
+          members: withMembers ?? members,
           onBack: onBack,
           onRename: onRename ?? (_) {},
           onSetCharter: onSetCharter ?? (_) {},
@@ -342,6 +343,9 @@ void main() {
         (tester) async {
       await pumpPanel(tester);
 
+      // Shut until asked — the strip is an explanation, not a fixture.
+      expect(find.text('Both concern the website redesign.'), findsNothing);
+
       await tester.tap(find.text('2 threads'));
       await tester.pumpAndSettle();
 
@@ -366,6 +370,48 @@ void main() {
       expect(find.byType(Checkbox), findsNothing);
       // Two cards carry one each; the strip adds none.
       expect(find.byTooltip('Remove from storyline'), findsNWidgets(2));
+    });
+
+    testWidgets('labels a member by its own connector, not by a key twin',
+        (tester) async {
+      // One conversation key under two connectors — legal, since keys are
+      // only unique within the connector that issued them. Each member row
+      // must take its subject from ITS episode, not whichever twin a lookup
+      // on the bare key happens to find first.
+      final mailTwin = _episode(
+        key: 'shared-1',
+        subject: 'Homepage copy',
+        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
+      );
+      final chatTwin = _episode(
+        key: 'shared-1',
+        source: 'teams',
+        subject: 'Sarah Whitfield',
+        messages: [_message(id: 'm2', receivedAt: '2026-08-01T10:00:00Z')],
+      );
+      await pumpPanel(
+        tester,
+        only: [mailTwin, chatTwin],
+        withMembers: const [
+          StorylineMember(
+            storylineId: 'sl-1',
+            conversationKey: 'shared-1',
+            addedBy: 'auto',
+          ),
+          StorylineMember(
+            storylineId: 'sl-1',
+            source: 'teams',
+            conversationKey: 'shared-1',
+            addedBy: 'auto',
+          ),
+        ],
+      );
+
+      await tester.tap(find.text('2 threads'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Homepage copy'), findsOneWidget);
+      expect(find.text('Sarah Whitfield'), findsOneWidget);
     });
   });
 
