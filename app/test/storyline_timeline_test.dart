@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:flutter/material.dart';
@@ -11,15 +12,43 @@ Message _message({
   String from = 'Sarah Chen',
   String address = 'sarah@example.com',
   String? body,
+  String source = 'email',
 }) =>
     Message(
       id: id,
+      source: source,
       outbound: false,
       fromName: from,
       fromAddress: address,
       receivedAt: receivedAt,
       bodyText: body ?? 'body of $id',
     );
+
+StorylineEpisode _episode({
+  required String key,
+  required List<Message> messages,
+  String source = 'email',
+  String subject = '',
+  List<String> participants = const ['Sarah Chen'],
+  String? latestAt,
+  String? summary,
+}) =>
+    StorylineEpisode(
+      source: source,
+      conversationKey: key,
+      subject: subject,
+      participants: participants,
+      messages: messages,
+      latestAt: latestAt ?? messages.last.receivedAt,
+      summary: summary,
+    );
+
+/// The messages actually on screen, in order — which is what "expanded" means
+/// here. A shut card renders a preview and no [MessageRow].
+List<String> _renderedIds(WidgetTester tester) => tester
+    .widgetList<MessageRow>(find.byType(MessageRow))
+    .map((row) => row.message.id)
+    .toList();
 
 const _storyline = Storyline(
   id: 'sl-1',
@@ -41,16 +70,25 @@ const _chartered = Storyline(
 );
 
 void main() {
-  // Two threads interleaved in time: c1 opens, c2 answers, c1 closes. Every
-  // message is from the same sender within the run window, so any seam the
-  // view draws is the thread changing and nothing else.
-  final messages = [
-    _message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z'),
-    _message(id: 'm2', receivedAt: '2026-08-01T09:01:00Z'),
-    _message(id: 'm3', receivedAt: '2026-08-01T09:02:00Z'),
-  ];
-  const keyByMessageId = {'m1': 'c1', 'm2': 'c2', 'm3': 'c1'};
-  const subjectByKey = {'c1': 'Homepage copy', 'c2': 'Launch date'};
+  // Two member threads, oldest activity first: the homepage thread ran in the
+  // morning, the launch thread answered later. Newest last is what the panel is
+  // handed and what it renders.
+  final homepage = _episode(
+    key: 'c1',
+    subject: 'Homepage copy',
+    summary: 'The studio wants the hero paragraph cut.',
+    messages: [
+      _message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z'),
+      _message(id: 'm3', receivedAt: '2026-08-01T09:02:00Z'),
+    ],
+  );
+  final launch = _episode(
+    key: 'c2',
+    subject: 'Launch date',
+    messages: [_message(id: 'm2', receivedAt: '2026-08-01T10:00:00Z')],
+  );
+  final episodes = [homepage, launch];
+
   const members = [
     StorylineMember(
       storylineId: 'sl-1',
@@ -68,7 +106,7 @@ void main() {
   Future<void> pumpPanel(
     WidgetTester tester, {
     Storyline storyline = _storyline,
-    List<Message>? only,
+    List<StorylineEpisode>? only,
     void Function(String title)? onRename,
     void Function(String charter)? onSetCharter,
     void Function(String source, String key)? onRemoveThread,
@@ -82,9 +120,7 @@ void main() {
       home: Scaffold(
         body: StorylineTimelinePanel(
           storyline: storyline,
-          messages: only ?? messages,
-          keyByMessageId: keyByMessageId,
-          subjectByKey: subjectByKey,
+          episodes: only ?? episodes,
           members: members,
           onBack: onBack,
           onRename: onRename ?? (_) {},
@@ -118,46 +154,92 @@ void main() {
     });
   });
 
-  group('transcript', () {
-    testWidgets('renders every message in merged order', (tester) async {
-      await pumpPanel(tester);
-
-      expect(find.byType(MessageRow), findsNWidgets(3));
-      expect(find.text('body of m1'), findsOneWidget);
-      expect(find.text('body of m2'), findsOneWidget);
-      expect(find.text('body of m3'), findsOneWidget);
-    });
-
-    testWidgets('a seam chip appears each time the thread changes',
+  group('the spine', () {
+    testWidgets('is one card per episode, in the order it was given',
         (tester) async {
       await pumpPanel(tester);
 
-      // c1 opens, c2 interrupts, c1 resumes: three seams, and the middle
-      // thread is named once.
-      expect(find.text('✉ Homepage copy'), findsNWidgets(2));
+      // The source is marked on both, mail included: an unmarked card leaves
+      // the reader guessing what it was.
+      final homepageCard = find.text('✉ Homepage copy');
+      final launchCard = find.text('✉ Launch date');
+      expect(homepageCard, findsOneWidget);
+      expect(launchCard, findsOneWidget);
+      expect(
+        tester.getTopLeft(homepageCard).dy,
+        lessThan(tester.getTopLeft(launchCard).dy),
+      );
+    });
+
+    testWidgets('the newest episode is the one that opens', (tester) async {
+      await pumpPanel(tester);
+
+      // The last card holds the newest message, so it is the one the reader
+      // lands in. Everything above it is a headline until they ask for more.
+      expect(_renderedIds(tester), ['m2']);
+    });
+
+    testWidgets('tapping a card header opens it, and tapping again shuts it',
+        (tester) async {
+      await pumpPanel(tester);
+
+      await tester.tap(find.text('✉ Homepage copy'));
+      await tester.pumpAndSettle();
+
+      // Opening one leaves the other where it was: this is skimming, not a
+      // single-expansion accordion.
+      expect(_renderedIds(tester), ['m1', 'm3', 'm2']);
+
+      await tester.tap(find.text('✉ Launch date'));
+      await tester.pumpAndSettle();
+
+      expect(_renderedIds(tester), ['m1', 'm3']);
+    });
+
+    testWidgets('a shut card previews the newest message in its thread',
+        (tester) async {
+      await pumpPanel(tester);
+
+      // m3 is the homepage thread's last message, and the card is shut, so the
+      // preview is the only place it appears.
+      expect(_renderedIds(tester), ['m2']);
+      expect(find.text('body of m3'), findsOneWidget);
+      expect(find.text('body of m1'), findsNothing);
+    });
+
+    testWidgets('the summary rides on the card, and its absence is quiet',
+        (tester) async {
+      await pumpPanel(tester);
+
+      expect(find.text('The studio wants the hero paragraph cut.'),
+          findsOneWidget);
+      // The launch episode has no summary at all, which is a card with one
+      // line fewer rather than an empty one.
+      expect(tester.takeException(), isNull);
       expect(find.text('✉ Launch date'), findsOneWidget);
     });
 
-    testWidgets('a seam always breaks the run, however close in time',
-        (tester) async {
-      await pumpPanel(tester);
+    testWidgets('day dividers live inside an episode', (tester) async {
+      final overnight = _episode(
+        key: 'c3',
+        subject: 'Overnight',
+        messages: [
+          _message(id: 'n1', receivedAt: '2026-08-01T09:00:00Z'),
+          _message(id: 'n2', receivedAt: '2026-08-02T09:00:00Z'),
+        ],
+      );
+      await pumpPanel(tester, only: [overnight]);
 
-      // Same sender, a minute apart — the thread panel would collapse all
-      // three under one header. Here each one opens its own.
-      final rows = tester
-          .widgetList<MessageRow>(find.byType(MessageRow))
-          .map((r) => r.showHeader)
-          .toList();
-      expect(rows, [true, true, true]);
+      expect(find.byType(MessageRow), findsNWidgets(2));
+      expect(find.byType(DayDivider), findsNWidgets(2));
     });
 
-    testWidgets('tapping a seam chip opens that thread', (tester) async {
-      final opened = <String>[];
-      await pumpPanel(tester, onOpenThread: (_, key) => opened.add(key));
+    testWidgets('nothing left of the seam pills', (tester) async {
+      await pumpPanel(tester);
 
-      await tester.tap(find.text('✉ Launch date'));
-
-      expect(opened, ['c2']);
+      // The seam is the card boundary now. A pill at every thread change was
+      // the merged transcript's way of coping and it went with it.
+      expect(find.byType(BondFilterPill), findsNothing);
     });
 
     testWidgets('an empty storyline says so rather than going blank',
@@ -168,48 +250,46 @@ void main() {
     });
   });
 
-  group('member strip', () {
-    testWidgets('is collapsed until the thread count is tapped',
+  group('card actions', () {
+    testWidgets('Open thread reports the source as well as the key',
         (tester) async {
-      await pumpPanel(tester);
-      expect(find.byType(Checkbox), findsNothing);
+      final opened = <String>[];
+      final chat = _episode(
+        key: 'chat-1',
+        source: 'teams',
+        subject: 'Sarah Whitfield',
+        messages: [
+          _message(
+            id: 't1',
+            source: 'teams',
+            receivedAt: '2026-08-01T11:00:00Z',
+          ),
+        ],
+      );
+      await pumpPanel(
+        tester,
+        only: [homepage, chat],
+        onOpenThread: (source, key) => opened.add('$source/$key'),
+      );
 
-      await tester.tap(find.text('2 threads'));
-      await tester.pumpAndSettle();
+      // A key is only unique within its connector: dropping the source is how
+      // a chat card opened a mail thread.
+      await tester.tap(find.byTooltip('Open thread').last);
 
-      expect(find.byType(Checkbox), findsNWidgets(2));
+      expect(opened, ['teams/chat-1']);
     });
 
-    testWidgets('un-ticking a thread filters it out of the transcript',
-        (tester) async {
-      await pumpPanel(tester);
-      await tester.tap(find.text('2 threads'));
-      await tester.pumpAndSettle();
-
-      // The second entry is c2 — the one message from the Launch date thread.
-      await tester.tap(find.byType(Checkbox).last);
-      await tester.pumpAndSettle();
-
-      expect(find.byType(MessageRow), findsNWidgets(2));
-      expect(find.text('body of m2'), findsNothing);
-      // With c2 hidden, c1's two messages are no longer interrupted, so the
-      // seam count drops with them.
-      expect(find.text('✉ Launch date'), findsNothing);
-      expect(find.text('✉ Homepage copy'), findsOneWidget);
-    });
-
-    testWidgets('the close icon removes the thread from the storyline',
+    testWidgets('the close icon removes that thread from the storyline',
         (tester) async {
       final removed = <String>[];
-      await pumpPanel(tester, onRemoveThread: (_, key) => removed.add(key));
-      await tester.tap(find.text('2 threads'));
-      await tester.pumpAndSettle();
+      await pumpPanel(
+        tester,
+        onRemoveThread: (source, key) => removed.add('$source/$key'),
+      );
 
-      await tester.tap(find.byIcon(Icons.close).first);
+      await tester.tap(find.byTooltip('Remove from storyline').first);
 
-      // Hiding is a view filter; removing is a correction. They are different
-      // controls on purpose.
-      expect(removed, ['c1']);
+      expect(removed, ['email/c1']);
     });
   });
 
@@ -273,6 +353,19 @@ void main() {
       expect(find.text('Launch date'), findsOneWidget);
       // The explanation is the strip itself now. Nothing here opens a popup.
       expect(find.byType(AlertDialog), findsNothing);
+    });
+
+    testWidgets('is a read-only explanation — no tick, no way out',
+        (tester) async {
+      await pumpPanel(tester);
+      await tester.tap(find.text('2 threads'));
+      await tester.pumpAndSettle();
+
+      // Hiding a thread was a view filter nobody could tell from a removal.
+      // Both gestures live on the episode cards now.
+      expect(find.byType(Checkbox), findsNothing);
+      // Two cards carry one each; the strip adds none.
+      expect(find.byTooltip('Remove from storyline'), findsNWidgets(2));
     });
   });
 

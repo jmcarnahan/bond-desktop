@@ -7,8 +7,10 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/storyline_pickers.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
+import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -46,8 +48,13 @@ void main() {
 
   tearDown(() => db.close());
 
-  Future<void> seedThread(String key, String subject) async {
+  Future<void> seedThread(
+    String key,
+    String subject, {
+    String source = 'email',
+  }) async {
     await store.upsertMessage({
+      'source': source,
       'source_message_id': '$key-m1',
       'conversation_key': key,
       'direction': 'inbound',
@@ -56,6 +63,7 @@ void main() {
       'body_text': 'body',
     });
     await store.upsertConversation({
+      'source': source,
       'conversation_key': key,
       'subject': subject,
       'state': 'waiting',
@@ -180,6 +188,45 @@ void main() {
 
     expect(find.byType(AddThreadToStorylinePane), findsNothing);
     expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('Open thread on a card opens it, whatever the source filter says',
+      (tester) async {
+    // One key, two connectors — which is legal, since a conversation key is
+    // only unique within the connector that issued it.
+    await seedThread('shared-1', 'Homepage copy');
+    await seedThread('shared-1', 'Sarah Whitfield', source: 'teams');
+    await store.insertStoryline(
+      id: 'sl-1',
+      title: 'Website redesign',
+      status: 'active',
+      createdBy: 'auto',
+    );
+    await store.addStorylineMember('sl-1', 'teams', 'shared-1',
+        addedBy: 'auto');
+
+    await openStoryline(tester, 'Website redesign');
+
+    // Mail only, so the chat this storyline holds is not in the list the pane
+    // resolves the selection against first.
+    await tester.tap(find.byKey(SourceFilterBar.mailKey));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Open thread'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    // The card knows which connector its key belongs to and says so, which is
+    // what stops the key resolving to the mail thread that shares it. An
+    // explicit click also outranks the filter — landing on a section overview
+    // instead would read as a broken card.
+    final panel =
+        tester.widget<ThreadDetailPanel>(find.byType(ThreadDetailPanel));
+    expect(panel.conversation.source, 'teams');
+    expect(panel.conversation.subject, 'Sarah Whitfield');
     await settleQueues(tester);
   });
 }

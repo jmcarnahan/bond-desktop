@@ -1,5 +1,6 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
@@ -30,11 +31,13 @@ class UnusedLlm extends LlmClient {
   UnusedLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
 }
 
-/// A store whose storyline read fails, for the never-blank rule.
+/// A store whose storyline reads fail, for the never-blank rule. Each read has
+/// its own switch: the two notifiers under test fail independently.
 class UnreadableStore extends MessageStore {
   UnreadableStore(super.db);
 
   bool broken = false;
+  bool timelineBroken = false;
 
   @override
   Future<List<Storyline>> loadStorylines({
@@ -42,6 +45,15 @@ class UnreadableStore extends MessageStore {
   }) async {
     if (broken) throw StateError('disk is gone');
     return super.loadStorylines(statuses: statuses);
+  }
+
+  @override
+  Future<List<Map<String, Object?>>> storylineTimeline(
+    String storylineId, {
+    List<String> sources = const ['email'],
+  }) async {
+    if (timelineBroken) throw StateError('disk is gone');
+    return super.storylineTimeline(storylineId, sources: sources);
   }
 }
 
@@ -85,13 +97,19 @@ void main() {
     String id, {
     required String receivedAt,
     String? subject,
+    String source = 'email',
+    String? fromName,
+    String? fromAddress,
   }) {
     return store.upsertMessage({
+      'source': source,
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'inbound',
       'received_at': receivedAt,
       'subject': subject ?? key,
+      'from_name': fromName,
+      'from_address': fromAddress,
       'body_text': 'body of $id',
     });
   }
@@ -264,7 +282,10 @@ void main() {
   });
 
   group('timeline', () {
-    test('merges the member threads and names each one', () async {
+    /// The two-thread storyline every case below starts from: c1 opens, c2
+    /// answers, c1 closes. Interleaved in time, so a view that merged them by
+    /// timestamp would split each thread in half.
+    Future<void> seedTwoThreads() async {
       await seedConversation('c1', subject: 'Re: Homepage copy');
       await seedConversation('c2', subject: 'Launch date');
       await seedMessage('c1', 'm1',
@@ -272,7 +293,100 @@ void main() {
       await seedMessage('c2', 'm2',
           receivedAt: '2026-08-01T10:00:00Z', subject: 'Launch date');
       await seedMessage('c1', 'm3',
-          receivedAt: '2026-08-01T11:00:00Z', subject: 'Re: Homepage copy');
+          receivedAt: '2026-08-01T11:00:00Z', subject: 'Re: Re: Homepage copy');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+    }
+
+    test('groups the member threads into one episode each', () async {
+      await seedTwoThreads();
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+
+      await notifier.load();
+
+      final state = notifier.state as StorylineTimelineLoaded;
+      // Ordered by last activity, oldest first: c1's second message is the
+      // newest thing in the storyline, so its episode sorts last.
+      expect(state.episodes.map((e) => e.conversationKey), ['c2', 'c1']);
+      expect(state.episodes.first.messages.map((m) => m.id), ['m2']);
+      expect(state.episodes.last.messages.map((m) => m.id), ['m1', 'm3']);
+      expect(state.episodes.last.latestAt, '2026-08-01T11:00:00Z');
+      expect(state.episodes.last.threadKey, 'email\nc1');
+      expect(state.loadError, isNull);
+    });
+
+    test('the first non-empty subject names the thread', () async {
+      await seedTwoThreads();
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+
+      await notifier.load();
+
+      // Stripped, so the label matches the one on the inbox row — and taken
+      // from the first message, not the `Re: Re:` one that closed the thread.
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(
+        {for (final e in state.episodes) e.conversationKey: e.subject},
+        {'c1': 'Homepage copy', 'c2': 'Launch date'},
+      );
+    });
+
+    test('a thread whose first message has no subject takes the next one',
+        () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z',
+          subject: '');
+      await seedMessage('c1', 'm2',
+          receivedAt: '2026-08-01T10:00:00Z', subject: 'Homepage copy');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+      await notifier.load();
+
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(state.episodes.single.subject, 'Homepage copy');
+    });
+
+    test('participants are the senders, deduped, in the order they spoke',
+        () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1',
+          receivedAt: '2026-08-01T09:00:00Z',
+          fromName: 'Sarah Chen',
+          fromAddress: 'sarah@example.com');
+      await seedMessage('c1', 'm2',
+          receivedAt: '2026-08-01T10:00:00Z',
+          fromAddress: 'eric@example.com');
+      await seedMessage('c1', 'm3',
+          receivedAt: '2026-08-01T11:00:00Z',
+          fromName: 'Sarah Chen',
+          fromAddress: 'sarah@example.com');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+      await notifier.load();
+
+      // A sender with no display name is their address rather than a gap —
+      // the card names who is in the thread, and half a list is worse than a
+      // raw address.
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(state.episodes.single.participants,
+          ['Sarah Chen', 'eric@example.com']);
+    });
+
+    test('an episode with no timestamp sorts first', () async {
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await store.upsertMessage({
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'subject': 'Undated',
+        'body_text': 'body of m1',
+      });
+      await seedMessage('c2', 'm2', receivedAt: '2026-08-01T10:00:00Z');
       await seedStoryline('sl-1', status: 'active');
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
       await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
@@ -280,12 +394,65 @@ void main() {
       final notifier = StorylineTimelineNotifier(store, 'sl-1');
       await notifier.load();
 
+      // Nothing about an undated thread says it is the latest, and the last
+      // card is the one that opens.
       final state = notifier.state as StorylineTimelineLoaded;
-      expect(state.messages.map((m) => m.id), ['m1', 'm2', 'm3']);
-      expect(state.keyByMessageId, {'m1': 'c1', 'm2': 'c2', 'm3': 'c1'});
-      // Stripped, so the label matches the one on the inbox row.
-      expect(state.subjectByKey, {'c1': 'Homepage copy', 'c2': 'Launch date'});
-      expect(state.loadError, isNull);
+      expect(state.episodes.map((e) => e.conversationKey), ['c1', 'c2']);
+      expect(state.episodes.first.latestAt, isNull);
+    });
+
+    test('the episode carries the newest inbound triage summary', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedMessage('c1', 'm2', receivedAt: '2026-08-01T10:00:00Z');
+      await store.writeTriage(
+        'email',
+        'm2',
+        status: 'ok',
+        result: const TriageResult(
+          urgency: 'normal',
+          category: 'other',
+          summary: 'The studio wants the hero paragraph cut.',
+          needsAction: false,
+          actionItems: [],
+        ),
+      );
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+      await notifier.load();
+
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(state.episodes.single.summary,
+          'The studio wants the hero paragraph cut.');
+    });
+
+    test('a thread triage has not reached carries no summary', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+      await notifier.load();
+
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(state.episodes.single.summary, isNull);
+    });
+
+    test('a failed re-read keeps the episodes and explains itself', () async {
+      await seedTwoThreads();
+      final broken = UnreadableStore(db);
+      final notifier = StorylineTimelineNotifier(broken, 'sl-1');
+      await notifier.load();
+
+      broken.timelineBroken = true;
+      await notifier.load();
+
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(state.episodes, hasLength(2));
+      expect(state.loadError, contains("Couldn't refresh"));
     });
 
     test('an empty storyline loads as empty rather than erroring', () async {
@@ -295,8 +462,7 @@ void main() {
       await notifier.load();
 
       final state = notifier.state as StorylineTimelineLoaded;
-      expect(state.messages, isEmpty);
-      expect(state.subjectByKey, isEmpty);
+      expect(state.episodes, isEmpty);
     });
   });
 
@@ -318,7 +484,10 @@ void main() {
 
       await container.read(storylineTimelineProvider('sl-1').notifier).load();
       final timeline = container.read(storylineTimelineProvider('sl-1'));
-      expect((timeline as StorylineTimelineLoaded).messages.single.id, 'm1');
+      expect(
+        (timeline as StorylineTimelineLoaded).episodes.single.messages.single.id,
+        'm1',
+      );
     });
   });
 }

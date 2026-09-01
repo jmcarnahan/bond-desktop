@@ -252,7 +252,7 @@ final storylineThreadIdsProvider = FutureProvider.autoDispose
       .toSet(),
 );
 
-// ── one storyline's merged transcript ──────────────────────────────────
+// ── one storyline's thread episodes ────────────────────────────────────
 
 @immutable
 sealed class StorylineTimelineState {
@@ -268,34 +268,54 @@ class StorylineTimelineLoading extends StorylineTimelineState {
 }
 
 class StorylineTimelineLoaded extends StorylineTimelineState {
-  /// Every message of every member thread, oldest first.
-  final List<Message> messages;
-
-  /// `source_message_id` → `conversation_key`. Carried beside the messages
-  /// because [Message] has no field for its thread's key, and the merged
-  /// transcript has to know where one thread ends and the next begins.
-  final Map<String, String> keyByMessageId;
-
-  /// `conversation_key` → the thread's stripped subject. The timeline needs it
-  /// to label the point where the transcript crosses from one thread into
-  /// another, and the messages alone cannot supply it: a member thread's
-  /// subject may be `Re: Re:` on every row.
-  final Map<String, String> subjectByKey;
+  /// One episode per member thread, oldest activity first — the whole
+  /// storyline, grouped the way it is read.
+  final List<StorylineEpisode> episodes;
 
   final String? loadError;
 
-  const StorylineTimelineLoaded(
-    this.messages,
-    this.keyByMessageId,
-    this.subjectByKey, [
-    this.loadError,
-  ]);
+  const StorylineTimelineLoaded(this.episodes, [this.loadError]);
 }
 
 class StorylineTimelineError extends StorylineTimelineState {
   final String message;
 
   const StorylineTimelineError(this.message);
+}
+
+/// One thread's rows while they are still being gathered. [StorylineEpisode]
+/// is immutable and one of its fields — the triage summary — costs a second
+/// read per thread, so the grouping pass fills one of these first.
+class _EpisodeDraft {
+  final String source;
+  final String conversationKey;
+  final List<Message> messages = [];
+  final List<String> participants = [];
+  final Set<String> _seen = {};
+
+  String subject = '';
+  String? latestAt;
+
+  _EpisodeDraft(this.source, this.conversationKey);
+
+  void add(Message message, String? rawSubject) {
+    messages.add(message);
+
+    // The FIRST non-empty subject in chronological order names the thread —
+    // the same rule the conversation fold uses, so the label here matches the
+    // one on the inbox row.
+    if (subject.isEmpty) subject = stripReFw(rawSubject);
+
+    final name = message.fromName?.isNotEmpty == true
+        ? message.fromName!
+        : (message.fromAddress ?? '');
+    if (name.isNotEmpty && _seen.add(name)) participants.add(name);
+
+    // Last one wins: the rows arrive oldest first, and a message with no
+    // timestamp must not blank a stamp an earlier one supplied.
+    final receivedAt = message.receivedAt;
+    if (receivedAt != null) latestAt = receivedAt;
+  }
 }
 
 class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
@@ -313,51 +333,78 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
       state = const StorylineTimelineLoading();
     }
 
-    final List<Map<String, Object?>> rows;
+    final episodes = <StorylineEpisode>[];
     try {
       // Every connector, not just mail: a chat thread can join a storyline
       // through the assignment pass, and a timeline that dropped its messages
       // would show a member strip listing a thread with nothing in it.
-      rows =
+      final rows =
           await _store.storylineTimeline(storylineId, sources: inboxSources);
+      if (seq != _fetchSeq) return;
+
+      // The rows arrive received_at ASC, so first encounter is the order the
+      // threads started in and every episode's messages are already oldest
+      // first.
+      final drafts = <String, _EpisodeDraft>{};
+      for (final row in rows) {
+        final key = row['conversation_key'] as String? ?? '';
+        if (key.isEmpty) continue;
+        final message = Message.fromRow(row);
+        drafts
+            .putIfAbsent(
+              '${message.source}\n$key',
+              () => _EpisodeDraft(message.source, key),
+            )
+            .add(message, row['subject'] as String?);
+      }
+
+      for (final draft in drafts.values) {
+        final card = await _store.newestInboundCardData(
+          draft.source,
+          draft.conversationKey,
+        );
+        if (seq != _fetchSeq) return;
+        final summary = card?['summary'] as String?;
+        episodes.add(StorylineEpisode(
+          source: draft.source,
+          conversationKey: draft.conversationKey,
+          subject: draft.subject,
+          participants: draft.participants,
+          messages: draft.messages,
+          latestAt: draft.latestAt,
+          // An empty summary is a triage pass that had nothing to say, which
+          // the card renders the same way as one that has not run.
+          summary: summary?.isEmpty == true ? null : summary,
+        ));
+      }
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;
       state = current is StorylineTimelineLoaded
           ? StorylineTimelineLoaded(
-              current.messages,
-              current.keyByMessageId,
-              current.subjectByKey,
+              current.episodes,
               "Couldn't refresh this storyline just now.",
             )
           : StorylineTimelineError('Could not read this storyline: $e');
       return;
     }
 
-    final messages = <Message>[];
-    final keys = <String, String>{};
-    final subjects = <String, String>{};
-    for (final row in rows) {
-      final message = Message.fromRow(row);
-      messages.add(message);
-      final key = row['conversation_key'] as String? ?? '';
-      if (key.isEmpty) continue;
-      keys[message.id] = key;
-      // The FIRST non-empty subject in chronological order names the thread —
-      // the same rule the conversation fold uses, so the label here matches
-      // the one on the inbox row.
-      if (subjects[key]?.isNotEmpty == true) continue;
-      final subject = stripReFw(row['subject'] as String?);
-      if (subject.isNotEmpty) subjects[key] = subject;
-    }
+    // Ascending, so the newest episode sits at the BOTTOM — the direction the
+    // messages inside it already read in. An episode with no timestamp sorts
+    // first, since nothing about it says it is the latest, and the thread key
+    // breaks ties so one storyline always renders in one order.
+    episodes.sort((a, b) {
+      final byTime = (a.latestAt ?? '').compareTo(b.latestAt ?? '');
+      return byTime != 0 ? byTime : a.threadKey.compareTo(b.threadKey);
+    });
 
     if (seq != _fetchSeq) return;
-    state = StorylineTimelineLoaded(messages, keys, subjects);
+    state = StorylineTimelineLoaded(episodes);
   }
 }
 
 /// Deliberately NOT autoDispose, for the reason `threadProvider` is not:
-/// clicking back into a storyline should show its transcript, not a spinner
+/// clicking back into a storyline should show its episodes, not a spinner
 /// over a read that already ran this session.
 final storylineTimelineProvider = StateNotifierProvider.family<
     StorylineTimelineNotifier, StorylineTimelineState, String>(

@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart' show immutable;
 
+import 'message_models.dart';
+
 /// Row models for storylines — the named groups of related conversations the
 /// clustering pass proposes and the user keeps, renames or dismisses.
 ///
@@ -124,4 +126,47 @@ class StorylineMember {
       addedAt: row['added_at'] as String? ?? '',
     );
   }
+}
+
+/// One member thread's whole run inside a storyline — the unit the storyline
+/// pane renders as a card.
+///
+/// Assembled by `StorylineTimelineNotifier`, not read from a table: the store
+/// answers with messages, and which thread each one belongs to is a column on
+/// the row rather than a field on [Message].
+@immutable
+class StorylineEpisode {
+  final String source;
+  final String conversationKey;
+
+  /// First non-empty stripped subject in chronological order — the same rule
+  /// the conversation fold uses, so the card matches the inbox row. Empty when
+  /// no message carries one.
+  final String subject;
+
+  /// Distinct sender display names in first-appearance order.
+  final List<String> participants;
+
+  /// The thread's messages, oldest first.
+  final List<Message> messages;
+
+  /// The newest message's timestamp; null when none carries one.
+  final String? latestAt;
+
+  /// The newest inbound message's triage summary; null until triage has run.
+  final String? summary;
+
+  const StorylineEpisode({
+    required this.source,
+    required this.conversationKey,
+    required this.subject,
+    required this.participants,
+    required this.messages,
+    this.latestAt,
+    this.summary,
+  });
+
+  /// The composite a storyline's membership is keyed on. A conversation key is
+  /// only unique within its connector.
+  String get threadKey => '$source\n$conversationKey';
 }

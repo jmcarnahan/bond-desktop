@@ -77,6 +77,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   RailSection? _section = RailSection.needsYou;
   String? _selectedId;
 
+  /// Which connector [_selectedId] belongs to, set only when the caller knows
+  /// — a storyline card does, the rail does not. A conversation key is unique
+  /// within a connector and not across them, so without this a chat and a mail
+  /// thread that share a key are the same selection.
+  String? _selectedSource;
+
   /// The open storyline. Never set at the same time as [_selectedId] — the
   /// main pane shows exactly one thing, and the three selections clear each
   /// other rather than racing to be rendered.
@@ -225,9 +231,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     widget.onSignedOut?.call();
   }
 
-  void _select(String id) {
+  void _select(String id, {String? source}) {
     setState(() {
       _selectedId = id;
+      _selectedSource = source;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
@@ -250,6 +257,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _selectedStorylineId = id;
       _selectedId = null;
+      _selectedSource = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _addingToStorylineId = null;
@@ -266,6 +274,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _section = section;
       _selectedId = null;
+      _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
@@ -282,6 +291,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _section = RailSection.later;
       _selectedLaterDay = dayKey;
       _selectedId = null;
+      _selectedSource = null;
       _selectedStorylineId = null;
       _showingActivityLog = false;
       _addingToStorylineId = null;
@@ -297,6 +307,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _showingActivityLog = true;
       _selectedId = null;
+      _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _addingToStorylineId = null;
@@ -829,18 +840,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   Conversation? _selected(List<Conversation> conversations) {
+    // The source narrows the match only when the caller supplied one. Every
+    // other route here knows an id and nothing else, and demanding a source of
+    // them would match nothing at all.
+    bool matches(Conversation c) =>
+        c.id == _selectedId &&
+        (_selectedSource == null || c.source == _selectedSource);
+
     for (final c in conversations) {
-      if (c.id == _selectedId) return c;
+      if (matches(c)) return c;
     }
     // Not in the FILTERED list. An explicit selection is the most specific
     // thing the user asked for and outranks the source filter — a storyline
-    // seam chip can open a chat while the filter shows Mail, and landing on a
+    // card can open a chat while the filter shows Mail, and landing on a
     // section overview instead would read as a broken click. The unfiltered
     // list settles whether the thread still exists at all.
     final state = ref.read(conversationsProvider);
     if (state is ConversationsLoaded) {
       for (final c in state.conversations) {
-        if (c.id == _selectedId) return c;
+        if (matches(c)) return c;
       }
     }
     // A thread can leave the list between renders — a sync that moved it, or
@@ -1002,40 +1020,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return const Center(child: CircularProgressIndicator());
     }
 
-    final (
-      List<Message> messages,
-      Map<String, String> keys,
-      Map<String, String> subjects,
-      String? error,
-    ) = switch (timeline) {
-      StorylineTimelineLoaded(
-        :final messages,
-        :final keyByMessageId,
-        :final subjectByKey,
-        :final loadError,
-      ) =>
-        (messages, keyByMessageId, subjectByKey, loadError),
+    final (List<StorylineEpisode> episodes, String? error) = switch (timeline) {
+      StorylineTimelineLoaded(:final episodes, :final loadError) =>
+        (episodes, loadError),
       StorylineTimelineError(:final message) => (
-          const <Message>[],
-          const <String, String>{},
-          const <String, String>{},
+          const <StorylineEpisode>[],
           message,
         ),
-      _ => (
-          const <Message>[],
-          const <String, String>{},
-          const <String, String>{},
-          null,
-        ),
+      _ => (const <StorylineEpisode>[], null),
     };
 
     final notifier = ref.read(storylinesProvider.notifier);
     final panel = StorylineTimelinePanel(
       key: ValueKey(storyline.id),
       storyline: storyline,
-      messages: messages,
-      keyByMessageId: keys,
-      subjectByKey: subjects,
+      episodes: episodes,
       // Empty for the frame before the read lands — the same thing the pane
       // shows for a storyline whose members have not been written yet.
       members:
@@ -1049,7 +1048,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         if (!mounted) return;
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
-      onOpenThread: (_, key) => _select(key),
+      onOpenThread: (source, key) => _select(key, source: source),
       onAddThread: () =>
           setState(() => _addingToStorylineId = storyline.id),
     );
@@ -1057,8 +1056,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // Chats are not reply targets — see [_replyElsewhere] for why. A storyline
     // of only chats therefore offers the caption instead of a dropdown, and a
     // mixed one offers its mail threads.
-    final targets = _emailTargets(messages, keys, subjects);
-    final replyKey = _replyTargetFor(messages, keys, targets);
+    final targets = _emailTargets(episodes);
+    final replyKey = _replyTargetFor(episodes, targets);
 
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -1079,7 +1078,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             _replyTargetPicker(replyKey, targets),
             const SizedBox(height: BondSpacing.s8),
             _composer(replyKey),
-          ] else if (subjects.isNotEmpty) ...[
+          ] else if (episodes.isNotEmpty) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
           ],
@@ -1088,46 +1087,32 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// The member threads a reply can actually go to: the mail ones.
-  ///
-  /// Derived from the messages rather than from a source column on the
-  /// subject map, because that is where the source lives — the timeline
-  /// carries `conversation_key` and `subject` per thread and the source per
-  /// message.
-  Map<String, String> _emailTargets(
-    List<Message> messages,
-    Map<String, String> keyByMessageId,
-    Map<String, String> subjectByKey,
-  ) {
-    final mailKeys = <String>{};
-    for (final message in messages) {
-      if (message.source != 'email') continue;
-      final key = keyByMessageId[message.id];
-      if (key != null) mailKeys.add(key);
-    }
+  /// The member threads a reply can actually go to: the mail ones, by key and
+  /// the subject the dropdown names them with.
+  Map<String, String> _emailTargets(List<StorylineEpisode> episodes) {
     return {
-      for (final entry in subjectByKey.entries)
-        if (mailKeys.contains(entry.key)) entry.key: entry.value,
+      for (final episode in episodes)
+        if (episode.source == 'email') episode.conversationKey: episode.subject,
     };
   }
 
   /// Which member thread a storyline's composer answers.
   ///
   /// The user's pick when they made one and it is still a member; otherwise the
-  /// thread the newest message in the merged timeline belongs to, which is
-  /// nearly always the one that is actually waiting on an answer.
+  /// newest mail episode, which is nearly always the one actually waiting on an
+  /// answer — the episodes arrive oldest first, so that is the last of them.
   String? _replyTargetFor(
-    List<Message> messages,
-    Map<String, String> keyByMessageId,
-    Map<String, String> subjectByKey,
+    List<StorylineEpisode> episodes,
+    Map<String, String> targets,
   ) {
     final picked = _storylineReplyKey;
-    if (picked != null && subjectByKey.containsKey(picked)) return picked;
-    for (final message in messages.reversed) {
-      final key = keyByMessageId[message.id];
-      if (key != null && subjectByKey.containsKey(key)) return key;
+    if (picked != null && targets.containsKey(picked)) return picked;
+    for (final episode in episodes.reversed) {
+      if (targets.containsKey(episode.conversationKey)) {
+        return episode.conversationKey;
+      }
     }
-    return subjectByKey.keys.isEmpty ? null : subjectByKey.keys.first;
+    return targets.keys.isEmpty ? null : targets.keys.first;
   }
 
   Widget _replyTargetPicker(String selected, Map<String, String> subjects) {
@@ -1183,7 +1168,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       messages: messages,
       onMarkDone: () =>
           ref.read(conversationsProvider.notifier).markDone(selected.id),
-      onBack: () => setState(() => _selectedId = null),
+      onBack: () => setState(() {
+        _selectedId = null;
+        _selectedSource = null;
+      }),
       onAddToStoryline: () => setState(() => _pickingStorylineForThread =
           (source: selected.source, id: selected.id)),
       // Sender-scoped, because the screen is the layer that knows the address

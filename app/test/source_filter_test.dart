@@ -11,7 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Everything that tells a chat from an email on screen: the filter pills, the
-/// glyph on a row, and the seam chips in a merged storyline.
+/// glyph on a row, and the source mark on a storyline's episode cards.
 
 Conversation _conv({
   required String id,
@@ -173,8 +173,8 @@ void main() {
     });
   });
 
-  group('storyline seam chips', () {
-    testWidgets('name the source on both sides of a seam', (tester) async {
+  group('storyline episode cards', () {
+    testWidgets('name the source on every card, mail included', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1000, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -185,25 +185,41 @@ void main() {
           status: 'active',
           memberCount: 2,
         ),
-        messages: const [
-          Message(
-            id: 'm1',
-            outbound: false,
-            fromName: 'Sarah',
-            receivedAt: '2026-08-01T09:00:00Z',
-            bodyText: 'the mail one',
+        episodes: const [
+          StorylineEpisode(
+            source: 'email',
+            conversationKey: 'c1',
+            subject: 'Homepage copy',
+            participants: ['Sarah'],
+            latestAt: '2026-08-01T09:00:00Z',
+            messages: [
+              Message(
+                id: 'm1',
+                outbound: false,
+                fromName: 'Sarah',
+                receivedAt: '2026-08-01T09:00:00Z',
+                bodyText: 'the mail one',
+              ),
+            ],
           ),
-          Message(
-            id: 'm2',
+          StorylineEpisode(
             source: 'teams',
-            outbound: false,
-            fromName: 'Sarah',
-            receivedAt: '2026-08-01T09:05:00Z',
-            bodyText: 'the chat one',
+            conversationKey: 'chat-1',
+            subject: 'Sarah Whitfield',
+            participants: ['Sarah'],
+            latestAt: '2026-08-01T09:05:00Z',
+            messages: [
+              Message(
+                id: 'm2',
+                source: 'teams',
+                outbound: false,
+                fromName: 'Sarah',
+                receivedAt: '2026-08-01T09:05:00Z',
+                bodyText: 'the chat one',
+              ),
+            ],
           ),
         ],
-        keyByMessageId: const {'m1': 'c1', 'm2': 'chat-1'},
-        subjectByKey: const {'c1': 'Homepage copy', 'chat-1': 'Sarah Whitfield'},
         members: const [
           StorylineMember(
             storylineId: 'sl-1',
@@ -225,8 +241,8 @@ void main() {
         onAddThread: () {},
       )));
 
-      // Both marked here, mail included: in a merged transcript an unmarked
-      // seam leaves the reader guessing.
+      // Both marked here, mail included: a storyline holds threads and chats,
+      // and an unmarked card leaves the reader guessing which this was.
       expect(find.text('✉ Homepage copy'), findsOneWidget);
       expect(find.text('💬 Sarah Whitfield'), findsOneWidget);
     });
