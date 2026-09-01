@@ -268,7 +268,7 @@ void main() {
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
       expect(
-        find.text('Teams chats — awaiting admin approval'),
+        find.text('Teams chats'),
         findsOneWidget,
       );
       expect(find.byIcon(Icons.check), findsNWidgets(3));
