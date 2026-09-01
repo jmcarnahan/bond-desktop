@@ -214,7 +214,11 @@ class AiWorker {
             );
             if (item == null) break;
             late final Future<void> future;
-            future = _runOne(handler, item).then((outcome) {
+            // [ActivityLog.inSpan] gives this item its own tally, so
+            // concurrent items' notes and model calls land on their own
+            // activity rows. It runs its body synchronously, so the claim
+            // inside [_runOne] still happens before this loop continues.
+            future = _log.inSpan(() => _runOne(handler, item)).then((outcome) {
               parkedKind |= outcome == _RunOutcome.parkKind;
               parkedDrain |= outcome == _RunOutcome.parkDrain;
             }).whenComplete(() => inFlight.remove(future));

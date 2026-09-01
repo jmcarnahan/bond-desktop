@@ -67,15 +67,28 @@ class ActivityEvent {
 /// a [debugPrint], and the default every instrumented constructor takes is
 /// [ActivityLog.disabled] — a recorder that stores nothing.
 ///
-/// Besides the finished rows, it carries the facts about the unit of work IN
+/// Besides the finished rows, it carries the facts about each unit of work IN
 /// FLIGHT — the model calls it made ([noteLlmCall]) and whatever its handler
-/// chose to add ([note]/[noteStatus]) — in one pending slot that the next
-/// [record] folds in and clears. One slot is enough because both drains hold
-/// the shared `DrainGate` and each is strictly serial: there is never a
-/// second unit of work to interleave with. If a future phase parallelizes
-/// the drains, this slot is the thing that breaks — see [_staleAfter], which
-/// also makes a queue torn down mid-drain (a backend switch) harmless: its
-/// orphaned tally ages out instead of being attributed to whatever runs next.
+/// chose to add ([note]/[noteStatus]) — in a pending slot that the unit's own
+/// [record] folds in and clears.
+///
+/// One slot per unit, not one slot total, and the drains are why. They run up
+/// to K=3 items in flight, so three triage messages' model calls interleave —
+/// and with a single slot, whichever recorded first would claim all three
+/// tallies (the original single-slot design said as much: "if a future phase
+/// parallelizes the drains, this slot is the thing that breaks"). The fix is
+/// [inSpan]: a queue wraps each item's whole async flow in it, and every
+/// note or record made anywhere inside — the handler's, the storyline
+/// service's, even the [LlmCallObserver] the client fires mid-request — lands
+/// in that item's slot, because a callback runs in whatever zone invokes it
+/// and the item's entire await chain lives in the item's zone.
+///
+/// Callers that never overlap — the sync passes, anything outside a drain —
+/// use the ROOT slot without wrapping and behave exactly as before; see
+/// [_staleAfter], which makes a caller torn down mid-unit (a backend switch)
+/// harmless: its orphaned tally ages out instead of being attributed to
+/// whatever runs next. A span's slot needs no aging at all — it dies with the
+/// zone that owned it.
 class ActivityLog {
   /// A pending tally older than this belongs to a unit of work that never
   /// recorded — a torn-down queue, a crash mid-item — and is dropped rather
@@ -109,18 +122,20 @@ class ActivityLog {
     'storyline_sweep': activityLastSweepKey,
   };
 
+  /// The zone value under which [inSpan] parks a unit's slot. An [Object]
+  /// identity key rather than a symbol so nothing outside this file can forge
+  /// or read it.
+  static final Object _spanKey = Object();
+
   final MessageStore? _store;
   final StreamController<ActivityEvent>? _events;
 
-  Map<String, Object?> _pendingDetail = {};
-  String? _pendingStatus;
-  int _pendingLlmCalls = 0;
-  int _pendingLlmMs = 0;
-  int _pendingPromptTokens = 0;
-  int _pendingCompletionTokens = 0;
-  String? _pendingLlmLabel;
-  String? _pendingLlmError;
-  DateTime? _pendingSince;
+  /// The slot for callers that never overlap. Everything inside an [inSpan]
+  /// gets its own instead.
+  final _PendingSlot _rootSlot = _PendingSlot();
+
+  _PendingSlot get _slot =>
+      (Zone.current[_spanKey] as _PendingSlot?) ?? _rootSlot;
 
   ActivityLog(MessageStore store)
       : _store = store,
@@ -138,39 +153,48 @@ class ActivityLog {
   Stream<ActivityEvent> get events =>
       _events?.stream ?? const Stream<ActivityEvent>.empty();
 
+  /// Runs one unit of work with its own pending slot, so the notes and model
+  /// calls it makes anywhere in its async flow fold into ITS row rather than
+  /// into whichever concurrent sibling records first. The queues wrap each
+  /// item in this; a caller with nothing concurrent going on simply doesn't.
+  Future<T> inSpan<T>(Future<T> Function() body) {
+    if (_store == null) return body();
+    return runZoned(body, zoneValues: {_spanKey: _PendingSlot()});
+  }
+
   /// Facts the handler wants on the row the worker is about to write —
   /// extraction's topics, a draft's length.
   void note(Map<String, Object?> facts) {
     if (_store == null) return;
-    _touchPending();
-    _pendingDetail.addAll(facts);
+    final slot = _slot.._touch();
+    slot.detail.addAll(facts);
   }
 
   /// Overrides the status the worker would otherwise write — a handler that
   /// early-returned wants `skipped`, not a misleading `ok`.
   void noteStatus(String status) {
     if (_store == null) return;
-    _touchPending();
-    _pendingStatus = status;
+    final slot = _slot.._touch();
+    slot.status = status;
   }
 
   /// Accumulated, not stored: calls, summed ms, summed tokens. A storyline
   /// sweep makes several model calls per item and they belong on one row.
   void noteLlmCall(LlmCallRecord call) {
     if (_store == null) return;
-    _touchPending();
-    _pendingLlmCalls += 1;
-    _pendingLlmMs += call.durationMs;
-    _pendingPromptTokens += call.promptTokens ?? 0;
-    _pendingCompletionTokens += call.completionTokens ?? 0;
-    _pendingLlmLabel = call.label;
-    if (call.outcome != 'ok') _pendingLlmError = call.error ?? call.outcome;
+    final slot = _slot.._touch();
+    slot.llmCalls += 1;
+    slot.llmMs += call.durationMs;
+    slot.promptTokens += call.promptTokens ?? 0;
+    slot.completionTokens += call.completionTokens ?? 0;
+    slot.llmLabel = call.label;
+    if (call.outcome != 'ok') slot.llmError = call.error ?? call.outcome;
   }
 
   /// The status the pending slot holds, or [fallback] when nothing set one.
   /// Read-and-consumed by the worker at its `done` write, so a handler's
   /// `skipped` beats the worker's `ok` without the handler throwing.
-  String pendingStatusOr(String fallback) => _pendingStatus ?? fallback;
+  String pendingStatusOr(String fallback) => _slot.status ?? fallback;
 
   /// Appends one event, folding in and clearing whatever [note]/[noteLlmCall]
   /// accumulated since the last record.
@@ -242,7 +266,7 @@ class ActivityLog {
       }
     } catch (e) {
       debugPrint('ActivityLog: dropped a $kind event: $e');
-      _clearPending();
+      _slot._clear();
     }
   }
 
@@ -273,44 +297,61 @@ class ActivityLog {
         (entry.value is num && entry.value == 0));
   }
 
-  void _touchPending() {
-    final since = _pendingSince;
-    if (since != null && DateTime.now().difference(since) > _staleAfter) {
-      _clearPending();
+  Map<String, Object?> _drainPending() => _slot._drain();
+}
+
+/// One unit of work's accumulating tally — the root caller's, or a span's.
+///
+/// The staleness handling ([_touch]) only ever matters for the root slot: a
+/// span's slot is unreachable once its zone's work ends, recorded or not.
+/// It stays on the class rather than the root because it is behavior of a
+/// slot, not of the log.
+class _PendingSlot {
+  Map<String, Object?> detail = {};
+  String? status;
+  int llmCalls = 0;
+  int llmMs = 0;
+  int promptTokens = 0;
+  int completionTokens = 0;
+  String? llmLabel;
+  String? llmError;
+  DateTime? since;
+
+  void _touch() {
+    final start = since;
+    if (start != null &&
+        DateTime.now().difference(start) > ActivityLog._staleAfter) {
+      _clear();
     }
-    _pendingSince ??= DateTime.now();
+    since ??= DateTime.now();
   }
 
-  Map<String, Object?> _drainPending() {
-    _touchPending();
-    final detail = _pendingDetail;
-    if (_pendingLlmCalls > 0) {
-      detail['llm_calls'] = _pendingLlmCalls;
-      detail['llm_ms'] = _pendingLlmMs;
-      if (_pendingPromptTokens > 0) {
-        detail['prompt_tokens'] = _pendingPromptTokens;
-      }
-      if (_pendingCompletionTokens > 0) {
-        detail['completion_tokens'] = _pendingCompletionTokens;
-      }
-      final label = _pendingLlmLabel;
-      if (label != null) detail['llm_label'] = label;
+  Map<String, Object?> _drain() {
+    _touch();
+    final drained = detail;
+    if (llmCalls > 0) {
+      drained['llm_calls'] = llmCalls;
+      drained['llm_ms'] = llmMs;
+      if (promptTokens > 0) drained['prompt_tokens'] = promptTokens;
+      if (completionTokens > 0) drained['completion_tokens'] = completionTokens;
+      final label = llmLabel;
+      if (label != null) drained['llm_label'] = label;
     }
-    final llmError = _pendingLlmError;
-    if (llmError != null) detail['llm_error'] = llmError;
-    _clearPending();
-    return detail;
+    final error = llmError;
+    if (error != null) drained['llm_error'] = error;
+    _clear();
+    return drained;
   }
 
-  void _clearPending() {
-    _pendingDetail = {};
-    _pendingStatus = null;
-    _pendingLlmCalls = 0;
-    _pendingLlmMs = 0;
-    _pendingPromptTokens = 0;
-    _pendingCompletionTokens = 0;
-    _pendingLlmLabel = null;
-    _pendingLlmError = null;
-    _pendingSince = null;
+  void _clear() {
+    detail = {};
+    status = null;
+    llmCalls = 0;
+    llmMs = 0;
+    promptTokens = 0;
+    completionTokens = 0;
+    llmLabel = null;
+    llmError = null;
+    since = null;
   }
 }

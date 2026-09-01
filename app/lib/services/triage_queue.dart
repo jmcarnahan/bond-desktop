@@ -176,7 +176,12 @@ class TriageQueue {
         final row = _store.nextPendingTriage(sources: const [_source]);
         if (row == null) break;
         late final Future<void> future;
-        future = _triageOne(row).then((carryOn) {
+        // [ActivityLog.inSpan] gives this message its own tally, so three
+        // concurrent messages' model calls land on three activity rows
+        // instead of whichever records first. It runs its body synchronously,
+        // so the claim inside [_triageOne] still happens before this loop
+        // continues.
+        future = _log.inSpan(() => _triageOne(row)).then((carryOn) {
           if (!carryOn) parked = true;
         }).whenComplete(() => inFlight.remove(future));
         inFlight.add(future);
