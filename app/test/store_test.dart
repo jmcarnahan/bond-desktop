@@ -480,21 +480,22 @@ void main() {
       expect(store.getDeltaLink('inbox', source: 'email'), isNull);
     });
 
-    test('settings survive it, and the ownership claim does not', () {
+    test('settings survive it; the ownership claim and about-me do not', () {
       // Deliberately changed from "everything goes": what a wipe isolates is
-      // MAIL. Which backend this machine talks through and which server it
-      // points at are the machine's configuration, and taking them out made
-      // every account switch a re-setup — while the identity claim on the rows
+      // one PERSON'S presence. Which backend this machine talks through and
+      // which server it points at are the machine's configuration, and taking
+      // them out made every account switch a re-setup. The identity claim
       // must not outlive the rows, or the next sign-in reads a wiped mailbox
-      // as still owned and never claims it.
+      // as still owned and never claims it — and the about-me text is one
+      // person's self-description, which the next identity must not inherit.
       store.setPref('backend_mode', 'sdk');
-      store.setPref('about_me', 'An LO in Denver');
+      store.setPref(aboutMeKey, 'An LO in Denver');
       store.setPref(dbOwnerKey, 'ada@example.test');
 
       store.wipeAll();
 
       expect(store.getPref('backend_mode'), 'sdk');
-      expect(store.getPref('about_me'), 'An LO in Denver');
+      expect(store.getPref(aboutMeKey), isNull);
       expect(store.getPref(dbOwnerKey), isNull);
     });
   });

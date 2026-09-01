@@ -269,8 +269,15 @@ class _SettingsDialogState extends State<SettingsDialog> {
     // the notifier inside a locked tree is an exception on every unmount. A
     // microtask rather than a Future so no timer outlives the tree; the text
     // is captured now, before the controller dies under the callback.
+    //
+    // Saved only when the user actually edited it. A text nobody touched is
+    // not new information — and re-saving it can be actively wrong: a sign-in
+    // from THIS dialog that changed the identity wipes the previous person's
+    // about-me, and an unconditional save on close would write it right back.
     final aboutMe = _aboutMe.text;
-    scheduleMicrotask(() => widget.onAboutMeChanged(aboutMe));
+    if (aboutMe != widget.aboutMe) {
+      scheduleMicrotask(() => widget.onAboutMeChanged(aboutMe));
+    }
     _aboutMe.dispose();
     _serverUrl.dispose();
     super.dispose();

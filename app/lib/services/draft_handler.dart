@@ -1,6 +1,5 @@
 import '../data/message_store.dart';
 import '../models/message_models.dart';
-import '../providers/prefs_provider.dart' show aboutMeKey;
 import 'ai_worker.dart';
 import 'llm/draft_task.dart';
 import 'llm/json_task.dart';

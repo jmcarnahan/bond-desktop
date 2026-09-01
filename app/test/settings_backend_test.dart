@@ -595,6 +595,10 @@ void main() {
 
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
+      // Edited, not just present: an untouched text is no longer saved at all
+      // (see the settings_dialog tests), and this test needs the save to
+      // actually FIRE through the unmount-inside-callback path it guards.
+      await tester.enterText(find.byType(TextField), 'who I am, edited');
       await tester.tap(find.text('This Mac'));
       await tester.pumpAndSettle();
 
@@ -603,7 +607,7 @@ void main() {
       final prefs = ProviderScope.containerOf(
         tester.element(find.text('mode:$backendModeSdk')),
       ).read(_prefsProvider.notifier);
-      expect(prefs.aboutMeSaves, ['who I am']);
+      expect(prefs.aboutMeSaves, ['who I am, edited']);
     });
   });
 }

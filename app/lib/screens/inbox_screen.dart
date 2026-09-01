@@ -656,6 +656,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ref.invalidate(threadProvider);
             ref.invalidate(draftProvider);
             ref.invalidate(storylineTimelineProvider);
+            // And the previous person's about-me text, which the notifier
+            // still holds in memory — same reason SignInScreen clears it.
+            ref.read(appPrefsProvider.notifier).setAboutMe('');
           }
           _reloadAfterBackendChange();
         },

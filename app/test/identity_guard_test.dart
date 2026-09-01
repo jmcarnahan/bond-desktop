@@ -199,11 +199,12 @@ void main() {
           reason: "resuming Ada's sync position against Grace's mailbox is "
               'the other half of the same bug');
       expect(store.getPref(dbOwnerKey), 'grace@example.test');
-      // A wipe is about mail isolation, not about the machine's setup: which
-      // backend it talks through has to survive, or every account switch is a
-      // re-setup.
+      // A wipe is about one person's presence, not about the machine's setup:
+      // which backend it talks through has to survive, or every account
+      // switch is a re-setup — while Ada's self-description is hers, and
+      // inherited by Grace it would steer Grace's triage with Ada's words.
       expect(store.getPref(backendModeKey), backendModeSdk);
-      expect(store.getPref(aboutMeKey), 'An LO in Denver');
+      expect(store.getPref(aboutMeKey), isNull);
     });
 
     test('an unclaimed database after a sign-out wipe is claimed, not wiped',

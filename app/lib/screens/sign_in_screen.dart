@@ -121,6 +121,11 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
     ref.invalidate(threadProvider);
     ref.invalidate(draftProvider);
     ref.invalidate(storylineTimelineProvider);
+    // The wipe deleted the previous person's about-me row, but the notifier
+    // read it at construction and still holds the text — which would show it
+    // to the new identity and steer their triage. Cleared through the setter
+    // so memory and table agree.
+    ref.read(appPrefsProvider.notifier).setAboutMe('');
   }
 
   Future<void> _openConnect() async {
