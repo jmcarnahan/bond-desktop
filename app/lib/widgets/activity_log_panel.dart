@@ -280,8 +280,8 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
     return Padding(
       padding: const EdgeInsets.only(bottom: BondSpacing.s8),
       child: Wrap(
-        spacing: BondSpacing.s12,
-        runSpacing: BondSpacing.s12,
+        spacing: BondSpacing.s8,
+        runSpacing: BondSpacing.s8,
         children: [
           _tile('${stats.ingestedBySource['email'] ?? 0}', 'Mail messages'),
           _tile('${stats.ingestedBySource['teams'] ?? 0}', 'Teams messages'),
@@ -331,11 +331,14 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
     return ActivityLogPanel.formatSpeed(tokens * 1000 / ms);
   }
 
+  // Sized so the full set — through the two wall-clock stamps, the widest
+  // values — stays one row on a laptop pane; a wrapped tile row buries the
+  // table it sits above.
   Widget _tile(String value, String label, {Color? valueColor}) {
     return Container(
       padding: const EdgeInsets.symmetric(
-        horizontal: BondSpacing.s16,
-        vertical: BondSpacing.s12,
+        horizontal: BondSpacing.s12,
+        vertical: BondSpacing.s8,
       ),
       decoration: BoxDecoration(
         color: BondColors.faintGround,
@@ -346,14 +349,7 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(
-            value,
-            style: BondType.mono.copyWith(
-              fontSize: 20,
-              height: 28 / 20,
-              color: valueColor,
-            ),
-          ),
+          Text(value, style: BondType.mono.copyWith(color: valueColor)),
           const SizedBox(height: 2),
           Text(label, style: BondType.caption),
         ],
