@@ -29,6 +29,17 @@ const _storyline = Storyline(
   memberCount: 2,
 );
 
+/// The same storyline once someone has written down what belongs in it.
+const _chartered = Storyline(
+  id: 'sl-1',
+  title: 'Website redesign',
+  summary: 'The studio is reviewing the homepage copy.',
+  status: 'active',
+  charter: 'Threads about the new homepage and its launch.',
+  charterLocked: true,
+  memberCount: 2,
+);
+
 void main() {
   // Two threads interleaved in time: c1 opens, c2 answers, c1 closes. Every
   // message is from the same sender within the run window, so any seam the
@@ -56,26 +67,31 @@ void main() {
 
   Future<void> pumpPanel(
     WidgetTester tester, {
+    Storyline storyline = _storyline,
     List<Message>? only,
     void Function(String title)? onRename,
+    void Function(String charter)? onSetCharter,
     void Function(String source, String key)? onRemoveThread,
     void Function(String source, String key)? onOpenThread,
     VoidCallback? onBack,
+    VoidCallback? onAddThread,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: StorylineTimelinePanel(
-          storyline: _storyline,
+          storyline: storyline,
           messages: only ?? messages,
           keyByMessageId: keyByMessageId,
           subjectByKey: subjectByKey,
           members: members,
           onBack: onBack,
           onRename: onRename ?? (_) {},
+          onSetCharter: onSetCharter ?? (_) {},
           onRemoveThread: onRemoveThread ?? (_, _) {},
           onOpenThread: onOpenThread ?? (_, _) {},
+          onAddThread: onAddThread ?? () {},
         ),
       ),
     ));
@@ -241,21 +257,108 @@ void main() {
     });
   });
 
-  group('why these threads', () {
-    testWidgets('lists the model evidence and the threads the user added',
+  group('member strip evidence', () {
+    testWidgets('the model reasoning reads inline, not in a dialog',
         (tester) async {
       await pumpPanel(tester);
 
-      await tester.tap(find.text('Why these threads?'));
+      await tester.tap(find.text('2 threads'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Both concern the website redesign.'),
-          findsOneWidget);
+      expect(find.text('Both concern the website redesign.'), findsOneWidget);
       // A thread a person filed has no model reasoning to show, and inventing
       // one would be worse than saying who did it.
       expect(find.text('You added this.'), findsOneWidget);
       expect(find.text('Homepage copy'), findsOneWidget);
       expect(find.text('Launch date'), findsOneWidget);
+      // The explanation is the strip itself now. Nothing here opens a popup.
+      expect(find.byType(AlertDialog), findsNothing);
+    });
+  });
+
+  group('the charter', () {
+    const placeholder = 'No charter yet — the model drafts one from the '
+        'threads.';
+    const charter = 'Threads about the new homepage and its launch.';
+
+    testWidgets('About says so when nothing has been written yet',
+        (tester) async {
+      await pumpPanel(tester);
+      expect(find.text(placeholder), findsNothing);
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+
+      expect(find.text(placeholder), findsOneWidget);
+    });
+
+    testWidgets('and shows the charter once there is one', (tester) async {
+      await pumpPanel(tester, storyline: _chartered);
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+
+      expect(find.text(charter), findsOneWidget);
+    });
+
+    testWidgets('tapping it opens a prefilled field that saves what it holds',
+        (tester) async {
+      final saved = <String>[];
+      await pumpPanel(
+        tester,
+        storyline: _chartered,
+        onSetCharter: saved.add,
+      );
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(charter));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TextField), findsOneWidget);
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller?.text,
+        charter,
+      );
+
+      await tester.enterText(
+        find.byType(TextField),
+        'Only the launch announcement threads.',
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(saved, ['Only the launch announcement threads.']);
+    });
+
+    testWidgets('Cancel writes nothing', (tester) async {
+      final saved = <String>[];
+      await pumpPanel(
+        tester,
+        storyline: _chartered,
+        onSetCharter: saved.add,
+      );
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(charter));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Something else.');
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(saved, isEmpty);
+      expect(find.text(charter), findsOneWidget);
+    });
+
+    testWidgets('Add thread asks the host for a picker', (tester) async {
+      var asked = 0;
+      await pumpPanel(tester, onAddThread: () => asked++);
+
+      await tester.tap(find.text('Add thread'));
+      await tester.pumpAndSettle();
+
+      expect(asked, 1);
     });
   });
 }

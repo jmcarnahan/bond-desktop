@@ -104,6 +104,11 @@ class ActivityLog {
     'sync_teams',
     'storyline',
     'storyline_sweep',
+    // Quiet even though a user's charter save is what queues it: every pass
+    // that actually ran notes its counts, so the only recordings suppressed
+    // here are the genuine nothings — a recruit that arrived after its
+    // storyline was dismissed.
+    'storyline_recruit',
   };
 
   /// Detail keys that describe how much a pass LOOKED AT, not what it

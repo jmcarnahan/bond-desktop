@@ -7,6 +7,8 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:bond_inbox/widgets/storyline_pickers.dart';
+import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -142,6 +144,42 @@ void main() {
     await tester.pump();
 
     expect(find.text('2 threads'), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('Add thread opens a pane over the storyline, and back returns',
+      (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await seedThread('c2', 'Launch date');
+    await store.insertStoryline(
+      id: 'sl-1',
+      title: 'Website redesign',
+      status: 'active',
+      createdBy: 'auto',
+    );
+    await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+    await openStoryline(tester, 'Website redesign');
+
+    await tester.tap(find.text('Add thread'));
+    await tester.pump();
+    await tester.pump();
+
+    // A pane in the main pane, not a popup over it — that is the whole point
+    // of the surface.
+    expect(find.byType(AddThreadToStorylinePane), findsOneWidget);
+    expect(find.byType(StorylineTimelinePanel), findsNothing);
+    expect(find.byType(AlertDialog), findsNothing);
+    // The thread already in the storyline is not on offer.
+    expect(find.text('✉ Launch date'), findsOneWidget);
+    expect(find.text('✉ Homepage copy'), findsNothing);
+
+    await tester.tap(find.byIcon(Icons.arrow_back));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(AddThreadToStorylinePane), findsNothing);
+    expect(find.byType(StorylineTimelinePanel), findsOneWidget);
     await settleQueues(tester);
   });
 }

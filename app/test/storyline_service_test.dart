@@ -961,4 +961,235 @@ void main() {
       expect(row.detail['proposed'], 1);
     });
   });
+
+  group('the recruit pass', () {
+    /// Runs a recruit with [llm] and returns the recorded activity detail —
+    /// every recruit notes, so the row is part of the pass's contract.
+    Future<Map<String, Object?>> recruitAndRecord(
+      FakeLlm llm, {
+      String id = 'sl-1',
+    }) async {
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      await StorylineService(store, llm, activityLog: log).recruit(id);
+      await log.record('storyline_recruit', source: 'email', entityId: id);
+      final rows = await store.recentActivity();
+      if (rows.isEmpty) return const {};
+      return ActivityEvent.fromRow(rows.single).detail;
+    }
+
+    test('a candidate over the gate is confirmed against the charter and filed',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1',
+          vector: vectorAt(0.8), lastMessageAt: '2026-08-30T10:00:00Z');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      // Exactly one confirmation: the member's own thread also has a vector —
+      // at cosine 1.0 it would top the ranking — so one call is also the
+      // proof that members are excluded.
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(llm.userMessages.single, contains('Charter:'));
+      final members = await store.membersOf('sl-1');
+      expect(members.map((m) => m.conversationKey), ['member', 'c1']);
+      expect(members.last.addedBy, 'auto');
+      expect(members.last.evidence, 'Both concern the website redesign.');
+      final hashRow = await db
+          .customSelect(
+            'SELECT member_hash FROM storylines WHERE id = ?',
+            variables: [Variable('sl-1')],
+          )
+          .getSingle();
+      expect(hashRow.data['member_hash'], isNotNull);
+      expect((await store.getStoryline('sl-1'))!.lastActivityAt,
+          '2026-08-30T10:00:00Z');
+      expect(detail['recruited'], 1);
+      expect(detail['considered'], 1);
+    });
+
+    test('the gate is the LOWER one even with nobody in common', () async {
+      await seedStoryline(store, memberParticipants: const ['Sarah Chen']);
+      // 0.55 with disjoint people: assignment would demand 0.60 here. The
+      // user's charter is what buys the look instead of a shared name.
+      await seed(store, 'c1',
+          vector: vectorAt(0.55), participants: const ['Ann Lu']);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await recruitAndRecord(llm);
+
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('under the gate never reaches the model', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.45));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.schemas, isEmpty);
+      // An all-zero recruit is a quiet kind's genuine nothing: noted by the
+      // service, suppressed by the log. "0 of 5" would have shown.
+      expect(detail, isEmpty);
+    });
+
+    test('a blocked thread is never even considered', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
+      // Removing a non-member with block: true records the user's "no"
+      // without ever having had a membership to delete.
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.schemas, isEmpty);
+      expect(detail, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+    });
+
+    test('the pass is capped at the top eight by cosine', () async {
+      await seedStoryline(store);
+      // Ten over the gate, at distinct cosines. The two weakest must never
+      // reach the model, however agreeable it is scripted to be.
+      for (var i = 0; i < 10; i++) {
+        await seed(store, 'c$i', vector: vectorAt(0.51 + 0.04 * i));
+      }
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.callsFor('storyline_membership'), 8);
+      expect(detail['considered'], 8);
+      final keys = (await store.membersOf('sl-1'))
+          .map((m) => m.conversationKey)
+          .toSet();
+      // c0 (0.51) and c1 (0.55) are ranks nine and ten.
+      expect(keys.contains('c0'), false);
+      expect(keys.contains('c1'), false);
+      expect(keys.contains('c9'), true);
+    });
+
+    test('a low-confidence yes is a no', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(confidence: 'low')],
+      });
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(await store.membersOf('sl-1'), hasLength(1));
+      expect(detail['recruited'], 0);
+      expect(detail['considered'], 1);
+    });
+
+    test('a dismissed storyline is not resurrected by a queued recruit',
+        () async {
+      await seedStoryline(store, status: 'dismissed');
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await StorylineService(store, llm, activityLog: log).recruit('sl-1');
+      await log.record('storyline_recruit', source: 'email', entityId: 'sl-1');
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+      // Nothing noted, so nothing recorded: this pass genuinely did nothing.
+      expect(await store.recentActivity(), isEmpty);
+    });
+
+    test('a storyline with no member vectors reports an empty pass', () async {
+      await seed(store, 'bare');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'user',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'bare', addedBy: 'user');
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.schemas, isEmpty);
+      expect(detail, isEmpty);
+    });
+
+    test('an unavailable server parks the pass and keeps what already landed',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      await seed(store, 'c2', vector: vectorAt(0.8));
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          const LlmUnavailableException('server off'),
+        ],
+      });
+
+      await expectLater(
+        StorylineService(store, llm).recruit('sl-1'),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+
+      // The first candidate stays filed; the re-run after the park skips it
+      // as a member and picks up where this one stopped.
+      expect(
+        (await store.membersOf('sl-1')).map((m) => m.conversationKey),
+        ['member', 'c1'],
+      );
+    });
+  });
+
+  group('setCharter', () {
+    test('a save trims, locks, and queues one recruit', () async {
+      await seedStoryline(store);
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm)
+          .setCharter('sl-1', '  Only the venue booking.  ');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, 'Only the venue booking.');
+      expect(storyline.charterLocked, true);
+      final work = await store.nextPendingWork('storyline_recruit');
+      expect(work?['entity_id'], 'sl-1');
+      // The save writes and queues; the model is for the drain to consult.
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('clearing unlocks, drafts nothing, and recruits nothing', () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1', charterLocked: true);
+
+      await StorylineService(store, FakeLlm(const {}))
+          .setCharter('sl-1', '   ');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, null);
+      expect(storyline.charterLocked, false);
+      expect(await store.nextPendingWork('storyline_recruit'), null);
+    });
+
+    test('a second save revives a recruit the drain already finished',
+        () async {
+      await seedStoryline(store);
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.setCharter('sl-1', 'First charter.');
+      await store.writeWork('storyline_recruit', 'email', 'sl-1',
+          status: 'done');
+      await service.setCharter('sl-1', 'Second charter.');
+
+      final work = await store.nextPendingWork('storyline_recruit');
+      expect(work?['entity_id'], 'sl-1');
+    });
+  });
 }

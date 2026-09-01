@@ -23,6 +23,7 @@ import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
 import '../widgets/settings_dialog.dart';
 import '../widgets/source_filter.dart';
+import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
@@ -90,6 +91,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// other: the pane shows exactly one thing, and every setter clears the rest
   /// rather than racing to be rendered.
   bool _showingActivityLog = false;
+
+  /// The storyline the add-thread pane is picking a conversation for. An
+  /// overlay on the storyline selection rather than a peer of it: back returns
+  /// to the storyline underneath.
+  String? _addingToStorylineId;
+
+  /// The thread the add-to-storyline pane is filing. Same overlay contract.
+  ({String source, String id})? _pickingStorylineForThread;
 
   /// Which member thread a storyline's composer replies to, when the user has
   /// picked one. Null means "the thread the newest message is in", which is
@@ -222,6 +231,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
     });
     // The quietest signal the app collects: opening a thread is the user saying
@@ -241,6 +252,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
       // The reply target belongs to the storyline that was open, not to this
       // one; the default below picks the newest thread in the new timeline.
@@ -256,6 +269,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
     });
   }
@@ -269,6 +284,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedId = null;
       _selectedStorylineId = null;
       _showingActivityLog = false;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
     });
   }
@@ -282,6 +299,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedId = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
     });
   }
@@ -830,16 +849,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
-  /// Exactly one view, never two: the activity log, then the thread
-  /// transcript, then the storyline timeline, then the section overview. The
-  /// order is the priority — the log is first because it is the only one of
-  /// the four that is not about the mail at all, so nothing under it can be
-  /// what the user meant.
+  /// Exactly one view, never two: the activity log, then the two picker panes,
+  /// then the thread transcript, then the storyline timeline, then the section
+  /// overview. The order is the priority — the log is first because it is the
+  /// only one that is not about the mail at all, and a pane outranks what it
+  /// was opened from because it is the newer thing the user asked for.
   ///
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
     if (_showingActivityLog) return _activityLog();
+
+    final addingTo = _addingToStorylineId;
+    if (addingTo != null) {
+      final storyline = _storylineById(addingTo);
+      if (storyline != null) return _addThreadPane(storyline);
+      // Dismissed or gone from under the pane; fall through to whatever is
+      // next.
+    }
+
+    final picking = _pickingStorylineForThread;
+    if (picking != null) return _pickStorylinePane(picking);
 
     final selected = _selected(conversations);
     if (selected != null) return _thread(selected);
@@ -851,6 +881,117 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
 
     return _overview(conversations, loadError);
+  }
+
+  /// Which thread joins [storyline].
+  ///
+  /// Read from the UNFILTERED conversations, for the reason [_selected] reads
+  /// them: the source pills are what the user is browsing with, and a storyline
+  /// that merges mail and chats must be able to recruit from both whichever
+  /// pill happens to be down.
+  Widget _addThreadPane(Storyline storyline) {
+    final state = ref.watch(conversationsProvider);
+    final all = state is ConversationsLoaded
+        ? state.conversations
+        : const <Conversation>[];
+
+    // Both reads are empty for the frame before they land, which offers a
+    // thread that is already in for that one frame. Adding it again is a no-op
+    // in the store, so the worst that frame can cost is a redundant write.
+    final members =
+        ref.watch(storylineMembersProvider(storyline.id)).valueOrNull ??
+            const <StorylineMember>[];
+    final taken = <String>{
+      for (final member in members)
+        '${member.source}\n${member.conversationKey}',
+      ...?ref
+          .watch(storylineBlockedThreadsProvider(storyline.id))
+          .valueOrNull,
+    };
+
+    final candidates = [
+      for (final c in all)
+        if (!taken.contains('${c.source}\n${c.id}')) c,
+    ]..sort((a, b) {
+        final left = a.lastMessageAt ?? '';
+        final right = b.lastMessageAt ?? '';
+        // Newest first, a thread with no stamp last rather than first — and
+        // the id as the tie-break, so the same mailbox always sorts the same
+        // way rather than in whatever order the list read happened to return.
+        if (left != right) {
+          if (left.isEmpty) return 1;
+          if (right.isEmpty) return -1;
+          return right.compareTo(left);
+        }
+        return a.id.compareTo(b.id);
+      });
+
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: AddThreadToStorylinePane(
+        storylineTitle:
+            storyline.title.isEmpty ? '(untitled)' : storyline.title,
+        candidates: candidates,
+        onBack: () => setState(() => _addingToStorylineId = null),
+        onPick: (conversation) async {
+          final notifier = ref.read(storylinesProvider.notifier);
+          await notifier.addThread(
+            storyline.id,
+            conversation.source,
+            conversation.id,
+          );
+          if (!mounted) return;
+          setState(() => _addingToStorylineId = null);
+          // The timeline must show the thread the user just filed, this
+          // frame's sibling — the same reload onRemoveThread already does.
+          ref.read(storylineTimelineProvider(storyline.id).notifier).load();
+        },
+      ),
+    );
+  }
+
+  /// Which storyline [thread] joins, or the one it starts.
+  Widget _pickStorylinePane(({String source, String id}) thread) {
+    // Suggestions are deliberately absent: filing a thread into a group the
+    // user has not accepted yet would be answering the suggestion for them. So
+    // are the storylines this thread is already in — an "Add to" that does
+    // nothing reads as a broken row.
+    //
+    // Empty until the read lands, which leaves every storyline offered for one
+    // frame. Adding a thread it is already in is a no-op in the store, so the
+    // worst that frame can cost is a redundant write.
+    final already = ref
+            .watch(storylineThreadIdsProvider(
+              (source: thread.source, conversationKey: thread.id),
+            ))
+            .valueOrNull ??
+        const <String>{};
+
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: AddToStorylinePane(
+        choices: [
+          for (final storyline in _storylines())
+            if (!storyline.isSuggested && !already.contains(storyline.id))
+              storyline,
+        ],
+        onBack: () => setState(() => _pickingStorylineForThread = null),
+        onPick: (id) {
+          ref
+              .read(storylinesProvider.notifier)
+              .addThread(id, thread.source, thread.id);
+          setState(() => _pickingStorylineForThread = null);
+        },
+        onCreate: (title) {
+          ref.read(storylinesProvider.notifier).create(
+                title,
+                conversationKey: thread.id,
+                source: thread.source,
+              );
+          setState(() => _pickingStorylineForThread = null);
+        },
+      ),
+    );
   }
 
   Widget _storyline(Storyline storyline) {
@@ -902,12 +1043,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               const [],
       onBack: () => setState(() => _selectedStorylineId = null),
       onRename: (title) => notifier.rename(storyline.id, title),
+      onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
       onRemoveThread: (source, key) async {
         await notifier.removeThread(storyline.id, source, key);
         if (!mounted) return;
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
       onOpenThread: (_, key) => _select(key),
+      onAddThread: () =>
+          setState(() => _addingToStorylineId = storyline.id),
     );
 
     // Chats are not reply targets — see [_replyElsewhere] for why. A storyline
@@ -1018,46 +1162,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// Files [conversationKey] into a storyline the user names now.
-  ///
-  /// A dialog rather than an inline field: it is the one storyline action that
-  /// creates something, and it is reached from a thread, where there is no
-  /// obvious place to put a text field that would not be mistaken for a
-  /// composer.
-  Future<void> _promptNewStoryline(String conversationKey) async {
-    final controller = TextEditingController();
-    final title = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('New storyline'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Name this storyline'),
-          onSubmitted: (value) => Navigator.of(context).pop(value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Create'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-
-    final trimmed = (title ?? '').trim();
-    if (trimmed.isEmpty || !mounted) return;
-    await ref.read(storylinesProvider.notifier).create(
-          trimmed,
-          conversationKey: conversationKey,
-        );
-  }
-
   Widget _thread(Conversation selected) {
     final thread = ref.watch(threadProvider(selected.id));
 
@@ -1080,30 +1184,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onMarkDone: () =>
           ref.read(conversationsProvider.notifier).markDone(selected.id),
       onBack: () => setState(() => _selectedId = null),
-      // Suggestions are deliberately absent: filing a thread into a group the
-      // user has not accepted yet would be answering the suggestion for them.
-      // So are the storylines this thread is already in — an "Add to" that
-      // does nothing reads as a broken menu item.
-      storylineChoices: () {
-        // Empty until the read lands, which leaves every storyline offered for
-        // one frame. Adding a thread it is already in is a no-op in the store,
-        // so the worst that frame can cost is a redundant write.
-        final already = ref
-                .watch(storylineThreadIdsProvider(
-                  (source: selected.source, conversationKey: selected.id),
-                ))
-                .valueOrNull ??
-            const <String>{};
-        return [
-          for (final storyline in _storylines())
-            if (!storyline.isSuggested && !already.contains(storyline.id))
-              (storyline.id, storyline.title),
-        ];
-      }(),
-      onAddToStoryline: (id) => ref
-          .read(storylinesProvider.notifier)
-          .addThread(id, selected.source, selected.id),
-      onNewStoryline: () => _promptNewStoryline(selected.id),
+      onAddToStoryline: () => setState(() => _pickingStorylineForThread =
+          (source: selected.source, id: selected.id)),
       // Sender-scoped, because the screen is the layer that knows the address
       // behind the row. A thread with no address to key a rule on gets no item
       // rather than a rule keyed on the empty string, which would apply to

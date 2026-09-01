@@ -283,6 +283,10 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // around.
       StorylineAssignHandler(storylines),
       StorylineSweepHandler(storylines),
+      // After the sweep and before drafts: a recruit is rare — it only exists
+      // when a charter was just saved — and the threads it files are exactly
+      // what the draft below should know about.
+      StorylineRecruitHandler(storylines),
       // Last, and after both storyline passes: a draft reads the storyline
       // summary as background, so drafting before the sweep has run would
       // write the one reply for this thread without it.

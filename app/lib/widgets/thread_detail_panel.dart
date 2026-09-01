@@ -25,17 +25,12 @@ class ThreadDetailPanel extends StatelessWidget {
   /// layouts where the thread is not something you navigated into.
   final VoidCallback? onBack;
 
-  /// `(id, title)` for every storyline this thread could be filed into. Empty
-  /// leaves the menu with nothing but "New storyline…".
-  final List<(String, String)> storylineChoices;
-
-  final void Function(String storylineId)? onAddToStoryline;
-
-  /// Opens the name prompt for a storyline built around this thread. The whole
-  /// overflow menu is hidden when this and [onAddToStoryline] are both null,
-  /// so a host that knows nothing about storylines renders exactly what it
-  /// used to.
-  final VoidCallback? onNewStoryline;
+  /// Opens the pane that picks — or names — the storyline this thread goes
+  /// into. The menu does not list the storylines itself: the choice is a pane
+  /// with a way back, because the house rule is screens rather than popups.
+  /// Null hides the item, so a host that knows nothing about storylines
+  /// renders exactly what it used to.
+  final VoidCallback? onAddToStoryline;
 
   /// Defers this thread's sender. Sender-scoped rather than thread-scoped
   /// because that is the correction worth collecting: one thread going quiet
@@ -54,9 +49,7 @@ class ThreadDetailPanel extends StatelessWidget {
     required this.messages,
     required this.onMarkDone,
     this.onBack,
-    this.storylineChoices = const [],
     this.onAddToStoryline,
-    this.onNewStoryline,
     this.onSendToLater,
     this.onKeepInInbox,
   });
@@ -254,36 +247,28 @@ class ThreadDetailPanel extends StatelessWidget {
   /// menu rather than visible controls: these are corrections, not part of
   /// reading mail, and the automatic passes are supposed to get them right
   /// without being asked.
+  ///
+  /// The storyline half is one item that opens a pane. Listing every storyline
+  /// here would put the whole choice in a popup, and the house rule is a screen
+  /// with a way back.
   Widget? _overflowMenu() {
     final bucketed = conversation.bucket != null;
     final showKeep = onKeepInInbox != null && bucketed;
-    if (onAddToStoryline == null &&
-        onNewStoryline == null &&
-        onSendToLater == null &&
-        !showKeep) {
+    if (onAddToStoryline == null && onSendToLater == null && !showKeep) {
       return null;
     }
-    final hasStorylineItems =
-        storylineChoices.isNotEmpty || onNewStoryline != null;
 
     return PopupMenuButton<String>(
       icon: const Icon(Icons.more_horiz),
       iconSize: 20,
       tooltip: 'More',
       itemBuilder: (context) => [
-        for (final (id, title) in storylineChoices)
-          PopupMenuItem<String>(
-            value: id,
-            child: Text('Add to $title', overflow: TextOverflow.ellipsis),
-          ),
-        if (storylineChoices.isNotEmpty && onNewStoryline != null)
-          const PopupMenuDivider(),
-        if (onNewStoryline != null)
+        if (onAddToStoryline != null)
           const PopupMenuItem<String>(
-            value: _newStorylineValue,
-            child: Text('New storyline…'),
+            value: _addToStorylineValue,
+            child: Text('Add to storyline…'),
           ),
-        if (hasStorylineItems && (onSendToLater != null || showKeep))
+        if (onAddToStoryline != null && (onSendToLater != null || showKeep))
           const PopupMenuDivider(),
         if (onSendToLater != null)
           const PopupMenuItem<String>(
@@ -298,21 +283,18 @@ class ThreadDetailPanel extends StatelessWidget {
       ],
       onSelected: (value) {
         switch (value) {
-          case _newStorylineValue:
-            onNewStoryline?.call();
+          case _addToStorylineValue:
+            onAddToStoryline?.call();
           case _sendToLaterValue:
             onSendToLater?.call();
           case _keepInInboxValue:
             onKeepInInbox?.call();
-          default:
-            onAddToStoryline?.call(value);
         }
       },
     );
   }
 
-  /// Namespaced so they cannot collide with a storyline id, which is `sl-…`.
-  static const String _newStorylineValue = '__new_storyline__';
+  static const String _addToStorylineValue = '__add_to_storyline__';
   static const String _sendToLaterValue = '__send_to_later__';
   static const String _keepInInboxValue = '__keep_in_inbox__';
 }

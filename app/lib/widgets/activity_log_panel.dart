@@ -74,6 +74,7 @@ class ActivityLogPanel extends StatefulWidget {
     'draft': 'Draft',
     'storyline': 'Storylines',
     'storyline_sweep': 'Storyline sweep',
+    'storyline_recruit': 'Storyline recruit',
     'embed_fail': 'Embeddings',
   };
 
@@ -167,6 +168,13 @@ class ActivityLogPanel extends StatefulWidget {
         return 'Storylines updated';
       case 'storyline_sweep':
         return 'Storyline sweep';
+      case 'storyline_recruit':
+        final recruited = detail['recruited'];
+        final considered = detail['considered'];
+        return recruited is num && considered is num
+            ? 'Recruited ${recruited.toInt()} of ${considered.toInt()} '
+                'candidate threads'
+            : label;
       default:
         return label;
     }

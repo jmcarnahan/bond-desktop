@@ -231,6 +231,21 @@ void main() {
 
       expect(await store.isMemberBlocked('sl-2', 'email', 'c1'), isFalse);
     });
+
+    test('blockedThreadsOf lists this storyline\'s blocks, source included',
+        () async {
+      await seedStoryline('sl-1');
+      await seedStoryline('sl-2');
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      await store.removeStorylineMember('sl-1', 'teams', 'chat-1', block: true);
+      await store.removeStorylineMember('sl-2', 'email', 'c2', block: true);
+
+      expect(
+        await store.blockedThreadsOf('sl-1'),
+        {'email\nc1', 'teams\nchat-1'},
+      );
+      expect(await store.blockedThreadsOf('sl-3'), isEmpty);
+    });
   });
 
   group('storylineIdsFor', () {

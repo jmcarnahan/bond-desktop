@@ -58,14 +58,22 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   /// otherwise be three full list reads.
   static const Duration _reloadDelay = Duration(milliseconds: 400);
 
-  /// The two kinds whose progress means the storyline list may have changed.
+  /// The kinds whose progress means the storyline list may have changed.
   /// Extraction and triage report constantly and change nothing here.
-  static const Set<String> _kinds = {'storyline', 'storyline_sweep'};
+  static const Set<String> _kinds = {
+    'storyline',
+    'storyline_sweep',
+    'storyline_recruit',
+  };
 
   static const String _source = 'email';
 
   final MessageStore _store;
   final StorylineService _service;
+
+  /// Held so [setCharter] can pump the queue it just fed. Nullable for tests
+  /// that construct the notifier without a worker.
+  final AiWorker? _worker;
 
   /// Called at the end of every list read. Membership is read by providers of
   /// its own now, and they cache — so without this the member strip would keep
@@ -84,7 +92,8 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     this._service, {
     AiWorker? aiWorker,
     void Function()? onMembersChanged,
-  })  : _onMembersChanged = onMembersChanged,
+  })  : _worker = aiWorker,
+        _onMembersChanged = onMembersChanged,
         super(const StorylinesInitial()) {
     final worker = aiWorker;
     if (worker == null) return;
@@ -155,6 +164,17 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     await load();
   }
 
+  /// Saves the charter and starts the recruit it queued. The pump is what
+  /// turns "queued" into "runs now" — the worker owns no timer, and without it
+  /// the user's edit would sit until the next sync happened to drain the
+  /// queue. Fire-and-forget: the pump handles its own failures, and the save
+  /// this method reports on has already landed.
+  Future<void> setCharter(String id, String charter) async {
+    await _service.setCharter(id, charter);
+    await load();
+    unawaited(_worker?.pump());
+  }
+
   Future<void> addThread(String id, String source, String conversationKey) async {
     await _service.addThread(id, source, conversationKey);
     await load();
@@ -195,6 +215,7 @@ final storylinesProvider =
     onMembersChanged: () {
       ref.invalidate(storylineMembersProvider);
       ref.invalidate(storylineThreadIdsProvider);
+      ref.invalidate(storylineBlockedThreadsProvider);
     },
   ),
 );
@@ -210,6 +231,15 @@ final storylinesProvider =
 final storylineMembersProvider =
     FutureProvider.autoDispose.family<List<StorylineMember>, String>(
   (ref, id) => ref.watch(messageStoreProvider).membersOf(id),
+);
+
+/// The threads the user blocked from one storyline, as
+/// `'<source>\n<conversation_key>'` composites. Same caching rules as
+/// [storylineMembersProvider], and invalidated with it: a removal writes a
+/// block in the same transaction it deletes the membership.
+final storylineBlockedThreadsProvider =
+    FutureProvider.autoDispose.family<Set<String>, String>(
+  (ref, id) => ref.watch(messageStoreProvider).blockedThreadsOf(id),
 );
 
 /// The storylines one thread is already filed under, so the "Add to storyline"

@@ -41,8 +41,17 @@ class StorylineTimelinePanel extends StatefulWidget {
   final VoidCallback? onBack;
 
   final void Function(String title) onRename;
+
+  /// Saves the storyline's membership criteria. Passed through untrimmed —
+  /// the service decides what an empty charter means.
+  final void Function(String charter) onSetCharter;
+
   final void Function(String source, String conversationKey) onRemoveThread;
   final void Function(String source, String conversationKey) onOpenThread;
+
+  /// Opens the pane that picks a thread to file in here. A pane and not a
+  /// menu: the choice is a whole mailbox long.
+  final VoidCallback onAddThread;
 
   const StorylineTimelinePanel({
     super.key,
@@ -53,8 +62,10 @@ class StorylineTimelinePanel extends StatefulWidget {
     required this.members,
     required this.onBack,
     required this.onRename,
+    required this.onSetCharter,
     required this.onRemoveThread,
     required this.onOpenThread,
+    required this.onAddThread,
   });
 
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
@@ -76,14 +87,20 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   final Set<String> _hidden = {};
 
   bool _showMembers = false;
+  bool _showAbout = false;
   bool _editingTitle = false;
+  bool _editingCharter = false;
 
   late final TextEditingController _title =
       TextEditingController(text: widget.storyline.title);
 
+  late final TextEditingController _charter =
+      TextEditingController(text: widget.storyline.charter ?? '');
+
   @override
   void dispose() {
     _title.dispose();
+    _charter.dispose();
     super.dispose();
   }
 
@@ -191,6 +208,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _header(),
+          if (_showAbout) _aboutBlock(),
           if (_showMembers) _memberStrip(),
           const Divider(height: 1, color: BondColors.border),
           Expanded(
@@ -266,7 +284,12 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                       () => setState(() => _showMembers = !_showMembers),
                     ),
                     const SizedBox(width: BondSpacing.s4),
-                    _quietButton('Why these threads?', _explain),
+                    _quietButton(
+                      'About',
+                      () => setState(() => _showAbout = !_showAbout),
+                    ),
+                    const SizedBox(width: BondSpacing.s4),
+                    _quietButton('Add thread', widget.onAddThread),
                   ],
                 ),
               ],
@@ -312,9 +335,96 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
-  /// The member threads, each with a visibility tick and a way out of the
-  /// storyline. Collapsed by default: it is a correction surface, and the
-  /// transcript is what the user came for.
+  /// The charter: what belongs in this storyline, in a sentence.
+  ///
+  /// Editable because it is the membership criteria and not a description of
+  /// one — narrowing or widening this sentence is how a user says which
+  /// threads belong, and saving it is what sends the model hunting for the
+  /// ones that match.
+  Widget _aboutBlock() {
+    final charter = widget.storyline.charter ?? '';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s16,
+        0,
+        BondSpacing.s16,
+        BondSpacing.s12,
+      ),
+      child: _editingCharter ? _charterField() : _charterText(charter),
+    );
+  }
+
+  Widget _charterText(String charter) {
+    return InkWell(
+      onTap: () => setState(() {
+        _charter.text = charter;
+        _editingCharter = true;
+      }),
+      borderRadius: BondRadii.smAll,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: BondSpacing.s4),
+        child: Text(
+          charter.isEmpty
+              ? 'No charter yet — the model drafts one from the threads.'
+              : charter,
+          style: BondType.caption,
+        ),
+      ),
+    );
+  }
+
+  Widget _charterField() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        TextField(
+          controller: _charter,
+          autofocus: true,
+          minLines: 2,
+          maxLines: 4,
+          style: BondType.caption,
+          decoration: const InputDecoration(
+            isDense: true,
+            contentPadding: EdgeInsets.symmetric(vertical: BondSpacing.s4),
+          ),
+        ),
+        const SizedBox(height: BondSpacing.s4),
+        Text(
+          'Saving pins this description and hunts for matching threads. '
+          'Clearing it lets the model redraft.',
+          style: BondType.caption,
+        ),
+        Row(
+          children: [
+            TextButton(
+              onPressed: () {
+                // Untrimmed on purpose: the service owns what an empty
+                // charter means, and a field wiped to whitespace is a
+                // deliberate clear rather than an edit to reject here.
+                widget.onSetCharter(_charter.text);
+                setState(() => _editingCharter = false);
+              },
+              child: const Text('Save'),
+            ),
+            TextButton(
+              onPressed: () => setState(() => _editingCharter = false),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  /// The member threads, each with a visibility tick, the reason it is here
+  /// and a way out of the storyline. Collapsed by default: it is a correction
+  /// surface, and the transcript is what the user came for.
+  ///
+  /// The one place the grouping explains itself. A user who cannot see why two
+  /// threads were put together has no way to tell a good group from a bad one,
+  /// and a feature that cannot be checked is a feature that gets turned off.
   Widget _memberStrip() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -323,12 +433,15 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         BondSpacing.s16,
         BondSpacing.s12,
       ),
-      child: Wrap(
-        spacing: BondSpacing.s8,
-        runSpacing: BondSpacing.s4,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
           for (final member in widget.members)
-            _memberEntry(member),
+            Padding(
+              padding: const EdgeInsets.only(bottom: BondSpacing.s4),
+              child: _memberEntry(member),
+            ),
         ],
       ),
     );
@@ -365,11 +478,25 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
           ),
           const SizedBox(width: BondSpacing.s4),
           Flexible(
-            child: Text(
-              _labelFor(key),
-              style: BondType.caption,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _labelFor(key),
+                  style: BondType.caption,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  member.addedByUser
+                      ? 'You added this.'
+                      : (member.evidence?.isNotEmpty == true
+                          ? member.evidence!
+                          : 'Grouped automatically.'),
+                  style: BondType.caption,
+                ),
+              ],
             ),
           ),
           IconButton(
@@ -380,58 +507,6 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
             padding: const EdgeInsets.all(BondSpacing.s4),
             constraints: const BoxConstraints(),
             visualDensity: VisualDensity.compact,
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// Why each thread is here, in the model's own words.
-  ///
-  /// The one place the grouping explains itself. A user who cannot see why two
-  /// threads were put together has no way to tell a good group from a bad one,
-  /// and a feature that cannot be checked is a feature that gets turned off.
-  void _explain() {
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Why these threads?'),
-        content: SizedBox(
-          width: 420,
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              for (final member in widget.members)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: BondSpacing.s12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        _labelFor(member.conversationKey),
-                        style:
-                            BondType.small.copyWith(fontWeight: FontWeight.w600),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        member.addedByUser
-                            ? 'You added this.'
-                            : (member.evidence?.isNotEmpty == true
-                                ? member.evidence!
-                                : 'Grouped automatically.'),
-                        style: BondType.caption,
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Close'),
           ),
         ],
       ),

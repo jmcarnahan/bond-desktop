@@ -8,9 +8,7 @@ void main() {
   Future<void> pump(
     WidgetTester tester, {
     String? bucket,
-    List<(String, String)> storylineChoices = const [],
-    void Function(String)? onAddToStoryline,
-    VoidCallback? onNewStoryline,
+    VoidCallback? onAddToStoryline,
     VoidCallback? onSendToLater,
     VoidCallback? onKeepInInbox,
   }) async {
@@ -26,9 +24,7 @@ void main() {
           ),
           messages: const [],
           onMarkDone: () {},
-          storylineChoices: storylineChoices,
           onAddToStoryline: onAddToStoryline,
-          onNewStoryline: onNewStoryline,
           onSendToLater: onSendToLater,
           onKeepInInbox: onKeepInInbox,
         ),
@@ -75,18 +71,24 @@ void main() {
     expect(find.text('Keep in inbox'), findsOneWidget);
   });
 
+  testWidgets('the menu never lists the storylines themselves', (tester) async {
+    // The choice is a pane with a way back, not a popup full of rows.
+    await pump(tester, onAddToStoryline: () {});
+    await openMenu(tester);
+
+    expect(find.text('Add to storyline…'), findsOneWidget);
+    expect(find.text('New storyline…'), findsNothing);
+  });
+
   testWidgets('each item fires only its own callback', (tester) async {
     var later = 0;
     var keep = 0;
-    final added = <String>[];
-    var created = 0;
+    var picking = 0;
 
     await pump(
       tester,
       bucket: 'later',
-      storylineChoices: const [('sl-1', 'Website redesign')],
-      onAddToStoryline: added.add,
-      onNewStoryline: () => created++,
+      onAddToStoryline: () => picking++,
       onSendToLater: () => later++,
       onKeepInInbox: () => keep++,
     );
@@ -94,8 +96,7 @@ void main() {
     await openMenu(tester);
     await tester.tap(find.text('Send to Later'));
     await tester.pumpAndSettle();
-    expect((later, keep, created), (1, 0, 0));
-    expect(added, isEmpty);
+    expect((later, keep, picking), (1, 0, 0));
 
     await openMenu(tester);
     await tester.tap(find.text('Keep in inbox'));
@@ -103,15 +104,8 @@ void main() {
     expect((later, keep), (1, 1));
 
     await openMenu(tester);
-    await tester.tap(find.text('Add to Website redesign'));
+    await tester.tap(find.text('Add to storyline…'));
     await tester.pumpAndSettle();
-    expect(added, ['sl-1']);
-
-    await openMenu(tester);
-    await tester.tap(find.text('New storyline…'));
-    await tester.pumpAndSettle();
-    expect(created, 1);
-    // The storyline value namespace and the new items cannot collide.
-    expect(added, ['sl-1']);
+    expect((later, keep, picking), (1, 1, 1));
   });
 }

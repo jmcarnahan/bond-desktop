@@ -47,6 +47,13 @@ class StorylineTuning {
   /// Below this there is not enough unassigned mail for a cluster to mean
   /// anything, and the sweep would be proposing groups out of noise.
   static const int sweepMinUnassigned = 4;
+
+  /// How many threads one recruit pass may put in front of the model. A
+  /// charter save is one user action, and eight confirmations is already the
+  /// most model time any single click in this app spends — past the top eight
+  /// by cosine, a candidate was not close enough for a missed-thread hunt to
+  /// be the pass that finds it.
+  static const int recruitMaxCandidates = 8;
 }
 
 /// Groups conversations into storylines, and applies the user's corrections.
@@ -134,34 +141,18 @@ class StorylineService {
         continue;
       }
 
-      final members = await _store.membersOf(storyline.id);
-      if (members.any((m) =>
-          m.source == source && m.conversationKey == conversationKey)) {
+      final context = await _memberContext(storyline.id);
+      if (context.memberThreads.contains(_threadKey(source, conversationKey))) {
         continue;
       }
 
-      final vectors = <List<double>>[];
-      final memberParticipants = <String>{};
-      for (final member in members) {
-        final memberVector =
-            await _vectorFor(member.source, member.conversationKey);
-        if (memberVector != null) vectors.add(memberVector);
-        final memberRow = await _store.getConversationRow(
-          member.source,
-          member.conversationKey,
-        );
-        if (memberRow == null) continue;
-        for (final display in _displaysOf(Conversation.fromRow(memberRow))) {
-          memberParticipants.add(display.toLowerCase());
-        }
-      }
       // A storyline whose members have no vectors cannot be compared against
       // anything. Skipped rather than guessed at.
-      final centroid = _centroid(vectors);
+      final centroid = context.centroid;
       if (centroid == null) continue;
 
       final overlap = participants
-          .any((display) => memberParticipants.contains(display.toLowerCase()));
+          .any((display) => context.participants.contains(display.toLowerCase()));
       final gate = overlap
           ? StorylineTuning.assignCosineGateWithOverlap
           : StorylineTuning.assignCosineGate;
@@ -268,6 +259,119 @@ class StorylineService {
     if (!storyline.charterLocked && result.charter.isNotEmpty) {
       await _store.updateStoryline(storylineId, charter: result.charter);
     }
+  }
+
+  // ── automatic: one storyline, on the user's charter ────────────────────
+
+  /// Hunts for member threads the assignment pass missed, against a charter
+  /// the user just wrote. Queued only by [setCharter] — this is the model
+  /// answering an edit, not a pass that runs on its own.
+  ///
+  /// The same funnel as [assignConversation] turned inside out: one storyline,
+  /// every embedded thread as a candidate. The gate is the LOWER assignment
+  /// gate for every candidate, overlap or not — the user's charter is a
+  /// stronger invitation to look than a shared participant is — and the top
+  /// [StorylineTuning.recruitMaxCandidates] by cosine each get the same
+  /// confirmation call a normal assignment gets, against that charter.
+  Future<void> recruit(String storylineId) async {
+    final storyline = await _store.getStoryline(storylineId);
+    // Dismissed between the save and the drain. Recruiting into it would
+    // resurrect a group the user threw away, silently.
+    if (storyline == null ||
+        (storyline.status != 'active' && storyline.status != 'suggested')) {
+      return;
+    }
+
+    final context = await _memberContext(storylineId);
+    final centroid = context.centroid;
+    if (centroid == null) {
+      // No member vectors means no ranking, and a recruit that considered
+      // nothing is still an answer to the user's save.
+      _log.note({'recruited': 0, 'considered': 0});
+      return;
+    }
+
+    // Scored, then top-N. Ties break on the store's own order (newest first,
+    // key ascending), and the sort is made deterministic by index because
+    // List.sort makes no stability promise of its own.
+    final scored = <({int index, Map<String, Object?> row, double score})>[];
+    var index = 0;
+    for (final row in await _store.conversationsWithEmbeddings(
+      embedModel: EmbeddingsClient.modelTag,
+      sources: const [_source],
+    )) {
+      final order = index++;
+      final key = row['conversation_key'] as String? ?? '';
+      if (key.isEmpty) continue;
+      final rowSource = row['source'] as String? ?? _source;
+      if (context.memberThreads.contains(_threadKey(rowSource, key))) continue;
+      if (await _store.isMemberBlocked(storylineId, rowSource, key)) continue;
+      final blob = row['embedding'];
+      if (blob is! Uint8List) continue;
+      final vector = decodeEmbedding(blob);
+      if (vector.isEmpty) continue;
+      final score = cosine(vector, centroid);
+      if (score < StorylineTuning.assignCosineGateWithOverlap) continue;
+      scored.add((index: order, row: row, score: score));
+    }
+    scored.sort((a, b) {
+      final byScore = b.score.compareTo(a.score);
+      return byScore != 0 ? byScore : a.index.compareTo(b.index);
+    });
+    final considered =
+        scored.take(StorylineTuning.recruitMaxCandidates).toList();
+
+    // One snapshot for every candidate: the storyline as the user saved it is
+    // what all eight are judged against, not a group that grows under the
+    // later candidates as the earlier ones land.
+    final storylineParticipants = await _participantsOfStoryline(storylineId);
+
+    var recruited = 0;
+    for (final candidate in considered) {
+      final row = candidate.row;
+      final rowSource = row['source'] as String? ?? _source;
+      final key = row['conversation_key'] as String? ?? '';
+      final cardData = await _store.newestInboundCardData(rowSource, key);
+
+      final result = await runTask(
+        _confirmClient,
+        const ConfirmMembershipTask(),
+        ConfirmInput(
+          storyline: storyline,
+          storylineParticipants: storylineParticipants,
+          candidateCard: enrichedCardForConversationRow(row, cardData),
+        ),
+        // Zero for the reason assignment runs at zero: a re-run after a park
+        // must not move different threads.
+        temperature: 0,
+      );
+      if (!result.belongs || result.confidence == 'low') continue;
+
+      await _store.addStorylineMember(
+        storylineId,
+        rowSource,
+        key,
+        addedBy: 'auto',
+        evidence: result.evidence,
+      );
+      final lastMessageAt = row['last_message_at'] as String?;
+      if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
+        await _store.touchStorylineActivity(storylineId, lastMessageAt);
+      }
+      recruited++;
+    }
+
+    if (recruited > 0) {
+      await _store.updateStoryline(
+        storylineId,
+        memberHash: await _memberHashOf(storylineId),
+      );
+    }
+    // Always, zeroes included — the log is what decides what a person sees.
+    // "Recruited 0 of 5" survives its quiet-kind check and shows: the model
+    // was consulted and said no, which is an answer. An all-zero pass is
+    // suppressed there as the genuine nothing it is.
+    _log.note({'recruited': recruited, 'considered': considered.length});
   }
 
   // ── automatic: the whole mailbox ───────────────────────────────────────
@@ -464,6 +568,23 @@ class StorylineService {
   Future<void> rename(String id, String title) =>
       _store.updateStoryline(id, title: title, titleLocked: true);
 
+  /// Saves the user's charter and sends the model hunting with it.
+  ///
+  /// A non-empty save locks the charter — the same contract a rename gives the
+  /// title — and queues one [recruit] pass, revived rather than merely
+  /// enqueued so the second edit of the day recruits again. Clearing the text
+  /// unlocks instead: the next naming refresh re-drafts a charter, and nothing
+  /// is recruited on the strength of a criteria the user just deleted.
+  Future<void> setCharter(String id, String charter) async {
+    final trimmed = charter.trim();
+    if (trimmed.isEmpty) {
+      await _store.updateStoryline(id, charter: null, charterLocked: false);
+      return;
+    }
+    await _store.updateStoryline(id, charter: trimmed, charterLocked: true);
+    await _store.requeueWork('storyline_recruit', _source, id);
+  }
+
   Future<void> addThread(String id, String source, String key) async {
     await _store.addStorylineMember(id, source, key, addedBy: 'user');
     await _store.updateStoryline(id, memberHash: await _memberHashOf(id));
@@ -520,6 +641,47 @@ class StorylineService {
     if (counted == 0) return null;
     return [for (final value in sum) value / counted];
   }
+
+  /// One storyline's members, read once for comparison work: the mean member
+  /// vector (null when no member has one), every member participant
+  /// lower-cased, and the member threads themselves as [_threadKey]s.
+  ///
+  /// Shared by [assignConversation] and [recruit], which is the point — the
+  /// two passes are mirror images, and a centroid computed two ways would let
+  /// them disagree about the same storyline.
+  Future<
+      ({
+        List<double>? centroid,
+        Set<String> participants,
+        Set<String> memberThreads,
+      })> _memberContext(String storylineId) async {
+    final vectors = <List<double>>[];
+    final participants = <String>{};
+    final memberThreads = <String>{};
+    for (final member in await _store.membersOf(storylineId)) {
+      memberThreads.add(_threadKey(member.source, member.conversationKey));
+      final vector = await _vectorFor(member.source, member.conversationKey);
+      if (vector != null) vectors.add(vector);
+      final row = await _store.getConversationRow(
+        member.source,
+        member.conversationKey,
+      );
+      if (row == null) continue;
+      for (final display in _displaysOf(Conversation.fromRow(row))) {
+        participants.add(display.toLowerCase());
+      }
+    }
+    return (
+      centroid: _centroid(vectors),
+      participants: participants,
+      memberThreads: memberThreads,
+    );
+  }
+
+  /// A thread's identity across sources, for set membership. Newline-joined
+  /// because a newline can appear in neither half.
+  static String _threadKey(String source, String conversationKey) =>
+      '$source\n$conversationKey';
 
   static List<String> _displaysOf(Conversation conversation) => [
         for (final participant in conversation.participants)

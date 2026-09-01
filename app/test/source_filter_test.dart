@@ -219,8 +219,10 @@ void main() {
         ],
         onBack: null,
         onRename: (_) {},
+        onSetCharter: (_) {},
         onRemoveThread: (_, _) {},
         onOpenThread: (_, _) {},
+        onAddThread: () {},
       )));
 
       // Both marked here, mail included: in a merged transcript an unmarked

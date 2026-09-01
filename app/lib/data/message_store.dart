@@ -1755,6 +1755,25 @@ FROM storylines s''';
     return result.isNotEmpty;
   }
 
+  /// Every thread the user has removed from [storylineId], as
+  /// `'<source>\n<conversation_key>'` composites — newline-joined because a
+  /// newline can appear in neither half. The pane that offers threads to add
+  /// leaves these out: a block is the user's own "no", and offering the
+  /// thread back would invite them to overrule it by accident.
+  Future<Set<String>> blockedThreadsOf(String storylineId) async {
+    final result = await db
+        .customSelect(
+          'SELECT source, conversation_key FROM storyline_member_blocks '
+          'WHERE storyline_id = ?',
+          variables: _args([storylineId]),
+        )
+        .get();
+    return {
+      for (final row in result)
+        '${row.data['source']}\n${row.data['conversation_key']}',
+    };
+  }
+
   Future<List<StorylineMember>> membersOf(String storylineId) async {
     final result = await db
         .customSelect(
