@@ -268,6 +268,12 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
   /// "last" tiles describe right now. Together they answer the two different
   /// questions people arrive with — "is it working?" and "is it working
   /// *currently*?" — which no single number can.
+  ///
+  /// The "last" tiles carry wall-clock stamps, not relative ages, and the
+  /// reason is what keeps them honest: the panel's clock only ticks while
+  /// syncs keep running, so a relative "just now" freezes at "just now" in
+  /// exactly the failure it exists to expose. "8:13 PM" an hour later
+  /// convicts itself.
   Widget _tiles() {
     final stats = widget.stats;
     final avg = stats.avgMsByKind;
@@ -290,12 +296,12 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
           _tile(_avg(avg['triage']), 'Avg triage'),
           _tile(_avg(avg['extract']), 'Avg extract'),
           _tile(_genSpeed(), 'Gen speed'),
-          _tile(_ago(widget.lastMailSyncIso), 'Last sync'),
+          _tile(_stamp(widget.lastMailSyncIso), 'Last sync'),
           // Only when Teams has actually run: a permanent dash beside a live
           // mail tile reads as a broken connector rather than an absent one.
           if (widget.lastTeamsSyncIso != null)
-            _tile(_ago(widget.lastTeamsSyncIso), 'Last teams sync'),
-          _tile(_ago(widget.lastSweepIso), 'Last sweep'),
+            _tile(_stamp(widget.lastTeamsSyncIso), 'Last teams sync'),
+          _tile(_stamp(widget.lastSweepIso), 'Last sweep'),
         ],
       ),
     );
@@ -304,7 +310,7 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
   static String _avg(int? ms) =>
       ms == null ? '—' : ActivityLogPanel.formatDuration(ms);
 
-  String _ago(String? iso) => relativeTime(iso, widget.now) ?? '—';
+  static String _stamp(String? iso) => formatTimestamp(iso) ?? '—';
 
   /// Generation speed across the whole window, weighted by time rather than
   /// averaged per row: a hundred one-token retries and one long answer are not

@@ -134,10 +134,13 @@ void main() {
         lastSweepIso: now.subtract(const Duration(hours: 2)).toIso8601String(),
       );
 
+      // Wall-clock stamps, not relative ages: a relative "just now" freezes
+      // at "just now" when syncs stop, which is the failure the tiles exist
+      // to expose. An absolute time an hour later convicts itself.
       expect(find.text('Last sync'), findsOneWidget);
-      expect(find.text('4m ago'), findsOneWidget);
+      expect(find.text('Mar 12, 8:56 AM'), findsOneWidget);
       expect(find.text('Last sweep'), findsOneWidget);
-      expect(find.text('2h ago'), findsOneWidget);
+      expect(find.text('Mar 12, 7:00 AM'), findsOneWidget);
       // A connector that has never synced has no tile at all: a permanent dash
       // beside a live mail tile reads as broken rather than as absent.
       expect(find.text('Last teams sync'), findsNothing);
@@ -153,7 +156,7 @@ void main() {
       );
 
       expect(find.text('Last teams sync'), findsOneWidget);
-      expect(find.text('1d ago'), findsOneWidget);
+      expect(find.text('Mar 11, 9:00 AM'), findsOneWidget);
     });
   });
 
