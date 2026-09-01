@@ -138,14 +138,16 @@ class SettingsDialog extends StatefulWidget {
 
   /// The three extended permissions, in the order they matter to the user:
   /// label, the bare scope each one is really asking about, and whether a
-  /// fresh sign-in can actually obtain it. Teams cannot — the tenant
-  /// admin-gates `Chat.Read`, so the sign-in no longer requests it (see
-  /// GraphAuth.pendingAdminScopes) and offering "sign in again" for it would
-  /// send the user through a round that cannot deliver.
+  /// fresh sign-in can actually obtain it. Teams cannot via a direct-Graph
+  /// sign-in — the SDK path still leaves `Chat.Read` out of its request (see
+  /// GraphAuth.pendingAdminScopes), and in MCP mode the grant arrives through
+  /// a platform-side Microsoft reconnect, not this app's sign-in — so
+  /// offering "sign in again" for it would send the user through a round
+  /// that cannot deliver.
   static const List<(String, String, bool)> permissions = [
     ('Send mail', 'mail.send', true),
     ('Save drafts', 'mail.readwrite', true),
-    ('Teams chats — awaiting admin approval', 'chat.read', false),
+    ('Teams chats', 'chat.read', false),
   ];
 
   @override
@@ -735,13 +737,27 @@ class _SettingsDialogState extends State<SettingsDialog> {
       if (scope is String && scope.isNotEmpty) scope.toLowerCase(),
   };
 
+  /// Which granted scope stands in for a scope this dialog asks about — the
+  /// same two pairs `McpAuthSession._subsumedBy` holds, for the same reason:
+  /// Microsoft's consent hierarchy makes the ReadWrite grant include Read,
+  /// and the platform's admin grant for Teams is `Chat.ReadWrite` while the
+  /// row here asks the read-only question. The two matchers must agree or the
+  /// dialog contradicts the Teams pill it sits on top of.
+  static const Map<String, Set<String>> _subsumedBy = {
+    'mail.read': {'mail.readwrite'},
+    'chat.read': {'chat.readwrite'},
+  };
+
   /// Whether the connected account holds [scope].
   ///
   /// A connected account with no scopes recorded is a row that predates the
   /// platform storing them; those grants were all mail-only, which is the same
   /// answer `McpAuthSession.hasScope` gives.
-  static bool _holds(Set<String> granted, String scope) =>
-      granted.isEmpty ? scope.startsWith('mail.') : granted.contains(scope);
+  static bool _holds(Set<String> granted, String scope) {
+    if (granted.isEmpty) return scope.startsWith('mail.');
+    return granted.contains(scope) ||
+        (_subsumedBy[scope]?.any(granted.contains) ?? false);
+  }
 
   /// What Microsoft actually granted, and the one thing that can change it.
   ///

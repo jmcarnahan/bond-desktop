@@ -276,6 +276,12 @@ void main() {
       expect(await ask('mail.read', ['mail.readwrite']), isTrue);
     });
 
+    test('chat.readwrite subsumes chat.read', () async {
+      // The platform's admin grant is Chat.ReadWrite; the app only ever asks
+      // the read-only question, and must recognize the wider grant.
+      expect(await ask('chat.read', ['chat.readwrite']), isTrue);
+    });
+
     test('subsumption does not run the other way', () async {
       expect(await ask('mail.readwrite', ['mail.read']), isFalse);
     });

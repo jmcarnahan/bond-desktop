@@ -271,12 +271,33 @@ void main() {
 
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
-      expect(find.text('Teams chats — awaiting admin approval'), findsOneWidget);
+      expect(find.text('Teams chats'), findsOneWidget);
       expect(find.byIcon(Icons.check), findsNWidgets(2));
-      // Chat.Read is admin-gated and was not granted; there is nothing in this
-      // dialog that can change that, so there is no offer beside it either.
+      // Chat.Read was not granted; there is nothing in this dialog that can
+      // change that, so there is no offer beside it either.
       expect(find.byIcon(Icons.close), findsOneWidget);
       expect(find.text('Sign in again to enable'), findsNothing);
+    });
+
+    testWidgets('the wider grant satisfies the read-only question',
+        (tester) async {
+      // The platform's admin grant is Chat.ReadWrite / Mail.ReadWrite; the
+      // rows ask chat.read / mail.readwrite. The dialog's matcher must agree
+      // with McpAuthSession.hasScope, or it contradicts the Teams pill that
+      // is enabled right behind it.
+      await open(
+        tester,
+        onBackendModeChanged: (_) {},
+        connectionStatus: status({
+          'connected': true,
+          'scopes': ['Mail.Send', 'Mail.ReadWrite', 'Chat.ReadWrite'],
+        }),
+        onConnectMicrosoft: () {},
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byIcon(Icons.check), findsNWidgets(3));
+      expect(find.byIcon(Icons.close), findsNothing);
     });
 
     testWidgets('a connected account with no scopes recorded is mail-only',
