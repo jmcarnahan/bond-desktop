@@ -13,6 +13,7 @@ import '../services/extract_handler.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart';
+import '../services/identity_guard.dart';
 import '../services/llm/embeddings_client.dart';
 import '../services/llm/llm_client.dart';
 import '../services/mcp/bond_mcp_client.dart';
@@ -88,6 +89,12 @@ final dbProvider = Provider<Database>(
 
 final messageStoreProvider =
     Provider<MessageStore>((ref) => MessageStore(ref.watch(dbProvider)));
+
+/// Enforces the one-identity-per-database rule at every completed sign-in.
+/// See [IdentityGuard] for why it is a guard rather than a convention.
+final identityGuardProvider = Provider<IdentityGuard>(
+  (ref) => IdentityGuard(ref.watch(messageStoreProvider)),
+);
 
 final mailBackendProvider = Provider<MailBackend>((ref) {
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));

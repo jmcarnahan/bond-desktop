@@ -54,6 +54,13 @@ class BondInboxApp extends StatelessWidget {
 /// allowed to be optimistic. A token that turns out to be dead surfaces later
 /// as [NotSignedIn] from the first Graph call, which Phase 3 routes back
 /// here.
+///
+/// It answers ONCE at launch, and again only when a screen explicitly reports
+/// a sign-in or a sign-out. Changing the backend or the server in Settings
+/// never swaps the screen mid-session: the settings dialog is where sessions
+/// are managed, and it shows the selected target's state and signs in and out
+/// in place. A gate that swapped the whole screen under an open dialog was
+/// three live bugs, all of them in the gap between the switch and the answer.
 class AuthGate extends ConsumerStatefulWidget {
   const AuthGate({super.key});
 

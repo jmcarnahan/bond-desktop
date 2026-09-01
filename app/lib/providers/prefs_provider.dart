@@ -5,6 +5,8 @@ import '../data/message_store.dart';
 import '../services/attention.dart';
 import 'app_providers.dart';
 
+export '../data/message_store.dart' show aboutMeKey;
+
 /// Which Microsoft backend the app talks through.
 ///
 /// [backendModeMcp] goes through the Bond MCP server, which holds the Microsoft
@@ -84,8 +86,10 @@ class AppPrefs {
 
 /// Keys in `app_prefs`. Constants because they are typed in two places — the
 /// read below and the tests that assert what landed in the table.
+/// [aboutMeKey] lives in `message_store.dart` — `wipeAll` has to clear it and
+/// that layer imports nothing above itself — and is re-exported here so this
+/// file stays where prefs keys are found.
 const String attentionThresholdKey = 'attention_threshold';
-const String aboutMeKey = 'about_me';
 const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 

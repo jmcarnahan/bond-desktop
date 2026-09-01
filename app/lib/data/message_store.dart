@@ -6,6 +6,22 @@ import 'package:sqlite3/sqlite3.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 
+/// Which Microsoft identity the mail rows in this database belong to, stored in
+/// `app_prefs` alongside the settings but emphatically not one of them: it is
+/// ownership metadata, written by `IdentityGuard` and cleared by [wipeAll],
+/// never something a user sets. Declared here because [wipeAll] is what has to
+/// clear it, and this layer imports nothing above itself.
+const String dbOwnerKey = 'db_owner';
+
+/// The user's own words about who they are, fed to the AI on their behalf.
+/// A user setting like any other — except it is one PERSON'S text, not the
+/// machine's configuration, so [wipeAll] clears it along with their mail.
+/// Declared here beside [dbOwnerKey] for the same reason: the wipe is what
+/// has to name it, and this layer imports nothing above itself.
+/// `prefs_provider.dart` re-exports it for everything that reads or writes
+/// the setting normally.
+const String aboutMeKey = 'about_me';
+
 /// Every SQL statement in the app except the schema itself lives here. Screens
 /// and providers call methods; they never build a query.
 ///
@@ -712,11 +728,17 @@ LIMIT ?
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` goes too. Its rows (attention threshold, volume slider) are
-  /// the previous user's calibration, and stale cursors hiding in a kept
-  /// table is exactly the class of bug this method exists to rule out —
-  /// everything or nothing is the only policy that stays correct as tables
-  /// are added.
+  /// `app_prefs` SURVIVES, with two exceptions. What this method isolates is
+  /// one person's presence: which backend the app talks through, which server
+  /// it points at, and where the slider sits are the machine's configuration,
+  /// not the previous account's data, and wiping them turned every account
+  /// switch into a re-setup. The exceptions are [dbOwnerKey] — the identity
+  /// claim on these rows, which must not outlive the rows it describes, or
+  /// the next sign-in would read the wiped mailbox as still owned — and
+  /// [aboutMeKey], which is one person's self-description and would otherwise
+  /// be inherited by the next identity and steer THEIR triage. Both callers
+  /// depend on the first: sign-out leaves the database unclaimed, and
+  /// `IdentityGuard` writes the new owner immediately after.
   void wipeAll() {
     const tables = [
       'messages',
@@ -730,7 +752,6 @@ LIMIT ?
       'storyline_member_blocks',
       'feedback_events',
       'sender_prefs',
-      'app_prefs',
       'drafts',
     ];
     db.execute('BEGIN');
@@ -738,6 +759,10 @@ LIMIT ?
       for (final table in tables) {
         db.execute('DELETE FROM $table');
       }
+      db.execute(
+        'DELETE FROM app_prefs WHERE key IN (?, ?)',
+        [dbOwnerKey, aboutMeKey],
+      );
       db.execute('COMMIT');
     } catch (_) {
       db.execute('ROLLBACK');

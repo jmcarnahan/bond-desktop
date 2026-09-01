@@ -12,7 +12,6 @@ import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
-import '../services/mcp/bond_mcp_client.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/app_rail.dart';
@@ -574,14 +573,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// the list as it changes — the whole point of the slider is watching Needs
   /// You grow and shrink under it — while the "about me" text is only saved.
   ///
-  /// "Sign in again" signs OUT and lets the gate above take over. That is the
-  /// only way a missing consent is ever fixed: a refresh cannot add a scope
-  /// nobody consented to, and the fresh sign-in asks for the whole list.
+  /// It is also where SESSIONS are managed. The dialog shows whether the
+  /// backend it is currently pointing at is signed in, and signs in and out of
+  /// it in place — the gate above never swaps the screen for a settings change,
+  /// so this is the only place that work can happen.
+  ///
+  /// "Sign in again" is kept wired for the SDK permissions table, where it
+  /// signs OUT and lets the gate take over. It is not rendered while the
+  /// session block is on screen — that block's Sign in… is the same action,
+  /// beside the state it fixes.
   Future<void> _openSettings() async {
     final prefs = ref.read(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
-    final auth = ref.read(authSessionProvider);
-    final mcpMode = prefs.backendMode == backendModeMcp;
     await showDialog<void>(
       context: context,
       builder: (context) => SettingsDialog(
@@ -589,22 +592,29 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         aboutMe: prefs.aboutMe,
         onThresholdChanged: (value) {
           notifier.setAttentionThreshold(value);
+          if (!mounted) return;
           ref.read(conversationsProvider.notifier).load(syncFirst: false);
         },
         onAboutMeChanged: notifier.setAboutMe,
-        // Exactly one of these two answers the permissions section: in MCP mode
-        // the grant belongs to the workspace and the platform is the only thing
-        // that can report it.
-        hasScope: mcpMode ? null : auth.hasScope,
-        connectionStatus: mcpMode ? _connectionStatus : null,
-        onConnectMicrosoft:
-            mcpMode ? () => unawaited(_connectMicrosoft()) : null,
+        // BOTH sources are wired, and deliberately not bound to the mode the
+        // dialog OPENED in: the toggle now switches backends without closing
+        // the dialog, so which one answers is the dialog's live choice. Each
+        // closure reads the providers at CALL time — after a switch, the
+        // dialog's re-ask lands on the session the switch just built.
+        //
+        // Every closure that touches `ref` starts with a mounted check. The
+        // dialog lives in the ROOT overlay and can outlive this screen — a
+        // sign-out from the rail behind it, for one — and a dead host must
+        // answer with nothing, never with "ref after dispose".
+        hasScope: (scope) async {
+          if (!mounted) return false;
+          return ref.read(authSessionProvider).hasScope(scope);
+        },
+        connectionStatus: _connectionStatus,
+        onConnectMicrosoft: () => unawaited(_connectMicrosoft()),
         backendMode: prefs.backendMode,
         mcpServerUrl: prefs.mcpServerUrl,
         onBackendModeChanged: (mode) {
-          // Closed first: the switch replaces the session, and every answer in
-          // the dialog was given by the one being left behind.
-          Navigator.of(context).pop();
           notifier.setBackendMode(mode);
           _reloadAfterBackendChange();
         },
@@ -615,6 +625,53 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onSignInAgain: () {
           Navigator.of(context).pop();
           _signOut();
+        },
+        isTargetSignedIn: () async {
+          if (!mounted) return false;
+          return ref.read(authSessionProvider).isSignedIn;
+        },
+        targetAccountLabel: () async {
+          if (!mounted) return null;
+          final account = await ref.read(authSessionProvider).storedAccount;
+          return account?.mail ?? account?.displayName;
+        },
+        onSignIn: () async {
+          if (!mounted) return;
+          final account = await ref.read(authSessionProvider).signIn();
+          if (!mounted) return;
+          // Before anything syncs: if the rows in this file belong to a
+          // different person, the sign-in that just succeeded is the moment
+          // they stop being reachable. Two mailboxes must never be in the
+          // database at once, and after the first sync is too late.
+          final wiped = await ref.read(identityGuardProvider).adopt(account);
+          if (!mounted) return;
+          if (wiped) {
+            // The same list `SignInScreen._invalidateAfterWipe` drops, and
+            // duplicated for the same reason it is duplicated there: it is
+            // "everything holding mail rows in memory", and a shared helper
+            // would hide that from whichever screen gains a provider next.
+            // Keep them in step.
+            ref.invalidate(conversationsProvider);
+            ref.invalidate(storylinesProvider);
+            ref.invalidate(threadProvider);
+            ref.invalidate(draftProvider);
+            ref.invalidate(storylineTimelineProvider);
+            // And the previous person's about-me text, which the notifier
+            // still holds in memory — same reason SignInScreen clears it.
+            ref.read(appPrefsProvider.notifier).setAboutMe('');
+          }
+          _reloadAfterBackendChange();
+        },
+        onSignOutOfServer: () async {
+          if (!mounted) return;
+          await ref.read(authSessionProvider).signOut();
+          if (!mounted) return;
+          // NO database wipe here, deliberately. Leaving one server is not
+          // "remove this account from this machine" — the rail's Sign out is,
+          // and it keeps its explicit wipe. If a different identity signs in
+          // next, the IdentityGuard wipes then, which is the moment the rows
+          // actually stop being this user's.
+          _reloadAfterBackendChange();
         },
       ),
     );
@@ -627,30 +684,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// This reads what is already stored, with no sync: the rows are the same
   /// mailbox either way, and asking the brand-new session for mail before the
   /// user has signed in to it would put an error where a list belongs.
-  void _reloadAfterBackendChange() =>
-      ref.read(conversationsProvider.notifier).load(syncFirst: false);
+  ///
+  /// A target with no session is NOT a reason to take anything off screen: the
+  /// gate above decides at launch only, this screen stays where it is, and the
+  /// settings dialog reports "not signed in to this server" with a Sign in…
+  /// beside it. The list underneath is simply empty until that happens, which
+  /// is the truth about a server nobody has signed in to.
+  void _reloadAfterBackendChange() {
+    // The dialog outlives nothing here any more, but it can still be closed
+    // and reopened around an in-flight change; a dead host must answer with
+    // nothing rather than with "ref after dispose".
+    if (!mounted) return;
+    ref.read(conversationsProvider.notifier).load(syncFirst: false);
+  }
 
   /// The platform's view of the workspace's Microsoft account.
   ///
-  /// Every MCP failure answers null rather than throwing: this is a report on a
+  /// EVERY failure answers null rather than throwing: this is a report on a
   /// settings pane, and a server that cannot be reached is a row that says so,
-  /// not an exception on its way to a banner.
+  /// not an exception on its way to a banner. The catch-all covers the rest —
+  /// an ask still in flight when this screen goes away must render "no answer"
+  /// rather than crash on a ref whose element is gone.
   Future<Map<String, Object?>?> _connectionStatus() async {
     try {
       return await ref
           .read(mcpStackProvider)
           .client
           .callTool('connection_status', const {});
-    } on McpToolException {
-      return null;
-    } on McpTransportException {
-      return null;
-    } on AuthException {
+    } on Object {
       return null;
     }
   }
 
   Future<void> _connectMicrosoft() async {
+    if (!mounted) return;
     final url = await ref.read(mcpStackProvider).auth.microsoftConnectUrl();
     final uri = url == null ? null : Uri.tryParse(url);
     if (uri == null) return;

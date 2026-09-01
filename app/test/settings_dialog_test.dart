@@ -127,6 +127,24 @@ void main() {
     expect(saved, ['typed then dismissed']);
   });
 
+  testWidgets('but a text nobody touched is not saved at all', (tester) async {
+    // Not just an economy: a sign-in from this dialog that changes the
+    // identity wipes the previous person's about-me, and an unconditional
+    // save on close would write it right back.
+    final saved = <String>[];
+    await open(
+      tester,
+      aboutMe: 'the previous text',
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: saved.add,
+    );
+
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+
+    expect(saved, isEmpty);
+  });
+
   testWidgets('it opens on what is already stored', (tester) async {
     await open(
       tester,

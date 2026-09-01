@@ -68,6 +68,23 @@ const String _asMetadata =
 const String _authorizeEndpoint = '$_issuer/oauth/authorize';
 const String _tokenEndpoint = '$_issuer/oauth/token';
 
+/// The local `make dev` server, the second endpoint this file signs in to.
+/// Its session lives in its own keychain slot, which is the entire point of
+/// naming it separately from [_mcp].
+const String _localMcp = 'http://localhost:18001/mcp';
+
+/// The key names one server's session reads and writes, read off a session
+/// rather than spelled out: a slot is a digest of the URL, and a test that
+/// hardcoded that digest would pin the derivation instead of the behaviour.
+McpAuthSession _keysFor(String url) => McpAuthSession(
+      mcpUrl: Uri.parse(url),
+      mcpClient: _FakeBondMcpClient(const {}),
+      store: _Tokens(),
+    );
+
+final McpAuthSession _keys = _keysFor(_mcp);
+final McpAuthSession _localKeys = _keysFor(_localMcp);
+
 /// A JWT whose payload really decodes — only `exp` and the identity claims are
 /// ever read, and never to decide validity.
 String _jwt(Map<String, dynamic> claims) {
@@ -88,7 +105,15 @@ String _liveJwt({String? email}) => _jwt({
 /// Records what the scripted authorization server was asked.
 class _Server {
   final List<Map<String, String>> tokenPosts = [];
+
+  /// Every non-token URL asked for, in order. The sign-in probe is among them
+  /// and is a POST — the endpoint is what these assertions are about, not the
+  /// verb.
   final List<Uri> gets = [];
+
+  /// The sign-in probes, whole: the request that pins the probe's shape reads
+  /// its method and body back out of here.
+  final List<http.Request> probes = [];
 
   /// Replies for the token endpoint, one per POST; the last one repeats.
   List<http.Response> tokenReplies = [];
@@ -102,7 +127,10 @@ class _Server {
               : tokenReplies.removeAt(0);
         }
         gets.add(request.url);
+        if (request.method == 'POST' && url == _mcp) probes.add(request);
         switch (url) {
+          // The deployed shape: the initialize POST is challenged, and the
+          // challenge is where the discovery chain starts.
           case _mcp:
             return http.Response(
               'unauthorized',
@@ -243,8 +271,8 @@ void main() {
 
       expect(account.displayName, 'Ada Lovelace');
       expect(account.mail, 'ada@example.test');
-      expect(store.values['mcp_refresh_token'], 'rt-1');
-      expect(store.values['mcp_account_json'], isNotNull);
+      expect(store.values[_keys.refreshTokenKey], 'rt-1');
+      expect(store.values[_keys.accountJsonKey], isNotNull);
       expect(await auth.isSignedIn, isTrue);
     });
 
@@ -291,7 +319,7 @@ void main() {
       // Local → Deployed switch, a stale flag would let validJwt answer "no
       // bearer needed" the day the refresh token is gone, instead of the
       // honest NotSignedIn.
-      store.values['mcp_local_mode'] = '1';
+      store.values[_keys.localModeKey] = '1';
       server.tokenReplies = [
         _tokenOk(accessToken: _liveJwt(email: 'ada@example.test'), refreshToken: 'rt-1'),
       ];
@@ -300,8 +328,8 @@ void main() {
         'get_profile_json': {'display_name': 'Ada', 'mail': 'ada@example.test'},
       }).signIn();
 
-      expect(store.values.containsKey('mcp_local_mode'), isFalse);
-      expect(store.values['mcp_refresh_token'], 'rt-1');
+      expect(store.values.containsKey(_keys.localModeKey), isFalse);
+      expect(store.values[_keys.refreshTokenKey], 'rt-1');
     });
 
     test('a refusal on the callback is AuthorizeDenied, not a hang', () async {
@@ -338,7 +366,7 @@ void main() {
         throwsA(isA<AuthException>().having((e) => e.message, 'message',
             'the code has already been used')),
       );
-      expect(store.values.containsKey('mcp_refresh_token'), isFalse);
+      expect(store.values.containsKey(_keys.refreshTokenKey), isFalse);
     });
 
     test('signing in without a connected account still signs in', () async {
@@ -356,8 +384,8 @@ void main() {
       expect(account.displayName, 'ada@example.test');
       expect(account.mail, 'ada@example.test');
       // Nothing to persist — there is no profile behind it yet.
-      expect(store.values.containsKey('mcp_account_json'), isFalse);
-      expect(store.values['mcp_refresh_token'], 'rt-1');
+      expect(store.values.containsKey(_keys.accountJsonKey), isFalse);
+      expect(store.values[_keys.refreshTokenKey], 'rt-1');
     });
 
     test('an unreachable profile tool does not fail the sign-in', () async {
@@ -374,14 +402,27 @@ void main() {
   });
 
   group('signIn against a server that wants no token', () {
-    /// The local `make dev` server: a bare GET is answered, not challenged.
+    /// The local `make dev` server: it ANSWERS the initialize POST, which is
+    /// the only thing that means "no auth wall" now. A bare GET at the same
+    /// path still gets the 405 a real one gives — and that 405 is precisely
+    /// what must no longer read as an open server.
     MockClient localServer() => MockClient((request) async =>
-        http.Response('Method Not Allowed', 405));
+        request.method == 'POST' && request.url.path == '/mcp'
+            ? http.Response(
+                jsonEncode({
+                  'jsonrpc': '2.0',
+                  'id': 0,
+                  'result': {'protocolVersion': '2025-03-26'},
+                }),
+                200,
+                headers: {'content-type': 'application/json'},
+              )
+            : http.Response('Method Not Allowed', 405));
 
     test('records local mode and needs no browser', () async {
       final store = _Tokens();
       final auth = McpAuthSession(
-        mcpUrl: Uri.parse('http://localhost:18001/mcp'),
+        mcpUrl: Uri.parse(_localMcp),
         mcpClient: _FakeBondMcpClient({
           'get_profile_json': {'error': 'not_connected', 'connect_url': null},
         }),
@@ -392,15 +433,15 @@ void main() {
 
       final account = await auth.signIn();
       expect(account.displayName, 'Local session');
-      expect(store.values['mcp_local_mode'], '1');
-      expect(store.values.containsKey('mcp_account_json'), isFalse);
+      expect(store.values[_localKeys.localModeKey], '1');
+      expect(store.values.containsKey(_localKeys.accountJsonKey), isFalse);
       expect(await auth.isSignedIn, isTrue);
     });
 
     test('a profile the local server can answer is used and stored', () async {
       final store = _Tokens();
       final auth = McpAuthSession(
-        mcpUrl: Uri.parse('http://localhost:18001/mcp'),
+        mcpUrl: Uri.parse(_localMcp),
         mcpClient: _FakeBondMcpClient({
           'get_profile_json': {
             'display_name': 'Ada Lovelace',
@@ -416,17 +457,19 @@ void main() {
       final account = await auth.signIn();
       expect(account.displayName, 'Ada Lovelace');
       expect(account.userPrincipalName, 'ada@corp.example.test');
-      expect(store.values['mcp_account_json'], isNotNull);
+      expect(store.values[_localKeys.accountJsonKey], isNotNull);
     });
 
-    test('a local sign-in forgets a deployed session\'s refresh token', () async {
-      // The keys are shared per keychain, not per server URL. A refresh token
-      // left over from a deployed sign-in would win over the local-mode flag
-      // in validJwt and send a refresh at a server with no token endpoint to
-      // discover — breaking every call until a sign-out.
-      final store = _Tokens()..values['mcp_refresh_token'] = 'stale-deployed-rt';
+    test('a local sign-in forgets a refresh token in the same slot', () async {
+      // Within ONE server's slot the two markers stay mutually exclusive: the
+      // same URL can be challenged today and open tomorrow (a local server
+      // rebooted with auth off is the everyday case). A refresh token left in
+      // this slot would win over the local-mode flag in validJwt and send a
+      // refresh at a server with no token endpoint to discover — breaking
+      // every call until a sign-out.
+      final store = _Tokens()..values[_localKeys.refreshTokenKey] = 'stale-deployed-rt';
       final auth = McpAuthSession(
-        mcpUrl: Uri.parse('http://localhost:18001/mcp'),
+        mcpUrl: Uri.parse(_localMcp),
         mcpClient: _FakeBondMcpClient({
           'get_profile_json': {'error': 'not_connected', 'connect_url': null},
         }),
@@ -436,20 +479,106 @@ void main() {
       );
 
       await auth.signIn();
-      expect(store.values.containsKey('mcp_refresh_token'), isFalse);
-      expect(store.values['mcp_local_mode'], '1');
+      expect(store.values.containsKey(_localKeys.refreshTokenKey), isFalse);
+      expect(store.values[_localKeys.localModeKey], '1');
       expect(await auth.validJwt(), isNull);
     });
 
     test('validJwt sends no bearer in local mode', () async {
-      final store = _Tokens()..values['mcp_local_mode'] = '1';
+      final store = _Tokens()..values[_localKeys.localModeKey] = '1';
       final auth = McpAuthSession(
-        mcpUrl: Uri.parse('http://localhost:18001/mcp'),
+        mcpUrl: Uri.parse(_localMcp),
         mcpClient: _FakeBondMcpClient(const {}),
         httpClient: localServer(),
         store: store,
       );
       expect(await auth.validJwt(), isNull);
+    });
+  });
+
+  group('the sign-in probe', () {
+    /// A server whose only answer is [status] — the shape of an endpoint this
+    /// app was never meant to be pointed at, and of a real one answering the
+    /// wrong question.
+    McpAuthSession answering(int status) => McpAuthSession(
+          mcpUrl: Uri.parse(_mcp),
+          mcpClient: _FakeBondMcpClient(const {}),
+          httpClient: MockClient((_) async => http.Response('nope', status)),
+          store: _Tokens(),
+          openBrowser: (_) async =>
+              fail('an unreadable answer must not open a browser'),
+        );
+
+    Matcher namesStatus(int status) => throwsA(isA<AuthException>()
+        .having((e) => e.message, 'message', contains('$status')));
+
+    test('a 405 is an error, not an open server', () async {
+      // The regression this whole probe exists for: FastMCP refuses a GET at
+      // /mcp with 405 BEFORE its auth layer runs, so a bare GET made the
+      // deployed platform look exactly like an open dev box — "signed in" with
+      // no bearer, and a 401 behind every call after it.
+      await expectLater(answering(405).signIn(), namesStatus(405));
+    });
+
+    test('a 403 is an error naming the status', () async {
+      await expectLater(answering(403).signIn(), namesStatus(403));
+    });
+
+    test('a 400 is an error naming the status', () async {
+      // What the local dev server answers a bare GET. Ambiguity is an error
+      // whichever end it comes from.
+      await expectLater(answering(400).signIn(), namesStatus(400));
+    });
+
+    test('a 401 with no challenge to follow is its own error', () async {
+      await expectLater(
+        answering(401).signIn(),
+        throwsA(isA<AuthException>().having((e) => e.message, 'message',
+            contains('did not say where'))),
+      );
+    });
+
+    test('a 401 carrying a challenge still starts discovery', () async {
+      // The deployed path is unchanged by the switch to a POST: the challenge
+      // is read exactly as before.
+      final server = _Server();
+      final auth = McpAuthSession(
+        mcpUrl: Uri.parse(_mcp),
+        mcpClient: _FakeBondMcpClient(const {}),
+        httpClient: server.client,
+        store: _Tokens(),
+        openBrowser: (_) async =>
+            throw const AuthException('stop here — discovery is the point'),
+      );
+
+      await expectLater(auth.signIn(), throwsA(isA<AuthException>()));
+      expect(server.gets.map((u) => u.toString()),
+          containsAllInOrder([_mcp, _prm, _asMetadata]));
+      expect(jsonDecode(server.probes.single.body)['method'], 'initialize');
+    });
+
+    test('is an initialize POST, not a bare GET', () async {
+      final seen = <http.Request>[];
+      final auth = McpAuthSession(
+        mcpUrl: Uri.parse(_localMcp),
+        mcpClient: _FakeBondMcpClient(const {}),
+        httpClient: MockClient((request) async {
+          seen.add(request);
+          return http.Response(jsonEncode({'jsonrpc': '2.0', 'id': 0}), 200);
+        }),
+        store: _Tokens(),
+        openBrowser: (_) async => fail('an open server must not open a browser'),
+      );
+
+      await auth.signIn();
+
+      final probe = seen.single;
+      expect(probe.method, 'POST');
+      expect(probe.url.toString(), _localMcp);
+      final body = jsonDecode(probe.body) as Map<String, dynamic>;
+      expect(body['jsonrpc'], '2.0');
+      expect(body['method'], 'initialize');
+      expect((body['params'] as Map)['clientInfo'], isNotNull);
     });
   });
 
@@ -466,7 +595,7 @@ void main() {
 
     setUp(() {
       server = _Server();
-      store = _Tokens()..values['mcp_refresh_token'] = 'rt-1';
+      store = _Tokens()..values[_keys.refreshTokenKey] = 'rt-1';
     });
 
     test('refreshes after a relaunch by re-walking discovery', () async {
@@ -505,24 +634,24 @@ void main() {
     test('a rotated refresh token replaces the stored one', () async {
       server.tokenReplies = [_tokenOk(accessToken: _liveJwt(), refreshToken: 'rt-2')];
       await session().validJwt();
-      expect(store.values['mcp_refresh_token'], 'rt-2');
+      expect(store.values[_keys.refreshTokenKey], 'rt-2');
     });
 
     test('invalid_grant ends the session, and only this one', () async {
       store.values['refresh_token'] = 'graph-rt';
       store.values['granted_scopes'] = 'Mail.Read User.Read';
       store.values['account_json'] = '{"displayName":"Graph User"}';
-      store.values['mcp_account_json'] = '{"displayName":"Ada"}';
-      store.values['mcp_local_mode'] = '1';
+      store.values[_keys.accountJsonKey] = '{"displayName":"Ada"}';
+      store.values[_keys.localModeKey] = '1';
       server.tokenReplies = [
         http.Response(jsonEncode({'error': 'invalid_grant'}), 400),
       ];
 
       await expectLater(session().validJwt(), throwsA(isA<NotSignedIn>()));
 
-      expect(store.values.containsKey('mcp_refresh_token'), isFalse);
-      expect(store.values.containsKey('mcp_account_json'), isFalse);
-      expect(store.values.containsKey('mcp_local_mode'), isFalse);
+      expect(store.values.containsKey(_keys.refreshTokenKey), isFalse);
+      expect(store.values.containsKey(_keys.accountJsonKey), isFalse);
+      expect(store.values.containsKey(_keys.localModeKey), isFalse);
       expect(store.values['refresh_token'], 'graph-rt');
       expect(store.values['granted_scopes'], 'Mail.Read User.Read');
       expect(store.values['account_json'], '{"displayName":"Graph User"}');
@@ -534,7 +663,7 @@ void main() {
 
       await expectLater(session().validJwt(), throwsA(isA<AuthException>()));
       // Clearing here would turn a dropped network into a forced sign-out.
-      expect(store.values['mcp_refresh_token'], 'rt-1');
+      expect(store.values[_keys.refreshTokenKey], 'rt-1');
     });
 
     test('a failed refresh does not poison the next attempt', () async {
@@ -550,7 +679,7 @@ void main() {
     });
 
     test('no stored token and no local mode is NotSignedIn', () async {
-      store.values.remove('mcp_refresh_token');
+      store.values.remove(_keys.refreshTokenKey);
       await expectLater(session().validJwt(), throwsA(isA<NotSignedIn>()));
       expect(server.tokenPosts, isEmpty);
     });

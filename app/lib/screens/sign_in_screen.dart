@@ -5,7 +5,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../providers/app_providers.dart';
+import '../providers/conversations_provider.dart';
+import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
+import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
 import '../theme/tokens.dart';
 
@@ -75,7 +78,13 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
     });
     try {
       final session = ref.read(authSessionProvider);
-      await session.signIn();
+      final account = await session.signIn();
+      // Before anything syncs: if these rows belong to a different person, the
+      // sign-in that just succeeded is the moment they stop being reachable.
+      // Doing it here rather than after the first sync is what keeps two
+      // mailboxes from ever existing in the file at the same time.
+      final wiped = await ref.read(identityGuardProvider).adopt(account);
+      if (wiped) _invalidateAfterWipe();
       if (!mounted) return;
       // Only MCP mode has a second grant to ask about. In SDK mode the sign-in
       // IS the Microsoft consent, and asking again would cost a round trip to
@@ -98,6 +107,25 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Drops what the notifiers are still holding from the wiped mailbox.
+  ///
+  /// The same list `InboxScreen._signOut` invalidates, and duplicated rather
+  /// than shared: the two are the same list for the same reason — everything
+  /// that caches mail rows in memory — and a helper spanning two screens would
+  /// hide that from whichever one gains a provider next. Keep them in step.
+  void _invalidateAfterWipe() {
+    ref.invalidate(conversationsProvider);
+    ref.invalidate(storylinesProvider);
+    ref.invalidate(threadProvider);
+    ref.invalidate(draftProvider);
+    ref.invalidate(storylineTimelineProvider);
+    // The wipe deleted the previous person's about-me row, but the notifier
+    // read it at construction and still holds the text — which would show it
+    // to the new identity and steer their triage. Cleared through the setter
+    // so memory and table agree.
+    ref.read(appPrefsProvider.notifier).setAboutMe('');
   }
 
   Future<void> _openConnect() async {
@@ -124,6 +152,16 @@ class _SignInScreenState extends ConsumerState<SignInScreen>
       final stillNeeded = await auth.needsReconsent;
       if (!mounted) return;
       if (!stillNeeded) {
+        // The other door into the inbox, and it needs the same guard: the
+        // sign-in that got the user here had no Microsoft account behind it
+        // yet, so [IdentityGuard] had no identity to compare and claimed
+        // nothing. Now there is one, and these rows may be somebody else's.
+        final account = await auth.storedAccount;
+        if (account != null &&
+            await ref.read(identityGuardProvider).adopt(account)) {
+          _invalidateAfterWipe();
+        }
+        if (!mounted) return;
         widget.onSignedIn();
         return;
       }

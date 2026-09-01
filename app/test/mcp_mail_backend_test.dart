@@ -363,6 +363,22 @@ void main() {
       );
     });
 
+    test('the client\'s own "requires a sign-in" reaches the caller intact',
+        () async {
+      // The one the MCP client raises when a bearer-less connection is refused
+      // twice. It has to arrive as itself, message and all: it is the app's
+      // only cue that this server is not the open one it was taken for.
+      final mcp = _FakeMcp({
+        'list_mail_delta': [const NotSignedIn('This server requires a sign-in.')],
+      });
+
+      await expectLater(
+        McpMailBackend(mcp).deltaPage('inbox'),
+        throwsA(isA<NotSignedIn>().having(
+            (e) => e.message, 'message', 'This server requires a sign-in.')),
+      );
+    });
+
     test('a vanished message does not park the triage queue', () async {
       // The reason the status parse above is load bearing: SyncService skips a
       // 404 and rethrows everything else, so without it ONE deleted message
