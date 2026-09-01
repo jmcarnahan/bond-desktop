@@ -118,6 +118,14 @@ class Conversation {
   /// scoring pass; null until one has run.
   final double? attentionScore;
 
+  /// How many inbound messages on this thread the user has not read. Counted
+  /// at read time from `messages.is_read` by the subquery in
+  /// `loadConversations` rather than stored on the thread, so read state made
+  /// in Outlook arrives with the next sync and a derived count can never drift
+  /// from the messages it describes. Zero on anything read from a payload that
+  /// does not carry it, because absent data must never invent unread mail.
+  final int unreadCount;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -135,6 +143,7 @@ class Conversation {
     this.lastMessagePreview,
     this.bucket,
     this.attentionScore,
+    this.unreadCount = 0,
   });
 
   /// First participant — the row's primary sender. Null when a conversation
@@ -144,8 +153,14 @@ class Conversation {
 
   String? get primaryEmail => primaryParticipant?.email;
 
-  /// Deliberately narrow: state is the only field a local action flips.
-  Conversation copyWith({ConversationState? state}) {
+  /// Whether anything on this thread is still unread. What bolds a row in
+  /// Conversations.
+  bool get hasUnread => unreadCount > 0;
+
+  /// Deliberately narrow: state and unread count are the only two fields a
+  /// local action flips. Marking a thread done flips the state; opening one
+  /// flips the count to zero.
+  Conversation copyWith({ConversationState? state, int? unreadCount}) {
     return Conversation(
       id: id,
       source: source,
@@ -163,6 +178,7 @@ class Conversation {
       lastMessagePreview: lastMessagePreview,
       bucket: bucket,
       attentionScore: attentionScore,
+      unreadCount: unreadCount ?? this.unreadCount,
     );
   }
 
@@ -188,6 +204,7 @@ class Conversation {
       lastMessagePreview: lastMessagePreview,
       bucket: bucket,
       attentionScore: attentionScore,
+      unreadCount: unreadCount,
     );
   }
 
@@ -240,6 +257,9 @@ class Conversation {
       // not join it.
       bucket: row['bucket'] as String?,
       attentionScore: (row['attention_score'] as num?)?.toDouble(),
+      // Counted by the same query's subquery, and absent from every read that
+      // does not run it — which reads as "nothing unread", never as unread.
+      unreadCount: (row['unread_count'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -258,6 +278,11 @@ class Message {
   final String? receivedAt;
   final String? subject;
   final String? bodyText;
+
+  /// Whether the user has read this message, as the server last told us.
+  /// Defaults to read, and stays read when the column is absent or null: a
+  /// message nobody can say anything about must not be shown as new mail.
+  final bool isRead;
 
   /// The sender-side snippet a delta page carries. Bodies are fetched one
   /// thread at a time, so this is what a message has to show for itself
@@ -299,6 +324,7 @@ class Message {
     this.receivedAt,
     this.subject,
     this.bodyText,
+    this.isRead = true,
     this.bodyPreview,
     this.gateReason,
     this.sourceMetaJson,
@@ -355,6 +381,7 @@ class Message {
       receivedAt: json['received_at'] as String?,
       subject: json['subject'] as String?,
       bodyText: json['body_text'] as String?,
+      isRead: json['is_read'] as bool? ?? true,
       bodyPreview: json['body_preview'] as String?,
       gateReason: json['gate_reason'] as String?,
       urgency: json['urgency'] as String?,
@@ -371,7 +398,7 @@ class Message {
 
   /// A row from the `messages` table. `source_message_id` is the id here;
   /// `to_json` / `action_items_json` are JSON-encoded TEXT and
-  /// `needs_action` is a 0/1 integer (STRICT has no bool).
+  /// `needs_action` / `is_read` are 0/1 integers (STRICT has no bool).
   factory Message.fromRow(Map<String, Object?> row) {
     return Message(
       id: row['source_message_id'] as String? ?? '',
@@ -385,6 +412,9 @@ class Message {
       receivedAt: row['received_at'] as String?,
       subject: row['subject'] as String?,
       bodyText: row['body_text'] as String?,
+      // A row read without the column, or with a null in it, is read: the
+      // unread grammar only ever comes from a `0` somebody wrote.
+      isRead: _boolFromInt(row['is_read']) ?? true,
       bodyPreview: row['body_preview'] as String?,
       gateReason: row['gate_reason'] as String?,
       sourceMetaJson: row['source_meta_json'] as String?,

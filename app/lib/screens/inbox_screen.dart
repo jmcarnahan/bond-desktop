@@ -246,6 +246,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // this one was worth their time. Fire-and-forget, and nothing on screen
     // reads it yet.
     ref.read(conversationsProvider.notifier).noteThreadOpened(id);
+    // Opening it IS reading it. The row's own source, resolved from the loaded
+    // list the way [_selected] resolves it — the rail passes an id and nothing
+    // else, and a hard-coded `'email'` would mark a chat read against a thread
+    // that does not exist.
+    final loaded = ref.read(conversationsProvider);
+    if (loaded is ConversationsLoaded) {
+      for (final c in loaded.conversations) {
+        if (c.id != id) continue;
+        if (source != null && c.source != source) continue;
+        ref.read(conversationsProvider.notifier).markRead(c.source, id);
+        break;
+      }
+    }
     ref.read(threadProvider(id).notifier).load();
     // Reads what the queue has already written for this thread. It never asks
     // for a new one — a draft is written by the background queue or by the
@@ -1430,7 +1443,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ),
         ],
-      RailSection.conversations => [('OPEN', conversationRows(conversations))],
+      RailSection.conversations => [
+          (
+            'OPEN',
+            conversationRows(
+              conversations,
+              threshold: ref.watch(appPrefsProvider).attentionThreshold,
+            ),
+          ),
+        ],
       RailSection.later ||
       RailSection.storylines =>
         const <(String, List<Conversation>)>[],

@@ -367,6 +367,35 @@ void main() {
     });
   });
 
+  group('markRead', () {
+    test('zeroes the row before the write, and the store agrees after it',
+        () async {
+      await seed('c1');
+      final n = notifier();
+      await n.load();
+      expect(rowFor(n, 'c1').unreadCount, 1);
+
+      final pending = n.markRead('email', 'c1');
+      expect(rowFor(n, 'c1').hasUnread, isFalse,
+          reason: 'the row un-bolds on the click, not on the write');
+
+      await pending;
+      expect((await store.loadConversations()).single.unreadCount, 0);
+    });
+
+    test('leaves every other thread unread', () async {
+      await seed('c1');
+      await seed('c2');
+      final n = notifier();
+      await n.load();
+
+      await n.markRead('email', 'c1');
+
+      expect(rowFor(n, 'c1').unreadCount, 0);
+      expect(rowFor(n, 'c2').unreadCount, 1);
+    });
+  });
+
   group('scoring runs before the rows are read', () {
     test('a load leaves scores on the rows it returns', () async {
       await seed('c1', state: 'needs_reply');
@@ -404,12 +433,18 @@ void main() {
       final all = rows(n);
       expect(needsYouRows(all), hasLength(1),
           reason: 'with no threshold everything eligible is in');
+      expect(conversationRows(all), isEmpty,
+          reason: 'and what Needs You claims, Conversations does not repeat');
+
       expect(
         needsYouRows(all, threshold: AttentionTuning.defaultThreshold),
         isEmpty,
       );
-      expect(conversationRows(all), hasLength(1),
-          reason: 'nothing the threshold cuts is ever hidden entirely');
+      expect(
+        conversationRows(all, threshold: AttentionTuning.defaultThreshold),
+        hasLength(1),
+        reason: 'nothing the threshold cuts is ever hidden entirely',
+      );
     });
   });
 

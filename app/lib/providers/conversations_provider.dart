@@ -368,6 +368,34 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
   }
 
+  /// The user opened this thread, so it is read. Locally first and instantly —
+  /// the server ack is a queued row somebody else drains.
+  ///
+  /// Optimistic for [markDone]'s reason, and with the same fallback: the store
+  /// is the truth about what is unread, so a failed write is answered by
+  /// re-reading it rather than by guessing what the count went back to.
+  ///
+  /// [source] is passed rather than resolved from the list because the caller
+  /// already knows it — the screen resolved the row before it opened it.
+  Future<void> markRead(String source, String conversationKey) async {
+    final current = state;
+    if (current is! ConversationsLoaded) return;
+
+    state = current.withRows([
+      for (final c in current.conversations)
+        if (c.id == conversationKey && c.source == source)
+          c.copyWith(unreadCount: 0)
+        else
+          c,
+    ], current.loadError);
+
+    try {
+      await _store.markConversationRead(source, conversationKey);
+    } catch (_) {
+      await load(syncFirst: false);
+    }
+  }
+
   // ── corrections ──────────────────────────────────────────────────────
   //
   // Every explicit correction does the same three things in the same order:
