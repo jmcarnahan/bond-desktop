@@ -174,6 +174,33 @@ CREATE TABLE IF NOT EXISTS feedback_events (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS ix_feedback_scope
   ON feedback_events(scope, scope_key, created_at DESC);
+-- The append-only record of what the app did on its own: what each sync
+-- brought in, what the model was asked, how long it took, and what came back.
+-- Both queues expose live counts and nothing that outlives a process; this
+-- table is the only history.
+--
+-- `INTEGER PRIMARY KEY` for feedback_events' reason (AUTOINCREMENT drags in
+-- sqlite_sequence, which is not STRICT). Rows here ARE deleted — see
+-- MessageStore.pruneActivity — but only from the old end, so the max rowid
+-- survives every prune and no id is ever reused in practice.
+--
+-- `count` is a column and not a field inside detail_json so the stats header
+-- can SUM it in SQL without depending on the JSON1 extension.
+CREATE TABLE IF NOT EXISTS activity_events (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  source TEXT,
+  status TEXT NOT NULL,
+  entity_id TEXT,
+  count INTEGER,
+  duration_ms INTEGER,
+  detail_json TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS ix_activity_created
+  ON activity_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS ix_activity_kind
+  ON activity_events(kind, created_at DESC);
 CREATE TABLE IF NOT EXISTS sender_prefs (
   address TEXT PRIMARY KEY,
   disposition TEXT NOT NULL,

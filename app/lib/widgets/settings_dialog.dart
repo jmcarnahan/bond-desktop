@@ -35,6 +35,15 @@ class SettingsDialog extends StatefulWidget {
   /// keystroke, and there is nothing on screen waiting to read it.
   final void Function(String value) onAboutMeChanged;
 
+  /// Whether the rail is currently offering the activity log.
+  final bool showActivityLog;
+
+  /// Fired the instant the switch moves, not on the way out like the text
+  /// above: the thing it changes is a rail icon sitting behind this dialog,
+  /// and a toggle whose effect only appears after Done reads as broken. Null
+  /// hides the row entirely — the same discipline [hasScope] follows.
+  final void Function(bool value)? onShowActivityLogChanged;
+
   /// Answers "did Microsoft grant this bare scope". Null hides the whole
   /// permissions section, which is what a host with no auth wired wants — and
   /// what MCP mode passes, where [connectionStatus] answers instead.
@@ -110,6 +119,8 @@ class SettingsDialog extends StatefulWidget {
     required this.aboutMe,
     required this.onThresholdChanged,
     required this.onAboutMeChanged,
+    this.showActivityLog = false,
+    this.onShowActivityLogChanged,
     this.hasScope,
     this.onSignInAgain,
     this.backendMode = backendModeMcp,
@@ -143,8 +154,10 @@ class SettingsDialog extends StatefulWidget {
 
 class _SettingsDialogState extends State<SettingsDialog> {
   late double _threshold = widget.threshold.clamp(0.0, 1.0);
-  late final TextEditingController _aboutMe =
-      TextEditingController(text: widget.aboutMe);
+  late bool _showActivityLog = widget.showActivityLog;
+  late final TextEditingController _aboutMe = TextEditingController(
+    text: widget.aboutMe,
+  );
 
   /// Ten stops. Enough that the slider feels like it has an opinion, few enough
   /// that the same drag lands on the same value twice.
@@ -204,11 +217,10 @@ class _SettingsDialogState extends State<SettingsDialog> {
     _connection = !wantsPlatform
         ? null
         : session == null
-            ? widget.connectionStatus!.call()
-            : session.then(
-                (state) =>
-                    state.signedIn ? widget.connectionStatus!.call() : null,
-              );
+        ? widget.connectionStatus!.call()
+        : session.then(
+            (state) => state.signedIn ? widget.connectionStatus!.call() : null,
+          );
     _granted = wantsPlatform || widget.hasScope == null
         ? null
         : Future.wait([
@@ -239,8 +251,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
   /// still matches a preset.
   late String _serverPreset = _presetFor(widget.mcpServerUrl);
 
-  late final TextEditingController _serverUrl =
-      TextEditingController(text: widget.mcpServerUrl);
+  late final TextEditingController _serverUrl = TextEditingController(
+    text: widget.mcpServerUrl,
+  );
 
   /// The last server actually handed to the host. Pressing Enter both submits
   /// and drops focus, so without this one keystroke would commit twice — and a
@@ -287,60 +300,66 @@ class _SettingsDialogState extends State<SettingsDialog> {
   Widget build(BuildContext context) {
     return AlertDialog(
       title: const Text('Settings'),
-      content: SizedBox(
-        width: 420,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(
-              'How much lands in Needs You',
-              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: BondSpacing.s4),
-            // The direction is the thing worth stating: the slider raises a
-            // score threshold, so RIGHT means more mail, and a label-less
-            // slider would leave that a coin flip.
-            Slider(
-              value: 1 - _threshold,
-              divisions: _divisions,
-              onChanged: (value) => setState(() => _threshold = 1 - value),
-              onChangeEnd: (value) => widget.onThresholdChanged(1 - value),
-            ),
-            // Both halves flex: the labels are long enough relative to the
-            // dialog that a fixed Row overflows at the default text scale.
-            Row(
-              children: [
-                Expanded(
-                  child: Text('Only the critical', style: BondType.caption),
-                ),
-                Expanded(
-                  child: Text(
-                    'Anything plausible',
-                    style: BondType.caption,
-                    textAlign: TextAlign.right,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: BondSpacing.s24),
-            Text(
-              'About me & my role',
-              style: BondType.body.copyWith(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: BondSpacing.s4),
-            TextField(
-              controller: _aboutMe,
-              minLines: 3,
-              maxLines: 5,
-              decoration: const InputDecoration(
-                hintText: 'e.g. I am a loan officer; I own rate locks and '
-                    'closing dates, my processor handles document chasing.',
+      // Scrollable because the section list has outgrown short windows: the
+      // switch and session rows below the about-me field are what tip it over.
+      content: SingleChildScrollView(
+        child: SizedBox(
+          width: 420,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'How much lands in Needs You',
+                style: BondType.body.copyWith(fontWeight: FontWeight.w600),
               ),
-            ),
-            ..._connectionSection(),
-            ..._permissionsSection(),
-          ],
+              const SizedBox(height: BondSpacing.s4),
+              // The direction is the thing worth stating: the slider raises a
+              // score threshold, so RIGHT means more mail, and a label-less
+              // slider would leave that a coin flip.
+              Slider(
+                value: 1 - _threshold,
+                divisions: _divisions,
+                onChanged: (value) => setState(() => _threshold = 1 - value),
+                onChangeEnd: (value) => widget.onThresholdChanged(1 - value),
+              ),
+              // Both halves flex: the labels are long enough relative to the
+              // dialog that a fixed Row overflows at the default text scale.
+              Row(
+                children: [
+                  Expanded(
+                    child: Text('Only the critical', style: BondType.caption),
+                  ),
+                  Expanded(
+                    child: Text(
+                      'Anything plausible',
+                      style: BondType.caption,
+                      textAlign: TextAlign.right,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: BondSpacing.s24),
+              Text(
+                'About me & my role',
+                style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: BondSpacing.s4),
+              TextField(
+                controller: _aboutMe,
+                minLines: 3,
+                maxLines: 5,
+                decoration: const InputDecoration(
+                  hintText:
+                      'e.g. I am a loan officer; I own rate locks and '
+                      'closing dates, my processor handles document chasing.',
+                ),
+              ),
+              ..._activityLogSwitch(),
+              ..._connectionSection(),
+              ..._permissionsSection(),
+            ],
+          ),
         ),
       ),
       actions: [
@@ -350,6 +369,37 @@ class _SettingsDialogState extends State<SettingsDialog> {
         ),
       ],
     );
+  }
+
+  /// Whether the rail carries the door to the machine room.
+  ///
+  /// Reported to the host on the spot rather than at dispose: the icon this
+  /// controls is on screen behind the dialog, and a switch that only takes
+  /// effect once the dialog is closed cannot be checked by the person who
+  /// flipped it.
+  List<Widget> _activityLogSwitch() {
+    final onChanged = widget.onShowActivityLogChanged;
+    if (onChanged == null) return const [];
+    return [
+      const SizedBox(height: BondSpacing.s8),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        value: _showActivityLog,
+        title: Text(
+          'Show activity log',
+          style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Text(
+          'Adds a link in the sidebar to what has synced and what the AI did.',
+          style: BondType.caption,
+        ),
+        onChanged: (value) {
+          setState(() => _showActivityLog = value);
+          onChanged(value);
+        },
+      ),
+    ];
   }
 
   /// Which backend the app talks through, and where.
@@ -429,8 +479,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 state?.signedIn != true
                     ? 'Not signed in to this server.'
                     : label == null
-                        ? 'Signed in.'
-                        : 'Signed in as $label.',
+                    ? 'Signed in.'
+                    : 'Signed in as $label.',
                 style: BondType.small,
               ),
               Align(
@@ -681,9 +731,9 @@ class _SettingsDialogState extends State<SettingsDialog> {
   }
 
   static Set<String> _grantedScopes(Object? raw) => {
-        for (final scope in raw is List ? raw : const [])
-          if (scope is String && scope.isNotEmpty) scope.toLowerCase(),
-      };
+    for (final scope in raw is List ? raw : const [])
+      if (scope is String && scope.isNotEmpty) scope.toLowerCase(),
+  };
 
   /// Whether the connected account holds [scope].
   ///
@@ -720,14 +770,15 @@ class _SettingsDialogState extends State<SettingsDialog> {
           // Absent an answer, every row reads as not granted — the same thing
           // the composer assumes while it is waiting, so the two never
           // disagree on screen.
-          final answers = snapshot.data ??
+          final answers =
+              snapshot.data ??
               List.filled(SettingsDialog.permissions.length, false);
           // Only a scope a fresh sign-in can deliver counts as fixable —
           // an admin-gated row must not turn the offer into a permanent nag.
           var missing = false;
           for (var i = 0; i < SettingsDialog.permissions.length; i++) {
-            missing = missing ||
-                (SettingsDialog.permissions[i].$3 && !answers[i]);
+            missing =
+                missing || (SettingsDialog.permissions[i].$3 && !answers[i]);
           }
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,

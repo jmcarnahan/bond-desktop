@@ -458,6 +458,7 @@ void main() {
         origin: 'explicit',
       );
       store.enqueueWork('extract', 'email', 'm1');
+      store.recordActivity(kind: 'sync_mail', status: 'ok', count: 1);
 
       store.wipeAll();
 
@@ -468,6 +469,7 @@ void main() {
         'work_items',
         'feedback_events',
         'sender_prefs',
+        'activity_events',
       ]) {
         expect(
           store.db.select('SELECT COUNT(*) AS n FROM $table').first['n'],

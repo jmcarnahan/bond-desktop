@@ -46,8 +46,17 @@ class EmbeddingsClient {
   /// running would print one line per message for the length of a backlog.
   final Set<String> _reported = {};
 
-  EmbeddingsClient({String? baseUrl, http.Client? httpClient})
-      : baseUrl = baseUrl ?? defaultBaseUrl,
+  /// Told about each DISTINCT failure once, alongside the debugPrint — in the
+  /// app, the activity log. It rides the same dedupe on purpose: this client's
+  /// whole contract is that a missing embedding server costs nothing, and a
+  /// row per message would make the panel read as though the app were broken.
+  final void Function(String reason)? onFail;
+
+  EmbeddingsClient({
+    String? baseUrl,
+    http.Client? httpClient,
+    this.onFail,
+  })  : baseUrl = baseUrl ?? defaultBaseUrl,
         _http = httpClient ?? http.Client();
 
   /// One vector for [text], or null if anything at all went wrong.
@@ -108,6 +117,7 @@ class EmbeddingsClient {
   Null _fail(String reason) {
     if (_reported.add(reason)) {
       debugPrint('EmbeddingsClient: the embedding server $reason');
+      onFail?.call(reason);
     }
     return null;
   }

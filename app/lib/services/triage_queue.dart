@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../data/message_store.dart';
 import '../models/message_models.dart';
+import 'activity_log.dart';
 import 'drain_gate.dart';
 import 'gates.dart';
 import 'backend/backend_types.dart';
@@ -85,6 +86,8 @@ class TriageQueue {
   /// which simply triage whatever is stored.
   final Future<void> Function(String sourceMessageId)? _ensureBody;
 
+  final ActivityLog _log;
+
   final StreamController<TriageProgress> _progress =
       StreamController<TriageProgress>.broadcast();
 
@@ -98,9 +101,11 @@ class TriageQueue {
     String? userAddress,
     Future<void> Function(String sourceMessageId)? ensureBody,
     DrainGate? gate,
+    ActivityLog? activityLog,
   })  : _userAddress = userAddress,
         _ensureBody = ensureBody,
-        _gate = gate ?? DrainGate();
+        _gate = gate ?? DrainGate(),
+        _log = activityLog ?? ActivityLog.disabled();
 
   /// The signed-in mailbox, for the gate that skips the loan officer's own
   /// mail. Set after sign-in resolves; until then that one gate is simply off.
@@ -160,11 +165,16 @@ class TriageQueue {
     // looks for at the next launch — and what keeps a re-entrant pump from
     // handing the same message to two drains.
     _store.writeTriage(_source, id, status: 'processing');
+    final sw = Stopwatch()..start();
 
     // Tier one, on the delta page's own fields. Free, and it is what keeps
     // the fetch below off every no-reply and every message the LO sent.
     final senderGate = gateFor(message, userAddress: _userAddress);
     if (senderGate != null) {
+      // No activity row, here or at the header gate below. A `triage` row
+      // means the model was consulted, and a gate is the mechanism that keeps
+      // it from being — one row per newsletter would bury the work the panel
+      // exists to show under the mail that never cost anything.
       _store.writeTriage(_source, id, status: 'skipped', gateReason: senderGate);
       _emit();
       return true;
@@ -180,9 +190,9 @@ class TriageQueue {
         current = _store.getMessageRow(_source, id) ?? current;
         message = Message.fromRow(current);
       } on NotSignedIn {
-        return _parkForSession(id);
+        return _parkForSession(id, sw.elapsedMilliseconds);
       } on ReconsentRequired {
-        return _parkForSession(id);
+        return _parkForSession(id, sw.elapsedMilliseconds);
       } catch (_) {
         // Degraded, not parked: this message is classified from its preview
         // and the drain carries on.
@@ -207,6 +217,20 @@ class TriageQueue {
       );
       _store.writeTriage(_source, id, status: 'triaged', result: result);
       _foldUp(current, message, result);
+      // What the model decided, on the row. The `llm_*` tally the call itself
+      // reported folds in from the log's pending slot.
+      _log.record(
+        'triage',
+        source: _source,
+        entityId: id,
+        durationMs: sw.elapsedMilliseconds,
+        detail: {
+          'urgency': result.urgency,
+          'category': result.category,
+          'needs_action': result.needsAction,
+          'action_items': result.actionItems.length,
+        },
+      );
       _emit();
       return true;
     } on LlmUnavailableException {
@@ -215,12 +239,20 @@ class TriageQueue {
       // and marking a hundred of them is just noise on a laptop where the
       // model server is not running.
       _store.writeTriage(_source, id, status: 'pending');
+      _log.record(
+        'triage',
+        status: 'parked',
+        source: _source,
+        entityId: id,
+        durationMs: sw.elapsedMilliseconds,
+        detail: {'reason': 'model_unavailable'},
+      );
       _emit();
       return false;
     } on LlmException catch (e) {
-      return _recordFailure(current, id, e, e.statusCode);
+      return _recordFailure(current, id, e, e.statusCode, sw.elapsedMilliseconds);
     } catch (e) {
-      return _recordFailure(current, id, e, null);
+      return _recordFailure(current, id, e, null, sw.elapsedMilliseconds);
     }
   }
 
@@ -229,8 +261,16 @@ class TriageQueue {
   /// attempt — nothing is wrong with the message — and the drain parks. The
   /// sign-out routing lives in the inbox notifier; triage's whole job here is
   /// to stop burning model time on previews it cannot improve on.
-  bool _parkForSession(String id) {
+  bool _parkForSession(String id, int durationMs) {
     _store.writeTriage(_source, id, status: 'pending');
+    _log.record(
+      'triage',
+      status: 'parked',
+      source: _source,
+      entityId: id,
+      durationMs: durationMs,
+      detail: {'reason': 'session'},
+    );
     _emit();
     return false;
   }
@@ -240,6 +280,7 @@ class TriageQueue {
     String id,
     Object error,
     int? statusCode,
+    int durationMs,
   ) {
     final attempts = ((row['triage_attempts'] as num?)?.toInt() ?? 0) + 1;
     // A 400 from a json_schema request is this app's schema being wrong, not
@@ -252,6 +293,21 @@ class TriageQueue {
       status: fatal ? 'error' : 'pending',
       error: '$error',
       attempts: attempts,
+    );
+    // `retry` while the message still has an attempt left, `error` once it
+    // does not — the row says which of the two this was, where the message's
+    // own `pending` status cannot.
+    _log.record(
+      'triage',
+      status: fatal ? 'error' : 'retry',
+      source: _source,
+      entityId: id,
+      durationMs: durationMs,
+      detail: {
+        'error': '$error',
+        'attempts': attempts,
+        'status_code': ?statusCode,
+      },
     );
     _emit();
     return true;

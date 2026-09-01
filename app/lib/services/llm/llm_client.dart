@@ -48,6 +48,47 @@ class LlmFormatException extends LlmException {
   const LlmFormatException(super.message);
 }
 
+/// One call to the local model, as the HTTP layer saw it.
+///
+/// Lives here rather than beside the activity log because this file may not
+/// import upward: the client reports what happened and has no opinion about
+/// who is listening.
+class LlmCallRecord {
+  /// Which task asked — a [completeJson] caller's `schemaName`, or
+  /// `'complete'` for free text. The five names in the app today: `triage`,
+  /// `extraction`, `draft_reply`, `storyline_membership`, `storyline_name`
+  /// (the storyline propose path reuses the naming task's schema, so there is
+  /// deliberately no sixth).
+  final String label;
+
+  final int durationMs;
+
+  /// llama-server's own token counts, null when the response carried none —
+  /// which every failure does.
+  final int? promptTokens;
+  final int? completionTokens;
+
+  /// `ok`, `unavailable`, `error`, or `format`.
+  final String outcome;
+
+  final int? statusCode;
+  final String? error;
+
+  const LlmCallRecord({
+    required this.label,
+    required this.durationMs,
+    required this.outcome,
+    this.promptTokens,
+    this.completionTokens,
+    this.statusCode,
+    this.error,
+  });
+}
+
+/// Sees every HTTP round trip to the model server, success or failure. Must
+/// not throw; whatever it does happens on the queues' hot path.
+typedef LlmCallObserver = void Function(LlmCallRecord record);
+
 class LlmClient {
   /// Overridable at build time (`--dart-define=LLAMA_URL=…`) for a model
   /// server on another port or another machine.
@@ -70,10 +111,12 @@ class LlmClient {
 
   final String baseUrl;
   final http.Client _http;
+  final LlmCallObserver? _onCall;
 
-  LlmClient({String? baseUrl, http.Client? httpClient})
+  LlmClient({String? baseUrl, http.Client? httpClient, LlmCallObserver? onCall})
       : baseUrl = baseUrl ?? defaultBaseUrl,
-        _http = httpClient ?? http.Client();
+        _http = httpClient ?? http.Client(),
+        _onCall = onCall;
 
   /// Free-text completion. Nothing in this app uses it yet; it is the seam a
   /// draft-reply task lands on.
@@ -93,6 +136,7 @@ class LlmClient {
         think: think,
       ),
       think: think,
+      label: 'complete',
     );
     return _content(message);
   }
@@ -134,7 +178,7 @@ class LlmClient {
       },
     };
 
-    final content = _content(await _post(body, think: think));
+    final content = _content(await _post(body, think: think, label: schemaName));
     final Object? decoded;
     try {
       decoded = jsonDecode(content);
@@ -170,8 +214,60 @@ class LlmClient {
         if (!think) 'chat_template_kwargs': {'enable_thinking': false},
       };
 
-  /// POSTs and returns the assistant message object.
+  /// POSTs and returns the assistant message object, telling the observer —
+  /// when there is one — what every round trip cost and how it ended.
+  ///
+  /// A thin wrapper on purpose: the single try below is what instruments all
+  /// of [_postInner]'s failure paths without touching any of them.
   Future<Map<String, dynamic>> _post(
+    Map<String, dynamic> body, {
+    required bool think,
+    required String label,
+  }) async {
+    final observer = _onCall;
+    if (observer == null) return (await _postInner(body, think: think)).message;
+
+    final sw = Stopwatch()..start();
+    try {
+      final result = await _postInner(body, think: think);
+      observer(LlmCallRecord(
+        label: label,
+        durationMs: sw.elapsedMilliseconds,
+        outcome: 'ok',
+        promptTokens: result.promptTokens,
+        completionTokens: result.completionTokens,
+      ));
+      return result.message;
+    } on LlmUnavailableException catch (e) {
+      observer(LlmCallRecord(
+        label: label,
+        durationMs: sw.elapsedMilliseconds,
+        outcome: 'unavailable',
+        error: e.message,
+      ));
+      rethrow;
+    } on LlmFormatException catch (e) {
+      observer(LlmCallRecord(
+        label: label,
+        durationMs: sw.elapsedMilliseconds,
+        outcome: 'format',
+        error: e.message,
+      ));
+      rethrow;
+    } on LlmException catch (e) {
+      observer(LlmCallRecord(
+        label: label,
+        durationMs: sw.elapsedMilliseconds,
+        outcome: 'error',
+        statusCode: e.statusCode,
+        error: e.message,
+      ));
+      rethrow;
+    }
+  }
+
+  Future<({Map<String, dynamic> message, int? promptTokens, int? completionTokens})>
+      _postInner(
     Map<String, dynamic> body, {
     required bool think,
   }) async {
@@ -253,7 +349,14 @@ class LlmClient {
       }
     }
 
-    return Map<String, dynamic>.from(message);
+    final usage = decoded['usage'];
+    return (
+      message: Map<String, dynamic>.from(message),
+      promptTokens:
+          usage is Map ? (usage['prompt_tokens'] as num?)?.toInt() : null,
+      completionTokens:
+          usage is Map ? (usage['completion_tokens'] as num?)?.toInt() : null,
+    );
   }
 
   static String _content(Map<String, dynamic> message) {

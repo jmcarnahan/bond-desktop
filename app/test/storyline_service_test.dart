@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
@@ -657,6 +658,71 @@ void main() {
 
       expect(store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
       expect(store.membersOf('sl-1'), hasLength(1));
+    });
+  });
+
+  /// What the two automatic passes tell the activity log they did.
+  ///
+  /// Load-bearing rather than decorative: a pass that notes nothing looks
+  /// identical to one that did nothing, and `ActivityLog.record` suppresses the
+  /// latter. An assignment that forgot to note would silently stop appearing on
+  /// the activity panel, and no other assertion in this file would move.
+  group('what the passes note', () {
+    test('a filing names the storyline it filed into', () async {
+      seedStoryline(store);
+      seed(store, 'c1', vector: vectorAt(0.8));
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await StorylineService(
+        store,
+        FakeLlm({'storyline_membership': [confirmAnswer()]}),
+        activityLog: log,
+      ).assignConversation('email', 'c1');
+
+      log.record('storyline', source: 'email', entityId: 'c1');
+
+      final row = ActivityEvent.fromRow(store.recentActivity().single);
+      expect(row.detail['assigned'], 'Willow St purchase');
+    });
+
+    test('a pass that filed nothing notes nothing, and so writes no row',
+        () async {
+      seedStoryline(store);
+      // Under the gate, so the model is never consulted and nothing is filed.
+      seed(store, 'c1', vector: vectorAt(0.1));
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await StorylineService(
+        store,
+        FakeLlm({'storyline_membership': [confirmAnswer()]}),
+        activityLog: log,
+      ).assignConversation('email', 'c1');
+
+      log.record('storyline', source: 'email', entityId: 'c1');
+
+      expect(store.recentActivity(), isEmpty);
+    });
+
+    test('a sweep counts its proposals once, not once per cluster', () async {
+      seed(store, 'c1', vector: vectorAt(1));
+      seed(store, 'c2', vector: vectorAt(0.9));
+      seed(store, 'c3', vector: vectorAt(0));
+      seed(store, 'c4', vector: vectorAt(-0.9));
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await StorylineService(
+        store,
+        FakeLlm({'storyline_name': [nameAnswer()]}),
+        activityLog: log,
+      ).sweep();
+
+      log.record('storyline_sweep', source: 'email', entityId: 'sweep');
+
+      final row = ActivityEvent.fromRow(store.recentActivity().single);
+      expect(row.detail['proposed'], 1);
     });
   });
 }

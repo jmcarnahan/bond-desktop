@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../data/message_store.dart';
+import 'activity_log.dart';
 import 'drain_gate.dart';
 import 'backend/backend_types.dart';
 import 'llm/llm_client.dart';
@@ -73,6 +74,7 @@ class AiWorker {
   final MessageStore _store;
   final List<WorkHandler> _handlers;
   final DrainGate _gate;
+  final ActivityLog _log;
 
   final StreamController<WorkProgress> _progress =
       StreamController<WorkProgress>.broadcast();
@@ -89,9 +91,14 @@ class AiWorker {
 
   bool _stopped = false;
 
-  AiWorker(this._store, {required List<WorkHandler> handlers, DrainGate? gate})
-      : _handlers = List.unmodifiable(handlers),
-        _gate = gate ?? DrainGate();
+  AiWorker(
+    this._store, {
+    required List<WorkHandler> handlers,
+    DrainGate? gate,
+    ActivityLog? activityLog,
+  })  : _handlers = List.unmodifiable(handlers),
+        _gate = gate ?? DrainGate(),
+        _log = activityLog ?? ActivityLog.disabled();
 
   Stream<WorkProgress> get progress => _progress.stream;
 
@@ -170,10 +177,22 @@ class AiWorker {
     // for at the next launch — and what keeps a re-entrant pump from handing
     // the same item to two drains.
     _store.writeWork(handler.kind, source, id, status: 'processing');
+    final sw = Stopwatch()..start();
 
     try {
       await handler.run(item);
       _store.writeWork(handler.kind, source, id, status: 'done');
+      // The work row is `done` either way; the activity row is where a
+      // handler that early-returned gets to say so. [ActivityLog.note] and
+      // [ActivityLog.noteStatus] are how it does that without throwing, and
+      // both are folded in and cleared by this one call.
+      _log.record(
+        handler.kind,
+        status: _log.pendingStatusOr('ok'),
+        source: source,
+        entityId: id,
+        durationMs: sw.elapsedMilliseconds,
+      );
       _emit(handler.kind);
       return true;
     } on LlmUnavailableException {
@@ -181,22 +200,48 @@ class AiWorker {
       // drain stops too: every item behind it would fail identically, and
       // marking a hundred of them is just noise on a laptop where the model
       // server is not running.
-      return _park(handler.kind, source, id);
+      return _park(
+        handler.kind,
+        source,
+        id,
+        'model_unavailable',
+        sw.elapsedMilliseconds,
+      );
     } on NotSignedIn {
-      return _park(handler.kind, source, id);
+      return _park(handler.kind, source, id, 'session', sw.elapsedMilliseconds);
     } on ReconsentRequired {
-      return _park(handler.kind, source, id);
+      return _park(handler.kind, source, id, 'session', sw.elapsedMilliseconds);
     } on LlmException catch (e) {
-      return _recordFailure(handler.kind, item, e, e.statusCode);
+      return _recordFailure(
+        handler.kind,
+        item,
+        e,
+        e.statusCode,
+        sw.elapsedMilliseconds,
+      );
     } catch (e) {
-      return _recordFailure(handler.kind, item, e, null);
+      return _recordFailure(handler.kind, item, e, null, sw.elapsedMilliseconds);
     }
   }
 
   /// Back to `pending` without spending an attempt, and the drain parks. The
   /// session ending or the server being down says nothing about this item.
-  bool _park(String kind, String source, String id) {
+  bool _park(
+    String kind,
+    String source,
+    String id,
+    String reason,
+    int durationMs,
+  ) {
     _store.writeWork(kind, source, id, status: 'pending');
+    _log.record(
+      kind,
+      status: 'parked',
+      source: source,
+      entityId: id,
+      durationMs: durationMs,
+      detail: {'reason': reason},
+    );
     _emit(kind);
     return false;
   }
@@ -206,6 +251,7 @@ class AiWorker {
     Map<String, Object?> item,
     Object error,
     int? statusCode,
+    int durationMs,
   ) {
     final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
@@ -221,6 +267,20 @@ class AiWorker {
       status: fatal ? 'error' : 'pending',
       error: '$error',
       attempts: attempts,
+    );
+    // `retry` while the item still has an attempt left, `error` once it does
+    // not — the work row's `pending` cannot tell those apart after the fact.
+    _log.record(
+      kind,
+      status: fatal ? 'error' : 'retry',
+      source: source,
+      entityId: id,
+      durationMs: durationMs,
+      detail: {
+        'error': '$error',
+        'attempts': attempts,
+        'status_code': ?statusCode,
+      },
     );
     _emit(kind);
     return true;

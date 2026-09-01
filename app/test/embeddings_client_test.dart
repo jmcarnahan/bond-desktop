@@ -138,6 +138,43 @@ void main() {
     });
   });
 
+  group('onFail', () {
+    test('fires once per distinct reason, however long the backlog', () async {
+      final reasons = <String>[];
+      var status = 503;
+      final client = EmbeddingsClient(
+        baseUrl: _url,
+        httpClient: MockClient((_) async => http.Response('nope', status)),
+        onFail: reasons.add,
+      );
+
+      for (var i = 0; i < 5; i++) {
+        await client.embed('anything');
+      }
+      // A second, different failure is worth saying once as well.
+      status = 500;
+      await client.embed('anything');
+      await client.embed('anything');
+
+      // It rides the debugPrint's own dedupe on purpose: an embedding server
+      // that is simply not running would otherwise write one activity row per
+      // message for the length of a backlog, which reads as a broken app.
+      expect(reasons, [
+        'rejected the request (HTTP 503)',
+        'rejected the request (HTTP 500)',
+      ]);
+    });
+
+    test('a client with no callback still degrades quietly', () async {
+      final client = EmbeddingsClient(
+        baseUrl: _url,
+        httpClient: MockClient((_) async => http.Response('nope', 503)),
+      );
+
+      expect(await client.embed('anything'), isNull);
+    });
+  });
+
   group('encoding', () {
     test('round-trips to float32 precision', () {
       final original = [0.5, -0.25, 0.0, 1.0, -1.0, 0.125];

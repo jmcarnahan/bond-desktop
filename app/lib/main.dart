@@ -22,9 +22,14 @@ Future<void> main() async {
   // triage on the message row, everything else on the work queue. Clearing
   // both here, before a screen exists to start a new drain, is what keeps a
   // crash from stranding that work permanently.
+  // The activity log is trimmed in the same breath. Once per launch is the
+  // whole policy: the table only grows while the app is running, and a prune
+  // on every write would be a delete per sync on a database the UI isolate
+  // reads synchronously.
   MessageStore(db)
     ..resetInterruptedTriage()
-    ..resetInterruptedWork();
+    ..resetInterruptedWork()
+    ..pruneActivity();
 
   runApp(
     ProviderScope(
