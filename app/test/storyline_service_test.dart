@@ -73,8 +73,15 @@ Map<String, dynamic> confirmAnswer({
 Map<String, dynamic> nameAnswer({
   String title = 'Website redesign',
   String summary = 'The studio is reviewing the homepage copy.',
+  String charter = 'The redesign of the Northline Studio website — the '
+      'homepage copy, the new photography, and the launch date.',
 }) =>
-    {'evidence': 'shared deal', 'title': title, 'summary': summary};
+    {
+      'evidence': 'shared deal',
+      'title': title,
+      'summary': summary,
+      'charter': charter,
+    };
 
 void main() {
   late BondDatabase db;
@@ -121,6 +128,10 @@ void main() {
     String id = 'sl-1',
     String status = 'active',
     String? summary = 'The studio is reviewing the homepage copy.',
+    // A storyline named since charters existed has one. The tests that care
+    // about the backfill pass null and say so.
+    String? charter = 'The redesign of the Northline Studio website — the '
+        'homepage copy, the new photography, and the launch date.',
     bool titleLocked = false,
     String memberKey = 'member',
     List<double>? memberVector,
@@ -136,6 +147,7 @@ void main() {
       id: id,
       title: 'Website redesign',
       summary: summary,
+      charter: charter,
       status: status,
       createdBy: 'auto',
     );
@@ -153,7 +165,8 @@ void main() {
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(llm.callsFor('storyline_membership'), 1);
-      // The summary is already there, so nothing needs naming.
+      // The summary and the charter are both already there, so nothing needs
+      // naming.
       expect(llm.callsFor('storyline_name'), 0);
       final members = await store.membersOf('sl-1');
       expect(members.map((m) => m.conversationKey), ['member', 'c1']);
@@ -361,6 +374,227 @@ void main() {
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+  });
+
+  /// What the model is actually shown, and what it is judged against.
+  ///
+  /// Both halves are invisible from every other assertion in this file: a
+  /// thinner card and a charter that never got written still file threads and
+  /// still pass every membership test above. They only show up in whether the
+  /// answers are RIGHT, which is measured live.
+  group('the charter and the enriched card', () {
+    /// The newest inbound message on a thread, with the two things the card
+    /// enrichment reads: a triage summary, and an extraction to pull topics
+    /// from.
+    Future<void> seedInbound(
+      String key, {
+      String? summary,
+      String? extractionJson,
+    }) async {
+      await store.upsertMessage({
+        'source_message_id': 'm-$key',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+      if (summary != null) {
+        await db.customStatement(
+          'UPDATE messages SET summary = ? WHERE source_message_id = ?',
+          [summary, 'm-$key'],
+        );
+      }
+      if (extractionJson != null) {
+        await store.writeExtraction('email', 'm-$key', extractionJson);
+      }
+    }
+
+    String confirmMessageOf(FakeLlm llm) =>
+        llm.userMessages[llm.schemas.indexOf('storyline_membership')];
+
+    test('the candidate card carries the topics and the triage summary',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await seedInbound(
+        'c1',
+        summary: 'Asks what time to come on Friday and offers dessert.',
+        extractionJson: '{"topics":["dinner plans","scheduling"]}',
+      );
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      final user = confirmMessageOf(llm);
+      expect(user, contains('dinner plans, scheduling'));
+      expect(user,
+          contains('Asks what time to come on Friday and offers dessert.'));
+    });
+
+    test('a thread with no extraction still gets judged, on a thinner card',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await seedInbound('c1', summary: 'Asks what time to come on Friday.');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      // Enrichment is a bonus, never a requirement: the summary is there, the
+      // topics segment is empty, and the call went out.
+      final user = confirmMessageOf(llm);
+      expect(user, contains('Asks what time to come on Friday.'));
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('a corrupt extraction costs the topics and nothing else', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await seedInbound(
+        'c1',
+        summary: 'Asks what time to come on Friday.',
+        extractionJson: 'not json at all',
+      );
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      expect(confirmMessageOf(llm), contains('Asks what time to come'));
+      expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('naming cards carry the summary but never the topics', () async {
+      await seedStoryline(store, summary: null, charter: null);
+      await seedInbound(
+        'member',
+        summary: 'The studio sent the homepage copy back.',
+        extractionJson: '{"topics":["homepage copy","review"]}',
+      );
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      final naming = llm.userMessages[llm.schemas.indexOf('storyline_name')];
+      expect(naming, contains('The studio sent the homepage copy back.'));
+      // Naming reads every member card under one cap, and a topic list is the
+      // segment that says least per character it costs.
+      expect(naming, isNot(contains('homepage copy, review')));
+    });
+
+    test('a storyline with no charter gets one, even when it has a summary',
+        () async {
+      // The pre-charter shape: named by an older build, so the summary is
+      // there and the charter is not. One naming call backfills it.
+      await seedStoryline(store, charter: null);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      expect(llm.callsFor('storyline_name'), 1);
+      expect((await store.getStoryline('sl-1'))!.charter,
+          startsWith('The redesign of the Northline Studio website'));
+    });
+
+    test('an edited charter is never taken back', () async {
+      await seedStoryline(store, summary: null, charter: null);
+      await store.updateStoryline(
+        'sl-1',
+        charter: 'Only the homepage copy. Not the photography.',
+        charterLocked: true,
+      );
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      // The naming call still happened — the summary was missing — and it
+      // still refreshed the summary. The charter is the user's.
+      expect(storyline.summary, 'The studio is reviewing the homepage copy.');
+      expect(storyline.charter, 'Only the homepage copy. Not the photography.');
+      expect(storyline.charterLocked, isTrue);
+    });
+
+    test('a storyline that has both is left alone', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      // No script for naming: a second backfill call would throw here, which
+      // is what makes "converges" a claim this test can check.
+      expect(llm.callsFor('storyline_name'), 0);
+    });
+
+    test('a proposed storyline is stored with its charter', () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c3', vector: vectorAt(0));
+      await seed(store, 'c4', vector: vectorAt(-0.9));
+      final llm = FakeLlm({'storyline_name': [nameAnswer()]});
+
+      await StorylineService(store, llm).sweep();
+
+      expect((await store.loadStorylines()).single.charter,
+          startsWith('The redesign of the Northline Studio website'));
+    });
+
+    test('a model that offered no charter leaves the column null', () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c3', vector: vectorAt(0));
+      await seed(store, 'c4', vector: vectorAt(-0.9));
+      final llm = FakeLlm({'storyline_name': [nameAnswer(charter: '')]});
+
+      await StorylineService(store, llm).sweep();
+
+      // NULL rather than '': a storyline with no charter is judged against its
+      // summary, and an empty string would be judged against nothing.
+      expect((await store.loadStorylines()).single.charter, isNull);
+    });
+
+    test('nine member summaries still fit under the naming cap', () async {
+      await store.insertStoryline(
+        id: 'sl-big',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      for (var i = 0; i < 9; i++) {
+        await seed(store, 'big-$i', vector: vectorAt(1));
+        await seedInbound('big-$i', summary: 's' * 600);
+        await store.addStorylineMember('sl-big', 'email', 'big-$i',
+            addedBy: 'auto');
+      }
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      // The cards are clamped as a SET, not one by one — a storyline of nine
+      // threads has to fit in one prompt however long each summary ran.
+      final naming = llm.userMessages[llm.schemas.indexOf('storyline_name')];
+      expect('s'.allMatches(naming).length, lessThanOrEqualTo(4000));
     });
   });
 

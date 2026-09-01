@@ -54,7 +54,8 @@ void main() {
     test('puts evidence first', () {
       final properties = name.schema['properties'] as Map<String, dynamic>;
 
-      expect(properties.keys.toList(), ['evidence', 'title', 'summary']);
+      expect(
+          properties.keys.toList(), ['evidence', 'title', 'summary', 'charter']);
       expect(name.schema['required'], properties.keys.toList());
       expect(name.schema['additionalProperties'], isFalse);
     });
@@ -76,8 +77,13 @@ void main() {
     });
 
     test('the membership prompt asks the narrow question', () {
-      expect(confirm.systemPrompt, contains("a person's email threads"));
-      expect(confirm.systemPrompt, contains('SAME event, project, or topic'));
+      expect(confirm.systemPrompt, contains("a person's message threads"));
+      expect(confirm.systemPrompt,
+          contains("SAME specific event, project, or topic the storyline's "
+              'charter describes'));
+      // The participant list is the signal this prompt most needs held down:
+      // unqualified, a shared name reads as the requirement.
+      expect(confirm.systemPrompt, contains('context, not a requirement'));
       expect(confirm.systemPrompt, contains('same KIND of thing'));
       expect(confirm.systemPrompt, contains('low|medium|high'));
       expect(confirm.systemPrompt, contains('Return ONLY valid JSON.'));

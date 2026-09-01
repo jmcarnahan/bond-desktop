@@ -30,6 +30,15 @@ class Storyline {
   /// but the name is the user's.
   final bool titleLocked;
 
+  /// The membership criteria the confirm task judges candidates against.
+  /// Auto-drafted by the naming pass; locked the moment a person edits it.
+  final String? charter;
+
+  /// Set once a person edits the charter. Same contract as [titleLocked]: a
+  /// later naming pass may keep refreshing everything else, but what belongs
+  /// in the storyline is then the user's call.
+  final bool charterLocked;
+
   final bool pinned;
 
   /// The newest `last_message_at` of any member thread. Only ever moves
@@ -48,6 +57,8 @@ class Storyline {
     this.status = 'suggested',
     this.createdBy = 'auto',
     this.titleLocked = false,
+    this.charter,
+    this.charterLocked = false,
     this.pinned = false,
     this.lastActivityAt,
     this.memberCount = 0,
@@ -68,6 +79,8 @@ class Storyline {
       createdBy: row['created_by'] as String? ?? 'auto',
       // STRICT has no bool: these are 0/1 integers.
       titleLocked: (row['title_locked'] as num?)?.toInt() == 1,
+      charter: row['charter'] as String?,
+      charterLocked: (row['charter_locked'] as num?)?.toInt() == 1,
       pinned: (row['pinned'] as num?)?.toInt() == 1,
       lastActivityAt: row['last_activity_at'] as String?,
       memberCount: (row['member_count'] as num?)?.toInt() ?? 0,

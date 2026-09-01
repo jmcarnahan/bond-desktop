@@ -1546,6 +1546,7 @@ FROM storylines s''';
     required String id,
     required String title,
     String? summary,
+    String? charter,
     required String status,
     required String createdBy,
     String? memberHash,
@@ -1553,11 +1554,13 @@ FROM storylines s''';
     final now = _nowIso();
     await db.customUpdate(
       'INSERT INTO storylines '
-      '(id, title, summary, status, created_by, title_locked, pinned, '
-      'member_hash, last_activity_at, created_at, updated_at) '
-      'VALUES (?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?)',
-      variables:
-          _args([id, title, summary, status, createdBy, memberHash, now, now]),
+      '(id, title, summary, charter, status, created_by, title_locked, '
+      'charter_locked, pinned, member_hash, last_activity_at, created_at, '
+      'updated_at) '
+      'VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NULL, ?, ?)',
+      variables: _args(
+        [id, title, summary, charter, status, createdBy, memberHash, now, now],
+      ),
     );
   }
 
@@ -1569,15 +1572,17 @@ FROM storylines s''';
   /// activity — and a whole-row write from any one of them would quietly
   /// reset the other three.
   ///
-  /// [summary] uses the [_unset] sentinel because null means something: a
-  /// storyline whose summary should be cleared is a different write from one
-  /// whose summary is simply not this call's business.
+  /// [summary] and [charter] use the [_unset] sentinel because null means
+  /// something: a storyline whose summary should be cleared is a different
+  /// write from one whose summary is simply not this call's business.
   Future<void> updateStoryline(
     String id, {
     String? title,
     Object? summary = _unset,
+    Object? charter = _unset,
     String? status,
     bool? titleLocked,
+    bool? charterLocked,
     bool? pinned,
     String? lastActivityAt,
     String? memberHash,
@@ -1593,6 +1598,10 @@ FROM storylines s''';
       sets.add('summary = ?');
       args.add(summary as String?);
     }
+    if (!identical(charter, _unset)) {
+      sets.add('charter = ?');
+      args.add(charter as String?);
+    }
     if (status != null) {
       sets.add('status = ?');
       args.add(status);
@@ -1600,6 +1609,10 @@ FROM storylines s''';
     if (titleLocked != null) {
       sets.add('title_locked = ?');
       args.add(titleLocked ? 1 : 0);
+    }
+    if (charterLocked != null) {
+      sets.add('charter_locked = ?');
+      args.add(charterLocked ? 1 : 0);
     }
     if (pinned != null) {
       sets.add('pinned = ?');
@@ -1999,6 +2012,32 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
           'SELECT * FROM messages '
           "WHERE source = ? AND conversation_key = ? AND direction = 'inbound' "
           'ORDER BY received_at DESC, source_message_id DESC LIMIT 1',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// The pieces of the embedding card that live on the message side: the
+  /// newest inbound message's triage summary and its stored extraction.
+  /// One query, LEFT JOIN, so a thread whose extraction has not run yet
+  /// still answers with its summary. Ties break on `source_message_id
+  /// DESC`, the same way [newestInboundMessage] breaks them.
+  Future<Map<String, Object?>?> newestInboundCardData(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.summary, ai.extraction_json '
+          'FROM messages m '
+          'LEFT JOIN message_ai ai '
+          '  ON ai.source = m.source '
+          '  AND ai.source_message_id = m.source_message_id '
+          "WHERE m.source = ? AND m.conversation_key = ? "
+          "AND m.direction = 'inbound' "
+          'ORDER BY m.received_at DESC, m.source_message_id DESC LIMIT 1',
           variables: _args([source, conversationKey]),
         )
         .get();

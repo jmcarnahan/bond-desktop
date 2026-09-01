@@ -88,7 +88,8 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop \
-        app-install app-run app-test app-gen app-analyze app-build bench ab
+        app-install app-run app-test app-gen app-analyze app-build bench ab \
+        ab-membership
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -113,6 +114,7 @@ help:
 	@printf "  make app-gen      → regenerate Drift code + migration snapshots\n"
 	@printf "  make bench        → live model benchmark (needs make fast up)\n"
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
+	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
 	@printf "  make app-build    → release build of the macOS app\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
@@ -539,6 +541,16 @@ ab:
 	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
 	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_ab_live_test.dart --run-skipped
+
+# The membership eval set through the confirm task on BOTH servers, printing
+# where each lands against the answer a person would give. Live and never a
+# gate, for `ab`'s reason: a verdict is a judgement, not a defect to fail on.
+ab-membership:
+	@curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health || { \
+	   printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }
+	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
+	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_membership_live_test.dart --run-skipped
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze

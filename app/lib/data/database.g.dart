@@ -4538,6 +4538,29 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _charterMeta = const VerificationMeta(
+    'charter',
+  );
+  late final GeneratedColumn<String> charter = GeneratedColumn<String>(
+    'charter',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _charterLockedMeta = const VerificationMeta(
+    'charterLocked',
+  );
+  late final GeneratedColumn<int> charterLocked = GeneratedColumn<int>(
+    'charter_locked',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -4551,6 +4574,8 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
     lastActivityAt,
     createdAt,
     updatedAt,
+    charter,
+    charterLocked,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -4641,6 +4666,21 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
     } else if (isInserting) {
       context.missing(_updatedAtMeta);
     }
+    if (data.containsKey('charter')) {
+      context.handle(
+        _charterMeta,
+        charter.isAcceptableOrUnknown(data['charter']!, _charterMeta),
+      );
+    }
+    if (data.containsKey('charter_locked')) {
+      context.handle(
+        _charterLockedMeta,
+        charterLocked.isAcceptableOrUnknown(
+          data['charter_locked']!,
+          _charterLockedMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -4694,6 +4734,14 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
         DriftSqlType.string,
         data['${effectivePrefix}updated_at'],
       )!,
+      charter: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}charter'],
+      ),
+      charterLocked: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}charter_locked'],
+      )!,
     );
   }
 
@@ -4720,6 +4768,12 @@ class Storyline extends DataClass implements Insertable<Storyline> {
   final String? lastActivityAt;
   final String createdAt;
   final String updatedAt;
+
+  /// Migration-added columns sit AFTER the originals: ALTER TABLE appends, so
+  /// this is the only position where an upgraded install and a fresh one get
+  /// identical table_info — which the parity test compares in order.
+  final String? charter;
+  final int charterLocked;
   const Storyline({
     required this.id,
     required this.title,
@@ -4732,6 +4786,8 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     this.lastActivityAt,
     required this.createdAt,
     required this.updatedAt,
+    this.charter,
+    required this.charterLocked,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -4753,6 +4809,10 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     }
     map['created_at'] = Variable<String>(createdAt);
     map['updated_at'] = Variable<String>(updatedAt);
+    if (!nullToAbsent || charter != null) {
+      map['charter'] = Variable<String>(charter);
+    }
+    map['charter_locked'] = Variable<int>(charterLocked);
     return map;
   }
 
@@ -4775,6 +4835,10 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           : Value(lastActivityAt),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
+      charter: charter == null && nullToAbsent
+          ? const Value.absent()
+          : Value(charter),
+      charterLocked: Value(charterLocked),
     );
   }
 
@@ -4795,6 +4859,8 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       lastActivityAt: serializer.fromJson<String?>(json['last_activity_at']),
       createdAt: serializer.fromJson<String>(json['created_at']),
       updatedAt: serializer.fromJson<String>(json['updated_at']),
+      charter: serializer.fromJson<String?>(json['charter']),
+      charterLocked: serializer.fromJson<int>(json['charter_locked']),
     );
   }
   @override
@@ -4812,6 +4878,8 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       'last_activity_at': serializer.toJson<String?>(lastActivityAt),
       'created_at': serializer.toJson<String>(createdAt),
       'updated_at': serializer.toJson<String>(updatedAt),
+      'charter': serializer.toJson<String?>(charter),
+      'charter_locked': serializer.toJson<int>(charterLocked),
     };
   }
 
@@ -4827,6 +4895,8 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     Value<String?> lastActivityAt = const Value.absent(),
     String? createdAt,
     String? updatedAt,
+    Value<String?> charter = const Value.absent(),
+    int? charterLocked,
   }) => Storyline(
     id: id ?? this.id,
     title: title ?? this.title,
@@ -4841,6 +4911,8 @@ class Storyline extends DataClass implements Insertable<Storyline> {
         : this.lastActivityAt,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
+    charter: charter.present ? charter.value : this.charter,
+    charterLocked: charterLocked ?? this.charterLocked,
   );
   Storyline copyWithCompanion(StorylinesCompanion data) {
     return Storyline(
@@ -4861,6 +4933,10 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           : this.lastActivityAt,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      charter: data.charter.present ? data.charter.value : this.charter,
+      charterLocked: data.charterLocked.present
+          ? data.charterLocked.value
+          : this.charterLocked,
     );
   }
 
@@ -4877,7 +4953,9 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           ..write('memberHash: $memberHash, ')
           ..write('lastActivityAt: $lastActivityAt, ')
           ..write('createdAt: $createdAt, ')
-          ..write('updatedAt: $updatedAt')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('charter: $charter, ')
+          ..write('charterLocked: $charterLocked')
           ..write(')'))
         .toString();
   }
@@ -4895,6 +4973,8 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     lastActivityAt,
     createdAt,
     updatedAt,
+    charter,
+    charterLocked,
   );
   @override
   bool operator ==(Object other) =>
@@ -4910,7 +4990,9 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           other.memberHash == this.memberHash &&
           other.lastActivityAt == this.lastActivityAt &&
           other.createdAt == this.createdAt &&
-          other.updatedAt == this.updatedAt);
+          other.updatedAt == this.updatedAt &&
+          other.charter == this.charter &&
+          other.charterLocked == this.charterLocked);
 }
 
 class StorylinesCompanion extends UpdateCompanion<Storyline> {
@@ -4925,6 +5007,8 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
   final Value<String?> lastActivityAt;
   final Value<String> createdAt;
   final Value<String> updatedAt;
+  final Value<String?> charter;
+  final Value<int> charterLocked;
   final Value<int> rowid;
   const StorylinesCompanion({
     this.id = const Value.absent(),
@@ -4938,6 +5022,8 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     this.lastActivityAt = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
+    this.charter = const Value.absent(),
+    this.charterLocked = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   StorylinesCompanion.insert({
@@ -4952,6 +5038,8 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     this.lastActivityAt = const Value.absent(),
     required String createdAt,
     required String updatedAt,
+    this.charter = const Value.absent(),
+    this.charterLocked = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        title = Value(title),
@@ -4969,6 +5057,8 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     Expression<String>? lastActivityAt,
     Expression<String>? createdAt,
     Expression<String>? updatedAt,
+    Expression<String>? charter,
+    Expression<int>? charterLocked,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -4983,6 +5073,8 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
       if (lastActivityAt != null) 'last_activity_at': lastActivityAt,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
+      if (charter != null) 'charter': charter,
+      if (charterLocked != null) 'charter_locked': charterLocked,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -4999,6 +5091,8 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     Value<String?>? lastActivityAt,
     Value<String>? createdAt,
     Value<String>? updatedAt,
+    Value<String?>? charter,
+    Value<int>? charterLocked,
     Value<int>? rowid,
   }) {
     return StorylinesCompanion(
@@ -5013,6 +5107,8 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
       lastActivityAt: lastActivityAt ?? this.lastActivityAt,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      charter: charter ?? this.charter,
+      charterLocked: charterLocked ?? this.charterLocked,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -5053,6 +5149,12 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     if (updatedAt.present) {
       map['updated_at'] = Variable<String>(updatedAt.value);
     }
+    if (charter.present) {
+      map['charter'] = Variable<String>(charter.value);
+    }
+    if (charterLocked.present) {
+      map['charter_locked'] = Variable<int>(charterLocked.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -5073,6 +5175,8 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
           ..write('lastActivityAt: $lastActivityAt, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
+          ..write('charter: $charter, ')
+          ..write('charterLocked: $charterLocked, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -10045,6 +10149,8 @@ typedef $StorylinesCreateCompanionBuilder =
       Value<String?> lastActivityAt,
       required String createdAt,
       required String updatedAt,
+      Value<String?> charter,
+      Value<int> charterLocked,
       Value<int> rowid,
     });
 typedef $StorylinesUpdateCompanionBuilder =
@@ -10060,6 +10166,8 @@ typedef $StorylinesUpdateCompanionBuilder =
       Value<String?> lastActivityAt,
       Value<String> createdAt,
       Value<String> updatedAt,
+      Value<String?> charter,
+      Value<int> charterLocked,
       Value<int> rowid,
     });
 
@@ -10123,6 +10231,16 @@ class $StorylinesFilterComposer extends Composer<_$BondDatabase, Storylines> {
 
   ColumnFilters<String> get updatedAt => $composableBuilder(
     column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get charter => $composableBuilder(
+    column: $table.charter,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get charterLocked => $composableBuilder(
+    column: $table.charterLocked,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -10189,6 +10307,16 @@ class $StorylinesOrderingComposer extends Composer<_$BondDatabase, Storylines> {
     column: $table.updatedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get charter => $composableBuilder(
+    column: $table.charter,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get charterLocked => $composableBuilder(
+    column: $table.charterLocked,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $StorylinesAnnotationComposer
@@ -10238,6 +10366,14 @@ class $StorylinesAnnotationComposer
 
   GeneratedColumn<String> get updatedAt =>
       $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get charter =>
+      $composableBuilder(column: $table.charter, builder: (column) => column);
+
+  GeneratedColumn<int> get charterLocked => $composableBuilder(
+    column: $table.charterLocked,
+    builder: (column) => column,
+  );
 }
 
 class $StorylinesTableManager
@@ -10279,6 +10415,8 @@ class $StorylinesTableManager
                 Value<String?> lastActivityAt = const Value.absent(),
                 Value<String> createdAt = const Value.absent(),
                 Value<String> updatedAt = const Value.absent(),
+                Value<String?> charter = const Value.absent(),
+                Value<int> charterLocked = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => StorylinesCompanion(
                 id: id,
@@ -10292,6 +10430,8 @@ class $StorylinesTableManager
                 lastActivityAt: lastActivityAt,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
+                charter: charter,
+                charterLocked: charterLocked,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -10307,6 +10447,8 @@ class $StorylinesTableManager
                 Value<String?> lastActivityAt = const Value.absent(),
                 required String createdAt,
                 required String updatedAt,
+                Value<String?> charter = const Value.absent(),
+                Value<int> charterLocked = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => StorylinesCompanion.insert(
                 id: id,
@@ -10320,6 +10462,8 @@ class $StorylinesTableManager
                 lastActivityAt: lastActivityAt,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
+                charter: charter,
+                charterLocked: charterLocked,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

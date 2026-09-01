@@ -228,8 +228,51 @@ void main() {
     });
   });
 
+  /// The two pieces of the embedding card that live on the message side. The
+  /// storyline prompts read them, and they arrive in one query so a thread
+  /// whose extraction has not run yet still answers with its summary.
+  group('newestInboundCardData', () {
+    Future<void> summarise(String id, String summary) => db.customStatement(
+          'UPDATE messages SET summary = ? WHERE source_message_id = ?',
+          [summary, id],
+        );
+
+    test('is the newest inbound message summary and its extraction', () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
+      await summarise('m1', 'The older message.');
+      await summarise('m2', 'Asks what time to come on Friday.');
+      await store.writeExtraction('email', 'm1', '{"topics":["stale"]}');
+      await store.writeExtraction(
+          'email', 'm2', '{"topics":["dinner plans","scheduling"]}');
+
+      final data = await store.newestInboundCardData('email', 'conv-1');
+
+      expect(data!['summary'], 'Asks what time to come on Friday.');
+      expect(data['extraction_json'], '{"topics":["dinner plans","scheduling"]}');
+    });
+
+    test('a thread whose extraction has not run still answers', () async {
+      await seedMessage(id: 'm1');
+      await summarise('m1', 'Asks what time to come on Friday.');
+
+      final data = await store.newestInboundCardData('email', 'conv-1');
+
+      // The LEFT JOIN is the whole point: an inner one would drop this thread
+      // and cost it the summary it does have.
+      expect(data!['summary'], 'Asks what time to come on Friday.');
+      expect(data['extraction_json'], isNull);
+    });
+
+    test('is null for a thread with nothing inbound', () async {
+      await seedMessage(id: 'o1', direction: 'outbound');
+
+      expect(await store.newestInboundCardData('email', 'conv-1'), isNull);
+    });
+  });
+
   group('recentOutboundToSender', () {
-    test('finds the LO\'s replies to one address, newest first', () async {
+    test('finds the user\'s replies to one address, newest first', () async {
       await seedMessage(
         id: 'o1',
         direction: 'outbound',

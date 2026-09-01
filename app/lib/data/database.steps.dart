@@ -1375,8 +1375,393 @@ i1.GeneratedColumn<String> _column_87(String aliasedName) =>
       type: i1.DriftSqlType.string,
       $customConstraints: '',
     );
+
+final class Schema3 extends i0.VersionedSchema {
+  Schema3({required super.database}) : super(version: 3);
+  @override
+  late final List<i1.DatabaseSchemaEntity> entities = [
+    messages,
+    ixMessagesConv,
+    ixMessagesTriage,
+    conversations,
+    ixConvLast,
+    syncState,
+    workItems,
+    ixWorkPending,
+    messageAi,
+    conversationAi,
+    storylines,
+    ixStorylinesStatus,
+    storylineMembers,
+    ixStorylineMembersConv,
+    storylineMemberBlocks,
+    feedbackEvents,
+    ixFeedbackScope,
+    activityEvents,
+    ixActivityCreated,
+    ixActivityKind,
+    senderPrefs,
+    appPrefs,
+    drafts,
+  ];
+  late final Shape0 messages = Shape0(
+    source: i0.VersionedTable(
+      entityName: 'messages',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, source_message_id)'],
+      columns: [
+        _column_0,
+        _column_1,
+        _column_2,
+        _column_3,
+        _column_4,
+        _column_5,
+        _column_6,
+        _column_7,
+        _column_8,
+        _column_9,
+        _column_10,
+        _column_11,
+        _column_12,
+        _column_13,
+        _column_14,
+        _column_15,
+        _column_16,
+        _column_17,
+        _column_18,
+        _column_19,
+        _column_20,
+        _column_21,
+        _column_22,
+        _column_23,
+        _column_24,
+        _column_25,
+        _column_26,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixMessagesConv = i1.Index(
+    'ix_messages_conv',
+    'CREATE INDEX ix_messages_conv ON messages (source, conversation_key, received_at)',
+  );
+  final i1.Index ixMessagesTriage = i1.Index(
+    'ix_messages_triage',
+    'CREATE INDEX ix_messages_triage ON messages (triage_status, received_at DESC)',
+  );
+  late final Shape1 conversations = Shape1(
+    source: i0.VersionedTable(
+      entityName: 'conversations',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, conversation_key)'],
+      columns: [
+        _column_0,
+        _column_3,
+        _column_5,
+        _column_27,
+        _column_28,
+        _column_20,
+        _column_29,
+        _column_30,
+        _column_31,
+        _column_32,
+        _column_33,
+        _column_34,
+        _column_35,
+        _column_36,
+        _column_37,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixConvLast = i1.Index(
+    'ix_conv_last',
+    'CREATE INDEX ix_conv_last ON conversations (last_message_at DESC)',
+  );
+  late final Shape2 syncState = Shape2(
+    source: i0.VersionedTable(
+      entityName: 'sync_state',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, folder)'],
+      columns: [_column_0, _column_38, _column_39, _column_40],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape3 workItems = Shape3(
+    source: i0.VersionedTable(
+      entityName: 'work_items',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(task_kind, source, entity_id)'],
+      columns: [
+        _column_41,
+        _column_0,
+        _column_42,
+        _column_43,
+        _column_44,
+        _column_45,
+        _column_46,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixWorkPending = i1.Index(
+    'ix_work_pending',
+    'CREATE INDEX ix_work_pending ON work_items (task_kind, status, created_at DESC)',
+  );
+  late final Shape4 messageAi = Shape4(
+    source: i0.VersionedTable(
+      entityName: 'message_ai',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, source_message_id)'],
+      columns: [_column_0, _column_1, _column_47, _column_48],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape5 conversationAi = Shape5(
+    source: i0.VersionedTable(
+      entityName: 'conversation_ai',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, conversation_key)'],
+      columns: [
+        _column_0,
+        _column_3,
+        _column_49,
+        _column_50,
+        _column_51,
+        _column_52,
+        _column_53,
+        _column_54,
+        _column_55,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape14 storylines = Shape14(
+    source: i0.VersionedTable(
+      entityName: 'storylines',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_56,
+        _column_57,
+        _column_21,
+        _column_58,
+        _column_59,
+        _column_60,
+        _column_61,
+        _column_62,
+        _column_63,
+        _column_24,
+        _column_25,
+        _column_88,
+        _column_89,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixStorylinesStatus = i1.Index(
+    'ix_storylines_status',
+    'CREATE INDEX ix_storylines_status ON storylines (status, last_activity_at DESC)',
+  );
+  late final Shape7 storylineMembers = Shape7(
+    source: i0.VersionedTable(
+      entityName: 'storyline_members',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(storyline_id, source, conversation_key)'],
+      columns: [
+        _column_64,
+        _column_0,
+        _column_3,
+        _column_65,
+        _column_66,
+        _column_67,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixStorylineMembersConv = i1.Index(
+    'ix_storyline_members_conv',
+    'CREATE INDEX ix_storyline_members_conv ON storyline_members (source, conversation_key)',
+  );
+  late final Shape8 storylineMemberBlocks = Shape8(
+    source: i0.VersionedTable(
+      entityName: 'storyline_member_blocks',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(storyline_id, source, conversation_key)'],
+      columns: [_column_64, _column_0, _column_3, _column_68],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape9 feedbackEvents = Shape9(
+    source: i0.VersionedTable(
+      entityName: 'feedback_events',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_70,
+        _column_71,
+        _column_4,
+        _column_72,
+        _column_24,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixFeedbackScope = i1.Index(
+    'ix_feedback_scope',
+    'CREATE INDEX ix_feedback_scope ON feedback_events (scope, scope_key, created_at DESC)',
+  );
+  late final Shape10 activityEvents = Shape10(
+    source: i0.VersionedTable(
+      entityName: 'activity_events',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [
+        _column_69,
+        _column_73,
+        _column_74,
+        _column_75,
+        _column_76,
+        _column_77,
+        _column_78,
+        _column_79,
+        _column_24,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  final i1.Index ixActivityCreated = i1.Index(
+    'ix_activity_created',
+    'CREATE INDEX ix_activity_created ON activity_events (created_at DESC)',
+  );
+  final i1.Index ixActivityKind = i1.Index(
+    'ix_activity_kind',
+    'CREATE INDEX ix_activity_kind ON activity_events (kind, created_at DESC)',
+  );
+  late final Shape11 senderPrefs = Shape11(
+    source: i0.VersionedTable(
+      entityName: 'sender_prefs',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [_column_80, _column_81, _column_25],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape12 appPrefs = Shape12(
+    source: i0.VersionedTable(
+      entityName: 'app_prefs',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: [],
+      columns: [_column_82, _column_83],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+  late final Shape13 drafts = Shape13(
+    source: i0.VersionedTable(
+      entityName: 'drafts',
+      withoutRowId: false,
+      isStrict: true,
+      tableConstraints: ['PRIMARY KEY(source, conversation_key)'],
+      columns: [
+        _column_0,
+        _column_3,
+        _column_84,
+        _column_85,
+        _column_66,
+        _column_58,
+        _column_86,
+        _column_87,
+        _column_24,
+        _column_25,
+      ],
+      attachedDatabase: database,
+    ),
+    alias: null,
+  );
+}
+
+class Shape14 extends i0.VersionedTable {
+  Shape14({required super.source, required super.alias}) : super.aliased();
+  i1.GeneratedColumn<String> get id =>
+      columnsByName['id']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get title =>
+      columnsByName['title']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get summary =>
+      columnsByName['summary']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get status =>
+      columnsByName['status']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get createdBy =>
+      columnsByName['created_by']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<int> get titleLocked =>
+      columnsByName['title_locked']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<int> get pinned =>
+      columnsByName['pinned']! as i1.GeneratedColumn<int>;
+  i1.GeneratedColumn<String> get memberHash =>
+      columnsByName['member_hash']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get lastActivityAt =>
+      columnsByName['last_activity_at']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get createdAt =>
+      columnsByName['created_at']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get updatedAt =>
+      columnsByName['updated_at']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<String> get charter =>
+      columnsByName['charter']! as i1.GeneratedColumn<String>;
+  i1.GeneratedColumn<int> get charterLocked =>
+      columnsByName['charter_locked']! as i1.GeneratedColumn<int>;
+}
+
+i1.GeneratedColumn<String> _column_88(String aliasedName) =>
+    i1.GeneratedColumn<String>(
+      'charter',
+      aliasedName,
+      true,
+      type: i1.DriftSqlType.string,
+      $customConstraints: '',
+    );
+i1.GeneratedColumn<int> _column_89(String aliasedName) =>
+    i1.GeneratedColumn<int>(
+      'charter_locked',
+      aliasedName,
+      false,
+      type: i1.DriftSqlType.int,
+      $customConstraints: 'NOT NULL DEFAULT 0',
+      defaultValue: const i1.CustomExpression('0'),
+    );
 i0.MigrationStepWithVersion migrationSteps({
   required Future<void> Function(i1.Migrator m, Schema2 schema) from1To2,
+  required Future<void> Function(i1.Migrator m, Schema3 schema) from2To3,
 }) {
   return (currentVersion, database) async {
     switch (currentVersion) {
@@ -1385,6 +1770,11 @@ i0.MigrationStepWithVersion migrationSteps({
         final migrator = i1.Migrator(database, schema);
         await from1To2(migrator, schema);
         return 2;
+      case 2:
+        final schema = Schema3(database: database);
+        final migrator = i1.Migrator(database, schema);
+        await from2To3(migrator, schema);
+        return 3;
       default:
         throw ArgumentError.value('Unknown migration from $currentVersion');
     }
@@ -1393,6 +1783,7 @@ i0.MigrationStepWithVersion migrationSteps({
 
 i1.OnUpgrade stepByStep({
   required Future<void> Function(i1.Migrator m, Schema2 schema) from1To2,
+  required Future<void> Function(i1.Migrator m, Schema3 schema) from2To3,
 }) => i0.VersionedSchema.stepByStepHelper(
-  step: migrationSteps(from1To2: from1To2),
+  step: migrationSteps(from1To2: from1To2, from2To3: from2To3),
 );

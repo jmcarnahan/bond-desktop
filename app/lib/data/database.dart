@@ -35,7 +35,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -57,6 +57,17 @@ class BondDatabase extends _$BondDatabase {
                 "AND category NOT IN ('personal', 'other')",
               );
             }
+          },
+          // v3 — storylines gain a charter: one or two sentences of membership
+          // criteria the confirm task judges candidates against.
+          // `charter_locked` is set when the user edits it, so later naming
+          // passes keep their hands off.
+          from2To3: (m, schema) async {
+            await m.addColumn(schema.storylines, schema.storylines.charter);
+            await m.addColumn(
+              schema.storylines,
+              schema.storylines.charterLocked,
+            );
           },
         ),
         beforeOpen: (details) async {

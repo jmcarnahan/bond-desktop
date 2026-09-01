@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -175,13 +176,15 @@ class StorylineService {
 
     if (best == null) return;
 
+    final cardData = await _store.newestInboundCardData(source, conversationKey);
+
     final result = await runTask(
       _confirmClient,
       const ConfirmMembershipTask(),
       ConfirmInput(
         storyline: best,
         storylineParticipants: await _participantsOfStoryline(best.id),
-        candidateCard: cardForConversationRow(row),
+        candidateCard: enrichedCardForConversationRow(row, cardData),
       ),
       // Zero: the same thread judged against the same storyline twice must
       // give the same answer, or a re-run after a restart would move threads
@@ -221,15 +224,23 @@ class StorylineService {
 
   /// Re-names a storyline when it has nothing to say for itself.
   ///
-  /// Only when the summary is missing, NOT on every membership change. Naming
-  /// costs a model call, assignment already spent one, and a storyline whose
-  /// name churns every time a thread lands reads as instability rather than as
-  /// freshness. A user who dislikes the name renames it, which locks it.
+  /// Only when the summary or the charter is missing, NOT on every membership
+  /// change. Naming costs a model call, assignment already spent one, and a
+  /// storyline whose name churns every time a thread lands reads as
+  /// instability rather than as freshness. A user who dislikes the name
+  /// renames it, which locks it.
+  ///
+  /// The charter clause is what carries storylines written before there were
+  /// charters: each gets ONE naming call to draft one, and then converges,
+  /// because the same call that writes the charter also writes the summary.
   Future<void> _refreshName(String storylineId) async {
     final storyline = await _store.getStoryline(storylineId);
     if (storyline == null) return;
     final summary = storyline.summary;
-    if (summary != null && summary.trim().isNotEmpty) return;
+    final hasSummary = summary != null && summary.trim().isNotEmpty;
+    final needsCharter = !storyline.charterLocked &&
+        (storyline.charter == null || storyline.charter!.trim().isEmpty);
+    if (hasSummary && !needsCharter) return;
 
     final cards = await _cardsOf(storylineId);
     if (cards.isEmpty) return;
@@ -249,6 +260,14 @@ class StorylineService {
       title: storyline.titleLocked ? null : result.title,
       summary: result.summary,
     );
+
+    // A separate, conditional write: a locked charter is the user's, the same
+    // contract `title_locked` gives the title. An empty answer is not written
+    // either — a storyline whose charter was never drafted is judged against
+    // its summary, which is strictly better than judging it against nothing.
+    if (!storyline.charterLocked && result.charter.isNotEmpty) {
+      await _store.updateStoryline(storylineId, charter: result.charter);
+    }
   }
 
   // ── automatic: the whole mailbox ───────────────────────────────────────
@@ -361,10 +380,21 @@ class StorylineService {
     final memberHash = cardHash(keys.join('\n'));
     if (await _store.dismissedMemberHashExists(memberHash)) return false;
 
+    final cards = <String>[];
+    for (final row in rows) {
+      cards.add(_namingCardForConversationRow(
+        row,
+        await _store.newestInboundCardData(
+          row['source'] as String? ?? _source,
+          row['conversation_key'] as String? ?? '',
+        ),
+      ));
+    }
+
     final result = await runTask(
       _client,
       const NameStorylineTask(),
-      NameInput([for (final row in rows) cardForConversationRow(row)]),
+      NameInput(cards),
       temperature: 0,
     );
 
@@ -373,6 +403,7 @@ class StorylineService {
       id: id,
       title: result.title,
       summary: result.summary,
+      charter: result.charter.isEmpty ? null : result.charter,
       status: 'suggested',
       createdBy: 'auto',
       memberHash: memberHash,
@@ -520,7 +551,13 @@ class StorylineService {
         member.conversationKey,
       );
       if (row == null) continue;
-      cards.add(cardForConversationRow(row));
+      cards.add(_namingCardForConversationRow(
+        row,
+        await _store.newestInboundCardData(
+          member.source,
+          member.conversationKey,
+        ),
+      ));
     }
     return cards;
   }
@@ -572,4 +609,68 @@ String cardForConversationRow(Map<String, Object?> row) {
     topics: const [],
     summary: null,
   );
+}
+
+/// The card the NAMING prompt reads: the thin card plus the newest inbound
+/// triage summary, and deliberately no topics.
+///
+/// Naming sees every member thread at once under one 4000-character cap, and
+/// a topic list is the segment that says least per character it costs — the
+/// sentence describing what was last said is what a title comes out of. The
+/// membership prompt, which reads ONE card, can afford both.
+String _namingCardForConversationRow(
+  Map<String, Object?> row,
+  Map<String, Object?>? cardData,
+) {
+  final conversation = Conversation.fromRow(row);
+  return buildConversationCard(
+    subject: stripReFw(conversation.subject),
+    participants: [
+      for (final participant in conversation.participants)
+        if (participant.display.isNotEmpty) participant.display,
+    ],
+    topics: const [],
+    summary: cardData?['summary'] as String?,
+  );
+}
+
+/// The card for a conversation row enriched with what the AI already knows
+/// about the thread: extracted topics and the newest inbound triage summary.
+/// Degrades to [cardForConversationRow]'s thin card when [cardData] is null
+/// or its pieces are missing/corrupt — enrichment is a bonus, never a
+/// requirement.
+String enrichedCardForConversationRow(
+  Map<String, Object?> row,
+  Map<String, Object?>? cardData,
+) {
+  final conversation = Conversation.fromRow(row);
+  return buildConversationCard(
+    subject: stripReFw(conversation.subject),
+    participants: [
+      for (final participant in conversation.participants)
+        if (participant.display.isNotEmpty) participant.display,
+    ],
+    topics: _topicsOf(cardData?['extraction_json']),
+    summary: cardData?['summary'] as String?,
+  );
+}
+
+/// The `topics` list out of a stored extraction blob, or nothing. Every step
+/// can fail against a row an older build wrote, and every failure is the same
+/// answer: no topics, which is the card this app sent before there were any.
+List<String> _topicsOf(Object? extractionJson) {
+  if (extractionJson is! String || extractionJson.isEmpty) return const [];
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(extractionJson);
+  } on FormatException {
+    return const [];
+  }
+  if (decoded is! Map) return const [];
+  final topics = decoded['topics'];
+  if (topics is! List) return const [];
+  return [
+    for (final topic in topics)
+      if (topic is String && topic.isNotEmpty) topic,
+  ];
 }

@@ -101,4 +101,39 @@ void main() {
       {'m-personal': 'dinner plans', 'm-other': null},
     );
   });
+
+  test('v2 to v3 adds storyline charter columns', () async {
+    final schema = await verifier.schemaAt(2);
+    schema.rawDatabase.execute("""
+      INSERT INTO storylines (id, title, status, created_by, title_locked,
+        pinned, created_at, updated_at)
+      VALUES ('sl-1', 'Tahoe trip', 'active', 'user', 1, 0, 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 3);
+    addTearDown(db.close);
+
+    // An existing storyline has no charter and nobody has edited one, which is
+    // what the confirm task's summary fallback is for.
+    Future<Map<String, Object?>> charterOf() async => (await db
+            .customSelect(
+                'SELECT charter, charter_locked FROM storylines WHERE id = ?',
+                variables: [Variable('sl-1')])
+            .getSingle())
+        .data;
+
+    final migrated = await charterOf();
+    // `null` rather than `isNull`: drift exports an `isNull` of its own into
+    // this file, and the two names collide.
+    expect(migrated['charter'], null);
+    expect(migrated['charter_locked'], 0);
+
+    await db.customStatement(
+        "UPDATE storylines SET charter = 'Planning the Tahoe trip.', "
+        "charter_locked = 1 WHERE id = 'sl-1'");
+    final edited = await charterOf();
+    expect(edited['charter'], 'Planning the Tahoe trip.');
+    expect(edited['charter_locked'], 1);
+  });
 }

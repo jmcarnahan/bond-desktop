@@ -252,7 +252,7 @@ void main() {
 
     // Adoption stamps 1, and the open then walks the step migrations to the
     // current version — drift must never have run onCreate.
-    expect(userVersionOf(path), 2);
+    expect(userVersionOf(path), 3);
   });
 
   test('a fresh path is created by drift and round-trips', () async {
@@ -277,7 +277,7 @@ void main() {
     final row = await store.getMessageRow('email', 'm1');
     expect(row!['subject'], 'Hello');
     expect(row['triage_status'], 'pending');
-    expect(userVersionOf(path), 2);
+    expect(userVersionOf(path), 3);
   });
 
   test(
