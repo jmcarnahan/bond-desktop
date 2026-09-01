@@ -16,35 +16,35 @@ import 'package:flutter_test/flutter_test.dart';
 /// because they take about as long as every other test in this suite combined.
 /// They exist for the things a fake cannot check: that this llama-server build
 /// accepts each schema, that `enable_thinking: false` is honoured, and that a
-/// realistic mortgage email comes back classified rather than merely
+/// realistic everyday email comes back classified rather than merely
 /// well-formed.
 
 /// The email both live tests run on.
 Message liveMessage() => Message(
       id: 'live-1',
       outbound: false,
-      fromName: 'Sarah Chen',
-      fromAddress: 'sarah.chen@example.com',
-      subject: 'Rate lock expires Thursday — can we extend?',
+      fromName: 'Marisa Okonkwo',
+      fromAddress: 'marisa.okonkwo@example.com',
+      subject: 'Launch is Thursday — are we still on?',
       receivedAt: '2026-08-29T16:05:00Z',
       bodyText: '''
-Hi Jason,
+Hi Alex,
 
-Our rate lock on the Willow Street purchase expires this Thursday and we still
-haven't heard back from underwriting on the condition about my bonus income. My
-agent says we can't close without the clear-to-close by Friday.
+The launch is this Thursday and we still haven't heard back about the homepage
+copy. The printer needs the final files by tomorrow and we announced the date
+to our whole list two weeks ago.
 
-Can you find out today whether we need to extend the lock? I'm worried about
-the cost if the rate has moved.
+Can you find out today whether Thursday still holds? I'd rather tell people now
+than on Wednesday night.
 
 Thanks,
-Sarah
+Marisa
 ''',
     );
 
 void main() {
   test(
-    'a real mortgage email comes back triaged',
+    'a real everyday email comes back triaged',
     () async {
       final client = LlmClient();
       final message = liveMessage();
@@ -61,6 +61,7 @@ void main() {
       print(
         'urgency:      ${result.urgency}\n'
         'category:     ${result.category}\n'
+        'label:        ${result.label}\n'
         'summary:      ${result.summary}\n'
         'needs_action: ${result.needsAction}\n'
         'action_items: ${result.actionItems}\n'
@@ -72,13 +73,16 @@ void main() {
         anyOf('low', 'normal', 'high', 'urgent'),
       );
       expect(result.summary, isNotEmpty);
-      expect(result.category, isNotEmpty);
+      expect(result.category, anyOf('work', 'personal', 'notification', 'other'));
+      // Shape, not judgement: the words are the model's to choose, but a
+      // message that came back with no label at all is a call that went wrong.
+      expect(result.label, isNotEmpty);
     },
     timeout: const Timeout(Duration(minutes: 3)),
   );
 
   test(
-    'a real mortgage email comes back with facts extracted',
+    'a real everyday email comes back with facts extracted',
     () async {
       final client = LlmClient();
 
@@ -124,13 +128,13 @@ void main() {
       final client = LlmClient();
 
       // Two cards in the shape `buildConversationCard` produces:
-      // subject | participants | topics | summary. Both are the same deal,
+      // subject | participants | topics | summary. Both are the same project,
       // which is the thing the naming prompt has to notice.
       const cards = [
-        'Rate lock expires Thursday | Sarah Chen | rate lock | '
-            'Sarah is asking whether to extend the lock on Willow Street.',
-        'Willow St appraisal came in | Dana Ruiz, Sarah Chen | appraisal | '
-            'The appraisal on Willow Street came in at value.',
+        'Launch is Thursday | Marisa Okonkwo | launch date | '
+            'Marisa is asking whether the site still goes live on Thursday.',
+        'Homepage copy is back | Jordan Feld, Marisa Okonkwo | homepage copy | '
+            'The rewritten homepage copy is ready for a final read.',
       ];
 
       final stopwatch = Stopwatch()..start();

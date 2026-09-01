@@ -54,8 +54,8 @@ http.Response jsonOk(Object body) => http.Response(
 Map<String, dynamic> graphMessage({
   required String id,
   String? conversationId = 'conv-1',
-  String subject = 'Closing Disclosure',
-  String fromAddress = 'sarah@harborline.com',
+  String subject = 'Project brief',
+  String fromAddress = 'sarah@example.com',
   required String receivedDateTime,
 }) =>
     {

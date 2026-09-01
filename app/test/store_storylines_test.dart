@@ -50,7 +50,7 @@ void main() {
 
   Future<String> seedStoryline(
     String id, {
-    String title = 'Willow St purchase',
+    String title = 'Website redesign',
     String? summary,
     String status = 'suggested',
     String createdBy = 'auto',
@@ -69,12 +69,12 @@ void main() {
 
   group('insert and read', () {
     test('a fresh storyline reads back with its defaults', () async {
-      await seedStoryline('sl-1', summary: 'Waiting on the appraisal.');
+      await seedStoryline('sl-1', summary: 'Waiting on the homepage copy.');
 
       final storyline = (await store.getStoryline('sl-1'))!;
       expect(storyline.id, 'sl-1');
-      expect(storyline.title, 'Willow St purchase');
-      expect(storyline.summary, 'Waiting on the appraisal.');
+      expect(storyline.title, 'Website redesign');
+      expect(storyline.summary, 'Waiting on the homepage copy.');
       expect(storyline.status, 'suggested');
       expect(storyline.createdBy, 'auto');
       expect(storyline.titleLocked, isFalse);
@@ -152,7 +152,7 @@ void main() {
 
       final storyline = (await store.getStoryline('sl-1'))!;
       expect(storyline.status, 'active');
-      expect(storyline.title, 'Willow St purchase');
+      expect(storyline.title, 'Website redesign');
       // The sentinel's whole job: an omitted summary is not a cleared one.
       expect(storyline.summary, 'the original summary');
     });
@@ -183,14 +183,14 @@ void main() {
       await seedStoryline('sl-1');
 
       await store.addStorylineMember('sl-1', 'email', 'c1',
-          addedBy: 'auto', evidence: 'same appraisal');
+          addedBy: 'auto', evidence: 'same homepage copy');
       await store.addStorylineMember('sl-1', 'email', 'c1',
           addedBy: 'user', evidence: 'second thoughts');
 
       final member = (await store.membersOf('sl-1')).single;
       expect(member.conversationKey, 'c1');
       expect(member.addedBy, 'auto');
-      expect(member.evidence, 'same appraisal');
+      expect(member.evidence, 'same homepage copy');
     });
 
     test('removing with block records the block', () async {

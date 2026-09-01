@@ -221,7 +221,7 @@ class _MessageRowState extends State<MessageRow> {
                 Text('Sending…', style: BondType.caption),
               ],
               // The model's one-line read of this message, labelled as the
-              // model's: it sits under mail the LO can see for themselves, and
+              // model's: it sits under mail the user can see for themselves, and
               // it must never be mistaken for something the sender wrote.
               if (summary != null && summary.isNotEmpty) ...[
                 const SizedBox(height: 2),

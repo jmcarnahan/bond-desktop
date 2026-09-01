@@ -250,8 +250,9 @@ void main() {
     expect((await store.getMessageRow('email', 'msg-1'))!['triage_status'],
         'triaged');
 
-    // The version survives the open — drift must not have run onCreate.
-    expect(userVersionOf(path), 1);
+    // Adoption stamps 1, and the open then walks the step migrations to the
+    // current version — drift must never have run onCreate.
+    expect(userVersionOf(path), 2);
   });
 
   test('a fresh path is created by drift and round-trips', () async {
@@ -276,17 +277,25 @@ void main() {
     final row = await store.getMessageRow('email', 'm1');
     expect(row!['subject'], 'Hello');
     expect(row['triage_status'], 'pending');
-    expect(userVersionOf(path), 1);
+    expect(userVersionOf(path), 2);
   });
 
-  test('drift creates the same tables, columns and indexes as the old DDL',
-      () async {
-    // The hard constraint of the whole port: an install created by drift and
-    // one created by the pre-drift DDL must be the same database. Compared on
+  test(
+      'a migrated pre-drift install has the same tables, columns and indexes '
+      'as a fresh one', () async {
+    // The hard constraint of the whole port: an install adopted from the
+    // pre-drift DDL and walked through the step migrations must be the same
+    // database as one drift created fresh at the current version. Compared on
     // `table_info` and the index list rather than the stored SQL text, which
-    // differs harmlessly in quoting and whitespace.
+    // differs harmlessly in quoting and whitespace. This comparison is
+    // ordered, which is why schema.drift appends migration-added columns at
+    // the end of their table — where ALTER TABLE puts them.
     final legacyPath = '${dir.path}/legacy.db';
     writeLegacyDb(legacyPath, messageCount: 0);
+    await adoptLegacyDatabase(legacyPath);
+    final migratedDb = BondDatabase.open(legacyPath);
+    await migratedDb.customSelect('SELECT 1').get(); // run the migrations
+    await migratedDb.close();
     final legacy = raw.sqlite3.open(legacyPath);
     addTearDown(legacy.close);
 

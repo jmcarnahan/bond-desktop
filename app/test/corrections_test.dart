@@ -395,7 +395,7 @@ void main() {
       await store.upsertConversation({
         'conversation_key': 'c1',
         'state': 'waiting',
-        'cta_text': 'Send the appraisal',
+        'cta_text': 'Send the homepage copy',
         'last_message_at': DateTime.now().toUtc().toIso8601String(),
       });
       final n = notifier();
@@ -416,7 +416,7 @@ void main() {
   group('prefs provider', () {
     test('reads what is stored, writes what is set', () async {
       await store.setPref(attentionThresholdKey, '0.8');
-      await store.setPref(aboutMeKey, 'I am a loan officer.');
+      await store.setPref(aboutMeKey, 'I run a small design studio.');
 
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
@@ -425,7 +425,7 @@ void main() {
       await container.read(appPrefsProvider.notifier).ready;
 
       expect(container.read(appPrefsProvider).attentionThreshold, 0.8);
-      expect(container.read(appPrefsProvider).aboutMe, 'I am a loan officer.');
+      expect(container.read(appPrefsProvider).aboutMe, 'I run a small design studio.');
 
       await container.read(appPrefsProvider.notifier).setAttentionThreshold(0.3);
       expect(container.read(appPrefsProvider).attentionThreshold, 0.3);

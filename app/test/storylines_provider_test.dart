@@ -61,7 +61,7 @@ void main() {
   Future<void> seedStoryline(
     String id, {
     String status = 'suggested',
-    String title = 'Willow St purchase',
+    String title = 'Website redesign',
   }) {
     return store.insertStoryline(
       id: id,
@@ -171,11 +171,11 @@ void main() {
       final notifier = StorylinesNotifier(store, service);
       await notifier.load();
 
-      await notifier.rename('sl-1', 'Chen refinance');
+      await notifier.rename('sl-1', 'Brightsea launch');
 
       final storyline =
           (notifier.state as StorylinesLoaded).storylines.single;
-      expect(storyline.title, 'Chen refinance');
+      expect(storyline.title, 'Brightsea launch');
       expect(storyline.titleLocked, isTrue);
     });
 
@@ -200,7 +200,7 @@ void main() {
       final notifier = StorylinesNotifier(store, service);
       await notifier.load();
 
-      final id = await notifier.create('Chen refinance', conversationKey: 'c1');
+      final id = await notifier.create('Brightsea launch', conversationKey: 'c1');
 
       final storylines = (notifier.state as StorylinesLoaded).storylines;
       expect(storylines.single.id, id);
@@ -265,14 +265,14 @@ void main() {
 
   group('timeline', () {
     test('merges the member threads and names each one', () async {
-      await seedConversation('c1', subject: 'Re: Appraisal review');
-      await seedConversation('c2', subject: 'Rate lock');
+      await seedConversation('c1', subject: 'Re: Homepage copy');
+      await seedConversation('c2', subject: 'Launch date');
       await seedMessage('c1', 'm1',
-          receivedAt: '2026-08-01T09:00:00Z', subject: 'Re: Appraisal review');
+          receivedAt: '2026-08-01T09:00:00Z', subject: 'Re: Homepage copy');
       await seedMessage('c2', 'm2',
-          receivedAt: '2026-08-01T10:00:00Z', subject: 'Rate lock');
+          receivedAt: '2026-08-01T10:00:00Z', subject: 'Launch date');
       await seedMessage('c1', 'm3',
-          receivedAt: '2026-08-01T11:00:00Z', subject: 'Re: Appraisal review');
+          receivedAt: '2026-08-01T11:00:00Z', subject: 'Re: Homepage copy');
       await seedStoryline('sl-1', status: 'active');
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
       await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
@@ -284,7 +284,7 @@ void main() {
       expect(state.messages.map((m) => m.id), ['m1', 'm2', 'm3']);
       expect(state.keyByMessageId, {'m1': 'c1', 'm2': 'c2', 'm3': 'c1'});
       // Stripped, so the label matches the one on the inbox row.
-      expect(state.subjectByKey, {'c1': 'Appraisal review', 'c2': 'Rate lock'});
+      expect(state.subjectByKey, {'c1': 'Homepage copy', 'c2': 'Launch date'});
       expect(state.loadError, isNull);
     });
 

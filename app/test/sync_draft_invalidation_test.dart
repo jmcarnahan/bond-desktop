@@ -57,13 +57,13 @@ http.Response jsonOk(Object body) => http.Response(
 Map<String, dynamic> graphMessage({
   required String id,
   String conversationId = 'conv-1',
-  String fromAddress = 'sarah@harborline.com',
+  String fromAddress = 'sarah@example.com',
   required String receivedDateTime,
 }) =>
     {
       'id': id,
       'conversationId': conversationId,
-      'subject': 'Rate lock',
+      'subject': 'Launch date',
       'from': {
         'emailAddress': {'name': 'Sarah', 'address': fromAddress}
       },

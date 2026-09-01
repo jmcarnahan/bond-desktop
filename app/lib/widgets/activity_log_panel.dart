@@ -9,7 +9,7 @@ import 'time_format.dart';
 ///
 /// The rule this panel exists to keep: **quiet is not the same as broken.** An
 /// inbox that syncs in the background and annotates with a local model gives
-/// the LO no way to tell "nothing arrived" from "the model server is off" or
+/// the user no way to tell "nothing arrived" from "the model server is off" or
 /// "the Teams scope was never granted" — and the guess they make in that gap is
 /// always the pessimistic one. Every row here is one thing that happened, in a
 /// sentence, with the states that are not failures — parks, skips — rendered as
@@ -77,7 +77,7 @@ class ActivityLogPanel extends StatefulWidget {
     'embed_fail': 'Embeddings',
   };
 
-  /// The machine-readable reasons the pipeline records, in the words the LO
+  /// The machine-readable reasons the pipeline records, in the words the user
   /// would use. Anything unmapped falls back to the raw reason with its
   /// underscores opened up — a new reason reads awkwardly rather than
   /// disappearing.
@@ -582,7 +582,7 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
   }
 
   /// A detail value as one line. Lists are joined rather than shown as their
-  /// Dart literal: `[rate lock, appraisal]` is a topic list a person can read,
+  /// Dart literal: `[dinner plans, invoice]` is a topic list a person can read,
   /// and the brackets are the only part of it that came from the language.
   static String _value(Object? value) =>
       value is List ? value.join(', ') : '$value';
@@ -590,7 +590,7 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
   /// The status, as the smallest mark that can carry it.
   ///
   /// A park and a retry share the attention colour on purpose: both mean the
-  /// work is still owed, and neither is something the LO did wrong. Only
+  /// work is still owed, and neither is something the user did wrong. Only
   /// `error` is red.
   Widget _dot(String status) {
     final color = switch (status) {

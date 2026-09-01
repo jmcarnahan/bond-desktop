@@ -318,7 +318,7 @@ void main() {
             source: 'email',
             detail: const {
               'intent': 'request',
-              'topics': ['rate lock', 'appraisal'],
+              'topics': ['launch date', 'homepage copy'],
             },
           ),
         ],
@@ -328,17 +328,17 @@ void main() {
       // and the keys are what the tap is for.
       expect(find.text('intent: request'), findsNothing);
 
-      await tester.tap(find.text('Extract — request · rate lock, appraisal'));
+      await tester.tap(find.text('Extract — request · launch date, homepage copy'));
       await tester.pumpAndSettle();
 
       expect(find.text('intent: request'), findsOneWidget);
       // A list reads as its members, not as its Dart literal.
-      expect(find.text('topics: rate lock, appraisal'), findsOneWidget);
+      expect(find.text('topics: launch date, homepage copy'), findsOneWidget);
 
       // The row's own copy of the sentence is the first one; the expansion
       // below it repeats it unelided.
       await tester
-          .tap(find.text('Extract — request · rate lock, appraisal').first);
+          .tap(find.text('Extract — request · launch date, homepage copy').first);
       await tester.pumpAndSettle();
 
       expect(find.text('intent: request'), findsNothing);
@@ -349,13 +349,13 @@ void main() {
         tester,
         events: [_event(kind: 'triage', source: 'email', entityId: 'conv-1')],
         entityLabel: (event) =>
-            event.entityId == 'conv-1' ? 'Rate lock for the Whitfields' : null,
+            event.entityId == 'conv-1' ? 'Launch date for Brightsea' : null,
       );
 
       await tester.tap(find.text('Triage'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Rate lock for the Whitfields'), findsOneWidget);
+      expect(find.text('Launch date for Brightsea'), findsOneWidget);
       // The raw id too, because it is what a person digging into a stuck item
       // has to be able to copy out.
       expect(find.text('conv-1'), findsOneWidget);
@@ -468,12 +468,12 @@ void main() {
           kind: 'triage',
           detail: const {
             'urgency': 'high',
-            'category': 'borrower',
+            'category': 'work',
             'needs_action': true,
             'action_items': 2,
           },
         )),
-        'Triage — high · borrower',
+        'Triage — high · work',
       );
     });
 
@@ -488,10 +488,10 @@ void main() {
           detail: const {
             'intent': 'request',
             'importance': 'high',
-            'topics': ['rate lock', 'appraisal'],
+            'topics': ['launch date', 'homepage copy'],
           },
         )),
-        'Extract — request · rate lock, appraisal',
+        'Extract — request · launch date, homepage copy',
       );
     });
 
@@ -636,7 +636,7 @@ void main() {
         durationMs: 9400,
         detail: const {
           'urgency': 'high',
-          'category': 'borrower',
+          'category': 'work',
           'llm_calls': 3,
           'llm_ms': 9100,
           'prompt_tokens': 2200,
@@ -644,7 +644,7 @@ void main() {
           'llm_label': 'triage',
         },
       ));
-      expect(sentence, 'Triage — high · borrower');
+      expect(sentence, 'Triage — high · work');
     });
 
     test('an unknown kind renders as itself rather than as nothing', () {

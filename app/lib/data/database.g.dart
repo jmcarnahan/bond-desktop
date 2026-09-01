@@ -297,6 +297,15 @@ class Messages extends Table with TableInfo<Messages, Message> {
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _labelMeta = const VerificationMeta('label');
+  late final GeneratedColumn<String> label = GeneratedColumn<String>(
+    'label',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -325,6 +334,7 @@ class Messages extends Table with TableInfo<Messages, Message> {
     actionItemsJson,
     createdAt,
     updatedAt,
+    label,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -543,6 +553,12 @@ class Messages extends Table with TableInfo<Messages, Message> {
     } else if (isInserting) {
       context.missing(_updatedAtMeta);
     }
+    if (data.containsKey('label')) {
+      context.handle(
+        _labelMeta,
+        label.isAcceptableOrUnknown(data['label']!, _labelMeta),
+      );
+    }
     return context;
   }
 
@@ -656,6 +672,10 @@ class Messages extends Table with TableInfo<Messages, Message> {
         DriftSqlType.string,
         data['${effectivePrefix}updated_at'],
       )!,
+      label: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}label'],
+      ),
     );
   }
 
@@ -706,6 +726,11 @@ class Message extends DataClass implements Insertable<Message> {
   final String? actionItemsJson;
   final String createdAt;
   final String updatedAt;
+
+  /// Migration-added columns sit AFTER the originals: ALTER TABLE appends, so
+  /// this is the only position where an upgraded install and a fresh one get
+  /// identical table_info — which the parity test compares in order.
+  final String? label;
   const Message({
     required this.source,
     required this.sourceMessageId,
@@ -733,6 +758,7 @@ class Message extends DataClass implements Insertable<Message> {
     this.actionItemsJson,
     required this.createdAt,
     required this.updatedAt,
+    this.label,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -793,6 +819,9 @@ class Message extends DataClass implements Insertable<Message> {
     }
     map['created_at'] = Variable<String>(createdAt);
     map['updated_at'] = Variable<String>(updatedAt);
+    if (!nullToAbsent || label != null) {
+      map['label'] = Variable<String>(label);
+    }
     return map;
   }
 
@@ -854,6 +883,9 @@ class Message extends DataClass implements Insertable<Message> {
           : Value(actionItemsJson),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
+      label: label == null && nullToAbsent
+          ? const Value.absent()
+          : Value(label),
     );
   }
 
@@ -891,6 +923,7 @@ class Message extends DataClass implements Insertable<Message> {
       actionItemsJson: serializer.fromJson<String?>(json['action_items_json']),
       createdAt: serializer.fromJson<String>(json['created_at']),
       updatedAt: serializer.fromJson<String>(json['updated_at']),
+      label: serializer.fromJson<String?>(json['label']),
     );
   }
   @override
@@ -923,6 +956,7 @@ class Message extends DataClass implements Insertable<Message> {
       'action_items_json': serializer.toJson<String?>(actionItemsJson),
       'created_at': serializer.toJson<String>(createdAt),
       'updated_at': serializer.toJson<String>(updatedAt),
+      'label': serializer.toJson<String?>(label),
     };
   }
 
@@ -953,6 +987,7 @@ class Message extends DataClass implements Insertable<Message> {
     Value<String?> actionItemsJson = const Value.absent(),
     String? createdAt,
     String? updatedAt,
+    Value<String?> label = const Value.absent(),
   }) => Message(
     source: source ?? this.source,
     sourceMessageId: sourceMessageId ?? this.sourceMessageId,
@@ -986,6 +1021,7 @@ class Message extends DataClass implements Insertable<Message> {
         : this.actionItemsJson,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
+    label: label.present ? label.value : this.label,
   );
   Message copyWithCompanion(MessagesCompanion data) {
     return Message(
@@ -1045,6 +1081,7 @@ class Message extends DataClass implements Insertable<Message> {
           : this.actionItemsJson,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      label: data.label.present ? data.label.value : this.label,
     );
   }
 
@@ -1076,7 +1113,8 @@ class Message extends DataClass implements Insertable<Message> {
           ..write('needsAction: $needsAction, ')
           ..write('actionItemsJson: $actionItemsJson, ')
           ..write('createdAt: $createdAt, ')
-          ..write('updatedAt: $updatedAt')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('label: $label')
           ..write(')'))
         .toString();
   }
@@ -1109,6 +1147,7 @@ class Message extends DataClass implements Insertable<Message> {
     actionItemsJson,
     createdAt,
     updatedAt,
+    label,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -1139,7 +1178,8 @@ class Message extends DataClass implements Insertable<Message> {
           other.needsAction == this.needsAction &&
           other.actionItemsJson == this.actionItemsJson &&
           other.createdAt == this.createdAt &&
-          other.updatedAt == this.updatedAt);
+          other.updatedAt == this.updatedAt &&
+          other.label == this.label);
 }
 
 class MessagesCompanion extends UpdateCompanion<Message> {
@@ -1169,6 +1209,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
   final Value<String?> actionItemsJson;
   final Value<String> createdAt;
   final Value<String> updatedAt;
+  final Value<String?> label;
   final Value<int> rowid;
   const MessagesCompanion({
     this.source = const Value.absent(),
@@ -1197,6 +1238,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.actionItemsJson = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
+    this.label = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessagesCompanion.insert({
@@ -1226,6 +1268,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.actionItemsJson = const Value.absent(),
     required String createdAt,
     required String updatedAt,
+    this.label = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : sourceMessageId = Value(sourceMessageId),
        conversationKey = Value(conversationKey),
@@ -1259,6 +1302,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Expression<String>? actionItemsJson,
     Expression<String>? createdAt,
     Expression<String>? updatedAt,
+    Expression<String>? label,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1288,6 +1332,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       if (actionItemsJson != null) 'action_items_json': actionItemsJson,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
+      if (label != null) 'label': label,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1319,6 +1364,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Value<String?>? actionItemsJson,
     Value<String>? createdAt,
     Value<String>? updatedAt,
+    Value<String?>? label,
     Value<int>? rowid,
   }) {
     return MessagesCompanion(
@@ -1348,6 +1394,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       actionItemsJson: actionItemsJson ?? this.actionItemsJson,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      label: label ?? this.label,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1433,6 +1480,9 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     if (updatedAt.present) {
       map['updated_at'] = Variable<String>(updatedAt.value);
     }
+    if (label.present) {
+      map['label'] = Variable<String>(label.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1468,6 +1518,7 @@ class MessagesCompanion extends UpdateCompanion<Message> {
           ..write('actionItemsJson: $actionItemsJson, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
+          ..write('label: $label, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -7990,6 +8041,7 @@ typedef $MessagesCreateCompanionBuilder =
       Value<String?> actionItemsJson,
       required String createdAt,
       required String updatedAt,
+      Value<String?> label,
       Value<int> rowid,
     });
 typedef $MessagesUpdateCompanionBuilder =
@@ -8020,6 +8072,7 @@ typedef $MessagesUpdateCompanionBuilder =
       Value<String?> actionItemsJson,
       Value<String> createdAt,
       Value<String> updatedAt,
+      Value<String?> label,
       Value<int> rowid,
     });
 
@@ -8158,6 +8211,11 @@ class $MessagesFilterComposer extends Composer<_$BondDatabase, Messages> {
 
   ColumnFilters<String> get updatedAt => $composableBuilder(
     column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get label => $composableBuilder(
+    column: $table.label,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -8299,6 +8357,11 @@ class $MessagesOrderingComposer extends Composer<_$BondDatabase, Messages> {
     column: $table.updatedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get label => $composableBuilder(
+    column: $table.label,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $MessagesAnnotationComposer extends Composer<_$BondDatabase, Messages> {
@@ -8416,6 +8479,9 @@ class $MessagesAnnotationComposer extends Composer<_$BondDatabase, Messages> {
 
   GeneratedColumn<String> get updatedAt =>
       $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get label =>
+      $composableBuilder(column: $table.label, builder: (column) => column);
 }
 
 class $MessagesTableManager
@@ -8472,6 +8538,7 @@ class $MessagesTableManager
                 Value<String?> actionItemsJson = const Value.absent(),
                 Value<String> createdAt = const Value.absent(),
                 Value<String> updatedAt = const Value.absent(),
+                Value<String?> label = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion(
                 source: source,
@@ -8500,6 +8567,7 @@ class $MessagesTableManager
                 actionItemsJson: actionItemsJson,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
+                label: label,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -8530,6 +8598,7 @@ class $MessagesTableManager
                 Value<String?> actionItemsJson = const Value.absent(),
                 required String createdAt,
                 required String updatedAt,
+                Value<String?> label = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion.insert(
                 source: source,
@@ -8558,6 +8627,7 @@ class $MessagesTableManager
                 actionItemsJson: actionItemsJson,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
+                label: label,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

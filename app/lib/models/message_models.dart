@@ -8,8 +8,8 @@ import 'package:flutter/foundation.dart' show immutable;
 /// render. Timestamps stay ISO [String]s — they are displayed and sorted,
 /// never arithmetic'd.
 ///
-/// Ported from a sibling CRM app's conversation models, minus the
-/// CRM-only fields (campaign, relevance, suggestions, attachments).
+/// Ported from a sibling app's conversation models, minus the fields this
+/// inbox has no use for (campaign, relevance, suggestions, attachments).
 
 /// Decodes a JSON-encoded TEXT column into a list, tolerating null, empty
 /// string, malformed JSON, and a payload that decodes to a non-list.
@@ -114,7 +114,7 @@ class Conversation {
   /// from a payload that does not carry it.
   final String? bucket;
 
-  /// How loudly this thread is asking for the LO, 0..2. Written by the
+  /// How loudly this thread is asking for the user, 0..2. Written by the
   /// scoring pass; null until one has run.
   final double? attentionScore;
 
@@ -276,6 +276,11 @@ class Message {
   // ── Triage output ────────────────────────────────────────────────────
   final String? urgency;
   final String? category;
+
+  /// The free-text "what is this about" label triage writes alongside
+  /// [category] — a couple of words like "dinner plans" or "invoice". Null
+  /// until triage has run; buckets filter, this displays.
+  final String? label;
   final String? summary;
   final bool? needsAction;
   final List<String> actionItems;
@@ -299,6 +304,7 @@ class Message {
     this.sourceMetaJson,
     this.urgency,
     this.category,
+    this.label,
     this.summary,
     this.needsAction,
     this.actionItems = const [],
@@ -353,6 +359,7 @@ class Message {
       gateReason: json['gate_reason'] as String?,
       urgency: json['urgency'] as String?,
       category: json['category'] as String?,
+      label: json['label'] as String?,
       summary: json['summary'] as String?,
       needsAction: json['needs_action'] as bool?,
       actionItems: [
@@ -383,6 +390,7 @@ class Message {
       sourceMetaJson: row['source_meta_json'] as String?,
       urgency: row['urgency'] as String?,
       category: row['category'] as String?,
+      label: row['label'] as String?,
       summary: row['summary'] as String?,
       needsAction: _boolFromInt(row['needs_action']),
       actionItems: [
@@ -394,11 +402,16 @@ class Message {
 }
 
 /// What the triage model returns for one inbound message. The store writes
-/// these five fields onto the message row.
+/// these fields onto the message row.
 @immutable
 class TriageResult {
   final String urgency;
   final String category;
+
+  /// A couple of free-text words naming what the message is about ("dinner
+  /// plans", "invoice"). Empty when the model offered none — the store writes
+  /// it as-is, and an empty label renders as no label.
+  final String label;
   final String summary;
   final bool needsAction;
   final List<String> actionItems;
@@ -406,6 +419,7 @@ class TriageResult {
   const TriageResult({
     required this.urgency,
     required this.category,
+    this.label = '',
     required this.summary,
     required this.needsAction,
     required this.actionItems,
@@ -416,6 +430,7 @@ class TriageResult {
   factory TriageResult.fallback() => const TriageResult(
         urgency: 'normal',
         category: 'other',
+        label: '',
         summary: '',
         needsAction: false,
         actionItems: [],
@@ -426,6 +441,7 @@ class TriageResult {
     return TriageResult(
       urgency: json['urgency'] as String? ?? 'normal',
       category: json['category'] as String? ?? 'other',
+      label: json['label'] as String? ?? '',
       summary: json['summary'] as String? ?? '',
       needsAction: json['needs_action'] as bool? ?? false,
       actionItems: [

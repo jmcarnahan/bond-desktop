@@ -124,20 +124,20 @@ void main() {
     await store.recomputeConversationCounts('teams', key);
   }
 
-  Future<void> seedMail(String key, {String subject = 'Appraisal review'}) async {
+  Future<void> seedMail(String key, {String subject = 'Homepage copy'}) async {
     await store.upsertMessage({
       'source_message_id': '$key-m1',
       'conversation_key': key,
       'direction': 'inbound',
       'from_name': 'Eric Vance',
-      'from_address': 'eric@harborline.com',
+      'from_address': 'eric@example.com',
       'received_at': '2026-08-28T09:00:00Z',
-      'body_text': 'The appraisal is in.',
+      'body_text': 'The homepage copy is in.',
     });
     await store.upsertConversation({
       'conversation_key': key,
       'subject': subject,
-      'participants_json': '[{"name":"Eric Vance","email":"eric@harborline.com"}]',
+      'participants_json': '[{"name":"Eric Vance","email":"eric@example.com"}]',
       'state': 'needs_reply',
       'last_message_at': '2026-08-28T09:00:00Z',
       'last_inbound_at': '2026-08-28T09:00:00Z',

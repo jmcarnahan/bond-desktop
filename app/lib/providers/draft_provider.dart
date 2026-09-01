@@ -266,7 +266,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     );
   }
 
-  /// The LO changed the text. Records it so the suggestion stops being the
+  /// The user changed the text. Records it so the suggestion stops being the
   /// model's — and so a reopened thread shows what they typed, not what was
   /// suggested.
   Future<void> markEdited(String body) async {
@@ -323,7 +323,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     }
 
     // A thread only earns a generated draft when it ranks high enough, but
-    // the LO can reply to ANY thread — so a missing draft row falls back to
+    // the user can reply to ANY thread — so a missing draft row falls back to
     // the newest inbound message, which is exactly what the draft handler
     // itself replies to.
     var replyTo = state.replyToMessageId;
@@ -363,7 +363,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
         graphDraftId: draftId,
       );
       // The strongest positive signal the app collects, and implicit rather
-      // than explicit: the LO did not press a rating, they answered the mail.
+      // than explicit: the user did not press a rating, they answered the mail.
       await _logSent();
       state = state.copyWith(
         sending: false,

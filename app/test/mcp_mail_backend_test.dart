@@ -122,7 +122,7 @@ void main() {
         'id': 'm-gone',
         '@removed': {'reason': 'deleted'},
       };
-      final live = {'id': 'm1', 'subject': 'Appraisal', 'isRead': false};
+      final live = {'id': 'm1', 'subject': 'Homepage copy', 'isRead': false};
       final mcp = _FakeMcp({
         'list_mail_delta': [
           _delta(messages: [live, tombstone]),
@@ -157,7 +157,7 @@ void main() {
       final mcp = _FakeMcp({
         'get_mail_detail': [
           {
-            'body_text': 'The appraisal is in.',
+            'body_text': 'The homepage copy is in.',
             'headers': {
               'list-unsubscribe': '<mailto:x@y.z>',
               'precedence': 'bulk',
@@ -171,7 +171,7 @@ void main() {
 
       expect(mcp.argsFor('get_mail_detail'), {'message_id': 'm1'});
       expect(detail, {
-        'uniqueBody': {'content': 'The appraisal is in.'},
+        'uniqueBody': {'content': 'The homepage copy is in.'},
         'internetMessageHeaders': [
           {'name': 'list-unsubscribe', 'value': '<mailto:x@y.z>'},
           {'name': 'precedence', 'value': 'bulk'},
@@ -227,7 +227,7 @@ void main() {
       final mcp = _FakeMcp({
         'get_mail_detail': [
           {
-            'body_text': 'The appraisal is in.',
+            'body_text': 'The homepage copy is in.',
             'headers': {'precedence': 'bulk'},
             'has_attachments': true,
           },
@@ -238,7 +238,7 @@ void main() {
       await sync.ensureMessageBody('m1');
 
       final row = (await store.loadThread('c1', sources: const ['email'])).single;
-      expect(row.bodyText, 'The appraisal is in.');
+      expect(row.bodyText, 'The homepage copy is in.');
       expect(row.sourceMetaJson, contains('precedence'),
           reason: 'the headers the bulk-mail gates read landed too');
     });

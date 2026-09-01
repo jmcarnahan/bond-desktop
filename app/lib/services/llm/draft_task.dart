@@ -9,18 +9,18 @@ import 'prompt_guard.dart';
 /// into: see [JsonTask.systemPrompt] for why one changed character costs about
 /// two seconds a message.
 ///
-/// The invention rule is the one that matters. A model that guesses a rate, a
+/// The invention rule is the one that matters. A model that guesses a price, a
 /// date or a commitment writes a reply that reads perfectly and is false, and
 /// the person about to press Send is the last line of defence — so the prompt
 /// pushes the model toward asking rather than filling in.
 const String _draftRules = '''
-You are drafting an email reply on behalf of a mortgage loan officer. You write as the loan officer, in the first person.
+You are drafting an email reply on behalf of the inbox's owner. You write as them, in the first person.
 
 Rules:
 - evidence: ONE sentence naming what the sender needs and what your reply commits to. Write it first — the reply below should follow from it.
 - reply_body: the reply itself, as plain text. No subject line, no markdown, no signature block beyond a sign-off.
-- Greet briefly, answer what was actually asked, and sign off with the loan officer's first name only.
-- NEVER invent facts, numbers, dates, names, or commitments that are not present in the thread. No made-up rates, no made-up closing dates, no promises about what someone else will do.
+- Greet briefly, answer what was actually asked, and sign off the way the past replies do. When no past replies are provided, end with a short neutral sign-off ("Thanks,") and no name — never invent one.
+- NEVER invent facts, numbers, dates, names, or commitments that are not present in the thread. No made-up prices, no made-up dates, no promises about what someone else will do.
 - If the thread does not contain what is needed to answer, do not guess: write a short reply that asks the one clarifying question that would unblock it.
 - When past replies are provided, match their tone, greeting and sign-off.
 - Keep it under 150 words.
@@ -49,11 +49,11 @@ class DraftInput {
   /// The storyline this thread belongs to, when it belongs to one.
   final String? storylineSummary;
 
-  /// What the LO says about themselves, from settings.
+  /// What the owner says about themselves, from settings.
   final String? aboutMe;
 
   /// Injected for the same reason `TriageInput.now` is: so a test can pin the
-  /// date anchor, and so the anchor is the LO's local day.
+  /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
 
   const DraftInput({
@@ -79,7 +79,7 @@ class DraftResult {
   const DraftResult({required this.evidence, required this.replyBody});
 }
 
-/// Writes the reply the LO is about to edit and send.
+/// Writes the reply the owner is about to edit and send.
 class DraftTask implements JsonTask<DraftResult> {
   const DraftTask();
 
@@ -92,8 +92,8 @@ class DraftTask implements JsonTask<DraftResult> {
   /// signatures rather than context.
   static const int _threadCap = 3000;
 
-  /// Two of the LO's own replies is a tone sample; ten is a second thread for
-  /// the model to get confused by.
+  /// Two of the owner's own replies is a tone sample; ten is a second thread
+  /// for the model to get confused by.
   static const int _styleCap = 1500;
 
   static const int _summaryCap = 600;
@@ -136,13 +136,13 @@ class DraftTask implements JsonTask<DraftResult> {
       };
 
   /// The date anchor is ours, so it sits outside every fence. Everything else —
-  /// the thread, the LO's own past replies, the storyline summary, the about-me
-  /// text — is variable text and sits inside one, each with a plain line above
-  /// it saying what it is for.
+  /// the thread, the owner's own past replies, the storyline summary, the
+  /// about-me text — is variable text and sits inside one, each with a plain
+  /// line above it saying what it is for.
   ///
-  /// The LO's own text is fenced too. It is not hostile, but it IS variable,
-  /// and a fence that only some variable text goes through is a fence with a
-  /// hole in it.
+  /// The owner's own text is fenced too. It is not hostile, but it IS
+  /// variable, and a fence that only some variable text goes through is a
+  /// fence with a hole in it.
   @override
   String buildUserMessage(DraftInput input) {
     final buffer = StringBuffer()

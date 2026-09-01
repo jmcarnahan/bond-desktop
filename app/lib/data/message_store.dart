@@ -440,7 +440,7 @@ WHERE source = ? AND conversation_key = ?
   ///
   /// Newest first, not oldest: the worker runs behind a live mailbox, so the
   /// mail worth classifying soonest is the mail that just landed. Outbound is
-  /// excluded because triage answers "does this need me?" — the LO's own sent
+  /// excluded because triage answers "does this need me?" — the user's own sent
   /// mail never does.
   Future<Map<String, Object?>?> nextPendingTriage({
     List<String> sources = const ['email'],
@@ -498,7 +498,7 @@ RETURNING *
   /// `skipped` / `backlog`.
   ///
   /// A first sync of a real mailbox lands thousands of messages at once.
-  /// Triaging all of them would burn hours of model time on mail the LO
+  /// Triaging all of them would burn hours of model time on mail the user
   /// stopped caring about weeks ago, so only the freshest slice stays in the
   /// queue. Nothing is deleted — a skipped message still renders, it just
   /// never reaches the model.
@@ -581,6 +581,7 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       sets.addAll([
         'urgency = ?',
         'category = ?',
+        'label = ?',
         'summary = ?',
         'needs_action = ?',
         'action_items_json = ?',
@@ -588,6 +589,9 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       args.addAll([
         result.urgency,
         result.category,
+        // NULL, not '': an empty label means the model offered none, and the
+        // column reads the same as a message triage never reached.
+        result.label.isEmpty ? null : result.label,
         result.summary,
         // An explicit int — `needs_action` is read back as `row != 0`.
         result.needsAction ? 1 : 0,
@@ -1148,8 +1152,8 @@ RETURNING *
   /// How often each sender gets answered, as a 0..1 fraction.
   ///
   /// A cheap approximation, and deliberately so: "replied" means the thread
-  /// contains at least one outbound message, not that the LO replied to THIS
-  /// message. A thread the LO started and a thread they answered look the same
+  /// contains at least one outbound message, not that the user replied to THIS
+  /// message. A thread the user started and a thread they answered look the same
   /// here. The scorer uses it as a small nudge (see
   /// `AttentionTuning.replyRateMax`), never as a decision, so the approximation
   /// costs a fraction of a point on a thread rather than a wrong bucket.
@@ -1189,7 +1193,7 @@ RETURNING *
   ///
   /// **The latest inbound sender owns the thread.** A thread's sender is
   /// whoever wrote its newest inbound message, not whoever started it: a
-  /// newsletter the LO forwarded to a colleague who replied is that colleague's
+  /// newsletter the user forwarded to a colleague who replied is that colleague's
   /// thread now, and "never show me mail from this newsletter again" must not
   /// bury the colleague's answer. Ties break the same way [latestInboundMeta]
   /// breaks them, so the two always agree on who that is.
@@ -1256,7 +1260,7 @@ SELECT conversation_key FROM (
   /// differently from "corrected once, a year ago" — neither of which survives
   /// in a table that only remembers the latest value.
   ///
-  /// [origin] separates `explicit` (a button the LO pressed) from `implicit`
+  /// [origin] separates `explicit` (a button the user pressed) from `implicit`
   /// (opening a thread, marking one done). Implicit signals are far noisier and
   /// far more numerous, and anything that learns from these has to be able to
   /// tell them apart.
@@ -2002,7 +2006,7 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
     return Map<String, Object?>.from(result.first.data);
   }
 
-  /// The LO's own recent replies to one address, newest first — the tone the
+  /// The user's own recent replies to one address, newest first — the tone the
   /// draft model is asked to match.
   ///
   /// `to_json LIKE '%address%'` is an APPROXIMATION and knowingly so. The
@@ -2010,7 +2014,7 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// that merely contains the one asked for (`eric@x.com` inside
   /// `noteric@x.com`) and it matches a message the address was CC'd on as
   /// readily as one addressed to them. Both are fine for what this feeds: a
-  /// handful of the LO's own sentences shown to the model as a writing sample.
+  /// handful of the user's own sentences shown to the model as a writing sample.
   /// A wrong sample costs a slightly-off tone, never a wrong recipient — the
   /// address a reply actually goes to comes from Graph's own `createReply`.
   Future<List<Map<String, Object?>>> recentOutboundToSender(
@@ -2034,7 +2038,7 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// The threads worth spending a model call drafting a reply for.
   ///
   /// Four filters, and each one is there to stop a specific waste: the thread
-  /// must actually be waiting on the LO, it must not be filed away in Later, it
+  /// must actually be waiting on the user, it must not be filed away in Later, it
   /// must have scored high enough to be worth answering, and it must not have a
   /// draft already. That last one is what makes this safe to call on every list
   /// load — a thread drops out of the list the moment it has a suggestion, so

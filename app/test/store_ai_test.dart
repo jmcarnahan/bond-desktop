@@ -417,7 +417,7 @@ void main() {
         'WHERE source = ? AND conversation_key = ?',
         variables: [
           Variable('now'),
-          Variable('rate lock expires'),
+          Variable('launch date moved'),
           Variable(0.87),
           Variable('2026-09-01T00:00:00Z'),
           Variable('email'),
@@ -437,7 +437,7 @@ void main() {
       expect(row['embedding'], bytes([9, 9, 9, 9]));
       expect(row['embedded_hash'], 'h2');
       expect(row['bucket'], 'now');
-      expect(row['bucket_reason'], 'rate lock expires');
+      expect(row['bucket_reason'], 'launch date moved');
       expect(row['attention_score'], 0.87);
       expect(row['snoozed_until'], '2026-09-01T00:00:00Z');
     });

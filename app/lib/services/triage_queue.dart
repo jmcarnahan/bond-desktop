@@ -120,8 +120,8 @@ class TriageQueue {
         _concurrency = concurrency,
         _log = activityLog ?? ActivityLog.disabled();
 
-  /// The signed-in mailbox, for the gate that skips the loan officer's own
-  /// mail. Set after sign-in resolves; until then that one gate is simply off.
+  /// The signed-in mailbox, for the gate that skips the user's own mail. Set
+  /// after sign-in resolves; until then that one gate is simply off.
   set userAddress(String? value) => _userAddress = value;
 
   Stream<TriageProgress> get progress => _progress.stream;
@@ -208,7 +208,7 @@ class TriageQueue {
     final sw = Stopwatch()..start();
 
     // Tier one, on the delta page's own fields. Free, and it is what keeps
-    // the fetch below off every no-reply and every message the LO sent.
+    // the fetch below off every no-reply and every message the user sent.
     final senderGate = gateFor(message, userAddress: _userAddress);
     if (senderGate != null) {
       // No activity row, here or at the header gate below. A `triage` row
@@ -226,7 +226,7 @@ class TriageQueue {
     }
 
     // Tier two, and only for what survived tier one. Skipped entirely for a
-    // message that already has both — a thread the LO opened was fetched then.
+    // message that already has both — a thread the user opened was fetched then.
     final fetch = _ensureBody;
     if (fetch != null &&
         (message.bodyText?.isNotEmpty != true || message.headers.isEmpty)) {

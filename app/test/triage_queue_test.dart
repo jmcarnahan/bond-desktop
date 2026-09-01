@@ -88,8 +88,8 @@ class FakeDetailFetch {
 
 Map<String, dynamic> answer({
   String urgency = 'high',
-  String category = 'borrower',
-  String summary = 'Sarah asks about the rate lock.',
+  String category = 'work',
+  String summary = 'Jordan asks about the launch date.',
   bool needsAction = true,
   List<String> actionItems = const ['Call Sarah about the lock'],
 }) =>
@@ -117,7 +117,7 @@ void main() {
     String conversationKey = 'conv-1',
     String direction = 'inbound',
     String? from = 'sarah@example.com',
-    String subject = 'Rate lock',
+    String subject = 'Launch date',
     String receivedAt = '2026-08-29T10:00:00Z',
     String triageStatus = 'pending',
     // False is what a message looks like straight off a delta page: a
@@ -151,7 +151,7 @@ void main() {
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
-      'subject': 'Rate lock',
+      'subject': 'Launch date',
       'state': state,
       'last_inbound_at': lastInboundAt,
       'last_message_at': lastInboundAt,
@@ -493,9 +493,9 @@ void main() {
       final llm = FakeLlm([
         answer(
           urgency: 'urgent',
-          category: 'title_escrow',
-          summary: 'Escrow needs the payoff today.',
-          actionItems: const ['Send the payoff demand', 'Call escrow'],
+          category: 'work',
+          summary: 'Marisa needs the final copy today.',
+          actionItems: const ['Send the final copy', 'Call Marisa'],
         ),
       ]);
 
@@ -504,12 +504,12 @@ void main() {
       final row = await messageRow('m1');
       expect(row['triage_status'], 'triaged');
       expect(row['urgency'], 'urgent');
-      expect(row['category'], 'title_escrow');
-      expect(row['summary'], 'Escrow needs the payoff today.');
+      expect(row['category'], 'work');
+      expect(row['summary'], 'Marisa needs the final copy today.');
       expect(row['needs_action'], 1);
       expect(
         jsonDecode(row['action_items_json'] as String),
-        ['Send the payoff demand', 'Call escrow'],
+        ['Send the final copy', 'Call Marisa'],
       );
     });
 
@@ -518,7 +518,7 @@ void main() {
       final llm = FakeLlm([
         {
           'urgency': 'CRITICAL',
-          'category': 'mortgage',
+          'category': 'errand',
           'summary': 'x' * 900,
           'needs_action': 'yes',
           'action_items': ['one', 'two', 'three', 'four'],
@@ -541,15 +541,15 @@ void main() {
       await seedConversation();
       await seedMessage(id: 'm1');
       final llm = FakeLlm([
-        answer(urgency: 'urgent', actionItems: const ['Send the payoff demand']),
+        answer(urgency: 'urgent', actionItems: const ['Send the final invoice']),
       ]);
 
       await TriageQueue(store, llm).pump();
 
       final row = await conversationRow();
-      expect(row['cta_text'], 'Send the payoff demand');
+      expect(row['cta_text'], 'Send the final invoice');
       expect(row['cta_urgency'], 'urgent');
-      expect(row['category'], 'borrower');
+      expect(row['category'], 'work');
     });
 
     test('with no action items, a needed summary stands in', () async {
@@ -596,9 +596,9 @@ void main() {
       await store.updateConversationTriage(
         'email',
         'conv-1',
-        ctaText: 'Send the closing disclosure',
+        ctaText: 'Send the project brief',
         ctaUrgency: 'urgent',
-        category: 'borrower',
+        category: 'work',
       );
       await seedMessage(
         id: 'newest',
@@ -614,7 +614,7 @@ void main() {
 
       expect((await messageRow('older'))['triage_status'], 'triaged');
       final row = await conversationRow();
-      expect(row['cta_text'], 'Send the closing disclosure');
+      expect(row['cta_text'], 'Send the project brief');
       expect(row['cta_urgency'], 'urgent');
     });
 
@@ -752,13 +752,13 @@ void main() {
       // standing between it and a thread advertising last week's ask.
       final held = Completer<Object>();
       final llm = FakeLlm([
-        answer(urgency: 'urgent', actionItems: const ['Extend the lock']),
+        answer(urgency: 'urgent', actionItems: const ['Ship on Thursday']),
         held.future,
       ]);
 
       final drain = TriageQueue(store, llm).pump();
       await Future<void>.delayed(const Duration(milliseconds: 20));
-      expect((await conversationRow())['cta_text'], 'Extend the lock');
+      expect((await conversationRow())['cta_text'], 'Ship on Thursday');
       held.complete(
         answer(urgency: 'low', actionItems: const ['Reply about parking']),
       );
@@ -766,7 +766,7 @@ void main() {
 
       expect((await messageRow('older'))['triage_status'], 'triaged');
       final row = await conversationRow();
-      expect(row['cta_text'], 'Extend the lock');
+      expect(row['cta_text'], 'Ship on Thursday');
       expect(row['cta_urgency'], 'urgent');
     });
 

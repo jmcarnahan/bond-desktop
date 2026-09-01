@@ -184,7 +184,7 @@ class ScriptedHandler extends WorkHandler {
 Map<String, dynamic> graphMessage(String id) => {
       'id': id,
       'conversationId': 'conv-$id',
-      'subject': 'Rate lock',
+      'subject': 'Launch date',
       'from': {
         'emailAddress': {'name': 'Sarah', 'address': 'sarah@example.com'}
       },
@@ -198,12 +198,12 @@ Map<String, dynamic> graphMessage(String id) => {
 
 Map<String, dynamic> triageAnswer({
   String urgency = 'high',
-  String category = 'borrower',
+  String category = 'work',
 }) =>
     {
       'urgency': urgency,
       'category': category,
-      'summary': 'Sarah asks about the rate lock.',
+      'summary': 'Jordan asks about the launch date.',
       'needs_action': true,
       'action_items': const ['Call Sarah about the lock'],
     };
@@ -235,7 +235,7 @@ void main() {
       'source_message_id': id,
       'conversation_key': 'conv-1',
       'direction': 'inbound',
-      'subject': 'Rate lock',
+      'subject': 'Launch date',
       'from_name': 'Sarah',
       'from_address': 'sarah@example.com',
       'received_at': '2026-08-29T10:00:00Z',
@@ -364,7 +364,7 @@ void main() {
       expect(row.entityId, 'm1');
       expect(row.durationMs, isNotNull);
       expect(row.detail['urgency'], 'high');
-      expect(row.detail['category'], 'borrower');
+      expect(row.detail['category'], 'work');
       expect(row.detail['needs_action'], isTrue);
       expect(row.detail['action_items'], 1);
       // The tally the client reported, folded onto the item's own row.
@@ -378,9 +378,9 @@ void main() {
         'source_message_id': 'bulk',
         'conversation_key': 'conv-1',
         'direction': 'inbound',
-        'subject': 'This week at Harborline',
-        'from_name': 'Harborline',
-        'from_address': 'no-reply@harborline.com',
+        'subject': 'This week at Northline',
+        'from_name': 'Northline',
+        'from_address': 'no-reply@example.com',
         'received_at': '2026-08-29T10:00:00Z',
         'body_text': 'Newsletter',
         'triage_status': 'pending',

@@ -19,14 +19,14 @@ import '../models/message_models.dart';
 ///
 /// They are constants rather than settings on purpose. The one thing the user
 /// tunes is the THRESHOLD — how much reaches Needs You — and leaving the
-/// weights fixed means the ordering the LO learns to trust does not change
+/// weights fixed means the ordering the user learns to trust does not change
 /// under them when they move that slider.
 class AttentionTuning {
-  /// A thread awaiting the LO's reply. The unit everything else is relative to.
+  /// A thread awaiting the user's reply. The unit everything else is relative to.
   static const double needsReplyBase = 1.0;
 
   /// A thread waiting on someone else. It can still climb — an urgent ask on a
-  /// thread the LO already answered is worth seeing — but it starts well below
+  /// thread the user already answered is worth seeing — but it starts well below
   /// anything that is actually theirs to move.
   static const double waitingBase = 0.35;
 
@@ -63,7 +63,7 @@ class AttentionTuning {
   static const double maxScore = 2.0;
 
   /// What a `keep` sender's mail is multiplied by. A boost rather than a floor:
-  /// the LO said this sender matters, not that every message from them is
+  /// the user said this sender matters, not that every message from them is
   /// urgent, and a floor would rank a two-month-old newsletter above this
   /// morning's real question.
   static const double keepBoost = 1.25;
@@ -75,18 +75,18 @@ class AttentionTuning {
   static const Set<String> quietIntents = {'fyi', 'transactional'};
 }
 
-/// How loudly one thread is asking for the LO, from 0 to
+/// How loudly one thread is asking for the user, from 0 to
 /// [AttentionTuning.maxScore].
 ///
 /// The chain, in order:
-/// 1. A `later` sender rule, or a thread the LO closed, scores exactly 0. Both
+/// 1. A `later` sender rule, or a thread the user closed, scores exactly 0. Both
 ///    are a person having already answered the question this function asks.
 /// 2. A base by state: [AttentionTuning.needsReplyBase] for a thread awaiting
 ///    their reply, [AttentionTuning.waitingBase] for anything else still open.
 /// 3. Multiplied by the ask's urgency, as triage read it.
 /// 4. Plus [AttentionTuning.questionBonus] when the newest inbound message's
 ///    intent is one of [AttentionTuning.askingIntents].
-/// 5. Plus up to [AttentionTuning.replyRateMax] for a sender the LO answers.
+/// 5. Plus up to [AttentionTuning.replyRateMax] for a sender the user answers.
 /// 6. Multiplied by recency, halving every
 ///    [AttentionTuning.recencyHalfLifeDays].
 /// 7. Multiplied by [AttentionTuning.keepBoost] for a `keep` sender.
@@ -103,7 +103,7 @@ double attentionScore({
   String? senderPref,
   required DateTime now,
 }) {
-  // Both hard zeros, checked before anything else: a thread the LO has
+  // Both hard zeros, checked before anything else: a thread the user has
   // dismissed must not be able to climb back up on a fresh timestamp.
   if (senderPref == 'later') return 0;
   if (conversation.state == ConversationState.done) return 0;
@@ -116,7 +116,7 @@ double attentionScore({
     CtaUrgency.urgent => AttentionTuning.urgentMultiplier,
     CtaUrgency.high => AttentionTuning.highMultiplier,
     // `low` does not discount. Triage's `low` means "not pressing", and a
-    // thread the LO still has to answer is still theirs to answer.
+    // thread the user still has to answer is still theirs to answer.
     CtaUrgency.normal || CtaUrgency.low => 1.0,
   };
 
@@ -167,8 +167,8 @@ double _recencyFactor(String? lastMessageAt, DateTime now) {
 /// - A sender rule wins outright, in both directions. It is a person's
 ///   standing instruction, and the model does not get to overrule it by being
 ///   confident.
-/// - A thread awaiting the LO's reply is NEVER deferred, whatever the model
-///   thinks of the message. Getting this wrong hides work the LO is holding up,
+/// - A thread awaiting the user's reply is NEVER deferred, whatever the model
+///   thinks of the message. Getting this wrong hides work the user is holding up,
 ///   which is the one failure this feature cannot afford.
 /// - What is left goes to Later only when the model says both that it is low
 ///   importance AND that the sender is not asking for anything.

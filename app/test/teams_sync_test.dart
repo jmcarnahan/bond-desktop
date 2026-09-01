@@ -358,7 +358,7 @@ void main() {
 
     test('a topic wins over the names', () async {
       graph.chats.add(
-        _chat(id: 'chat-1', topic: 'Willow St closing', previewAt: _iso(Duration.zero)),
+        _chat(id: 'chat-1', topic: 'Website redesign', previewAt: _iso(Duration.zero)),
       );
       graph.members['chat-1'] = [
         {'userId': 'u1', 'displayName': 'Sarah Whitfield'},
@@ -369,7 +369,7 @@ void main() {
 
       expect(
         (await store.loadConversations(sources: const ['teams'])).single.subject,
-        'Willow St closing',
+        'Website redesign',
       );
     });
 

@@ -38,6 +38,10 @@ CREATE TABLE messages (
   action_items_json TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  -- Migration-added columns sit AFTER the originals: ALTER TABLE appends, so
+  -- this is the only position where an upgraded install and a fresh one get
+  -- identical table_info — which the parity test compares in order.
+  label TEXT,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
 

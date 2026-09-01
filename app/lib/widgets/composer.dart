@@ -22,7 +22,7 @@ enum SendCapability {
   copyOnly,
 }
 
-/// The reply box under a thread: a suggested draft the LO edits, and the one
+/// The reply box under a thread: a suggested draft the user edits, and the one
 /// button that sends it.
 ///
 /// **Nothing here sends on its own.** [onSend] fires from exactly one place —
@@ -33,7 +33,7 @@ enum SendCapability {
 /// The suggested state is drawn as visibly *not yet theirs*: the text sits at
 /// reduced opacity behind an accent rule, with a caption saying where it came
 /// from. The first keystroke takes all of that away, because from that point on
-/// the words are the LO's and dressing them as a machine's suggestion would be
+/// the words are the user's and dressing them as a machine's suggestion would be
 /// a lie about who wrote them.
 class Composer extends StatefulWidget {
   /// The cached draft's body. Null means there is no suggestion — the field
@@ -62,7 +62,7 @@ class Composer extends StatefulWidget {
   /// Throws the suggestion away and leaves an empty box.
   final VoidCallback? onDismiss;
 
-  /// The LO started editing. Debounced, so it fires on pauses rather than on
+  /// The user started editing. Debounced, so it fires on pauses rather than on
   /// keystrokes.
   final void Function(String body)? onEdited;
 
@@ -99,7 +99,7 @@ class _ComposerState extends State<Composer> {
       TextEditingController(text: widget.suggestedBody ?? '');
 
   /// Whether the text in the field is still the machine's. Flips on the first
-  /// edit and never flips back — a suggestion the LO has rewritten does not
+  /// edit and never flips back — a suggestion the user has rewritten does not
   /// become a suggestion again by being deleted.
   bool _touched = false;
 
@@ -114,7 +114,7 @@ class _ComposerState extends State<Composer> {
     super.didUpdateWidget(oldWidget);
     // A new suggestion arrived — a regenerate landed, or the selection moved to
     // a thread whose draft was already cached. Typed-in text is never
-    // overwritten: the LO's own words outrank anything the model just wrote.
+    // overwritten: the user's own words outrank anything the model just wrote.
     if (widget.suggestedBody != oldWidget.suggestedBody && !_touched) {
       _body.text = widget.suggestedBody ?? '';
       _dismissed = false;

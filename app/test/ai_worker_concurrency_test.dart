@@ -83,11 +83,11 @@ class DraftStub extends WorkHandler {
 }
 
 Map<String, dynamic> extraction() => {
-      'evidence': 'Sarah is asking to extend the rate lock.',
-      'topics': const ['rate lock'],
+      'evidence': 'Jordan is asking whether the launch date holds.',
+      'topics': const ['launch date'],
       'people': const ['Sarah Chen'],
-      'organizations': const ['Harborline'],
-      'project': 'Willow St purchase',
+      'organizations': const ['Northline'],
+      'project': 'Website redesign',
       'intent': 'request',
       'importance': 'high',
     };
@@ -122,11 +122,11 @@ void main() {
       'direction': 'inbound',
       // Per-id, so a prompt can be traced back to the message that produced
       // it — which is how the exactly-once assertion below is made.
-      'subject': 'Re: Rate lock $id',
+      'subject': 'Re: Launch date $id',
       'from_name': 'Sarah',
       'from_address': 'sarah@x.com',
       'received_at': '2026-08-29T10:00:00Z',
-      'body_text': 'Can we extend the lock through Friday?',
+      'body_text': 'Can we still ship on Thursday?',
     });
     await store.enqueueWork('extract', 'email', id);
   }
@@ -182,7 +182,7 @@ void main() {
       expect(asked.length, 9);
       for (var i = 0; i < 9; i++) {
         expect(
-          asked.where((user) => user.contains('Re: Rate lock m$i')).length,
+          asked.where((user) => user.contains('Re: Launch date m$i')).length,
           1,
           reason: 'm$i',
         );

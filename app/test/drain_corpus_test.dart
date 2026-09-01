@@ -19,14 +19,16 @@ import 'fixtures/fake_llama_server.dart';
 
 Map<String, dynamic> triageAnswer({
   String urgency = 'high',
-  String category = 'borrower',
-  String summary = 'The borrower is asking about the rate lock.',
+  String category = 'work',
+  String label = 'website launch',
+  String summary = 'The client is asking whether the launch date holds.',
   bool needsAction = true,
-  List<String> actionItems = const ['Call Sarah about the lock'],
+  List<String> actionItems = const ['Call Marisa about the launch date'],
 }) =>
     {
       'urgency': urgency,
       'category': category,
+      'label': label,
       'summary': summary,
       'needs_action': needsAction,
       'action_items': actionItems,
@@ -73,7 +75,7 @@ void main() {
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
-      'subject': 'Willow St purchase',
+      'subject': 'Website redesign',
       'state': 'needs_reply',
       'last_inbound_at': lastInboundAt,
       'last_message_at': lastInboundAt,
@@ -102,18 +104,18 @@ void main() {
 
     setUp(() async {
       await seedCorpus(emails);
-      // The Willow St thread's newest inbound is the rate-lock email, so that
+      // The redesign thread's newest inbound is the escalation email, so that
       // is the message whose ask the row should end up carrying.
-      await seedConversation('conv-willow-st', '2026-08-30T16:05:00Z');
+      await seedConversation('conv-website-redesign', '2026-08-30T16:05:00Z');
       fake.scriptFor('triage', [
         triageAnswer(
           urgency: 'urgent',
-          category: 'borrower',
-          actionItems: const ['Extend the lock through Friday'],
+          category: 'work',
+          actionItems: const ['Confirm the launch date with Marisa'],
         ),
       ]);
 
-      await TriageQueue(store, client, userAddress: loAddress).pump();
+      await TriageQueue(store, client, userAddress: userAddress).pump();
     });
 
     test('every gated message is skipped with its own reason', () async {
@@ -139,10 +141,11 @@ void main() {
     });
 
     test('the newest inbound message\'s ask lands on the thread', () async {
-      final row = (await store.getConversationRow('email', 'conv-willow-st'))!;
-      expect(row['cta_text'], 'Extend the lock through Friday');
+      final row =
+          (await store.getConversationRow('email', 'conv-website-redesign'))!;
+      expect(row['cta_text'], 'Confirm the launch date with Marisa');
       expect(row['cta_urgency'], 'urgent');
-      expect(row['category'], 'borrower');
+      expect(row['category'], 'work');
     });
   });
 
@@ -161,7 +164,7 @@ void main() {
     // and both need the requests to go out one at a time. What a park does
     // with three requests already in flight is `triage_queue_test.dart`'s
     // job, and it owns that coverage.
-    await TriageQueue(store, client, userAddress: loAddress, concurrency: 1)
+    await TriageQueue(store, client, userAddress: userAddress, concurrency: 1)
         .pump();
 
     expect((await messageRow(ungated.first.id))['triage_status'], 'triaged');

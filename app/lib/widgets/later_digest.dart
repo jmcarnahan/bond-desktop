@@ -11,7 +11,7 @@ import 'time_format.dart';
 /// The rule this panel exists to keep: **deferred is not deleted.** Every
 /// deferred thread appears here in full — sender, subject, and the line it was
 /// carrying — with nothing behind a disclosure triangle and nothing summarised
-/// away. Later is a reading order, not a filter, and a digest the LO cannot
+/// away. Later is a reading order, not a filter, and a digest the user cannot
 /// trust to be complete is one they will stop opening, which puts them back to
 /// reading everything in arrival order.
 ///

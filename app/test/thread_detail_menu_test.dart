@@ -21,7 +21,7 @@ void main() {
         body: ThreadDetailPanel(
           conversation: Conversation(
             id: 'c1',
-            subject: 'Rate lock',
+            subject: 'Launch date',
             bucket: bucket,
           ),
           messages: const [],
@@ -84,7 +84,7 @@ void main() {
     await pump(
       tester,
       bucket: 'later',
-      storylineChoices: const [('sl-1', 'Willow St')],
+      storylineChoices: const [('sl-1', 'Website redesign')],
       onAddToStoryline: added.add,
       onNewStoryline: () => created++,
       onSendToLater: () => later++,
@@ -103,7 +103,7 @@ void main() {
     expect((later, keep), (1, 1));
 
     await openMenu(tester);
-    await tester.tap(find.text('Add to Willow St'));
+    await tester.tap(find.text('Add to Website redesign'));
     await tester.pumpAndSettle();
     expect(added, ['sl-1']);
 

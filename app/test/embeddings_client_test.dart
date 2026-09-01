@@ -46,11 +46,11 @@ void main() {
     test('prepends the clustering prefix to the input', () async {
       final stub = Stub(() => jsonOk(embeddingBody(const [0.1, 0.2])));
 
-      await stub.client.embed('Rate lock | Sarah Chen');
+      await stub.client.embed('Launch date | Sarah Chen');
 
       expect(
         stub.bodies.single['input'],
-        'task: clustering | query: Rate lock | Sarah Chen',
+        'task: clustering | query: Launch date | Sarah Chen',
       );
       // Everything this app embeds is embedded to be clustered. A corpus half
       // written under one prefix is a corpus whose distances mean nothing.

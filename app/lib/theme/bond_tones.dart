@@ -6,9 +6,9 @@ import 'bond_colors.dart';
 /// only this file resolves them to colors. Feeds `BondChip` and any tinted
 /// indicator.
 ///
-/// Ported from a sibling CRM app's tone tokens with the CRM-specific
-/// resolvers (stage, contact type, loan status, chart series) dropped — this
-/// app has no pipeline to tint.
+/// Ported from a sibling app's tone tokens with the resolvers that app needed
+/// (stage, contact type, record status, chart series) dropped — this app has
+/// no pipeline to tint.
 enum BondTone {
   /// Warm limestone — untyped/neutral values.
   neutral,

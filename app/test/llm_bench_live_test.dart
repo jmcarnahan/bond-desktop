@@ -46,6 +46,11 @@ void main() {
       final extractMs = <int>[];
       final lines = <String>[];
 
+      // Where the model disagreed with the corpus. Collected and printed, not
+      // asserted: a category and a label are judgements, and pinning them
+      // would fail the bench on the next model swap for no defect.
+      final misses = <String>[];
+
       // The table prints even when a call fails mid-run. A later phase points
       // this bench at an experimental server config, and a failure on the
       // fifteenth email is exactly when the fourteen numbers already paid for
@@ -78,18 +83,39 @@ void main() {
           triageMs.add(triageWatch.elapsed.inMilliseconds);
           extractMs.add(extractWatch.elapsed.inMilliseconds);
 
+          // What the corpus says this message is, next to what the model said
+          // it is. `expectedLabel` is a loose fragment on purpose — "dinner
+          // plans" and "friday dinner" are both right — so the match is
+          // `contains`, and a miss is printed rather than thrown.
+          final categoryMiss = entry.expectedCategory != null &&
+              entry.expectedCategory != triage.category;
+          final labelMiss = entry.expectedLabel != null &&
+              !triage.label.toLowerCase().contains(entry.expectedLabel!);
+          if (categoryMiss) {
+            misses.add('$current: category '
+                '${entry.expectedCategory} != ${triage.category}');
+          }
+          if (labelMiss) {
+            misses.add('$current: label '
+                '"${entry.expectedLabel}" not in "${triage.label}"');
+          }
+
           lines.add(
             '${entry.id.padRight(26)} '
             'triage ${triageWatch.elapsed.inMilliseconds.toString().padLeft(6)}ms  '
             'extract ${extractWatch.elapsed.inMilliseconds.toString().padLeft(6)}ms  '
-            '${triage.category}/${triage.urgency}/'
+            '${triage.category}${categoryMiss ? '!' : ''}/${triage.urgency}/'
             'needs_action=${triage.needsAction}  '
+            'label="${triage.label}"${labelMiss ? '!' : ''}  '
             '${extraction.intent}/${extraction.importance}',
           );
 
-          // Shape, not quality: an empty label is a call that went wrong.
+          // Shape, not quality: an empty field is a call that went wrong,
+          // while the words inside it are the model's judgement and are only
+          // printed.
           expect(triage.category, isNotEmpty, reason: entry.id);
           expect(triage.urgency, isNotEmpty, reason: entry.id);
+          expect(triage.label, isNotEmpty, reason: entry.id);
           expect(extraction.intent, isNotEmpty, reason: entry.id);
           expect(extraction.importance, isNotEmpty, reason: entry.id);
 
@@ -113,7 +139,8 @@ void main() {
           '| --- | --- | --- | --- | --- | --- |\n'
           '${row('triage', triageMs)}\n'
           '${row('extract', extractMs)}\n'
-          '\n${lines.join('\n')}\n',
+          '\n${lines.join('\n')}\n'
+          '\n${misses.isEmpty ? 'no disagreements with the corpus' : 'disagreed with the corpus:\n${misses.join('\n')}'}\n',
         );
       }
 

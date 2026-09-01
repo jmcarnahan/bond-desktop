@@ -38,7 +38,7 @@ const String mcpLocalUrl = 'http://localhost:18001/mcp';
 const String defaultMcpServerUrl =
     mcpDeployedUrl != '' ? mcpDeployedUrl : mcpLocalUrl;
 
-/// The settings the LO controls, held in memory so the widgets that read them
+/// The settings the user controls, held in memory so the widgets that read them
 /// rebuild the moment one changes.
 ///
 /// They live in `app_prefs` as TEXT, which is the only shape that table has.
@@ -51,7 +51,7 @@ class AppPrefs {
   /// what exists.
   final double attentionThreshold;
 
-  /// What the LO says about themselves and their role. Written here, read by
+  /// What the user says about themselves and their role. Written here, read by
   /// the next phase's prompts.
   final String aboutMe;
 

@@ -116,7 +116,7 @@ class ExtractHandler extends WorkHandler {
   /// The scoring sweep would reach the same answer on the next list load, so
   /// this is purely about when: extraction runs behind a queue that can be
   /// minutes deep, and without this a message would appear in the inbox, sit
-  /// there, and then jump to Later while the LO was reading the list. Filing it
+  /// there, and then jump to Later while the user was reading the list. Filing it
   /// as the fact lands means the row is only ever drawn once, where it belongs.
   ///
   /// It shares [bucketFor] with the sweep rather than reimplementing the rule —

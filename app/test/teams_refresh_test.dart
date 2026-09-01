@@ -160,7 +160,7 @@ void main() {
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
       await notifier.load();
 
-      await notifier.sendSenderToLater('sarah@harborline.com');
+      await notifier.sendSenderToLater('sarah@example.com');
       await notifier.keepThreadInInbox('email', 'c1');
 
       expect(teams.calls, 0);

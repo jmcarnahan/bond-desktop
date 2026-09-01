@@ -61,8 +61,8 @@ void main() {
       expect(railTitleFor(_conv(id: 'a', source: 'teams', who: 'Sarah')),
           '💬 Sarah');
       expect(
-        railTitleFor(_conv(id: 'a', source: 'teams', subject: 'Re: Willow St')),
-        '💬 Willow St',
+        railTitleFor(_conv(id: 'a', source: 'teams', subject: 'Re: Website redesign')),
+        '💬 Website redesign',
       );
       expect(railTitleFor(_conv(id: 'a', source: 'teams')), '💬 (no subject)');
       expect(railTitleFor(_conv(id: 'a', who: 'Sarah')), 'Sarah');
@@ -72,19 +72,19 @@ void main() {
       await tester.pumpWidget(_host(Column(children: [
         ConversationRow(
           conversation:
-              _conv(id: 'chat-1', source: 'teams', who: 'Sarah', subject: 'Rate lock'),
+              _conv(id: 'chat-1', source: 'teams', who: 'Sarah', subject: 'Launch date'),
           selected: false,
           onTap: () {},
         ),
         ConversationRow(
-          conversation: _conv(id: 'c1', who: 'Eric', subject: 'Appraisal'),
+          conversation: _conv(id: 'c1', who: 'Eric', subject: 'Homepage copy'),
           selected: false,
           onTap: () {},
         ),
       ])));
 
-      expect(find.text('💬 Rate lock'), findsOneWidget);
-      expect(find.text('Appraisal'), findsOneWidget);
+      expect(find.text('💬 Launch date'), findsOneWidget);
+      expect(find.text('Homepage copy'), findsOneWidget);
       // The name stays clean — it is the loudest thing on the card and a
       // glyph there would compete with the state dot.
       expect(find.text('Sarah'), findsOneWidget);
@@ -181,7 +181,7 @@ void main() {
       await tester.pumpWidget(_host(StorylineTimelinePanel(
         storyline: const Storyline(
           id: 'sl-1',
-          title: 'Willow St purchase',
+          title: 'Website redesign',
           status: 'active',
           memberCount: 2,
         ),
@@ -203,7 +203,7 @@ void main() {
           ),
         ],
         keyByMessageId: const {'m1': 'c1', 'm2': 'chat-1'},
-        subjectByKey: const {'c1': 'Appraisal review', 'chat-1': 'Sarah Whitfield'},
+        subjectByKey: const {'c1': 'Homepage copy', 'chat-1': 'Sarah Whitfield'},
         members: const [
           StorylineMember(
             storylineId: 'sl-1',
@@ -225,7 +225,7 @@ void main() {
 
       // Both marked here, mail included: in a merged transcript an unmarked
       // seam leaves the reader guessing.
-      expect(find.text('✉ Appraisal review'), findsOneWidget);
+      expect(find.text('✉ Homepage copy'), findsOneWidget);
       expect(find.text('💬 Sarah Whitfield'), findsOneWidget);
     });
   });

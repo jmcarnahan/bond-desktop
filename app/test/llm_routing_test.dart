@@ -68,15 +68,15 @@ class FakeLlm extends LlmClient {
 List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
 
 Map<String, dynamic> confirmAnswer() => {
-      'evidence': 'Both concern the Willow Street appraisal.',
+      'evidence': 'Both concern the website redesign.',
       'belongs': true,
       'confidence': 'high',
     };
 
 Map<String, dynamic> nameAnswer() => {
       'evidence': 'shared deal',
-      'title': 'Willow St purchase',
-      'summary': 'Underwriting is reviewing the appraisal.',
+      'title': 'Website redesign',
+      'summary': 'The studio is reviewing the homepage copy.',
     };
 
 void main() {
@@ -116,7 +116,7 @@ void main() {
     await seed('member', vector: vectorAt(1));
     await store.insertStoryline(
       id: 'sl-1',
-      title: 'Willow St purchase',
+      title: 'Website redesign',
       status: 'active',
       createdBy: 'auto',
     );
@@ -145,7 +145,7 @@ void main() {
       // And it did the work, rather than routing tidily past a no-op.
       expect(await store.membersOf('sl-1'), hasLength(2));
       expect((await store.getStoryline('sl-1'))!.summary,
-          'Underwriting is reviewing the appraisal.');
+          'The studio is reviewing the homepage copy.');
     });
 
     test('the sweep names on the primary even with a confirm client', () async {

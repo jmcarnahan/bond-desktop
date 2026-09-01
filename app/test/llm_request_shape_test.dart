@@ -28,7 +28,7 @@ const Map<String, dynamic> _probeSchema = {
 
 Map<String, dynamic> _triageAnswer() => {
       'urgency': 'high',
-      'category': 'borrower',
+      'category': 'work',
       'summary': 'Sarah is asking about the lock.',
       'needs_action': true,
       'action_items': const ['Call Sarah about the lock'],

@@ -38,7 +38,7 @@ class FakeLlm extends LlmClient {
 }
 
 Map<String, dynamic> answer({
-  String evidence = 'Sarah is asking to extend the rate lock through Friday.',
+  String evidence = 'Jordan is asking whether the launch still lands on Thursday.',
   String replyBody = 'Hi Sarah — Friday works. I will send the addendum today.',
 }) =>
     {'evidence': evidence, 'reply_body': replyBody};
@@ -59,13 +59,13 @@ void main() {
     String key = 'conv-1',
     String receivedAt = '2026-08-29T10:00:00Z',
     String address = 'sarah@x.com',
-    String body = 'Can we extend the lock through Friday?',
+    String body = 'Can we still ship on Thursday?',
   }) async {
     await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'inbound',
-      'subject': 'Re: Rate lock',
+      'subject': 'Re: Launch date',
       'from_name': 'Sarah',
       'from_address': address,
       'received_at': receivedAt,
@@ -108,7 +108,7 @@ void main() {
       expect(draft['body'], startsWith('Hi Sarah — Friday works.'));
       expect(
         draft['evidence'],
-        'Sarah is asking to extend the rate lock through Friday.',
+        'Jordan is asking whether the launch still lands on Thursday.',
       );
       expect(draft['graph_draft_id'], isNull,
           reason: 'nothing here has touched Graph');
@@ -162,20 +162,20 @@ void main() {
 
     test('the about-me preference, read from the store', () async {
       await seedInbound();
-      await store.setPref(aboutMeKey, 'I own rate locks and closing dates.');
+      await store.setPref(aboutMeKey, 'I own the website redesign and the launch.');
 
       final llm = FakeLlm([answer()]);
       await runOne(DraftHandler(store, llm));
 
       expect(llm.userMessages.single, contains('about_me'));
-      expect(llm.userMessages.single, contains('I own rate locks'));
+      expect(llm.userMessages.single, contains('I own the website redesign'));
     });
 
     test('the storyline summary, when the thread is in one', () async {
       await seedInbound();
       await store.insertStoryline(
         id: 's1',
-        title: 'Willow St purchase',
+        title: 'Website redesign',
         summary: 'Closing 9/15, lock expires 9/10.',
         status: 'active',
         createdBy: 'auto',

@@ -4,12 +4,12 @@ import '../models/message_models.dart';
 ///
 /// Every message the gates catch is a message the local model does not spend
 /// seventeen seconds on, and a triage result nobody wanted anyway: a shipping
-/// notification has no urgency and asks the loan officer for nothing. The
+/// notification has no urgency and asks the reader for nothing. The
 /// gates are pure — no I/O, no clock — so the whole set is table-testable.
 ///
 /// Two gates deliberately do NOT exist:
 /// - an internal-domain gate. Mail from a colleague is exactly the mail that
-///   blocks a file, and skipping it would hide the underwriting conditions
+///   blocks the reader's own work, and skipping it would hide the requests
 ///   this app exists to surface.
 /// - a meeting-invite gate. The delta `$select` this app uses carries no
 ///   `@odata.type`, so there is nothing on a stored row that distinguishes an
@@ -85,7 +85,7 @@ String? _teamsGate(Message message) {
 String? _emailGate(Message message, String? userAddress) {
   final from = message.fromAddress?.toLowerCase() ?? '';
 
-  // The loan officer's own mail, arriving in the inbox because they were
+  // The user's own mail, arriving in the inbox because they were
   // cc'd or the message came back off a list. Triage answers "does this need
   // me?" and the answer is never yes.
   if (userAddress != null && userAddress.isNotEmpty) {

@@ -4,6 +4,8 @@ import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:sqlite3/sqlite3.dart' as raw;
 
+import 'database.steps.dart';
+
 part 'database.g.dart';
 
 /// The on-disk store. One sqlite file under the app support directory, with
@@ -27,12 +29,36 @@ class BondDatabase extends _$BondDatabase {
   /// A private in-memory database — what tests open.
   BondDatabase.memory() : super(NativeDatabase.memory());
 
+  /// Any executor the caller hands over — what the generated migration test
+  /// in `test/drift/bond/` opens (it verifies each step against the schema
+  /// snapshots in `drift_schemas/bond/`).
+  BondDatabase(super.e);
+
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
         onCreate: (m) => m.createAll(),
+        onUpgrade: stepByStep(
+          // v2 — the generalize round: triage gains a free-text `label`, and
+          // the category taxonomy narrows from the eight domain-specific
+          // buckets to work|personal|notification|other. `personal` and
+          // `other` carry over; every other old value described the same
+          // thing — mail about the user's work — so it becomes `work`.
+          // `notification` only ever comes from fresh triage. NULL (never
+          // triaged, or gated) stays NULL.
+          from1To2: (m, schema) async {
+            await m.addColumn(schema.messages, schema.messages.label);
+            for (final table in ['messages', 'conversations']) {
+              await customStatement(
+                "UPDATE $table SET category = 'work' "
+                'WHERE category IS NOT NULL '
+                "AND category NOT IN ('personal', 'other')",
+              );
+            }
+          },
+        ),
         beforeOpen: (details) async {
           // WAL is a no-op on an in-memory database (sqlite reports back
           // "memory"), which is why this is not conditional on the path.

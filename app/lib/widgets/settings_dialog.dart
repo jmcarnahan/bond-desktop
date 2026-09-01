@@ -12,7 +12,7 @@ import '../providers/prefs_provider.dart'
 import '../services/backend/backend_types.dart' show AuthException;
 import '../theme/tokens.dart';
 
-/// What the LO gets to say about how the inbox behaves, plus what Microsoft
+/// What the user gets to say about how the inbox behaves, plus what Microsoft
 /// has actually let this app do.
 ///
 /// A dialog rather than a settings screen because there is very little in it,
@@ -136,7 +136,7 @@ class SettingsDialog extends StatefulWidget {
     this.onSignOutOfServer,
   });
 
-  /// The three extended permissions, in the order they matter to the LO:
+  /// The three extended permissions, in the order they matter to the user:
   /// label, the bare scope each one is really asking about, and whether a
   /// fresh sign-in can actually obtain it. Teams cannot — the tenant
   /// admin-gates `Chat.Read`, so the sign-in no longer requests it (see
@@ -351,8 +351,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 maxLines: 5,
                 decoration: const InputDecoration(
                   hintText:
-                      'e.g. I am a loan officer; I own rate locks and '
-                      'closing dates, my processor handles document chasing.',
+                      'e.g. I run marketing at a small company; I own the '
+                      'website redesign and event planning.',
                 ),
               ),
               ..._activityLogSwitch(),

@@ -134,7 +134,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     if (queue == null) return;
     if (userAddress != null) {
       // Fire-and-forget, and a failure is survivable: without the address the
-      // self gate is off, which costs a few model calls on the LO's own mail
+      // self gate is off, which costs a few model calls on the user's own mail
       // and nothing else.
       unawaited(
         userAddress.then<void>((address) {
@@ -354,7 +354,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         ConversationState.done,
       );
       // On the success path only. Closing a thread is the quietest "I am done
-      // with this" the LO ever gives, and it is worth recording — but recording
+      // with this" the user ever gives, and it is worth recording — but recording
       // one for a write that failed would teach the app from something that
       // never happened.
       await _logImplicit('thread', conversationKey, 'down');
@@ -490,7 +490,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// overwriting and hand it back to [restoreSenderPref].
   Future<String?> senderPref(String address) => _store.getSenderPref(address);
 
-  /// Records something the LO did rather than something they said — opening a
+  /// Records something the user did rather than something they said — opening a
   /// thread, closing one. Fire-and-forget and never reloads: these fire on
   /// every click, and a list read behind each one would make the app feel
   /// slower for a signal nothing on screen reads yet.
@@ -515,7 +515,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
   }
 
-  /// The LO opened this thread. The weakest positive signal there is, and the
+  /// The user opened this thread. The weakest positive signal there is, and the
   /// most plentiful.
   Future<void> noteThreadOpened(String conversationKey) =>
       _logImplicit('thread', conversationKey, 'up');

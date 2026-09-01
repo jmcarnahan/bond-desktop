@@ -54,7 +54,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   static const List<String> _sources = inboxSources;
 
   /// Slow enough to be invisible on a metered connection, fast enough that a
-  /// reply that arrived while the LO was reading feels like it just showed
+  /// reply that arrived while the user was reading feels like it just showed
   /// up. Graph delta calls with nothing new are cheap.
   ///
   /// **Mail only.** [_refresh] is what this fires and it does not touch Teams:
@@ -224,7 +224,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _showingActivityLog = false;
       _railOpen = false;
     });
-    // The quietest signal the app collects: opening a thread is the LO saying
+    // The quietest signal the app collects: opening a thread is the user saying
     // this one was worth their time. Fire-and-forget, and nothing on screen
     // reads it yet.
     ref.read(conversationsProvider.notifier).noteThreadOpened(id);
@@ -423,7 +423,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   //
   // Every explicit correction lands the same way: it happens immediately, and
   // it says so in a bar with an UNDO on it. Confirming first would put a modal
-  // in front of a one-click gesture the LO is going to make dozens of times;
+  // in front of a one-click gesture the user is going to make dozens of times;
   // an undo costs nothing when it is not used.
 
   /// How long the undo stays reachable. Long enough to notice the bar and
@@ -790,7 +790,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// How much mail the local model still has to look at, and nothing when
   /// there is none. Deliberately a quiet caption: triage is a background
-  /// annotator, not something the LO waits on, and the first sync of a real
+  /// annotator, not something the user waits on, and the first sync of a real
   /// mailbox leaves it counting down for the better part of an hour.
   Widget _triageProgress() {
     return StreamBuilder<TriageProgress>(

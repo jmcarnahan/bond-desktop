@@ -245,14 +245,14 @@ void main() {
 
   group('the pending slot', () {
     test('note folds facts onto the next row and only that row', () async {
-      log.note({'intent': 'question', 'topics': ['rate lock']});
+      log.note({'intent': 'question', 'topics': ['launch date']});
       await log.record('extract', entityId: 'm1');
       await log.record('extract', entityId: 'm2');
 
       final rows = await store.recentActivity();
       expect(detailOf(rows.last), {
         'intent': 'question',
-        'topics': ['rate lock'],
+        'topics': ['launch date'],
       });
       expect(detailOf(rows.first), isEmpty);
     });

@@ -105,7 +105,7 @@ void main() {
   testWidgets('names the thread an event was about', (tester) async {
     await store.upsertConversation({
       'conversation_key': 'c1',
-      'subject': 'Appraisal review',
+      'subject': 'Homepage copy',
       'state': 'waiting',
       'last_message_at': '2026-08-28T09:00:00Z',
     });
@@ -132,7 +132,7 @@ void main() {
     expect(
       find.descendant(
         of: find.byType(ActivityLogPanel),
-        matching: find.textContaining('Appraisal review'),
+        matching: find.textContaining('Homepage copy'),
       ),
       findsOneWidget,
     );

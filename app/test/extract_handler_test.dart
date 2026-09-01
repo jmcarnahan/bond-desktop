@@ -70,9 +70,9 @@ class FakeEmbeddings {
 }
 
 Map<String, dynamic> answer({
-  String evidence = 'Sarah is asking to extend the rate lock.',
-  List<String> topics = const ['rate lock'],
-  String project = 'Willow St purchase',
+  String evidence = 'Jordan is asking whether the launch date holds.',
+  List<String> topics = const ['launch date'],
+  String project = 'Website redesign',
   String intent = 'request',
   String importance = 'high',
 }) =>
@@ -80,7 +80,7 @@ Map<String, dynamic> answer({
       'evidence': evidence,
       'topics': topics,
       'people': const ['Sarah Chen'],
-      'organizations': const ['Harborline'],
+      'organizations': const ['Northline'],
       'project': project,
       'intent': intent,
       'importance': importance,
@@ -107,11 +107,11 @@ void main() {
       'source_message_id': id,
       'conversation_key': conversationKey,
       'direction': 'inbound',
-      'subject': 'Re: Rate lock',
+      'subject': 'Re: Launch date',
       'from_name': 'Sarah',
       'from_address': 'sarah@x.com',
       'received_at': '2026-08-29T10:00:00Z',
-      'body_text': 'Can we extend the lock through Friday?',
+      'body_text': 'Can we still ship on Thursday?',
     });
     if (summary != null) {
       await store.writeTriage(
@@ -120,10 +120,10 @@ void main() {
         status: 'triaged',
         result: TriageResult(
           urgency: 'high',
-          category: 'borrower',
+          category: 'work',
           summary: summary,
           needsAction: true,
-          actionItems: const ['Extend the lock'],
+          actionItems: const ['Ship on Thursday'],
         ),
       );
     }
@@ -133,10 +133,10 @@ void main() {
     await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
-      'subject': 'Rate lock',
+      'subject': 'Launch date',
       'participants_json': jsonEncode([
         {'name': 'Sarah Chen', 'email': 'sarah@x.com'},
-        {'name': null, 'email': 'escrow@title.com'},
+        {'name': null, 'email': 'billing@vendor.example.com'},
       ]),
       'state': 'needs_reply',
       'last_message_at': '2026-08-29T10:00:00Z',
@@ -206,8 +206,8 @@ void main() {
 
       final stored =
           jsonDecode((await store.getExtraction('email', 'm1'))!) as Map<String, dynamic>;
-      expect(stored['evidence'], 'Sarah is asking to extend the rate lock.');
-      expect(stored['topics'], ['rate lock']);
+      expect(stored['evidence'], 'Jordan is asking whether the launch date holds.');
+      expect(stored['topics'], ['launch date']);
       expect(stored['intent'], 'request');
       expect(stored['importance'], 'high');
     });
@@ -254,7 +254,7 @@ void main() {
       expect(
         embeddings.inputs.single,
         '${EmbeddingsClient.clusteringPrefix}'
-        'Rate lock | Sarah Chen, escrow@title.com | rate lock | '
+        'Launch date | Sarah Chen, billing@vendor.example.com | launch date | '
         'Sarah needs the lock extended.',
       );
       final row = (await store.getConversationAi('email', 'conv-1'))!;
@@ -293,7 +293,7 @@ void main() {
         store,
         FakeLlm([
           answer(),
-          answer(topics: const ['appraisal', 'closing date']),
+          answer(topics: const ['homepage copy', 'launch date']),
         ]),
         embeddings.client,
       );
@@ -302,7 +302,7 @@ void main() {
       await runOne(handler);
 
       expect(embeddings.inputs.length, 2);
-      expect(embeddings.inputs.last, contains('appraisal, closing date'));
+      expect(embeddings.inputs.last, contains('homepage copy, launch date'));
     });
 
     test('an embedding server that is down does not cost the extraction',
@@ -339,7 +339,7 @@ void main() {
       await seedMessage();
       final handler = ExtractHandler(
         store,
-        FakeLlm([answer(), answer(topics: const ['appraisal'])]),
+        FakeLlm([answer(), answer(topics: const ['homepage copy'])]),
         FakeEmbeddings().client,
       );
       await runOne(handler);
@@ -368,7 +368,7 @@ void main() {
     }) async {
       await store.upsertConversation({
         'conversation_key': 'conv-1',
-        'subject': 'Rate lock',
+        'subject': 'Launch date',
         'state': state,
         'last_message_at': lastInboundAt,
         'last_inbound_at': lastInboundAt,
@@ -499,12 +499,12 @@ void main() {
     test('is four segments, empty ones included', () {
       expect(
         buildConversationCard(
-          subject: 'Rate lock',
+          subject: 'Launch date',
           participants: const ['Sarah', 'Tom'],
-          topics: const ['lock', 'appraisal'],
-          summary: 'Extend by Friday.',
+          topics: const ['launch', 'homepage copy'],
+          summary: 'Shipping Thursday.',
         ),
-        'Rate lock | Sarah, Tom | lock, appraisal | Extend by Friday.',
+        'Launch date | Sarah, Tom | launch, homepage copy | Shipping Thursday.',
       );
       // Fixed shape, so the same thread always produces the same card — which
       // is what makes the hash a usable "has anything changed" test.

@@ -61,9 +61,9 @@ http.Response jsonOk(Object body) => http.Response(
 Map<String, dynamic> graphMessage({
   required String id,
   String? conversationId = 'conv-1',
-  String subject = 'Closing Disclosure',
+  String subject = 'Project brief',
   String fromName = 'Sarah Whitfield',
-  String fromAddress = 'sarah@harborline.com',
+  String fromAddress = 'sarah@example.com',
   List<String> to = const ['lo@bond.com'],
   String? receivedDateTime = '2026-08-28T10:00:00Z',
   bool isRead = false,
@@ -72,7 +72,7 @@ Map<String, dynamic> graphMessage({
 }) =>
     {
       'id': id,
-      'internetMessageId': '<$id@harborline.com>',
+      'internetMessageId': '<$id@example.com>',
       'conversationId': ?conversationId,
       'subject': subject,
       'from': {
@@ -421,7 +421,7 @@ void main() {
                   id: 's1',
                   fromName: 'Bond LO',
                   fromAddress: 'lo@bond.com',
-                  to: const ['sarah@harborline.com'],
+                  to: const ['sarah@example.com'],
                 )
               ],
               deltaLink: deltaCursor('sentitems', 'c1'),
@@ -434,7 +434,7 @@ void main() {
       expect(row['direction'], 'outbound');
       expect(row['triage_status'], 'skipped');
       expect(row['gate_reason'], 'outbound');
-      expect(jsonDecode(row['to_json'] as String), ['sarah@harborline.com']);
+      expect(jsonDecode(row['to_json'] as String), ['sarah@example.com']);
     });
 
     test('mail older than the triage window arrives already skipped',
@@ -534,13 +534,13 @@ void main() {
               [
                 graphMessage(
                   id: 'in-1',
-                  subject: 'Closing Disclosure',
+                  subject: 'Project brief',
                   receivedDateTime: '2026-08-27T09:00:00Z',
                   preview: 'the first ask',
                 ),
                 graphMessage(
                   id: 'in-2',
-                  subject: 'Re: Closing Disclosure',
+                  subject: 'Re: Project brief',
                   receivedDateTime: '2026-08-28T15:00:00Z',
                   preview: 'the newest word',
                 ),
@@ -553,10 +553,10 @@ void main() {
               [
                 graphMessage(
                   id: 'out-1',
-                  subject: 'Re: Closing Disclosure',
+                  subject: 'Re: Project brief',
                   fromName: 'Bond LO',
                   fromAddress: 'lo@bond.com',
-                  to: const ['sarah@harborline.com'],
+                  to: const ['sarah@example.com'],
                   receivedDateTime: '2026-08-28T09:00:00Z',
                   preview: 'my reply',
                 )
@@ -577,10 +577,10 @@ void main() {
       expect(conversation.lastInboundAt, '2026-08-28T15:00:00Z');
       expect(conversation.lastOutboundAt, '2026-08-28T09:00:00Z');
       // Named by how it opened, with the reply marker stripped.
-      expect(conversation.subject, 'Closing Disclosure');
+      expect(conversation.subject, 'Project brief');
       expect(
         conversation.participants.map((p) => p.email).toList(),
-        ['sarah@harborline.com'],
+        ['sarah@example.com'],
       );
     });
 

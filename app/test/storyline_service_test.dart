@@ -64,15 +64,15 @@ class FakeLlm extends LlmClient {
 List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
 
 Map<String, dynamic> confirmAnswer({
-  String evidence = 'Both concern the Willow Street appraisal.',
+  String evidence = 'Both concern the website redesign.',
   bool belongs = true,
   String confidence = 'high',
 }) =>
     {'evidence': evidence, 'belongs': belongs, 'confidence': confidence};
 
 Map<String, dynamic> nameAnswer({
-  String title = 'Willow St purchase',
-  String summary = 'Underwriting is reviewing the appraisal.',
+  String title = 'Website redesign',
+  String summary = 'The studio is reviewing the homepage copy.',
 }) =>
     {'evidence': 'shared deal', 'title': title, 'summary': summary};
 
@@ -120,7 +120,7 @@ void main() {
     MessageStore into, {
     String id = 'sl-1',
     String status = 'active',
-    String? summary = 'Underwriting is reviewing the appraisal.',
+    String? summary = 'The studio is reviewing the homepage copy.',
     bool titleLocked = false,
     String memberKey = 'member',
     List<double>? memberVector,
@@ -134,7 +134,7 @@ void main() {
     );
     await into.insertStoryline(
       id: id,
-      title: 'Willow St purchase',
+      title: 'Website redesign',
       summary: summary,
       status: status,
       createdBy: 'auto',
@@ -159,7 +159,7 @@ void main() {
       expect(members.map((m) => m.conversationKey), ['member', 'c1']);
       final added = members.last;
       expect(added.addedBy, 'auto');
-      expect(added.evidence, 'Both concern the Willow Street appraisal.');
+      expect(added.evidence, 'Both concern the website redesign.');
       // The activity stamp follows the thread that joined.
       expect((await store.getStoryline('sl-1'))!.lastActivityAt,
           '2026-08-29T10:00:00Z');
@@ -280,7 +280,7 @@ void main() {
       await seed(store, 'member');
       await store.insertStoryline(
         id: 'sl-1',
-        title: 'Willow St purchase',
+        title: 'Website redesign',
         status: 'active',
         createdBy: 'auto',
       );
@@ -334,9 +334,9 @@ void main() {
 
       final storyline = (await store.getStoryline('sl-1'))!;
       // The user named it. No later pass takes that back.
-      expect(storyline.title, 'Willow St purchase');
+      expect(storyline.title, 'Website redesign');
       // The summary describes where things stand, which no rename claimed.
-      expect(storyline.summary, 'Underwriting is reviewing the appraisal.');
+      expect(storyline.summary, 'The studio is reviewing the homepage copy.');
     });
 
     test('an unlocked title is replaced when the storyline is named',
@@ -345,12 +345,12 @@ void main() {
       await seed(store, 'c1', vector: vectorAt(0.9));
       final llm = FakeLlm({
         'storyline_membership': [confirmAnswer()],
-        'storyline_name': [nameAnswer(title: 'Chen refinance')],
+        'storyline_name': [nameAnswer(title: 'Brightsea launch')],
       });
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
-      expect((await store.getStoryline('sl-1'))!.title, 'Chen refinance');
+      expect((await store.getStoryline('sl-1'))!.title, 'Brightsea launch');
     });
 
     test('a suggestion still collects members while it waits', () async {
@@ -397,8 +397,8 @@ void main() {
       final storyline = (await store.loadStorylines()).single;
       expect(storyline.status, 'suggested');
       expect(storyline.createdBy, 'auto');
-      expect(storyline.title, 'Willow St purchase');
-      expect(storyline.summary, 'Underwriting is reviewing the appraisal.');
+      expect(storyline.title, 'Website redesign');
+      expect(storyline.summary, 'The studio is reviewing the homepage copy.');
       expect(storyline.id, startsWith('sl-'));
       expect(storyline.lastActivityAt, '2026-08-29T04:00:00Z');
 
@@ -568,13 +568,13 @@ void main() {
           StorylineService(store, FakeLlm(const {}));
 
       final id = await service.createStoryline(
-        'Chen refinance',
+        'Brightsea launch',
         source: 'email',
         conversationKey: 'c1',
       );
 
       final storyline = (await store.getStoryline(id))!;
-      expect(storyline.title, 'Chen refinance');
+      expect(storyline.title, 'Brightsea launch');
       expect(storyline.status, 'active');
       expect(storyline.createdBy, 'user');
       expect(storyline.titleLocked, isTrue);
@@ -590,8 +590,8 @@ void main() {
     test('keep and dismiss move the status and nothing else', () async {
       await store.insertStoryline(
         id: 'sl-1',
-        title: 'Willow St purchase',
-        summary: 'Underwriting is reviewing the appraisal.',
+        title: 'Website redesign',
+        summary: 'The studio is reviewing the homepage copy.',
         status: 'suggested',
         createdBy: 'auto',
         memberHash: 'h1',
@@ -605,7 +605,7 @@ void main() {
       await service.dismissSuggestion('sl-1');
       final dismissed = (await store.getStoryline('sl-1'))!;
       expect(dismissed.status, 'dismissed');
-      expect(dismissed.summary, 'Underwriting is reviewing the appraisal.');
+      expect(dismissed.summary, 'The studio is reviewing the homepage copy.');
       // The member rows are the record the hash was computed over. Deleting
       // them would leave the app unable to recognise the cluster again.
       expect(await store.membersOf('sl-1'), hasLength(1));
@@ -621,17 +621,17 @@ void main() {
       );
       final service = StorylineService(store, FakeLlm(const {}));
 
-      await service.rename('sl-1', 'Chen refinance');
+      await service.rename('sl-1', 'Brightsea launch');
 
       final storyline = (await store.getStoryline('sl-1'))!;
-      expect(storyline.title, 'Chen refinance');
+      expect(storyline.title, 'Brightsea launch');
       expect(storyline.titleLocked, isTrue);
     });
 
     test('removing a thread always blocks it', () async {
       await store.insertStoryline(
         id: 'sl-1',
-        title: 'Willow St purchase',
+        title: 'Website redesign',
         status: 'active',
         createdBy: 'auto',
       );
@@ -648,7 +648,7 @@ void main() {
       await seed(store, 'c1');
       await store.insertStoryline(
         id: 'sl-1',
-        title: 'Willow St purchase',
+        title: 'Website redesign',
         status: 'active',
         createdBy: 'auto',
       );
@@ -685,7 +685,7 @@ void main() {
       await log.record('storyline', source: 'email', entityId: 'c1');
 
       final row = ActivityEvent.fromRow((await store.recentActivity()).single);
-      expect(row.detail['assigned'], 'Willow St purchase');
+      expect(row.detail['assigned'], 'Website redesign');
     });
 
     test('a pass that filed nothing notes nothing, and so writes no row',

@@ -23,8 +23,8 @@ Message _message({
 
 const _storyline = Storyline(
   id: 'sl-1',
-  title: 'Willow St purchase',
-  summary: 'Underwriting is reviewing the appraisal.',
+  title: 'Website redesign',
+  summary: 'The studio is reviewing the homepage copy.',
   status: 'active',
   memberCount: 2,
 );
@@ -39,13 +39,13 @@ void main() {
     _message(id: 'm3', receivedAt: '2026-08-01T09:02:00Z'),
   ];
   const keyByMessageId = {'m1': 'c1', 'm2': 'c2', 'm3': 'c1'};
-  const subjectByKey = {'c1': 'Appraisal review', 'c2': 'Rate lock'};
+  const subjectByKey = {'c1': 'Homepage copy', 'c2': 'Launch date'};
   const members = [
     StorylineMember(
       storylineId: 'sl-1',
       conversationKey: 'c1',
       addedBy: 'auto',
-      evidence: 'Both concern the Willow Street appraisal.',
+      evidence: 'Both concern the website redesign.',
     ),
     StorylineMember(
       storylineId: 'sl-1',
@@ -86,8 +86,8 @@ void main() {
         (tester) async {
       await pumpPanel(tester);
 
-      expect(find.text('Willow St purchase'), findsOneWidget);
-      expect(find.text('Underwriting is reviewing the appraisal.'),
+      expect(find.text('Website redesign'), findsOneWidget);
+      expect(find.text('The studio is reviewing the homepage copy.'),
           findsOneWidget);
       expect(find.text('2 threads'), findsOneWidget);
     });
@@ -118,8 +118,8 @@ void main() {
 
       // c1 opens, c2 interrupts, c1 resumes: three seams, and the middle
       // thread is named once.
-      expect(find.text('✉ Appraisal review'), findsNWidgets(2));
-      expect(find.text('✉ Rate lock'), findsOneWidget);
+      expect(find.text('✉ Homepage copy'), findsNWidgets(2));
+      expect(find.text('✉ Launch date'), findsOneWidget);
     });
 
     testWidgets('a seam always breaks the run, however close in time',
@@ -139,7 +139,7 @@ void main() {
       final opened = <String>[];
       await pumpPanel(tester, onOpenThread: (_, key) => opened.add(key));
 
-      await tester.tap(find.text('✉ Rate lock'));
+      await tester.tap(find.text('✉ Launch date'));
 
       expect(opened, ['c2']);
     });
@@ -170,7 +170,7 @@ void main() {
       await tester.tap(find.text('2 threads'));
       await tester.pumpAndSettle();
 
-      // The second entry is c2 — the one message from the Rate lock thread.
+      // The second entry is c2 — the one message from the Launch date thread.
       await tester.tap(find.byType(Checkbox).last);
       await tester.pumpAndSettle();
 
@@ -178,8 +178,8 @@ void main() {
       expect(find.text('body of m2'), findsNothing);
       // With c2 hidden, c1's two messages are no longer interrupted, so the
       // seam count drops with them.
-      expect(find.text('✉ Rate lock'), findsNothing);
-      expect(find.text('✉ Appraisal review'), findsOneWidget);
+      expect(find.text('✉ Launch date'), findsNothing);
+      expect(find.text('✉ Homepage copy'), findsOneWidget);
     });
 
     testWidgets('the close icon removes the thread from the storyline',
@@ -203,36 +203,36 @@ void main() {
       final renamed = <String>[];
       await pumpPanel(tester, onRename: renamed.add);
 
-      await tester.tap(find.text('Willow St purchase'));
+      await tester.tap(find.text('Website redesign'));
       await tester.pumpAndSettle();
       expect(find.byType(TextField), findsOneWidget);
 
-      await tester.enterText(find.byType(TextField), 'Chen refinance');
+      await tester.enterText(find.byType(TextField), 'Brightsea launch');
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pumpAndSettle();
 
-      expect(renamed, ['Chen refinance']);
+      expect(renamed, ['Brightsea launch']);
     });
 
     testWidgets('an empty rename is a cancel', (tester) async {
       final renamed = <String>[];
       await pumpPanel(tester, onRename: renamed.add);
 
-      await tester.tap(find.text('Willow St purchase'));
+      await tester.tap(find.text('Website redesign'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), '   ');
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pumpAndSettle();
 
       expect(renamed, isEmpty);
-      expect(find.text('Willow St purchase'), findsOneWidget);
+      expect(find.text('Website redesign'), findsOneWidget);
     });
 
     testWidgets('submitting the same title writes nothing', (tester) async {
       final renamed = <String>[];
       await pumpPanel(tester, onRename: renamed.add);
 
-      await tester.tap(find.text('Willow St purchase'));
+      await tester.tap(find.text('Website redesign'));
       await tester.pumpAndSettle();
       await tester.testTextInput.receiveAction(TextInputAction.done);
       await tester.pumpAndSettle();
@@ -249,13 +249,13 @@ void main() {
       await tester.tap(find.text('Why these threads?'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Both concern the Willow Street appraisal.'),
+      expect(find.text('Both concern the website redesign.'),
           findsOneWidget);
       // A thread a person filed has no model reasoning to show, and inventing
       // one would be worse than saying who did it.
       expect(find.text('You added this.'), findsOneWidget);
-      expect(find.text('Appraisal review'), findsOneWidget);
-      expect(find.text('Rate lock'), findsOneWidget);
+      expect(find.text('Homepage copy'), findsOneWidget);
+      expect(find.text('Launch date'), findsOneWidget);
     });
   });
 }

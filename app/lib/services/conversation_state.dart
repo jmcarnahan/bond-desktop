@@ -5,7 +5,7 @@
 /// Graph: everything here is exercised by unit tests that construct
 /// snapshots directly.
 ///
-/// Ported from a sibling CRM app. Its asymmetry is deliberate and is the whole point
+/// Ported from a sibling app. Its asymmetry is deliberate and is the whole point
 /// of the file — see [foldMessage].
 library;
 
@@ -60,7 +60,7 @@ const String stateDone = 'done';
 ///
 /// - an inbound message may set `needs_reply` only if the thread has no
 ///   outbound at all, or its newest outbound is STRICTLY older than this
-///   message. An inbound that arrived before the LO's reply was already
+///   message. An inbound that arrived before the user's reply was already
 ///   answered by that reply.
 /// - an outbound message may set `waiting` only if the thread has no inbound
 ///   at all, or its newest inbound is older than OR EQUAL TO this message.

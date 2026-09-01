@@ -104,13 +104,13 @@ void main() {
       onAboutMeChanged: saved.add,
     );
 
-    await tester.enterText(find.byType(TextField), 'I own rate locks.');
+    await tester.enterText(find.byType(TextField), 'I own the website redesign.');
     expect(saved, isEmpty, reason: 'not saved per keystroke');
 
     await tester.tap(find.text('Done'));
     await tester.pumpAndSettle();
 
-    expect(saved, ['I own rate locks.']);
+    expect(saved, ['I own the website redesign.']);
   });
 
   testWidgets('and saved when it is dismissed rather than confirmed',
@@ -179,13 +179,13 @@ void main() {
       onAboutMeChanged: prefs.setAboutMe,
     );
 
-    await tester.enterText(find.byType(TextField), 'I am a loan officer.');
+    await tester.enterText(find.byType(TextField), 'I run a small design studio.');
     await tester.drag(find.byType(Slider), const Offset(-500, 0));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Done'));
     await tester.pumpAndSettle();
 
-    expect(await store.getPref(aboutMeKey), 'I am a loan officer.');
+    expect(await store.getPref(aboutMeKey), 'I run a small design studio.');
     expect(double.parse((await store.getPref(attentionThresholdKey))!), 1.0);
     expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
   });

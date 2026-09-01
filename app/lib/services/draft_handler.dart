@@ -82,7 +82,7 @@ class DraftHandler extends WorkHandler {
       // A retryable failure, deliberately. An empty answer from a local model
       // is usually a one-off, and the worker's retry-once policy is exactly the
       // right response — writing the blank draft instead would put an empty
-      // composer in front of the LO as though it were a suggestion.
+      // composer in front of the user as though it were a suggestion.
       throw const LlmFormatException('The local model drafted an empty reply.');
     }
 
@@ -97,7 +97,7 @@ class DraftHandler extends WorkHandler {
     _log.note({'chars': result.replyBody.length});
   }
 
-  /// The LO's own recent replies to this sender, as writing samples.
+  /// The user's own recent replies to this sender, as writing samples.
   Future<List<String>> _styleExamplesFor(String source, String? address) async {
     if (address == null || address.isEmpty) return const [];
     final rows = await _store.recentOutboundToSender(

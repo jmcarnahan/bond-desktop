@@ -10,7 +10,7 @@ import 'dart:io';
 /// the response encoding. llama-server sends `application/json` with NO
 /// charset, which makes `http`'s `body` getter fall back to latin-1; this
 /// server reproduces that exactly, so a regression away from `bodyBytes`
-/// fails a test instead of mangling one borrower's name in production.
+/// fails a test instead of mangling one sender's name in production.
 class FakeLlamaServer {
   final HttpServer _server;
 

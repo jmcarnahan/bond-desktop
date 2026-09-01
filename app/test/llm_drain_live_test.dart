@@ -61,7 +61,7 @@ void main() {
       final queue = TriageQueue(
         store,
         LlmClient(baseUrl: LlmClient.fastBaseUrl),
-        userAddress: loAddress,
+        userAddress: userAddress,
         concurrency: concurrency,
       );
 

@@ -246,7 +246,7 @@ class SyncService implements MailSync {
         final id = message['id'] as String?;
         if (id == null || id.isEmpty) continue;
         // A draft is mail that was never sent. It has no place in a thread
-        // that is asking whether the LO replied.
+        // that is asking whether the user replied.
         if (message['isDraft'] == true) continue;
 
         final receivedAt = message['receivedDateTime'] as String?;
@@ -270,7 +270,7 @@ class SyncService implements MailSync {
         // message exactly once. Delta feeds legitimately replay messages —
         // across pages, and wholesale during the 24-hour re-drain a 410
         // forces — and folding one a second time would reopen every thread
-        // the LO had marked done. The upsert itself still runs: a replay can
+        // the user had marked done. The upsert itself still runs: a replay can
         // carry a newer read state.
         final firstSighting = !await _store.hasMessage(_source, id);
 
@@ -321,7 +321,7 @@ class SyncService implements MailSync {
           preview: preview,
         );
         // Whoever is on the other end: the sender of mail that came in, the
-        // recipients of mail that went out. Never the LO.
+        // recipients of mail that went out. Never the user.
         if (outbound) {
           for (final address in recipients) {
             entry.addParticipant(null, address);
@@ -376,7 +376,7 @@ class SyncService implements MailSync {
     required String? receivedAt,
     required String backlogCutoff,
   }) {
-    // Triage answers "does this need me?" — the LO's own sent mail never
+    // Triage answers "does this need me?" — the user's own sent mail never
     // does.
     if (outbound) return ('skipped', 'outbound');
     if (receivedAt != null &&

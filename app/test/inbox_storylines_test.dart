@@ -101,35 +101,35 @@ void main() {
 
   testWidgets('the member strip counts what the storyline holds',
       (tester) async {
-    await seedThread('c1', 'Appraisal review');
-    await seedThread('c2', 'Rate lock');
+    await seedThread('c1', 'Homepage copy');
+    await seedThread('c2', 'Launch date');
     await store.insertStoryline(
       id: 'sl-1',
-      title: 'Willow St purchase',
+      title: 'Website redesign',
       status: 'active',
       createdBy: 'auto',
     );
     await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
     await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
 
-    await openStoryline(tester, 'Willow St purchase');
+    await openStoryline(tester, 'Website redesign');
 
     expect(find.text('2 threads'), findsOneWidget);
     await settleQueues(tester);
   });
 
   testWidgets('and follows a thread joining it', (tester) async {
-    await seedThread('c1', 'Appraisal review');
-    await seedThread('c2', 'Rate lock');
+    await seedThread('c1', 'Homepage copy');
+    await seedThread('c2', 'Launch date');
     await store.insertStoryline(
       id: 'sl-1',
-      title: 'Willow St purchase',
+      title: 'Website redesign',
       status: 'active',
       createdBy: 'auto',
     );
     await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
 
-    await openStoryline(tester, 'Willow St purchase');
+    await openStoryline(tester, 'Website redesign');
     expect(find.text('1 thread'), findsOneWidget);
 
     // The strip is read through a cache. What drops it is the list load every

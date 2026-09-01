@@ -1,8 +1,9 @@
 # bond-desktop — local orchestration for the on-device model server.
 # Runs a llama.cpp OpenAI-compatible server (Qwen 3.8 27B, Q4_K_M) on
 # :8080 and drives the Dart agent in agent/ against it. Coexists with the
-# sibling stacks: a local CRM app (:8001 / :3001), bond-ai (:8000 / :8002) and
-# bond-mcps (:18000-18005). Nothing here starts or stops those.
+# sibling stacks on this machine: one on :8001 / :3001, bond-ai
+# (:8000 / :8002) and bond-mcps (:18000-18005). Nothing here starts or stops
+# those.
 
 # These comments sit ABOVE their assignment, never trailing after the value:
 # make keeps the whitespace between a value and a trailing `#`, so

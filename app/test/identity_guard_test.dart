@@ -115,9 +115,9 @@ void main() {
       'conversation_key': 'c1',
       'direction': 'inbound',
       'from_name': 'Eric Vance',
-      'from_address': 'eric@harborline.com',
+      'from_address': 'eric@example.com',
       'received_at': '2026-08-28T09:00:00Z',
-      'body_text': 'The appraisal is in.',
+      'body_text': 'The homepage copy is in.',
     });
   }
 

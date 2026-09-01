@@ -60,8 +60,8 @@ class HeldLlm extends LlmClient {
     ));
     return {
       'urgency': 'normal',
-      'category': 'borrower',
-      'summary': 'A borrower question.',
+      'category': 'work',
+      'summary': 'A client question.',
       'needs_action': true,
       'action_items': const ['Reply'],
     };
@@ -94,7 +94,7 @@ void main() {
       'from_name': 'Sarah Chen',
       'from_address': 'sarah@example.com',
       'received_at': '2026-08-29T1${id.substring(1)}:00:00Z',
-      'body_text': 'Can we extend the lock through Friday?',
+      'body_text': 'Can we still ship on Thursday?',
       'triage_status': 'pending',
     });
   }
@@ -145,8 +145,8 @@ void main() {
     fake.scriptFor('triage', [
       {
         'urgency': 'normal',
-        'category': 'borrower',
-        'summary': 'A borrower question.',
+        'category': 'work',
+        'summary': 'A client question.',
         'needs_action': true,
         'action_items': const ['Reply'],
       },

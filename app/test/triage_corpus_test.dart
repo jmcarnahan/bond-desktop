@@ -49,7 +49,7 @@ void main() {
     for (final entry in gatedCorpus) {
       test('${entry.id} is caught as ${entry.expectedGate}', () {
         expect(
-          gateFor(entry.message, userAddress: loAddress),
+          gateFor(entry.message, userAddress: userAddress),
           entry.expectedGate,
         );
       });
@@ -57,7 +57,7 @@ void main() {
 
     for (final entry in nonGatedCorpus) {
       test('${entry.id} reaches the model', () {
-        expect(gateFor(entry.message, userAddress: loAddress), isNull);
+        expect(gateFor(entry.message, userAddress: userAddress), isNull);
       });
     }
   });
@@ -91,7 +91,7 @@ void main() {
 
       // Four rounds of quoted history and a confidentiality footer, not sent.
       expect(user, isNot(contains(quotedTailMarker)));
-      expect(user, contains('sending the updated bank'));
+      expect(user, contains('sending the revised homepage copy'));
     });
   });
 

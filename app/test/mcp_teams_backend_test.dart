@@ -120,7 +120,7 @@ void main() {
             'chats': [
               {
                 'id': 'chat-1',
-                'topic': 'Harborline closing',
+                'topic': 'Website redesign',
                 'last_preview_at': '2026-08-28T11:00:00Z',
               },
               {'id': 'chat-2', 'topic': null, 'last_preview_at': null},
@@ -135,7 +135,7 @@ void main() {
       expect(chats, [
         {
           'id': 'chat-1',
-          'topic': 'Harborline closing',
+          'topic': 'Website redesign',
           'lastMessagePreview': {'createdDateTime': '2026-08-28T11:00:00Z'},
         },
         // Null, not an empty object: "nothing known" is what makes the sync

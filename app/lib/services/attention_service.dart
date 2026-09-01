@@ -26,7 +26,7 @@ class AttentionService {
   /// Rescores every open thread and re-files every thread that the rules — not
   /// a person — put where it is. Returns how many threads were scored.
   ///
-  /// Threads the LO has marked done are skipped entirely: they are not in any
+  /// Threads the user has marked done are skipped entirely: they are not in any
   /// list, so a score on them would be a number nothing reads.
   ///
   /// [now] is injected so a test can pin the recency decay; production passes
