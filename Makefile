@@ -48,7 +48,7 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed \
         embed embed-stop \
-        app-install app-run app-test app-analyze app-build
+        app-install app-run app-test app-analyze app-build bench
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -68,6 +68,7 @@ help:
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
 	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
+	@printf "  make bench        → live model benchmark (needs make model up)\n"
 	@printf "  make app-build    → release build of the macOS app\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
@@ -363,6 +364,15 @@ app-run:
 
 app-test:
 	@cd $(APP_DIR) && $(FLUTTER) test
+
+# Live, not a gate: replays the fixture corpus through the real task prompts
+# against the llama-server on :$(MODEL_PORT) and prints a latency table. The
+# test file is @Skip'd so `make app-test` never depends on a server being up;
+# --run-skipped is what actually runs it here.
+bench:
+	@curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health || { \
+	   printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_bench_live_test.dart --run-skipped
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze

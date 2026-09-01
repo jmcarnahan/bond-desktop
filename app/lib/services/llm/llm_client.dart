@@ -71,6 +71,9 @@ class LlmClient {
   final String baseUrl;
   final http.Client _http;
 
+  /// Fires with the tripwire below, so a test can catch a thinking regression.
+  void Function()? onReasoningLeak;
+
   LlmClient({String? baseUrl, http.Client? httpClient})
       : baseUrl = baseUrl ?? defaultBaseUrl,
         _http = httpClient ?? http.Client();
@@ -250,6 +253,7 @@ class LlmClient {
         debugPrint(
           'LlmClient: enable_thinking was ignored — triage will be ~2x slower',
         );
+        onReasoningLeak?.call();
       }
     }
 
