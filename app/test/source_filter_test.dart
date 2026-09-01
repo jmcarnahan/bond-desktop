@@ -239,6 +239,9 @@ void main() {
         onRemoveThread: (_, _) {},
         onOpenThread: (_, _) {},
         onAddThread: () {},
+        newestFirst: false,
+        onToggleSort: () {},
+        onDismiss: () {},
       )));
 
       // Both marked here, mail included: a storyline holds threads and chats,

@@ -114,6 +114,9 @@ void main() {
     void Function(String source, String key)? onOpenThread,
     VoidCallback? onBack,
     VoidCallback? onAddThread,
+    bool newestFirst = false,
+    VoidCallback? onToggleSort,
+    VoidCallback? onDismiss,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -129,6 +132,9 @@ void main() {
           onRemoveThread: onRemoveThread ?? (_, _) {},
           onOpenThread: onOpenThread ?? (_, _) {},
           onAddThread: onAddThread ?? () {},
+          newestFirst: newestFirst,
+          onToggleSort: onToggleSort ?? () {},
+          onDismiss: onDismiss ?? () {},
         ),
       ),
     ));
@@ -170,6 +176,40 @@ void main() {
         tester.getTopLeft(homepageCard).dy,
         lessThan(tester.getTopLeft(launchCard).dy),
       );
+    });
+
+    testWidgets('newest first flips the spine, not the default expansion',
+        (tester) async {
+      await pumpPanel(tester, newestFirst: true);
+
+      final homepageCard = find.text('✉ Homepage copy');
+      final launchCard = find.text('✉ Launch date');
+      expect(
+        tester.getTopLeft(launchCard).dy,
+        lessThan(tester.getTopLeft(homepageCard).dy),
+      );
+      // The preference is a reading direction and nothing more: the newest
+      // thread is still the one the reader lands in, now at the top.
+      expect(_renderedIds(tester), ['m2']);
+    });
+
+    testWidgets('the sort button names the current order and reports a toggle',
+        (tester) async {
+      var toggled = 0;
+      await pumpPanel(tester, onToggleSort: () => toggled++);
+
+      expect(find.text('Oldest first'), findsOneWidget);
+      expect(find.text('Newest first'), findsNothing);
+
+      await tester.tap(find.text('Oldest first'));
+      await tester.pumpAndSettle();
+
+      // The host owns the preference, so the label only follows a rebuild
+      // with the new value.
+      expect(toggled, 1);
+
+      await pumpPanel(tester, newestFirst: true);
+      expect(find.text('Newest first'), findsOneWidget);
     });
 
     testWidgets('the newest episode is the one that opens', (tester) async {
@@ -291,6 +331,44 @@ void main() {
       await tester.tap(find.byTooltip('Remove from storyline').first);
 
       expect(removed, ['email/c1']);
+    });
+  });
+
+  group('dismiss', () {
+    testWidgets('asks before it retires anything, and takes no for an answer',
+        (tester) async {
+      var dismissed = 0;
+      await pumpPanel(tester, onDismiss: () => dismissed++);
+
+      await tester.tap(find.text('Dismiss'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Dismiss storyline'), findsOneWidget);
+      expect(find.text('Cancel'), findsOneWidget);
+      expect(dismissed, 0);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Dismiss'), findsOneWidget);
+      expect(find.text('Dismiss storyline'), findsNothing);
+      expect(dismissed, 0);
+      expect(find.byType(AlertDialog), findsNothing);
+    });
+
+    testWidgets('the second tap is what retires it', (tester) async {
+      var dismissed = 0;
+      await pumpPanel(tester, onDismiss: () => dismissed++);
+
+      await tester.tap(find.text('Dismiss'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Dismiss storyline'));
+      await tester.pumpAndSettle();
+
+      expect(dismissed, 1);
+      // The confirmation is a pair of buttons in the header, not a popup over
+      // it — the same rule the rest of this panel follows.
+      expect(find.byType(AlertDialog), findsNothing);
     });
   });
 

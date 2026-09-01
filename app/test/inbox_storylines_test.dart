@@ -227,6 +227,31 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('Dismiss on the panel retires a kept storyline', (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await store.insertStoryline(
+      id: 'sl-1',
+      title: 'Website redesign',
+      status: 'active',
+      createdBy: 'auto',
+    );
+    await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+    await openStoryline(tester, 'Website redesign');
+
+    // A kept storyline could only be dismissed while it was still a suggestion
+    // in the rail. The panel is where a user is when they decide it is done.
+    await tester.tap(find.text('Dismiss'));
+    await tester.pump();
+    await tester.tap(find.text('Dismiss storyline'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(StorylineTimelinePanel), findsNothing);
+    expect((await store.getStoryline('sl-1'))!.status, 'dismissed');
+    await settleQueues(tester);
+  });
+
   testWidgets('Open thread on a card opens it, whatever the source filter says',
       (tester) async {
     // One key, two connectors — which is legal, since a conversation key is

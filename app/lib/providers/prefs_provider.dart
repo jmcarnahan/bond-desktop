@@ -69,12 +69,19 @@ class AppPrefs {
   /// mail.
   final bool showActivityLog;
 
+  /// Which end of a storyline its spine starts at. Off — oldest first — is how
+  /// a storyline reads as a story. Global rather than per storyline because
+  /// reading direction is a habit a person has, not a fact about one grouping:
+  /// someone who wants the latest at the top wants it everywhere.
+  final bool storylineNewestFirst;
+
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
     this.backendMode = backendModeMcp,
     this.mcpServerUrl = defaultMcpServerUrl,
     this.showActivityLog = false,
+    this.storylineNewestFirst = false,
   });
 
   AppPrefs copyWith({
@@ -83,6 +90,7 @@ class AppPrefs {
     String? backendMode,
     String? mcpServerUrl,
     bool? showActivityLog,
+    bool? storylineNewestFirst,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -90,6 +98,8 @@ class AppPrefs {
         backendMode: backendMode ?? this.backendMode,
         mcpServerUrl: mcpServerUrl ?? this.mcpServerUrl,
         showActivityLog: showActivityLog ?? this.showActivityLog,
+        storylineNewestFirst:
+            storylineNewestFirst ?? this.storylineNewestFirst,
       );
 }
 
@@ -102,6 +112,7 @@ const String attentionThresholdKey = 'attention_threshold';
 const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
+const String storylineNewestFirstKey = 'storyline_newest_first';
 
 class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   final MessageStore _store;
@@ -143,6 +154,8 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       // Anything that is not the string this notifier writes reads as off,
       // an absent key included — which is the state every install starts in.
       showActivityLog: await store.getPref(showActivityLogKey) == 'true',
+      storylineNewestFirst:
+          await store.getPref(storylineNewestFirstKey) == 'true',
     );
   }
 
@@ -198,6 +211,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setShowActivityLog(bool value) async {
     state = state.copyWith(showActivityLog: value);
     await _store.setPref(showActivityLogKey, value.toString());
+  }
+
+  Future<void> setStorylineNewestFirst(bool value) async {
+    state = state.copyWith(storylineNewestFirst: value);
+    await _store.setPref(storylineNewestFirstKey, value.toString());
   }
 }
 

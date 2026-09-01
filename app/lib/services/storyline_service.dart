@@ -567,7 +567,8 @@ class StorylineService {
   Future<void> keepSuggestion(String id) =>
       _store.updateStoryline(id, status: 'active');
 
-  /// Dismisses a suggestion. The member rows stay: they are what
+  /// Retires a storyline — a suggestion the user never wanted, or a kept one
+  /// they are done with. The member rows stay either way: they are what
   /// `member_hash` was computed over, and deleting them would leave the app
   /// unable to recognise the same cluster when the very next sweep rebuilds
   /// it.

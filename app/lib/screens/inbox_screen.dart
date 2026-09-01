@@ -1039,6 +1039,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     };
 
     final notifier = ref.read(storylinesProvider.notifier);
+    final newestFirst =
+        ref.watch(appPrefsProvider.select((p) => p.storylineNewestFirst));
     final panel = StorylineTimelinePanel(
       key: ValueKey(storyline.id),
       storyline: storyline,
@@ -1059,6 +1061,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenThread: (source, key) => _select(key, source: source),
       onAddThread: () =>
           setState(() => _addingToStorylineId = storyline.id),
+      newestFirst: newestFirst,
+      onToggleSort: () => unawaited(ref
+          .read(appPrefsProvider.notifier)
+          .setStorylineNewestFirst(!newestFirst)),
+      onDismiss: () {
+        // Same order as the rail's dismissal: the storyline leaves the list,
+        // so the selection pointing at it goes first and the pane is back on
+        // the overview in the frame the row disappears.
+        setState(() {
+          _selectedStorylineId = null;
+          _addingToStorylineId = null;
+        });
+        unawaited(notifier.dismiss(storyline.id));
+      },
     );
 
     // Chats are not reply targets — see [_replyElsewhere] for why. A storyline

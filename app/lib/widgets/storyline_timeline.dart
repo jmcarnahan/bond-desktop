@@ -17,7 +17,9 @@ import 'time_format.dart';
 class StorylineTimelinePanel extends StatefulWidget {
   final Storyline storyline;
 
-  /// One card each, in the order they are given — oldest activity first.
+  /// One card each, oldest activity first. That is the canonical order — what
+  /// opens by default and what a member's label is read from — but the spine
+  /// may be displayed reversed, per [newestFirst].
   final List<StorylineEpisode> episodes;
 
   final List<StorylineMember> members;
@@ -39,6 +41,16 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// menu: the choice is a whole mailbox long.
   final VoidCallback onAddThread;
 
+  /// Displays the spine newest card first. Only the rendering order changes:
+  /// the newest episode is still the one that opens on its own.
+  final bool newestFirst;
+
+  final VoidCallback onToggleSort;
+
+  /// Retires the storyline. The host decides what that leaves on screen — this
+  /// panel is one of the things it takes away.
+  final VoidCallback onDismiss;
+
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -50,6 +62,9 @@ class StorylineTimelinePanel extends StatefulWidget {
     required this.onRemoveThread,
     required this.onOpenThread,
     required this.onAddThread,
+    required this.newestFirst,
+    required this.onToggleSort,
+    required this.onDismiss,
   });
 
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
@@ -74,6 +89,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   bool _showAbout = false;
   bool _editingTitle = false;
   bool _editingCharter = false;
+  bool _confirmingDismiss = false;
 
   late final TextEditingController _title =
       TextEditingController(text: widget.storyline.title);
@@ -132,6 +148,12 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
 
   @override
   Widget build(BuildContext context) {
+    // The only place the preference is applied. Everything else in here reads
+    // `widget.episodes`, which stays oldest first whatever is on screen.
+    final displayed = widget.newestFirst
+        ? widget.episodes.reversed.toList()
+        : widget.episodes;
+
     return Container(
       decoration: BoxDecoration(
         color: BondColors.surface,
@@ -166,7 +188,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                           BondSpacing.s24,
                         ),
                         children: [
-                          for (final episode in widget.episodes)
+                          for (final episode in displayed)
                             _episodeCard(episode),
                         ],
                       ),
@@ -413,6 +435,29 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                     ),
                     const SizedBox(width: BondSpacing.s4),
                     _quietButton('Add thread', widget.onAddThread),
+                    const SizedBox(width: BondSpacing.s4),
+                    // The label names the order the spine is in; tapping it
+                    // flips to the other one.
+                    _quietButton(
+                      widget.newestFirst ? 'Newest first' : 'Oldest first',
+                      widget.onToggleSort,
+                    ),
+                    const SizedBox(width: BondSpacing.s4),
+                    // The two-step stands where a confirm dialog would: the
+                    // first tap asks, the second retires the storyline.
+                    if (!_confirmingDismiss)
+                      _quietButton(
+                        'Dismiss',
+                        () => setState(() => _confirmingDismiss = true),
+                      )
+                    else ...[
+                      _quietButton('Dismiss storyline', widget.onDismiss),
+                      const SizedBox(width: BondSpacing.s4),
+                      _quietButton(
+                        'Cancel',
+                        () => setState(() => _confirmingDismiss = false),
+                      ),
+                    ],
                   ],
                 ),
               ],
