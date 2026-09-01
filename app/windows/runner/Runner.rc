@@ -89,11 +89,11 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.southbayequity" "\0"
+            VALUE "CompanyName", "com.bondinbox" "\0"
             VALUE "FileDescription", "bond_inbox" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "bond_inbox" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.southbayequity. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.bondinbox. All rights reserved." "\0"
             VALUE "OriginalFilename", "bond_inbox.exe" "\0"
             VALUE "ProductName", "bond_inbox" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"

@@ -8,7 +8,7 @@
 PRODUCT_NAME = bond_inbox
 
 // The application's bundle identifier
-PRODUCT_BUNDLE_IDENTIFIER = com.southbayequity.bondInbox
+PRODUCT_BUNDLE_IDENTIFIER = com.bondinbox.app
 
 // The copyright displayed in application information
-PRODUCT_COPYRIGHT = Copyright © 2026 com.southbayequity. All rights reserved.
+PRODUCT_COPYRIGHT = Copyright © 2026 com.bondinbox. All rights reserved.
