@@ -82,6 +82,26 @@ class ActivityLog {
   /// than folded into a stranger's row.
   static const Duration _staleAfter = Duration(minutes: 10);
 
+  /// The kinds that run on a schedule rather than because something happened,
+  /// and so are the only ones a "did nothing" outcome is unremarkable for. A
+  /// triage or a draft that did nothing is news; a poll that did nothing is
+  /// the normal state of an inbox.
+  static const Set<String> _quietKinds = {
+    'sync_mail',
+    'sync_teams',
+    'storyline',
+    'storyline_sweep',
+  };
+
+  /// Where each pass's completion time is stamped. `storyline` is absent on
+  /// purpose: it is per-thread work, so "when did it last run" is a fact about
+  /// whichever thread happened to be extracted, not about the mailbox.
+  static const Map<String, String> _lastRunPrefKeys = {
+    'sync_mail': activityLastSyncMailKey,
+    'sync_teams': activityLastSyncTeamsKey,
+    'storyline_sweep': activityLastSweepKey,
+  };
+
   final MessageStore? _store;
   final StreamController<ActivityEvent>? _events;
 
@@ -147,6 +167,21 @@ class ActivityLog {
 
   /// Appends one event, folding in and clearing whatever [note]/[noteLlmCall]
   /// accumulated since the last record.
+  ///
+  /// Except when the event is QUIET — a sync or a storyline pass that finished
+  /// `ok` having done nothing at all ([_isQuiet]). Those are most of them: the
+  /// mail poll runs on a timer whether or not the mailbox moved, and a panel
+  /// whose every screen is "Mail sync — nothing new" hides the handful of rows
+  /// a person opened it to read. A quiet pass writes no row.
+  ///
+  /// Quiet is not the same as unrecorded, and the two things a suppressed pass
+  /// still owes the reader are both delivered here. The timestamp goes to the
+  /// pref ([_lastRunPrefKeys]) that the panel's "last sync" tile reads, so the
+  /// pass is still visible as freshness rather than as a row. And a TRANSIENT
+  /// event — `id: -1`, never stored, never re-readable — goes to the stream, so
+  /// an open panel rebuilds and those relative times keep moving. Roughly once
+  /// a minute, which is what makes the tile trustworthy: a stalled clock on a
+  /// live panel would read as a stalled sync.
   void record(
     String kind, {
     String status = 'ok',
@@ -160,6 +195,29 @@ class ActivityLog {
     if (store == null) return;
     try {
       final merged = <String, Object?>{..._drainPending(), ...detail};
+
+      final prefKey = _lastRunPrefKeys[kind];
+      if (prefKey != null && status == 'ok') {
+        store.setPref(prefKey, DateTime.now().toUtc().toIso8601String());
+      }
+
+      if (_isQuiet(kind, status, count, merged)) {
+        final events = _events;
+        if (events != null && !events.isClosed) {
+          events.add(ActivityEvent(
+            id: -1,
+            kind: kind,
+            status: status,
+            createdAt: DateTime.now().toUtc().toIso8601String(),
+            source: source,
+            count: count,
+            durationMs: durationMs,
+            detail: merged,
+          ));
+        }
+        return;
+      }
+
       final json = merged.isEmpty ? null : jsonEncode(merged);
       store.recordActivity(
         kind: kind,
@@ -183,6 +241,26 @@ class ActivityLog {
 
   void dispose() {
     _events?.close();
+  }
+
+  /// Whether this event is a scheduled pass that came back empty-handed.
+  ///
+  /// The detail test is the careful half, and it is deliberately conservative:
+  /// a pass is quiet only when EVERY value it carries is a number equal to
+  /// zero. Anything else — a `resync: true`, a model tally, a storyline's
+  /// noted `assigned` — is something that happened, and the row survives to
+  /// say so. Erring this way costs an occasional dull row; erring the other
+  /// way would silently swallow the row that explained a slow morning.
+  static bool _isQuiet(
+    String kind,
+    String status,
+    int? count,
+    Map<String, Object?> detail,
+  ) {
+    if (!_quietKinds.contains(kind)) return false;
+    if (status != 'ok') return false;
+    if ((count ?? 0) != 0) return false;
+    return detail.values.every((value) => value is num && value == 0);
   }
 
   void _touchPending() {

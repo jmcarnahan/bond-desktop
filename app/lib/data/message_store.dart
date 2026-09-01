@@ -22,6 +22,19 @@ const String dbOwnerKey = 'db_owner';
 /// the setting normally.
 const String aboutMeKey = 'about_me';
 
+/// When each background pass last completed, ISO-8601 UTC.
+///
+/// They live in `app_prefs` rather than being derived from `activity_events`
+/// because the events they describe are the ones that DO NOT get written: a
+/// sync that brought nothing in records no row (see `ActivityLog.record`), and
+/// "nothing has arrived for three hours" is exactly the fact the activity panel
+/// has to be able to state. Written on every `ok` pass, suppressed or not, and
+/// wiped by [MessageStore.wipeAll] along with everything else about this
+/// mailbox — a fresh identity has not synced yet.
+const String activityLastSyncMailKey = 'activity_last_sync_mail';
+const String activityLastSyncTeamsKey = 'activity_last_sync_teams';
+const String activityLastSweepKey = 'activity_last_sweep';
+
 /// Every SQL statement in the app except the schema itself lives here. Screens
 /// and providers call methods; they never build a query.
 ///

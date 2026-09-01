@@ -259,14 +259,20 @@ void main() {
       expect(row.detail['queued_extract'], isA<int>());
     });
 
-    test('a replayed message is not counted twice', () async {
+    test('a replayed message is not counted twice, and writes no row at all',
+        () async {
       final mail = FakeMail(messages: [graphMessage('m1'), graphMessage('m2')]);
       final sync = SyncService(mail, store, activityLog: log);
 
       await sync.syncNow();
       await sync.syncNow();
 
-      expect([for (final row in rows('sync_mail')) row.count], [0, 2]);
+      // The replay ingested nothing, so it is suppressed rather than logged as
+      // a second row — a poll that runs on a timer would otherwise fill the
+      // panel with its own heartbeat.
+      expect([for (final row in rows('sync_mail')) row.count], [2]);
+      // It still happened, and the pref is where that is recorded.
+      expect(store.getPref(activityLastSyncMailKey), isNotNull);
     });
 
     test('a failing backend writes an error row AND still throws', () async {
@@ -305,17 +311,15 @@ void main() {
       expect(teams.calls, 0);
     });
 
-    test('an empty chat list still records the walk', () async {
+    test('an empty chat list is recorded as freshness, not as a row', () async {
       final teams = FakeTeams();
 
       await TeamsSync(teams, store, activityLog: log).syncNow();
 
-      final row = rows('sync_teams').single;
-      expect(row.status, 'ok');
-      expect(row.count, 0);
-      expect(row.detail['chats_seen'], 0);
-      expect(row.detail['chats_fetched'], 0);
-      expect(row.durationMs, isNotNull);
+      // No chats, no messages, nothing queued: there is nothing here a reader
+      // would learn from, and the walk is reported by the timestamp instead.
+      expect(rows('sync_teams'), isEmpty);
+      expect(store.getPref(activityLastSyncTeamsKey), isNotNull);
     });
 
     test('the count is messages seen for the first time, not messages read',

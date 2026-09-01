@@ -15,9 +15,21 @@ import 'time_format.dart';
 /// sentence, with the states that are not failures — parks, skips — rendered as
 /// states rather than as red.
 ///
+/// A table rather than a list of cards, because the question a person brings to
+/// this screen is comparative — "is triage always this slow?", "when did that
+/// start failing?" — and comparison needs columns that line up. The cost is
+/// that a row can only hold what fits on one line, which is what the
+/// tap-to-expand block underneath is for: everything the row had to elide,
+/// including the raw detail map, in place rather than in a dialog.
+///
+/// Liveness is the tiles' job. Rows are only written when something actually
+/// happened (see `ActivityLog.record`), so an empty table is the normal state
+/// of a working app, and the "last sync" tiles are what separate that from a
+/// sync that has not run since Tuesday.
+///
 /// Dumb by construction, like the Later digest: stats and rows in, nothing read
 /// from a provider, and [now] injected so a widget test pins the clock.
-class ActivityLogPanel extends StatelessWidget {
+class ActivityLogPanel extends StatefulWidget {
   /// The header numbers, aggregated over whatever window the caller chose.
   final ActivityStats stats;
 
@@ -27,11 +39,29 @@ class ActivityLogPanel extends StatelessWidget {
 
   final DateTime now;
 
+  /// When each scheduled pass last finished, ISO-8601. Read from the prefs the
+  /// recorder stamps rather than from [events], because the passes these
+  /// describe are usually the ones that wrote no row at all. Null renders as a
+  /// dash — never run, or never recorded.
+  final String? lastMailSyncIso;
+  final String? lastTeamsSyncIso;
+  final String? lastSweepIso;
+
+  /// What an event was ABOUT, in words — a subject line. Resolving it needs the
+  /// store, which this widget deliberately cannot reach, so the lookup is
+  /// passed in. Returning null is ordinary and not an error: plenty of events
+  /// point at rows that are not conversations or no longer exist.
+  final String? Function(ActivityEvent event)? entityLabel;
+
   const ActivityLogPanel({
     super.key,
     required this.stats,
     required this.events,
     required this.now,
+    this.lastMailSyncIso,
+    this.lastTeamsSyncIso,
+    this.lastSweepIso,
+    this.entityLabel,
   });
 
   /// How each kind is named to a person. The panel and [describe] read the
@@ -160,8 +190,52 @@ class ActivityLogPanel extends StatelessWidget {
     return '${seconds ~/ 60}m${(seconds % 60).toString().padLeft(2, '0')}s';
   }
 
+  /// How fast the model generated, in tokens per second, or null when this
+  /// event cannot say.
+  ///
+  /// COMPLETION tokens over model time, not total tokens over wall time: the
+  /// prompt is processed at a wholly different rate from the answer, and wall
+  /// time includes the store writes around the call. This is the number that
+  /// moves when a different model is loaded or the machine is thermally
+  /// throttled, which is the only reason to show it.
+  static double? speedOf(Map<String, Object?> detail) {
+    final tokens = detail['completion_tokens'];
+    final ms = detail['llm_ms'];
+    if (tokens is! num || ms is! num) return null;
+    if (tokens <= 0 || ms <= 0) return null;
+    return tokens / (ms / 1000);
+  }
+
+  /// Tokens per second at the precision the number deserves: a decimal below
+  /// ten, where the difference between 5.5 and 6 is the difference between
+  /// usable and not, and none above it, where it is noise in a column.
+  static String formatSpeed(double tps) {
+    final value = tps >= 10 ? tps.toStringAsFixed(0) : tps.toStringAsFixed(1);
+    return '$value t/s';
+  }
+
+  @override
+  State<ActivityLogPanel> createState() => _ActivityLogPanelState();
+}
+
+class _ActivityLogPanelState extends State<ActivityLogPanel> {
+  /// The event ids whose detail block is open. Ids rather than indices, so a
+  /// tick that prepends a new row does not slide an expansion onto its
+  /// neighbour.
+  final Set<int> _expanded = {};
+
+  /// The column grid, shared by the header and every row — the whole reason
+  /// this reads as a table and not as a list. The status dot has no header of
+  /// its own; its width is reserved above so Type starts in the same place.
+  static const double _statusWidth = 20;
+  static const double _typeWidth = 56;
+  static const double _speedWidth = 64;
+  static const double _whenWidth = 76;
+  static const double _tookWidth = 64;
+
   @override
   Widget build(BuildContext context) {
+    final events = widget.events;
     return ListView(
       padding: const EdgeInsets.only(bottom: BondSpacing.s24),
       children: [
@@ -175,19 +249,27 @@ class ActivityLogPanel extends StatelessWidget {
               textAlign: TextAlign.center,
             ),
           )
-        else
+        else ...[
+          _columnHeader(),
           for (final (dayKey, rows) in _grouped()) ...[
             _dayHeader(dayKey),
-            for (final event in rows) _row(event),
+            for (final event in rows) _entry(event),
           ],
+        ],
       ],
     );
   }
 
-  /// The headline numbers. A [Wrap] rather than a Row: six tiles do not fit
+  /// The headline numbers. A [Wrap] rather than a Row: the tiles do not fit
   /// the narrow layout's main pane, and a tile that has wrapped still reads
   /// correctly while a squeezed one does not.
+  ///
+  /// The counts describe the window the caller aggregated over; the three
+  /// "last" tiles describe right now. Together they answer the two different
+  /// questions people arrive with — "is it working?" and "is it working
+  /// *currently*?" — which no single number can.
   Widget _tiles() {
+    final stats = widget.stats;
     final avg = stats.avgMsByKind;
     return Padding(
       padding: const EdgeInsets.only(bottom: BondSpacing.s8),
@@ -207,12 +289,41 @@ class ActivityLogPanel extends StatelessWidget {
           ),
           _tile(_avg(avg['triage']), 'Avg triage'),
           _tile(_avg(avg['extract']), 'Avg extract'),
+          _tile(_genSpeed(), 'Gen speed'),
+          _tile(_ago(widget.lastMailSyncIso), 'Last sync'),
+          // Only when Teams has actually run: a permanent dash beside a live
+          // mail tile reads as a broken connector rather than an absent one.
+          if (widget.lastTeamsSyncIso != null)
+            _tile(_ago(widget.lastTeamsSyncIso), 'Last teams sync'),
+          _tile(_ago(widget.lastSweepIso), 'Last sweep'),
         ],
       ),
     );
   }
 
-  static String _avg(int? ms) => ms == null ? '—' : formatDuration(ms);
+  static String _avg(int? ms) =>
+      ms == null ? '—' : ActivityLogPanel.formatDuration(ms);
+
+  String _ago(String? iso) => relativeTime(iso, widget.now) ?? '—';
+
+  /// Generation speed across the whole window, weighted by time rather than
+  /// averaged per row: a hundred one-token retries and one long answer are not
+  /// two data points of equal worth. Summing both sides and dividing once gives
+  /// the rate the machine actually sustained.
+  String _genSpeed() {
+    var tokens = 0.0;
+    var ms = 0.0;
+    for (final event in widget.events) {
+      final eventTokens = event.detail['completion_tokens'];
+      final eventMs = event.detail['llm_ms'];
+      if (eventTokens is! num || eventMs is! num) continue;
+      if (eventTokens <= 0 || eventMs <= 0) continue;
+      tokens += eventTokens.toDouble();
+      ms += eventMs.toDouble();
+    }
+    if (ms <= 0) return '—';
+    return ActivityLogPanel.formatSpeed(tokens * 1000 / ms);
+  }
 
   Widget _tile(String value, String label, {Color? valueColor}) {
     return Container(
@@ -248,7 +359,7 @@ class ActivityLogPanel extends StatelessWidget {
   /// the order they were handed over.
   List<(String, List<ActivityEvent>)> _grouped() {
     final days = <String, List<ActivityEvent>>{};
-    for (final event in events) {
+    for (final event in widget.events) {
       final dayKey = dayKeyOfIso(event.createdAt) ?? '';
       (days[dayKey] ??= <ActivityEvent>[]).add(event);
     }
@@ -270,91 +381,141 @@ class ActivityLogPanel extends StatelessWidget {
     );
   }
 
-  /// One event: what it was, what happened, when, and how long it took.
+  /// Names the columns once, above every day. Built from the same widths as
+  /// the rows rather than through a shared layout widget, because the header is
+  /// the one place where a wrong grid is visible immediately.
+  Widget _columnHeader() {
+    Widget cell(String text, double width, {TextAlign? align}) => SizedBox(
+          width: width,
+          child: Text(text, style: BondType.label, textAlign: align),
+        );
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s4,
+        BondSpacing.s8,
+        BondSpacing.s4,
+        0,
+      ),
+      child: Row(
+        children: [
+          const SizedBox(width: _statusWidth),
+          const SizedBox(width: BondSpacing.s8),
+          cell('Type', _typeWidth),
+          const SizedBox(width: BondSpacing.s8),
+          Expanded(child: Text('Activity', style: BondType.label)),
+          const SizedBox(width: BondSpacing.s8),
+          cell('t/s', _speedWidth, align: TextAlign.right),
+          const SizedBox(width: BondSpacing.s8),
+          cell('When', _whenWidth, align: TextAlign.right),
+          const SizedBox(width: BondSpacing.s8),
+          cell('Took', _tookWidth, align: TextAlign.right),
+        ],
+      ),
+    );
+  }
+
+  /// One event's row, plus its detail block when that row is open.
+  Widget _entry(ActivityEvent event) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _row(event),
+        if (_expanded.contains(event.id)) _detail(event),
+      ],
+    );
+  }
+
+  /// One event: what it was, what happened, how fast the model ran, when, and
+  /// how long it took.
   ///
-  /// The kind is its own column so a reader scanning for "what did triage do"
-  /// has a left edge to run down — and the sentence beside it drops the kind
-  /// [describe] opens with, because "Mail sync · Mail sync — 4 new" is the same
-  /// words twice. Whole word only: "Storyline" must not eat the "s" off
-  /// "Storylines updated".
+  /// One line, always, at the price of eliding the sentence — the tap that
+  /// opens [_detail] is what gets the whole of it back. Every card affordance
+  /// the old rows had is gone: at this density a border per row is a grid of
+  /// boxes rather than a table, so a single hairline underneath carries the
+  /// separation instead.
   Widget _row(ActivityEvent event) {
-    final label = _label(event.kind);
-    final sentence = describe(event);
-    final tail = switch (sentence) {
-      _ when sentence == label => '',
-      _ when sentence.startsWith('$label — ') =>
-        sentence.substring(label.length + 3),
-      _ when sentence.startsWith('$label ') =>
-        sentence.substring(label.length + 1),
-      _ => sentence,
-    };
-    final ago = relativeTime(event.createdAt, now);
     final durationMs = event.durationMs;
+    final speed = ActivityLogPanel.speedOf(event.detail);
+    final mono = BondType.mono.copyWith(
+      fontSize: 12,
+      height: 16 / 12,
+      color: BondColors.inkSecondary,
+    );
 
     return Material(
-      color: BondColors.surface,
-      borderRadius: BondRadii.mdAll,
+      color: Colors.transparent,
       child: InkWell(
-        onTap: null,
-        borderRadius: BondRadii.mdAll,
+        onTap: () => setState(() {
+          if (!_expanded.remove(event.id)) _expanded.add(event.id);
+        }),
         child: Container(
-          margin: const EdgeInsets.only(bottom: BondSpacing.s4),
           padding: const EdgeInsets.symmetric(
-            horizontal: BondSpacing.s12,
-            vertical: BondSpacing.s8,
+            horizontal: BondSpacing.s4,
+            vertical: BondSpacing.s4,
           ),
-          decoration: BoxDecoration(
-            borderRadius: BondRadii.mdAll,
-            border: Border.all(color: BondColors.border),
+          decoration: const BoxDecoration(
+            border: Border(bottom: BorderSide(color: BondColors.border)),
           ),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Padding(
-                padding: const EdgeInsets.only(top: BondSpacing.s4),
-                child: _dot(event.status),
-              ),
-              const SizedBox(width: BondSpacing.s8),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      label,
-                      style: BondType.small.copyWith(
-                        color: BondColors.ink,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (tail.isNotEmpty)
-                      Text(
-                        tail,
-                        style: BondType.small,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                  ],
+              SizedBox(
+                width: _statusWidth,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _dot(event.status),
                 ),
               ),
               const SizedBox(width: BondSpacing.s8),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (ago != null) Text(ago, style: BondType.caption),
-                  if (durationMs != null)
-                    Text(
-                      formatDuration(durationMs),
-                      style: BondType.mono.copyWith(
-                        fontSize: 12,
-                        height: 16 / 12,
-                        color: BondColors.inkSecondary,
+              SizedBox(
+                width: _typeWidth,
+                child: Text(
+                  _sourceLabel(event.source),
+                  style: BondType.small,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: BondSpacing.s8),
+              Expanded(
+                child: Text(
+                  ActivityLogPanel.describe(event),
+                  style: BondType.small.copyWith(color: BondColors.ink),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: BondSpacing.s8),
+              SizedBox(
+                width: _speedWidth,
+                child: speed == null
+                    ? const SizedBox.shrink()
+                    : Text(
+                        ActivityLogPanel.formatSpeed(speed),
+                        style: mono,
+                        textAlign: TextAlign.right,
                       ),
-                    ),
-                ],
+              ),
+              const SizedBox(width: BondSpacing.s8),
+              SizedBox(
+                width: _whenWidth,
+                child: Text(
+                  relativeTime(event.createdAt, widget.now) ?? '',
+                  style: BondType.caption,
+                  textAlign: TextAlign.right,
+                ),
+              ),
+              const SizedBox(width: BondSpacing.s8),
+              SizedBox(
+                width: _tookWidth,
+                child: Text(
+                  durationMs == null
+                      ? ''
+                      : ActivityLogPanel.formatDuration(durationMs),
+                  style: mono,
+                  textAlign: TextAlign.right,
+                ),
               ),
             ],
           ),
@@ -362,6 +523,67 @@ class ActivityLogPanel extends StatelessWidget {
       ),
     );
   }
+
+  /// Which connector the event came from. `App` rather than a blank for the
+  /// passes that belong to no source — a blank cell in a table reads as
+  /// missing data, and "the app did this by itself" is not missing.
+  static String _sourceLabel(String? source) => switch (source) {
+        'email' => 'Mail',
+        'teams' => 'Teams',
+        _ => 'App',
+      };
+
+  /// Everything the row had to leave out, in place.
+  ///
+  /// Inline rather than a dialog on purpose: a person reading this table is
+  /// comparing rows, and a modal takes the comparison away to show one of
+  /// them. The raw detail map is rendered whole and unfiltered — this is the
+  /// bottom of the panel, and a key nobody has taught it to name is exactly
+  /// what someone digging is here for.
+  Widget _detail(ActivityEvent event) {
+    final label = widget.entityLabel?.call(event);
+    final entityId = event.entityId;
+    final speed = ActivityLogPanel.speedOf(event.detail);
+    final keys = event.detail.keys.toList()..sort();
+    final mono = BondType.mono.copyWith(
+      fontSize: 12,
+      height: 16 / 12,
+      color: BondColors.inkSecondary,
+    );
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: BondSpacing.s4),
+      padding: const EdgeInsets.all(BondSpacing.s12),
+      decoration: const BoxDecoration(
+        color: BondColors.faintGround,
+        borderRadius: BondRadii.mdAll,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(ActivityLogPanel.describe(event), style: BondType.small),
+          if (label != null && label.isNotEmpty)
+            Text(
+              label,
+              style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+            ),
+          if (entityId != null && entityId.isNotEmpty)
+            Text(entityId, style: mono),
+          for (final key in keys)
+            Text('$key: ${_value(event.detail[key])}', style: mono),
+          if (speed != null)
+            Text('speed: ${ActivityLogPanel.formatSpeed(speed)}', style: mono),
+        ],
+      ),
+    );
+  }
+
+  /// A detail value as one line. Lists are joined rather than shown as their
+  /// Dart literal: `[rate lock, appraisal]` is a topic list a person can read,
+  /// and the brackets are the only part of it that came from the language.
+  static String _value(Object? value) =>
+      value is List ? value.join(', ') : '$value';
 
   /// The status, as the smallest mark that can carry it.
   ///

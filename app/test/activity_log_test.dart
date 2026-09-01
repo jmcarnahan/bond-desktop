@@ -77,7 +77,10 @@ void main() {
     });
 
     test('defaults to ok and writes no detail when there is none', () {
-      log.record('sync_mail');
+      // A kind the suppression rule does not touch: an empty `sync_mail` is
+      // exactly what that rule exists to swallow, so it cannot stand in for a
+      // plain row here.
+      log.record('triage');
 
       final row = only();
       expect(row['status'], 'ok');
@@ -96,6 +99,87 @@ void main() {
       // And the failed write clears the pending slot rather than leaving it to
       // be attributed to whatever records next.
       expect(broken.pendingStatusOr('ok'), 'ok');
+    });
+  });
+
+  group('suppression', () {
+    test('a sync that brought nothing in writes no row, only a tick', () async {
+      final seen = <ActivityEvent>[];
+      final sub = log.events.listen(seen.add);
+      addTearDown(sub.cancel);
+
+      log.record('sync_mail', source: 'email', count: 0, durationMs: 40);
+      await pumpEventQueue();
+
+      expect(store.recentActivity(), isEmpty);
+      // The tick still fires, because it is what keeps an open panel's
+      // relative times moving. It was never stored, so it has no row id.
+      expect(seen, hasLength(1));
+      expect(seen.single.id, -1);
+      expect(seen.single.kind, 'sync_mail');
+      // And the fact the row would have carried survives in the pref, which is
+      // what the panel's "last sync" tile reads.
+      expect(store.getPref(activityLastSyncMailKey), isNotNull);
+    });
+
+    test('a sync that brought something in is a row AND a stamp', () {
+      log.record('sync_mail', source: 'email', count: 2, detail: {'inbox': 2});
+
+      expect(only()['count'], 2);
+      expect(store.getPref(activityLastSyncMailKey), isNotNull);
+    });
+
+    test('a detail value that is not a zero is something that happened', () {
+      // A 410 recovery moved no mail and is still the most interesting thing
+      // the sync did that week.
+      log.record(
+        'sync_mail',
+        source: 'email',
+        count: 0,
+        detail: {'inbox': 0, 'sent': 0, 'resync': true},
+      );
+
+      expect(detailOf(only())['resync'], isTrue);
+    });
+
+    test('only an ok pass is ever quiet, and only an ok pass stamps', () {
+      log.record(
+        'sync_mail',
+        status: 'error',
+        source: 'email',
+        count: 0,
+        detail: {'error': 'Graph is down'},
+      );
+
+      expect(only()['status'], 'error');
+      // A failed sync did not sync. Stamping it would let a broken connector
+      // read as fresh.
+      expect(store.getPref(activityLastSyncMailKey), isNull);
+    });
+
+    test('a storyline pass is a row only when it filed something', () {
+      log.note({'assigned': 'Deal X'});
+      log.record('storyline', source: 'email', entityId: 'c1');
+
+      expect(detailOf(only())['assigned'], 'Deal X');
+
+      log.record('storyline', source: 'email', entityId: 'c2');
+
+      expect(store.recentActivity(), hasLength(1));
+    });
+
+    test('a sweep is a row only when it spent something', () {
+      // The model calls are the cost, and a sweep that made them is worth a
+      // row whether or not it ended up proposing anything.
+      log.noteLlmCall(call(label: 'storyline', durationMs: 900));
+      log.record('storyline_sweep', source: 'email', entityId: 'sweep');
+
+      expect(detailOf(only())['llm_calls'], 1);
+
+      log.record('storyline_sweep', source: 'email', entityId: 'sweep');
+
+      expect(store.recentActivity(), hasLength(1));
+      expect(store.getPref(activityLastSweepKey), isNotNull);
     });
   });
 

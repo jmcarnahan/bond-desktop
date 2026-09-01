@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../providers/app_providers.dart';
@@ -1208,12 +1209,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// What the sync and the local model have been doing, over the last week.
   ///
   /// The [StreamBuilder] ticks once per recorded event, so a sync landing while
-  /// the panel is open appears without a refresh. Each tick costs two indexed
-  /// reads against a synchronous database on the UI isolate — at rest that is
-  /// roughly once a minute, and even a first sync of a large mailbox records
-  /// one row per drained item, not per message. If a future drain ever ticks
-  /// fast enough to be felt here, the debounce in `conversations_provider` is
-  /// the documented pattern to copy.
+  /// the panel is open appears without a refresh. It also ticks on the events
+  /// the recorder SUPPRESSED — a poll that brought nothing in emits a transient
+  /// tick and writes no row — and that is what keeps the panel's relative times
+  /// honest: the "last sync" tiles are read from prefs on every rebuild, so
+  /// without a tick roughly once a minute they would freeze at whatever they
+  /// said when the panel opened.
+  ///
+  /// Each tick costs two indexed reads against a synchronous database on the UI
+  /// isolate, plus one pref read per tile. Even a first sync of a large mailbox
+  /// records one row per drained item, not per message. If a future drain ever
+  /// ticks fast enough to be felt here, the debounce in
+  /// `conversations_provider` is the documented pattern to copy.
   Widget _activityLog() {
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -1238,6 +1245,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                       ActivityEvent.fromRow(row),
                   ],
                   now: DateTime.now(),
+                  lastMailSyncIso: store.getPref(activityLastSyncMailKey),
+                  lastTeamsSyncIso: store.getPref(activityLastSyncTeamsKey),
+                  lastSweepIso: store.getPref(activityLastSweepKey),
+                  entityLabel: (event) => _activityEntityLabel(store, event),
                 );
               },
             ),
@@ -1245,6 +1256,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ],
       ),
     );
+  }
+
+  /// The subject of the thread an activity row was about, or null.
+  ///
+  /// Null is the common answer and not a failure: triage records a MESSAGE id,
+  /// which is not a conversation key, and a thread can be deleted after the row
+  /// that named it was written. Wrapped besides, because this runs inside a
+  /// build and the panel is the last place in the app that should be able to
+  /// throw.
+  static String? _activityEntityLabel(MessageStore store, ActivityEvent event) {
+    final entityId = event.entityId;
+    if (entityId == null) return null;
+    try {
+      final row = store.getConversationRow(event.source ?? 'email', entityId);
+      if (row == null) return null;
+      final subject = Conversation.fromRow(row).subject;
+      return subject != null && subject.isNotEmpty ? subject : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   Widget _overview(List<Conversation> conversations, String? loadError) {

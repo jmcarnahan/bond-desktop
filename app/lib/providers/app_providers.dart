@@ -256,5 +256,6 @@ final storylineServiceProvider = Provider<StorylineService>(
   (ref) => StorylineService(
     ref.watch(messageStoreProvider),
     ref.watch(llmClientProvider),
+    activityLog: ref.watch(activityLogProvider),
   ),
 );

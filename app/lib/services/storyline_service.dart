@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
+import 'activity_log.dart';
 import 'conversation_state.dart';
 import 'extract_handler.dart';
 import 'llm/embeddings_client.dart';
@@ -63,12 +64,20 @@ class StorylineService {
   final MessageStore _store;
   final LlmClient _client;
 
+  /// Notes what the two automatic passes actually DID onto the row the worker
+  /// is about to write. Only the outcomes: both passes are no-ops most of the
+  /// time, and an unnoted no-op is suppressed rather than logged — see
+  /// `ActivityLog.record`. Nothing here calls `record` itself; the worker owns
+  /// the row, this only fills it in.
+  final ActivityLog _log;
+
   /// Cryptographic randomness for ids. Not for secrecy — for the guarantee
   /// that two ids generated in the same millisecond differ, which a
   /// time-seeded generator does not give.
   static final math.Random _random = math.Random.secure();
 
-  StorylineService(this._store, this._client);
+  StorylineService(this._store, this._client, {ActivityLog? activityLog})
+      : _log = activityLog ?? ActivityLog.disabled();
 
   // ── automatic: one thread ──────────────────────────────────────────────
 
@@ -174,6 +183,11 @@ class StorylineService {
       evidence: result.evidence,
     );
     _store.updateStoryline(best.id, memberHash: _memberHashOf(best.id));
+    // The name rather than the id, because this is read by a person in the
+    // activity panel, and because a filing that happened is the whole point of
+    // the pass — an unnoted one would be indistinguishable from the far more
+    // common pass that filed nothing.
+    _log.note({'assigned': best.title});
 
     final lastMessageAt = conversation.lastMessageAt;
     if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
@@ -262,6 +276,10 @@ class StorylineService {
         proposed++;
       }
     }
+
+    // Once at the end, not once per proposal: the sweep is one unit of work
+    // and gets one row, so a per-cluster note would just overwrite itself.
+    if (proposed > 0) _log.note({'proposed': proposed});
   }
 
   /// Single-link greedy agglomeration, in one pass.
