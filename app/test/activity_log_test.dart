@@ -1,9 +1,12 @@
-import 'package:bond_inbox/data/db.dart';
+// `show`: drift generates an `ActivityEvent` row class from the
+// `activity_events` table, and this file means the log's own.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// The recorder itself: one row and one stream event per [ActivityLog.record],
 /// the pending slot that folds a unit of work's model calls onto that row, and
@@ -28,22 +31,23 @@ LlmCallRecord call({
     );
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late ActivityLog log;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     log = ActivityLog(store);
   });
 
-  tearDown(() {
+  tearDown(() async {
     log.dispose();
-    db.close();
+    await db.close();
   });
 
-  Map<String, Object?> only() => store.recentActivity().single;
+  Future<Map<String, Object?>> only() async =>
+      (await store.recentActivity()).single;
 
   Map<String, Object?> detailOf(Map<String, Object?> row) =>
       ActivityEvent.fromRow(row).detail;
@@ -54,7 +58,7 @@ void main() {
       final sub = log.events.listen(seen.add);
       addTearDown(sub.cancel);
 
-      log.record(
+      await log.record(
         'triage',
         source: 'email',
         entityId: 'm1',
@@ -64,7 +68,7 @@ void main() {
       );
       await pumpEventQueue();
 
-      expect(store.recentActivity(), hasLength(1));
+      expect(await store.recentActivity(), hasLength(1));
       expect(seen, hasLength(1));
       expect(seen.single.kind, 'triage');
       expect(seen.single.source, 'email');
@@ -76,13 +80,13 @@ void main() {
       expect(seen.single.id, greaterThan(0));
     });
 
-    test('defaults to ok and writes no detail when there is none', () {
+    test('defaults to ok and writes no detail when there is none', () async {
       // A kind the suppression rule does not touch: an empty `sync_mail` is
       // exactly what that rule exists to swallow, so it cannot stand in for a
       // plain row here.
-      log.record('triage');
+      await log.record('triage');
 
-      final row = only();
+      final row = await only();
       expect(row['status'], 'ok');
       expect(row['detail_json'], isNull);
     });
@@ -90,12 +94,14 @@ void main() {
     test('a store that cannot be written to does not throw', () async {
       // The one rule the whole class serves: the log must never be able to
       // break the pipeline it observes.
-      final closing = openDbAt(':memory:');
+      final closing = testDb();
       final broken = ActivityLog(MessageStore(closing));
       addTearDown(broken.dispose);
-      closing.close();
+      await closing.close();
 
-      expect(() => broken.record('triage', entityId: 'm1'), returnsNormally);
+      // Awaited rather than merely called: the write fails inside the future
+      // now, so a synchronous `returnsNormally` would prove nothing.
+      await expectLater(broken.record('triage', entityId: 'm1'), completes);
       // And the failed write clears the pending slot rather than leaving it to
       // be attributed to whatever records next.
       expect(broken.pendingStatusOr('ok'), 'ok');
@@ -108,10 +114,10 @@ void main() {
       final sub = log.events.listen(seen.add);
       addTearDown(sub.cancel);
 
-      log.record('sync_mail', source: 'email', count: 0, durationMs: 40);
+      await log.record('sync_mail', source: 'email', count: 0, durationMs: 40);
       await pumpEventQueue();
 
-      expect(store.recentActivity(), isEmpty);
+      expect(await store.recentActivity(), isEmpty);
       // The tick still fires, because it is what keeps an open panel's
       // relative times moving. It was never stored, so it has no row id.
       expect(seen, hasLength(1));
@@ -119,20 +125,20 @@ void main() {
       expect(seen.single.kind, 'sync_mail');
       // And the fact the row would have carried survives in the pref, which is
       // what the panel's "last sync" tile reads.
-      expect(store.getPref(activityLastSyncMailKey), isNotNull);
+      expect(await store.getPref(activityLastSyncMailKey), isNotNull);
     });
 
-    test('a sync that brought something in is a row AND a stamp', () {
-      log.record('sync_mail', source: 'email', count: 2, detail: {'inbox': 2});
+    test('a sync that brought something in is a row AND a stamp', () async {
+      await log.record('sync_mail', source: 'email', count: 2, detail: {'inbox': 2});
 
-      expect(only()['count'], 2);
-      expect(store.getPref(activityLastSyncMailKey), isNotNull);
+      expect((await only())['count'], 2);
+      expect(await store.getPref(activityLastSyncMailKey), isNotNull);
     });
 
-    test('a Teams walk that scanned chats and stored nothing is quiet', () {
+    test('a Teams walk that scanned chats and stored nothing is quiet', () async {
       // A connected tenant always has chats to scan, so if the scan tally
       // counted as "something happened", no Teams sync would ever be quiet.
-      log.record(
+      await log.record(
         'sync_teams',
         source: 'teams',
         count: 0,
@@ -140,11 +146,11 @@ void main() {
         detail: {'chats_seen': 5, 'chats_fetched': 2, 'queued_extract': 0},
       );
 
-      expect(store.recentActivity(), isEmpty);
-      expect(store.getPref(activityLastSyncTeamsKey), isNotNull);
+      expect(await store.recentActivity(), isEmpty);
+      expect(await store.getPref(activityLastSyncTeamsKey), isNotNull);
 
       // The same walk with a stored message keeps its row, scan tally intact.
-      log.record(
+      await log.record(
         'sync_teams',
         source: 'teams',
         count: 1,
@@ -152,24 +158,24 @@ void main() {
         detail: {'chats_seen': 5, 'chats_fetched': 2, 'queued_extract': 1},
       );
 
-      expect(detailOf(only())['chats_seen'], 5);
+      expect(detailOf(await only())['chats_seen'], 5);
     });
 
-    test('a detail value that is not a zero is something that happened', () {
+    test('a detail value that is not a zero is something that happened', () async {
       // A 410 recovery moved no mail and is still the most interesting thing
       // the sync did that week.
-      log.record(
+      await log.record(
         'sync_mail',
         source: 'email',
         count: 0,
         detail: {'inbox': 0, 'sent': 0, 'resync': true},
       );
 
-      expect(detailOf(only())['resync'], isTrue);
+      expect(detailOf(await only())['resync'], isTrue);
     });
 
-    test('only an ok pass is ever quiet, and only an ok pass stamps', () {
-      log.record(
+    test('only an ok pass is ever quiet, and only an ok pass stamps', () async {
+      await log.record(
         'sync_mail',
         status: 'error',
         source: 'email',
@@ -177,35 +183,35 @@ void main() {
         detail: {'error': 'Graph is down'},
       );
 
-      expect(only()['status'], 'error');
+      expect((await only())['status'], 'error');
       // A failed sync did not sync. Stamping it would let a broken connector
       // read as fresh.
-      expect(store.getPref(activityLastSyncMailKey), isNull);
+      expect(await store.getPref(activityLastSyncMailKey), isNull);
     });
 
-    test('a storyline pass is a row only when it filed something', () {
+    test('a storyline pass is a row only when it filed something', () async {
       log.note({'assigned': 'Deal X'});
-      log.record('storyline', source: 'email', entityId: 'c1');
+      await log.record('storyline', source: 'email', entityId: 'c1');
 
-      expect(detailOf(only())['assigned'], 'Deal X');
+      expect(detailOf(await only())['assigned'], 'Deal X');
 
-      log.record('storyline', source: 'email', entityId: 'c2');
+      await log.record('storyline', source: 'email', entityId: 'c2');
 
-      expect(store.recentActivity(), hasLength(1));
+      expect(await store.recentActivity(), hasLength(1));
     });
 
-    test('a sweep is a row only when it spent something', () {
+    test('a sweep is a row only when it spent something', () async {
       // The model calls are the cost, and a sweep that made them is worth a
       // row whether or not it ended up proposing anything.
       log.noteLlmCall(call(label: 'storyline', durationMs: 900));
-      log.record('storyline_sweep', source: 'email', entityId: 'sweep');
+      await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
 
-      expect(detailOf(only())['llm_calls'], 1);
+      expect(detailOf(await only())['llm_calls'], 1);
 
-      log.record('storyline_sweep', source: 'email', entityId: 'sweep');
+      await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
 
-      expect(store.recentActivity(), hasLength(1));
-      expect(store.getPref(activityLastSweepKey), isNotNull);
+      expect(await store.recentActivity(), hasLength(1));
+      expect(await store.getPref(activityLastSweepKey), isNotNull);
     });
   });
 
@@ -223,11 +229,11 @@ void main() {
       );
       off.dispose();
 
-      expect(store.recentActivity(), isEmpty);
+      expect(await store.recentActivity(), isEmpty);
       expect(await off.events.isEmpty, isTrue);
     });
 
-    test('its pending slot stays empty, so a worker sees its fallback', () {
+    test('its pending slot stays empty, so a worker sees its fallback', () async {
       final off = ActivityLog.disabled();
       addTearDown(off.dispose);
 
@@ -238,40 +244,40 @@ void main() {
   });
 
   group('the pending slot', () {
-    test('note folds facts onto the next row and only that row', () {
-      log.note({'intent': 'question', 'topics': ['rate lock']});
-      log.record('extract', entityId: 'm1');
-      log.record('extract', entityId: 'm2');
+    test('note folds facts onto the next row and only that row', () async {
+      log.note({'intent': 'question', 'topics': ['launch date']});
+      await log.record('extract', entityId: 'm1');
+      await log.record('extract', entityId: 'm2');
 
-      final rows = store.recentActivity();
+      final rows = await store.recentActivity();
       expect(detailOf(rows.last), {
         'intent': 'question',
-        'topics': ['rate lock'],
+        'topics': ['launch date'],
       });
       expect(detailOf(rows.first), isEmpty);
     });
 
-    test('an explicit detail wins over a noted key of the same name', () {
+    test('an explicit detail wins over a noted key of the same name', () async {
       log.note({'reason': 'noted'});
 
-      log.record('extract', detail: {'reason': 'passed in'});
+      await log.record('extract', detail: {'reason': 'passed in'});
 
-      expect(detailOf(only())['reason'], 'passed in');
+      expect(detailOf(await only())['reason'], 'passed in');
     });
 
-    test('noteStatus is what a handler beats the worker with', () {
+    test('noteStatus is what a handler beats the worker with', () async {
       log.noteStatus('skipped');
 
       expect(log.pendingStatusOr('ok'), 'skipped');
 
-      log.record('extract', status: log.pendingStatusOr('ok'));
+      await log.record('extract', status: log.pendingStatusOr('ok'));
 
-      expect(only()['status'], 'skipped');
+      expect((await only())['status'], 'skipped');
       // Consumed by the record, so the next item starts clean.
       expect(log.pendingStatusOr('ok'), 'ok');
     });
 
-    test('one model call rides onto the row it was made for', () {
+    test('one model call rides onto the row it was made for', () async {
       log.noteLlmCall(call(
         label: 'triage',
         durationMs: 1700,
@@ -279,9 +285,9 @@ void main() {
         completionTokens: 60,
       ));
 
-      log.record('triage', entityId: 'm1');
+      await log.record('triage', entityId: 'm1');
 
-      expect(detailOf(only()), {
+      expect(detailOf(await only()), {
         'llm_calls': 1,
         'llm_ms': 1700,
         'prompt_tokens': 900,
@@ -290,35 +296,35 @@ void main() {
       });
     });
 
-    test('several calls for one item sum onto one row', () {
+    test('several calls for one item sum onto one row', () async {
       // A storyline sweep makes more than one call per item, and they belong
       // on the item's row rather than on rows of their own.
       log.noteLlmCall(call(durationMs: 1000, promptTokens: 100, completionTokens: 10));
       log.noteLlmCall(call(durationMs: 500, promptTokens: 40, completionTokens: 5));
 
-      log.record('storyline_sweep', entityId: 'sweep');
+      await log.record('storyline_sweep', entityId: 'sweep');
 
-      final detail = detailOf(only());
+      final detail = detailOf(await only());
       expect(detail['llm_calls'], 2);
       expect(detail['llm_ms'], 1500);
       expect(detail['prompt_tokens'], 140);
       expect(detail['completion_tokens'], 15);
     });
 
-    test('a failed call leaves its reason on the row', () {
+    test('a failed call leaves its reason on the row', () async {
       log.noteLlmCall(call(outcome: 'format', error: 'not JSON'));
 
-      log.record('triage', status: 'retry', entityId: 'm1');
+      await log.record('triage', status: 'retry', entityId: 'm1');
 
-      expect(detailOf(only())['llm_error'], 'not JSON');
+      expect(detailOf(await only())['llm_error'], 'not JSON');
     });
 
-    test('the tally is cleared by the row it landed on', () {
+    test('the tally is cleared by the row it landed on', () async {
       log.noteLlmCall(call());
-      log.record('triage', entityId: 'm1');
-      log.record('triage', entityId: 'm2');
+      await log.record('triage', entityId: 'm1');
+      await log.record('triage', entityId: 'm2');
 
-      final rows = store.recentActivity();
+      final rows = await store.recentActivity();
       expect(detailOf(rows.last)['llm_calls'], 1);
       expect(detailOf(rows.first), isEmpty);
     });

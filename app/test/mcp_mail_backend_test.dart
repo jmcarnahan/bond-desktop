@@ -1,4 +1,3 @@
-import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
@@ -6,7 +5,8 @@ import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
 import 'package:bond_inbox/services/mcp/mcp_mail_backend.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// The mail backend over MCP, with only the wire faked.
 ///
@@ -122,7 +122,7 @@ void main() {
         'id': 'm-gone',
         '@removed': {'reason': 'deleted'},
       };
-      final live = {'id': 'm1', 'subject': 'Appraisal', 'isRead': false};
+      final live = {'id': 'm1', 'subject': 'Homepage copy', 'isRead': false};
       final mcp = _FakeMcp({
         'list_mail_delta': [
           _delta(messages: [live, tombstone]),
@@ -157,7 +157,7 @@ void main() {
       final mcp = _FakeMcp({
         'get_mail_detail': [
           {
-            'body_text': 'The appraisal is in.',
+            'body_text': 'The homepage copy is in.',
             'headers': {
               'list-unsubscribe': '<mailto:x@y.z>',
               'precedence': 'bulk',
@@ -171,7 +171,7 @@ void main() {
 
       expect(mcp.argsFor('get_mail_detail'), {'message_id': 'm1'});
       expect(detail, {
-        'uniqueBody': {'content': 'The appraisal is in.'},
+        'uniqueBody': {'content': 'The homepage copy is in.'},
         'internetMessageHeaders': [
           {'name': 'list-unsubscribe', 'value': '<mailto:x@y.z>'},
           {'name': 'precedence', 'value': 'bulk'},
@@ -215,11 +215,10 @@ void main() {
 
     test('and what SyncService stores from it round-trips', () async {
       // The reshape is only correct if the reader agrees, so the reader runs.
-      final db = sqlite3.openInMemory();
-      applySchema(db);
+      final db = testDb();
       addTearDown(db.close);
       final store = MessageStore(db);
-      store.upsertMessage({
+      await store.upsertMessage({
         'source_message_id': 'm1',
         'conversation_key': 'c1',
         'direction': 'inbound',
@@ -228,7 +227,7 @@ void main() {
       final mcp = _FakeMcp({
         'get_mail_detail': [
           {
-            'body_text': 'The appraisal is in.',
+            'body_text': 'The homepage copy is in.',
             'headers': {'precedence': 'bulk'},
             'has_attachments': true,
           },
@@ -238,8 +237,8 @@ void main() {
 
       await sync.ensureMessageBody('m1');
 
-      final row = store.loadThread('c1', sources: const ['email']).single;
-      expect(row.bodyText, 'The appraisal is in.');
+      final row = (await store.loadThread('c1', sources: const ['email'])).single;
+      expect(row.bodyText, 'The homepage copy is in.');
       expect(row.sourceMetaJson, contains('precedence'),
           reason: 'the headers the bulk-mail gates read landed too');
     });
@@ -383,8 +382,7 @@ void main() {
       // The reason the status parse above is load bearing: SyncService skips a
       // 404 and rethrows everything else, so without it ONE deleted message
       // would stop every body fetch behind it.
-      final db = sqlite3.openInMemory();
-      applySchema(db);
+      final db = testDb();
       addTearDown(db.close);
       final mcp = _FakeMcp({
         'get_mail_detail': [
@@ -398,8 +396,7 @@ void main() {
 
     test('but a server that is failing outright still reaches the banner',
         () async {
-      final db = sqlite3.openInMemory();
-      applySchema(db);
+      final db = testDb();
       addTearDown(db.close);
       final mcp = _FakeMcp({
         'get_mail_detail': [

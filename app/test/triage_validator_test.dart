@@ -11,17 +11,19 @@ void main() {
   test('a well-formed answer passes through, trimmed', () {
     final result = task.validate(const {
       'urgency': 'high',
-      'category': 'borrower',
-      'summary': '  Rate lock expires Friday.  ',
+      'category': 'work',
+      'label': '  launch date  ',
+      'summary': '  The launch date is Thursday.  ',
       'needs_action': true,
-      'action_items': ['  Call Sarah  ', 'Send the LE'],
+      'action_items': ['  Call Marisa  ', 'Send the copy'],
     });
 
     expect(result.urgency, 'high');
-    expect(result.category, 'borrower');
-    expect(result.summary, 'Rate lock expires Friday.');
+    expect(result.category, 'work');
+    expect(result.label, 'launch date');
+    expect(result.summary, 'The launch date is Thursday.');
     expect(result.needsAction, isTrue);
-    expect(result.actionItems, ['Call Sarah', 'Send the LE']);
+    expect(result.actionItems, ['Call Marisa', 'Send the copy']);
   });
 
   test('an unknown urgency falls back to the quiet middle', () {
@@ -47,13 +49,9 @@ void main() {
       expect(task.validate({'urgency': value}).urgency, value);
     }
     for (final value in const [
-      'borrower',
-      'realtor_partner',
-      'title_escrow',
-      'underwriting',
-      'lead',
-      'vendor',
+      'work',
       'personal',
+      'notification',
       'other',
     ]) {
       expect(task.validate({'category': value}).category, value);
@@ -61,8 +59,29 @@ void main() {
   });
 
   test('an unknown category falls back to other', () {
-    expect(task.validate({'category': 'mortgage'}).category, 'other');
+    expect(task.validate({'category': 'errand'}).category, 'other');
     expect(task.validate({'category': 7}).category, 'other');
+  });
+
+  test('a runaway label is capped at 40 characters', () {
+    final result = task.validate({'label': 'w' * 90});
+    expect(result.label.length, 40);
+  });
+
+  test('a missing label is empty, not a guess', () {
+    expect(task.validate(const {}).label, isEmpty);
+  });
+
+  test('a non-string label is dropped rather than stringified', () {
+    // The one free-text field, so there is no enum to catch a model that got
+    // the type wrong — and "Instance of ..." is not what a message is about.
+    for (final value in const [42, true, null, ['dinner'], {'a': 1}]) {
+      expect(
+        task.validate({'label': value}).label,
+        isEmpty,
+        reason: 'label $value',
+      );
+    }
   });
 
   test('a runaway summary is capped at 500 characters', () {
@@ -116,6 +135,7 @@ void main() {
     final fallback = TriageResult.fallback();
     expect(result.urgency, fallback.urgency);
     expect(result.category, fallback.category);
+    expect(result.label, fallback.label);
     expect(result.summary, fallback.summary);
     expect(result.needsAction, fallback.needsAction);
     expect(result.actionItems, fallback.actionItems);
@@ -124,14 +144,16 @@ void main() {
   test('one bad field does not cost the others', () {
     final result = task.validate(const {
       'urgency': 'nonsense',
-      'category': 'borrower',
-      'summary': 'Docs attached.',
+      'category': 'work',
+      'label': 'shared doc',
+      'summary': 'The notes are attached.',
       'needs_action': true,
-      'action_items': ['Review the docs'],
+      'action_items': ['Review the notes'],
     });
     expect(result.urgency, 'normal');
-    expect(result.category, 'borrower');
-    expect(result.summary, 'Docs attached.');
-    expect(result.actionItems, ['Review the docs']);
+    expect(result.category, 'work');
+    expect(result.label, 'shared doc');
+    expect(result.summary, 'The notes are attached.');
+    expect(result.actionItems, ['Review the notes']);
   });
 }

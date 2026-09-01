@@ -1,4 +1,4 @@
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart'
@@ -6,7 +6,8 @@ import 'package:bond_inbox/providers/prefs_provider.dart'
 import 'package:bond_inbox/services/attention_service.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// Who asks for a draft, and when.
 ///
@@ -27,42 +28,44 @@ class FakeSync implements MailSync {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late FakeSync sync;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     sync = FakeSync();
   });
 
   tearDown(() => db.close());
 
-  void seedThread({
+  Future<void> seedThread({
     required String key,
     String state = 'needs_reply',
     double score = 0.9,
     String? bucket,
-  }) {
-    store.upsertConversation({
+  }) async {
+    await store.upsertConversation({
       'conversation_key': key,
       'subject': key,
       'state': state,
       'last_message_at': '2026-08-29T10:00:00Z',
     });
-    store.writeAttentionScore('email', key, score);
+    await store.writeAttentionScore('email', key, score);
     if (bucket != null) {
-      store.setConversationBucket('email', key, bucket: bucket);
+      await store.setConversationBucket('email', key, bucket: bucket);
     }
   }
 
-  List<String> queuedDrafts() => [
-        for (final row in db.select(
-          "SELECT entity_id FROM work_items WHERE task_kind = 'draft' "
-          "AND status = 'pending' ORDER BY entity_id",
-        ))
-          row['entity_id'] as String,
+  Future<List<String>> queuedDrafts() async => [
+        for (final row in await db
+            .customSelect(
+              "SELECT entity_id FROM work_items WHERE task_kind = 'draft' "
+              "AND status = 'pending' ORDER BY entity_id",
+            )
+            .get())
+          row.data['entity_id'] as String,
       ];
 
   ConversationsNotifier notifierFor({AttentionService? attention}) {
@@ -73,49 +76,49 @@ void main() {
   }
 
   test('a load queues a draft for every thread that has earned one', () async {
-    seedThread(key: 'hot');
-    seedThread(key: 'cold', score: 0.1);
-    seedThread(key: 'done-with', state: 'done');
+    await seedThread(key: 'hot');
+    await seedThread(key: 'cold', score: 0.1);
+    await seedThread(key: 'done-with', state: 'done');
 
     await notifierFor().load();
 
-    expect(queuedDrafts(), ['hot']);
+    expect(await queuedDrafts(), ['hot']);
   });
 
   test('the stored threshold is what decides, not the default', () async {
-    seedThread(key: 'middling', score: 0.4);
-    store.setPref(attentionThresholdKey, '0.3');
+    await seedThread(key: 'middling', score: 0.4);
+    await store.setPref(attentionThresholdKey, '0.3');
 
     await notifierFor().load();
 
-    expect(queuedDrafts(), ['middling']);
+    expect(await queuedDrafts(), ['middling']);
   });
 
   test('an unparseable threshold falls back rather than throwing', () async {
-    seedThread(key: 'hot');
-    store.setPref(attentionThresholdKey, 'not a number');
+    await seedThread(key: 'hot');
+    await store.setPref(attentionThresholdKey, 'not a number');
 
     await notifierFor().load();
 
-    expect(queuedDrafts(), ['hot']);
+    expect(await queuedDrafts(), ['hot']);
   });
 
   test('a load that skips the sync still queues — it is a local read',
       () async {
-    seedThread(key: 'hot');
+    await seedThread(key: 'hot');
 
     await notifierFor().load(syncFirst: false);
 
-    expect(queuedDrafts(), ['hot']);
+    expect(await queuedDrafts(), ['hot']);
   });
 
   test('a second load queues nothing new once the draft exists', () async {
-    seedThread(key: 'hot');
+    await seedThread(key: 'hot');
     final notifier = notifierFor();
 
     await notifier.load();
-    store.writeWork('draft', 'email', 'hot', status: 'done');
-    store.upsertDraft(
+    await store.writeWork('draft', 'email', 'hot', status: 'done');
+    await store.upsertDraft(
       source: 'email',
       conversationKey: 'hot',
       replyToMessageId: 'm1',
@@ -125,16 +128,16 @@ void main() {
 
     // The work row stays done: needsDraftKeys drops any thread that has a
     // draft, so the requeue never reaches it.
-    expect(queuedDrafts(), isEmpty);
-    expect(store.workCounts('draft'), {'done': 1});
+    expect(await queuedDrafts(), isEmpty);
+    expect(await store.workCounts('draft'), {'done': 1});
   });
 
   test('a draft the sync invalidated is queued again', () async {
-    seedThread(key: 'hot');
+    await seedThread(key: 'hot');
     final notifier = notifierFor();
     await notifier.load();
-    store.writeWork('draft', 'email', 'hot', status: 'done');
-    store.upsertDraft(
+    await store.writeWork('draft', 'email', 'hot', status: 'done');
+    await store.upsertDraft(
       source: 'email',
       conversationKey: 'hot',
       replyToMessageId: 'm1',
@@ -142,28 +145,28 @@ void main() {
     );
 
     // What a newer inbound message does.
-    store.deleteDraft('email', 'hot');
+    await store.deleteDraft('email', 'hot');
     await notifier.load();
 
-    expect(queuedDrafts(), ['hot']);
+    expect(await queuedDrafts(), ['hot']);
   });
 
   test('it does not revive an item a worker is holding', () async {
-    seedThread(key: 'hot');
-    store.enqueueWork('draft', 'email', 'hot');
-    store.writeWork('draft', 'email', 'hot', status: 'processing');
+    await seedThread(key: 'hot');
+    await store.enqueueWork('draft', 'email', 'hot');
+    await store.writeWork('draft', 'email', 'hot', status: 'processing');
 
     await notifierFor().load();
 
     // Resetting a processing row would hand the item to a second drain.
-    expect(store.workCounts('draft'), {'processing': 1});
+    expect(await store.workCounts('draft'), {'processing': 1});
   });
 
   test('it runs after the scoring pass, on the scores that pass wrote',
       () async {
     // No score written by hand here: the AttentionService is what puts one on
     // the row, and the enqueue reads it in the same load.
-    store.upsertMessage({
+    await store.upsertMessage({
       'source_message_id': 'm1',
       'conversation_key': 'scored',
       'direction': 'inbound',
@@ -171,7 +174,7 @@ void main() {
       'received_at': DateTime.now().toUtc().toIso8601String(),
       'body_text': 'Can you confirm?',
     });
-    store.upsertConversation({
+    await store.upsertConversation({
       'conversation_key': 'scored',
       'subject': 'Confirm',
       'state': 'needs_reply',
@@ -179,10 +182,10 @@ void main() {
       'last_inbound_at': DateTime.now().toUtc().toIso8601String(),
       'cta_urgency': 'urgent',
     });
-    store.setPref(attentionThresholdKey, '0.0');
+    await store.setPref(attentionThresholdKey, '0.0');
 
     await notifierFor(attention: AttentionService(store)).load();
 
-    expect(queuedDrafts(), ['scored']);
+    expect(await queuedDrafts(), ['scored']);
   });
 }

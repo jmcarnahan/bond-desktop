@@ -157,14 +157,17 @@ mail comes from is a choice between two backends, and only the other one needs
 an Azure app registration on this machine: see
 [Microsoft backends](#microsoft-backends) below.
 
-**Two model servers, both optional.** `make model` is the chat model on `:8080`
-that triages, extracts, names storylines and drafts replies. `make embed` is a
-second, much smaller llama-server on `:8081` running `embeddinggemma-300M`,
-which is what turns conversations into vectors so they can be clustered — it
-needs its own process because `--embeddings` puts a server in embedding mode
-and one server cannot both chat and embed. With neither running the inbox works
-fine and simply stays un-annotated; with only the chat model, everything except
-storyline clustering works.
+**Three model servers, all optional.** `make model` is the main chat model on
+`:8080` — the careful reader that names storylines and writes draft replies.
+`make fast` is a much smaller model on `:8082` that does the bulk per-message
+work — triage and extraction — in seconds rather than tens of seconds, with
+several requests in flight at once. `make embed` is a third llama-server on
+`:8081` running `embeddinggemma-300M`, which is what turns conversations into
+vectors so they can be clustered — it needs its own process because
+`--embeddings` puts a server in embedding mode and one server cannot both chat
+and embed. With none of them running the inbox works fine and simply stays
+un-annotated; each missing server parks only the work that needs it, and the
+work resumes when the server comes up.
 
 Nothing about the mail ever leaves the machine at inference time. Both servers
 are local, and the only network calls the app makes are the ones that fetch the
@@ -173,14 +176,14 @@ the Microsoft grant on your behalf.
 
 The left rail has four sections:
 
-**Needs You** ranks what the LO is actually on the hook for. Every open thread
+**Needs You** ranks what the signed-in user is actually on the hook for. Every open thread
 gets an attention score from its state, how recently it moved, what the model
 found in it, and how often that sender gets answered; a slider in Settings sets
 how high a thread must score to appear. Threads awaiting a reply come first,
 then threads waiting on somebody else, dimmed.
 
-**Storylines** are groups of threads about the same thing — one property, one
-file, one deal — proposed by the model and kept or dismissed by the user. A
+**Storylines** are groups of threads about the same thing — one project, one
+trip, one event — proposed by the model and kept or dismissed by the user. A
 clustering sweep compares conversation embeddings, a confirmation call decides
 whether a candidate really belongs, and the result opens as a single merged
 transcript with a chip at each seam naming the thread it just crossed into.
@@ -202,8 +205,8 @@ Outlook Drafts, or copies to the clipboard.
 Triage's cheap gates (the user's own address, no-reply senders, list and
 auto-generated headers) skip what is not worth a model call; the rest go through
 one at a time, newest first. First run syncs 14 days of mail and queues the
-newest 7 days for triage, capped at 150 messages. At roughly 17 seconds an email
-that backlog annotates itself over about 45 minutes, in the background, with a
+newest 7 days for triage, capped at 150 messages. On the fast server that
+backlog annotates itself in a few minutes, in the background, with a
 `Triaging N remaining…` counter in the rail. It survives a restart: work in
 flight is re-queued at the next launch.
 
@@ -306,6 +309,8 @@ make logs                   # tail the server log
 make stop                   # stop the chat server on :8080
 make embed                  # start the embedding server on :8081
 make embed-stop             # stop it
+make fast                   # start the bulk-work model server on :8082
+make fast-stop              # stop it
 make verify                 # SHA256 the downloaded weights (~1 min)
 make clean-model            # delete the cache, forcing a re-download
 make clean                  # rm tmp/logs

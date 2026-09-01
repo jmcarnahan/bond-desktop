@@ -12,10 +12,10 @@ import 'llm/extract_task.dart';
 /// answer rates, and the sender rules — and doing them separately would mean
 /// running all four twice.
 ///
-/// It is called synchronously from the list load, immediately before the rows
-/// are read. That is affordable because none of it is a model call: four
-/// indexed queries and a few hundred multiplications, well under a millisecond
-/// on a mailbox this size. Doing it on a timer instead would mean the list can
+/// It is awaited by the list load, immediately before the rows are read. That
+/// is affordable because none of it is a model call: four indexed queries and
+/// a few hundred multiplications, well under a millisecond on a mailbox this
+/// size. Doing it on a timer instead would mean the list can
 /// render rows whose score was computed against a different sender rule than
 /// the one the user just set, which reads as the correction not having worked.
 class AttentionService {
@@ -26,26 +26,26 @@ class AttentionService {
   /// Rescores every open thread and re-files every thread that the rules — not
   /// a person — put where it is. Returns how many threads were scored.
   ///
-  /// Threads the LO has marked done are skipped entirely: they are not in any
+  /// Threads the user has marked done are skipped entirely: they are not in any
   /// list, so a score on them would be a number nothing reads.
   ///
   /// [now] is injected so a test can pin the recency decay; production passes
   /// nothing and gets the wall clock.
-  int recomputeAll({
+  Future<int> recomputeAll({
     List<String> sources = const ['email'],
     DateTime? now,
-  }) {
+  }) async {
     final at = now ?? DateTime.now();
-    final conversations = _store.loadConversations(sources: sources);
+    final conversations = await _store.loadConversations(sources: sources);
     if (conversations.isEmpty) return 0;
 
-    final meta = _store.latestInboundMeta(sources: sources);
-    final prefs = _store.allSenderPrefs();
-    final reasons = _store.bucketReasons(sources: sources);
+    final meta = await _store.latestInboundMeta(sources: sources);
+    final prefs = await _store.allSenderPrefs();
+    final reasons = await _store.bucketReasons(sources: sources);
     // Reply rates are per-source, and email is the only source that has one.
     // A second connector gets its own call here rather than a merged map, so
     // an address that appears in both does not average across them.
-    final replyRates = _store.senderReplyRates();
+    final replyRates = await _store.senderReplyRates();
 
     var scored = 0;
     for (final conversation in conversations) {
@@ -56,7 +56,7 @@ class AttentionService {
       final extraction = _extraction(latest?['extraction_json']);
 
       if (conversation.state != ConversationState.done) {
-        _store.writeAttentionScore(
+        await _store.writeAttentionScore(
           conversation.source,
           conversation.id,
           attentionScore(
@@ -70,7 +70,7 @@ class AttentionService {
         scored++;
       }
 
-      _sweepBucket(
+      await _sweepBucket(
         conversation,
         senderPref: senderPref,
         extraction: extraction,
@@ -92,20 +92,20 @@ class AttentionService {
   ///   rule itself, so removing the rule removes the bucket.
   /// - `low_value` — this pass's own guess, and the only bucket it will clear
   ///   on the strength of a new guess.
-  void _sweepBucket(
+  Future<void> _sweepBucket(
     Conversation conversation, {
     required String? senderPref,
     required ExtractionResult? extraction,
     required String? reason,
-  }) {
+  }) async {
     if (reason == 'user') return;
 
     if (senderPref == 'later') {
-      _file(conversation, 'later', 'sender_pref');
+      await _file(conversation, 'later', 'sender_pref');
       return;
     }
     if (senderPref == 'keep') {
-      if (conversation.bucket != null) _file(conversation, null, null);
+      if (conversation.bucket != null) await _file(conversation, null, null);
       return;
     }
 
@@ -120,14 +120,18 @@ class AttentionService {
           );
 
     if (bucket != null) {
-      _file(conversation, bucket, 'low_value');
+      await _file(conversation, bucket, 'low_value');
     } else if (reason == 'low_value') {
-      _file(conversation, null, null);
+      await _file(conversation, null, null);
     }
   }
 
-  void _file(Conversation conversation, String? bucket, String? reason) {
-    _store.setConversationBucket(
+  Future<void> _file(
+    Conversation conversation,
+    String? bucket,
+    String? reason,
+  ) {
+    return _store.setConversationBucket(
       conversation.source,
       conversation.id,
       bucket: bucket,

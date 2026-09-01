@@ -1,4 +1,4 @@
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
@@ -10,7 +10,8 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// A [MailSync] that never touches a socket. These tests are about what the
 /// corrections write, so nothing here needs the network to do anything at all.
@@ -26,13 +27,12 @@ class SilentSync implements MailSync {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late SilentSync sync;
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
     sync = SilentSync();
   });
@@ -40,20 +40,20 @@ void main() {
   tearDown(() => db.close());
 
   /// One thread with one inbound message from [from].
-  void seed(
+  Future<void> seed(
     String key, {
     String from = 'eric@x.com',
     String state = 'waiting',
     String receivedAt = '2026-08-28T10:00:00Z',
-  }) {
-    store.upsertConversation({
+  }) async {
+    await store.upsertConversation({
       'conversation_key': key,
       'subject': key,
       'state': state,
       'last_message_at': receivedAt,
       'last_inbound_at': receivedAt,
     });
-    store.upsertMessage({
+    await store.upsertMessage({
       'source_message_id': '$key-m1',
       'conversation_key': key,
       'direction': 'inbound',
@@ -65,10 +65,11 @@ void main() {
   ConversationsNotifier notifier() =>
       ConversationsNotifier(store, sync, attention: AttentionService(store));
 
-  List<Map<String, Object?>> events() => [
-        for (final row
-            in db.select('SELECT * FROM feedback_events ORDER BY id ASC'))
-          Map<String, Object?>.from(row),
+  Future<List<Map<String, Object?>>> events() async => [
+        for (final row in await db
+            .customSelect('SELECT * FROM feedback_events ORDER BY id ASC')
+            .get())
+          Map<String, Object?>.from(row.data),
       ];
 
   List<Conversation> rows(ConversationsNotifier n) =>
@@ -80,18 +81,18 @@ void main() {
   group('sendSenderToLater', () {
     test('records the event, sets the rule, moves the threads, reloads',
         () async {
-      seed('c1');
-      seed('c2');
-      seed('c3', from: 'dana@y.com');
+      await seed('c1');
+      await seed('c2');
+      await seed('c3', from: 'dana@y.com');
       final n = notifier();
       await n.load();
 
       final affected = await n.sendSenderToLater('eric@x.com');
 
       expect(affected, 2);
-      expect(store.getSenderPref('eric@x.com'), 'later');
+      expect(await store.getSenderPref('eric@x.com'), 'later');
 
-      final event = events().single;
+      final event = (await events()).single;
       expect(event['scope'], 'sender');
       expect(event['scope_key'], 'eric@x.com');
       expect(event['direction'], 'down');
@@ -104,18 +105,18 @@ void main() {
     });
 
     test('the event key is lowercased whatever the caller passed', () async {
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
 
       await n.sendSenderToLater('Eric@X.com');
 
-      expect(events().single['scope_key'], 'eric@x.com');
+      expect((await events()).single['scope_key'], 'eric@x.com');
     });
 
     test('a teams sender re-files the TEAMS rows, and reports their count',
         () async {
-      store.upsertConversation({
+      await store.upsertConversation({
         'source': 'teams',
         'conversation_key': 'chat-1',
         'subject': 'chat-1',
@@ -123,7 +124,7 @@ void main() {
         'last_message_at': '2026-08-28T10:00:00Z',
         'last_inbound_at': '2026-08-28T10:00:00Z',
       });
-      store.upsertMessage({
+      await store.upsertMessage({
         'source': 'teams',
         'source_message_id': 'chat-1-m1',
         'conversation_key': 'chat-1',
@@ -141,15 +142,15 @@ void main() {
           await n.sendSenderToLater('teams:29:abc', source: 'teams');
 
       expect(affected, 1);
-      final bucket = db.select(
+      final bucket = (await db.customSelect(
         "SELECT bucket FROM conversation_ai WHERE source = 'teams' "
         "AND conversation_key = 'chat-1'",
-      ).single['bucket'];
+      ).get()).single.data['bucket'];
       expect(bucket, 'later');
     });
 
     test('deferred threads leave the rail sections they were in', () async {
-      seed('c1', state: 'needs_reply');
+      await seed('c1', state: 'needs_reply');
       final n = notifier();
       await n.load();
       expect(needsYouRows(rows(n)), hasLength(1));
@@ -164,7 +165,7 @@ void main() {
 
   group('keepSenderInInbox', () {
     test('records, sets keep, and brings the threads back', () async {
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
       await n.sendSenderToLater('eric@x.com');
@@ -172,14 +173,14 @@ void main() {
       final affected = await n.keepSenderInInbox('eric@x.com');
 
       expect(affected, 1);
-      expect(store.getSenderPref('eric@x.com'), 'keep');
+      expect(await store.getSenderPref('eric@x.com'), 'keep');
       expect(rowFor(n, 'c1').bucket, isNull);
-      expect(events().map((e) => e['direction']), ['down', 'up']);
+      expect((await events()).map((e) => e['direction']), ['down', 'up']);
     });
 
     test('a keep rule survives the scoring sweep that runs on every load',
         () async {
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
       await n.keepSenderInInbox('eric@x.com');
@@ -193,65 +194,65 @@ void main() {
   group('undo', () {
     test('restores "there was no rule", which is not "the rule was keep"',
         () async {
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
 
-      final previous = n.senderPref('eric@x.com');
+      final previous = await n.senderPref('eric@x.com');
       expect(previous, isNull);
       await n.sendSenderToLater('eric@x.com');
-      expect(store.getSenderPref('eric@x.com'), 'later');
+      expect(await store.getSenderPref('eric@x.com'), 'later');
 
       await n.restoreSenderPref('eric@x.com', previous);
 
-      expect(store.getSenderPref('eric@x.com'), isNull);
+      expect(await store.getSenderPref('eric@x.com'), isNull);
       expect(rowFor(n, 'c1').bucket, isNull);
     });
 
     test('restores an earlier rule rather than clearing it', () async {
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
       await n.keepSenderInInbox('eric@x.com');
 
-      final previous = n.senderPref('eric@x.com');
+      final previous = await n.senderPref('eric@x.com');
       await n.sendSenderToLater('eric@x.com');
       await n.restoreSenderPref('eric@x.com', previous);
 
-      expect(store.getSenderPref('eric@x.com'), 'keep');
+      expect(await store.getSenderPref('eric@x.com'), 'keep');
       expect(rowFor(n, 'c1').bucket, isNull);
     });
 
     test('restoring a later rule re-defers the threads', () async {
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
       await n.sendSenderToLater('eric@x.com');
 
-      final previous = n.senderPref('eric@x.com');
+      final previous = await n.senderPref('eric@x.com');
       await n.keepSenderInInbox('eric@x.com');
       await n.restoreSenderPref('eric@x.com', previous);
 
-      expect(store.getSenderPref('eric@x.com'), 'later');
+      expect(await store.getSenderPref('eric@x.com'), 'later');
       expect(rowFor(n, 'c1').bucket, 'later');
     });
 
     test('the undo is itself recorded, in the opposite direction', () async {
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
       await n.sendSenderToLater('eric@x.com');
       await n.restoreSenderPref('eric@x.com', null);
 
-      expect(events().map((e) => e['direction']), ['down', 'up']);
-      expect(events().every((e) => e['origin'] == 'explicit'), isTrue);
+      expect((await events()).map((e) => e['direction']), ['down', 'up']);
+      expect((await events()).every((e) => e['origin'] == 'explicit'), isTrue);
     });
   });
 
   group('thread-scoped corrections', () {
     test('sendThreadToLater buckets exactly one thread, as the user', () async {
-      seed('c1');
-      seed('c2');
+      await seed('c1');
+      await seed('c2');
       final n = notifier();
       await n.load();
 
@@ -259,11 +260,11 @@ void main() {
 
       expect(rowFor(n, 'c1').bucket, 'later');
       expect(rowFor(n, 'c2').bucket, isNull);
-      expect(store.bucketReasons()['c1'], 'user');
+      expect((await store.bucketReasons())['c1'], 'user');
       // No sender rule was set: this was about the thread, not the person.
-      expect(store.getSenderPref('eric@x.com'), isNull);
+      expect(await store.getSenderPref('eric@x.com'), isNull);
 
-      final event = events().single;
+      final event = (await events()).single;
       expect(event['scope'], 'thread');
       expect(event['scope_key'], 'c1');
       expect(event['direction'], 'down');
@@ -271,8 +272,8 @@ void main() {
 
     test('keepThreadInInbox lifts a thread out of a sender-wide rule',
         () async {
-      seed('c1');
-      seed('c2');
+      await seed('c1');
+      await seed('c2');
       final n = notifier();
       await n.load();
       await n.sendSenderToLater('eric@x.com');
@@ -287,8 +288,8 @@ void main() {
       // The bug this guards: the sweep runs on every load, sees the sender rule
       // still in force, and re-defers the thread — which would make the button
       // look like it did nothing.
-      seed('c1');
-      seed('c2');
+      await seed('c1');
+      await seed('c2');
       final n = notifier();
       await n.load();
       await n.sendSenderToLater('eric@x.com');
@@ -306,7 +307,7 @@ void main() {
         () async {
       // A newer instruction about a wider set. The person saying "all of this
       // sender's mail" means all of it, including the one they excepted before.
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
       await n.sendSenderToLater('eric@x.com');
@@ -318,7 +319,7 @@ void main() {
     });
 
     test('a hand-deferred thread survives every later load', () async {
-      seed('c1');
+      await seed('c1');
       final n = notifier();
       await n.load();
       await n.sendThreadToLater('email', 'c1');
@@ -326,16 +327,16 @@ void main() {
       await n.load();
 
       expect(rowFor(n, 'c1').bucket, 'later');
-      expect(store.bucketReasons()['c1'], 'user');
+      expect((await store.bucketReasons())['c1'], 'user');
     });
   });
 
   group('implicit signals', () {
-    test('opening a thread records a quiet up', () {
+    test('opening a thread records a quiet up', () async {
       final n = notifier();
-      n.noteThreadOpened('c1');
+      await n.noteThreadOpened('c1');
 
-      final event = events().single;
+      final event = (await events()).single;
       expect(event['scope'], 'thread');
       expect(event['scope_key'], 'c1');
       expect(event['direction'], 'up');
@@ -343,32 +344,32 @@ void main() {
     });
 
     test('marking done records a quiet down', () async {
-      seed('c1', state: 'needs_reply');
+      await seed('c1', state: 'needs_reply');
       final n = notifier();
       await n.load();
 
       await n.markDone('c1');
 
-      final event = events().single;
+      final event = (await events()).single;
       expect(event['direction'], 'down');
       expect(event['origin'], 'implicit');
     });
 
     test('a mark-done that failed to save records nothing', () async {
-      seed('c1', state: 'needs_reply');
+      await seed('c1', state: 'needs_reply');
       final n = ConversationsNotifier(_UnwritableStore(db), sync);
       await n.load();
 
       await n.markDone('c1');
 
-      expect(events(), isEmpty,
+      expect(await events(), isEmpty,
           reason: 'the app must not learn from something that did not happen');
     });
   });
 
   group('scoring runs before the rows are read', () {
     test('a load leaves scores on the rows it returns', () async {
-      seed('c1', state: 'needs_reply');
+      await seed('c1', state: 'needs_reply');
       final n = notifier();
 
       await n.load();
@@ -377,7 +378,7 @@ void main() {
     });
 
     test('with no service wired the load still works', () async {
-      seed('c1');
+      await seed('c1');
       final n = ConversationsNotifier(store, sync);
       await n.load();
 
@@ -391,10 +392,10 @@ void main() {
         () async {
       // A waiting thread with an ask scores around the waiting base, which is
       // below the default cut.
-      store.upsertConversation({
+      await store.upsertConversation({
         'conversation_key': 'c1',
         'state': 'waiting',
-        'cta_text': 'Send the appraisal',
+        'cta_text': 'Send the homepage copy',
         'last_message_at': DateTime.now().toUtc().toIso8601String(),
       });
       final n = notifier();
@@ -413,30 +414,32 @@ void main() {
   });
 
   group('prefs provider', () {
-    test('reads what is stored, writes what is set', () {
-      store.setPref(attentionThresholdKey, '0.8');
-      store.setPref(aboutMeKey, 'I am a loan officer.');
+    test('reads what is stored, writes what is set', () async {
+      await store.setPref(attentionThresholdKey, '0.8');
+      await store.setPref(aboutMeKey, 'I run a small design studio.');
 
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
       );
       addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
 
       expect(container.read(appPrefsProvider).attentionThreshold, 0.8);
-      expect(container.read(appPrefsProvider).aboutMe, 'I am a loan officer.');
+      expect(container.read(appPrefsProvider).aboutMe, 'I run a small design studio.');
 
-      container.read(appPrefsProvider.notifier).setAttentionThreshold(0.3);
+      await container.read(appPrefsProvider.notifier).setAttentionThreshold(0.3);
       expect(container.read(appPrefsProvider).attentionThreshold, 0.3);
-      expect(store.getPref(attentionThresholdKey), '0.3');
+      expect(await store.getPref(attentionThresholdKey), '0.3');
     });
 
-    test('an unreadable stored threshold falls back to the default', () {
-      store.setPref(attentionThresholdKey, 'somewhat');
+    test('an unreadable stored threshold falls back to the default', () async {
+      await store.setPref(attentionThresholdKey, 'somewhat');
 
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
       );
       addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
 
       expect(
         container.read(appPrefsProvider).attentionThreshold,
@@ -444,13 +447,15 @@ void main() {
       );
     });
 
-    test('a value outside the slider range is clamped before it is stored', () {
+    test('a value outside the slider range is clamped before it is stored',
+        () async {
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
       );
       addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
 
-      container.read(appPrefsProvider.notifier).setAttentionThreshold(9);
+      await container.read(appPrefsProvider.notifier).setAttentionThreshold(9);
       expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
     });
   });
@@ -458,7 +463,7 @@ void main() {
   group('provider wiring', () {
     test('the attention service is wired into the real conversations provider',
         () async {
-      seed('c1', state: 'needs_reply');
+      await seed('c1', state: 'needs_reply');
       final container = ProviderContainer(overrides: [
         dbProvider.overrideWithValue(db),
         syncServiceProvider.overrideWithValue(sync),
@@ -478,11 +483,11 @@ class _UnwritableStore extends MessageStore {
   _UnwritableStore(super.db);
 
   @override
-  void setConversationState(
+  Future<void> setConversationState(
     String source,
     String conversationKey,
     ConversationState state,
-  ) {
+  ) async {
     throw StateError('disk is full');
   }
 }

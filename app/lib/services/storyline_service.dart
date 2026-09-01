@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -46,6 +47,13 @@ class StorylineTuning {
   /// Below this there is not enough unassigned mail for a cluster to mean
   /// anything, and the sweep would be proposing groups out of noise.
   static const int sweepMinUnassigned = 4;
+
+  /// How many threads one recruit pass may put in front of the model. A
+  /// charter save is one user action, and eight confirmations is already the
+  /// most model time any single click in this app spends — past the top eight
+  /// by cosine, a candidate was not close enough for a missed-thread hunt to
+  /// be the pass that finds it.
+  static const int recruitMaxCandidates = 8;
 }
 
 /// Groups conversations into storylines, and applies the user's corrections.
@@ -64,6 +72,16 @@ class StorylineService {
   final MessageStore _store;
   final LlmClient _client;
 
+  /// Where membership questions go. Deciding whether one thread belongs to a
+  /// group is a label under a tight schema, re-checked in Dart — the small
+  /// model answers it in a fraction of the time and the app is not measurably
+  /// worse for it. Naming stays on [_client] because a title and a summary are
+  /// prose a person reads, and there the bigger model shows.
+  ///
+  /// Defaults to [_client], so a caller that passes one client gets the
+  /// single-server behaviour this service had before there were two.
+  final LlmClient _confirmClient;
+
   /// Notes what the two automatic passes actually DID onto the row the worker
   /// is about to write. Only the outcomes: both passes are no-ops most of the
   /// time, and an unnoted no-op is suppressed rather than logged — see
@@ -76,8 +94,14 @@ class StorylineService {
   /// time-seeded generator does not give.
   static final math.Random _random = math.Random.secure();
 
-  StorylineService(this._store, this._client, {ActivityLog? activityLog})
-      : _log = activityLog ?? ActivityLog.disabled();
+  StorylineService(
+    this._store,
+    LlmClient client, {
+    LlmClient? confirmClient,
+    ActivityLog? activityLog,
+  })  : _client = client,
+        _confirmClient = confirmClient ?? client,
+        _log = activityLog ?? ActivityLog.disabled();
 
   // ── automatic: one thread ──────────────────────────────────────────────
 
@@ -90,13 +114,13 @@ class StorylineService {
   /// creates a membership. At most one confirmation call per thread, whatever
   /// the mailbox looks like.
   Future<void> assignConversation(String source, String conversationKey) async {
-    final vector = _vectorFor(source, conversationKey);
+    final vector = await _vectorFor(source, conversationKey);
     // No comparable vector yet. Silent rather than an error: the extraction
     // handler re-queues this item the moment it writes an embedding, so the
     // thread is not lost, it is simply not ready.
     if (vector == null) return;
 
-    final row = _store.getConversationRow(source, conversationKey);
+    final row = await _store.getConversationRow(source, conversationKey);
     if (row == null) return;
 
     final conversation = Conversation.fromRow(row);
@@ -105,7 +129,7 @@ class StorylineService {
     // Suggestions included: a thread that belongs to a group the user has not
     // answered yet still belongs to it, and waiting would mean the suggestion
     // is judged on a member set that stopped growing.
-    final candidates = _store.loadStorylines(
+    final candidates = await _store.loadStorylines(
       statuses: const ['suggested', 'active'],
     );
 
@@ -113,35 +137,22 @@ class StorylineService {
     var bestScore = 0.0;
 
     for (final storyline in candidates) {
-      if (_store.isMemberBlocked(storyline.id, source, conversationKey)) {
+      if (await _store.isMemberBlocked(storyline.id, source, conversationKey)) {
         continue;
       }
 
-      final members = _store.membersOf(storyline.id);
-      if (members.any((m) =>
-          m.source == source && m.conversationKey == conversationKey)) {
+      final context = await _memberContext(storyline.id);
+      if (context.memberThreads.contains(_threadKey(source, conversationKey))) {
         continue;
       }
 
-      final vectors = <List<double>>[];
-      final memberParticipants = <String>{};
-      for (final member in members) {
-        final memberVector = _vectorFor(member.source, member.conversationKey);
-        if (memberVector != null) vectors.add(memberVector);
-        final memberRow =
-            _store.getConversationRow(member.source, member.conversationKey);
-        if (memberRow == null) continue;
-        for (final display in _displaysOf(Conversation.fromRow(memberRow))) {
-          memberParticipants.add(display.toLowerCase());
-        }
-      }
       // A storyline whose members have no vectors cannot be compared against
       // anything. Skipped rather than guessed at.
-      final centroid = _centroid(vectors);
+      final centroid = context.centroid;
       if (centroid == null) continue;
 
       final overlap = participants
-          .any((display) => memberParticipants.contains(display.toLowerCase()));
+          .any((display) => context.participants.contains(display.toLowerCase()));
       final gate = overlap
           ? StorylineTuning.assignCosineGateWithOverlap
           : StorylineTuning.assignCosineGate;
@@ -156,13 +167,15 @@ class StorylineService {
 
     if (best == null) return;
 
+    final cardData = await _store.newestInboundCardData(source, conversationKey);
+
     final result = await runTask(
-      _client,
+      _confirmClient,
       const ConfirmMembershipTask(),
       ConfirmInput(
         storyline: best,
-        storylineParticipants: _participantsOfStoryline(best.id),
-        candidateCard: cardForConversationRow(row),
+        storylineParticipants: await _participantsOfStoryline(best.id),
+        candidateCard: enrichedCardForConversationRow(row, cardData),
       ),
       // Zero: the same thread judged against the same storyline twice must
       // give the same answer, or a re-run after a restart would move threads
@@ -175,14 +188,17 @@ class StorylineService {
     // still hold the next time the model changes its mind.
     if (!result.belongs || result.confidence == 'low') return;
 
-    _store.addStorylineMember(
+    await _store.addStorylineMember(
       best.id,
       source,
       conversationKey,
       addedBy: 'auto',
       evidence: result.evidence,
     );
-    _store.updateStoryline(best.id, memberHash: _memberHashOf(best.id));
+    await _store.updateStoryline(
+      best.id,
+      memberHash: await _memberHashOf(best.id),
+    );
     // The name rather than the id, because this is read by a person in the
     // activity panel, and because a filing that happened is the whole point of
     // the pass — an unnoted one would be indistinguishable from the far more
@@ -191,7 +207,7 @@ class StorylineService {
 
     final lastMessageAt = conversation.lastMessageAt;
     if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
-      _store.touchStorylineActivity(best.id, lastMessageAt);
+      await _store.touchStorylineActivity(best.id, lastMessageAt);
     }
 
     await _refreshName(best.id);
@@ -199,17 +215,25 @@ class StorylineService {
 
   /// Re-names a storyline when it has nothing to say for itself.
   ///
-  /// Only when the summary is missing, NOT on every membership change. Naming
-  /// costs a model call, assignment already spent one, and a storyline whose
-  /// name churns every time a thread lands reads as instability rather than as
-  /// freshness. A user who dislikes the name renames it, which locks it.
+  /// Only when the summary or the charter is missing, NOT on every membership
+  /// change. Naming costs a model call, assignment already spent one, and a
+  /// storyline whose name churns every time a thread lands reads as
+  /// instability rather than as freshness. A user who dislikes the name
+  /// renames it, which locks it.
+  ///
+  /// The charter clause is what carries storylines written before there were
+  /// charters: each gets ONE naming call to draft one, and then converges,
+  /// because the same call that writes the charter also writes the summary.
   Future<void> _refreshName(String storylineId) async {
-    final storyline = _store.getStoryline(storylineId);
+    final storyline = await _store.getStoryline(storylineId);
     if (storyline == null) return;
     final summary = storyline.summary;
-    if (summary != null && summary.trim().isNotEmpty) return;
+    final hasSummary = summary != null && summary.trim().isNotEmpty;
+    final needsCharter = !storyline.charterLocked &&
+        (storyline.charter == null || storyline.charter!.trim().isEmpty);
+    if (hasSummary && !needsCharter) return;
 
-    final cards = _cardsOf(storylineId);
+    final cards = await _cardsOf(storylineId);
     if (cards.isEmpty) return;
 
     final result = await runTask(
@@ -219,14 +243,144 @@ class StorylineService {
       temperature: 0,
     );
 
-    _store.updateStoryline(
+    // Re-read before writing: the naming call takes seconds, and a user who
+    // renamed the storyline or saved a charter while it ran has set a lock
+    // this pass must honor. Deciding from the pre-call snapshot would
+    // overwrite their text with the model's — and leave the lock set, so no
+    // later pass would ever re-draft over the damage.
+    final fresh = await _store.getStoryline(storylineId);
+    if (fresh == null) return;
+
+    await _store.updateStoryline(
       storylineId,
       // A locked title is the user's, and no later pass may take it back. The
       // summary is refreshed either way — it describes where the storyline
       // stands, which is not something a rename claimed ownership of.
-      title: storyline.titleLocked ? null : result.title,
+      title: fresh.titleLocked ? null : result.title,
       summary: result.summary,
     );
+
+    // A separate, conditional write: a locked charter is the user's, the same
+    // contract `title_locked` gives the title. An empty answer is not written
+    // either — a storyline whose charter was never drafted is judged against
+    // its summary, which is strictly better than judging it against nothing.
+    if (!fresh.charterLocked && result.charter.isNotEmpty) {
+      await _store.updateStoryline(storylineId, charter: result.charter);
+    }
+  }
+
+  // ── automatic: one storyline, on the user's charter ────────────────────
+
+  /// Hunts for member threads the assignment pass missed, against a charter
+  /// the user just wrote. Queued only by [setCharter] — this is the model
+  /// answering an edit, not a pass that runs on its own.
+  ///
+  /// The same funnel as [assignConversation] turned inside out: one storyline,
+  /// every embedded thread as a candidate. The gate is the LOWER assignment
+  /// gate for every candidate, overlap or not — the user's charter is a
+  /// stronger invitation to look than a shared participant is — and the top
+  /// [StorylineTuning.recruitMaxCandidates] by cosine each get the same
+  /// confirmation call a normal assignment gets, against that charter.
+  Future<void> recruit(String storylineId) async {
+    final storyline = await _store.getStoryline(storylineId);
+    // Dismissed between the save and the drain. Recruiting into it would
+    // resurrect a group the user threw away, silently.
+    if (storyline == null ||
+        (storyline.status != 'active' && storyline.status != 'suggested')) {
+      return;
+    }
+
+    final context = await _memberContext(storylineId);
+    final centroid = context.centroid;
+    if (centroid == null) {
+      // No member vectors means no ranking. The all-zero note is quiet on
+      // purpose — the log's quiet-kind check suppresses it as the genuine
+      // nothing it is (see the note at the end of this method).
+      _log.note({'recruited': 0, 'considered': 0});
+      return;
+    }
+
+    // Scored, then top-N. Ties break on the store's own order (newest first,
+    // key ascending), and the sort is made deterministic by index because
+    // List.sort makes no stability promise of its own.
+    final scored = <({int index, Map<String, Object?> row, double score})>[];
+    var index = 0;
+    for (final row in await _store.conversationsWithEmbeddings(
+      embedModel: EmbeddingsClient.modelTag,
+      sources: const [_source],
+    )) {
+      final order = index++;
+      final key = row['conversation_key'] as String? ?? '';
+      if (key.isEmpty) continue;
+      final rowSource = row['source'] as String? ?? _source;
+      if (context.memberThreads.contains(_threadKey(rowSource, key))) continue;
+      if (await _store.isMemberBlocked(storylineId, rowSource, key)) continue;
+      final blob = row['embedding'];
+      if (blob is! Uint8List) continue;
+      final vector = decodeEmbedding(blob);
+      if (vector.isEmpty) continue;
+      final score = cosine(vector, centroid);
+      if (score < StorylineTuning.assignCosineGateWithOverlap) continue;
+      scored.add((index: order, row: row, score: score));
+    }
+    scored.sort((a, b) {
+      final byScore = b.score.compareTo(a.score);
+      return byScore != 0 ? byScore : a.index.compareTo(b.index);
+    });
+    final considered =
+        scored.take(StorylineTuning.recruitMaxCandidates).toList();
+
+    // One snapshot for every candidate: the storyline as the user saved it is
+    // what all eight are judged against, not a group that grows under the
+    // later candidates as the earlier ones land.
+    final storylineParticipants = await _participantsOfStoryline(storylineId);
+
+    var recruited = 0;
+    for (final candidate in considered) {
+      final row = candidate.row;
+      final rowSource = row['source'] as String? ?? _source;
+      final key = row['conversation_key'] as String? ?? '';
+      final cardData = await _store.newestInboundCardData(rowSource, key);
+
+      final result = await runTask(
+        _confirmClient,
+        const ConfirmMembershipTask(),
+        ConfirmInput(
+          storyline: storyline,
+          storylineParticipants: storylineParticipants,
+          candidateCard: enrichedCardForConversationRow(row, cardData),
+        ),
+        // Zero for the reason assignment runs at zero: a re-run after a park
+        // must not move different threads.
+        temperature: 0,
+      );
+      if (!result.belongs || result.confidence == 'low') continue;
+
+      await _store.addStorylineMember(
+        storylineId,
+        rowSource,
+        key,
+        addedBy: 'auto',
+        evidence: result.evidence,
+      );
+      final lastMessageAt = row['last_message_at'] as String?;
+      if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
+        await _store.touchStorylineActivity(storylineId, lastMessageAt);
+      }
+      // In the same breath as the membership write, like every other add
+      // path: a park on a later candidate must not leave the hash describing
+      // a set that no longer exists. At most eight extra writes.
+      await _store.updateStoryline(
+        storylineId,
+        memberHash: await _memberHashOf(storylineId),
+      );
+      recruited++;
+    }
+    // Always, zeroes included — the log is what decides what a person sees.
+    // "Recruited 0 of 5" survives its quiet-kind check and shows: the model
+    // was consulted and said no, which is an answer. An all-zero pass is
+    // suppressed there as the genuine nothing it is.
+    _log.note({'recruited': recruited, 'considered': considered.length});
   }
 
   // ── automatic: the whole mailbox ───────────────────────────────────────
@@ -239,14 +393,14 @@ class StorylineService {
   /// been dismissed before.
   Future<void> sweep() async {
     final pending =
-        _store.loadStorylines(statuses: const ['suggested']).length;
+        (await _store.loadStorylines(statuses: const ['suggested'])).length;
     final room = StorylineTuning.maxPendingSuggestions - pending;
     if (room <= 0) return;
 
-    final taken = _store.assignedOrBlockedKeys(_source);
+    final taken = await _store.assignedOrBlockedKeys(_source);
     final rows = <Map<String, Object?>>[];
     final vectors = <List<double>>[];
-    for (final row in _store.conversationsWithEmbeddings(
+    for (final row in await _store.conversationsWithEmbeddings(
       embedModel: EmbeddingsClient.modelTag,
       sources: const [_source],
     )) {
@@ -337,20 +491,32 @@ class StorylineService {
       for (final row in rows) row['conversation_key'] as String? ?? '',
     ]..sort();
     final memberHash = cardHash(keys.join('\n'));
-    if (_store.dismissedMemberHashExists(memberHash)) return false;
+    if (await _store.dismissedMemberHashExists(memberHash)) return false;
+
+    final cards = <String>[];
+    for (final row in rows) {
+      cards.add(_namingCardForConversationRow(
+        row,
+        await _store.newestInboundCardData(
+          row['source'] as String? ?? _source,
+          row['conversation_key'] as String? ?? '',
+        ),
+      ));
+    }
 
     final result = await runTask(
       _client,
       const NameStorylineTask(),
-      NameInput([for (final row in rows) cardForConversationRow(row)]),
+      NameInput(cards),
       temperature: 0,
     );
 
     final id = newStorylineId();
-    _store.insertStoryline(
+    await _store.insertStoryline(
       id: id,
       title: result.title,
       summary: result.summary,
+      charter: result.charter.isEmpty ? null : result.charter,
       status: 'suggested',
       createdBy: 'auto',
       memberHash: memberHash,
@@ -358,7 +524,7 @@ class StorylineService {
     for (final row in rows) {
       final key = row['conversation_key'] as String? ?? '';
       if (key.isEmpty) continue;
-      _store.addStorylineMember(
+      await _store.addStorylineMember(
         id,
         row['source'] as String? ?? _source,
         key,
@@ -370,7 +536,7 @@ class StorylineService {
       );
       final lastMessageAt = row['last_message_at'] as String?;
       if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
-        _store.touchStorylineActivity(id, lastMessageAt);
+        await _store.touchStorylineActivity(id, lastMessageAt);
       }
     }
     return true;
@@ -381,52 +547,70 @@ class StorylineService {
   /// Starts a storyline around one thread. Active immediately and titled by
   /// the user, so it never appears as something to accept — a person does not
   /// need the app's permission for a group they just made.
-  String createStoryline(
+  Future<String> createStoryline(
     String title, {
     required String source,
     required String conversationKey,
-  }) {
+  }) async {
     final id = newStorylineId();
-    _store.insertStoryline(
+    await _store.insertStoryline(
       id: id,
       title: title,
       status: 'active',
       createdBy: 'user',
     );
-    _store.updateStoryline(id, titleLocked: true);
-    addThread(id, source, conversationKey);
+    await _store.updateStoryline(id, titleLocked: true);
+    await addThread(id, source, conversationKey);
     return id;
   }
 
-  void keepSuggestion(String id) =>
+  Future<void> keepSuggestion(String id) =>
       _store.updateStoryline(id, status: 'active');
 
-  /// Dismisses a suggestion. The member rows stay: they are what
+  /// Retires a storyline — a suggestion the user never wanted, or a kept one
+  /// they are done with. The member rows stay either way: they are what
   /// `member_hash` was computed over, and deleting them would leave the app
   /// unable to recognise the same cluster when the very next sweep rebuilds
   /// it.
-  void dismissSuggestion(String id) =>
+  Future<void> dismissSuggestion(String id) =>
       _store.updateStoryline(id, status: 'dismissed');
 
-  void rename(String id, String title) =>
+  Future<void> rename(String id, String title) =>
       _store.updateStoryline(id, title: title, titleLocked: true);
 
-  void addThread(String id, String source, String key) {
-    _store.addStorylineMember(id, source, key, addedBy: 'user');
-    _store.updateStoryline(id, memberHash: _memberHashOf(id));
-    final row = _store.getConversationRow(source, key);
+  /// Saves the user's charter and sends the model hunting with it.
+  ///
+  /// A non-empty save locks the charter — the same contract a rename gives the
+  /// title — and queues one [recruit] pass, revived rather than merely
+  /// enqueued so the second edit of the day recruits again. Clearing the text
+  /// unlocks instead: the next naming refresh re-drafts a charter, and nothing
+  /// is recruited on the strength of a criteria the user just deleted.
+  Future<void> setCharter(String id, String charter) async {
+    final trimmed = charter.trim();
+    if (trimmed.isEmpty) {
+      await _store.updateStoryline(id, charter: null, charterLocked: false);
+      return;
+    }
+    await _store.updateStoryline(id, charter: trimmed, charterLocked: true);
+    await _store.requeueWork('storyline_recruit', _source, id);
+  }
+
+  Future<void> addThread(String id, String source, String key) async {
+    await _store.addStorylineMember(id, source, key, addedBy: 'user');
+    await _store.updateStoryline(id, memberHash: await _memberHashOf(id));
+    final row = await _store.getConversationRow(source, key);
     final lastMessageAt = row?['last_message_at'] as String?;
     if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
-      _store.touchStorylineActivity(id, lastMessageAt);
+      await _store.touchStorylineActivity(id, lastMessageAt);
     }
   }
 
   /// Takes a thread out, and blocks it from coming back. Always blocking:
   /// there is no other way for a user to reach this, and an unblocked removal
   /// would be undone by the next assignment pass.
-  void removeThread(String id, String source, String key) {
-    _store.removeStorylineMember(id, source, key, block: true);
-    _store.updateStoryline(id, memberHash: _memberHashOf(id));
+  Future<void> removeThread(String id, String source, String key) async {
+    await _store.removeStorylineMember(id, source, key, block: true);
+    await _store.updateStoryline(id, memberHash: await _memberHashOf(id));
   }
 
   // ── helpers ────────────────────────────────────────────────────────────
@@ -435,8 +619,11 @@ class StorylineService {
   /// compare. The model tag check is not optional: vectors from two embedding
   /// models occupy different spaces, and a cosine across them is a number with
   /// no meaning that still sorts.
-  List<double>? _vectorFor(String source, String conversationKey) {
-    final ai = _store.getConversationAi(source, conversationKey);
+  Future<List<double>?> _vectorFor(
+    String source,
+    String conversationKey,
+  ) async {
+    final ai = await _store.getConversationAi(source, conversationKey);
     if (ai == null) return null;
     if (ai['embed_model'] != EmbeddingsClient.modelTag) return null;
     final blob = ai['embedding'];
@@ -465,18 +652,61 @@ class StorylineService {
     return [for (final value in sum) value / counted];
   }
 
+  /// One storyline's members, read once for comparison work: the mean member
+  /// vector (null when no member has one), every member participant
+  /// lower-cased, and the member threads themselves as [_threadKey]s.
+  ///
+  /// Shared by [assignConversation] and [recruit], which is the point — the
+  /// two passes are mirror images, and a centroid computed two ways would let
+  /// them disagree about the same storyline.
+  Future<
+      ({
+        List<double>? centroid,
+        Set<String> participants,
+        Set<String> memberThreads,
+      })> _memberContext(String storylineId) async {
+    final vectors = <List<double>>[];
+    final participants = <String>{};
+    final memberThreads = <String>{};
+    for (final member in await _store.membersOf(storylineId)) {
+      memberThreads.add(_threadKey(member.source, member.conversationKey));
+      final vector = await _vectorFor(member.source, member.conversationKey);
+      if (vector != null) vectors.add(vector);
+      final row = await _store.getConversationRow(
+        member.source,
+        member.conversationKey,
+      );
+      if (row == null) continue;
+      for (final display in _displaysOf(Conversation.fromRow(row))) {
+        participants.add(display.toLowerCase());
+      }
+    }
+    return (
+      centroid: _centroid(vectors),
+      participants: participants,
+      memberThreads: memberThreads,
+    );
+  }
+
+  /// A thread's identity across sources, for set membership. Newline-joined
+  /// because a newline can appear in neither half.
+  static String _threadKey(String source, String conversationKey) =>
+      '$source\n$conversationKey';
+
   static List<String> _displaysOf(Conversation conversation) => [
         for (final participant in conversation.participants)
           if (participant.display.isNotEmpty) participant.display,
       ];
 
   /// Everyone on any member thread, de-duplicated, in first-seen order.
-  List<String> _participantsOfStoryline(String storylineId) {
+  Future<List<String>> _participantsOfStoryline(String storylineId) async {
     final seen = <String>{};
     final displays = <String>[];
-    for (final member in _store.membersOf(storylineId)) {
-      final row =
-          _store.getConversationRow(member.source, member.conversationKey);
+    for (final member in await _store.membersOf(storylineId)) {
+      final row = await _store.getConversationRow(
+        member.source,
+        member.conversationKey,
+      );
       if (row == null) continue;
       for (final display in _displaysOf(Conversation.fromRow(row))) {
         if (seen.add(display.toLowerCase())) displays.add(display);
@@ -485,13 +715,21 @@ class StorylineService {
     return displays;
   }
 
-  List<String> _cardsOf(String storylineId) {
+  Future<List<String>> _cardsOf(String storylineId) async {
     final cards = <String>[];
-    for (final member in _store.membersOf(storylineId)) {
-      final row =
-          _store.getConversationRow(member.source, member.conversationKey);
+    for (final member in await _store.membersOf(storylineId)) {
+      final row = await _store.getConversationRow(
+        member.source,
+        member.conversationKey,
+      );
       if (row == null) continue;
-      cards.add(cardForConversationRow(row));
+      cards.add(_namingCardForConversationRow(
+        row,
+        await _store.newestInboundCardData(
+          member.source,
+          member.conversationKey,
+        ),
+      ));
     }
     return cards;
   }
@@ -499,9 +737,9 @@ class StorylineService {
   /// The dedupe key for a storyline's current member set: its conversation
   /// keys, sorted, hashed. Sorted because membership is a set — the same
   /// threads arriving in a different order are the same storyline.
-  String _memberHashOf(String storylineId) {
+  Future<String> _memberHashOf(String storylineId) async {
     final keys = [
-      for (final member in _store.membersOf(storylineId))
+      for (final member in await _store.membersOf(storylineId))
         member.conversationKey,
     ]..sort();
     return cardHash(keys.join('\n'));
@@ -543,4 +781,68 @@ String cardForConversationRow(Map<String, Object?> row) {
     topics: const [],
     summary: null,
   );
+}
+
+/// The card the NAMING prompt reads: the thin card plus the newest inbound
+/// triage summary, and deliberately no topics.
+///
+/// Naming sees every member thread at once under one 4000-character cap, and
+/// a topic list is the segment that says least per character it costs — the
+/// sentence describing what was last said is what a title comes out of. The
+/// membership prompt, which reads ONE card, can afford both.
+String _namingCardForConversationRow(
+  Map<String, Object?> row,
+  Map<String, Object?>? cardData,
+) {
+  final conversation = Conversation.fromRow(row);
+  return buildConversationCard(
+    subject: stripReFw(conversation.subject),
+    participants: [
+      for (final participant in conversation.participants)
+        if (participant.display.isNotEmpty) participant.display,
+    ],
+    topics: const [],
+    summary: cardData?['summary'] as String?,
+  );
+}
+
+/// The card for a conversation row enriched with what the AI already knows
+/// about the thread: extracted topics and the newest inbound triage summary.
+/// Degrades to [cardForConversationRow]'s thin card when [cardData] is null
+/// or its pieces are missing/corrupt — enrichment is a bonus, never a
+/// requirement.
+String enrichedCardForConversationRow(
+  Map<String, Object?> row,
+  Map<String, Object?>? cardData,
+) {
+  final conversation = Conversation.fromRow(row);
+  return buildConversationCard(
+    subject: stripReFw(conversation.subject),
+    participants: [
+      for (final participant in conversation.participants)
+        if (participant.display.isNotEmpty) participant.display,
+    ],
+    topics: _topicsOf(cardData?['extraction_json']),
+    summary: cardData?['summary'] as String?,
+  );
+}
+
+/// The `topics` list out of a stored extraction blob, or nothing. Every step
+/// can fail against a row an older build wrote, and every failure is the same
+/// answer: no topics, which is the card this app sent before there were any.
+List<String> _topicsOf(Object? extractionJson) {
+  if (extractionJson is! String || extractionJson.isEmpty) return const [];
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(extractionJson);
+  } on FormatException {
+    return const [];
+  }
+  if (decoded is! Map) return const [];
+  final topics = decoded['topics'];
+  if (topics is! List) return const [];
+  return [
+    for (final topic in topics)
+      if (topic is String && topic.isNotEmpty) topic,
+  ];
 }

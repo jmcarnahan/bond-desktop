@@ -71,15 +71,15 @@ class SyncService implements MailSync {
       // — must not remove mail from the AI pipeline forever. Errored rows get
       // another chance on each sync until their attempt ceiling; the enqueue
       // below is `OR IGNORE`, so nothing here double-queues.
-      final revivedTriage = _store.reviveErroredTriage(source: _source);
-      final revivedWork = _store.reviveErroredWork();
+      final revivedTriage = await _store.reviveErroredTriage(source: _source);
+      final revivedWork = await _store.reviveErroredWork();
 
       // After both drains, so the window it queues from is the mailbox as it
       // stands rather than as it stood mid-sync. `OR IGNORE` on the work table
       // makes this idempotent, which is what lets it run on every sync: new mail
       // is queued, finished work stays finished, and a queue that a crash left
       // short refills itself without anyone tracking that it did.
-      final queued = _store.enqueueExtractBacklog(
+      final queued = await _store.enqueueExtractBacklog(
         cap: firstRunTriageCap,
         sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
         source: _source,
@@ -89,9 +89,9 @@ class SyncService implements MailSync {
       // one per thread — there is one mailbox to sweep — and a requeue rather
       // than an enqueue, so the sweep that ran after the last sync runs again
       // after this one instead of staying `done` forever.
-      _store.requeueWork('storyline_sweep', _source, 'sweep');
+      await _store.requeueWork('storyline_sweep', _source, 'sweep');
 
-      _log.record(
+      await _log.record(
         'sync_mail',
         source: _source,
         count: inbox + sent,
@@ -109,7 +109,7 @@ class SyncService implements MailSync {
       // The last frame in which the exception object still exists: the load
       // that called this collapses it into a banner string. Recorded, then
       // rethrown so that banner still appears.
-      _log.record(
+      await _log.record(
         'sync_mail',
         status: 'error',
         source: _source,
@@ -124,7 +124,7 @@ class SyncService implements MailSync {
   /// cursor. Returns `(messages seen for the first time, whether the 410
   /// recovery fired)`.
   Future<(int, bool)> _syncFolder(String folder, String direction) async {
-    final storedLink = _store.getDeltaLink(folder, source: _source);
+    final storedLink = await _store.getDeltaLink(folder, source: _source);
     final firstRun = storedLink == null;
     var newMessages = 0;
     var resynced = false;
@@ -144,7 +144,7 @@ class SyncService implements MailSync {
       // the dead cursor and that window's edge, and nothing ever fetches it
       // again. Ingest is idempotent per page, so re-reading stored mail costs
       // bandwidth once and corrupts nothing.
-      _store.setDeltaLink(folder, null, source: _source);
+      await _store.setDeltaLink(folder, null, source: _source);
       resynced = true;
       try {
         // Re-reading stored mail is not "new": firstSighting inside the
@@ -168,7 +168,7 @@ class SyncService implements MailSync {
     // Only the inbox: outbound mail is never queued for triage in the first
     // place, so there is nothing there to cap.
     if (firstRun && folder == 'inbox') {
-      _store.capPendingTriage(firstRunTriageCap, source: _source);
+      await _store.capPendingTriage(firstRunTriageCap, source: _source);
     }
     return (newMessages, resynced);
   }
@@ -195,7 +195,7 @@ class SyncService implements MailSync {
       );
       firstRequest = false;
 
-      newMessages += _ingestPage(page.messages, direction);
+      newMessages += await _ingestPage(page.messages, direction);
 
       final next = page.nextLink;
       if (next != null && next.isNotEmpty) {
@@ -208,7 +208,7 @@ class SyncService implements MailSync {
 
       final delta = page.deltaLink;
       if (delta != null && delta.isNotEmpty) {
-        _store.setDeltaLink(folder, delta, source: _source);
+        await _store.setDeltaLink(folder, delta, source: _source);
       }
       return newMessages;
     }
@@ -224,14 +224,16 @@ class SyncService implements MailSync {
   /// activity row written inside the transaction would roll back with the
   /// page, and one that somehow survived would count messages that never
   /// landed.
-  int _ingestPage(List<Map<String, dynamic>> raw, String direction) {
+  Future<int> _ingestPage(
+    List<Map<String, dynamic>> raw,
+    String direction,
+  ) async {
     if (raw.isEmpty) return 0;
     final outbound = direction == 'outbound';
     final backlogCutoff = _isoAgo(const Duration(days: triageWindowDays));
 
-    _store.db.execute('BEGIN');
-    var newMessages = 0;
-    try {
+    return _store.db.transaction(() async {
+      var newMessages = 0;
       final work = <String, _ConversationWork>{};
 
       for (final message in raw) {
@@ -244,7 +246,7 @@ class SyncService implements MailSync {
         final id = message['id'] as String?;
         if (id == null || id.isEmpty) continue;
         // A draft is mail that was never sent. It has no place in a thread
-        // that is asking whether the LO replied.
+        // that is asking whether the user replied.
         if (message['isDraft'] == true) continue;
 
         final receivedAt = message['receivedDateTime'] as String?;
@@ -268,11 +270,11 @@ class SyncService implements MailSync {
         // message exactly once. Delta feeds legitimately replay messages —
         // across pages, and wholesale during the 24-hour re-drain a 410
         // forces — and folding one a second time would reopen every thread
-        // the LO had marked done. The upsert itself still runs: a replay can
+        // the user had marked done. The upsert itself still runs: a replay can
         // carry a newer read state.
-        final firstSighting = !_store.hasMessage(_source, id);
+        final firstSighting = !await _store.hasMessage(_source, id);
 
-        _store.upsertMessage({
+        await _store.upsertMessage({
           'source': _source,
           'source_message_id': id,
           'internet_message_id': message['internetMessageId'] as String?,
@@ -300,14 +302,17 @@ class SyncService implements MailSync {
         // The moment a newer inbound message lands, that draft is a reply to
         // the wrong thing — so it goes, and the enqueue on the next list load
         // writes a fresh one against what the sender actually just said.
-        if (!outbound) _store.deleteDraft(_source, key);
+        if (!outbound) await _store.deleteDraft(_source, key);
 
-        final entry = work.putIfAbsent(
-          key,
-          () => _ConversationWork.from(
-            _store.getConversationRow(_source, key),
-          ),
-        );
+        // Spelled out rather than `putIfAbsent`, which takes a synchronous
+        // factory and the seed read is a query now.
+        var entry = work[key];
+        if (entry == null) {
+          entry = _ConversationWork.from(
+            await _store.getConversationRow(_source, key),
+          );
+          work[key] = entry;
+        }
         entry.snapshot = foldMessage(
           entry.snapshot,
           outbound: outbound,
@@ -316,7 +321,7 @@ class SyncService implements MailSync {
           preview: preview,
         );
         // Whoever is on the other end: the sender of mail that came in, the
-        // recipients of mail that went out. Never the LO.
+        // recipients of mail that went out. Never the user.
         if (outbound) {
           for (final address in recipients) {
             entry.addParticipant(null, address);
@@ -326,22 +331,20 @@ class SyncService implements MailSync {
         }
       }
 
-      work.forEach(_writeConversation);
-      _store.db.execute('COMMIT');
-    } catch (_) {
-      _store.db.execute('ROLLBACK');
-      rethrow;
-    }
-    return newMessages;
+      for (final folded in work.entries) {
+        await _writeConversation(folded.key, folded.value);
+      }
+      return newMessages;
+    });
   }
 
-  void _writeConversation(String key, _ConversationWork entry) {
+  Future<void> _writeConversation(String key, _ConversationWork entry) async {
     final snapshot = entry.snapshot;
     // Unreachable: an entry exists only because a message was folded into
     // it. Checked rather than forced so a future caller cannot make an empty
     // write silently reset a thread.
     if (snapshot == null) return;
-    _store.upsertConversation({
+    await _store.upsertConversation({
       'source': _source,
       'conversation_key': key,
       'subject': snapshot.subject,
@@ -363,7 +366,7 @@ class SyncService implements MailSync {
       'last_message_at': snapshot.lastMessageAt,
       'last_message_preview': snapshot.lastMessagePreview,
     });
-    _store.recomputeConversationCounts(_source, key);
+    await _store.recomputeConversationCounts(_source, key);
   }
 
   /// The triage columns a message gets the first time it is stored. Both are
@@ -373,7 +376,7 @@ class SyncService implements MailSync {
     required String? receivedAt,
     required String backlogCutoff,
   }) {
-    // Triage answers "does this need me?" — the LO's own sent mail never
+    // Triage answers "does this need me?" — the user's own sent mail never
     // does.
     if (outbound) return ('skipped', 'outbound');
     if (receivedAt != null &&
@@ -390,7 +393,8 @@ class SyncService implements MailSync {
   /// thread costs one sqlite read and no network at all.
   @override
   Future<void> ensureBodies(String conversationKey) async {
-    final thread = _store.loadThread(conversationKey, sources: const [_source]);
+    final thread =
+        await _store.loadThread(conversationKey, sources: const [_source]);
     final missing = [
       for (final message in thread)
         if (message.bodyText == null || message.bodyText!.isEmpty) message,
@@ -429,7 +433,7 @@ class SyncService implements MailSync {
         uniqueBody is Map<String, dynamic> ? uniqueBody['content'] as String? : null;
     final headers = _headers(detail['internetMessageHeaders']);
 
-    _store.updateMessageDetail(
+    await _store.updateMessageDetail(
       _source,
       sourceMessageId,
       bodyText: bodyText,

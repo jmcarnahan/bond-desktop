@@ -7,7 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 Storyline _storyline({
   required String id,
-  String title = 'Willow St purchase',
+  String title = 'Website redesign',
   String status = 'active',
   int memberCount = 2,
   int openCount = 0,
@@ -259,7 +259,7 @@ void main() {
         id: 'c',
         who: 'Cleo',
         state: ConversationState.waiting,
-        cta: 'Send the appraisal',
+        cta: 'Send the homepage copy',
       ),
       _conv(id: 'd', who: 'Dev', state: ConversationState.done),
     ];
@@ -538,7 +538,7 @@ void main() {
           id: 'b',
           who: 'Waiting',
           state: ConversationState.waiting,
-          cta: 'Send the appraisal',
+          cta: 'Send the homepage copy',
           score: 1.9,
         ),
       ]);
@@ -600,7 +600,7 @@ void main() {
     testWidgets('rows replace the placeholder', (tester) async {
       await pumpRail(tester, storylines: [_storyline(id: 'sl-1')]);
 
-      expect(find.text('Willow St purchase'), findsOneWidget);
+      expect(find.text('Website redesign'), findsOneWidget);
       expect(find.text('Suggestions arrive after processing'), findsNothing);
     });
 
@@ -654,7 +654,7 @@ void main() {
         onSelectStoryline: selected.add,
       );
 
-      await tester.tap(find.text('Willow St purchase'));
+      await tester.tap(find.text('Website redesign'));
 
       expect(selected, ['sl-1']);
     });

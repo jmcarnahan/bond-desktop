@@ -1,14 +1,18 @@
 import 'dart:math' as math;
 
-import 'package:bond_inbox/data/db.dart';
+// `show`: drift generates an `ActivityEvent` row class from the
+// `activity_events` table, and this file means the log's own.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// An [LlmClient] that answers from a per-schema script and never opens a
 /// socket.
@@ -54,37 +58,73 @@ class FakeLlm extends LlmClient {
   }
 }
 
+/// A [FakeLlm] that runs [onCall] before answering — how a test lands a user
+/// action in the middle of a model call.
+class HookedFakeLlm extends FakeLlm {
+  final Future<void> Function(String schemaName) onCall;
+
+  HookedFakeLlm(super.scripts, this.onCall);
+
+  @override
+  Future<Map<String, dynamic>> completeJson({
+    required String system,
+    required String user,
+    required Map<String, dynamic> schema,
+    String schemaName = 'result',
+    int maxTokens = 512,
+    double temperature = 0.2,
+    bool think = false,
+  }) async {
+    await onCall(schemaName);
+    return super.completeJson(
+      system: system,
+      user: user,
+      schema: schema,
+      schemaName: schemaName,
+      maxTokens: maxTokens,
+      temperature: temperature,
+      think: think,
+    );
+  }
+}
+
 /// A unit vector whose cosine against `[1, 0]` is exactly [c]. Two dimensions
 /// is all these tests need — the gates are cosine thresholds, and a 768-wide
 /// vector would only make the arithmetic harder to read.
 List<double> vectorAt(double c) => [c, math.sqrt(1 - c * c)];
 
 Map<String, dynamic> confirmAnswer({
-  String evidence = 'Both concern the Willow Street appraisal.',
+  String evidence = 'Both concern the website redesign.',
   bool belongs = true,
   String confidence = 'high',
 }) =>
     {'evidence': evidence, 'belongs': belongs, 'confidence': confidence};
 
 Map<String, dynamic> nameAnswer({
-  String title = 'Willow St purchase',
-  String summary = 'Underwriting is reviewing the appraisal.',
+  String title = 'Website redesign',
+  String summary = 'The studio is reviewing the homepage copy.',
+  String charter = 'The redesign of the Northline Studio website — the '
+      'homepage copy, the new photography, and the launch date.',
 }) =>
-    {'evidence': 'shared deal', 'title': title, 'summary': summary};
+    {
+      'evidence': 'shared deal',
+      'title': title,
+      'summary': summary,
+      'charter': charter,
+    };
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
-  void seed(
+  Future<void> seed(
     MessageStore into,
     String key, {
     List<double>? vector,
@@ -93,8 +133,8 @@ void main() {
     String lastMessageAt = '2026-08-28T10:00:00Z',
     String? subject,
     String embedModel = EmbeddingsClient.modelTag,
-  }) {
-    into.upsertConversation({
+  }) async {
+    await into.upsertConversation({
       'conversation_key': key,
       'subject': subject ?? 'Subject for $key',
       'state': state,
@@ -103,7 +143,7 @@ void main() {
           '[${participants.map((p) => '{"name":"$p"}').join(',')}]',
     });
     if (vector == null) return;
-    into.upsertConversationAi(
+    await into.upsertConversationAi(
       'email',
       key,
       embedding: encodeEmbedding(vector),
@@ -113,59 +153,65 @@ void main() {
   }
 
   /// A storyline with one member, both already embedded.
-  void seedStoryline(
+  Future<void> seedStoryline(
     MessageStore into, {
     String id = 'sl-1',
     String status = 'active',
-    String? summary = 'Underwriting is reviewing the appraisal.',
+    String? summary = 'The studio is reviewing the homepage copy.',
+    // A storyline named since charters existed has one. The tests that care
+    // about the backfill pass null and say so.
+    String? charter = 'The redesign of the Northline Studio website — the '
+        'homepage copy, the new photography, and the launch date.',
     bool titleLocked = false,
     String memberKey = 'member',
     List<double>? memberVector,
     List<String> memberParticipants = const ['Sarah Chen'],
-  }) {
-    seed(
+  }) async {
+    await seed(
       into,
       memberKey,
       vector: memberVector ?? vectorAt(1),
       participants: memberParticipants,
     );
-    into.insertStoryline(
+    await into.insertStoryline(
       id: id,
-      title: 'Willow St purchase',
+      title: 'Website redesign',
       summary: summary,
+      charter: charter,
       status: status,
       createdBy: 'auto',
     );
-    if (titleLocked) into.updateStoryline(id, titleLocked: true);
-    into.addStorylineMember(id, 'email', memberKey, addedBy: 'auto');
+    if (titleLocked) await into.updateStoryline(id, titleLocked: true);
+    await into.addStorylineMember(id, 'email', memberKey, addedBy: 'auto');
   }
 
   group('assignConversation', () {
     test('a candidate over the gate is confirmed once and filed', () async {
-      seedStoryline(store);
-      seed(store, 'c1',
+      await seedStoryline(store);
+      await seed(store, 'c1',
           vector: vectorAt(0.8), lastMessageAt: '2026-08-29T10:00:00Z');
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(llm.callsFor('storyline_membership'), 1);
-      // The summary is already there, so nothing needs naming.
+      // The summary and the charter are both already there, so nothing needs
+      // naming.
       expect(llm.callsFor('storyline_name'), 0);
-      final members = store.membersOf('sl-1');
+      final members = await store.membersOf('sl-1');
       expect(members.map((m) => m.conversationKey), ['member', 'c1']);
       final added = members.last;
       expect(added.addedBy, 'auto');
-      expect(added.evidence, 'Both concern the Willow Street appraisal.');
+      expect(added.evidence, 'Both concern the website redesign.');
       // The activity stamp follows the thread that joined.
-      expect(store.getStoryline('sl-1')!.lastActivityAt,
+      expect((await store.getStoryline('sl-1'))!.lastActivityAt,
           '2026-08-29T10:00:00Z');
     });
 
     test('runs at temperature zero — the same pair must answer the same twice',
         () async {
-      seedStoryline(store);
-      seed(store, 'c1', vector: vectorAt(0.8));
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
@@ -174,35 +220,35 @@ void main() {
     });
 
     test('a candidate under the gate never reaches the model', () async {
-      seedStoryline(store);
+      await seedStoryline(store);
       // 0.55 is under the plain gate of 0.60 and there is nobody in common.
-      seed(store, 'c1', vector: vectorAt(0.55), participants: const ['Ann Lu']);
+      await seed(store, 'c1', vector: vectorAt(0.55), participants: const ['Ann Lu']);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(llm.schemas, isEmpty);
-      expect(store.membersOf('sl-1'), hasLength(1));
+      expect(await store.membersOf('sl-1'), hasLength(1));
     });
 
     test('a shared participant lowers the gate', () async {
-      seedStoryline(store, memberParticipants: const ['Sarah Chen']);
+      await seedStoryline(store, memberParticipants: const ['Sarah Chen']);
       // The same vector as the test above, and the same 0.55 cosine. The only
       // difference is that Sarah is on both threads.
-      seed(store, 'c1',
+      await seed(store, 'c1',
           vector: vectorAt(0.55), participants: const ['sarah chen']);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(llm.callsFor('storyline_membership'), 1);
-      expect(store.membersOf('sl-1'), hasLength(2));
+      expect(await store.membersOf('sl-1'), hasLength(2));
     });
 
     test('a blocked thread is skipped entirely', () async {
-      seedStoryline(store);
-      seed(store, 'c1', vector: vectorAt(0.95));
-      store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
@@ -210,13 +256,13 @@ void main() {
       // The user already said no. A confident model does not get to overrule
       // that by being confident again.
       expect(llm.schemas, isEmpty);
-      expect(store.membersOf('sl-1'), hasLength(1));
+      expect(await store.membersOf('sl-1'), hasLength(1));
     });
 
     test('a thread already in the storyline is not re-judged', () async {
-      seedStoryline(store);
-      seed(store, 'c1', vector: vectorAt(0.95));
-      store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
@@ -225,47 +271,47 @@ void main() {
     });
 
     test('a "no" adds nothing and blocks nothing', () async {
-      seedStoryline(store);
-      seed(store, 'c1', vector: vectorAt(0.95));
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
       final llm = FakeLlm({
         'storyline_membership': [confirmAnswer(belongs: false)],
       });
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
-      expect(store.membersOf('sl-1'), hasLength(1));
+      expect(await store.membersOf('sl-1'), hasLength(1));
       // Only a person's "no" is durable. A model that changes its mind next
       // week should be free to.
-      expect(store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
+      expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
     });
 
     test('a low-confidence yes is a no', () async {
-      seedStoryline(store);
-      seed(store, 'c1', vector: vectorAt(0.95));
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
       final llm = FakeLlm({
         'storyline_membership': [confirmAnswer(confidence: 'low')],
       });
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
-      expect(store.membersOf('sl-1'), hasLength(1));
-      expect(store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+      expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
     });
 
     test('a thread with no embedding returns silently', () async {
-      seedStoryline(store);
-      seed(store, 'c1');
+      await seedStoryline(store);
+      await seed(store, 'c1');
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(llm.schemas, isEmpty);
-      expect(store.membersOf('sl-1'), hasLength(1));
+      expect(await store.membersOf('sl-1'), hasLength(1));
     });
 
     test('a vector from another embedding model is not comparable', () async {
-      seedStoryline(store);
-      seed(store, 'c1', vector: vectorAt(1), embedModel: 'some-other-model');
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(1), embedModel: 'some-other-model');
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
@@ -274,15 +320,15 @@ void main() {
     });
 
     test('a storyline whose members have no vectors is skipped', () async {
-      seed(store, 'member');
-      store.insertStoryline(
+      await seed(store, 'member');
+      await store.insertStoryline(
         id: 'sl-1',
-        title: 'Willow St purchase',
+        title: 'Website redesign',
         status: 'active',
         createdBy: 'auto',
       );
-      store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
-      seed(store, 'c1', vector: vectorAt(1));
+      await store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
+      await seed(store, 'c1', vector: vectorAt(1));
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
@@ -291,7 +337,7 @@ void main() {
     });
 
     test('an unknown conversation returns silently', () async {
-      seedStoryline(store);
+      await seedStoryline(store);
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'nope');
@@ -301,12 +347,12 @@ void main() {
 
     test('only the best candidate is judged, whatever the mailbox looks like',
         () async {
-      seedStoryline(store, id: 'sl-far', memberKey: 'far-member');
-      seedStoryline(store,
+      await seedStoryline(store, id: 'sl-far', memberKey: 'far-member');
+      await seedStoryline(store,
           id: 'sl-near',
           memberKey: 'near-member',
           memberVector: vectorAt(0.95));
-      seed(store, 'c1', vector: vectorAt(0.9));
+      await seed(store, 'c1', vector: vectorAt(0.9));
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
@@ -314,14 +360,14 @@ void main() {
       // One call, and it went to the closer storyline: 0.9 against the near
       // one's 0.95 member beats 0.9 against the far one's [1, 0].
       expect(llm.callsFor('storyline_membership'), 1);
-      expect(store.membersOf('sl-near'), hasLength(2));
-      expect(store.membersOf('sl-far'), hasLength(1));
+      expect(await store.membersOf('sl-near'), hasLength(2));
+      expect(await store.membersOf('sl-far'), hasLength(1));
     });
 
     test('a storyline with no summary is named, and a locked title is kept',
         () async {
-      seedStoryline(store, summary: null, titleLocked: true);
-      seed(store, 'c1', vector: vectorAt(0.9));
+      await seedStoryline(store, summary: null, titleLocked: true);
+      await seed(store, 'c1', vector: vectorAt(0.9));
       final llm = FakeLlm({
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer(title: 'A name the model preferred')],
@@ -329,77 +375,322 @@ void main() {
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
-      final storyline = store.getStoryline('sl-1')!;
+      final storyline = (await store.getStoryline('sl-1'))!;
       // The user named it. No later pass takes that back.
-      expect(storyline.title, 'Willow St purchase');
+      expect(storyline.title, 'Website redesign');
       // The summary describes where things stand, which no rename claimed.
-      expect(storyline.summary, 'Underwriting is reviewing the appraisal.');
+      expect(storyline.summary, 'The studio is reviewing the homepage copy.');
     });
 
     test('an unlocked title is replaced when the storyline is named',
         () async {
-      seedStoryline(store, summary: null);
-      seed(store, 'c1', vector: vectorAt(0.9));
+      await seedStoryline(store, summary: null);
+      await seed(store, 'c1', vector: vectorAt(0.9));
       final llm = FakeLlm({
         'storyline_membership': [confirmAnswer()],
-        'storyline_name': [nameAnswer(title: 'Chen refinance')],
+        'storyline_name': [nameAnswer(title: 'Brightsea launch')],
       });
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
-      expect(store.getStoryline('sl-1')!.title, 'Chen refinance');
+      expect((await store.getStoryline('sl-1'))!.title, 'Brightsea launch');
     });
 
     test('a suggestion still collects members while it waits', () async {
-      seedStoryline(store, status: 'suggested');
-      seed(store, 'c1', vector: vectorAt(0.9));
+      await seedStoryline(store, status: 'suggested');
+      await seed(store, 'c1', vector: vectorAt(0.9));
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
-      expect(store.membersOf('sl-1'), hasLength(2));
+      expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+  });
+
+  /// What the model is actually shown, and what it is judged against.
+  ///
+  /// Both halves are invisible from every other assertion in this file: a
+  /// thinner card and a charter that never got written still file threads and
+  /// still pass every membership test above. They only show up in whether the
+  /// answers are RIGHT, which is measured live.
+  group('the charter and the enriched card', () {
+    /// The newest inbound message on a thread, with the two things the card
+    /// enrichment reads: a triage summary, and an extraction to pull topics
+    /// from.
+    Future<void> seedInbound(
+      String key, {
+      String? summary,
+      String? extractionJson,
+    }) async {
+      await store.upsertMessage({
+        'source_message_id': 'm-$key',
+        'conversation_key': key,
+        'direction': 'inbound',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+      if (summary != null) {
+        await db.customStatement(
+          'UPDATE messages SET summary = ? WHERE source_message_id = ?',
+          [summary, 'm-$key'],
+        );
+      }
+      if (extractionJson != null) {
+        await store.writeExtraction('email', 'm-$key', extractionJson);
+      }
+    }
+
+    String confirmMessageOf(FakeLlm llm) =>
+        llm.userMessages[llm.schemas.indexOf('storyline_membership')];
+
+    test('the candidate card carries the topics and the triage summary',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await seedInbound(
+        'c1',
+        summary: 'Asks what time to come on Friday and offers dessert.',
+        extractionJson: '{"topics":["dinner plans","scheduling"]}',
+      );
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      final user = confirmMessageOf(llm);
+      expect(user, contains('dinner plans, scheduling'));
+      expect(user,
+          contains('Asks what time to come on Friday and offers dessert.'));
+    });
+
+    test('a thread with no extraction still gets judged, on a thinner card',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await seedInbound('c1', summary: 'Asks what time to come on Friday.');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      // Enrichment is a bonus, never a requirement: the summary is there, the
+      // topics segment is empty, and the call went out.
+      final user = confirmMessageOf(llm);
+      expect(user, contains('Asks what time to come on Friday.'));
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('a corrupt extraction costs the topics and nothing else', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await seedInbound(
+        'c1',
+        summary: 'Asks what time to come on Friday.',
+        extractionJson: 'not json at all',
+      );
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      expect(confirmMessageOf(llm), contains('Asks what time to come'));
+      expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('naming cards carry the summary but never the topics', () async {
+      await seedStoryline(store, summary: null, charter: null);
+      await seedInbound(
+        'member',
+        summary: 'The studio sent the homepage copy back.',
+        extractionJson: '{"topics":["homepage copy","review"]}',
+      );
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      final naming = llm.userMessages[llm.schemas.indexOf('storyline_name')];
+      expect(naming, contains('The studio sent the homepage copy back.'));
+      // Naming reads every member card under one cap, and a topic list is the
+      // segment that says least per character it costs.
+      expect(naming, isNot(contains('homepage copy, review')));
+    });
+
+    test('a storyline with no charter gets one, even when it has a summary',
+        () async {
+      // The pre-charter shape: named by an older build, so the summary is
+      // there and the charter is not. One naming call backfills it.
+      await seedStoryline(store, charter: null);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      expect(llm.callsFor('storyline_name'), 1);
+      expect((await store.getStoryline('sl-1'))!.charter,
+          startsWith('The redesign of the Northline Studio website'));
+    });
+
+    test('an edited charter is never taken back', () async {
+      await seedStoryline(store, summary: null, charter: null);
+      await store.updateStoryline(
+        'sl-1',
+        charter: 'Only the homepage copy. Not the photography.',
+        charterLocked: true,
+      );
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      // The naming call still happened — the summary was missing — and it
+      // still refreshed the summary. The charter is the user's.
+      expect(storyline.summary, 'The studio is reviewing the homepage copy.');
+      expect(storyline.charter, 'Only the homepage copy. Not the photography.');
+      expect(storyline.charterLocked, isTrue);
+    });
+
+    test('a charter saved while naming is in flight is not overwritten',
+        () async {
+      // The backfill's naming call takes seconds against a real server. A
+      // user who opens About and saves their own charter in that window has
+      // set the lock — and the write that lands after the model returns must
+      // honor the lock as it is NOW, not as it was when the call started.
+      await seedStoryline(store, charter: null);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = HookedFakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      }, (schemaName) async {
+        if (schemaName != 'storyline_name') return;
+        await store.updateStoryline('sl-1',
+            charter: 'Only the launch.', charterLocked: true);
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, 'Only the launch.');
+      expect(storyline.charterLocked, isTrue);
+    });
+
+    test('a storyline that has both is left alone', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      // No script for naming: a second backfill call would throw here, which
+      // is what makes "converges" a claim this test can check.
+      expect(llm.callsFor('storyline_name'), 0);
+    });
+
+    test('a proposed storyline is stored with its charter', () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c3', vector: vectorAt(0));
+      await seed(store, 'c4', vector: vectorAt(-0.9));
+      final llm = FakeLlm({'storyline_name': [nameAnswer()]});
+
+      await StorylineService(store, llm).sweep();
+
+      expect((await store.loadStorylines()).single.charter,
+          startsWith('The redesign of the Northline Studio website'));
+    });
+
+    test('a model that offered no charter leaves the column null', () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c3', vector: vectorAt(0));
+      await seed(store, 'c4', vector: vectorAt(-0.9));
+      final llm = FakeLlm({'storyline_name': [nameAnswer(charter: '')]});
+
+      await StorylineService(store, llm).sweep();
+
+      // NULL rather than '': a storyline with no charter is judged against its
+      // summary, and an empty string would be judged against nothing.
+      expect((await store.loadStorylines()).single.charter, isNull);
+    });
+
+    test('nine member summaries still fit under the naming cap', () async {
+      await store.insertStoryline(
+        id: 'sl-big',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      for (var i = 0; i < 9; i++) {
+        await seed(store, 'big-$i', vector: vectorAt(1));
+        await seedInbound('big-$i', summary: 's' * 600);
+        await store.addStorylineMember('sl-big', 'email', 'big-$i',
+            addedBy: 'auto');
+      }
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer()],
+        'storyline_name': [nameAnswer()],
+      });
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      // The cards are clamped as a SET, not one by one — a storyline of nine
+      // threads has to fit in one prompt however long each summary ran.
+      final naming = llm.userMessages[llm.schemas.indexOf('storyline_name')];
+      expect('s'.allMatches(naming).length, lessThanOrEqualTo(4000));
     });
   });
 
   group('sweep', () {
     /// Four unassigned threads: c1 and c2 link, c3 and c4 link to nothing.
-    void seedMailbox(MessageStore into) {
-      seed(into, 'c1',
+    Future<void> seedMailbox(MessageStore into) async {
+      await seed(into, 'c1',
           vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      seed(into, 'c2',
+      await seed(into, 'c2',
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      seed(into, 'c3',
+      await seed(into, 'c3',
           vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
-      seed(into, 'c4',
+      await seed(into, 'c4',
           vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
     }
 
     test('too little unassigned mail is a no-op', () async {
-      seed(store, 'c1', vector: vectorAt(1));
-      seed(store, 'c2', vector: vectorAt(0.95));
+      await seed(store, 'c1', vector: vectorAt(1));
+      await seed(store, 'c2', vector: vectorAt(0.95));
       final llm = FakeLlm({'storyline_name': [nameAnswer()]});
 
       await StorylineService(store, llm).sweep();
 
       expect(llm.schemas, isEmpty);
-      expect(store.loadStorylines(), isEmpty);
+      expect(await store.loadStorylines(), isEmpty);
     });
 
     test('a cluster becomes one suggestion with its members', () async {
-      seedMailbox(store);
+      await seedMailbox(store);
       final llm = FakeLlm({'storyline_name': [nameAnswer()]});
 
       await StorylineService(store, llm).sweep();
 
-      final storyline = store.loadStorylines().single;
+      final storyline = (await store.loadStorylines()).single;
       expect(storyline.status, 'suggested');
       expect(storyline.createdBy, 'auto');
-      expect(storyline.title, 'Willow St purchase');
-      expect(storyline.summary, 'Underwriting is reviewing the appraisal.');
+      expect(storyline.title, 'Website redesign');
+      expect(storyline.summary, 'The studio is reviewing the homepage copy.');
       expect(storyline.id, startsWith('sl-'));
       expect(storyline.lastActivityAt, '2026-08-29T04:00:00Z');
 
-      final members = store.membersOf(storyline.id);
+      final members = await store.membersOf(storyline.id);
       expect(members.map((m) => m.conversationKey).toSet(), {'c1', 'c2'});
       expect(members.every((m) => m.addedBy == 'auto'), isTrue);
       expect(members.first.evidence, 'clustered together');
@@ -411,7 +702,7 @@ void main() {
     });
 
     test('a done thread is never the start of a story', () async {
-      seedMailbox(store);
+      await seedMailbox(store);
       store.setConversationState('email', 'c2', ConversationState.done);
       final llm = FakeLlm({'storyline_name': [nameAnswer()]});
 
@@ -420,18 +711,18 @@ void main() {
       // c1's only partner is finished, so nothing clusters — and with c2 gone
       // there are only three threads left to look at anyway.
       expect(llm.schemas, isEmpty);
-      expect(store.loadStorylines(), isEmpty);
+      expect(await store.loadStorylines(), isEmpty);
     });
 
     test('threads already in a storyline are left alone', () async {
-      seedMailbox(store);
-      store.insertStoryline(
+      await seedMailbox(store);
+      await store.insertStoryline(
         id: 'sl-existing',
         title: 'Existing',
         status: 'active',
         createdBy: 'user',
       );
-      store.addStorylineMember('sl-existing', 'email', 'c1', addedBy: 'user');
+      await store.addStorylineMember('sl-existing', 'email', 'c1', addedBy: 'user');
       final llm = FakeLlm({'storyline_name': [nameAnswer()]});
 
       await StorylineService(store, llm).sweep();
@@ -439,29 +730,32 @@ void main() {
       // c1 is spoken for, which leaves three unassigned threads — under the
       // floor, so the sweep does not run.
       expect(llm.schemas, isEmpty);
-      expect(store.loadStorylines(), hasLength(1));
+      expect(await store.loadStorylines(), hasLength(1));
     });
 
     test('a dismissed cluster is not proposed again', () async {
-      seedMailbox(store);
+      await seedMailbox(store);
       final llm = FakeLlm({'storyline_name': [nameAnswer()]});
       final service = StorylineService(store, llm);
 
       await service.sweep();
-      final first = store.loadStorylines().single;
-      final hash = db.select(
-        'SELECT member_hash FROM storylines WHERE id = ?',
-        [first.id],
-      ).single['member_hash'];
+      final first = (await store.loadStorylines()).single;
+      final hash = (await db
+              .customSelect(
+                'SELECT member_hash FROM storylines WHERE id = ?',
+                variables: [Variable(first.id)],
+              )
+              .getSingle())
+          .data['member_hash'];
       expect(hash, isNotNull);
-      service.dismissSuggestion(first.id);
+      await service.dismissSuggestion(first.id);
 
       // Dismissing frees c1 and c2 again, so the same four threads are back on
       // the table and the clustering is deterministic — without the hash guard
       // this would re-propose the group the user just threw away.
       await service.sweep();
 
-      expect(store.loadStorylines(), isEmpty);
+      expect(await store.loadStorylines(), isEmpty);
       expect(llm.callsFor('storyline_name'), 1);
     });
 
@@ -470,17 +764,17 @@ void main() {
       // Two distinct clusters: A (a1, a2) around vectorAt(1), B (b1, b2)
       // around vectorAt(-0.9). A's rows are newer, so the deterministic pass
       // builds A first and stable sorting keeps it ranked first.
-      seed(store, 'a1',
+      await seed(store, 'a1',
           vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      seed(store, 'a2',
+      await seed(store, 'a2',
           vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      seed(store, 'b1',
+      await seed(store, 'b1',
           vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T02:00:00Z');
-      seed(store, 'b2',
+      await seed(store, 'b2',
           vector: vectorAt(-0.95), lastMessageAt: '2026-08-29T01:00:00Z');
       // Two unrelated pending suggestions squeeze the room down to one slot.
       for (var i = 0; i < 2; i++) {
-        store.insertStoryline(
+        await store.insertStoryline(
           id: 'sl-pending-$i',
           title: 'Pending $i',
           status: 'suggested',
@@ -494,32 +788,30 @@ void main() {
 
       // Sweep #1: the single slot goes to A, the larger-ranked cluster.
       await service.sweep();
-      final proposedA = store
-          .loadStorylines(statuses: const ['suggested'])
+      final proposedA = (await store.loadStorylines(statuses: const ['suggested']))
           .where((s) => s.id.startsWith('sl-') && !s.id.startsWith('sl-pending'))
           .single;
-      expect(store.membersOf(proposedA.id).map((m) => m.conversationKey).toSet(),
+      expect((await store.membersOf(proposedA.id)).map((m) => m.conversationKey).toSet(),
           {'a1', 'a2'});
-      service.dismissSuggestion(proposedA.id);
+      await service.dismissSuggestion(proposedA.id);
 
       // Sweep #2: A is ranked first again and its hash is dismissed. That
       // must not eat the slot — B, which the user has never seen, gets it.
       await service.sweep();
 
-      final proposedB = store
-          .loadStorylines(statuses: const ['suggested'])
+      final proposedB = (await store.loadStorylines(statuses: const ['suggested']))
           .where((s) => s.id.startsWith('sl-') && !s.id.startsWith('sl-pending'))
           .single;
-      expect(store.membersOf(proposedB.id).map((m) => m.conversationKey).toSet(),
+      expect((await store.membersOf(proposedB.id)).map((m) => m.conversationKey).toSet(),
           {'b1', 'b2'});
       expect(llm.callsFor('storyline_name'), 2);
     });
 
     test('the pending-suggestion cap stops the sweep before it starts',
         () async {
-      seedMailbox(store);
+      await seedMailbox(store);
       for (var i = 0; i < 3; i++) {
-        store.insertStoryline(
+        await store.insertStoryline(
           id: 'sl-pending-$i',
           title: 'Pending $i',
           status: 'suggested',
@@ -531,27 +823,25 @@ void main() {
       await StorylineService(store, llm).sweep();
 
       expect(llm.schemas, isEmpty);
-      expect(store.loadStorylines(), hasLength(3));
+      expect(await store.loadStorylines(), hasLength(3));
     });
 
     test('clustering is deterministic — same mailbox, same groups', () async {
-      Future<Set<String>> clusterOf(Database into) async {
-        applySchema(into);
+      Future<Set<String>> clusterOf(BondDatabase into) async {
         final target = MessageStore(into);
-        seedMailbox(target);
+        await seedMailbox(target);
         await StorylineService(
           target,
           FakeLlm({'storyline_name': [nameAnswer()]}),
         ).sweep();
-        final storyline = target.loadStorylines().single;
-        return target
-            .membersOf(storyline.id)
+        final storyline = (await target.loadStorylines()).single;
+        return (await target.membersOf(storyline.id))
             .map((m) => m.conversationKey)
             .toSet();
       }
 
-      final a = sqlite3.openInMemory();
-      final b = sqlite3.openInMemory();
+      final a = testDb();
+      final b = testDb();
       addTearDown(a.close);
       addTearDown(b.close);
 
@@ -560,58 +850,58 @@ void main() {
   });
 
   group('user actions', () {
-    test('creating a storyline locks its title and files the thread', () {
-      seed(store, 'c1', lastMessageAt: '2026-08-29T10:00:00Z');
+    test('creating a storyline locks its title and files the thread', () async {
+      await seed(store, 'c1', lastMessageAt: '2026-08-29T10:00:00Z');
       final service =
           StorylineService(store, FakeLlm(const {}));
 
-      final id = service.createStoryline(
-        'Chen refinance',
+      final id = await service.createStoryline(
+        'Brightsea launch',
         source: 'email',
         conversationKey: 'c1',
       );
 
-      final storyline = store.getStoryline(id)!;
-      expect(storyline.title, 'Chen refinance');
+      final storyline = (await store.getStoryline(id))!;
+      expect(storyline.title, 'Brightsea launch');
       expect(storyline.status, 'active');
       expect(storyline.createdBy, 'user');
       expect(storyline.titleLocked, isTrue);
       expect(storyline.lastActivityAt, '2026-08-29T10:00:00Z');
-      expect(store.membersOf(id).single.addedBy, 'user');
+      expect((await store.membersOf(id)).single.addedBy, 'user');
     });
 
-    test('two ids in a row differ', () {
+    test('two ids in a row differ', () async {
       expect(newStorylineId(), isNot(newStorylineId()));
       expect(newStorylineId(), matches(RegExp(r'^sl-[0-9a-f]{16}$')));
     });
 
-    test('keep and dismiss move the status and nothing else', () {
-      store.insertStoryline(
+    test('keep and dismiss move the status and nothing else', () async {
+      await store.insertStoryline(
         id: 'sl-1',
-        title: 'Willow St purchase',
-        summary: 'Underwriting is reviewing the appraisal.',
+        title: 'Website redesign',
+        summary: 'The studio is reviewing the homepage copy.',
         status: 'suggested',
         createdBy: 'auto',
         memberHash: 'h1',
       );
-      store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
       final service = StorylineService(store, FakeLlm(const {}));
 
-      service.keepSuggestion('sl-1');
-      expect(store.getStoryline('sl-1')!.status, 'active');
+      await service.keepSuggestion('sl-1');
+      expect((await store.getStoryline('sl-1'))!.status, 'active');
 
-      service.dismissSuggestion('sl-1');
-      final dismissed = store.getStoryline('sl-1')!;
+      await service.dismissSuggestion('sl-1');
+      final dismissed = (await store.getStoryline('sl-1'))!;
       expect(dismissed.status, 'dismissed');
-      expect(dismissed.summary, 'Underwriting is reviewing the appraisal.');
+      expect(dismissed.summary, 'The studio is reviewing the homepage copy.');
       // The member rows are the record the hash was computed over. Deleting
       // them would leave the app unable to recognise the cluster again.
-      expect(store.membersOf('sl-1'), hasLength(1));
-      expect(store.dismissedMemberHashExists('h1'), isTrue);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+      expect(await store.dismissedMemberHashExists('h1'), isTrue);
     });
 
-    test('renaming locks the title', () {
-      store.insertStoryline(
+    test('renaming locks the title', () async {
+      await store.insertStoryline(
         id: 'sl-1',
         title: 'Untitled storyline',
         status: 'active',
@@ -619,45 +909,45 @@ void main() {
       );
       final service = StorylineService(store, FakeLlm(const {}));
 
-      service.rename('sl-1', 'Chen refinance');
+      await service.rename('sl-1', 'Brightsea launch');
 
-      final storyline = store.getStoryline('sl-1')!;
-      expect(storyline.title, 'Chen refinance');
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.title, 'Brightsea launch');
       expect(storyline.titleLocked, isTrue);
     });
 
-    test('removing a thread always blocks it', () {
-      store.insertStoryline(
+    test('removing a thread always blocks it', () async {
+      await store.insertStoryline(
         id: 'sl-1',
-        title: 'Willow St purchase',
+        title: 'Website redesign',
         status: 'active',
         createdBy: 'auto',
       );
-      store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
       final service = StorylineService(store, FakeLlm(const {}));
 
-      service.removeThread('sl-1', 'email', 'c1');
+      await service.removeThread('sl-1', 'email', 'c1');
 
-      expect(store.membersOf('sl-1'), isEmpty);
-      expect(store.isMemberBlocked('sl-1', 'email', 'c1'), isTrue);
+      expect(await store.membersOf('sl-1'), isEmpty);
+      expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isTrue);
     });
 
-    test('adding a thread back un-blocks it', () {
-      seed(store, 'c1');
-      store.insertStoryline(
+    test('adding a thread back un-blocks it', () async {
+      await seed(store, 'c1');
+      await store.insertStoryline(
         id: 'sl-1',
-        title: 'Willow St purchase',
+        title: 'Website redesign',
         status: 'active',
         createdBy: 'auto',
       );
       final service = StorylineService(store, FakeLlm(const {}));
-      service.addThread('sl-1', 'email', 'c1');
-      service.removeThread('sl-1', 'email', 'c1');
+      await service.addThread('sl-1', 'email', 'c1');
+      await service.removeThread('sl-1', 'email', 'c1');
 
-      service.addThread('sl-1', 'email', 'c1');
+      await service.addThread('sl-1', 'email', 'c1');
 
-      expect(store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
-      expect(store.membersOf('sl-1'), hasLength(1));
+      expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
+      expect(await store.membersOf('sl-1'), hasLength(1));
     });
   });
 
@@ -669,8 +959,8 @@ void main() {
   /// the activity panel, and no other assertion in this file would move.
   group('what the passes note', () {
     test('a filing names the storyline it filed into', () async {
-      seedStoryline(store);
-      seed(store, 'c1', vector: vectorAt(0.8));
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
@@ -680,17 +970,17 @@ void main() {
         activityLog: log,
       ).assignConversation('email', 'c1');
 
-      log.record('storyline', source: 'email', entityId: 'c1');
+      await log.record('storyline', source: 'email', entityId: 'c1');
 
-      final row = ActivityEvent.fromRow(store.recentActivity().single);
-      expect(row.detail['assigned'], 'Willow St purchase');
+      final row = ActivityEvent.fromRow((await store.recentActivity()).single);
+      expect(row.detail['assigned'], 'Website redesign');
     });
 
     test('a pass that filed nothing notes nothing, and so writes no row',
         () async {
-      seedStoryline(store);
+      await seedStoryline(store);
       // Under the gate, so the model is never consulted and nothing is filed.
-      seed(store, 'c1', vector: vectorAt(0.1));
+      await seed(store, 'c1', vector: vectorAt(0.1));
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
@@ -700,16 +990,16 @@ void main() {
         activityLog: log,
       ).assignConversation('email', 'c1');
 
-      log.record('storyline', source: 'email', entityId: 'c1');
+      await log.record('storyline', source: 'email', entityId: 'c1');
 
-      expect(store.recentActivity(), isEmpty);
+      expect(await store.recentActivity(), isEmpty);
     });
 
     test('a sweep counts its proposals once, not once per cluster', () async {
-      seed(store, 'c1', vector: vectorAt(1));
-      seed(store, 'c2', vector: vectorAt(0.9));
-      seed(store, 'c3', vector: vectorAt(0));
-      seed(store, 'c4', vector: vectorAt(-0.9));
+      await seed(store, 'c1', vector: vectorAt(1));
+      await seed(store, 'c2', vector: vectorAt(0.9));
+      await seed(store, 'c3', vector: vectorAt(0));
+      await seed(store, 'c4', vector: vectorAt(-0.9));
       final log = ActivityLog(store);
       addTearDown(log.dispose);
 
@@ -719,10 +1009,241 @@ void main() {
         activityLog: log,
       ).sweep();
 
-      log.record('storyline_sweep', source: 'email', entityId: 'sweep');
+      await log.record('storyline_sweep', source: 'email', entityId: 'sweep');
 
-      final row = ActivityEvent.fromRow(store.recentActivity().single);
+      final row = ActivityEvent.fromRow((await store.recentActivity()).single);
       expect(row.detail['proposed'], 1);
+    });
+  });
+
+  group('the recruit pass', () {
+    /// Runs a recruit with [llm] and returns the recorded activity detail —
+    /// every recruit notes, so the row is part of the pass's contract.
+    Future<Map<String, Object?>> recruitAndRecord(
+      FakeLlm llm, {
+      String id = 'sl-1',
+    }) async {
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      await StorylineService(store, llm, activityLog: log).recruit(id);
+      await log.record('storyline_recruit', source: 'email', entityId: id);
+      final rows = await store.recentActivity();
+      if (rows.isEmpty) return const {};
+      return ActivityEvent.fromRow(rows.single).detail;
+    }
+
+    test('a candidate over the gate is confirmed against the charter and filed',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1',
+          vector: vectorAt(0.8), lastMessageAt: '2026-08-30T10:00:00Z');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      // Exactly one confirmation: the member's own thread also has a vector —
+      // at cosine 1.0 it would top the ranking — so one call is also the
+      // proof that members are excluded.
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(llm.userMessages.single, contains('Charter:'));
+      final members = await store.membersOf('sl-1');
+      expect(members.map((m) => m.conversationKey), ['member', 'c1']);
+      expect(members.last.addedBy, 'auto');
+      expect(members.last.evidence, 'Both concern the website redesign.');
+      final hashRow = await db
+          .customSelect(
+            'SELECT member_hash FROM storylines WHERE id = ?',
+            variables: [Variable('sl-1')],
+          )
+          .getSingle();
+      expect(hashRow.data['member_hash'], isNotNull);
+      expect((await store.getStoryline('sl-1'))!.lastActivityAt,
+          '2026-08-30T10:00:00Z');
+      expect(detail['recruited'], 1);
+      expect(detail['considered'], 1);
+    });
+
+    test('the gate is the LOWER one even with nobody in common', () async {
+      await seedStoryline(store, memberParticipants: const ['Sarah Chen']);
+      // 0.55 with disjoint people: assignment would demand 0.60 here. The
+      // user's charter is what buys the look instead of a shared name.
+      await seed(store, 'c1',
+          vector: vectorAt(0.55), participants: const ['Ann Lu']);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await recruitAndRecord(llm);
+
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('under the gate never reaches the model', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.45));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.schemas, isEmpty);
+      // An all-zero recruit is a quiet kind's genuine nothing: noted by the
+      // service, suppressed by the log. "0 of 5" would have shown.
+      expect(detail, isEmpty);
+    });
+
+    test('a blocked thread is never even considered', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
+      // Removing a non-member with block: true records the user's "no"
+      // without ever having had a membership to delete.
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.schemas, isEmpty);
+      expect(detail, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+    });
+
+    test('the pass is capped at the top eight by cosine', () async {
+      await seedStoryline(store);
+      // Ten over the gate, at distinct cosines. The two weakest must never
+      // reach the model, however agreeable it is scripted to be.
+      for (var i = 0; i < 10; i++) {
+        await seed(store, 'c$i', vector: vectorAt(0.51 + 0.04 * i));
+      }
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.callsFor('storyline_membership'), 8);
+      expect(detail['considered'], 8);
+      final keys = (await store.membersOf('sl-1'))
+          .map((m) => m.conversationKey)
+          .toSet();
+      // c0 (0.51) and c1 (0.55) are ranks nine and ten.
+      expect(keys.contains('c0'), false);
+      expect(keys.contains('c1'), false);
+      expect(keys.contains('c9'), true);
+    });
+
+    test('a low-confidence yes is a no', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(confidence: 'low')],
+      });
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(await store.membersOf('sl-1'), hasLength(1));
+      expect(detail['recruited'], 0);
+      expect(detail['considered'], 1);
+    });
+
+    test('a dismissed storyline is not resurrected by a queued recruit',
+        () async {
+      await seedStoryline(store, status: 'dismissed');
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await StorylineService(store, llm, activityLog: log).recruit('sl-1');
+      await log.record('storyline_recruit', source: 'email', entityId: 'sl-1');
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+      // Nothing noted, so nothing recorded: this pass genuinely did nothing.
+      expect(await store.recentActivity(), isEmpty);
+    });
+
+    test('a storyline with no member vectors reports an empty pass', () async {
+      await seed(store, 'bare');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'user',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'bare', addedBy: 'user');
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.schemas, isEmpty);
+      expect(detail, isEmpty);
+    });
+
+    test('an unavailable server parks the pass and keeps what already landed',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      await seed(store, 'c2', vector: vectorAt(0.8));
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          const LlmUnavailableException('server off'),
+        ],
+      });
+
+      await expectLater(
+        StorylineService(store, llm).recruit('sl-1'),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+
+      // The first candidate stays filed; the re-run after the park skips it
+      // as a member and picks up where this one stopped.
+      expect(
+        (await store.membersOf('sl-1')).map((m) => m.conversationKey),
+        ['member', 'c1'],
+      );
+    });
+  });
+
+  group('setCharter', () {
+    test('a save trims, locks, and queues one recruit', () async {
+      await seedStoryline(store);
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm)
+          .setCharter('sl-1', '  Only the venue booking.  ');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, 'Only the venue booking.');
+      expect(storyline.charterLocked, true);
+      final work = await store.nextPendingWork('storyline_recruit');
+      expect(work?['entity_id'], 'sl-1');
+      // The save writes and queues; the model is for the drain to consult.
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('clearing unlocks, drafts nothing, and recruits nothing', () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1', charterLocked: true);
+
+      await StorylineService(store, FakeLlm(const {}))
+          .setCharter('sl-1', '   ');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, null);
+      expect(storyline.charterLocked, false);
+      expect(await store.nextPendingWork('storyline_recruit'), null);
+    });
+
+    test('a second save revives a recruit the drain already finished',
+        () async {
+      await seedStoryline(store);
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.setCharter('sl-1', 'First charter.');
+      await store.writeWork('storyline_recruit', 'email', 'sl-1',
+          status: 'done');
+      await service.setCharter('sl-1', 'Second charter.');
+
+      final work = await store.nextPendingWork('storyline_recruit');
+      expect(work?['entity_id'], 'sl-1');
     });
   });
 }

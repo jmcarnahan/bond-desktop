@@ -1,0 +1,241 @@
+-- The on-disk schema, version 1 — byte-for-byte the DDL that shipped before
+-- drift owned it, so an existing install adopts this file rather than
+-- migrating to it.
+--
+-- Every table is STRICT: a value whose storage class does not match its
+-- column type is rejected at write time rather than coerced, so a TEXT
+-- timestamp landing in an INTEGER count fails loudly here instead of
+-- surfacing as a wrong number three screens away.
+
+CREATE TABLE messages (
+  source TEXT NOT NULL DEFAULT 'email',
+  source_message_id TEXT NOT NULL,
+  internet_message_id TEXT,
+  conversation_key TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  subject TEXT,
+  from_name TEXT,
+  from_address TEXT,
+  -- `AS recipientsJson` renames drift's generated getter and nothing else:
+  -- the column stays `to_json` on disk. Without it the getter would be
+  -- `toJson`, which collides with the `toJson()` every drift row class
+  -- inherits, and the generated file would not compile.
+  to_json TEXT NOT NULL DEFAULT '[]' AS recipientsJson,
+  received_at TEXT,
+  is_read INTEGER NOT NULL DEFAULT 0,
+  body_preview TEXT,
+  body_text TEXT,
+  has_attachments INTEGER NOT NULL DEFAULT 0,
+  source_meta_json TEXT,
+  triage_status TEXT NOT NULL DEFAULT 'pending',
+  triage_attempts INTEGER NOT NULL DEFAULT 0,
+  triage_error TEXT,
+  gate_reason TEXT,
+  urgency TEXT,
+  category TEXT,
+  summary TEXT,
+  needs_action INTEGER,
+  action_items_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  -- Migration-added columns sit AFTER the originals: ALTER TABLE appends, so
+  -- this is the only position where an upgraded install and a fresh one get
+  -- identical table_info — which the parity test compares in order.
+  label TEXT,
+  PRIMARY KEY (source, source_message_id)
+) STRICT;
+
+CREATE INDEX ix_messages_conv ON messages(source, conversation_key, received_at);
+CREATE INDEX ix_messages_triage ON messages(triage_status, received_at DESC);
+
+CREATE TABLE conversations (
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  subject TEXT,
+  participants_json TEXT NOT NULL DEFAULT '[]',
+  state TEXT NOT NULL DEFAULT 'done',
+  category TEXT,
+  cta_text TEXT,
+  cta_urgency TEXT NOT NULL DEFAULT 'normal',
+  message_count INTEGER NOT NULL DEFAULT 0,
+  inbound_count INTEGER NOT NULL DEFAULT 0,
+  last_inbound_at TEXT,
+  last_outbound_at TEXT,
+  last_message_at TEXT,
+  last_message_preview TEXT,
+  state_changed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, conversation_key)
+) STRICT;
+
+CREATE INDEX ix_conv_last ON conversations(last_message_at DESC);
+
+CREATE TABLE sync_state (
+  source TEXT NOT NULL DEFAULT 'email',
+  folder TEXT NOT NULL,
+  delta_link TEXT,
+  synced_at TEXT,
+  PRIMARY KEY (source, folder)
+) STRICT;
+
+CREATE TABLE work_items (
+  task_kind TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'email',
+  entity_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  payload_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (task_kind, source, entity_id)
+) STRICT;
+
+CREATE INDEX ix_work_pending ON work_items(task_kind, status, created_at DESC);
+
+CREATE TABLE message_ai (
+  source TEXT NOT NULL DEFAULT 'email',
+  source_message_id TEXT NOT NULL,
+  extraction_json TEXT,
+  extracted_at TEXT,
+  PRIMARY KEY (source, source_message_id)
+) STRICT;
+
+CREATE TABLE conversation_ai (
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  embedding BLOB,
+  embedded_hash TEXT,
+  embed_model TEXT,
+  bucket TEXT,
+  bucket_reason TEXT,
+  attention_score REAL,
+  snoozed_until TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, conversation_key)
+) STRICT;
+
+CREATE TABLE storylines (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  summary TEXT,
+  status TEXT NOT NULL DEFAULT 'suggested',
+  created_by TEXT NOT NULL DEFAULT 'auto',
+  title_locked INTEGER NOT NULL DEFAULT 0,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  member_hash TEXT,
+  last_activity_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  -- Migration-added columns sit AFTER the originals: ALTER TABLE appends, so
+  -- this is the only position where an upgraded install and a fresh one get
+  -- identical table_info — which the parity test compares in order.
+  charter TEXT,
+  charter_locked INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE INDEX ix_storylines_status ON storylines(status, last_activity_at DESC);
+
+CREATE TABLE storyline_members (
+  storyline_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  added_by TEXT NOT NULL DEFAULT 'auto',
+  evidence TEXT,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (storyline_id, source, conversation_key)
+) STRICT;
+
+CREATE INDEX ix_storyline_members_conv
+  ON storyline_members(source, conversation_key);
+
+CREATE TABLE storyline_member_blocks (
+  storyline_id TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  blocked_at TEXT NOT NULL,
+  PRIMARY KEY (storyline_id, source, conversation_key)
+) STRICT;
+
+-- `INTEGER PRIMARY KEY` and not `AUTOINCREMENT`: the two behave identically
+-- for a table nothing is ever deleted from, and AUTOINCREMENT would add
+-- sqlite's own `sqlite_sequence` table to the schema — which is not STRICT,
+-- and every table here is.
+CREATE TABLE feedback_events (
+  id INTEGER PRIMARY KEY,
+  scope TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX ix_feedback_scope
+  ON feedback_events(scope, scope_key, created_at DESC);
+
+-- The append-only record of what the app did on its own: what each sync
+-- brought in, what the model was asked, how long it took, and what came back.
+-- Both queues expose live counts and nothing that outlives a process; this
+-- table is the only history.
+--
+-- `INTEGER PRIMARY KEY` for feedback_events' reason (AUTOINCREMENT drags in
+-- sqlite_sequence, which is not STRICT). Rows here ARE deleted — see
+-- MessageStore.pruneActivity — but only from the old end, so the max rowid
+-- survives every prune and no id is ever reused in practice.
+--
+-- `count` is a column and not a field inside detail_json so the stats header
+-- can SUM it in SQL without depending on the JSON1 extension.
+CREATE TABLE activity_events (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  source TEXT,
+  status TEXT NOT NULL,
+  entity_id TEXT,
+  count INTEGER,
+  duration_ms INTEGER,
+  detail_json TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX ix_activity_created
+  ON activity_events(created_at DESC);
+CREATE INDEX ix_activity_kind
+  ON activity_events(kind, created_at DESC);
+
+CREATE TABLE sender_prefs (
+  address TEXT PRIMARY KEY,
+  disposition TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+-- `key` is quoted because it is a keyword to drift's SQL parser, which
+-- otherwise drops the column from the schema it generates. The column name
+-- itself is unchanged, so the pre-drift installs this file adopts match.
+CREATE TABLE app_prefs (
+  "key" TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
+
+-- One draft per conversation, and the message it answers.
+--
+-- `reply_to_message_id` is what makes a draft falsifiable: a reply written
+-- against a message that is no longer the newest inbound one is stale, and the
+-- sync deletes it rather than letting the user send an answer to the
+-- second-to-last thing that was said.
+--
+-- `graph_draft_id` / `web_link` are null until the draft has been pushed to
+-- Outlook, which only happens on the user's own click.
+CREATE TABLE drafts (
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  reply_to_message_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  evidence TEXT,
+  status TEXT NOT NULL DEFAULT 'suggested',
+  graph_draft_id TEXT,
+  web_link TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, conversation_key)
+) STRICT;

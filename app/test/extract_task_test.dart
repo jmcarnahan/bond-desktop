@@ -7,8 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 Message email({
   String? fromName = 'Sarah Chen',
   String? fromAddress = 'sarah@example.com',
-  String? subject = 'Rate lock',
-  String? bodyText = 'Can we extend the lock through Friday?',
+  String? subject = 'Launch date',
+  String? bodyText = 'Can we still ship on Thursday?',
   String? bodyPreview,
   String? receivedAt = '2026-08-29T16:05:00Z',
 }) =>
@@ -24,11 +24,11 @@ Message email({
     );
 
 Map<String, dynamic> answer({
-  Object? evidence = 'Sarah is asking to extend the rate lock.',
-  Object? topics = const ['rate lock'],
+  Object? evidence = 'Jordan is asking whether the launch date holds.',
+  Object? topics = const ['launch date'],
   Object? people = const ['Sarah Chen'],
-  Object? organizations = const ['Harborline Realty'],
-  Object? project = 'Willow St purchase',
+  Object? organizations = const ['Northline Studio'],
+  Object? project = 'Website redesign',
   Object? intent = 'request',
   Object? importance = 'high',
 }) =>
@@ -104,7 +104,7 @@ void main() {
     });
 
     test('carries the rules and the security clause', () {
-      expect(task.systemPrompt, contains('mortgage loan officer'));
+      expect(task.systemPrompt, contains("a person's messages"));
       expect(
         task.systemPrompt,
         contains('request|question|approval|scheduling|fyi|transactional|social'),
@@ -147,9 +147,9 @@ void main() {
       expect(close, greaterThan(open));
       for (final line in const [
         'From: Sarah Chen &lt;sarah@example.com&gt;',
-        'Subject: Rate lock',
+        'Subject: Launch date',
         'Received: 2026-08-29T16:05:00Z',
-        'Can we extend the lock through Friday?',
+        'Can we still ship on Thursday?',
       ]) {
         final at = user.indexOf(line);
         expect(at, greaterThan(open), reason: line);
@@ -211,11 +211,11 @@ void main() {
     test('passes a good answer through', () {
       final result = task.validate(answer());
 
-      expect(result.evidence, 'Sarah is asking to extend the rate lock.');
-      expect(result.topics, ['rate lock']);
+      expect(result.evidence, 'Jordan is asking whether the launch date holds.');
+      expect(result.topics, ['launch date']);
       expect(result.people, ['Sarah Chen']);
-      expect(result.organizations, ['Harborline Realty']);
-      expect(result.project, 'Willow St purchase');
+      expect(result.organizations, ['Northline Studio']);
+      expect(result.project, 'Website redesign');
       expect(result.intent, 'request');
       expect(result.importance, 'high');
     });

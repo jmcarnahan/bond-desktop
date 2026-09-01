@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
@@ -9,7 +9,8 @@ import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// What a sync leaves on the extraction queue. A scripted Graph on one side, a
 /// real sqlite database on the other; only the socket is fake.
@@ -53,8 +54,8 @@ http.Response jsonOk(Object body) => http.Response(
 Map<String, dynamic> graphMessage({
   required String id,
   String? conversationId = 'conv-1',
-  String subject = 'Closing Disclosure',
-  String fromAddress = 'sarah@harborline.com',
+  String subject = 'Project brief',
+  String fromAddress = 'sarah@example.com',
   required String receivedDateTime,
 }) =>
     {
@@ -118,7 +119,7 @@ class GraphStub {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late GraphStub graph;
   late SyncService sync;
@@ -128,7 +129,7 @@ void main() {
       DateTime.now().toUtc().subtract(ago).toIso8601String();
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     graph = GraphStub();
 
@@ -140,14 +141,16 @@ void main() {
     sync = SyncService(GraphMail(auth, httpClient: graph.client), store);
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
-  List<String> queuedIds() => [
-        for (final row in db.select(
-          "SELECT entity_id FROM work_items WHERE task_kind = 'extract' "
-          'ORDER BY entity_id',
-        ))
-          row['entity_id'] as String,
+  Future<List<String>> queuedIds() async => [
+        for (final row in await db
+            .customSelect(
+              "SELECT entity_id FROM work_items WHERE task_kind = 'extract' "
+              'ORDER BY entity_id',
+            )
+            .get())
+          row.data['entity_id'] as String,
       ];
 
   test('a sync queues extraction for the inbound mail it kept', () async {
@@ -189,8 +192,8 @@ void main() {
 
     // Inbound and inside the window only: the LO's own sent mail and the
     // backlog cost model time and answer nothing.
-    expect(queuedIds(), ['fresh-1', 'fresh-2']);
-    expect(store.workCounts('extract'), {'pending': 2});
+    expect(await queuedIds(), ['fresh-1', 'fresh-2']);
+    expect(await store.workCounts('extract'), {'pending': 2});
   });
 
   test('a second sync neither duplicates nor resurrects', () async {
@@ -201,7 +204,7 @@ void main() {
           )),
     ]);
     await sync.syncNow();
-    store.writeWork('extract', 'email', 'm1', status: 'done');
+    await store.writeWork('extract', 'email', 'm1', status: 'done');
 
     graph.queue('inbox', [
       () => jsonOk(deltaBody(
@@ -217,8 +220,8 @@ void main() {
     ]);
     await sync.syncNow();
 
-    expect(queuedIds(), ['m1', 'm2']);
-    expect(store.workCounts('extract'), {'done': 1, 'pending': 1});
+    expect(await queuedIds(), ['m1', 'm2']);
+    expect(await store.workCounts('extract'), {'done': 1, 'pending': 1});
   });
 
   test('a first run queues no more than the triage cap', () async {
@@ -241,14 +244,14 @@ void main() {
 
     // The ten the triage cap demoted are the ten this skips too — extraction
     // is not worth doing on mail the app already decided not to read.
-    expect(queuedIds().length, firstRunTriageCap);
-    expect(queuedIds(), isNot(contains('m000')));
-    expect(queuedIds(), contains('m159'));
+    expect((await queuedIds()).length, firstRunTriageCap);
+    expect(await queuedIds(), isNot(contains('m000')));
+    expect(await queuedIds(), contains('m159'));
   });
 
   test('an empty mailbox queues nothing', () async {
     await sync.syncNow();
 
-    expect(queuedIds(), isEmpty);
+    expect(await queuedIds(), isEmpty);
   });
 }

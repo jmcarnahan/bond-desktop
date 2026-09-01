@@ -1,4 +1,6 @@
-import 'package:bond_inbox/data/db.dart';
+// `show BondDatabase`: drift generates row classes whose names collide with
+// the app's own models.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -11,7 +13,8 @@ import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// The sign-in screen's second step.
 ///
@@ -92,12 +95,11 @@ class _FakeSession implements AuthSession {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
   });
 
@@ -115,7 +117,7 @@ void main() {
     required VoidCallback onSignedIn,
     String backendMode = backendModeMcp,
   }) async {
-    store.setPref(backendModeKey, backendMode);
+    await store.setPref(backendModeKey, backendMode);
     final mcp = _FakeMcp(statuses);
     final auth = McpAuthSession(
       mcpUrl: Uri.parse(mcpLocalUrl),

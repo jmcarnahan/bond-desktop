@@ -58,22 +58,43 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   /// otherwise be three full list reads.
   static const Duration _reloadDelay = Duration(milliseconds: 400);
 
-  /// The two kinds whose progress means the storyline list may have changed.
+  /// The kinds whose progress means the storyline list may have changed.
   /// Extraction and triage report constantly and change nothing here.
-  static const Set<String> _kinds = {'storyline', 'storyline_sweep'};
+  static const Set<String> _kinds = {
+    'storyline',
+    'storyline_sweep',
+    'storyline_recruit',
+  };
 
   static const String _source = 'email';
 
   final MessageStore _store;
   final StorylineService _service;
 
+  /// Held so [setCharter] can pump the queue it just fed. Nullable for tests
+  /// that construct the notifier without a worker.
+  final AiWorker? _worker;
+
+  /// Called at the end of every list read. Membership is read by providers of
+  /// its own now, and they cache — so without this the member strip would keep
+  /// showing what was true before the user's last action or the assignment
+  /// pass. Supplied by the provider below, which is the layer that holds a
+  /// `Ref`; the notifier itself has no business knowing what a provider is.
+  final void Function()? _onMembersChanged;
+
   StreamSubscription<WorkProgress>? _progress;
   Timer? _reload;
 
   int _fetchSeq = 0;
 
-  StorylinesNotifier(this._store, this._service, {AiWorker? aiWorker})
-      : super(const StorylinesInitial()) {
+  StorylinesNotifier(
+    this._store,
+    this._service, {
+    AiWorker? aiWorker,
+    void Function()? onMembersChanged,
+  })  : _worker = aiWorker,
+        _onMembersChanged = onMembersChanged,
+        super(const StorylinesInitial()) {
     final worker = aiWorker;
     if (worker == null) return;
     _progress = worker.progress.listen((progress) {
@@ -105,7 +126,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
 
     final List<Storyline> rows;
     try {
-      rows = _store.loadStorylines();
+      rows = await _store.loadStorylines();
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;
@@ -116,6 +137,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     }
 
     if (seq != _fetchSeq) return;
+    _onMembersChanged?.call();
     state = StorylinesLoaded(rows);
   }
 
@@ -128,22 +150,33 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   // would disagree with the database within one action.
 
   Future<void> keep(String id) async {
-    _service.keepSuggestion(id);
+    await _service.keepSuggestion(id);
     await load();
   }
 
   Future<void> dismiss(String id) async {
-    _service.dismissSuggestion(id);
+    await _service.dismissSuggestion(id);
     await load();
   }
 
   Future<void> rename(String id, String title) async {
-    _service.rename(id, title);
+    await _service.rename(id, title);
     await load();
   }
 
+  /// Saves the charter and starts the recruit it queued. The pump is what
+  /// turns "queued" into "runs now" — the worker owns no timer, and without it
+  /// the user's edit would sit until the next sync happened to drain the
+  /// queue. Fire-and-forget: the pump handles its own failures, and the save
+  /// this method reports on has already landed.
+  Future<void> setCharter(String id, String charter) async {
+    await _service.setCharter(id, charter);
+    await load();
+    unawaited(_worker?.pump());
+  }
+
   Future<void> addThread(String id, String source, String conversationKey) async {
-    _service.addThread(id, source, conversationKey);
+    await _service.addThread(id, source, conversationKey);
     await load();
   }
 
@@ -152,7 +185,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     String source,
     String conversationKey,
   ) async {
-    _service.removeThread(id, source, conversationKey);
+    await _service.removeThread(id, source, conversationKey);
     await load();
   }
 
@@ -163,7 +196,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     required String conversationKey,
     String source = _source,
   }) async {
-    final id = _service.createStoryline(
+    final id = await _service.createStoryline(
       title,
       source: source,
       conversationKey: conversationKey,
@@ -179,10 +212,47 @@ final storylinesProvider =
     ref.watch(messageStoreProvider),
     ref.watch(storylineServiceProvider),
     aiWorker: ref.watch(aiWorkerProvider),
+    onMembersChanged: () {
+      ref.invalidate(storylineMembersProvider);
+      ref.invalidate(storylineThreadIdsProvider);
+      ref.invalidate(storylineBlockedThreadsProvider);
+    },
   ),
 );
 
-// ── one storyline's merged transcript ──────────────────────────────────
+/// One storyline's member threads.
+///
+/// A provider rather than a read the timeline pane makes for itself: the store
+/// is asynchronous and a widget build cannot await one. The strip renders empty
+/// for the frame before the read lands, which is what the pane already showed
+/// for a storyline with no members yet.
+///
+/// Dropped and re-read after every list load — see [StorylinesNotifier].
+final storylineMembersProvider =
+    FutureProvider.autoDispose.family<List<StorylineMember>, String>(
+  (ref, id) => ref.watch(messageStoreProvider).membersOf(id),
+);
+
+/// The threads the user blocked from one storyline, as
+/// `'<source>\n<conversation_key>'` composites. Same caching rules as
+/// [storylineMembersProvider], and invalidated with it: a removal writes a
+/// block in the same transaction it deletes the membership.
+final storylineBlockedThreadsProvider =
+    FutureProvider.autoDispose.family<Set<String>, String>(
+  (ref, id) => ref.watch(messageStoreProvider).blockedThreadsOf(id),
+);
+
+/// The storylines one thread is already filed under, so the "Add to storyline"
+/// menu can leave them out. Same caching rules as [storylineMembersProvider].
+final storylineThreadIdsProvider = FutureProvider.autoDispose
+    .family<Set<String>, ({String source, String conversationKey})>(
+  (ref, thread) async => (await ref
+          .watch(messageStoreProvider)
+          .storylineIdsFor(thread.source, thread.conversationKey))
+      .toSet(),
+);
+
+// ── one storyline's thread episodes ────────────────────────────────────
 
 @immutable
 sealed class StorylineTimelineState {
@@ -198,28 +268,13 @@ class StorylineTimelineLoading extends StorylineTimelineState {
 }
 
 class StorylineTimelineLoaded extends StorylineTimelineState {
-  /// Every message of every member thread, oldest first.
-  final List<Message> messages;
-
-  /// `source_message_id` → `conversation_key`. Carried beside the messages
-  /// because [Message] has no field for its thread's key, and the merged
-  /// transcript has to know where one thread ends and the next begins.
-  final Map<String, String> keyByMessageId;
-
-  /// `conversation_key` → the thread's stripped subject. The timeline needs it
-  /// to label the point where the transcript crosses from one thread into
-  /// another, and the messages alone cannot supply it: a member thread's
-  /// subject may be `Re: Re:` on every row.
-  final Map<String, String> subjectByKey;
+  /// One episode per member thread, oldest activity first — the whole
+  /// storyline, grouped the way it is read.
+  final List<StorylineEpisode> episodes;
 
   final String? loadError;
 
-  const StorylineTimelineLoaded(
-    this.messages,
-    this.keyByMessageId,
-    this.subjectByKey, [
-    this.loadError,
-  ]);
+  const StorylineTimelineLoaded(this.episodes, [this.loadError]);
 }
 
 class StorylineTimelineError extends StorylineTimelineState {
@@ -228,14 +283,76 @@ class StorylineTimelineError extends StorylineTimelineState {
   const StorylineTimelineError(this.message);
 }
 
+/// One thread's rows while they are still being gathered. [StorylineEpisode]
+/// is immutable and one of its fields — the triage summary — costs a second
+/// read per thread, so the grouping pass fills one of these first.
+class _EpisodeDraft {
+  final String source;
+  final String conversationKey;
+  final List<Message> messages = [];
+  final List<String> participants = [];
+  final Set<String> _seen = {};
+
+  String subject = '';
+  String? latestAt;
+
+  _EpisodeDraft(this.source, this.conversationKey);
+
+  void add(Message message, String? rawSubject) {
+    messages.add(message);
+
+    // The FIRST non-empty subject in chronological order names the thread —
+    // the same rule the conversation fold uses, so the label here matches the
+    // one on the inbox row.
+    if (subject.isEmpty) subject = stripReFw(rawSubject);
+
+    final name = message.fromName?.isNotEmpty == true
+        ? message.fromName!
+        : (message.fromAddress ?? '');
+    if (name.isNotEmpty && _seen.add(name)) participants.add(name);
+
+    // Last one wins: the rows arrive oldest first, and a message with no
+    // timestamp must not blank a stamp an earlier one supplied.
+    final receivedAt = message.receivedAt;
+    if (receivedAt != null) latestAt = receivedAt;
+  }
+}
+
 class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
   final MessageStore _store;
   final String storylineId;
 
+  StreamSubscription<WorkProgress>? _progress;
+  Timer? _reload;
+
   int _fetchSeq = 0;
 
-  StorylineTimelineNotifier(this._store, this.storylineId)
-      : super(const StorylineTimelineInitial());
+  /// Listens to the same worker kinds the list does, for the same reason: an
+  /// assignment or recruit pass filing a thread into THIS storyline must move
+  /// the spine, not just the member strip — the strip's providers refresh on
+  /// progress and a spine on a 60s poll would disagree with it for up to a
+  /// minute. Same debounce, so both surfaces move together.
+  StorylineTimelineNotifier(this._store, this.storylineId,
+      {AiWorker? aiWorker})
+      : super(const StorylineTimelineInitial()) {
+    final worker = aiWorker;
+    if (worker == null) return;
+    _progress = worker.progress.listen((progress) {
+      if (!StorylinesNotifier._kinds.contains(progress.kind)) return;
+      _reload?.cancel();
+      _reload = Timer(StorylinesNotifier._reloadDelay, () {
+        if (!mounted) return;
+        load();
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _reload?.cancel();
+    _progress?.cancel();
+    super.dispose();
+  }
 
   Future<void> load() async {
     final seq = ++_fetchSeq;
@@ -243,53 +360,84 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
       state = const StorylineTimelineLoading();
     }
 
-    final List<Map<String, Object?>> rows;
+    final episodes = <StorylineEpisode>[];
     try {
       // Every connector, not just mail: a chat thread can join a storyline
       // through the assignment pass, and a timeline that dropped its messages
       // would show a member strip listing a thread with nothing in it.
-      rows = _store.storylineTimeline(storylineId, sources: inboxSources);
+      final rows =
+          await _store.storylineTimeline(storylineId, sources: inboxSources);
+      if (seq != _fetchSeq) return;
+
+      // The rows arrive received_at ASC, so first encounter is the order the
+      // threads started in and every episode's messages are already oldest
+      // first.
+      final drafts = <String, _EpisodeDraft>{};
+      for (final row in rows) {
+        final key = row['conversation_key'] as String? ?? '';
+        if (key.isEmpty) continue;
+        final message = Message.fromRow(row);
+        drafts
+            .putIfAbsent(
+              '${message.source}\n$key',
+              () => _EpisodeDraft(message.source, key),
+            )
+            .add(message, row['subject'] as String?);
+      }
+
+      for (final draft in drafts.values) {
+        final card = await _store.newestInboundCardData(
+          draft.source,
+          draft.conversationKey,
+        );
+        if (seq != _fetchSeq) return;
+        final summary = card?['summary'] as String?;
+        episodes.add(StorylineEpisode(
+          source: draft.source,
+          conversationKey: draft.conversationKey,
+          subject: draft.subject,
+          participants: draft.participants,
+          messages: draft.messages,
+          latestAt: draft.latestAt,
+          // An empty summary is a triage pass that had nothing to say, which
+          // the card renders the same way as one that has not run.
+          summary: summary?.isEmpty == true ? null : summary,
+        ));
+      }
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;
       state = current is StorylineTimelineLoaded
           ? StorylineTimelineLoaded(
-              current.messages,
-              current.keyByMessageId,
-              current.subjectByKey,
+              current.episodes,
               "Couldn't refresh this storyline just now.",
             )
           : StorylineTimelineError('Could not read this storyline: $e');
       return;
     }
 
-    final messages = <Message>[];
-    final keys = <String, String>{};
-    final subjects = <String, String>{};
-    for (final row in rows) {
-      final message = Message.fromRow(row);
-      messages.add(message);
-      final key = row['conversation_key'] as String? ?? '';
-      if (key.isEmpty) continue;
-      keys[message.id] = key;
-      // The FIRST non-empty subject in chronological order names the thread —
-      // the same rule the conversation fold uses, so the label here matches
-      // the one on the inbox row.
-      if (subjects[key]?.isNotEmpty == true) continue;
-      final subject = stripReFw(row['subject'] as String?);
-      if (subject.isNotEmpty) subjects[key] = subject;
-    }
+    // Ascending, so the newest episode sits at the BOTTOM — the direction the
+    // messages inside it already read in. An episode with no timestamp sorts
+    // first, since nothing about it says it is the latest, and the thread key
+    // breaks ties so one storyline always renders in one order.
+    episodes.sort((a, b) {
+      final byTime = (a.latestAt ?? '').compareTo(b.latestAt ?? '');
+      return byTime != 0 ? byTime : a.threadKey.compareTo(b.threadKey);
+    });
 
     if (seq != _fetchSeq) return;
-    state = StorylineTimelineLoaded(messages, keys, subjects);
+    state = StorylineTimelineLoaded(episodes);
   }
 }
 
 /// Deliberately NOT autoDispose, for the reason `threadProvider` is not:
-/// clicking back into a storyline should show its transcript, not a spinner
+/// clicking back into a storyline should show its episodes, not a spinner
 /// over a read that already ran this session.
 final storylineTimelineProvider = StateNotifierProvider.family<
     StorylineTimelineNotifier, StorylineTimelineState, String>(
-  (ref, storylineId) =>
-      StorylineTimelineNotifier(ref.watch(messageStoreProvider), storylineId),
+  (ref, storylineId) => StorylineTimelineNotifier(
+    ref.watch(messageStoreProvider),
+    storylineId,
+    aiWorker: ref.watch(aiWorkerProvider),
+  ),
 );

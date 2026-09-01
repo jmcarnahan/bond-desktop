@@ -8,7 +8,7 @@ Message inbound({
   String id = 'm1',
   String from = 'Sarah',
   String address = 'sarah@x.com',
-  String body = 'Can we extend the lock through Friday?',
+  String body = 'Can we still ship on Thursday?',
   String receivedAt = '2026-08-29T10:00:00Z',
 }) =>
     Message(
@@ -97,7 +97,7 @@ void main() {
         lessThan(message.indexOf('<untrusted_data')),
       );
       expect(message, contains('<untrusted_data source="thread">'));
-      expect(message, contains('Can we extend the lock through Friday?'));
+      expect(message, contains('Can we still ship on Thursday?'));
     });
 
     test('marks the LO\'s own messages as theirs, not as the sender\'s', () {
@@ -174,8 +174,8 @@ void main() {
     test('and includes each one when it is present', () {
       final message = task.buildUserMessage(inputWith(
         styleExamples: const ['Thanks — on it.'],
-        storylineSummary: 'The Willow St purchase, closing 9/15.',
-        aboutMe: 'I own rate locks.',
+        storylineSummary: 'The website redesign, launching 9/15.',
+        aboutMe: 'I own the website redesign.',
       ));
 
       expect(message, contains('<untrusted_data source="style_examples">'));

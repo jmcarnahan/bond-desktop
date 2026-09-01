@@ -4,15 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
+import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
-import '../services/activity_log.dart';
 import '../services/backend/backend_types.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
@@ -24,6 +23,7 @@ import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
 import '../widgets/settings_dialog.dart';
 import '../widgets/source_filter.dart';
+import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
@@ -55,7 +55,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   static const List<String> _sources = inboxSources;
 
   /// Slow enough to be invisible on a metered connection, fast enough that a
-  /// reply that arrived while the LO was reading feels like it just showed
+  /// reply that arrived while the user was reading feels like it just showed
   /// up. Graph delta calls with nothing new are cheap.
   ///
   /// **Mail only.** [_refresh] is what this fires and it does not touch Teams:
@@ -77,6 +77,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   RailSection? _section = RailSection.needsYou;
   String? _selectedId;
 
+  /// Which connector [_selectedId] belongs to, set only when the caller knows
+  /// — a storyline card does, the rail does not. A conversation key is unique
+  /// within a connector and not across them, so without this a chat and a mail
+  /// thread that share a key are the same selection.
+  String? _selectedSource;
+
   /// The open storyline. Never set at the same time as [_selectedId] — the
   /// main pane shows exactly one thing, and the three selections clear each
   /// other rather than racing to be rendered.
@@ -92,6 +98,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// rather than racing to be rendered.
   bool _showingActivityLog = false;
 
+  /// The storyline the add-thread pane is picking a conversation for. An
+  /// overlay on the storyline selection rather than a peer of it: back returns
+  /// to the storyline underneath.
+  String? _addingToStorylineId;
+
+  /// The thread the add-to-storyline pane is filing. Same overlay contract.
+  ({String source, String id})? _pickingStorylineForThread;
+
   /// Which member thread a storyline's composer replies to, when the user has
   /// picked one. Null means "the thread the newest message is in", which is
   /// what the dropdown shows by default — a storyline has no inbox of its own
@@ -106,6 +120,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// When Teams was last pulled, by any route. Null until the first one.
   DateTime? _lastTeamsRefresh;
+
+  /// The stored "Teams last synced" stamp, read once and re-read only after a
+  /// pull. See [_teamsFreshness].
+  Future<String?>? _teamsSyncedAt;
 
   Timer? _poll;
 
@@ -193,6 +211,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (!mounted) return;
     _lastTeamsRefresh = DateTime.now();
     await ref.read(conversationsProvider.notifier).refreshTeams();
+    if (!mounted) return;
+    setState(() => _teamsSyncedAt = null);
   }
 
   Future<void> _signOut() async {
@@ -201,7 +221,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // file holds its mailbox, and the providers hold that in memory. A
     // different account signing in next must find neither — mail from two
     // mailboxes interleaved in one inbox is the bug this line rules out.
-    ref.read(messageStoreProvider).wipeAll();
+    await ref.read(messageStoreProvider).wipeAll();
+    if (!mounted) return;
     ref.invalidate(conversationsProvider);
     ref.invalidate(storylinesProvider);
     ref.invalidate(threadProvider);
@@ -210,15 +231,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     widget.onSignedOut?.call();
   }
 
-  void _select(String id) {
+  void _select(String id, {String? source}) {
     setState(() {
       _selectedId = id;
+      _selectedSource = source;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
     });
-    // The quietest signal the app collects: opening a thread is the LO saying
+    // The quietest signal the app collects: opening a thread is the user saying
     // this one was worth their time. Fire-and-forget, and nothing on screen
     // reads it yet.
     ref.read(conversationsProvider.notifier).noteThreadOpened(id);
@@ -233,8 +257,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _selectedStorylineId = id;
       _selectedId = null;
+      _selectedSource = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
       // The reply target belongs to the storyline that was open, not to this
       // one; the default below picks the newest thread in the new timeline.
@@ -247,9 +274,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _section = section;
       _selectedId = null;
+      _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
     });
   }
@@ -261,8 +291,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _section = RailSection.later;
       _selectedLaterDay = dayKey;
       _selectedId = null;
+      _selectedSource = null;
       _selectedStorylineId = null;
       _showingActivityLog = false;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
     });
   }
@@ -274,8 +307,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _showingActivityLog = true;
       _selectedId = null;
+      _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
       _railOpen = false;
     });
   }
@@ -417,7 +453,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   //
   // Every explicit correction lands the same way: it happens immediately, and
   // it says so in a bar with an UNDO on it. Confirming first would put a modal
-  // in front of a one-click gesture the LO is going to make dozens of times;
+  // in front of a one-click gesture the user is going to make dozens of times;
   // an undo costs nothing when it is not used.
 
   /// How long the undo stays reachable. Long enough to notice the bar and
@@ -447,7 +483,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final notifier = ref.read(conversationsProvider.notifier);
     // Captured BEFORE the write. The undo restores this exact value, including
     // "there was no rule", which is a different state from "the rule was keep".
-    final previous = notifier.senderPref(address);
+    final previous = await notifier.senderPref(address);
     final affected = await notifier.keepSenderInInbox(address, source: source);
     _toast(
       'Keeping $address in your inbox — ${_threads(affected)} moved back.',
@@ -457,7 +493,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Future<void> _laterSender(String address, String source) async {
     final notifier = ref.read(conversationsProvider.notifier);
-    final previous = notifier.senderPref(address);
+    final previous = await notifier.senderPref(address);
     final affected = await notifier.sendSenderToLater(address, source: source);
     _toast(
       '$address goes to Later — ${_threads(affected)} moved.',
@@ -502,9 +538,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onDismissSuggestion: (id) {
         // The dismissed storyline leaves the list, so a selection pointing at
         // it would render nothing. Clearing it here returns the pane to the
-        // overview in the same frame the row disappears.
-        if (_selectedStorylineId == id) {
-          setState(() => _selectedStorylineId = null);
+        // overview in the same frame the row disappears — and the add-thread
+        // overlay goes with it, since its pane belongs to the same storyline.
+        if (_selectedStorylineId == id || _addingToStorylineId == id) {
+          setState(() {
+            _selectedStorylineId = null;
+            _addingToStorylineId = null;
+          });
         }
         ref.read(storylinesProvider.notifier).dismiss(id);
       },
@@ -590,15 +630,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// changes it — chats do not arrive on their own here, and a caption saying
   /// so is the difference between "quiet" and "stale".
   Widget _teamsFreshness() {
-    final label =
-        relativeTime(ref.read(teamsSyncProvider).lastSyncedAt, DateTime.now());
-    if (label == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: BondSpacing.s4),
-      child: Text(
-        'Teams updated $label',
-        style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
-      ),
+    // Held rather than re-read on every build: it is a stored read and so a
+    // future now, and a fresh future per build would restart the FutureBuilder
+    // — blanking the caption for a frame every time anything on this screen
+    // changed. [_refreshTeams] drops it, which is the only thing that can
+    // change the answer.
+    final future = _teamsSyncedAt ??= ref.read(teamsSyncProvider).lastSyncedAt;
+    return FutureBuilder<String?>(
+      future: future,
+      builder: (context, snapshot) {
+        final label = relativeTime(snapshot.data, DateTime.now());
+        if (label == null) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: BondSpacing.s4),
+          child: Text(
+            'Teams updated $label',
+            style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
+          ),
+        );
+      },
     );
   }
 
@@ -623,14 +673,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       builder: (context) => SettingsDialog(
         threshold: prefs.attentionThreshold,
         aboutMe: prefs.aboutMe,
+        // The prefs setters update state first and persist behind the
+        // caller's back on purpose (see AppPrefsNotifier) — `unawaited` says
+        // the discard is that contract, not an oversight.
         onThresholdChanged: (value) {
-          notifier.setAttentionThreshold(value);
+          unawaited(notifier.setAttentionThreshold(value));
           if (!mounted) return;
           ref.read(conversationsProvider.notifier).load(syncFirst: false);
         },
-        onAboutMeChanged: notifier.setAboutMe,
+        onAboutMeChanged: (text) => unawaited(notifier.setAboutMe(text)),
         showActivityLog: prefs.showActivityLog,
-        onShowActivityLogChanged: notifier.setShowActivityLog,
+        onShowActivityLogChanged: (on) =>
+            unawaited(notifier.setShowActivityLog(on)),
         // BOTH sources are wired, and deliberately not bound to the mode the
         // dialog OPENED in: the toggle now switches backends without closing
         // the dialog, so which one answers is the dialog's live choice. Each
@@ -650,11 +704,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         backendMode: prefs.backendMode,
         mcpServerUrl: prefs.mcpServerUrl,
         onBackendModeChanged: (mode) {
-          notifier.setBackendMode(mode);
+          unawaited(notifier.setBackendMode(mode));
           _reloadAfterBackendChange();
         },
         onMcpServerUrlChanged: (url) {
-          notifier.setMcpServerUrl(url);
+          unawaited(notifier.setMcpServerUrl(url));
           _reloadAfterBackendChange();
         },
         onSignInAgain: () {
@@ -693,7 +747,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ref.invalidate(storylineTimelineProvider);
             // And the previous person's about-me text, which the notifier
             // still holds in memory — same reason SignInScreen clears it.
-            ref.read(appPrefsProvider.notifier).setAboutMe('');
+            unawaited(ref.read(appPrefsProvider.notifier).setAboutMe(''));
           }
           _reloadAfterBackendChange();
         },
@@ -774,7 +828,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// How much mail the local model still has to look at, and nothing when
   /// there is none. Deliberately a quiet caption: triage is a background
-  /// annotator, not something the LO waits on, and the first sync of a real
+  /// annotator, not something the user waits on, and the first sync of a real
   /// mailbox leaves it counting down for the better part of an hour.
   Widget _triageProgress() {
     return StreamBuilder<TriageProgress>(
@@ -794,18 +848,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   Conversation? _selected(List<Conversation> conversations) {
+    // The source narrows the match only when the caller supplied one. Every
+    // other route here knows an id and nothing else, and demanding a source of
+    // them would match nothing at all.
+    bool matches(Conversation c) =>
+        c.id == _selectedId &&
+        (_selectedSource == null || c.source == _selectedSource);
+
     for (final c in conversations) {
-      if (c.id == _selectedId) return c;
+      if (matches(c)) return c;
     }
     // Not in the FILTERED list. An explicit selection is the most specific
     // thing the user asked for and outranks the source filter — a storyline
-    // seam chip can open a chat while the filter shows Mail, and landing on a
+    // card can open a chat while the filter shows Mail, and landing on a
     // section overview instead would read as a broken click. The unfiltered
     // list settles whether the thread still exists at all.
     final state = ref.read(conversationsProvider);
     if (state is ConversationsLoaded) {
       for (final c in state.conversations) {
-        if (c.id == _selectedId) return c;
+        if (matches(c)) return c;
       }
     }
     // A thread can leave the list between renders — a sync that moved it, or
@@ -814,16 +875,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
-  /// Exactly one view, never two: the activity log, then the thread
-  /// transcript, then the storyline timeline, then the section overview. The
-  /// order is the priority — the log is first because it is the only one of
-  /// the four that is not about the mail at all, so nothing under it can be
-  /// what the user meant.
+  /// Exactly one view, never two: the activity log, then the two picker panes,
+  /// then the thread transcript, then the storyline timeline, then the section
+  /// overview. The order is the priority — the log is first because it is the
+  /// only one that is not about the mail at all, and a pane outranks what it
+  /// was opened from because it is the newer thing the user asked for.
   ///
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
     if (_showingActivityLog) return _activityLog();
+
+    final addingTo = _addingToStorylineId;
+    if (addingTo != null) {
+      final storyline = _storylineById(addingTo);
+      if (storyline != null) return _addThreadPane(storyline);
+      // Dismissed or gone from under the pane; fall through to whatever is
+      // next.
+    }
+
+    final picking = _pickingStorylineForThread;
+    if (picking != null) return _pickStorylinePane(picking);
 
     final selected = _selected(conversations);
     if (selected != null) return _thread(selected);
@@ -837,6 +909,117 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return _overview(conversations, loadError);
   }
 
+  /// Which thread joins [storyline].
+  ///
+  /// Read from the UNFILTERED conversations, for the reason [_selected] reads
+  /// them: the source pills are what the user is browsing with, and a storyline
+  /// that merges mail and chats must be able to recruit from both whichever
+  /// pill happens to be down.
+  Widget _addThreadPane(Storyline storyline) {
+    final state = ref.watch(conversationsProvider);
+    final all = state is ConversationsLoaded
+        ? state.conversations
+        : const <Conversation>[];
+
+    // Both reads are empty for the frame before they land, which offers a
+    // thread that is already in for that one frame. Adding it again is a no-op
+    // in the store, so the worst that frame can cost is a redundant write.
+    final members =
+        ref.watch(storylineMembersProvider(storyline.id)).valueOrNull ??
+            const <StorylineMember>[];
+    final taken = <String>{
+      for (final member in members)
+        '${member.source}\n${member.conversationKey}',
+      ...?ref
+          .watch(storylineBlockedThreadsProvider(storyline.id))
+          .valueOrNull,
+    };
+
+    final candidates = [
+      for (final c in all)
+        if (!taken.contains('${c.source}\n${c.id}')) c,
+    ]..sort((a, b) {
+        final left = a.lastMessageAt ?? '';
+        final right = b.lastMessageAt ?? '';
+        // Newest first, a thread with no stamp last rather than first — and
+        // the id as the tie-break, so the same mailbox always sorts the same
+        // way rather than in whatever order the list read happened to return.
+        if (left != right) {
+          if (left.isEmpty) return 1;
+          if (right.isEmpty) return -1;
+          return right.compareTo(left);
+        }
+        return a.id.compareTo(b.id);
+      });
+
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: AddThreadToStorylinePane(
+        storylineTitle:
+            storyline.title.isEmpty ? '(untitled)' : storyline.title,
+        candidates: candidates,
+        onBack: () => setState(() => _addingToStorylineId = null),
+        onPick: (conversation) async {
+          final notifier = ref.read(storylinesProvider.notifier);
+          await notifier.addThread(
+            storyline.id,
+            conversation.source,
+            conversation.id,
+          );
+          if (!mounted) return;
+          setState(() => _addingToStorylineId = null);
+          // The timeline must show the thread the user just filed, this
+          // frame's sibling — the same reload onRemoveThread already does.
+          ref.read(storylineTimelineProvider(storyline.id).notifier).load();
+        },
+      ),
+    );
+  }
+
+  /// Which storyline [thread] joins, or the one it starts.
+  Widget _pickStorylinePane(({String source, String id}) thread) {
+    // Suggestions are deliberately absent: filing a thread into a group the
+    // user has not accepted yet would be answering the suggestion for them. So
+    // are the storylines this thread is already in — an "Add to" that does
+    // nothing reads as a broken row.
+    //
+    // Empty until the read lands, which leaves every storyline offered for one
+    // frame. Adding a thread it is already in is a no-op in the store, so the
+    // worst that frame can cost is a redundant write.
+    final already = ref
+            .watch(storylineThreadIdsProvider(
+              (source: thread.source, conversationKey: thread.id),
+            ))
+            .valueOrNull ??
+        const <String>{};
+
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: AddToStorylinePane(
+        choices: [
+          for (final storyline in _storylines())
+            if (!storyline.isSuggested && !already.contains(storyline.id))
+              storyline,
+        ],
+        onBack: () => setState(() => _pickingStorylineForThread = null),
+        onPick: (id) {
+          ref
+              .read(storylinesProvider.notifier)
+              .addThread(id, thread.source, thread.id);
+          setState(() => _pickingStorylineForThread = null);
+        },
+        onCreate: (title) {
+          ref.read(storylinesProvider.notifier).create(
+                title,
+                conversationKey: thread.id,
+                source: thread.source,
+              );
+          setState(() => _pickingStorylineForThread = null);
+        },
+      ),
+    );
+  }
+
   Widget _storyline(Storyline storyline) {
     final timeline = ref.watch(storylineTimelineProvider(storyline.id));
 
@@ -845,56 +1028,60 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return const Center(child: CircularProgressIndicator());
     }
 
-    final (
-      List<Message> messages,
-      Map<String, String> keys,
-      Map<String, String> subjects,
-      String? error,
-    ) = switch (timeline) {
-      StorylineTimelineLoaded(
-        :final messages,
-        :final keyByMessageId,
-        :final subjectByKey,
-        :final loadError,
-      ) =>
-        (messages, keyByMessageId, subjectByKey, loadError),
+    final (List<StorylineEpisode> episodes, String? error) = switch (timeline) {
+      StorylineTimelineLoaded(:final episodes, :final loadError) =>
+        (episodes, loadError),
       StorylineTimelineError(:final message) => (
-          const <Message>[],
-          const <String, String>{},
-          const <String, String>{},
+          const <StorylineEpisode>[],
           message,
         ),
-      _ => (
-          const <Message>[],
-          const <String, String>{},
-          const <String, String>{},
-          null,
-        ),
+      _ => (const <StorylineEpisode>[], null),
     };
 
     final notifier = ref.read(storylinesProvider.notifier);
+    final newestFirst =
+        ref.watch(appPrefsProvider.select((p) => p.storylineNewestFirst));
     final panel = StorylineTimelinePanel(
       key: ValueKey(storyline.id),
       storyline: storyline,
-      messages: messages,
-      keyByMessageId: keys,
-      subjectByKey: subjects,
-      members: ref.read(messageStoreProvider).membersOf(storyline.id),
+      episodes: episodes,
+      // Empty for the frame before the read lands — the same thing the pane
+      // shows for a storyline whose members have not been written yet.
+      members:
+          ref.watch(storylineMembersProvider(storyline.id)).valueOrNull ??
+              const [],
       onBack: () => setState(() => _selectedStorylineId = null),
       onRename: (title) => notifier.rename(storyline.id, title),
+      onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
       onRemoveThread: (source, key) async {
         await notifier.removeThread(storyline.id, source, key);
         if (!mounted) return;
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
-      onOpenThread: (_, key) => _select(key),
+      onOpenThread: (source, key) => _select(key, source: source),
+      onAddThread: () =>
+          setState(() => _addingToStorylineId = storyline.id),
+      newestFirst: newestFirst,
+      onToggleSort: () => unawaited(ref
+          .read(appPrefsProvider.notifier)
+          .setStorylineNewestFirst(!newestFirst)),
+      onDismiss: () {
+        // Same order as the rail's dismissal: the storyline leaves the list,
+        // so the selection pointing at it goes first and the pane is back on
+        // the overview in the frame the row disappears.
+        setState(() {
+          _selectedStorylineId = null;
+          _addingToStorylineId = null;
+        });
+        unawaited(notifier.dismiss(storyline.id));
+      },
     );
 
     // Chats are not reply targets — see [_replyElsewhere] for why. A storyline
     // of only chats therefore offers the caption instead of a dropdown, and a
     // mixed one offers its mail threads.
-    final targets = _emailTargets(messages, keys, subjects);
-    final replyKey = _replyTargetFor(messages, keys, targets);
+    final targets = _emailTargets(episodes);
+    final replyKey = _replyTargetFor(episodes, targets);
 
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -915,7 +1102,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             _replyTargetPicker(replyKey, targets),
             const SizedBox(height: BondSpacing.s8),
             _composer(replyKey),
-          ] else if (subjects.isNotEmpty) ...[
+          ] else if (episodes.isNotEmpty) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
           ],
@@ -924,46 +1111,34 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// The member threads a reply can actually go to: the mail ones.
-  ///
-  /// Derived from the messages rather than from a source column on the
-  /// subject map, because that is where the source lives — the timeline
-  /// carries `conversation_key` and `subject` per thread and the source per
-  /// message.
-  Map<String, String> _emailTargets(
-    List<Message> messages,
-    Map<String, String> keyByMessageId,
-    Map<String, String> subjectByKey,
-  ) {
-    final mailKeys = <String>{};
-    for (final message in messages) {
-      if (message.source != 'email') continue;
-      final key = keyByMessageId[message.id];
-      if (key != null) mailKeys.add(key);
-    }
+  /// The member threads a reply can actually go to: the mail ones, by key and
+  /// the subject the dropdown names them with.
+  Map<String, String> _emailTargets(List<StorylineEpisode> episodes) {
     return {
-      for (final entry in subjectByKey.entries)
-        if (mailKeys.contains(entry.key)) entry.key: entry.value,
+      for (final episode in episodes)
+        if (episode.source == 'email') episode.conversationKey: episode.subject,
     };
   }
 
   /// Which member thread a storyline's composer answers.
   ///
   /// The user's pick when they made one and it is still a member; otherwise the
-  /// thread the newest message in the merged timeline belongs to, which is
-  /// nearly always the one that is actually waiting on an answer.
+  /// newest mail episode, which is nearly always the one actually waiting on an
+  /// answer — the episodes arrive oldest first, so that is the last of them.
   String? _replyTargetFor(
-    List<Message> messages,
-    Map<String, String> keyByMessageId,
-    Map<String, String> subjectByKey,
+    List<StorylineEpisode> episodes,
+    Map<String, String> targets,
   ) {
     final picked = _storylineReplyKey;
-    if (picked != null && subjectByKey.containsKey(picked)) return picked;
-    for (final message in messages.reversed) {
-      final key = keyByMessageId[message.id];
-      if (key != null && subjectByKey.containsKey(key)) return key;
+    if (picked != null && targets.containsKey(picked)) return picked;
+    for (final episode in episodes.reversed) {
+      if (targets.containsKey(episode.conversationKey)) {
+        return episode.conversationKey;
+      }
     }
-    return subjectByKey.keys.isEmpty ? null : subjectByKey.keys.first;
+    // Unreachable while targets is built from these episodes; null, not a
+    // fake fallback, so a future divergence surfaces as "no reply bar".
+    return null;
   }
 
   Widget _replyTargetPicker(String selected, Map<String, String> subjects) {
@@ -998,46 +1173,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// Files [conversationKey] into a storyline the user names now.
-  ///
-  /// A dialog rather than an inline field: it is the one storyline action that
-  /// creates something, and it is reached from a thread, where there is no
-  /// obvious place to put a text field that would not be mistaken for a
-  /// composer.
-  Future<void> _promptNewStoryline(String conversationKey) async {
-    final controller = TextEditingController();
-    final title = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('New storyline'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: 'Name this storyline'),
-          onSubmitted: (value) => Navigator.of(context).pop(value),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Create'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-
-    final trimmed = (title ?? '').trim();
-    if (trimmed.isEmpty || !mounted) return;
-    await ref.read(storylinesProvider.notifier).create(
-          trimmed,
-          conversationKey: conversationKey,
-        );
-  }
-
   Widget _thread(Conversation selected) {
     final thread = ref.watch(threadProvider(selected.id));
 
@@ -1059,26 +1194,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       messages: messages,
       onMarkDone: () =>
           ref.read(conversationsProvider.notifier).markDone(selected.id),
-      onBack: () => setState(() => _selectedId = null),
-      // Suggestions are deliberately absent: filing a thread into a group the
-      // user has not accepted yet would be answering the suggestion for them.
-      // So are the storylines this thread is already in — an "Add to" that
-      // does nothing reads as a broken menu item.
-      storylineChoices: () {
-        final already = ref
-            .read(messageStoreProvider)
-            .storylineIdsFor(selected.source, selected.id)
-            .toSet();
-        return [
-          for (final storyline in _storylines())
-            if (!storyline.isSuggested && !already.contains(storyline.id))
-              (storyline.id, storyline.title),
-        ];
-      }(),
-      onAddToStoryline: (id) => ref
-          .read(storylinesProvider.notifier)
-          .addThread(id, selected.source, selected.id),
-      onNewStoryline: () => _promptNewStoryline(selected.id),
+      onBack: () => setState(() {
+        _selectedId = null;
+        _selectedSource = null;
+      }),
+      onAddToStoryline: () => setState(() => _pickingStorylineForThread =
+          (source: selected.source, id: selected.id)),
       // Sender-scoped, because the screen is the layer that knows the address
       // behind the row. A thread with no address to key a rule on gets no item
       // rather than a rule keyed on the empty string, which would apply to
@@ -1208,20 +1329,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// What the sync and the local model have been doing, over the last week.
   ///
-  /// The [StreamBuilder] ticks once per recorded event, so a sync landing while
-  /// the panel is open appears without a refresh. It also ticks on the events
-  /// the recorder SUPPRESSED — a poll that brought nothing in emits a transient
-  /// tick and writes no row — and that is what keeps the panel's relative times
-  /// honest: the "last sync" tiles are read from prefs on every rebuild, so
-  /// without a tick roughly once a minute they would freeze at whatever they
-  /// said when the panel opened.
+  /// [activitySnapshotProvider] re-reads once per recorded event, so a sync
+  /// landing while the panel is open appears without a refresh. It also
+  /// re-reads on the events the recorder SUPPRESSED — a poll that brought
+  /// nothing in emits a transient tick and writes no row — and that is what
+  /// keeps the panel's relative times honest: the "last sync" tiles come from
+  /// prefs read in that same pass, so without a tick roughly once a minute they
+  /// would freeze at whatever they said when the panel opened.
   ///
-  /// Each tick costs two indexed reads against a synchronous database on the UI
-  /// isolate, plus one pref read per tile. Even a first sync of a large mailbox
-  /// records one row per drained item, not per message. If a future drain ever
-  /// ticks fast enough to be felt here, the debounce in
+  /// Each re-read is a handful of indexed queries. Even a first sync of a large
+  /// mailbox records one row per drained item, not per message. If a future
+  /// drain ever ticks fast enough to be felt here, the debounce in
   /// `conversations_provider` is the documented pattern to copy.
   Widget _activityLog() {
+    // The previous snapshot is carried through a reload, so this is null only
+    // before the very first read of the pane.
+    final snapshot = ref.watch(activitySnapshotProvider).valueOrNull;
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
       child: Column(
@@ -1230,52 +1353,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Text('Activity', style: BondType.title),
           const SizedBox(height: BondSpacing.s16),
           Expanded(
-            child: StreamBuilder<ActivityEvent>(
-              stream: ref.watch(activityLogProvider).events,
-              builder: (context, _) {
-                final store = ref.watch(messageStoreProvider);
-                final sinceIso = DateTime.now()
-                    .toUtc()
-                    .subtract(const Duration(days: 7))
-                    .toIso8601String();
-                return ActivityLogPanel(
-                  stats: store.activityStats(sinceIso: sinceIso),
-                  events: [
-                    for (final row in store.recentActivity(limit: 300))
-                      ActivityEvent.fromRow(row),
-                  ],
-                  now: DateTime.now(),
-                  lastMailSyncIso: store.getPref(activityLastSyncMailKey),
-                  lastTeamsSyncIso: store.getPref(activityLastSyncTeamsKey),
-                  lastSweepIso: store.getPref(activityLastSweepKey),
-                  entityLabel: (event) => _activityEntityLabel(store, event),
-                );
-              },
-            ),
+            child: snapshot == null
+                ? const Center(child: CircularProgressIndicator())
+                : ActivityLogPanel(
+                    stats: snapshot.stats,
+                    events: snapshot.events,
+                    now: DateTime.now(),
+                    lastMailSyncIso: snapshot.lastMailSyncIso,
+                    lastTeamsSyncIso: snapshot.lastTeamsSyncIso,
+                    lastSweepIso: snapshot.lastSweepIso,
+                    entityLabel: snapshot.labelFor,
+                  ),
           ),
         ],
       ),
     );
-  }
-
-  /// The subject of the thread an activity row was about, or null.
-  ///
-  /// Null is the common answer and not a failure: triage records a MESSAGE id,
-  /// which is not a conversation key, and a thread can be deleted after the row
-  /// that named it was written. Wrapped besides, because this runs inside a
-  /// build and the panel is the last place in the app that should be able to
-  /// throw.
-  static String? _activityEntityLabel(MessageStore store, ActivityEvent event) {
-    final entityId = event.entityId;
-    if (entityId == null) return null;
-    try {
-      final row = store.getConversationRow(event.source ?? 'email', entityId);
-      if (row == null) return null;
-      final subject = Conversation.fromRow(row).subject;
-      return subject != null && subject.isNotEmpty ? subject : null;
-    } catch (_) {
-      return null;
-    }
   }
 
   Widget _overview(List<Conversation> conversations, String? loadError) {

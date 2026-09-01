@@ -97,6 +97,13 @@ class LlmClient {
     defaultValue: 'http://localhost:8080/v1/chat/completions',
   );
 
+  /// The small model that does the bulk work — triage, extraction, storyline
+  /// membership. Same wire protocol, its own server: see `make fast`.
+  static const String fastBaseUrl = String.fromEnvironment(
+    'FAST_LLAMA_URL',
+    defaultValue: 'http://localhost:8082/v1/chat/completions',
+  );
+
   /// llama-server ignores the model name — it serves whatever was loaded at
   /// launch — but the OpenAI request schema requires the field.
   static const String _model = 'qwen3.8';
@@ -112,6 +119,9 @@ class LlmClient {
   final String baseUrl;
   final http.Client _http;
   final LlmCallObserver? _onCall;
+
+  /// Fires with the tripwire below, so a test can catch a thinking regression.
+  void Function()? onReasoningLeak;
 
   LlmClient({String? baseUrl, http.Client? httpClient, LlmCallObserver? onCall})
       : baseUrl = baseUrl ?? defaultBaseUrl,
@@ -346,6 +356,7 @@ class LlmClient {
         debugPrint(
           'LlmClient: enable_thinking was ignored — triage will be ~2x slower',
         );
+        onReasoningLeak?.call();
       }
     }
 

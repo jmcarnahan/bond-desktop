@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'tokens.dart';
 
 /// Bond app theme, assembled ONLY from `lib/theme/` tokens. Material 3,
-/// light-only. Ported from a sibling CRM app's theme; the
+/// light-only. Ported from a sibling app's theme; the
 /// component themes for widgets this app does not build are dropped.
 class BondTheme {
   static ThemeData get themeData {

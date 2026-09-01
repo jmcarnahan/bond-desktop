@@ -1,0 +1,10 @@
+targets:
+  $default:
+    builders:
+      drift_dev:
+        options:
+          # Names the database for `drift_dev make-migrations`, which writes
+          # its schema snapshots to `drift_schemas/bond/`. The v1 snapshot is
+          # the baseline every later step migration is diffed against.
+          databases:
+            bond: lib/data/database.dart

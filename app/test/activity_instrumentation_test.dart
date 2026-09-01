@@ -1,4 +1,6 @@
-import 'package:bond_inbox/data/db.dart';
+// `show`: drift generates an `ActivityEvent` row class from the
+// `activity_events` table, and this file means the log's own.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
@@ -10,7 +12,8 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// What the pipeline actually writes to `activity_events`.
 ///
@@ -162,7 +165,7 @@ class FakeLlm extends LlmClient {
 }
 
 /// A [WorkHandler] that does whatever the test hands it and nothing else.
-class ScriptedHandler implements WorkHandler {
+class ScriptedHandler extends WorkHandler {
   @override
   final String kind;
 
@@ -181,7 +184,7 @@ class ScriptedHandler implements WorkHandler {
 Map<String, dynamic> graphMessage(String id) => {
       'id': id,
       'conversationId': 'conv-$id',
-      'subject': 'Rate lock',
+      'subject': 'Launch date',
       'from': {
         'emailAddress': {'name': 'Sarah', 'address': 'sarah@example.com'}
       },
@@ -195,44 +198,44 @@ Map<String, dynamic> graphMessage(String id) => {
 
 Map<String, dynamic> triageAnswer({
   String urgency = 'high',
-  String category = 'borrower',
+  String category = 'work',
 }) =>
     {
       'urgency': urgency,
       'category': category,
-      'summary': 'Sarah asks about the rate lock.',
+      'summary': 'Jordan asks about the launch date.',
       'needs_action': true,
       'action_items': const ['Call Sarah about the lock'],
     };
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late ActivityLog log;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     log = ActivityLog(store);
   });
 
-  tearDown(() {
+  tearDown(() async {
     log.dispose();
-    db.close();
+    await db.close();
   });
 
-  List<ActivityEvent> rows([String? kind]) => [
-        for (final row in store.recentActivity())
+  Future<List<ActivityEvent>> rows([String? kind]) async => [
+        for (final row in await store.recentActivity())
           if (kind == null || row['kind'] == kind) ActivityEvent.fromRow(row),
       ];
 
-  void seedMessage(String id) {
-    store.upsertMessage({
+  Future<void> seedMessage(String id) async {
+    await store.upsertMessage({
       'source': 'email',
       'source_message_id': id,
       'conversation_key': 'conv-1',
       'direction': 'inbound',
-      'subject': 'Rate lock',
+      'subject': 'Launch date',
       'from_name': 'Sarah',
       'from_address': 'sarah@example.com',
       'received_at': '2026-08-29T10:00:00Z',
@@ -249,7 +252,7 @@ void main() {
 
       await SyncService(mail, store, activityLog: log).syncNow();
 
-      final row = rows('sync_mail').single;
+      final row = (await rows('sync_mail')).single;
       expect(row.status, 'ok');
       expect(row.source, 'email');
       expect(row.count, 3);
@@ -270,9 +273,9 @@ void main() {
       // The replay ingested nothing, so it is suppressed rather than logged as
       // a second row — a poll that runs on a timer would otherwise fill the
       // panel with its own heartbeat.
-      expect([for (final row in rows('sync_mail')) row.count], [2]);
+      expect([for (final row in await rows('sync_mail')) row.count], [2]);
       // It still happened, and the pref is where that is recorded.
-      expect(store.getPref(activityLastSyncMailKey), isNotNull);
+      expect(await store.getPref(activityLastSyncMailKey), isNotNull);
     });
 
     test('a failing backend writes an error row AND still throws', () async {
@@ -283,7 +286,7 @@ void main() {
         throwsA(isA<Exception>()),
       );
 
-      final row = rows('sync_mail').single;
+      final row = (await rows('sync_mail')).single;
       expect(row.status, 'error');
       expect(row.detail['error'], contains('Graph is down'));
       // The banner the caller shows is built from the rethrow; the row exists
@@ -304,7 +307,7 @@ void main() {
         activityLog: log,
       ).syncNow();
 
-      final row = rows('sync_teams').single;
+      final row = (await rows('sync_teams')).single;
       expect(row.status, 'skipped');
       expect(row.source, 'teams');
       expect(row.detail['reason'], 'no_scope');
@@ -318,8 +321,8 @@ void main() {
 
       // No chats, no messages, nothing queued: there is nothing here a reader
       // would learn from, and the walk is reported by the timestamp instead.
-      expect(rows('sync_teams'), isEmpty);
-      expect(store.getPref(activityLastSyncTeamsKey), isNotNull);
+      expect(await rows('sync_teams'), isEmpty);
+      expect(await store.getPref(activityLastSyncTeamsKey), isNotNull);
     });
 
     test('the count is messages seen for the first time, not messages read',
@@ -340,7 +343,7 @@ void main() {
       // chat. The scan tally is how much was looked at, not what changed.
       await sync.syncNow();
 
-      final walk = rows('sync_teams').single;
+      final walk = (await rows('sync_teams')).single;
       expect(walk.count, 2);
       expect(walk.detail['chats_seen'], 1);
       expect(walk.detail['chats_fetched'], 1);
@@ -350,18 +353,18 @@ void main() {
 
   group('TriageQueue', () {
     test('a triaged message carries the verdict and the model call', () async {
-      seedMessage('m1');
+      await seedMessage('m1');
       final llm = FakeLlm([triageAnswer()], observer: log.noteLlmCall);
 
       await TriageQueue(store, llm, activityLog: log).pump();
 
-      final row = rows('triage').single;
+      final row = (await rows('triage')).single;
       expect(row.status, 'ok');
       expect(row.source, 'email');
       expect(row.entityId, 'm1');
       expect(row.durationMs, isNotNull);
       expect(row.detail['urgency'], 'high');
-      expect(row.detail['category'], 'borrower');
+      expect(row.detail['category'], 'work');
       expect(row.detail['needs_action'], isTrue);
       expect(row.detail['action_items'], 1);
       // The tally the client reported, folded onto the item's own row.
@@ -370,14 +373,14 @@ void main() {
     });
 
     test('a gated message writes no row at all', () async {
-      store.upsertMessage({
+      await store.upsertMessage({
         'source': 'email',
         'source_message_id': 'bulk',
         'conversation_key': 'conv-1',
         'direction': 'inbound',
-        'subject': 'This week at Harborline',
-        'from_name': 'Harborline',
-        'from_address': 'no-reply@harborline.com',
+        'subject': 'This week at Northline',
+        'from_name': 'Northline',
+        'from_address': 'no-reply@example.com',
         'received_at': '2026-08-29T10:00:00Z',
         'body_text': 'Newsletter',
         'triage_status': 'pending',
@@ -389,12 +392,15 @@ void main() {
       // A gate is what keeps the model from being consulted, so there is
       // nothing to report — and a row per newsletter would bury the work the
       // panel exists to show.
-      expect(store.recentActivity(), isEmpty);
-      expect(store.getMessageRow('email', 'bulk')!['triage_status'], 'skipped');
+      expect(await store.recentActivity(), isEmpty);
+      expect(
+        (await store.getMessageRow('email', 'bulk'))!['triage_status'],
+        'skipped',
+      );
     });
 
     test('a model server that is down parks rather than errors', () async {
-      seedMessage('m1');
+      await seedMessage('m1');
       final llm = FakeLlm(
         [const LlmUnavailableException('not reachable')],
         observer: log.noteLlmCall,
@@ -402,23 +408,26 @@ void main() {
 
       await TriageQueue(store, llm, activityLog: log).pump();
 
-      final row = rows('triage').single;
+      final row = (await rows('triage')).single;
       expect(row.status, 'parked');
       expect(row.entityId, 'm1');
       expect(row.detail['reason'], 'model_unavailable');
       // Nothing about the message failed, so its row stays pending.
-      expect(store.getMessageRow('email', 'm1')!['triage_status'], 'pending');
+      expect(
+        (await store.getMessageRow('email', 'm1'))!['triage_status'],
+        'pending',
+      );
     });
 
     test('a retry and the error it becomes are two distinct rows', () async {
-      seedMessage('m1');
+      await seedMessage('m1');
       final llm = FakeLlm([const LlmFormatException('not JSON')]);
 
       await TriageQueue(store, llm, activityLog: log).pump();
 
       // The message row cannot tell these apart after the fact — it goes back
       // to `pending` and then to `error` — so the distinction lives here.
-      final triage = rows('triage');
+      final triage = await rows('triage');
       expect([for (final row in triage) row.status], ['error', 'retry']);
       expect(triage.last.detail['attempts'], 1);
       expect(triage.last.detail['error'], contains('not JSON'));
@@ -428,7 +437,7 @@ void main() {
 
   group('AiWorker', () {
     test("a handler's facts and status land on the item's row", () async {
-      store.enqueueWork('extract', 'email', 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
       final handler = ScriptedHandler('extract', (_) async {
         log
           ..noteStatus('skipped')
@@ -437,7 +446,7 @@ void main() {
 
       await AiWorker(store, handlers: [handler], activityLog: log).pump();
 
-      final row = rows('extract').single;
+      final row = (await rows('extract')).single;
       expect(row.status, 'skipped');
       expect(row.source, 'email');
       expect(row.entityId, 'm1');
@@ -445,22 +454,22 @@ void main() {
       expect(row.durationMs, isNotNull);
       // The work row is done either way — `skipped` is about what the handler
       // did, not about whether the item still needs doing.
-      expect(store.workCounts('extract'), {'done': 1});
+      expect(await store.workCounts('extract'), {'done': 1});
     });
 
     test('a handler that says nothing gets a plain ok row', () async {
-      store.enqueueWork('draft', 'email', 'conv-1');
+      await store.enqueueWork('draft', 'email', 'conv-1');
       final handler = ScriptedHandler('draft', (_) async {});
 
       await AiWorker(store, handlers: [handler], activityLog: log).pump();
 
-      final row = rows('draft').single;
+      final row = (await rows('draft')).single;
       expect(row.status, 'ok');
       expect(row.detail, isEmpty);
     });
 
     test('a park is a park, not an error', () async {
-      store.enqueueWork('extract', 'email', 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
       final handler = ScriptedHandler(
         'extract',
         (_) async => throw const LlmUnavailableException('not reachable'),
@@ -468,14 +477,14 @@ void main() {
 
       await AiWorker(store, handlers: [handler], activityLog: log).pump();
 
-      final row = rows('extract').single;
+      final row = (await rows('extract')).single;
       expect(row.status, 'parked');
       expect(row.detail['reason'], 'model_unavailable');
-      expect(store.workCounts('extract'), {'pending': 1});
+      expect(await store.workCounts('extract'), {'pending': 1});
     });
 
     test('the session ending parks with its own reason', () async {
-      store.enqueueWork('extract', 'email', 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
       final handler = ScriptedHandler(
         'extract',
         (_) async => throw const NotSignedIn(),
@@ -483,12 +492,12 @@ void main() {
 
       await AiWorker(store, handlers: [handler], activityLog: log).pump();
 
-      expect(rows('extract').single.detail['reason'], 'session');
+      expect((await rows('extract')).single.detail['reason'], 'session');
     });
 
     test('a second failure is an error, and says how many attempts it took',
         () async {
-      store.enqueueWork('extract', 'email', 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
       final handler = ScriptedHandler(
         'extract',
         (_) async => throw const LlmException('rejected', 400),
@@ -497,7 +506,7 @@ void main() {
       await AiWorker(store, handlers: [handler], activityLog: log).pump();
 
       // A 400 is this app's schema being wrong: fatal on the first attempt.
-      final row = rows('extract').single;
+      final row = (await rows('extract')).single;
       expect(row.status, 'error');
       expect(row.detail['attempts'], 1);
       expect(row.detail['status_code'], 400);
@@ -505,15 +514,15 @@ void main() {
 
     test('one row per item, not one per handler pass', () async {
       for (final id in ['m1', 'm2', 'm3']) {
-        store.enqueueWork('extract', 'email', id);
+        await store.enqueueWork('extract', 'email', id);
       }
       final handler = ScriptedHandler('extract', (_) async {});
 
       await AiWorker(store, handlers: [handler], activityLog: log).pump();
 
-      expect(rows('extract'), hasLength(3));
+      expect(await rows('extract'), hasLength(3));
       expect(
-        [for (final row in rows('extract')) row.entityId],
+        [for (final row in await rows('extract')) row.entityId],
         unorderedEquals(['m1', 'm2', 'm3']),
       );
     });

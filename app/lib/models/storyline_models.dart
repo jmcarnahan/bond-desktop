@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart' show immutable;
 
+import 'message_models.dart';
+
 /// Row models for storylines — the named groups of related conversations the
 /// clustering pass proposes and the user keeps, renames or dismisses.
 ///
@@ -30,6 +32,15 @@ class Storyline {
   /// but the name is the user's.
   final bool titleLocked;
 
+  /// The membership criteria the confirm task judges candidates against.
+  /// Auto-drafted by the naming pass; locked the moment a person edits it.
+  final String? charter;
+
+  /// Set once a person edits the charter. Same contract as [titleLocked]: a
+  /// later naming pass may keep refreshing everything else, but what belongs
+  /// in the storyline is then the user's call.
+  final bool charterLocked;
+
   final bool pinned;
 
   /// The newest `last_message_at` of any member thread. Only ever moves
@@ -48,6 +59,8 @@ class Storyline {
     this.status = 'suggested',
     this.createdBy = 'auto',
     this.titleLocked = false,
+    this.charter,
+    this.charterLocked = false,
     this.pinned = false,
     this.lastActivityAt,
     this.memberCount = 0,
@@ -68,6 +81,8 @@ class Storyline {
       createdBy: row['created_by'] as String? ?? 'auto',
       // STRICT has no bool: these are 0/1 integers.
       titleLocked: (row['title_locked'] as num?)?.toInt() == 1,
+      charter: row['charter'] as String?,
+      charterLocked: (row['charter_locked'] as num?)?.toInt() == 1,
       pinned: (row['pinned'] as num?)?.toInt() == 1,
       lastActivityAt: row['last_activity_at'] as String?,
       memberCount: (row['member_count'] as num?)?.toInt() ?? 0,
@@ -111,4 +126,47 @@ class StorylineMember {
       addedAt: row['added_at'] as String? ?? '',
     );
   }
+}
+
+/// One member thread's whole run inside a storyline — the unit the storyline
+/// pane renders as a card.
+///
+/// Assembled by `StorylineTimelineNotifier`, not read from a table: the store
+/// answers with messages, and which thread each one belongs to is a column on
+/// the row rather than a field on [Message].
+@immutable
+class StorylineEpisode {
+  final String source;
+  final String conversationKey;
+
+  /// First non-empty stripped subject in chronological order — the same rule
+  /// the conversation fold uses, so the card matches the inbox row. Empty when
+  /// no message carries one.
+  final String subject;
+
+  /// Distinct sender display names in first-appearance order.
+  final List<String> participants;
+
+  /// The thread's messages, oldest first.
+  final List<Message> messages;
+
+  /// The newest message's timestamp; null when none carries one.
+  final String? latestAt;
+
+  /// The newest inbound message's triage summary; null until triage has run.
+  final String? summary;
+
+  const StorylineEpisode({
+    required this.source,
+    required this.conversationKey,
+    required this.subject,
+    required this.participants,
+    required this.messages,
+    this.latestAt,
+    this.summary,
+  });
+
+  /// The composite a storyline's membership is keyed on. A conversation key is
+  /// only unique within its connector.
+  String get threadKey => '$source\n$conversationKey';
 }

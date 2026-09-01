@@ -5,22 +5,22 @@ import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 Storyline storyline({
-  String title = 'Willow St purchase',
-  String? summary = 'Waiting on the appraisal review.',
+  String title = 'Website redesign',
+  String? summary = 'Waiting on the homepage copy review.',
 }) =>
     Storyline(id: 'sl-1', title: title, summary: summary, status: 'active');
 
 Map<String, dynamic> confirmAnswer({
-  Object? evidence = 'Both threads concern the Willow Street appraisal.',
+  Object? evidence = 'Both threads concern the website redesign.',
   Object? belongs = true,
   Object? confidence = 'high',
 }) =>
     {'evidence': evidence, 'belongs': belongs, 'confidence': confidence};
 
 Map<String, dynamic> nameAnswer({
-  Object? evidence = 'Every thread is about the Willow Street purchase.',
-  Object? title = 'Willow St purchase',
-  Object? summary = 'The appraisal is back and underwriting is reviewing it.',
+  Object? evidence = 'Every thread is about the website redesign.',
+  Object? title = 'Website redesign',
+  Object? summary = 'The photos are back and the studio is reviewing them.',
 }) =>
     {'evidence': evidence, 'title': title, 'summary': summary};
 
@@ -54,7 +54,8 @@ void main() {
     test('puts evidence first', () {
       final properties = name.schema['properties'] as Map<String, dynamic>;
 
-      expect(properties.keys.toList(), ['evidence', 'title', 'summary']);
+      expect(
+          properties.keys.toList(), ['evidence', 'title', 'summary', 'charter']);
       expect(name.schema['required'], properties.keys.toList());
       expect(name.schema['additionalProperties'], isFalse);
     });
@@ -76,9 +77,14 @@ void main() {
     });
 
     test('the membership prompt asks the narrow question', () {
-      expect(confirm.systemPrompt, contains('mortgage loan officer'));
-      expect(confirm.systemPrompt, contains('SAME deal'));
-      expect(confirm.systemPrompt, contains('same KIND of work'));
+      expect(confirm.systemPrompt, contains("a person's message threads"));
+      expect(confirm.systemPrompt,
+          contains("SAME specific event, project, or topic the storyline's "
+              'charter describes'));
+      // The participant list is the signal this prompt most needs held down:
+      // unqualified, a shared name reads as the requirement.
+      expect(confirm.systemPrompt, contains('context, not a requirement'));
+      expect(confirm.systemPrompt, contains('same KIND of thing'));
       expect(confirm.systemPrompt, contains('low|medium|high'));
       expect(confirm.systemPrompt, contains('Return ONLY valid JSON.'));
       expect(confirm.systemPrompt,
@@ -87,7 +93,7 @@ void main() {
 
     test('the naming prompt refuses generic titles', () {
       expect(name.systemPrompt, contains('at most 6 words'));
-      expect(name.systemPrompt, contains('Willow St purchase'));
+      expect(name.systemPrompt, contains('Website redesign'));
       expect(name.systemPrompt, contains('Never a generic label'));
       expect(name.systemPrompt, contains('Return ONLY valid JSON.'));
       expect(name.systemPrompt,
@@ -105,15 +111,15 @@ void main() {
       final user = confirm.buildUserMessage(ConfirmInput(
         storyline: storyline(),
         storylineParticipants: const ['Sarah Chen', 'Dana Ruiz'],
-        candidateCard: 'Appraisal review | Sarah Chen | |',
+        candidateCard: 'Homepage copy | Sarah Chen | |',
       ));
 
       expect(user, contains('<untrusted_data source="storyline">'));
       expect(user, contains('<untrusted_data source="candidate_thread">'));
-      expect(user, contains('Title: Willow St purchase'));
-      expect(user, contains('Summary: Waiting on the appraisal review.'));
+      expect(user, contains('Title: Website redesign'));
+      expect(user, contains('Summary: Waiting on the homepage copy review.'));
       expect(user, contains('People: Sarah Chen, Dana Ruiz'));
-      expect(user, contains('Appraisal review'));
+      expect(user, contains('Homepage copy'));
       expect('</untrusted_data>'.allMatches(user).length, 2);
     });
 
@@ -166,14 +172,14 @@ void main() {
   group('NameStorylineTask user message', () {
     test('joins the cards inside one fence', () {
       final user = name.buildUserMessage(const NameInput([
-        'Appraisal review | Sarah Chen | |',
-        'Rate lock | Dana Ruiz | |',
+        'Homepage copy | Sarah Chen | |',
+        'Launch date | Dana Ruiz | |',
       ]));
 
       expect(user, startsWith('<untrusted_data source="threads">'));
       expect(user, contains('\n---\n'));
-      expect(user, contains('Appraisal review'));
-      expect(user, contains('Rate lock'));
+      expect(user, contains('Homepage copy'));
+      expect(user, contains('Launch date'));
       expect('</untrusted_data>'.allMatches(user).length, 1);
     });
 
@@ -195,7 +201,7 @@ void main() {
       final result = confirm.validate(confirmAnswer());
 
       expect(result.evidence,
-          'Both threads concern the Willow Street appraisal.');
+          'Both threads concern the website redesign.');
       expect(result.belongs, isTrue);
       expect(result.confidence, 'high');
     });
@@ -239,9 +245,9 @@ void main() {
     test('passes a good answer through', () {
       final result = name.validate(nameAnswer());
 
-      expect(result.title, 'Willow St purchase');
+      expect(result.title, 'Website redesign');
       expect(result.summary,
-          'The appraisal is back and underwriting is reviewing it.');
+          'The photos are back and the studio is reviewing them.');
       expect(result.evidence, isNotEmpty);
     });
 

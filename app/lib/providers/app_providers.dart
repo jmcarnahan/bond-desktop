@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:sqlite3/sqlite3.dart';
 
+// `show BondDatabase`: drift generates row classes (Message, Conversation,
+// Storyline, …) whose names collide with the app's models.
+import '../data/database.dart' show BondDatabase;
 import '../data/message_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
@@ -82,7 +84,7 @@ final authSessionProvider = Provider<AuthSession>((ref) {
 /// It throws rather than defaulting because opening the real file is async
 /// and a Provider body cannot be: a default that silently opened `:memory:`
 /// would give a release build an inbox that empties itself on every launch.
-final dbProvider = Provider<Database>(
+final dbProvider = Provider<BondDatabase>(
   (ref) => throw UnimplementedError(
     'dbProvider must be overridden with an open database (see main()).',
   ),
@@ -169,16 +171,54 @@ final llmClientProvider = Provider<LlmClient>(
   (ref) => LlmClient(onCall: ref.watch(activityLogProvider).noteLlmCall),
 );
 
-/// The one gate both drains hold while at the model server. One instance for
-/// the app, or it would serialize nothing — see [DrainGate].
+/// The second chat model, on its own server (`make fast`), and the reason
+/// there are two.
+///
+/// The 27B answers a triage call in about thirteen seconds; the small model
+/// answers the same call in about two. Everything routed here is a LABEL under
+/// a tight schema that Dart re-validates afterwards — triage, extraction,
+/// storyline membership — and none of it needs 27B judgement to come out
+/// right. What stays on [llmClientProvider] is the prose: drafted replies and
+/// storyline titles, where the difference between the two models is something
+/// a person reads.
+///
+/// Down is down, per server: a call to a server that is not running throws
+/// [LlmUnavailableException] and the drain parks, exactly as it always has.
+/// There is deliberately no fallback to the other server — silently answering
+/// bulk work on the 27B would turn "the fast server is off" into "the app got
+/// mysteriously slow".
+///
+/// Observed by the same activity log as the 27B: since the split THIS is the
+/// client that makes most of the app's model calls, and a log that only saw
+/// the 27B would show a mailbox that apparently triaged itself for free.
+final fastLlmClientProvider = Provider<LlmClient>(
+  (ref) => LlmClient(
+    baseUrl: LlmClient.fastBaseUrl,
+    onCall: ref.watch(activityLogProvider).noteLlmCall,
+  ),
+);
+
+/// The one gate the two DRAINS hold while at the model servers — servers
+/// plural since the split above, which is why the gate is about drains rather
+/// than about a server.
+///
+/// It keeps a triage drain and a worker drain from running at once: both send
+/// their bulk work to the fast server, so overlapping them would double-book
+/// its slots and have each drain's byte-identical system prompt evict the
+/// other's from the KV prefix cache. It deliberately does NOT serialize the
+/// handful of requests one drain has in flight — those are batched by the
+/// server on purpose, and are what the slot count is sized for.
+///
+/// One instance for the app, or it would serialize nothing — see [DrainGate].
 final drainGateProvider = Provider<DrainGate>((ref) => DrainGate());
 
-/// The triage worker. Exactly one for the whole app: it is a serial queue over
+/// The triage worker. Exactly one for the whole app: it is one queue over
 /// shared rows, and a second instance would claim the same messages.
 final triageQueueProvider = Provider<TriageQueue>((ref) {
   final queue = TriageQueue(
     ref.watch(messageStoreProvider),
-    ref.watch(llmClientProvider),
+    // Bulk work: the fast server. See [fastLlmClientProvider].
+    ref.watch(fastLlmClientProvider),
     // Triage fetches its own bodies rather than waiting for a human to open
     // the thread. Taken off [MailSync], so this stays typed to the interface
     // a test can override.
@@ -202,9 +242,12 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
     // guard is for the read itself — against a torn-down container it throws,
     // and this callback sits inside the failure path of a client whose whole
     // contract is that failure costs nothing.
-    onFail: (reason) {
+    // Async so the catch still covers the write itself: `record` returns a
+    // future, and a fire-and-forget call would put its failure outside this
+    // try. The callback's own return value is discarded either way.
+    onFail: (reason) async {
       try {
-        ref.read(activityLogProvider).record(
+        await ref.read(activityLogProvider).record(
               'embed_fail',
               status: 'error',
               detail: {'reason': reason},
@@ -215,7 +258,7 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
 );
 
 /// The AI work queue. One for the whole app, for the same reason there is one
-/// [triageQueueProvider]: it is a serial queue over shared rows.
+/// [triageQueueProvider]: it is one queue over shared rows.
 ///
 /// Its handlers drain in list order, so the order here is the order the work
 /// happens in.
@@ -230,7 +273,8 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // would have them clustering a mailbox half of which has no vector yet.
       ExtractHandler(
         ref.watch(messageStoreProvider),
-        ref.watch(llmClientProvider),
+        // Bulk work: the fast server. See [fastLlmClientProvider].
+        ref.watch(fastLlmClientProvider),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
       ),
@@ -239,9 +283,17 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // around.
       StorylineAssignHandler(storylines),
       StorylineSweepHandler(storylines),
+      // After the sweep and before drafts: a recruit is rare — it only exists
+      // when a charter was just saved — and the threads it files are exactly
+      // what the draft below should know about.
+      StorylineRecruitHandler(storylines),
       // Last, and after both storyline passes: a draft reads the storyline
       // summary as background, so drafting before the sweep has run would
       // write the one reply for this thread without it.
+      //
+      // The only handler still on the 27B. A draft is prose the user sends
+      // under their own name — the one place the bigger model earns its
+      // seconds.
       DraftHandler(
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
@@ -256,13 +308,17 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
 });
 
 /// The storyline logic, shared by the two work handlers and by the UI's user
-/// actions. Stateless beyond its store and client, so a second instance would
+/// actions. Stateless beyond its store and clients, so a second instance would
 /// be harmless — it is a provider because the handlers and the notifier must
 /// agree on the same store.
+///
+/// The one place the routing split runs through a single object: membership is
+/// a label and goes to the fast server, naming is prose and stays on the 27B.
 final storylineServiceProvider = Provider<StorylineService>(
   (ref) => StorylineService(
     ref.watch(messageStoreProvider),
     ref.watch(llmClientProvider),
+    confirmClient: ref.watch(fastLlmClientProvider),
     activityLog: ref.watch(activityLogProvider),
   ),
 );

@@ -38,25 +38,70 @@ abstract class WorkHandler {
   /// Matches `work_items.task_kind`.
   String get kind;
 
+  /// How many items of this kind may be at the server at once.
+  ///
+  /// One by default, and that default is the safe answer rather than a
+  /// performance oversight: a handler whose items touch shared state has to
+  /// see them one at a time — a storyline assignment changes the clusters the
+  /// next candidate is measured against, so two at once would each decide
+  /// against a mailbox the other is mid-way through changing. A handler raises
+  /// this only when its items are genuinely independent of each other, and
+  /// then no higher than the server it calls has slots for.
+  int get concurrency => 1;
+
   /// One row from `work_items`. `entity_id` names what to work on.
   Future<void> run(Map<String, Object?> item);
 }
 
-/// Drains the `work_items` queue through its handlers, one item at a time.
+/// What one item's outcome means for the rest of the drain.
+///
+/// Three cases and not two, because since phase 3 the kinds do not share a
+/// model server: "extraction's server is down" and "the session is over" used
+/// to imply each other and no longer do.
+enum _RunOutcome {
+  /// Done, or failed in a way that is about this item. Carry on.
+  ok,
+
+  /// This KIND's server is not answering. Every item of this kind behind it
+  /// would fail identically — but another kind on another server would not.
+  parkKind,
+
+  /// The session is gone. Every kind's Graph-dependent work fails the same
+  /// way, so the whole drain stops.
+  parkDrain,
+}
+
+/// Drains the `work_items` queue through its handlers, a few items of one kind
+/// at a time.
 ///
 /// This is `TriageQueue`'s protocol, generalised over a task kind — the same
-/// claim-before-await, the same failure policy, the same park-on-unavailable —
-/// and it is a COPY rather than a shared base class on purpose. Triage is
+/// atomic claim, the same failure policy, the same park-on-unavailable — and
+/// it is a COPY rather than a shared base class on purpose. Triage is
 /// hard-wired to the `messages` table by decision: its queue, its gates and
 /// its fold-up are one thing, and the seam that would let them be shared is
 /// not worth the coupling.
 ///
-/// Strictly serial for the reason triage is: the model generates at about
-/// twelve tokens a second, so a second concurrent request does not go twice as
-/// fast, it makes both take twice as long and throws away llama-server's
-/// prompt cache between them. The kinds drain in handler order rather than
-/// interleaved, for the same reason — and the caller chains this worker's
-/// [pump] AFTER triage's so the two queues never reach the one server at once.
+/// Bounded-concurrent within one kind, at [WorkHandler.concurrency]. The GPU
+/// reads the model's weights once per decode step no matter how many sequences
+/// share it, so K requests in flight at one llama-server come back in nothing
+/// like K times the wall clock of one — the aggregate is worth roughly 2.5-3x
+/// a serial drain. K is small and per handler because the trade runs the other
+/// way past a point: each individual request gets slower as the batch grows,
+/// and both the client's 120-second timeout and the person watching for the
+/// first result care about one request's latency, not the aggregate.
+///
+/// The kinds still drain in handler ORDER rather than interleaved, and that
+/// has never been about the server: extraction writes the embeddings both
+/// storyline passes compare, and a draft reads the storyline summary. The
+/// caller chains this worker's [pump] after triage's, and the shared
+/// [DrainGate] is what actually holds the two drains apart.
+///
+/// A park is per KIND when it is the model server that went away, because
+/// since phase 3 the kinds do not share one: extraction runs against the fast
+/// server and drafting against the 27B, so "extraction's server is not
+/// running" says nothing about drafting's. A dead SESSION is the opposite —
+/// every kind's Graph-dependent work fails identically — and parks the whole
+/// drain.
 ///
 /// The worker owns no timer. [pump] is called after each sync, is a no-op
 /// while a drain is running, and stops on its own when nothing is pending.
@@ -102,14 +147,14 @@ class AiWorker {
 
   Stream<WorkProgress> get progress => _progress.stream;
 
-  /// Ends the current drain after the item in flight finishes. Not permanent:
-  /// the next [pump] starts a fresh drain.
+  /// Ends the current drain after the items already in flight finish. Not
+  /// permanent: the next [pump] starts a fresh drain.
   void stop() => _stopped = true;
 
   /// Clears claims a previous run left behind, across every kind. Startup only
   /// — it must not run while a worker holds a claim, or it would hand that
   /// item to a second drain.
-  void resetInterrupted() => _store.resetInterruptedWork();
+  Future<void> resetInterrupted() => _store.resetInterruptedWork();
 
   void dispose() {
     _stopped = true;
@@ -146,71 +191,117 @@ class AiWorker {
         // Before the first item of each kind, not after it: a counter that
         // appears only once the first item lands is blank for exactly the
         // seconds someone would be looking at it.
-        _emit(handler.kind);
+        await _emit(handler.kind);
 
-        var carryOn = true;
-        while (!_stopped) {
-          final item = _store.nextPendingWork(
-            handler.kind,
-            sources: _sources,
-          );
-          if (item == null) break;
-          carryOn = await _runOne(handler, item);
-          if (!carryOn) break;
+        // Up to [WorkHandler.concurrency] items of this kind at the server at
+        // once. What makes that safe is the claim:
+        // [MessageStore.claimPendingWork] is one UPDATE…RETURNING, so choosing
+        // an item and taking it off the pending list are the same indivisible
+        // step. Two concurrent drains — or two iterations of this loop, which
+        // suspends on the claim now — can never see the same row: whichever
+        // claim lands second finds nothing pending to match and comes back
+        // null.
+        final inFlight = <Future<void>>{};
+        var parkedKind = false;
+        var parkedDrain = false;
+        while (!_stopped && !parkedKind && !parkedDrain) {
+          while (inFlight.length < handler.concurrency &&
+              !_stopped &&
+              !parkedKind &&
+              !parkedDrain) {
+            final item = await _store.claimPendingWork(
+              handler.kind,
+              sources: _sources,
+            );
+            if (item == null) break;
+            late final Future<void> future;
+            // [ActivityLog.inSpan] gives this item its own tally, so
+            // concurrent items' notes and model calls land on their own
+            // activity rows.
+            future = _log.inSpan(() => _runOne(handler, item)).then((outcome) {
+              parkedKind |= outcome == _RunOutcome.parkKind;
+              parkedDrain |= outcome == _RunOutcome.parkDrain;
+            }).whenComplete(() => inFlight.remove(future));
+            inFlight.add(future);
+          }
+          if (inFlight.isEmpty) break;
+          // Over a COPY: `whenComplete` mutates the set as each item lands.
+          await Future.any(inFlight.toList());
         }
-        // A park is about the model server or the session, not about this
-        // kind, so the kinds behind it stop too — and so does any repump: it
-        // would park on the same server or the same session all over again.
-        if (!carryOn) return;
+        // A park stops new launches, never the work already at the server:
+        // those answers are paid for and their results are kept.
+        await Future.wait(inFlight.toList());
+
+        // A dead session fails every kind identically, so nothing behind this
+        // one is worth trying — and neither is a repump, which would park on
+        // the same dead session all over again. A server that is down is not
+        // that: it is one kind's server, and the next kind may be on another.
+        if (parkedDrain) return;
       }
     } while (_repump && !_stopped);
   }
 
-  /// One item. Returns false when the whole drain should stop rather than move
-  /// on.
-  Future<bool> _runOne(WorkHandler handler, Map<String, Object?> item) async {
+  /// One item, and what its outcome means for the rest of the drain.
+  Future<_RunOutcome> _runOne(
+    WorkHandler handler,
+    Map<String, Object?> item,
+  ) async {
     final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
 
-    // Claimed before the first await. A crash mid-model-call therefore leaves
-    // the row in `processing`, which is exactly what [resetInterrupted] looks
-    // for at the next launch — and what keeps a re-entrant pump from handing
-    // the same item to two drains.
-    _store.writeWork(handler.kind, source, id, status: 'processing');
+    // The item arrives already claimed — the statement that picked it is the
+    // statement that wrote its `processing`. A crash mid-model-call therefore
+    // leaves it claimed, which is exactly what [resetInterrupted] looks for at
+    // the next launch.
     final sw = Stopwatch()..start();
 
     try {
       await handler.run(item);
-      _store.writeWork(handler.kind, source, id, status: 'done');
+      await _store.writeWork(handler.kind, source, id, status: 'done');
       // The work row is `done` either way; the activity row is where a
       // handler that early-returned gets to say so. [ActivityLog.note] and
       // [ActivityLog.noteStatus] are how it does that without throwing, and
       // both are folded in and cleared by this one call.
-      _log.record(
+      await _log.record(
         handler.kind,
         status: _log.pendingStatusOr('ok'),
         source: source,
         entityId: id,
         durationMs: sw.elapsedMilliseconds,
       );
-      _emit(handler.kind);
-      return true;
+      await _emit(handler.kind);
+      return _RunOutcome.ok;
     } on LlmUnavailableException {
-      // Nothing about this item failed, so it does not spend an attempt. The
-      // drain stops too: every item behind it would fail identically, and
-      // marking a hundred of them is just noise on a laptop where the model
-      // server is not running.
+      // Nothing about this item failed, so it does not spend an attempt. This
+      // kind stops too: every item of it behind this one would fail
+      // identically, and marking a hundred of them is just noise on a laptop
+      // where that model server is not running.
       return _park(
         handler.kind,
         source,
         id,
+        _RunOutcome.parkKind,
         'model_unavailable',
         sw.elapsedMilliseconds,
       );
     } on NotSignedIn {
-      return _park(handler.kind, source, id, 'session', sw.elapsedMilliseconds);
+      return _park(
+        handler.kind,
+        source,
+        id,
+        _RunOutcome.parkDrain,
+        'session',
+        sw.elapsedMilliseconds,
+      );
     } on ReconsentRequired {
-      return _park(handler.kind, source, id, 'session', sw.elapsedMilliseconds);
+      return _park(
+        handler.kind,
+        source,
+        id,
+        _RunOutcome.parkDrain,
+        'session',
+        sw.elapsedMilliseconds,
+      );
     } on LlmException catch (e) {
       return _recordFailure(
         handler.kind,
@@ -224,17 +315,19 @@ class AiWorker {
     }
   }
 
-  /// Back to `pending` without spending an attempt, and the drain parks. The
-  /// session ending or the server being down says nothing about this item.
-  bool _park(
+  /// Back to `pending` without spending an attempt. The session ending or the
+  /// server being down says nothing about this item; [outcome] says how far
+  /// the park reaches and [reason] tells the activity row why.
+  Future<_RunOutcome> _park(
     String kind,
     String source,
     String id,
+    _RunOutcome outcome,
     String reason,
     int durationMs,
-  ) {
-    _store.writeWork(kind, source, id, status: 'pending');
-    _log.record(
+  ) async {
+    await _store.writeWork(kind, source, id, status: 'pending');
+    await _log.record(
       kind,
       status: 'parked',
       source: source,
@@ -242,17 +335,17 @@ class AiWorker {
       durationMs: durationMs,
       detail: {'reason': reason},
     );
-    _emit(kind);
-    return false;
+    await _emit(kind);
+    return outcome;
   }
 
-  bool _recordFailure(
+  Future<_RunOutcome> _recordFailure(
     String kind,
     Map<String, Object?> item,
     Object error,
     int? statusCode,
     int durationMs,
-  ) {
+  ) async {
     final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
     final attempts = ((item['attempts'] as num?)?.toInt() ?? 0) + 1;
@@ -260,7 +353,7 @@ class AiWorker {
     // the model's answer. It is identical on every retry, so retrying it
     // burns model time to reproduce a bug.
     final fatal = statusCode == 400 || attempts >= _maxAttempts;
-    _store.writeWork(
+    await _store.writeWork(
       kind,
       source,
       id,
@@ -270,7 +363,7 @@ class AiWorker {
     );
     // `retry` while the item still has an attempt left, `error` once it does
     // not — the work row's `pending` cannot tell those apart after the fact.
-    _log.record(
+    await _log.record(
       kind,
       status: fatal ? 'error' : 'retry',
       source: source,
@@ -282,14 +375,17 @@ class AiWorker {
         'status_code': ?statusCode,
       },
     );
-    _emit(kind);
-    return true;
+    await _emit(kind);
+    return _RunOutcome.ok;
   }
 
-  void _emit(String kind) {
+  /// Awaited by every caller, never fired and forgotten: the counts are read
+  /// from the rows, so an unawaited emit would be free to report a queue that
+  /// has already moved on.
+  Future<void> _emit(String kind) async {
     if (_progress.isClosed) return;
-    _progress.add(
-      WorkProgress(kind, _store.workCounts(kind, sources: _sources)),
-    );
+    final counts = await _store.workCounts(kind, sources: _sources);
+    if (_progress.isClosed) return;
+    _progress.add(WorkProgress(kind, counts));
   }
 }

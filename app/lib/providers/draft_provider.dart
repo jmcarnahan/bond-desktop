@@ -194,10 +194,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
   Future<void> load() async {
     Map<String, Object?>? row;
     try {
-      row = _store.getDraft(_source, conversationKey);
+      row = await _store.getDraft(_source, conversationKey);
     } catch (_) {
       row = state.draft;
     }
+    // The read is a round trip now, and this notifier can be disposed across
+    // one — a thread closed while its draft was being read.
+    if (!mounted) return;
     // Whatever was being generated has landed, or has stopped.
     final settled = row != null && row['body'] != null;
     state = state.copyWith(
@@ -235,8 +238,8 @@ class DraftNotifier extends StateNotifier<DraftState> {
     if (state.generating) return;
     state = state.copyWith(generating: true, error: null);
     try {
-      _store.deleteDraft(_source, conversationKey);
-      _store.requeueWork('draft', _source, conversationKey);
+      await _store.deleteDraft(_source, conversationKey);
+      await _store.requeueWork('draft', _source, conversationKey);
     } catch (e) {
       state = state.copyWith(
         generating: false,
@@ -263,17 +266,17 @@ class DraftNotifier extends StateNotifier<DraftState> {
     );
   }
 
-  /// The LO changed the text. Records it so the suggestion stops being the
+  /// The user changed the text. Records it so the suggestion stops being the
   /// model's — and so a reopened thread shows what they typed, not what was
   /// suggested.
-  void markEdited(String body) {
+  Future<void> markEdited(String body) async {
     if (state.draft == null) return;
     // A sent reply's record must never be rewritten to "edited" by the
     // composer's trailing debounce — what reached the recipient is what the
     // row has to keep saying was sent.
     if ((state.draft?['status'] as String?) == 'sent') return;
     try {
-      _store.updateDraftStatus(
+      await _store.updateDraftStatus(
         _source,
         conversationKey,
         status: 'edited',
@@ -284,18 +287,23 @@ class DraftNotifier extends StateNotifier<DraftState> {
       // not worth a banner over a composer the user is mid-sentence in.
       return;
     }
-    state = state.copyWith(draft: _store.getDraft(_source, conversationKey));
+    final row = await _store.getDraft(_source, conversationKey);
+    if (!mounted) return;
+    state = state.copyWith(draft: row);
   }
 
   /// Throws the suggestion away. The row stays, marked `dismissed`, so the
   /// enqueue on the next list load does not immediately write another one.
-  void dismiss() {
+  Future<void> dismiss() async {
     if (state.draft == null) return;
-    _store.updateDraftStatus(_source, conversationKey, status: 'dismissed');
-    state = state.copyWith(
-      draft: _store.getDraft(_source, conversationKey),
-      error: null,
+    await _store.updateDraftStatus(
+      _source,
+      conversationKey,
+      status: 'dismissed',
     );
+    final row = await _store.getDraft(_source, conversationKey);
+    if (!mounted) return;
+    state = state.copyWith(draft: row, error: null);
   }
 
   /// Sends, saves, or copies [body] — whichever this grant allows.
@@ -315,14 +323,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
     }
 
     // A thread only earns a generated draft when it ranks high enough, but
-    // the LO can reply to ANY thread — so a missing draft row falls back to
+    // the user can reply to ANY thread — so a missing draft row falls back to
     // the newest inbound message, which is exactly what the draft handler
     // itself replies to.
     var replyTo = state.replyToMessageId;
     if (replyTo == null || replyTo.isEmpty) {
-      replyTo =
-          _store.newestInboundMessage(_source, conversationKey)?['source_message_id']
-              as String?;
+      final newest = await _store.newestInboundMessage(_source, conversationKey);
+      replyTo = newest?['source_message_id'] as String?;
     }
     if (replyTo == null || replyTo.isEmpty) {
       state = state.copyWith(
@@ -348,7 +355,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
       }
 
       await _mail.sendDraft(draftId);
-      _store.updateDraftStatus(
+      await _store.updateDraftStatus(
         _source,
         conversationKey,
         status: 'sent',
@@ -356,11 +363,11 @@ class DraftNotifier extends StateNotifier<DraftState> {
         graphDraftId: draftId,
       );
       // The strongest positive signal the app collects, and implicit rather
-      // than explicit: the LO did not press a rating, they answered the mail.
-      _logSent();
+      // than explicit: the user did not press a rating, they answered the mail.
+      await _logSent();
       state = state.copyWith(
         sending: false,
-        draft: _store.getDraft(_source, conversationKey),
+        draft: await _store.getDraft(_source, conversationKey),
         sendEpoch: state.sendEpoch + 1,
       );
       // The sent message lands in `sentitems` and folds in normally, which is
@@ -388,7 +395,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     String? webLink,
     String text,
   ) async {
-    _store.updateDraftStatus(
+    await _store.updateDraftStatus(
       _source,
       conversationKey,
       status: 'suggested',
@@ -398,7 +405,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     );
     state = state.copyWith(
       sending: false,
-      draft: _store.getDraft(_source, conversationKey),
+      draft: await _store.getDraft(_source, conversationKey),
     );
     if (webLink != null && webLink.isNotEmpty) {
       final uri = Uri.tryParse(webLink);
@@ -407,9 +414,9 @@ class DraftNotifier extends StateNotifier<DraftState> {
     return SendOutcome.savedToOutlook;
   }
 
-  void _logSent() {
+  Future<void> _logSent() async {
     try {
-      _store.recordFeedback(
+      await _store.recordFeedback(
         scope: 'thread',
         scopeKey: conversationKey,
         direction: 'up',

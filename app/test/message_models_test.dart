@@ -51,7 +51,7 @@ void main() {
       final c = Conversation.fromJson({
         'id': 'conv-1',
         'source': 'teams',
-        'subject': 'Closing Disclosure',
+        'subject': 'Project brief',
         'participants': [
           {'name': 'Sarah', 'email': 'sarah@x.com'},
           {'name': null, 'email': 'marcus@x.com'},
@@ -70,7 +70,7 @@ void main() {
 
       expect(c.id, 'conv-1');
       expect(c.source, 'teams');
-      expect(c.subject, 'Closing Disclosure');
+      expect(c.subject, 'Project brief');
       expect(c.participants.length, 2);
       expect(c.primaryParticipant?.display, 'Sarah');
       expect(c.primaryEmail, 'sarah@x.com');
@@ -221,7 +221,7 @@ void main() {
         'from_address': 'sarah@x.com',
         'to': ['lo@x.com', 'ops@x.com'],
         'received_at': '2026-08-28T10:00:00Z',
-        'subject': 'Closing Disclosure',
+        'subject': 'Project brief',
         'body_text': 'Body here',
         'gate_reason': null,
         'urgency': 'urgent',

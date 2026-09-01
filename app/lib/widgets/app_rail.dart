@@ -32,7 +32,7 @@ String _stripReplyPrefixes(String subject) {
   return out.trim();
 }
 
-/// What the LO is on the hook for, loudest first.
+/// What the user is on the hook for, loudest first.
 ///
 /// Three filters and a sort:
 /// - anything awaiting their reply, plus anything triage left an ask on that is
@@ -44,8 +44,8 @@ String _stripReplyPrefixes(String subject) {
 ///
 /// The sort is needs-reply first, then score. Two blocks rather than one
 /// ordering because they answer different questions: the top block is work the
-/// LO is holding up, the bottom is work someone else is, and a waiting thread
-/// with an urgent ask must not outrank a reply the LO owes however loudly it
+/// user is holding up, the bottom is work someone else is, and a waiting thread
+/// with an urgent ask must not outrank a reply the user owes however loudly it
 /// scores. Ties keep input order, so the store's newest-first ordering shows
 /// through and the list does not reshuffle between reads.
 List<Conversation> needsYouRows(
@@ -94,7 +94,7 @@ List<Conversation> conversationRows(List<Conversation> all) => [
 
 /// Everything deferred, in the order it was handed over.
 ///
-/// Done threads are excluded: a thread the LO closed is finished, not waiting
+/// Done threads are excluded: a thread the user closed is finished, not waiting
 /// for a quieter moment, and leaving it in Later would make the digest a place
 /// mail goes to be forgotten twice.
 List<Conversation> laterRows(List<Conversation> all) => [
@@ -437,12 +437,12 @@ class _AppRailState extends State<AppRail> {
 
   /// One thread. [dimmed] drops it to the muted ink used for the quieter half
   /// of Needs You — a thread on the list because someone else is late, not
-  /// because the LO is.
+  /// because the user is.
   Widget _item(Conversation c, {bool dimmed = false}) {
     final selected = widget.selectedId == c.id;
     final needsReply = c.state == ConversationState.needsReply;
 
-    // Bold is the whole grammar: a thread that wants the LO reads heavier
+    // Bold is the whole grammar: a thread that wants the user reads heavier
     // than one that is merely open. Nothing else in the rail is bold.
     final color = (selected || needsReply)
         ? BondColors.onDarkPrimary
@@ -695,7 +695,7 @@ class _AppRailState extends State<AppRail> {
     );
   }
 
-  /// A count pill. [attention] is the red one — reserved for work the LO is
+  /// A count pill. [attention] is the red one — reserved for work the user is
   /// holding up; everything else counts in grey.
   Widget _badge(int count, {required bool attention}) {
     return Container(

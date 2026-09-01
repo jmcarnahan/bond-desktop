@@ -1,10 +1,10 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
-import 'package:sqlite3/sqlite3.dart';
+import 'package:drift/drift.dart';
 
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
+import 'database.dart' show BondDatabase;
 
 /// Which Microsoft identity the mail rows in this database belong to, stored in
 /// `app_prefs` alongside the settings but emphatically not one of them: it is
@@ -39,13 +39,18 @@ const String activityLastSweepKey = 'activity_last_sweep';
 /// and providers call methods; they never build a query.
 ///
 /// Two conventions every write below follows:
-/// - booleans bind as explicit `0`/`1` integers. The sqlite3 package would
+/// - booleans bind as explicit `0`/`1` integers. The database layer would
 ///   coerce a Dart `bool` for us, but the reads compare against `1`, and a
 ///   write that says what it stores is one less thing to hold in your head.
 /// - `created_at` / `updated_at` are NOT NULL, so a caller that omits them
 ///   gets "now" rather than a constraint failure.
+///
+/// Every method is asynchronous because drift's executor is. The statements
+/// are unchanged, but the gaps between them are real now: a method that
+/// issues more than one runs them in a transaction, which is the atomicity
+/// the synchronous store used to get for free.
 class MessageStore {
-  final Database db;
+  final BondDatabase db;
 
   MessageStore(this.db);
 
@@ -53,6 +58,12 @@ class MessageStore {
 
   /// `?, ?, ?` for an IN clause of [n] values.
   static String _placeholders(int n) => List.filled(n, '?').join(', ');
+
+  /// Positional arguments for the `?` placeholders every statement here is
+  /// written against.
+  static List<Variable> _args(List<Object?> values) => [
+        for (final value in values) Variable(value),
+      ];
 
   // ── messages ─────────────────────────────────────────────────────────
 
@@ -68,9 +79,9 @@ class MessageStore {
   /// what makes the sync's backlog rule ("everything older than a week
   /// arrives already skipped") safe to evaluate on every page: a message
   /// seen again — or already triaged — keeps whatever it has.
-  void upsertMessage(Map<String, Object?> row) {
+  Future<void> upsertMessage(Map<String, Object?> row) async {
     final now = _nowIso();
-    db.execute(
+    await db.customUpdate(
       '''
 INSERT INTO messages (
   source, source_message_id, internet_message_id, conversation_key, direction,
@@ -86,7 +97,7 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
   body_text = COALESCE(excluded.body_text, messages.body_text),
   updated_at = excluded.updated_at
 ''',
-      [
+      variables: _args([
         row['source'] ?? 'email',
         row['source_message_id'],
         row['internet_message_id'],
@@ -106,7 +117,7 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
         row['gate_reason'],
         row['created_at'] ?? now,
         row['updated_at'] ?? now,
-      ],
+      ]),
     );
   }
 
@@ -116,39 +127,41 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
   /// insert from a conflict — and the sync needs to know, since a message
   /// must be folded into its conversation exactly once no matter how many
   /// times a delta feed replays it.
-  bool hasMessage(String source, String sourceMessageId) {
-    final result = db.select(
-      'SELECT 1 FROM messages WHERE source = ? AND source_message_id = ? LIMIT 1',
-      [source, sourceMessageId],
-    );
+  Future<bool> hasMessage(String source, String sourceMessageId) async {
+    final result = await db
+        .customSelect(
+          'SELECT 1 FROM messages WHERE source = ? AND source_message_id = ? LIMIT 1',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
     return result.isNotEmpty;
   }
 
   /// Writes what only the per-message detail fetch knows. Every column
   /// COALESCEs against itself, so a detail call that came back thin cannot
   /// blank a body, a header set, or an attachment flag already stored.
-  void updateMessageDetail(
+  Future<void> updateMessageDetail(
     String source,
     String sourceMessageId, {
     String? bodyText,
     bool? hasAttachments,
     String? sourceMetaJson,
-  }) {
-    db.execute(
+  }) async {
+    await db.customUpdate(
       'UPDATE messages SET '
       'body_text = COALESCE(?, body_text), '
       'has_attachments = COALESCE(?, has_attachments), '
       'source_meta_json = COALESCE(?, source_meta_json), '
       'updated_at = ? '
       'WHERE source = ? AND source_message_id = ?',
-      [
+      variables: _args([
         bodyText,
         hasAttachments == null ? null : (hasAttachments ? 1 : 0),
         sourceMetaJson,
         _nowIso(),
         source,
         sourceMessageId,
-      ],
+      ]),
     );
   }
 
@@ -157,38 +170,45 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
   /// The triage worker re-reads through this after it fetches a message's
   /// detail: the row it was handed predates that fetch, and the body and
   /// headers it is about to gate and classify on only exist on the new one.
-  Map<String, Object?>? getMessageRow(String source, String sourceMessageId) {
-    final result = db.select(
-      'SELECT * FROM messages WHERE source = ? AND source_message_id = ?',
-      [source, sourceMessageId],
-    );
+  Future<Map<String, Object?>?> getMessageRow(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return Map<String, Object?>.from(result.first);
+    return Map<String, Object?>.from(result.first.data);
   }
 
   /// One thread, oldest first — the order the chat transcript renders in.
-  List<Message> loadThread(
+  Future<List<Message>> loadThread(
     String conversationKey, {
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return const [];
-    final result = db.select(
-      'SELECT * FROM messages '
-      'WHERE conversation_key = ? AND source IN (${_placeholders(sources.length)}) '
-      // The tie-break matters now that one thread can hold two sources: two
-      // messages sharing a second must render in ONE order, not whichever the
-      // query plan felt like — same rule as storylineTimeline.
-      'ORDER BY received_at ASC, source_message_id ASC',
-      [conversationKey, ...sources],
-    );
-    return [for (final row in result) Message.fromRow(row)];
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages '
+          'WHERE conversation_key = ? AND source IN (${_placeholders(sources.length)}) '
+          // The tie-break matters now that one thread can hold two sources: two
+          // messages sharing a second must render in ONE order, not whichever the
+          // query plan felt like — same rule as storylineTimeline.
+          'ORDER BY received_at ASC, source_message_id ASC',
+          variables: _args([conversationKey, ...sources]),
+        )
+        .get();
+    return [for (final row in result) Message.fromRow(row.data)];
   }
 
   // ── conversations ────────────────────────────────────────────────────
 
-  void upsertConversation(Map<String, Object?> row) {
+  Future<void> upsertConversation(Map<String, Object?> row) async {
     final now = _nowIso();
-    db.execute(
+    await db.customUpdate(
       '''
 INSERT INTO conversations (
   source, conversation_key, subject, participants_json, state, category,
@@ -211,7 +231,7 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   last_message_preview = COALESCE(excluded.last_message_preview, conversations.last_message_preview),
   updated_at = excluded.updated_at
 ''',
-      [
+      variables: _args([
         row['source'] ?? 'email',
         row['conversation_key'],
         row['subject'],
@@ -229,7 +249,7 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
         row['state_changed_at'],
         row['created_at'] ?? now,
         row['updated_at'] ?? now,
-      ],
+      ]),
     );
   }
 
@@ -237,13 +257,18 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// folds a message so the state machine can see the thread's own history —
   /// including a `done` a human set, which no incoming message may quietly
   /// overwrite.
-  Map<String, Object?>? getConversationRow(String source, String conversationKey) {
-    final result = db.select(
-      'SELECT * FROM conversations WHERE source = ? AND conversation_key = ?',
-      [source, conversationKey],
-    );
+  Future<Map<String, Object?>?> getConversationRow(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM conversations WHERE source = ? AND conversation_key = ?',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return Map<String, Object?>.from(result.first);
+    return Map<String, Object?>.from(result.first.data);
   }
 
   /// Recounts one thread from the messages table.
@@ -251,8 +276,11 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// Counts are derived, never incremented: a delta page can replay messages
   /// already stored, and an incremented counter would drift a little further
   /// on every replay with nothing to correct it.
-  void recomputeConversationCounts(String source, String conversationKey) {
-    db.execute(
+  Future<void> recomputeConversationCounts(
+    String source,
+    String conversationKey,
+  ) async {
+    await db.customUpdate(
       '''
 UPDATE conversations SET
   message_count = (
@@ -269,7 +297,7 @@ UPDATE conversations SET
   updated_at = ?
 WHERE source = ? AND conversation_key = ?
 ''',
-      [_nowIso(), source, conversationKey],
+      variables: _args([_nowIso(), source, conversationKey]),
     );
   }
 
@@ -282,10 +310,10 @@ WHERE source = ? AND conversation_key = ?
   /// a query per row on a list that renders thousands. LEFT, not inner — a
   /// thread the AI has never looked at still belongs in the inbox, with both
   /// columns null.
-  List<Conversation> loadConversations({
+  Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
-  }) {
+  }) async {
     if (sources.isEmpty) return const [];
     final where =
         StringBuffer('c.source IN (${_placeholders(sources.length)})');
@@ -294,50 +322,58 @@ WHERE source = ? AND conversation_key = ?
       where.write(' AND c.state = ?');
       args.add(state.wire);
     }
-    final result = db.select(
-      'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score '
-      'FROM conversations c '
-      'LEFT JOIN conversation_ai ai '
-      '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
-      'WHERE $where ORDER BY c.last_message_at DESC',
-      args,
-    );
-    return [for (final row in result) Conversation.fromRow(row)];
+    final result = await db
+        .customSelect(
+          'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score '
+          'FROM conversations c '
+          'LEFT JOIN conversation_ai ai '
+          '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
+          'WHERE $where ORDER BY c.last_message_at DESC',
+          variables: _args(args),
+        )
+        .get();
+    return [for (final row in result) Conversation.fromRow(row.data)];
   }
 
   /// Flips a thread's state and stamps when it happened — "done 3 days ago"
   /// is a different row from "done just now", and only this write knows.
-  void setConversationState(
+  Future<void> setConversationState(
     String source,
     String conversationKey,
     ConversationState state,
-  ) {
+  ) async {
     final now = _nowIso();
-    db.execute(
+    await db.customUpdate(
       'UPDATE conversations SET state = ?, state_changed_at = ?, updated_at = ? '
       'WHERE source = ? AND conversation_key = ?',
-      [state.wire, now, now, source, conversationKey],
+      variables: _args([state.wire, now, now, source, conversationKey]),
     );
   }
 
   // ── sync state ───────────────────────────────────────────────────────
 
-  String? getDeltaLink(String folder, {String source = 'email'}) {
-    final result = db.select(
-      'SELECT delta_link FROM sync_state WHERE source = ? AND folder = ?',
-      [source, folder],
-    );
+  Future<String?> getDeltaLink(String folder, {String source = 'email'}) async {
+    final result = await db
+        .customSelect(
+          'SELECT delta_link FROM sync_state WHERE source = ? AND folder = ?',
+          variables: _args([source, folder]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return result.first['delta_link'] as String?;
+    return result.first.data['delta_link'] as String?;
   }
 
-  void setDeltaLink(String folder, String? link, {String source = 'email'}) {
-    db.execute(
+  Future<void> setDeltaLink(
+    String folder,
+    String? link, {
+    String source = 'email',
+  }) async {
+    await db.customUpdate(
       'INSERT INTO sync_state (source, folder, delta_link, synced_at) '
       'VALUES (?, ?, ?, ?) '
       'ON CONFLICT(source, folder) DO UPDATE SET '
       'delta_link = excluded.delta_link, synced_at = excluded.synced_at',
-      [source, folder, link, _nowIso()],
+      variables: _args([source, folder, link, _nowIso()]),
     );
   }
 
@@ -352,41 +388,51 @@ WHERE source = ? AND conversation_key = ?
   ///
   /// [iso] is passed rather than taken from the clock so the caller can stamp
   /// the moment the sync actually reached, and so a test can pin it.
-  void setSyncedAt(String folder, String iso, {String source = 'email'}) {
-    db.execute(
+  Future<void> setSyncedAt(
+    String folder,
+    String iso, {
+    String source = 'email',
+  }) async {
+    await db.customUpdate(
       'INSERT INTO sync_state (source, folder, delta_link, synced_at) '
       'VALUES (?, ?, NULL, ?) '
       'ON CONFLICT(source, folder) DO UPDATE SET '
       'synced_at = excluded.synced_at',
-      [source, folder, iso],
+      variables: _args([source, folder, iso]),
     );
   }
 
   /// When this source last finished a sync, or null when it never has.
-  String? getSyncedAt(String folder, {String source = 'email'}) {
-    final result = db.select(
-      'SELECT synced_at FROM sync_state WHERE source = ? AND folder = ?',
-      [source, folder],
-    );
+  Future<String?> getSyncedAt(String folder, {String source = 'email'}) async {
+    final result = await db
+        .customSelect(
+          'SELECT synced_at FROM sync_state WHERE source = ? AND folder = ?',
+          variables: _args([source, folder]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return result.first['synced_at'] as String?;
+    return result.first.data['synced_at'] as String?;
   }
 
   // ── triage ───────────────────────────────────────────────────────────
 
   /// `triage_status` → count. Statuses with no rows are simply absent.
-  Map<String, int> triageCounts({List<String> sources = const ['email']}) {
+  Future<Map<String, int>> triageCounts({
+    List<String> sources = const ['email'],
+  }) async {
     if (sources.isEmpty) return const {};
-    final result = db.select(
-      'SELECT triage_status, COUNT(*) AS n FROM messages '
-      'WHERE source IN (${_placeholders(sources.length)}) '
-      'GROUP BY triage_status',
-      [...sources],
-    );
+    final result = await db
+        .customSelect(
+          'SELECT triage_status, COUNT(*) AS n FROM messages '
+          'WHERE source IN (${_placeholders(sources.length)}) '
+          'GROUP BY triage_status',
+          variables: _args([...sources]),
+        )
+        .get();
     return {
       for (final row in result)
-        (row['triage_status'] as String? ?? 'pending'):
-            (row['n'] as num?)?.toInt() ?? 0,
+        (row.data['triage_status'] as String? ?? 'pending'):
+            (row.data['n'] as num?)?.toInt() ?? 0,
     };
   }
 
@@ -394,33 +440,70 @@ WHERE source = ? AND conversation_key = ?
   ///
   /// Newest first, not oldest: the worker runs behind a live mailbox, so the
   /// mail worth classifying soonest is the mail that just landed. Outbound is
-  /// excluded because triage answers "does this need me?" — the LO's own sent
+  /// excluded because triage answers "does this need me?" — the user's own sent
   /// mail never does.
-  Map<String, Object?>? nextPendingTriage({
+  Future<Map<String, Object?>?> nextPendingTriage({
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return null;
-    final result = db.select(
-      'SELECT * FROM messages '
-      "WHERE triage_status = 'pending' AND direction = 'inbound' "
-      'AND source IN (${_placeholders(sources.length)}) '
-      'ORDER BY received_at DESC LIMIT 1',
-      [...sources],
-    );
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages '
+          "WHERE triage_status = 'pending' AND direction = 'inbound' "
+          'AND source IN (${_placeholders(sources.length)}) '
+          'ORDER BY received_at DESC LIMIT 1',
+          variables: _args([...sources]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return Map<String, Object?>.from(result.first);
+    return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// Takes the next message for the triage worker AND claims it, in one
+  /// statement. The claimed row is returned as it now stands — `processing`,
+  /// with a fresh `updated_at` — or null when there was nothing to claim.
+  ///
+  /// One statement rather than [nextPendingTriage] followed by a `processing`
+  /// write, because between those two there is an await now, and a second
+  /// drain reaching the same row inside that gap would be handed a message
+  /// already spoken for. Here the pick and the claim are the same UPDATE:
+  /// whichever of two concurrent claims lands second finds no pending row
+  /// matching and gets null.
+  ///
+  /// The `rowid` subquery is what carries the ordering — `LIMIT` on the UPDATE
+  /// itself needs a compile flag sqlite is not usually built with — and it
+  /// mirrors [nextPendingTriage] exactly, so the two always pick the same row.
+  Future<Map<String, Object?>?> claimPendingTriage({
+    List<String> sources = const ['email'],
+  }) async {
+    if (sources.isEmpty) return null;
+    final claimed = await db.customWriteReturning(
+      '''
+UPDATE messages SET triage_status = 'processing', updated_at = ?
+WHERE rowid IN (
+  SELECT rowid FROM messages
+  WHERE triage_status = 'pending' AND direction = 'inbound'
+    AND source IN (${_placeholders(sources.length)})
+  ORDER BY received_at DESC LIMIT 1
+)
+RETURNING *
+''',
+      variables: _args([_nowIso(), ...sources]),
+    );
+    if (claimed.isEmpty) return null;
+    return Map<String, Object?>.from(claimed.first.data);
   }
 
   /// Demotes every pending inbound message except the newest [cap] to
   /// `skipped` / `backlog`.
   ///
   /// A first sync of a real mailbox lands thousands of messages at once.
-  /// Triaging all of them would burn hours of model time on mail the LO
+  /// Triaging all of them would burn hours of model time on mail the user
   /// stopped caring about weeks ago, so only the freshest slice stays in the
   /// queue. Nothing is deleted — a skipped message still renders, it just
   /// never reaches the model.
-  void capPendingTriage(int cap, {String source = 'email'}) {
-    db.execute(
+  Future<void> capPendingTriage(int cap, {String source = 'email'}) async {
+    await db.customUpdate(
       '''
 UPDATE messages SET triage_status = 'skipped', gate_reason = 'backlog',
   updated_at = ?
@@ -431,7 +514,7 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     ORDER BY received_at DESC LIMIT ?
   )
 ''',
-      [_nowIso(), source, source, cap],
+      variables: _args([_nowIso(), source, source, cap]),
     );
   }
 
@@ -442,11 +525,11 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// app was triaging when it quit would otherwise sit claimed forever —
   /// never retried, never surfaced. Called once at startup, before any worker
   /// can take a new claim.
-  void resetInterruptedTriage({String source = 'email'}) {
-    db.execute(
+  Future<void> resetInterruptedTriage({String source = 'email'}) async {
+    await db.customUpdate(
       "UPDATE messages SET triage_status = 'pending', updated_at = ? "
       'WHERE source = ? AND triage_status = ?',
-      [_nowIso(), source, 'processing'],
+      variables: _args([_nowIso(), source, 'processing']),
     );
   }
 
@@ -461,18 +544,20 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// `cta_text` is written unconditionally, null included: when the newest
   /// inbound message asks for nothing, the thread's ask is gone, and leaving
   /// the previous one on screen would be worse than showing none.
-  void updateConversationTriage(
+  Future<void> updateConversationTriage(
     String source,
     String conversationKey, {
     String? ctaText,
     required String ctaUrgency,
     String? category,
-  }) {
-    db.execute(
+  }) async {
+    await db.customUpdate(
       'UPDATE conversations SET cta_text = ?, cta_urgency = ?, '
       'category = COALESCE(?, category), updated_at = ? '
       'WHERE source = ? AND conversation_key = ?',
-      [ctaText, ctaUrgency, category, _nowIso(), source, conversationKey],
+      variables: _args(
+        [ctaText, ctaUrgency, category, _nowIso(), source, conversationKey],
+      ),
     );
   }
 
@@ -480,7 +565,7 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// actually carries are written: a status-only call (e.g. marking a message
   /// `gated`) leaves any previous result columns alone rather than nulling
   /// them.
-  void writeTriage(
+  Future<void> writeTriage(
     String source,
     String sourceMessageId, {
     required String status,
@@ -488,7 +573,7 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     String? error,
     String? gateReason,
     int? attempts,
-  }) {
+  }) async {
     final sets = <String>['triage_status = ?', 'updated_at = ?'];
     final args = <Object?>[status, _nowIso()];
 
@@ -496,6 +581,7 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       sets.addAll([
         'urgency = ?',
         'category = ?',
+        'label = ?',
         'summary = ?',
         'needs_action = ?',
         'action_items_json = ?',
@@ -503,6 +589,9 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       args.addAll([
         result.urgency,
         result.category,
+        // NULL, not '': an empty label means the model offered none, and the
+        // column reads the same as a message triage never reached.
+        result.label.isEmpty ? null : result.label,
         result.summary,
         // An explicit int — `needs_action` is read back as `row != 0`.
         result.needsAction ? 1 : 0,
@@ -523,10 +612,10 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     }
 
     args.addAll([source, sourceMessageId]);
-    db.execute(
+    await db.customUpdate(
       'UPDATE messages SET ${sets.join(', ')} '
       'WHERE source = ? AND source_message_id = ?',
-      args,
+      variables: _args(args),
     );
   }
 
@@ -541,19 +630,19 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// re-queueing something already pending, already running, or already done
   /// changes nothing, which is what lets every caller enqueue freely rather
   /// than track what it has enqueued before.
-  void enqueueWork(
+  Future<void> enqueueWork(
     String kind,
     String source,
     String entityId, {
     String? payloadJson,
-  }) {
+  }) async {
     final now = _nowIso();
-    db.execute(
+    await db.customUpdate(
       'INSERT OR IGNORE INTO work_items '
       '(task_kind, source, entity_id, status, attempts, error, payload_json, '
       'created_at, updated_at) '
       "VALUES (?, ?, ?, 'pending', 0, NULL, ?, ?, ?)",
-      [kind, source, entityId, payloadJson, now, now],
+      variables: _args([kind, source, entityId, payloadJson, now, now]),
     );
   }
 
@@ -582,20 +671,20 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// them. A caller that widens the statuses should narrow the reasons to
   /// match, or a `skipped` status would also drag in the bulk senders and
   /// backlog the mail path deliberately leaves out.
-  int enqueueExtractBacklog({
+  Future<int> enqueueExtractBacklog({
     int cap = 150,
     required String sinceIso,
     String source = 'email',
     List<String> triageStatuses = const ['pending', 'processing', 'triaged'],
     List<String>? gateReasons,
-  }) {
+  }) async {
     // An empty list would render as `IN ()`, which sqlite rejects. Nothing is
     // queued because nothing was asked for.
     if (triageStatuses.isEmpty) return 0;
     if (gateReasons != null && gateReasons.isEmpty) return 0;
 
     final now = _nowIso();
-    db.execute(
+    return db.customUpdate(
       '''
 INSERT OR IGNORE INTO work_items (
   task_kind, source, entity_id, status, attempts, error, payload_json,
@@ -611,7 +700,7 @@ WHERE source = ? AND direction = 'inbound'
 ORDER BY received_at DESC
 LIMIT ?
 ''',
-      [
+      variables: _args([
         now,
         now,
         source,
@@ -619,9 +708,8 @@ LIMIT ?
         ...?gateReasons,
         sinceIso,
         cap,
-      ],
+      ]),
     );
-    return db.updatedRows;
   }
 
   /// The next item of one [kind] for the worker.
@@ -630,33 +718,66 @@ LIMIT ?
   /// tie-break, since a batch enqueue stamps every row it inserts with the
   /// same `created_at` and an unordered LIMIT 1 would be free to hand the same
   /// drain a different row on every call.
-  Map<String, Object?>? nextPendingWork(
+  Future<Map<String, Object?>?> nextPendingWork(
     String kind, {
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return null;
-    final result = db.select(
-      'SELECT * FROM work_items '
-      "WHERE task_kind = ? AND status = 'pending' "
-      'AND source IN (${_placeholders(sources.length)}) '
-      'ORDER BY created_at DESC, entity_id DESC LIMIT 1',
-      [kind, ...sources],
-    );
+    final result = await db
+        .customSelect(
+          'SELECT * FROM work_items '
+          "WHERE task_kind = ? AND status = 'pending' "
+          'AND source IN (${_placeholders(sources.length)}) '
+          'ORDER BY created_at DESC, entity_id DESC LIMIT 1',
+          variables: _args([kind, ...sources]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return Map<String, Object?>.from(result.first);
+    return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// Takes the next item of one [kind] AND claims it, in one statement — the
+  /// work queue's [claimPendingTriage], with the same guarantee for the same
+  /// reason: two drains, or two iterations of one bounded-concurrent drain,
+  /// can never be handed the same row, because the second UPDATE finds nothing
+  /// pending to match.
+  ///
+  /// The returned row is the claimed one as it now stands: `processing`, with
+  /// a fresh `updated_at`, and `attempts` untouched — which is what the
+  /// worker's failure path counts from.
+  Future<Map<String, Object?>?> claimPendingWork(
+    String kind, {
+    List<String> sources = const ['email'],
+  }) async {
+    if (sources.isEmpty) return null;
+    final claimed = await db.customWriteReturning(
+      '''
+UPDATE work_items SET status = 'processing', updated_at = ?
+WHERE rowid IN (
+  SELECT rowid FROM work_items
+  WHERE task_kind = ? AND status = 'pending'
+    AND source IN (${_placeholders(sources.length)})
+  ORDER BY created_at DESC, entity_id DESC LIMIT 1
+)
+RETURNING *
+''',
+      variables: _args([_nowIso(), kind, ...sources]),
+    );
+    if (claimed.isEmpty) return null;
+    return Map<String, Object?>.from(claimed.first.data);
   }
 
   /// Records the outcome of one work item. Like [writeTriage], only the
   /// fields this call carries are written, so claiming an item does not blank
   /// the error a previous attempt left behind.
-  void writeWork(
+  Future<void> writeWork(
     String kind,
     String source,
     String entityId, {
     required String status,
     String? error,
     int? attempts,
-  }) {
+  }) async {
     final sets = <String>['status = ?', 'updated_at = ?'];
     final args = <Object?>[status, _nowIso()];
 
@@ -670,28 +791,31 @@ LIMIT ?
     }
 
     args.addAll([kind, source, entityId]);
-    db.execute(
+    await db.customUpdate(
       'UPDATE work_items SET ${sets.join(', ')} '
       'WHERE task_kind = ? AND source = ? AND entity_id = ?',
-      args,
+      variables: _args(args),
     );
   }
 
   /// `status` → count for one kind. Statuses with no rows are simply absent.
-  Map<String, int> workCounts(
+  Future<Map<String, int>> workCounts(
     String kind, {
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return const {};
-    final result = db.select(
-      'SELECT status, COUNT(*) AS n FROM work_items '
-      'WHERE task_kind = ? AND source IN (${_placeholders(sources.length)}) '
-      'GROUP BY status',
-      [kind, ...sources],
-    );
+    final result = await db
+        .customSelect(
+          'SELECT status, COUNT(*) AS n FROM work_items '
+          'WHERE task_kind = ? AND source IN (${_placeholders(sources.length)}) '
+          'GROUP BY status',
+          variables: _args([kind, ...sources]),
+        )
+        .get();
     return {
       for (final row in result)
-        (row['status'] as String? ?? 'pending'): (row['n'] as num?)?.toInt() ?? 0,
+        (row.data['status'] as String? ?? 'pending'):
+            (row.data['n'] as num?)?.toInt() ?? 0,
     };
   }
 
@@ -701,11 +825,11 @@ LIMIT ?
   /// writes a result; nothing else clears it, so an item the app was working
   /// on when it quit would sit claimed forever. Startup only — running this
   /// while a worker holds a claim would hand its item to a second drain.
-  void resetInterruptedWork() {
-    db.execute(
+  Future<void> resetInterruptedWork() async {
+    await db.customUpdate(
       "UPDATE work_items SET status = 'pending', updated_at = ? "
       "WHERE status = 'processing'",
-      [_nowIso()],
+      variables: _args([_nowIso()]),
     );
   }
 
@@ -715,24 +839,25 @@ LIMIT ?
   /// Attempts are deliberately NOT reset: the drain errors a row again at its
   /// next failed attempt, so each revival buys exactly one more try, and the
   /// [maxAttempts] ceiling is where a genuinely bad item stays down for good.
-  int reviveErroredWork({int maxAttempts = 6}) {
-    db.execute(
+  Future<int> reviveErroredWork({int maxAttempts = 6}) {
+    return db.customUpdate(
       "UPDATE work_items SET status = 'pending', updated_at = ? "
       "WHERE status = 'error' AND attempts < ?",
-      [_nowIso(), maxAttempts],
+      variables: _args([_nowIso(), maxAttempts]),
     );
-    return db.updatedRows;
   }
 
   /// The triage half of [reviveErroredWork], with the same one-more-try
   /// semantics per revival and the same permanent ceiling.
-  int reviveErroredTriage({String source = 'email', int maxAttempts = 6}) {
-    db.execute(
+  Future<int> reviveErroredTriage({
+    String source = 'email',
+    int maxAttempts = 6,
+  }) {
+    return db.customUpdate(
       "UPDATE messages SET triage_status = 'pending', updated_at = ? "
       "WHERE source = ? AND triage_status = 'error' AND triage_attempts < ?",
-      [_nowIso(), source, maxAttempts],
+      variables: _args([_nowIso(), source, maxAttempts]),
     );
-    return db.updatedRows;
   }
 
   /// Empties every table, in one transaction. Sign-out calls this: the rows
@@ -752,7 +877,7 @@ LIMIT ?
   /// be inherited by the next identity and steer THEIR triage. Both callers
   /// depend on the first: sign-out leaves the database unclaimed, and
   /// `IdentityGuard` writes the new owner immediately after.
-  void wipeAll() {
+  Future<void> wipeAll() async {
     const tables = [
       'messages',
       'conversations',
@@ -768,20 +893,15 @@ LIMIT ?
       'sender_prefs',
       'drafts',
     ];
-    db.execute('BEGIN');
-    try {
+    await db.transaction(() async {
       for (final table in tables) {
-        db.execute('DELETE FROM $table');
+        await db.customUpdate('DELETE FROM $table');
       }
-      db.execute(
+      await db.customUpdate(
         'DELETE FROM app_prefs WHERE key IN (?, ?)',
-        [dbOwnerKey, aboutMeKey],
+        variables: _args([dbOwnerKey, aboutMeKey]),
       );
-      db.execute('COMMIT');
-    } catch (_) {
-      db.execute('ROLLBACK');
-      rethrow;
-    }
+    });
   }
 
   // ── per-message AI output ────────────────────────────────────────────
@@ -791,30 +911,33 @@ LIMIT ?
   /// A separate table rather than columns on `messages`: the shape of what the
   /// model extracts is still moving, and a JSON blob absorbs a new field
   /// without a migration. Nothing queries inside it.
-  void writeExtraction(
+  Future<void> writeExtraction(
     String source,
     String sourceMessageId,
     String extractionJson,
-  ) {
-    db.execute(
+  ) async {
+    await db.customUpdate(
       'INSERT INTO message_ai '
       '(source, source_message_id, extraction_json, extracted_at) '
       'VALUES (?, ?, ?, ?) '
       'ON CONFLICT(source, source_message_id) DO UPDATE SET '
       'extraction_json = excluded.extraction_json, '
       'extracted_at = excluded.extracted_at',
-      [source, sourceMessageId, extractionJson, _nowIso()],
+      variables:
+          _args([source, sourceMessageId, extractionJson, _nowIso()]),
     );
   }
 
-  String? getExtraction(String source, String sourceMessageId) {
-    final result = db.select(
-      'SELECT extraction_json FROM message_ai '
-      'WHERE source = ? AND source_message_id = ?',
-      [source, sourceMessageId],
-    );
+  Future<String?> getExtraction(String source, String sourceMessageId) async {
+    final result = await db
+        .customSelect(
+          'SELECT extraction_json FROM message_ai '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return result.first['extraction_json'] as String?;
+    return result.first.data['extraction_json'] as String?;
   }
 
   // ── per-conversation AI state ────────────────────────────────────────
@@ -831,20 +954,14 @@ LIMIT ?
   /// alone when omitted. [embeddedHash] and [embedModel] are left alone when
   /// null — there is no "clear the hash" case, since a row with an embedding
   /// and no hash would re-embed on every pass.
-  void upsertConversationAi(
+  Future<void> upsertConversationAi(
     String source,
     String conversationKey, {
     Object? embedding = _unset,
     String? embeddedHash,
     String? embedModel,
-  }) {
+  }) async {
     final now = _nowIso();
-    db.execute(
-      'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
-      'VALUES (?, ?, ?) '
-      'ON CONFLICT(source, conversation_key) DO NOTHING',
-      [source, conversationKey, now],
-    );
 
     final sets = <String>['updated_at = ?'];
     final args = <Object?>[now];
@@ -860,22 +977,38 @@ LIMIT ?
       sets.add('embed_model = ?');
       args.add(embedModel);
     }
-
     args.addAll([source, conversationKey]);
-    db.execute(
-      'UPDATE conversation_ai SET ${sets.join(', ')} '
-      'WHERE source = ? AND conversation_key = ?',
-      args,
-    );
+
+    // The insert and the update are one unit: the row this update targets is
+    // the row the insert just guaranteed, and anything landing between them
+    // would be writing to a thread whose AI state is half-written.
+    await db.transaction(() async {
+      await db.customUpdate(
+        'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
+        'VALUES (?, ?, ?) '
+        'ON CONFLICT(source, conversation_key) DO NOTHING',
+        variables: _args([source, conversationKey, now]),
+      );
+      await db.customUpdate(
+        'UPDATE conversation_ai SET ${sets.join(', ')} '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: _args(args),
+      );
+    });
   }
 
-  Map<String, Object?>? getConversationAi(String source, String conversationKey) {
-    final result = db.select(
-      'SELECT * FROM conversation_ai WHERE source = ? AND conversation_key = ?',
-      [source, conversationKey],
-    );
+  Future<Map<String, Object?>?> getConversationAi(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM conversation_ai WHERE source = ? AND conversation_key = ?',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return Map<String, Object?>.from(result.first);
+    return Map<String, Object?>.from(result.first.data);
   }
 
   /// Files one thread into a bucket, or takes it out of every bucket.
@@ -896,46 +1029,50 @@ LIMIT ?
   ///
   /// Passing neither returns the thread to "nobody has ever ruled on this",
   /// which is what the sweep writes when it withdraws its own guess.
-  void setConversationBucket(
+  Future<void> setConversationBucket(
     String source,
     String conversationKey, {
     required String? bucket,
     String? reason,
-  }) {
+  }) async {
     final now = _nowIso();
-    db.execute(
-      'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
-      'VALUES (?, ?, ?) '
-      'ON CONFLICT(source, conversation_key) DO NOTHING',
-      [source, conversationKey, now],
-    );
-    db.execute(
-      'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, updated_at = ? '
-      'WHERE source = ? AND conversation_key = ?',
-      [bucket, reason, now, source, conversationKey],
-    );
+    await db.transaction(() async {
+      await db.customUpdate(
+        'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
+        'VALUES (?, ?, ?) '
+        'ON CONFLICT(source, conversation_key) DO NOTHING',
+        variables: _args([source, conversationKey, now]),
+      );
+      await db.customUpdate(
+        'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: _args([bucket, reason, now, source, conversationKey]),
+      );
+    });
   }
 
   /// Stores one thread's ranking score. Same targeted insert-then-update as
   /// [setConversationBucket]: the score is recomputed on every list load and
   /// must never disturb an embedding or a bucket sitting on the same row.
-  void writeAttentionScore(
+  Future<void> writeAttentionScore(
     String source,
     String conversationKey,
     double score,
-  ) {
+  ) async {
     final now = _nowIso();
-    db.execute(
-      'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
-      'VALUES (?, ?, ?) '
-      'ON CONFLICT(source, conversation_key) DO NOTHING',
-      [source, conversationKey, now],
-    );
-    db.execute(
-      'UPDATE conversation_ai SET attention_score = ?, updated_at = ? '
-      'WHERE source = ? AND conversation_key = ?',
-      [score, now, source, conversationKey],
-    );
+    await db.transaction(() async {
+      await db.customUpdate(
+        'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
+        'VALUES (?, ?, ?) '
+        'ON CONFLICT(source, conversation_key) DO NOTHING',
+        variables: _args([source, conversationKey, now]),
+      );
+      await db.customUpdate(
+        'UPDATE conversation_ai SET attention_score = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: _args([score, now, source, conversationKey]),
+      );
+    });
   }
 
   /// `conversation_key` → who last decided where it goes, for every thread
@@ -945,20 +1082,22 @@ LIMIT ?
   /// with no bucket: `(null, 'user')` means someone deliberately put it back in
   /// the inbox, which the sweep must respect exactly as much as a deliberate
   /// deferral — see [setConversationBucket].
-  Map<String, String?> bucketReasons({
+  Future<Map<String, String?>> bucketReasons({
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return const {};
-    final result = db.select(
-      'SELECT conversation_key, bucket_reason FROM conversation_ai '
-      'WHERE bucket_reason IS NOT NULL '
-      'AND source IN (${_placeholders(sources.length)})',
-      [...sources],
-    );
+    final result = await db
+        .customSelect(
+          'SELECT conversation_key, bucket_reason FROM conversation_ai '
+          'WHERE bucket_reason IS NOT NULL '
+          'AND source IN (${_placeholders(sources.length)})',
+          variables: _args([...sources]),
+        )
+        .get();
     return {
       for (final row in result)
-        (row['conversation_key'] as String? ?? ''):
-            row['bucket_reason'] as String?,
+        (row.data['conversation_key'] as String? ?? ''):
+            row.data['bucket_reason'] as String?,
     };
   }
 
@@ -978,69 +1117,73 @@ LIMIT ?
   /// The LEFT JOIN onto `message_ai` is what makes this one query rather than
   /// two: the scorer needs the intent the extraction found, and a per-thread
   /// lookup would be a query per row.
-  Map<String, Map<String, Object?>> latestInboundMeta({
+  Future<Map<String, Map<String, Object?>>> latestInboundMeta({
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return const {};
-    final result = db.select(
-      'SELECT conversation_key, source, source_message_id, from_address, '
-      '  received_at, extraction_json FROM ('
-      '  SELECT m.conversation_key AS conversation_key, m.source AS source, '
-      '    m.source_message_id AS source_message_id, '
-      '    m.from_address AS from_address, m.received_at AS received_at, '
-      '    a.extraction_json AS extraction_json, '
-      '    ROW_NUMBER() OVER ('
-      '      PARTITION BY m.source, m.conversation_key '
-      '      ORDER BY m.received_at DESC, m.source_message_id DESC'
-      '    ) AS rn '
-      '  FROM messages m '
-      '  LEFT JOIN message_ai a '
-      '    ON a.source = m.source AND a.source_message_id = m.source_message_id '
-      "  WHERE m.direction = 'inbound' "
-      '    AND m.source IN (${_placeholders(sources.length)})'
-      ') WHERE rn = 1',
-      [...sources],
-    );
+    final result = await db
+        .customSelect(
+          'SELECT conversation_key, source, source_message_id, from_address, '
+          '  received_at, extraction_json FROM ('
+          '  SELECT m.conversation_key AS conversation_key, m.source AS source, '
+          '    m.source_message_id AS source_message_id, '
+          '    m.from_address AS from_address, m.received_at AS received_at, '
+          '    a.extraction_json AS extraction_json, '
+          '    ROW_NUMBER() OVER ('
+          '      PARTITION BY m.source, m.conversation_key '
+          '      ORDER BY m.received_at DESC, m.source_message_id DESC'
+          '    ) AS rn '
+          '  FROM messages m '
+          '  LEFT JOIN message_ai a '
+          '    ON a.source = m.source AND a.source_message_id = m.source_message_id '
+          "  WHERE m.direction = 'inbound' "
+          '    AND m.source IN (${_placeholders(sources.length)})'
+          ') WHERE rn = 1',
+          variables: _args([...sources]),
+        )
+        .get();
     return {
       for (final row in result)
-        (row['conversation_key'] as String? ?? ''):
-            Map<String, Object?>.from(row),
+        (row.data['conversation_key'] as String? ?? ''):
+            Map<String, Object?>.from(row.data),
     };
   }
 
   /// How often each sender gets answered, as a 0..1 fraction.
   ///
   /// A cheap approximation, and deliberately so: "replied" means the thread
-  /// contains at least one outbound message, not that the LO replied to THIS
-  /// message. A thread the LO started and a thread they answered look the same
+  /// contains at least one outbound message, not that the user replied to THIS
+  /// message. A thread the user started and a thread they answered look the same
   /// here. The scorer uses it as a small nudge (see
   /// `AttentionTuning.replyRateMax`), never as a decision, so the approximation
   /// costs a fraction of a point on a thread rather than a wrong bucket.
   ///
   /// Computed in SQL rather than by loading messages: on a real mailbox this is
   /// hundreds of thousands of rows, and it runs on every list load.
-  Map<String, double> senderReplyRates({String source = 'email'}) {
-    final result = db.select(
-      'SELECT LOWER(m.from_address) AS addr, '
-      '  COUNT(DISTINCT m.conversation_key) AS threads, '
-      '  COUNT(DISTINCT CASE WHEN EXISTS ('
-      '    SELECT 1 FROM messages o WHERE o.source = m.source '
-      '      AND o.conversation_key = m.conversation_key '
-      "      AND o.direction = 'outbound'"
-      '  ) THEN m.conversation_key END) AS replied '
-      'FROM messages m '
-      "WHERE m.source = ? AND m.direction = 'inbound' "
-      "  AND m.from_address IS NOT NULL AND m.from_address <> '' "
-      'GROUP BY LOWER(m.from_address)',
-      [source],
-    );
+  Future<Map<String, double>> senderReplyRates({String source = 'email'}) async {
+    final result = await db
+        .customSelect(
+          'SELECT LOWER(m.from_address) AS addr, '
+          '  COUNT(DISTINCT m.conversation_key) AS threads, '
+          '  COUNT(DISTINCT CASE WHEN EXISTS ('
+          '    SELECT 1 FROM messages o WHERE o.source = m.source '
+          '      AND o.conversation_key = m.conversation_key '
+          "      AND o.direction = 'outbound'"
+          '  ) THEN m.conversation_key END) AS replied '
+          'FROM messages m '
+          "WHERE m.source = ? AND m.direction = 'inbound' "
+          "  AND m.from_address IS NOT NULL AND m.from_address <> '' "
+          'GROUP BY LOWER(m.from_address)',
+          variables: _args([source]),
+        )
+        .get();
     final rates = <String, double>{};
     for (final row in result) {
-      final address = row['addr'] as String? ?? '';
+      final address = row.data['addr'] as String? ?? '';
       if (address.isEmpty) continue;
-      final threads = (row['threads'] as num?)?.toInt() ?? 0;
+      final threads = (row.data['threads'] as num?)?.toInt() ?? 0;
       if (threads == 0) continue;
-      final replied = (row['replied'] as num?)?.toInt() ?? 0;
+      final replied = (row.data['replied'] as num?)?.toInt() ?? 0;
       rates[address] = replied / threads;
     }
     return rates;
@@ -1050,7 +1193,7 @@ LIMIT ?
   ///
   /// **The latest inbound sender owns the thread.** A thread's sender is
   /// whoever wrote its newest inbound message, not whoever started it: a
-  /// newsletter the LO forwarded to a colleague who replied is that colleague's
+  /// newsletter the user forwarded to a colleague who replied is that colleague's
   /// thread now, and "never show me mail from this newsletter again" must not
   /// bury the colleague's answer. Ties break the same way [latestInboundMeta]
   /// breaks them, so the two always agree on who that is.
@@ -1063,11 +1206,11 @@ LIMIT ?
   /// sender owns, whether or not the write actually changed the value. It is
   /// the number the UI reports back ("moved 12 threads"), and a user who does
   /// this twice should see the same count both times.
-  int rebucketSender(
+  Future<int> rebucketSender(
     String address, {
     required String? bucket,
     String source = 'email',
-  }) {
+  }) async {
     final lowered = address.toLowerCase();
     final now = _nowIso();
 
@@ -1084,25 +1227,26 @@ SELECT conversation_key FROM (
   FROM messages WHERE source = ? AND direction = 'inbound'
 ) WHERE rn = 1 AND LOWER(from_address) = ?''';
 
-    db.execute(
-      'INSERT OR IGNORE INTO conversation_ai '
-      '(source, conversation_key, updated_at) '
-      'SELECT ?, conversation_key, ? FROM ($owned)',
-      [source, now, source, lowered],
-    );
-    db.execute(
-      'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, updated_at = ? '
-      'WHERE source = ? AND conversation_key IN ($owned)',
-      [
-        bucket,
-        bucket == null ? null : 'sender_pref',
-        now,
-        source,
-        source,
-        lowered,
-      ],
-    );
-    return db.updatedRows;
+    return db.transaction(() async {
+      await db.customUpdate(
+        'INSERT OR IGNORE INTO conversation_ai '
+        '(source, conversation_key, updated_at) '
+        'SELECT ?, conversation_key, ? FROM ($owned)',
+        variables: _args([source, now, source, lowered]),
+      );
+      return db.customUpdate(
+        'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key IN ($owned)',
+        variables: _args([
+          bucket,
+          bucket == null ? null : 'sender_pref',
+          now,
+          source,
+          source,
+          lowered,
+        ]),
+      );
+    });
   }
 
   // ── feedback, sender rules, app preferences ──────────────────────────
@@ -1116,21 +1260,21 @@ SELECT conversation_key FROM (
   /// differently from "corrected once, a year ago" — neither of which survives
   /// in a table that only remembers the latest value.
   ///
-  /// [origin] separates `explicit` (a button the LO pressed) from `implicit`
+  /// [origin] separates `explicit` (a button the user pressed) from `implicit`
   /// (opening a thread, marking one done). Implicit signals are far noisier and
   /// far more numerous, and anything that learns from these has to be able to
   /// tell them apart.
-  void recordFeedback({
+  Future<void> recordFeedback({
     required String scope,
     required String scopeKey,
     required String direction,
     required String origin,
-  }) {
-    db.execute(
+  }) async {
+    await db.customUpdate(
       'INSERT INTO feedback_events '
       '(scope, scope_key, direction, origin, created_at) '
       'VALUES (?, ?, ?, ?, ?)',
-      [scope, scopeKey, direction, origin, _nowIso()],
+      variables: _args([scope, scopeKey, direction, origin, _nowIso()]),
     );
   }
 
@@ -1151,7 +1295,7 @@ SELECT conversation_key FROM (
   ///
   /// [count] and [durationMs] must be Dart ints: the table is STRICT and an
   /// INTEGER column rejects a double at write time.
-  void recordActivity({
+  Future<void> recordActivity({
     required String kind,
     required String status,
     String? source,
@@ -1160,12 +1304,12 @@ SELECT conversation_key FROM (
     int? durationMs,
     String? detailJson,
     String? createdAt,
-  }) {
-    db.execute(
+  }) async {
+    await db.customUpdate(
       'INSERT INTO activity_events '
       '(kind, source, status, entity_id, count, duration_ms, detail_json, '
       'created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [
+      variables: _args([
         kind,
         source,
         status,
@@ -1174,27 +1318,31 @@ SELECT conversation_key FROM (
         durationMs,
         detailJson,
         createdAt ?? _nowIso(),
-      ],
+      ]),
     );
   }
 
   /// The newest events first. Bounded by [limit] because the panel that reads
-  /// this runs on the UI isolate against a synchronous database.
-  List<Map<String, Object?>> recentActivity({
+  /// this renders every row it is handed.
+  Future<List<Map<String, Object?>>> recentActivity({
     int limit = 300,
     String? sinceIso,
-  }) {
+  }) async {
     final result = sinceIso == null
-        ? db.select(
-            'SELECT * FROM activity_events ORDER BY id DESC LIMIT ?',
-            [limit],
-          )
-        : db.select(
-            'SELECT * FROM activity_events WHERE created_at >= ? '
-            'ORDER BY id DESC LIMIT ?',
-            [sinceIso, limit],
-          );
-    return [for (final row in result) Map<String, Object?>.from(row)];
+        ? await db
+            .customSelect(
+              'SELECT * FROM activity_events ORDER BY id DESC LIMIT ?',
+              variables: _args([limit]),
+            )
+            .get()
+        : await db
+            .customSelect(
+              'SELECT * FROM activity_events WHERE created_at >= ? '
+              'ORDER BY id DESC LIMIT ?',
+              variables: _args([sinceIso, limit]),
+            )
+            .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
   /// Deletes what is older than [keepDays], then whatever is left beyond
@@ -1202,89 +1350,101 @@ SELECT conversation_key FROM (
   /// expect "history" to mean, and the row cap is what stops a first sync of
   /// a large mailbox from filling the window with thousands of rows. Returns
   /// how many rows went.
-  int pruneActivity({int keepDays = 30, int maxRows = 5000}) {
+  Future<int> pruneActivity({int keepDays = 30, int maxRows = 5000}) {
     final cutoff = DateTime.now()
         .toUtc()
         .subtract(Duration(days: keepDays))
         .toIso8601String();
-    db.execute(
-      'DELETE FROM activity_events WHERE created_at < ?',
-      [cutoff],
-    );
-    var pruned = db.updatedRows;
-    db.execute(
-      'DELETE FROM activity_events WHERE id NOT IN '
-      '(SELECT id FROM activity_events ORDER BY id DESC LIMIT ?)',
-      [maxRows],
-    );
-    pruned += db.updatedRows;
-    return pruned;
+    // One transaction because the returned total spans both deletes: a row
+    // inserted between them would be counted against the cap it was never
+    // measured against.
+    return db.transaction(() async {
+      var pruned = await db.customUpdate(
+        'DELETE FROM activity_events WHERE created_at < ?',
+        variables: _args([cutoff]),
+      );
+      pruned += await db.customUpdate(
+        'DELETE FROM activity_events WHERE id NOT IN '
+        '(SELECT id FROM activity_events ORDER BY id DESC LIMIT ?)',
+        variables: _args([maxRows]),
+      );
+      return pruned;
+    });
   }
 
   /// The activity panel's header numbers, over everything since [sinceIso].
   ///
   /// Three queries and a Dart finish: sqlite has no median, and under the
-  /// prune cap the ordered read is a few thousand rows at worst.
-  ActivityStats activityStats({required String sinceIso}) {
+  /// prune cap the ordered read is a few thousand rows at worst. The three
+  /// read one snapshot — a write landing between them would put an event in
+  /// one number and not the others.
+  Future<ActivityStats> activityStats({required String sinceIso}) {
     final kinds = _placeholders(activityWorkKinds.length);
 
-    final ingested = <String, int>{};
-    for (final row in db.select(
-      'SELECT source, SUM(count) AS n FROM activity_events '
-      "WHERE kind IN ('sync_mail', 'sync_teams') AND status = 'ok' "
-      'AND created_at >= ? GROUP BY source',
-      [sinceIso],
-    )) {
-      final source = row['source'] as String?;
-      final n = (row['n'] as num?)?.toInt() ?? 0;
-      if (source != null && n > 0) ingested[source] = n;
-    }
+    return db.transaction(() async {
+      final ingested = <String, int>{};
+      for (final row in await db
+          .customSelect(
+            'SELECT source, SUM(count) AS n FROM activity_events '
+            "WHERE kind IN ('sync_mail', 'sync_teams') AND status = 'ok' "
+            'AND created_at >= ? GROUP BY source',
+            variables: _args([sinceIso]),
+          )
+          .get()) {
+        final source = row.data['source'] as String?;
+        final n = (row.data['n'] as num?)?.toInt() ?? 0;
+        if (source != null && n > 0) ingested[source] = n;
+      }
 
-    final byKind = <String, Map<String, int>>{};
-    var errorCount = 0;
-    var aiItemCount = 0;
-    for (final row in db.select(
-      'SELECT kind, status, COUNT(*) AS n FROM activity_events '
-      'WHERE kind IN ($kinds) AND created_at >= ? GROUP BY kind, status',
-      [...activityWorkKinds, sinceIso],
-    )) {
-      final kind = row['kind'] as String;
-      final status = row['status'] as String;
-      final n = (row['n'] as num).toInt();
-      (byKind[kind] ??= {})[status] = n;
-      aiItemCount += n;
-      if (status == 'error') errorCount += n;
-    }
+      final byKind = <String, Map<String, int>>{};
+      var errorCount = 0;
+      var aiItemCount = 0;
+      for (final row in await db
+          .customSelect(
+            'SELECT kind, status, COUNT(*) AS n FROM activity_events '
+            'WHERE kind IN ($kinds) AND created_at >= ? GROUP BY kind, status',
+            variables: _args([...activityWorkKinds, sinceIso]),
+          )
+          .get()) {
+        final kind = row.data['kind'] as String;
+        final status = row.data['status'] as String;
+        final n = (row.data['n'] as num).toInt();
+        (byKind[kind] ??= {})[status] = n;
+        aiItemCount += n;
+        if (status == 'error') errorCount += n;
+      }
 
-    final durations = <String, List<int>>{};
-    for (final row in db.select(
-      'SELECT kind, duration_ms FROM activity_events '
-      "WHERE kind IN ($kinds) AND duration_ms IS NOT NULL AND status = 'ok' "
-      'AND created_at >= ? ORDER BY kind ASC, duration_ms ASC',
-      [...activityWorkKinds, sinceIso],
-    )) {
-      (durations[row['kind'] as String] ??= [])
-          .add((row['duration_ms'] as num).toInt());
-    }
-    final avg = <String, int>{};
-    final median = <String, int>{};
-    durations.forEach((kind, sorted) {
-      avg[kind] =
-          (sorted.reduce((a, b) => a + b) / sorted.length).round();
-      final mid = sorted.length ~/ 2;
-      median[kind] = sorted.length.isOdd
-          ? sorted[mid]
-          : ((sorted[mid - 1] + sorted[mid]) / 2).round();
+      final durations = <String, List<int>>{};
+      for (final row in await db
+          .customSelect(
+            'SELECT kind, duration_ms FROM activity_events '
+            "WHERE kind IN ($kinds) AND duration_ms IS NOT NULL AND status = 'ok' "
+            'AND created_at >= ? ORDER BY kind ASC, duration_ms ASC',
+            variables: _args([...activityWorkKinds, sinceIso]),
+          )
+          .get()) {
+        (durations[row.data['kind'] as String] ??= [])
+            .add((row.data['duration_ms'] as num).toInt());
+      }
+      final avg = <String, int>{};
+      final median = <String, int>{};
+      durations.forEach((kind, sorted) {
+        avg[kind] = (sorted.reduce((a, b) => a + b) / sorted.length).round();
+        final mid = sorted.length ~/ 2;
+        median[kind] = sorted.length.isOdd
+            ? sorted[mid]
+            : ((sorted[mid - 1] + sorted[mid]) / 2).round();
+      });
+
+      return ActivityStats(
+        ingestedBySource: ingested,
+        byKind: byKind,
+        avgMsByKind: avg,
+        medianMsByKind: median,
+        errorCount: errorCount,
+        aiItemCount: aiItemCount,
+      );
     });
-
-    return ActivityStats(
-      ingestedBySource: ingested,
-      byKind: byKind,
-      avgMsByKind: avg,
-      medianMsByKind: median,
-      errorCount: errorCount,
-      aiItemCount: aiItemCount,
-    );
   }
 
   /// Sets, or with a null [disposition] removes, one sender's standing rule.
@@ -1297,56 +1457,69 @@ SELECT conversation_key FROM (
   /// preserve the case a sender typed, so the same person can arrive as
   /// `Eric@x.com` and `eric@x.com`, and a rule that applied to only one of
   /// those would look like it silently stopped working.
-  void setSenderPref(String address, String? disposition) {
+  Future<void> setSenderPref(String address, String? disposition) async {
     final lowered = address.toLowerCase();
     if (disposition == null) {
-      db.execute('DELETE FROM sender_prefs WHERE address = ?', [lowered]);
+      await db.customUpdate(
+        'DELETE FROM sender_prefs WHERE address = ?',
+        variables: _args([lowered]),
+      );
       return;
     }
-    db.execute(
+    await db.customUpdate(
       'INSERT INTO sender_prefs (address, disposition, updated_at) '
       'VALUES (?, ?, ?) '
       'ON CONFLICT(address) DO UPDATE SET '
       'disposition = excluded.disposition, updated_at = excluded.updated_at',
-      [lowered, disposition, _nowIso()],
+      variables: _args([lowered, disposition, _nowIso()]),
     );
   }
 
   /// One sender's rule, or null when there is none. Lowercases first, so a
   /// caller may pass whatever casing the message carried.
-  String? getSenderPref(String address) {
-    final result = db.select(
-      'SELECT disposition FROM sender_prefs WHERE address = ?',
-      [address.toLowerCase()],
-    );
+  Future<String?> getSenderPref(String address) async {
+    final result = await db
+        .customSelect(
+          'SELECT disposition FROM sender_prefs WHERE address = ?',
+          variables: _args([address.toLowerCase()]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return result.first['disposition'] as String?;
+    return result.first.data['disposition'] as String?;
   }
 
   /// Every sender rule at once — what the scoring pass wants, since it asks
   /// about a rule for every thread in the inbox.
-  Map<String, String> allSenderPrefs() {
-    final result = db.select('SELECT address, disposition FROM sender_prefs');
+  Future<Map<String, String>> allSenderPrefs() async {
+    final result = await db
+        .customSelect('SELECT address, disposition FROM sender_prefs')
+        .get();
     return {
       for (final row in result)
-        (row['address'] as String? ?? ''): (row['disposition'] as String? ?? ''),
+        (row.data['address'] as String? ?? ''):
+            (row.data['disposition'] as String? ?? ''),
     };
   }
 
   /// One app-level setting, or null when it has never been set. Values are TEXT
   /// whatever they mean — a threshold is stored as its `toString()` and parsed
   /// back by the one reader that knows what it is.
-  String? getPref(String key) {
-    final result = db.select('SELECT value FROM app_prefs WHERE key = ?', [key]);
+  Future<String?> getPref(String key) async {
+    final result = await db
+        .customSelect(
+          'SELECT value FROM app_prefs WHERE key = ?',
+          variables: _args([key]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return result.first['value'] as String?;
+    return result.first.data['value'] as String?;
   }
 
-  void setPref(String key, String value) {
-    db.execute(
+  Future<void> setPref(String key, String value) async {
+    await db.customUpdate(
       'INSERT INTO app_prefs (key, value) VALUES (?, ?) '
       'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-      [key, value],
+      variables: _args([key, value]),
     );
   }
 
@@ -1369,21 +1542,25 @@ SELECT s.*,
     AS open_count
 FROM storylines s''';
 
-  void insertStoryline({
+  Future<void> insertStoryline({
     required String id,
     required String title,
     String? summary,
+    String? charter,
     required String status,
     required String createdBy,
     String? memberHash,
-  }) {
+  }) async {
     final now = _nowIso();
-    db.execute(
+    await db.customUpdate(
       'INSERT INTO storylines '
-      '(id, title, summary, status, created_by, title_locked, pinned, '
-      'member_hash, last_activity_at, created_at, updated_at) '
-      'VALUES (?, ?, ?, ?, ?, 0, 0, ?, NULL, ?, ?)',
-      [id, title, summary, status, createdBy, memberHash, now, now],
+      '(id, title, summary, charter, status, created_by, title_locked, '
+      'charter_locked, pinned, member_hash, last_activity_at, created_at, '
+      'updated_at) '
+      'VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NULL, ?, ?)',
+      variables: _args(
+        [id, title, summary, charter, status, createdBy, memberHash, now, now],
+      ),
     );
   }
 
@@ -1395,19 +1572,21 @@ FROM storylines s''';
   /// activity — and a whole-row write from any one of them would quietly
   /// reset the other three.
   ///
-  /// [summary] uses the [_unset] sentinel because null means something: a
-  /// storyline whose summary should be cleared is a different write from one
-  /// whose summary is simply not this call's business.
-  void updateStoryline(
+  /// [summary] and [charter] use the [_unset] sentinel because null means
+  /// something: a storyline whose summary should be cleared is a different
+  /// write from one whose summary is simply not this call's business.
+  Future<void> updateStoryline(
     String id, {
     String? title,
     Object? summary = _unset,
+    Object? charter = _unset,
     String? status,
     bool? titleLocked,
+    bool? charterLocked,
     bool? pinned,
     String? lastActivityAt,
     String? memberHash,
-  }) {
+  }) async {
     final sets = <String>['updated_at = ?'];
     final args = <Object?>[_nowIso()];
 
@@ -1419,6 +1598,10 @@ FROM storylines s''';
       sets.add('summary = ?');
       args.add(summary as String?);
     }
+    if (!identical(charter, _unset)) {
+      sets.add('charter = ?');
+      args.add(charter as String?);
+    }
     if (status != null) {
       sets.add('status = ?');
       args.add(status);
@@ -1426,6 +1609,10 @@ FROM storylines s''';
     if (titleLocked != null) {
       sets.add('title_locked = ?');
       args.add(titleLocked ? 1 : 0);
+    }
+    if (charterLocked != null) {
+      sets.add('charter_locked = ?');
+      args.add(charterLocked ? 1 : 0);
     }
     if (pinned != null) {
       sets.add('pinned = ?');
@@ -1441,7 +1628,10 @@ FROM storylines s''';
     }
 
     args.add(id);
-    db.execute('UPDATE storylines SET ${sets.join(', ')} WHERE id = ?', args);
+    await db.customUpdate(
+      'UPDATE storylines SET ${sets.join(', ')} WHERE id = ?',
+      variables: _args(args),
+    );
   }
 
   /// The rail's list: suggestions first, newest proposal at the top, then
@@ -1451,26 +1641,30 @@ FROM storylines s''';
   /// something. `rowid DESC` is the final tie-break — two storylines written in
   /// the same microsecond would otherwise be free to swap places between
   /// reads, which reads on screen as the list shuffling itself.
-  List<Storyline> loadStorylines({
+  Future<List<Storyline>> loadStorylines({
     List<String> statuses = const ['suggested', 'active'],
-  }) {
+  }) async {
     if (statuses.isEmpty) return const [];
-    final result = db.select(
-      '$_storylineSelect '
-      'WHERE s.status IN (${_placeholders(statuses.length)}) '
-      "ORDER BY (CASE WHEN s.status = 'suggested' THEN 0 ELSE 1 END), "
-      "CASE WHEN s.status = 'suggested' THEN s.created_at END DESC, "
-      "CASE WHEN s.status = 'suggested' THEN NULL ELSE s.last_activity_at END DESC, "
-      's.rowid DESC',
-      [...statuses],
-    );
-    return [for (final row in result) Storyline.fromRow(row)];
+    final result = await db
+        .customSelect(
+          '$_storylineSelect '
+          'WHERE s.status IN (${_placeholders(statuses.length)}) '
+          "ORDER BY (CASE WHEN s.status = 'suggested' THEN 0 ELSE 1 END), "
+          "CASE WHEN s.status = 'suggested' THEN s.created_at END DESC, "
+          "CASE WHEN s.status = 'suggested' THEN NULL ELSE s.last_activity_at END DESC, "
+          's.rowid DESC',
+          variables: _args([...statuses]),
+        )
+        .get();
+    return [for (final row in result) Storyline.fromRow(row.data)];
   }
 
-  Storyline? getStoryline(String id) {
-    final result = db.select('$_storylineSelect WHERE s.id = ?', [id]);
+  Future<Storyline?> getStoryline(String id) async {
+    final result = await db
+        .customSelect('$_storylineSelect WHERE s.id = ?', variables: _args([id]))
+        .get();
     if (result.isEmpty) return null;
-    return Storyline.fromRow(result.first);
+    return Storyline.fromRow(result.first.data);
   }
 
   /// Adds a thread to a storyline, and un-blocks it.
@@ -1479,86 +1673,138 @@ FROM storylines s''';
   /// of here", and putting it back explicitly is the user changing their mind.
   /// Leaving the block behind would let the assignment pass silently refuse a
   /// membership a person just asked for.
-  void addStorylineMember(
+  Future<void> addStorylineMember(
     String storylineId,
     String source,
     String conversationKey, {
     required String addedBy,
     String? evidence,
-  }) {
-    db.execute(
-      'INSERT OR IGNORE INTO storyline_members '
-      '(storyline_id, source, conversation_key, added_by, evidence, added_at) '
-      'VALUES (?, ?, ?, ?, ?, ?)',
-      [storylineId, source, conversationKey, addedBy, evidence, _nowIso()],
-    );
-    db.execute(
-      'DELETE FROM storyline_member_blocks '
-      'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
-      [storylineId, source, conversationKey],
-    );
+  }) async {
+    // The membership and the un-block are the same decision; a reader that
+    // caught only the insert would see a thread that is both a member and
+    // blocked from being one.
+    await db.transaction(() async {
+      await db.customUpdate(
+        'INSERT OR IGNORE INTO storyline_members '
+        '(storyline_id, source, conversation_key, added_by, evidence, added_at) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        variables: _args([
+          storylineId,
+          source,
+          conversationKey,
+          addedBy,
+          evidence,
+          _nowIso(),
+        ]),
+      );
+      await db.customUpdate(
+        'DELETE FROM storyline_member_blocks '
+        'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+        variables: _args([storylineId, source, conversationKey]),
+      );
+    });
   }
 
   /// Takes a thread out of a storyline. [block] records that the user meant
   /// it, so the next clustering pass cannot put it straight back — the model
   /// is not allowed to overrule a person by being confident twice.
-  void removeStorylineMember(
+  Future<void> removeStorylineMember(
     String storylineId,
     String source,
     String conversationKey, {
     required bool block,
-  }) {
-    db.execute(
-      'DELETE FROM storyline_members '
-      'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
-      [storylineId, source, conversationKey],
-    );
-    if (!block) return;
-    db.execute(
-      'INSERT OR IGNORE INTO storyline_member_blocks '
-      '(storyline_id, source, conversation_key, blocked_at) '
-      'VALUES (?, ?, ?, ?)',
-      [storylineId, source, conversationKey, _nowIso()],
-    );
+  }) async {
+    if (!block) {
+      await db.customUpdate(
+        'DELETE FROM storyline_members '
+        'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+        variables: _args([storylineId, source, conversationKey]),
+      );
+      return;
+    }
+    // Same unit as [addStorylineMember], for the mirror-image reason: a
+    // removal that landed without its block would let the next sweep put the
+    // thread straight back.
+    await db.transaction(() async {
+      await db.customUpdate(
+        'DELETE FROM storyline_members '
+        'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+        variables: _args([storylineId, source, conversationKey]),
+      );
+      await db.customUpdate(
+        'INSERT OR IGNORE INTO storyline_member_blocks '
+        '(storyline_id, source, conversation_key, blocked_at) '
+        'VALUES (?, ?, ?, ?)',
+        variables: _args([storylineId, source, conversationKey, _nowIso()]),
+      );
+    });
   }
 
-  bool isMemberBlocked(
+  Future<bool> isMemberBlocked(
     String storylineId,
     String source,
     String conversationKey,
-  ) {
-    final result = db.select(
-      'SELECT 1 FROM storyline_member_blocks '
-      'WHERE storyline_id = ? AND source = ? AND conversation_key = ? LIMIT 1',
-      [storylineId, source, conversationKey],
-    );
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT 1 FROM storyline_member_blocks '
+          'WHERE storyline_id = ? AND source = ? AND conversation_key = ? LIMIT 1',
+          variables: _args([storylineId, source, conversationKey]),
+        )
+        .get();
     return result.isNotEmpty;
   }
 
-  List<StorylineMember> membersOf(String storylineId) {
-    final result = db.select(
-      'SELECT * FROM storyline_members WHERE storyline_id = ? '
-      'ORDER BY added_at ASC, conversation_key ASC',
-      [storylineId],
-    );
-    return [for (final row in result) StorylineMember.fromRow(row)];
+  /// Every thread the user has removed from [storylineId], as
+  /// `'<source>\n<conversation_key>'` composites — newline-joined because a
+  /// newline can appear in neither half. The pane that offers threads to add
+  /// leaves these out: a block is the user's own "no", and offering the
+  /// thread back would invite them to overrule it by accident.
+  Future<Set<String>> blockedThreadsOf(String storylineId) async {
+    final result = await db
+        .customSelect(
+          'SELECT source, conversation_key FROM storyline_member_blocks '
+          'WHERE storyline_id = ?',
+          variables: _args([storylineId]),
+        )
+        .get();
+    return {
+      for (final row in result)
+        '${row.data['source']}\n${row.data['conversation_key']}',
+    };
+  }
+
+  Future<List<StorylineMember>> membersOf(String storylineId) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM storyline_members WHERE storyline_id = ? '
+          'ORDER BY added_at ASC, conversation_key ASC',
+          variables: _args([storylineId]),
+        )
+        .get();
+    return [for (final row in result) StorylineMember.fromRow(row.data)];
   }
 
   /// Which live storylines one thread belongs to. Dismissed and archived ones
   /// are excluded: their member rows survive only as the record behind
   /// [dismissedMemberHashExists], and a thread is not "in" a suggestion the
   /// user threw away.
-  List<String> storylineIdsFor(String source, String conversationKey) {
-    final result = db.select(
-      'SELECT m.storyline_id FROM storyline_members m '
-      'JOIN storylines s ON s.id = m.storyline_id '
-      'WHERE m.source = ? AND m.conversation_key = ? '
-      "AND s.status IN ('suggested', 'active') "
-      'ORDER BY m.added_at ASC',
-      [source, conversationKey],
-    );
+  Future<List<String>> storylineIdsFor(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.storyline_id FROM storyline_members m '
+          'JOIN storylines s ON s.id = m.storyline_id '
+          'WHERE m.source = ? AND m.conversation_key = ? '
+          "AND s.status IN ('suggested', 'active') "
+          'ORDER BY m.added_at ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
     return [
-      for (final row in result) row['storyline_id'] as String? ?? '',
+      for (final row in result) row.data['storyline_id'] as String? ?? '',
     ];
   }
 
@@ -1568,67 +1814,73 @@ FROM storylines s''';
   /// comparable when they came from the same model under the same task prefix,
   /// and a query that quietly mixed generations would return cosines that mean
   /// nothing. The caller passes `EmbeddingsClient.modelTag`.
-  List<Map<String, Object?>> conversationsWithEmbeddings({
+  Future<List<Map<String, Object?>>> conversationsWithEmbeddings({
     required String embedModel,
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return const [];
-    final result = db.select(
-      'SELECT a.source AS source, a.conversation_key AS conversation_key, '
-      'a.embedding AS embedding, c.subject AS subject, '
-      'c.participants_json AS participants_json, c.state AS state, '
-      'c.last_message_at AS last_message_at '
-      'FROM conversation_ai a '
-      'JOIN conversations c '
-      '  ON c.source = a.source AND c.conversation_key = a.conversation_key '
-      'WHERE a.embedding IS NOT NULL AND a.embed_model = ? '
-      'AND a.source IN (${_placeholders(sources.length)}) '
-      'ORDER BY c.last_message_at DESC, a.conversation_key ASC',
-      [embedModel, ...sources],
-    );
-    return [for (final row in result) Map<String, Object?>.from(row)];
+    final result = await db
+        .customSelect(
+          'SELECT a.source AS source, a.conversation_key AS conversation_key, '
+          'a.embedding AS embedding, c.subject AS subject, '
+          'c.participants_json AS participants_json, c.state AS state, '
+          'c.last_message_at AS last_message_at '
+          'FROM conversation_ai a '
+          'JOIN conversations c '
+          '  ON c.source = a.source AND c.conversation_key = a.conversation_key '
+          'WHERE a.embedding IS NOT NULL AND a.embed_model = ? '
+          'AND a.source IN (${_placeholders(sources.length)}) '
+          'ORDER BY c.last_message_at DESC, a.conversation_key ASC',
+          variables: _args([embedModel, ...sources]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
   /// Every thread the sweep must leave alone: already in a live storyline, or
   /// explicitly kept out of one. Blocks count because a thread the user pulled
   /// out of a group is not a thread to propose a new group around.
-  Set<String> assignedOrBlockedKeys(String source) {
-    final result = db.select(
-      'SELECT m.conversation_key AS conversation_key FROM storyline_members m '
-      'JOIN storylines s ON s.id = m.storyline_id '
-      "WHERE m.source = ? AND s.status IN ('suggested', 'active') "
-      'UNION '
-      'SELECT b.conversation_key AS conversation_key '
-      'FROM storyline_member_blocks b '
-      'JOIN storylines s ON s.id = b.storyline_id '
-      "WHERE b.source = ? AND s.status IN ('suggested', 'active')",
-      [source, source],
-    );
+  Future<Set<String>> assignedOrBlockedKeys(String source) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.conversation_key AS conversation_key FROM storyline_members m '
+          'JOIN storylines s ON s.id = m.storyline_id '
+          "WHERE m.source = ? AND s.status IN ('suggested', 'active') "
+          'UNION '
+          'SELECT b.conversation_key AS conversation_key '
+          'FROM storyline_member_blocks b '
+          'JOIN storylines s ON s.id = b.storyline_id '
+          "WHERE b.source = ? AND s.status IN ('suggested', 'active')",
+          variables: _args([source, source]),
+        )
+        .get();
     return {
-      for (final row in result) row['conversation_key'] as String? ?? '',
+      for (final row in result) row.data['conversation_key'] as String? ?? '',
     };
   }
 
   /// Whether this exact set of threads has already been proposed and thrown
   /// away. The sweep is deterministic, so without this a dismissed suggestion
   /// would be re-proposed identically on the very next sync.
-  bool dismissedMemberHashExists(String memberHash) {
-    final result = db.select(
-      "SELECT 1 FROM storylines WHERE status = 'dismissed' "
-      'AND member_hash = ? LIMIT 1',
-      [memberHash],
-    );
+  Future<bool> dismissedMemberHashExists(String memberHash) async {
+    final result = await db
+        .customSelect(
+          "SELECT 1 FROM storylines WHERE status = 'dismissed' "
+          'AND member_hash = ? LIMIT 1',
+          variables: _args([memberHash]),
+        )
+        .get();
     return result.isNotEmpty;
   }
 
   /// Moves a storyline's activity stamp forward, never back. Threads are
   /// assigned in whatever order the queue drains them, so an older thread
   /// joining must not make a live storyline look stale.
-  void touchStorylineActivity(String id, String lastMessageAt) {
-    db.execute(
+  Future<void> touchStorylineActivity(String id, String lastMessageAt) async {
+    await db.customUpdate(
       'UPDATE storylines SET last_activity_at = ?, updated_at = ? '
       'WHERE id = ? AND (last_activity_at IS NULL OR last_activity_at < ?)',
-      [lastMessageAt, _nowIso(), id, lastMessageAt],
+      variables: _args([lastMessageAt, _nowIso(), id, lastMessageAt]),
     );
   }
 
@@ -1644,9 +1896,9 @@ FROM storylines s''';
   /// are revived: resetting a `pending` row would lose its place in the drain
   /// order, and resetting a `processing` one would hand an item a worker is
   /// holding to a second drain.
-  void requeueWork(String kind, String source, String entityId) {
+  Future<void> requeueWork(String kind, String source, String entityId) async {
     final now = _nowIso();
-    db.execute(
+    await db.customUpdate(
       'INSERT INTO work_items '
       '(task_kind, source, entity_id, status, attempts, error, payload_json, '
       'created_at, updated_at) '
@@ -1654,7 +1906,7 @@ FROM storylines s''';
       'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
       "status = 'pending', updated_at = excluded.updated_at "
       "WHERE work_items.status IN ('done', 'error')",
-      [kind, source, entityId, now, now],
+      variables: _args([kind, source, entityId, now, now]),
     );
   }
 
@@ -1669,16 +1921,16 @@ FROM storylines s''';
   /// Outlook draft holding text nobody can see any more. `created_at` survives
   /// — it says when this conversation first got a suggestion, which is the one
   /// fact a regenerate does not change.
-  void upsertDraft({
+  Future<void> upsertDraft({
     required String source,
     required String conversationKey,
     required String replyToMessageId,
     required String body,
     String? evidence,
     String status = 'suggested',
-  }) {
+  }) async {
     final now = _nowIso();
-    db.execute(
+    await db.customUpdate(
       '''
 INSERT INTO drafts (
   source, conversation_key, reply_to_message_id, body, evidence, status,
@@ -1693,7 +1945,7 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   web_link = NULL,
   updated_at = excluded.updated_at
 ''',
-      [
+      variables: _args([
         source,
         conversationKey,
         replyToMessageId,
@@ -1702,17 +1954,22 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
         status,
         now,
         now,
-      ],
+      ]),
     );
   }
 
-  Map<String, Object?>? getDraft(String source, String conversationKey) {
-    final result = db.select(
-      'SELECT * FROM drafts WHERE source = ? AND conversation_key = ?',
-      [source, conversationKey],
-    );
+  Future<Map<String, Object?>?> getDraft(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM drafts WHERE source = ? AND conversation_key = ?',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return Map<String, Object?>.from(result.first);
+    return Map<String, Object?>.from(result.first.data);
   }
 
   /// Moves a draft along its lifecycle — `suggested` → `edited` → `sent`, or
@@ -1721,14 +1978,14 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// Targeted like [writeTriage]: the edit that marks a draft touched must not
   /// blank the Outlook ids a save-to-drafts wrote, and a send must not rewrite
   /// the body the user is looking at.
-  void updateDraftStatus(
+  Future<void> updateDraftStatus(
     String source,
     String conversationKey, {
     required String status,
     String? body,
     String? graphDraftId,
     String? webLink,
-  }) {
+  }) async {
     final sets = <String>['status = ?', 'updated_at = ?'];
     final args = <Object?>[status, _nowIso()];
 
@@ -1746,17 +2003,17 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
     }
 
     args.addAll([source, conversationKey]);
-    db.execute(
+    await db.customUpdate(
       'UPDATE drafts SET ${sets.join(', ')} '
       'WHERE source = ? AND conversation_key = ?',
-      args,
+      variables: _args(args),
     );
   }
 
-  void deleteDraft(String source, String conversationKey) {
-    db.execute(
+  Future<void> deleteDraft(String source, String conversationKey) async {
+    await db.customUpdate(
       'DELETE FROM drafts WHERE source = ? AND conversation_key = ?',
-      [source, conversationKey],
+      variables: _args([source, conversationKey]),
     );
   }
 
@@ -1765,21 +2022,49 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// Ties break on `source_message_id DESC`, the same way [latestInboundMeta]
   /// breaks them, so the draft is written against the message the rest of the
   /// app agrees is the latest.
-  Map<String, Object?>? newestInboundMessage(
+  Future<Map<String, Object?>?> newestInboundMessage(
     String source,
     String conversationKey,
-  ) {
-    final result = db.select(
-      'SELECT * FROM messages '
-      "WHERE source = ? AND conversation_key = ? AND direction = 'inbound' "
-      'ORDER BY received_at DESC, source_message_id DESC LIMIT 1',
-      [source, conversationKey],
-    );
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages '
+          "WHERE source = ? AND conversation_key = ? AND direction = 'inbound' "
+          'ORDER BY received_at DESC, source_message_id DESC LIMIT 1',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
     if (result.isEmpty) return null;
-    return Map<String, Object?>.from(result.first);
+    return Map<String, Object?>.from(result.first.data);
   }
 
-  /// The LO's own recent replies to one address, newest first — the tone the
+  /// The pieces of the embedding card that live on the message side: the
+  /// newest inbound message's triage summary and its stored extraction.
+  /// One query, LEFT JOIN, so a thread whose extraction has not run yet
+  /// still answers with its summary. Ties break on `source_message_id
+  /// DESC`, the same way [newestInboundMessage] breaks them.
+  Future<Map<String, Object?>?> newestInboundCardData(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.summary, ai.extraction_json '
+          'FROM messages m '
+          'LEFT JOIN message_ai ai '
+          '  ON ai.source = m.source '
+          '  AND ai.source_message_id = m.source_message_id '
+          "WHERE m.source = ? AND m.conversation_key = ? "
+          "AND m.direction = 'inbound' "
+          'ORDER BY m.received_at DESC, m.source_message_id DESC LIMIT 1',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// The user's own recent replies to one address, newest first — the tone the
   /// draft model is asked to match.
   ///
   /// `to_json LIKE '%address%'` is an APPROXIMATION and knowingly so. The
@@ -1787,28 +2072,31 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// that merely contains the one asked for (`eric@x.com` inside
   /// `noteric@x.com`) and it matches a message the address was CC'd on as
   /// readily as one addressed to them. Both are fine for what this feeds: a
-  /// handful of the LO's own sentences shown to the model as a writing sample.
+  /// handful of the user's own sentences shown to the model as a writing sample.
   /// A wrong sample costs a slightly-off tone, never a wrong recipient — the
   /// address a reply actually goes to comes from Graph's own `createReply`.
-  List<Map<String, Object?>> recentOutboundToSender(
+  Future<List<Map<String, Object?>>> recentOutboundToSender(
     String source,
     String senderAddress, {
     int limit = 2,
-  }) {
+  }) async {
     if (senderAddress.isEmpty) return const [];
-    final result = db.select(
-      'SELECT * FROM messages '
-      "WHERE source = ? AND direction = 'outbound' AND to_json LIKE ? "
-      'ORDER BY received_at DESC, source_message_id DESC LIMIT ?',
-      [source, '%${senderAddress.toLowerCase()}%', limit],
-    );
-    return [for (final row in result) Map<String, Object?>.from(row)];
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages '
+          "WHERE source = ? AND direction = 'outbound' AND to_json LIKE ? "
+          'ORDER BY received_at DESC, source_message_id DESC LIMIT ?',
+          variables:
+              _args([source, '%${senderAddress.toLowerCase()}%', limit]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
   /// The threads worth spending a model call drafting a reply for.
   ///
   /// Four filters, and each one is there to stop a specific waste: the thread
-  /// must actually be waiting on the LO, it must not be filed away in Later, it
+  /// must actually be waiting on the user, it must not be filed away in Later, it
   /// must have scored high enough to be worth answering, and it must not have a
   /// draft already. That last one is what makes this safe to call on every list
   /// load — a thread drops out of the list the moment it has a suggestion, so
@@ -1817,30 +2105,32 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// A thread with no attention score at all is excluded: `NULL >= ?` is NULL,
   /// which is not true. That is the wanted behaviour — a thread the scorer has
   /// never reached has not earned a model call yet.
-  List<String> needsDraftKeys({
+  Future<List<String>> needsDraftKeys({
     required double threshold,
     int limit = 7,
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return const [];
-    final result = db.select(
-      'SELECT c.conversation_key AS conversation_key FROM conversations c '
-      'LEFT JOIN conversation_ai ai '
-      '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
-      'LEFT JOIN drafts d '
-      '  ON d.source = c.source AND d.conversation_key = c.conversation_key '
-      "WHERE c.state = 'needs_reply' "
-      'AND c.source IN (${_placeholders(sources.length)}) '
-      // `IS NOT`, not `<>`: a thread with no bucket at all belongs here, and
-      // `NULL <> 'later'` would drop every one of them.
-      "AND ai.bucket IS NOT 'later' "
-      'AND ai.attention_score >= ? '
-      'AND d.conversation_key IS NULL '
-      'ORDER BY ai.attention_score DESC, c.conversation_key ASC LIMIT ?',
-      [...sources, threshold, limit],
-    );
+    final result = await db
+        .customSelect(
+          'SELECT c.conversation_key AS conversation_key FROM conversations c '
+          'LEFT JOIN conversation_ai ai '
+          '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
+          'LEFT JOIN drafts d '
+          '  ON d.source = c.source AND d.conversation_key = c.conversation_key '
+          "WHERE c.state = 'needs_reply' "
+          'AND c.source IN (${_placeholders(sources.length)}) '
+          // `IS NOT`, not `<>`: a thread with no bucket at all belongs here, and
+          // `NULL <> 'later'` would drop every one of them.
+          "AND ai.bucket IS NOT 'later' "
+          'AND ai.attention_score >= ? '
+          'AND d.conversation_key IS NULL '
+          'ORDER BY ai.attention_score DESC, c.conversation_key ASC LIMIT ?',
+          variables: _args([...sources, threshold, limit]),
+        )
+        .get();
     return [
-      for (final row in result) row['conversation_key'] as String? ?? '',
+      for (final row in result) row.data['conversation_key'] as String? ?? '',
     ];
   }
 
@@ -1850,20 +2140,22 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// included — because the timeline needs both: the key to know when the
   /// transcript crosses from one thread into another, and the subject to name
   /// the thread it crossed into.
-  List<Map<String, Object?>> storylineTimeline(
+  Future<List<Map<String, Object?>>> storylineTimeline(
     String storylineId, {
     List<String> sources = const ['email'],
-  }) {
+  }) async {
     if (sources.isEmpty) return const [];
-    final result = db.select(
-      'SELECT m.* FROM messages m '
-      'JOIN storyline_members sm '
-      '  ON sm.source = m.source AND sm.conversation_key = m.conversation_key '
-      'WHERE sm.storyline_id = ? '
-      'AND m.source IN (${_placeholders(sources.length)}) '
-      'ORDER BY m.received_at ASC, m.source_message_id ASC',
-      [storylineId, ...sources],
-    );
-    return [for (final row in result) Map<String, Object?>.from(row)];
+    final result = await db
+        .customSelect(
+          'SELECT m.* FROM messages m '
+          'JOIN storyline_members sm '
+          '  ON sm.source = m.source AND sm.conversation_key = m.conversation_key '
+          'WHERE sm.storyline_id = ? '
+          'AND m.source IN (${_placeholders(sources.length)}) '
+          'ORDER BY m.received_at ASC, m.source_message_id ASC',
+          variables: _args([storylineId, ...sources]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 }

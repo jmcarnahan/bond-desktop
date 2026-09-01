@@ -1,4 +1,3 @@
-import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -6,7 +5,8 @@ import 'package:bond_inbox/widgets/settings_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 void main() {
   /// Opens the dialog over a host that can pop it, which is what the "saved on
@@ -104,13 +104,13 @@ void main() {
       onAboutMeChanged: saved.add,
     );
 
-    await tester.enterText(find.byType(TextField), 'I own rate locks.');
+    await tester.enterText(find.byType(TextField), 'I own the website redesign.');
     expect(saved, isEmpty, reason: 'not saved per keystroke');
 
     await tester.tap(find.text('Done'));
     await tester.pumpAndSettle();
 
-    expect(saved, ['I own rate locks.']);
+    expect(saved, ['I own the website redesign.']);
   });
 
   testWidgets('and saved when it is dismissed rather than confirmed',
@@ -161,8 +161,7 @@ void main() {
   });
 
   testWidgets('what the dialog writes lands in app_prefs', (tester) async {
-    final db = sqlite3.openInMemory();
-    applySchema(db);
+    final db = testDb();
     addTearDown(db.close);
     final store = MessageStore(db);
 
@@ -180,14 +179,14 @@ void main() {
       onAboutMeChanged: prefs.setAboutMe,
     );
 
-    await tester.enterText(find.byType(TextField), 'I am a loan officer.');
+    await tester.enterText(find.byType(TextField), 'I run a small design studio.');
     await tester.drag(find.byType(Slider), const Offset(-500, 0));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Done'));
     await tester.pumpAndSettle();
 
-    expect(store.getPref(aboutMeKey), 'I am a loan officer.');
-    expect(double.parse(store.getPref(attentionThresholdKey)!), 1.0);
+    expect(await store.getPref(aboutMeKey), 'I run a small design studio.');
+    expect(double.parse((await store.getPref(attentionThresholdKey))!), 1.0);
     expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
   });
 

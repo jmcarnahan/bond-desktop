@@ -1,4 +1,6 @@
-import 'package:bond_inbox/data/db.dart';
+// `show BondDatabase`: drift generates row classes whose names collide with
+// the app's own models.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
@@ -14,7 +16,8 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// The switch between the two backends, as a property of the WIRING.
 ///
@@ -56,28 +59,32 @@ class _FakeSync implements MailSync {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
-  ProviderContainer container() {
+  /// A container with the stored settings already loaded: the notifier starts
+  /// on the defaults and replaces them a microtask later, so a test that read
+  /// a preference straight after building this would be reading the default
+  /// rather than what the database holds.
+  Future<ProviderContainer> container() async {
     final made = ProviderContainer(
       overrides: [dbProvider.overrideWithValue(db)],
     );
     addTearDown(made.dispose);
+    await made.read(appPrefsProvider.notifier).ready;
     return made;
   }
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
   });
 
   tearDown(() => db.close());
 
   group('which backend a fresh install gets', () {
-    test('is the MCP one, in all three providers', () {
-      final ref = container();
+    test('is the MCP one, in all three providers', () async {
+      final ref = await container();
 
       expect(ref.read(appPrefsProvider).backendMode, backendModeMcp);
       expect(ref.read(authSessionProvider), isA<McpAuthSession>());
@@ -85,7 +92,7 @@ void main() {
       expect(ref.read(teamsBackendProvider), isA<McpTeamsBackend>());
     });
 
-    test('pointed at the default server for this build', () {
+    test('pointed at the default server for this build', () async {
       // The deployed URL arrives ONLY as a --dart-define (public repo: which
       // cluster a company runs is environment, not code). The test binary
       // carries no define, so the compiled constant must be empty and the
@@ -94,7 +101,7 @@ void main() {
       expect(mcpDeployedUrl, isEmpty);
       expect(defaultMcpServerUrl, mcpLocalUrl);
 
-      final ref = container();
+      final ref = await container();
       expect(ref.read(appPrefsProvider).mcpServerUrl, defaultMcpServerUrl);
       expect(
         (ref.read(authSessionProvider) as McpAuthSession).mcpUrl.toString(),
@@ -102,14 +109,14 @@ void main() {
       );
     });
 
-    test('and it builds with no dart-defines at all', () {
+    test('and it builds with no dart-defines at all', () async {
       // The whole reason MCP is the default: the direct-Graph session cannot
       // even start without MS_CLIENT_ID and MS_TENANT_ID compiled in, and this
       // test process has neither.
       expect(GraphAuth.clientId, isEmpty);
       expect(GraphAuth.tenantId, isEmpty);
 
-      final ref = container();
+      final ref = await container();
 
       expect(ref.read(authSessionProvider), isA<McpAuthSession>());
       expect(ref.read(mailBackendProvider), isA<McpMailBackend>());
@@ -117,8 +124,8 @@ void main() {
       expect(ref.read(teamsSyncProvider), isA<TeamsSync>());
     });
 
-    test('and the MCP session and client are one stack, not two', () {
-      final ref = container();
+    test('and the MCP session and client are one stack, not two', () async {
+      final ref = await container();
 
       final stack = ref.read(mcpStackProvider);
       expect(identical(ref.read(mcpStackProvider), stack), isTrue);
@@ -127,11 +134,11 @@ void main() {
   });
 
   group('switching to the direct-Graph backend', () {
-    test('changes all three providers', () {
-      final ref = container();
+    test('changes all three providers', () async {
+      final ref = await container();
       expect(ref.read(authSessionProvider), isA<McpAuthSession>());
 
-      ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
+      await ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
 
       expect(ref.read(authSessionProvider), isA<GraphAuth>());
       expect(ref.read(mailBackendProvider), isA<GraphMail>());
@@ -139,11 +146,11 @@ void main() {
     });
 
     test('and everything built on them follows, with nothing invalidated by '
-        'hand', () {
-      final ref = container();
+        'hand', () async {
+      final ref = await container();
       final before = ref.read(syncServiceProvider);
 
-      ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
+      await ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
 
       // The mail sync is two providers below the switch. It rebuilt because it
       // watches, which is the whole mechanism — a stale sync here would keep
@@ -151,23 +158,23 @@ void main() {
       expect(identical(ref.read(syncServiceProvider), before), isFalse);
     });
 
-    test('and the choice is remembered', () {
-      final ref = container();
+    test('and the choice is remembered', () async {
+      final ref = await container();
 
-      ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
+      await ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
 
-      expect(store.getPref(backendModeKey), backendModeSdk);
+      expect(await store.getPref(backendModeKey), backendModeSdk);
       // A second launch reads it back.
-      final relaunched = container();
+      final relaunched = await container();
       expect(relaunched.read(appPrefsProvider).backendMode, backendModeSdk);
       expect(relaunched.read(authSessionProvider), isA<GraphAuth>());
     });
 
-    test('and back again', () {
-      final ref = container();
-      ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
+    test('and back again', () async {
+      final ref = await container();
+      await ref.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
 
-      ref.read(appPrefsProvider.notifier).setBackendMode(backendModeMcp);
+      await ref.read(appPrefsProvider.notifier).setBackendMode(backendModeMcp);
 
       expect(ref.read(authSessionProvider), isA<McpAuthSession>());
       expect(ref.read(mailBackendProvider), isA<McpMailBackend>());
@@ -180,23 +187,23 @@ void main() {
     // nothing about the rebuild.
     const custom = 'http://127.0.0.1:9999/mcp';
 
-    test('rebuilds the stack against the new URL', () {
-      final ref = container();
+    test('rebuilds the stack against the new URL', () async {
+      final ref = await container();
       final before = ref.read(mcpStackProvider);
 
-      ref.read(appPrefsProvider.notifier).setMcpServerUrl(custom);
+      await ref.read(appPrefsProvider.notifier).setMcpServerUrl(custom);
 
       final after = ref.read(mcpStackProvider);
       expect(identical(after, before), isFalse);
       expect(after.auth.mcpUrl.toString(), custom);
-      expect(store.getPref(mcpServerUrlKey), custom);
+      expect(await store.getPref(mcpServerUrlKey), custom);
     });
 
-    test('and the session and backends follow it', () {
-      final ref = container();
+    test('and the session and backends follow it', () async {
+      final ref = await container();
       final before = ref.read(mailBackendProvider);
 
-      ref.read(appPrefsProvider.notifier).setMcpServerUrl(custom);
+      await ref.read(appPrefsProvider.notifier).setMcpServerUrl(custom);
 
       expect(identical(ref.read(mailBackendProvider), before), isFalse);
       expect(
@@ -205,11 +212,11 @@ void main() {
       );
     });
 
-    test('an emptied field asks for the default back', () {
-      final ref = container();
-      ref.read(appPrefsProvider.notifier).setMcpServerUrl(mcpLocalUrl);
+    test('an emptied field asks for the default back', () async {
+      final ref = await container();
+      await ref.read(appPrefsProvider.notifier).setMcpServerUrl(mcpLocalUrl);
 
-      ref.read(appPrefsProvider.notifier).setMcpServerUrl('   ');
+      await ref.read(appPrefsProvider.notifier).setMcpServerUrl('   ');
 
       expect(ref.read(appPrefsProvider).mcpServerUrl, defaultMcpServerUrl);
     });
@@ -229,7 +236,7 @@ void main() {
       final mcp = _CountingMcp();
       final sync = _FakeSync();
       final teams = _RecordingTeams(McpTeamsBackend(mcp), store);
-      store.upsertConversation({
+      await store.upsertConversation({
         'source': 'email',
         'conversation_key': 'c1',
         'subject': 'c1',
@@ -247,8 +254,9 @@ void main() {
       expect(mcp.calls, isEmpty, reason: 'not one tool call reached the wire');
     });
 
-    test('and the connector the app builds is still the separate one', () {
-      final ref = container();
+    test('and the connector the app builds is still the separate one',
+        () async {
+      final ref = await container();
 
       // Typed to the concrete TeamsSync, and built from its own provider: that
       // separation is what makes "the timer cannot reach Teams" a fact about

@@ -1,6 +1,8 @@
 import 'dart:convert';
 
-import 'package:bond_inbox/data/db.dart';
+// `show`: drift generates row classes named Message/Conversation from the
+// tables, and this file means the app's own models.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -14,7 +16,8 @@ import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// One database, one identity — enforced rather than ritualized.
 ///
@@ -94,33 +97,36 @@ class _Tokens implements TokenStore {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late IdentityGuard guard;
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
     guard = IdentityGuard(store);
   });
 
   tearDown(() => db.close());
 
-  void seedMail(String id) {
-    store.upsertMessage({
+  Future<void> seedMail(String id) {
+    return store.upsertMessage({
       'source_message_id': id,
       'conversation_key': 'c1',
       'direction': 'inbound',
       'from_name': 'Eric Vance',
-      'from_address': 'eric@harborline.com',
+      'from_address': 'eric@example.com',
       'received_at': '2026-08-28T09:00:00Z',
-      'body_text': 'The appraisal is in.',
+      'body_text': 'The homepage copy is in.',
     });
   }
 
-  int mailCount() =>
-      store.db.select('SELECT COUNT(*) AS n FROM messages').first['n'] as int;
+  Future<int> mailCount() async {
+    final rows = await store.db
+        .customSelect('SELECT COUNT(*) AS n FROM messages')
+        .get();
+    return rows.first.data['n'] as int;
+  }
 
   group('IdentityGuard.adopt', () {
     test('an identity-less account neither wipes nor claims', () async {
@@ -129,18 +135,18 @@ void main() {
       // nor a UPN. They have read no mail, so there is nothing of theirs to
       // protect — and claiming the database in their name would hand it to a
       // label instead of a person.
-      seedMail('m1');
+      await seedMail('m1');
 
       final wiped =
           await guard.adopt(const AccountInfo(displayName: 'Local session'));
 
       expect(wiped, isFalse);
-      expect(mailCount(), 1);
-      expect(store.getPref(dbOwnerKey), isNull);
+      expect(await mailCount(), 1);
+      expect(await store.getPref(dbOwnerKey), isNull);
     });
 
     test('the first identity claims an unowned database, silently', () async {
-      seedMail('m1');
+      await seedMail('m1');
 
       final wiped = await guard.adopt(const AccountInfo(
         displayName: 'Ada Lovelace',
@@ -148,15 +154,15 @@ void main() {
       ));
 
       expect(wiped, isFalse);
-      expect(mailCount(), 1, reason: 'nothing to protect it from');
-      expect(store.getPref(dbOwnerKey), 'ada@example.test');
+      expect(await mailCount(), 1, reason: 'nothing to protect it from');
+      expect(await store.getPref(dbOwnerKey), 'ada@example.test');
     });
 
     test('the same identity in another case is the same person', () async {
       // Microsoft hands the address back in whatever case it was typed, and a
       // user must not lose their mailbox to a capital letter.
-      store.setPref(dbOwnerKey, 'ada@example.test');
-      seedMail('m1');
+      await store.setPref(dbOwnerKey, 'ada@example.test');
+      await seedMail('m1');
 
       final wiped = await guard.adopt(const AccountInfo(
         displayName: 'Ada Lovelace',
@@ -164,12 +170,12 @@ void main() {
       ));
 
       expect(wiped, isFalse);
-      expect(mailCount(), 1);
+      expect(await mailCount(), 1);
     });
 
     test('the UPN stands in when the tenant sets no mail address', () async {
-      store.setPref(dbOwnerKey, 'ada@corp.example.test');
-      seedMail('m1');
+      await store.setPref(dbOwnerKey, 'ada@corp.example.test');
+      await seedMail('m1');
 
       final wiped = await guard.adopt(const AccountInfo(
         displayName: 'Ada Lovelace',
@@ -177,16 +183,16 @@ void main() {
       ));
 
       expect(wiped, isFalse);
-      expect(mailCount(), 1);
+      expect(await mailCount(), 1);
     });
 
     test('a different identity finds the mail gone, and the settings kept',
         () async {
-      store.setPref(dbOwnerKey, 'ada@example.test');
-      store.setPref(backendModeKey, backendModeSdk);
-      store.setPref(aboutMeKey, 'An LO in Denver');
-      seedMail('m1');
-      store.setDeltaLink('inbox', 'cursor-1');
+      await store.setPref(dbOwnerKey, 'ada@example.test');
+      await store.setPref(backendModeKey, backendModeSdk);
+      await store.setPref(aboutMeKey, 'An LO in Denver');
+      await seedMail('m1');
+      await store.setDeltaLink('inbox', 'cursor-1');
 
       final wiped = await guard.adopt(const AccountInfo(
         displayName: 'Grace Hopper',
@@ -194,17 +200,17 @@ void main() {
       ));
 
       expect(wiped, isTrue);
-      expect(mailCount(), 0);
-      expect(store.getDeltaLink('inbox', source: 'email'), isNull,
+      expect(await mailCount(), 0);
+      expect(await store.getDeltaLink('inbox', source: 'email'), isNull,
           reason: "resuming Ada's sync position against Grace's mailbox is "
               'the other half of the same bug');
-      expect(store.getPref(dbOwnerKey), 'grace@example.test');
+      expect(await store.getPref(dbOwnerKey), 'grace@example.test');
       // A wipe is about one person's presence, not about the machine's setup:
       // which backend it talks through has to survive, or every account
       // switch is a re-setup — while Ada's self-description is hers, and
       // inherited by Grace it would steer Grace's triage with Ada's words.
-      expect(store.getPref(backendModeKey), backendModeSdk);
-      expect(store.getPref(aboutMeKey), isNull);
+      expect(await store.getPref(backendModeKey), backendModeSdk);
+      expect(await store.getPref(aboutMeKey), isNull);
     });
 
     test('an unclaimed database after a sign-out wipe is claimed, not wiped',
@@ -212,10 +218,10 @@ void main() {
       // The sign-out path clears db_owner along with the rows (see the wipeAll
       // group in store_test), so the next person to sign in — the same one or
       // not — takes an empty database over rather than wiping an empty one.
-      store.setPref(dbOwnerKey, 'ada@example.test');
-      seedMail('m1');
-      store.wipeAll();
-      seedMail('m2');
+      await store.setPref(dbOwnerKey, 'ada@example.test');
+      await seedMail('m1');
+      await store.wipeAll();
+      await seedMail('m2');
 
       final wiped = await guard.adopt(const AccountInfo(
         displayName: 'Grace Hopper',
@@ -223,16 +229,16 @@ void main() {
       ));
 
       expect(wiped, isFalse);
-      expect(mailCount(), 1);
-      expect(store.getPref(dbOwnerKey), 'grace@example.test');
+      expect(await mailCount(), 1);
+      expect(await store.getPref(dbOwnerKey), 'grace@example.test');
     });
   });
 
   group('the sign-in screen adopts before it hands over', () {
     testWidgets('a new identity finds the old mail already gone',
         (tester) async {
-      store.setPref(dbOwnerKey, 'ada@example.test');
-      seedMail('m1');
+      await store.setPref(dbOwnerKey, 'ada@example.test');
+      await seedMail('m1');
 
       int? mailWhenHandedOver;
       String? ownerWhenHandedOver;
@@ -247,15 +253,18 @@ void main() {
           )),
         ],
         child: MaterialApp(
-          home: SignInScreen(onSignedIn: () {
-            mailWhenHandedOver = mailCount();
-            ownerWhenHandedOver = store.getPref(dbOwnerKey);
+          home: SignInScreen(onSignedIn: () async {
+            mailWhenHandedOver = await mailCount();
+            ownerWhenHandedOver = await store.getPref(dbOwnerKey);
           }),
         ),
       ));
 
       await tester.tap(find.text('Sign in'));
       await tester.pump();
+      await tester.pump();
+      // The handover callback now reads the database, so what it captured
+      // lands a frame after the callback itself fired.
       await tester.pump();
 
       // Before the handover, not after: the gate swaps in the inbox the
@@ -270,8 +279,8 @@ void main() {
       // Microsoft account behind it, so the guard saw no identity and claimed
       // nothing; the identity arrives only when the connect lands, which is
       // where the rows finally become somebody's.
-      store.setPref(dbOwnerKey, 'ada@example.test');
-      seedMail('m1');
+      await store.setPref(dbOwnerKey, 'ada@example.test');
+      await seedMail('m1');
 
       final tokens = _Tokens();
       final auth = McpAuthSession(
@@ -304,19 +313,21 @@ void main() {
           ]))),
         ],
         child: MaterialApp(
-          home: SignInScreen(onSignedIn: () => mailWhenHandedOver = mailCount()),
+          home: SignInScreen(
+            onSignedIn: () async => mailWhenHandedOver = await mailCount(),
+          ),
         ),
       ));
 
       await tester.tap(find.text('Sign in'));
       await tester.pumpAndSettle();
-      expect(mailCount(), 1, reason: 'a nameless sign-in wipes nothing');
+      expect(await mailCount(), 1, reason: 'a nameless sign-in wipes nothing');
 
       await tester.tap(find.text("I've connected — continue"));
       await tester.pumpAndSettle();
 
       expect(mailWhenHandedOver, 0);
-      expect(store.getPref(dbOwnerKey), 'grace@example.test');
+      expect(await store.getPref(dbOwnerKey), 'grace@example.test');
     });
   });
 }

@@ -5,7 +5,7 @@ import '../theme/tokens.dart';
 import 'conversation_row.dart';
 
 /// Which threads the list shows. [open] is the working view — everything not
-/// yet resolved, split into what needs the LO and what is waiting on someone
+/// yet resolved, split into what needs the user and what is waiting on someone
 /// else; the rest are single-bucket views.
 ///
 /// [needsAction] is the model's view rather than the thread state machine's:
@@ -59,7 +59,7 @@ class ConversationListPane extends StatelessWidget {
       ];
 
   /// Threads triage left an ask on, in any state but done. A CTA on a thread
-  /// the LO already closed is history, not work — and `cta_text` is set only
+  /// the user already closed is history, not work — and `cta_text` is set only
   /// from a result that either named an action item or said the message needs
   /// one, so its presence IS the model's needs-action answer folded up.
   List<Conversation> get _needsAction => [
