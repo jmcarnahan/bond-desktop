@@ -14,6 +14,32 @@ MODEL_PORT   ?= 8080
 MODEL_HF     ?= ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
 # ~2GB KV cache; raise later for long agent trajectories.
 CTX_SIZE     ?= 32768
+
+# Explicit rather than the new auto default, which resolved to 4 slots — and
+# four slots against this app's strictly-serial client is slot roulette: the
+# LRU/LCP slot picker bounces consecutive requests across slots, so the
+# byte-identical system prompt the app maintains gets re-evaluated (~5s a
+# message) instead of hitting the one warm slot's cache. One slot until the
+# app actually sends concurrent requests.
+SLOTS        ?= 1
+
+# Speculative decoding seams, off by default — and MEASURED OFF on purpose.
+# This server disables speculation on grammar-constrained requests, and every
+# call the app makes is `response_format: json_schema`, so neither shape ever
+# engages for real traffic; both benched slightly SLOWER than no speculation
+# (corpus pass: 464.6s draft / 468.6s ngram vs 452.9s without). The seams stay
+# because they are one flag away for a build that lifts that limit or for
+# free-text work. Set one or the other, not both — the combination is untried.
+#   make model DRAFT_HF=ggml-org/Qwen3.5-0.8B-GGUF   → draft-model speculation
+#   make model SPEC_TYPE=ngram-simple                → ngram, no second model
+# A draft whose tokenizer does not match the target fails at startup — that
+# failure IS the compatibility check, so trying a candidate is safe.
+DRAFT_HF     ?=
+SPEC_TYPE    ?=
+
+# Tokens drafted per step when DRAFT_HF is set (build default: 3). Untuned —
+# see above: no measured config made speculation pay on this workload.
+DRAFT_MAX    ?= 12
 LOG_DIR      := tmp/logs
 WAIT_TIMEOUT ?= 120
 # Total seconds `make setup` waits for the first-run ~19GB download + model load.
@@ -121,6 +147,21 @@ setup:
 	@$(MAKE) --no-print-directory smoke
 	@printf "$(GREEN)setup complete — try: make chat$(RESET)\n"
 
+# -fa on rather than auto, so a regression in auto-detection can never
+# silently slow prefill. --load-mode mmap+mlock keeps mmap's fast load AND
+# wires the weights: without it macOS pages the mmap'd 16GB out during idle,
+# and the first prefill after a quiet stretch measured 6.8 tok/s against 130
+# warm (the bare mlock mode drops mmap; the old --mlock flag is deprecated).
+MODEL_FLAGS := --jinja -ngl 99 -c $(CTX_SIZE) -fa on --load-mode mmap+mlock \
+  --parallel $(SLOTS)
+ifneq ($(strip $(DRAFT_HF)),)
+MODEL_FLAGS += -hfd $(DRAFT_HF) --spec-draft-n-max $(DRAFT_MAX) \
+  --spec-draft-ngl 99
+endif
+ifneq ($(strip $(SPEC_TYPE)),)
+MODEL_FLAGS += --spec-type $(SPEC_TYPE)
+endif
+
 # -ngl 99 offloads every layer to Metal; --jinja is required for the model's
 # own chat template (and therefore for tool calling — see `make smoke-tools`).
 # The weights live in llama.cpp's HF cache, not this repo, so `make clean`
@@ -152,7 +193,7 @@ model:
 	 fi; \
 	 mkdir -p $(LOG_DIR); \
 	 printf "→ llama-server on :$(MODEL_PORT)  ($(MODEL_HF), ctx $(CTX_SIZE))\n"; \
-	 nohup llama-server -hf $(MODEL_HF) --jinja -ngl 99 -c $(CTX_SIZE) --port $(MODEL_PORT) \
+	 nohup llama-server -hf $(MODEL_HF) $(MODEL_FLAGS) --port $(MODEL_PORT) \
 	   > $(LOG_DIR)/model-$(MODEL_PORT).log 2>&1 &
 	@$(MAKE) --no-print-directory _wait-model
 
