@@ -12,7 +12,7 @@ import 'package:sqlite3/sqlite3.dart';
 /// It records concurrency as well as calls: "one item in flight, ever" is the
 /// worker's central promise, and a fake that only counted calls could not tell
 /// a serial drain from a parallel one.
-class ScriptedHandler implements WorkHandler {
+class ScriptedHandler extends WorkHandler {
   @override
   final String kind;
 
@@ -159,7 +159,8 @@ void main() {
       expect(workRow('extract', handler.seen.single)['attempts'], 0);
     });
 
-    test('a park stops the kinds behind it too', () async {
+    test('a downed server parks its own kind and lets the next kind run',
+        () async {
       store.enqueueWork('first', 'email', 'a');
       store.enqueueWork('second', 'email', 'b');
       final first = ScriptedHandler(
@@ -170,13 +171,33 @@ void main() {
 
       await AiWorker(store, handlers: [first, second]).pump();
 
-      // Both queues run against the same server. Marching on to the next kind
-      // would be a hundred more failures for the same reason.
+      // The kinds do not share a server any more — extraction is on the fast
+      // one, drafting on the 27B — so "this kind's server is not answering"
+      // is no evidence at all about the next kind's.
+      expect(workRow('first', 'a')['status'], 'pending');
+      expect(workRow('first', 'a')['attempts'], 0);
+      expect(second.seen, ['b']);
+      expect(workRow('second', 'b')['status'], 'done');
+    });
+
+    test('a dead session parks the whole drain, kinds behind it included',
+        () async {
+      store.enqueueWork('first', 'email', 'a');
+      store.enqueueWork('second', 'email', 'b');
+      final first =
+          ScriptedHandler('first', script: [const NotSignedIn()]);
+      final second = ScriptedHandler('second');
+
+      await AiWorker(store, handlers: [first, second]).pump();
+
+      // The other side of the same coin: a session that is over fails every
+      // kind's Graph-dependent work identically, whatever server it sits on.
       expect(second.seen, isEmpty);
+      expect(workRow('first', 'a')['status'], 'pending');
       expect(workRow('second', 'b')['status'], 'pending');
     });
 
-    test('a dead session parks the drain', () async {
+    test('a dead session stops the items behind it in its own kind', () async {
       store.enqueueWork('extract', 'email', 'a');
       store.enqueueWork('extract', 'email', 'b');
       final handler = ScriptedHandler('extract', script: [const NotSignedIn()]);

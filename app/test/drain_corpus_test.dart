@@ -160,7 +160,13 @@ void main() {
     seedCorpus(ungated);
     fake.scriptFor('triage', [triageAnswer(), 503]);
 
-    await TriageQueue(store, client, userAddress: loAddress).pump();
+    // Serial on purpose. The claims below are about drain SHAPE — which
+    // message the 503 lands on, and that exactly two sockets were opened —
+    // and both need the requests to go out one at a time. What a park does
+    // with three requests already in flight is `triage_queue_test.dart`'s
+    // job, and it owns that coverage.
+    await TriageQueue(store, client, userAddress: loAddress, concurrency: 1)
+        .pump();
 
     expect(messageRow(ungated.first.id)['triage_status'], 'triaged');
 

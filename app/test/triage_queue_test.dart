@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:bond_inbox/data/db.dart';
@@ -10,12 +11,14 @@ import 'package:sqlite3/sqlite3.dart';
 
 /// An [LlmClient] that answers from a script and never opens a socket.
 ///
-/// It records concurrency as well as calls: "one request in flight, ever" is
-/// the queue's central promise, and a fake that only counted calls could not
-/// tell a serial drain from a parallel one.
+/// It records concurrency as well as calls: how many requests the drain has in
+/// flight is the number this phase is about, and a fake that only counted
+/// calls could not tell a serial drain from a three-at-a-time one.
 class FakeLlm extends LlmClient {
-  /// Answers in order. A `Map` is returned, an `Exception` is thrown. The last
-  /// entry repeats once the script runs out.
+  /// Answers in order. A `Map` is returned, an `Exception` is thrown, and a
+  /// `Future` is awaited first and then treated as whichever of those it
+  /// yields — which is the only way to hold one request open while the drain
+  /// gets on with the others. The last entry repeats once the script runs out.
   final List<Object> script;
 
   final List<String> userMessages = [];
@@ -41,7 +44,8 @@ class FakeLlm extends LlmClient {
       // A real call suspends; without a suspension here two overlapping pumps
       // could interleave in a way the fake would never see.
       await Future<void>.delayed(const Duration(milliseconds: 1));
-      final step = script.length > 1 ? script.removeAt(0) : script.first;
+      var step = script.length > 1 ? script.removeAt(0) : script.first;
+      if (step is Future<Object>) step = await step;
       if (step is Exception) throw step;
       return Map<String, dynamic>.from(step as Map);
     } finally {
@@ -164,7 +168,7 @@ void main() {
       store.getConversationRow('email', key)!;
 
   group('drain', () {
-    test('runs strictly one request at a time', () async {
+    test('a second pump does not start a racing drain', () async {
       seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
       seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
       seedMessage(id: 'm3', receivedAt: '2026-08-29T12:00:00Z');
@@ -175,8 +179,40 @@ void main() {
       // and return rather than race it.
       await Future.wait([queue.pump(), queue.pump()]);
 
-      expect(llm.maxInFlight, 1);
+      // Three messages, three requests, and never more than one drain's worth
+      // in flight. A second drain would have shown up as either extra calls or
+      // a ceiling above the one queue's concurrency.
       expect(llm.userMessages.length, 3);
+      expect(llm.maxInFlight, lessThanOrEqualTo(3));
+    });
+
+    test('a backlog runs three at a time', () async {
+      for (var i = 0; i < 10; i++) {
+        seedMessage(id: 'm$i', receivedAt: '2026-08-29T${10 + i}:00:00Z');
+      }
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      // The whole point of the phase: a backlog keeps three requests batched
+      // at the server instead of leaving it idle between messages.
+      expect(llm.maxInFlight, 3);
+      expect(llm.userMessages.length, 10);
+      expect(store.triageCounts(sources: const ['email']), {'triaged': 10});
+    });
+
+    test('concurrency 1 is still available, and is still serial', () async {
+      for (var i = 0; i < 10; i++) {
+        seedMessage(id: 'm$i', receivedAt: '2026-08-29T${10 + i}:00:00Z');
+      }
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      // Not a vestige: the tests whose assertions are about request ORDER run
+      // this way, and so would a machine whose server has one slot.
+      expect(llm.maxInFlight, 1);
+      expect(store.triageCounts(sources: const ['email']), {'triaged': 10});
     });
 
     test('takes the newest message first', () async {
@@ -349,7 +385,11 @@ void main() {
       final llm = FakeLlm([answer()]);
       final fetch = FakeDetailFetch(store, error: const NotSignedIn());
 
-      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+      // Serial: this asserts that m2's fetch was never ATTEMPTED, which is a
+      // claim about what the drain does after the park rather than about what
+      // it had already sent.
+      await TriageQueue(store, llm, ensureBody: fetch.call, concurrency: 1)
+          .pump();
 
       // The session is over, so triaging m1 from its preview would be model
       // time spent on an answer the next sign-in could have done properly —
@@ -605,7 +645,9 @@ void main() {
         answer(),
       ]);
 
-      await TriageQueue(store, llm).pump();
+      // Serial: which message gets the 400 and which gets the answer is the
+      // script's ORDER, and only a one-at-a-time drain pins it.
+      await TriageQueue(store, llm, concurrency: 1).pump();
 
       expect(messageRow('bad')['triage_status'], 'error');
       expect(messageRow('good')['triage_status'], 'triaged');
@@ -616,7 +658,10 @@ void main() {
       seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
       final llm = FakeLlm([const LlmUnavailableException('not reachable')]);
 
-      await TriageQueue(store, llm).pump();
+      // Serial: the assertion is that exactly one call went out, which is a
+      // claim about the launch AFTER the park. The concurrent case — a park
+      // arriving with siblings already at the server — is the next test.
+      await TriageQueue(store, llm, concurrency: 1).pump();
 
       // One call, then the drain gives up: the second message would have
       // failed identically.
@@ -625,6 +670,73 @@ void main() {
       expect(row['triage_status'], 'pending');
       expect(row['triage_attempts'], 0);
       expect(messageRow('m2')['triage_status'], 'pending');
+    });
+
+    test('a park keeps the requests already in flight and launches no more',
+        () async {
+      for (var i = 1; i <= 5; i++) {
+        seedMessage(id: 'm$i', receivedAt: '2026-08-29T1$i:00:00Z');
+      }
+      // Launch order is newest first, so m5, m4 and m3 go out together. m5 and
+      // m3 are held open until m4 has found the server gone, which is the
+      // state a serial drain can never be in: a park with siblings mid-flight.
+      final held = Completer<Object>();
+      final llm = FakeLlm([
+        held.future,
+        const LlmUnavailableException('not reachable'),
+        held.future,
+      ]);
+      final queue = TriageQueue(store, llm);
+
+      final drain = queue.pump();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      held.complete(answer());
+      await drain;
+
+      // Three requests, and only three: the park stopped the launcher, so m2
+      // and m1 were never claimed.
+      expect(llm.userMessages.length, 3);
+
+      // The two that were already at the server were paid for either way, so
+      // their answers are kept rather than thrown away with the park.
+      expect(messageRow('m5')['triage_status'], 'triaged');
+      expect(messageRow('m3')['triage_status'], 'triaged');
+
+      // Nothing was wrong with any of these three, so none of them spends an
+      // attempt — the parked one included.
+      for (final id in ['m4', 'm2', 'm1']) {
+        final row = messageRow(id);
+        expect(row['triage_status'], 'pending', reason: id);
+        expect(row['triage_attempts'], 0, reason: id);
+      }
+    });
+
+    test('an older message finishing last still loses the fold-up', () async {
+      seedConversation(lastInboundAt: '2026-08-29T12:00:00Z');
+      seedMessage(id: 'newer', receivedAt: '2026-08-29T12:00:00Z');
+      seedMessage(id: 'older', receivedAt: '2026-08-20T09:00:00Z');
+      // Both go out at once, and the older one is held open so it folds up
+      // LAST. Serially that ordering was impossible; concurrently it is the
+      // normal case, and `_foldUp`'s newest-inbound guard is the only thing
+      // standing between it and a thread advertising last week's ask.
+      final held = Completer<Object>();
+      final llm = FakeLlm([
+        answer(urgency: 'urgent', actionItems: const ['Extend the lock']),
+        held.future,
+      ]);
+
+      final drain = TriageQueue(store, llm).pump();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(conversationRow()['cta_text'], 'Extend the lock');
+      held.complete(
+        answer(urgency: 'low', actionItems: const ['Reply about parking']),
+      );
+      await drain;
+
+      expect(messageRow('older')['triage_status'], 'triaged');
+      final row = conversationRow();
+      expect(row['cta_text'], 'Extend the lock');
+      expect(row['cta_urgency'], 'urgent');
     });
 
     test('the next pump picks up where a downed server left off', () async {

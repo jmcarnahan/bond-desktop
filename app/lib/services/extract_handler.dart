@@ -17,7 +17,7 @@ import 'llm/llm_client.dart';
 /// failure is the item's failure; the embedding is an optimisation on top, and
 /// an embedding server that is down must never cost a message the extraction
 /// that already succeeded.
-class ExtractHandler implements WorkHandler {
+class ExtractHandler extends WorkHandler {
   static const String _source = 'email';
 
   final MessageStore _store;
@@ -28,6 +28,23 @@ class ExtractHandler implements WorkHandler {
 
   @override
   String get kind => 'extract';
+
+  /// Three at a time, where every other kind is one.
+  ///
+  /// Extraction is the one queue whose items are genuinely independent: each
+  /// reads one message and writes that message's own row. The two things it
+  /// touches beyond that survive being reordered — the bucket filing is
+  /// guarded to the thread's newest inbound message, the embedding refresh is
+  /// last-writer-wins exactly as it already was under the serial drain (the
+  /// stored hash makes a repeat free, so the next extraction self-heals it),
+  /// and the storyline requeue is idempotent by construction (`requeueWork`
+  /// on a key that is already queued is the same row).
+  ///
+  /// Three and not more: it is the batch the fast server is started with slots
+  /// for (`FAST_SLOTS`), and past a small batch each individual request slows
+  /// down enough that the first result takes longer to reach the screen.
+  @override
+  int get concurrency => 3;
 
   @override
   Future<void> run(Map<String, Object?> item) async {

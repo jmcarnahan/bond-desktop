@@ -9,7 +9,7 @@ import 'storyline_service.dart';
 
 /// Considers one conversation for the storylines that already exist. Queued by
 /// the extraction handler whenever a thread's embedding changes.
-class StorylineAssignHandler implements WorkHandler {
+class StorylineAssignHandler extends WorkHandler {
   static const String _source = 'email';
 
   final StorylineService _service;
@@ -34,7 +34,7 @@ class StorylineAssignHandler implements WorkHandler {
 /// per sync against the single entity id `sweep` — there is one mailbox, so
 /// there is one sweep, and the work table's primary key is what keeps a
 /// hundred syncs from queueing a hundred of them.
-class StorylineSweepHandler implements WorkHandler {
+class StorylineSweepHandler extends WorkHandler {
   final StorylineService _service;
 
   StorylineSweepHandler(this._service);

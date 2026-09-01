@@ -158,7 +158,7 @@ class _GraphStub {
 }
 
 /// A handler that records what the worker handed it and does no work.
-class _Recording implements WorkHandler {
+class _Recording extends WorkHandler {
   @override
   final String kind;
 

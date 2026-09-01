@@ -161,11 +161,21 @@ final llmClientProvider = Provider<LlmClient>((ref) => LlmClient());
 final fastLlmClientProvider =
     Provider<LlmClient>((ref) => LlmClient(baseUrl: LlmClient.fastBaseUrl));
 
-/// The one gate both drains hold while at the model server. One instance for
-/// the app, or it would serialize nothing — see [DrainGate].
+/// The one gate the two DRAINS hold while at the model servers — servers
+/// plural since the split above, which is why the gate is about drains rather
+/// than about a server.
+///
+/// It keeps a triage drain and a worker drain from running at once: both send
+/// their bulk work to the fast server, so overlapping them would double-book
+/// its slots and have each drain's byte-identical system prompt evict the
+/// other's from the KV prefix cache. It deliberately does NOT serialize the
+/// handful of requests one drain has in flight — those are batched by the
+/// server on purpose, and are what the slot count is sized for.
+///
+/// One instance for the app, or it would serialize nothing — see [DrainGate].
 final drainGateProvider = Provider<DrainGate>((ref) => DrainGate());
 
-/// The triage worker. Exactly one for the whole app: it is a serial queue over
+/// The triage worker. Exactly one for the whole app: it is one queue over
 /// shared rows, and a second instance would claim the same messages.
 final triageQueueProvider = Provider<TriageQueue>((ref) {
   final queue = TriageQueue(
@@ -190,7 +200,7 @@ final embeddingsClientProvider =
     Provider<EmbeddingsClient>((ref) => EmbeddingsClient());
 
 /// The AI work queue. One for the whole app, for the same reason there is one
-/// [triageQueueProvider]: it is a serial queue over shared rows.
+/// [triageQueueProvider]: it is one queue over shared rows.
 ///
 /// Its handlers drain in list order, so the order here is the order the work
 /// happens in.

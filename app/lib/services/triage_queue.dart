@@ -31,13 +31,19 @@ class TriageProgress {
   int get done => total - remaining;
 }
 
-/// Drains pending inbound messages through the gates and the local model, one
-/// at a time, newest first.
+/// Drains pending inbound messages through the gates and the local model, a
+/// few at a time, newest first.
 ///
-/// Strictly serial, and not as a simplification: the model generates at about
-/// twelve tokens a second on one machine, so a second concurrent request does
-/// not go twice as fast, it makes both requests take twice as long — and it
-/// throws away llama-server's prompt cache between them.
+/// Bounded-concurrent rather than serial, and the bound is the interesting
+/// half. A GPU reads the model's weights once per decode step however many
+/// sequences share that step, so K requests in flight at one llama-server come
+/// back in nothing like K times the wall clock of one: at K=3, against a
+/// server started with matching slots, the aggregate is worth roughly 2.5-3x a
+/// serial drain. The trade reverses past a small K — every request in a batch
+/// gets individually slower — and two things here care about ONE request
+/// rather than the aggregate: [LlmClient]'s 120-second timeout, which is
+/// sized to catch a wedged server rather than a batched one, and the person
+/// waiting for the first triaged message to appear.
 ///
 /// Each message goes through two tiers, in this order for a reason:
 ///
@@ -88,6 +94,11 @@ class TriageQueue {
   final StreamController<TriageProgress> _progress =
       StreamController<TriageProgress>.broadcast();
 
+  /// How many messages may be at the model server at once. See the class doc
+  /// for why it is small; `concurrency: 1` restores the old strictly-serial
+  /// drain, which is what the tests that assert on request ORDER use.
+  final int _concurrency;
+
   String? _userAddress;
   bool _running = false;
   bool _stopped = false;
@@ -98,9 +109,11 @@ class TriageQueue {
     String? userAddress,
     Future<void> Function(String sourceMessageId)? ensureBody,
     DrainGate? gate,
+    int concurrency = 3,
   })  : _userAddress = userAddress,
         _ensureBody = ensureBody,
-        _gate = gate ?? DrainGate();
+        _gate = gate ?? DrainGate(),
+        _concurrency = concurrency;
 
   /// The signed-in mailbox, for the gate that skips the loan officer's own
   /// mail. Set after sign-in resolves; until then that one gate is simply off.
@@ -108,7 +121,7 @@ class TriageQueue {
 
   Stream<TriageProgress> get progress => _progress.stream;
 
-  /// Ends the current drain after the message in flight finishes. Not
+  /// Ends the current drain after the messages already in flight finish. Not
   /// permanent: the next [pump] starts a fresh drain.
   void stop() => _stopped = true;
 
@@ -136,20 +149,44 @@ class TriageQueue {
     // is exactly when a user with a fresh backlog is looking for it.
     _emit();
     try {
-      await _gate.run(() async {
-        while (!_stopped) {
-          final row = _store.nextPendingTriage(sources: const [_source]);
-          if (row == null) break;
-          if (!await _triageOne(row)) break;
-        }
-      });
+      await _gate.run(_drain);
     } finally {
       _running = false;
     }
   }
 
-  /// One message. Returns false when the drain should stop rather than move
-  /// on to the next message.
+  /// Up to [_concurrency] messages at the model server at once.
+  ///
+  /// What makes that safe is the claim: [_triageOne] writes `processing`
+  /// SYNCHRONOUSLY before its first await, and there is no await between
+  /// [MessageStore.nextPendingTriage] and the call to it, so the row is off
+  /// the pending list before this loop can ask for another one. A message can
+  /// never be handed to two futures. Do not put an await between those two
+  /// statements.
+  Future<void> _drain() async {
+    final inFlight = <Future<void>>{};
+    var parked = false;
+    while (!_stopped && !parked) {
+      while (inFlight.length < _concurrency && !_stopped && !parked) {
+        final row = _store.nextPendingTriage(sources: const [_source]);
+        if (row == null) break;
+        late final Future<void> future;
+        future = _triageOne(row).then((carryOn) {
+          if (!carryOn) parked = true;
+        }).whenComplete(() => inFlight.remove(future));
+        inFlight.add(future);
+      }
+      if (inFlight.isEmpty) break;
+      // Over a COPY: `whenComplete` mutates the set as each message lands.
+      await Future.any(inFlight.toList());
+    }
+    // A park — or a [stop] — stops new launches, never the requests already at
+    // the server: those answers are paid for, and their results are kept.
+    await Future.wait(inFlight.toList());
+  }
+
+  /// One message. Returns false when the drain should launch nothing further
+  /// rather than move on to the next message.
   Future<bool> _triageOne(Map<String, Object?> row) async {
     final id = row['source_message_id'] as String? ?? '';
     var current = row;
@@ -211,9 +248,11 @@ class TriageQueue {
       return true;
     } on LlmUnavailableException {
       // Nothing about this message failed, so it does not spend an attempt.
-      // The drain stops too: every message behind it would fail identically,
-      // and marking a hundred of them is just noise on a laptop where the
-      // model server is not running.
+      // The drain launches nothing more either: every message behind it would
+      // fail identically, and marking a hundred of them is just noise on a
+      // laptop where the model server is not running. Triage is one kind on
+      // one server, so unlike the AI worker there is no other queue here that
+      // a different server could still be answering for.
       _store.writeTriage(_source, id, status: 'pending');
       _emit();
       return false;

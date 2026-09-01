@@ -33,7 +33,7 @@ class FakeSync implements MailSync {
 }
 
 /// Records when it ran, relative to everything else in [log].
-class LoggingHandler implements WorkHandler {
+class LoggingHandler extends WorkHandler {
   @override
   final String kind;
   final List<String> log;

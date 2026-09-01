@@ -13,7 +13,7 @@ import 'llm/llm_client.dart';
 /// sqlite until a person presses Send, and keeping the model's output on this
 /// side of that line is what makes "never auto-send" a property of the code
 /// rather than a promise in a comment.
-class DraftHandler implements WorkHandler {
+class DraftHandler extends WorkHandler {
   static const String _source = 'email';
 
   /// A reply is longer than a label. The default 512 is enough to truncate a

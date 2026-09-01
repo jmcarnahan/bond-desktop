@@ -14,7 +14,7 @@ import 'package:sqlite3/sqlite3.dart';
 /// of the kind asked for and finishes. The real worker is used rather than a
 /// stand-in stream because what is being pinned is that the notifier filters
 /// the kinds the real worker actually reports.
-class SilentHandler implements WorkHandler {
+class SilentHandler extends WorkHandler {
   @override
   final String kind;
 

@@ -59,9 +59,11 @@ EMBED_HF     ?= ggml-org/embeddinggemma-300M-GGUF
 # parks exactly as it always has.
 FAST_PORT    ?= 8082
 FAST_HF      ?= ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF
-# 1 until phase 4 makes the drains concurrent — see SLOTS above for why more
-# slots against a strictly-serial client is slot roulette rather than speed.
-FAST_SLOTS   ?= 1
+# Matched to the app's drain concurrency of 3, plus one slot of headroom for a
+# user-triggered pump. Slots and concurrent clients want to be the same number:
+# more slots than clients is the slot roulette described under SLOTS above,
+# fewer makes the extra requests queue on the server instead of batching.
+FAST_SLOTS   ?= 4
 
 # Where llama-server's -hf flag parks the weights: the repo half of MODEL_HF
 # (everything before the ':'), with '/' turned into '--' the way huggingface's
