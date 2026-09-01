@@ -43,6 +43,15 @@ class ThreadDetailPanel extends StatelessWidget {
   /// that reads as broken.
   final VoidCallback? onKeepInInbox;
 
+  /// Rendered at the END of the transcript, inside the same scroll view and
+  /// indented to the message body column, so it reads as attached to the last
+  /// message rather than parked under the pane.
+  ///
+  /// Hosts pass the reply affordance here. The panel does not know what it is
+  /// and does not ask — it renders a transcript and knows nothing about drafts
+  /// or sending, which is the arrangement the composer already lives under.
+  final Widget? afterTranscript;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -52,6 +61,7 @@ class ThreadDetailPanel extends StatelessWidget {
     this.onAddToStoryline,
     this.onSendToLater,
     this.onKeepInInbox,
+    this.afterTranscript,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -98,8 +108,25 @@ class ThreadDetailPanel extends StatelessWidget {
       ));
       previous = message;
     }
+
+    final after = afterTranscript;
+    if (after != null) {
+      items.add(Padding(
+        // The avatar column plus its gutter — `MessageRow` reserves exactly
+        // this much on continuation rows, so the affordance starts where the
+        // message bodies above it do.
+        padding: const EdgeInsets.only(
+          left: _bodyColumnInset,
+          top: BondSpacing.s16,
+        ),
+        child: after,
+      ));
+    }
     return items;
   }
+
+  /// [MessageRow]'s avatar diameter (36) plus the gutter it puts beside it.
+  static const double _bodyColumnInset = 36 + BondSpacing.s12;
 
   @override
   Widget build(BuildContext context) {

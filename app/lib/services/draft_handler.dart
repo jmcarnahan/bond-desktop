@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
@@ -18,8 +20,9 @@ class DraftHandler extends WorkHandler {
 
   /// A reply is longer than a label. The default 512 is enough to truncate a
   /// 150-word draft mid-sentence, and a cut-off draft is grammar-valid, so
-  /// nothing downstream would notice.
-  static const int _maxTokens = 1024;
+  /// nothing downstream would notice. The answer now carries the two short
+  /// options as well as the long form, so the ceiling went up with it.
+  static const int _maxTokens = 1536;
 
   /// Two past replies, clipped: a tone sample, not a second thread.
   static const int _styleExamples = 2;
@@ -92,6 +95,15 @@ class DraftHandler extends WorkHandler {
       replyToMessageId: replyTo.id,
       body: result.replyBody,
       evidence: result.evidence,
+      // Null rather than `[]`: "the model offered no short replies" and "the
+      // options were read and there were none" are the same thing to every
+      // reader, and one of the two spellings is shorter.
+      optionsJson: result.options.isEmpty
+          ? null
+          : jsonEncode([
+              for (final option in result.options)
+                {'stance': option.stance, 'body': option.body},
+            ]),
       status: 'suggested',
     );
     _log.note({'chars': result.replyBody.length});

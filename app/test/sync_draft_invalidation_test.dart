@@ -141,6 +141,7 @@ void main() {
       conversationKey: key,
       replyToMessageId: 'old-message',
       body: 'A reply to what was said before.',
+      optionsJson: '[{"stance":"Confirm Friday","body":"Friday works."}]',
     );
   }
 
@@ -161,6 +162,8 @@ void main() {
 
     await sync.syncNow();
 
+    // The whole row goes, so the short replies go with it — they answered the
+    // message that is no longer the newest one, exactly as the long form did.
     expect(await store.getDraft('email', 'conv-1'), isNull);
   });
 

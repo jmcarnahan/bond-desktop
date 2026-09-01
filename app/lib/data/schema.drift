@@ -237,5 +237,22 @@ CREATE TABLE drafts (
   web_link TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  -- Migration-added columns sit AFTER the originals: ALTER TABLE appends, so
+  -- this is the only position where an upgraded install and a fresh one get
+  -- identical table_info.
+  --
+  -- `options_json` is a JSON array of at most two ready-to-send short replies,
+  -- `[{"stance": "…", "body": "…"}]`, written by the same model call that
+  -- writes `body` — the long form. A column rather than a table because
+  -- nothing ever queries INTO the options, and a second table would have to be
+  -- keyed by something other than (source, conversation_key), breaking the
+  -- one-draft-per-conversation primary key that `needsDraftKeys` and the
+  -- sync's draft invalidation both rely on.
+  --
+  -- `options_dismissed` keeps the row when the user closes the suggestions,
+  -- the same trick `status = 'dismissed'` plays for the long form: deleting it
+  -- would let the auto-enqueue write the identical options straight back.
+  options_json TEXT,
+  options_dismissed INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (source, conversation_key)
 ) STRICT;

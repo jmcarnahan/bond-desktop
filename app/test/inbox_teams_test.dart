@@ -33,6 +33,10 @@ import 'fixtures/test_db.dart';
 ///   Graph builds a mail reply for this app through `createReply`, and there is
 ///   no equivalent for a chat, so a reply box on one would be a box that
 ///   cannot send.
+/// - **the reply surface a mail thread DOES get**: the stored short replies
+///   reaching the transcript, and the composer staying collapsed until asked
+///   for. Both are wiring between the draft row and the pane, which is only
+///   assembled here.
 
 class _Tokens implements TokenStore {
   final Map<String, String> values = {};
@@ -246,7 +250,7 @@ void main() {
       expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
     });
 
-    testWidgets('a mail thread still has one', (tester) async {
+    testWidgets('a mail thread reaches one through Reply…', (tester) async {
       await seedMail('c1');
       await pumpScreen(tester);
 
@@ -254,8 +258,99 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.byType(Composer), findsOneWidget);
+      // Collapsed is the DEFAULT: a thread opens as something to read.
+      expect(find.byType(Composer), findsNothing);
       expect(find.text('Reply in Microsoft Teams'), findsNothing);
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+
+      expect(find.byType(Composer), findsOneWidget);
+    });
+
+    testWidgets('and the reply window closes again on its ×', (tester) async {
+      await seedMail('c1');
+      await pumpScreen(tester);
+
+      await tester.tap(find.text('Eric Vance').first);
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pump();
+
+      expect(find.byType(Composer), findsNothing);
+      expect(find.text('Reply…'), findsOneWidget);
+    });
+  });
+
+  group('the quick replies', () {
+    Future<void> seedOptions(String key) async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: key,
+        replyToMessageId: '$key-m1',
+        body: 'Thanks Eric — the copy looks good, I will review it today.',
+        optionsJson: '[{"stance":"Confirm receipt","body":"Got it, thanks."},'
+            '{"stance":"Ask for a deadline","body":"When do you need this by?"}]',
+      );
+    }
+
+    Future<void> openThread(WidgetTester tester) async {
+      await tester.tap(find.text('Eric Vance').first);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('the stored options reach the end of the transcript',
+        (tester) async {
+      await seedMail('c1');
+      await seedOptions('c1');
+      await pumpScreen(tester);
+
+      await openThread(tester);
+
+      expect(find.text('Confirm receipt'), findsOneWidget);
+      expect(find.text('Ask for a deadline'), findsOneWidget);
+    });
+
+    testWidgets('without a send grant a card opens the composer instead',
+        (tester) async {
+      // The honest version of the gesture: nothing in this build could put
+      // that mail in front of anyone, so nothing pretends to.
+      await seedMail('c1');
+      await seedOptions('c1');
+      await pumpScreen(tester);
+      await openThread(tester);
+
+      await tester.tap(find.text('Confirm receipt'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(Composer), findsOneWidget);
+      expect(find.widgetWithText(Composer, 'Got it, thanks.'), findsOneWidget);
+    });
+
+    testWidgets('after the user\'s OWN last message there is nothing to answer',
+        (tester) async {
+      await seedMail('c1');
+      await seedOptions('c1');
+      await store.upsertMessage({
+        'source_message_id': 'c1-m2',
+        'conversation_key': 'c1',
+        'direction': 'outbound',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'Already answered this one.',
+      });
+      await pumpScreen(tester);
+
+      await openThread(tester);
+
+      expect(find.text('Confirm receipt'), findsNothing);
+      expect(find.text('Reply…'), findsNothing);
     });
   });
 

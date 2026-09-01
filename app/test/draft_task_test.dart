@@ -54,21 +54,37 @@ void main() {
   const task = DraftTask();
 
   group('schema', () {
-    test('evidence comes first, and both fields are required', () {
-      // A grammar emits fields in schema order, so evidence first is what makes
-      // the model say what the sender needs before it writes the reply.
+    test('evidence first, then the options, then the long reply', () {
+      // A grammar emits fields in schema order. Evidence first is what makes
+      // the model say what the sender needs before it writes anything; the
+      // options before the long form is what makes the expansion follow a
+      // decision that has already been committed to.
       final properties = task.schema['properties'] as Map<String, dynamic>;
-      expect(properties.keys.toList(), ['evidence', 'reply_body']);
-      expect(task.schema['required'], ['evidence', 'reply_body']);
+      expect(properties.keys.toList(), ['evidence', 'options', 'reply_body']);
+      expect(task.schema['required'], ['evidence', 'options', 'reply_body']);
       expect(task.schema['additionalProperties'], isFalse);
     });
 
     test('is flat — no \$defs this llama-server build would reject', () {
       expect(task.schema.containsKey(r'$defs'), isFalse);
       final properties = task.schema['properties'] as Map<String, dynamic>;
-      for (final property in properties.values) {
-        expect((property as Map)['type'], 'string');
+      expect((properties['evidence'] as Map)['type'], 'string');
+      expect((properties['reply_body'] as Map)['type'], 'string');
+      final items = (properties['options'] as Map)['items'] as Map;
+      expect(items['additionalProperties'], isFalse);
+      final fields = items['properties'] as Map;
+      for (final field in fields.values) {
+        expect((field as Map)['type'], 'string');
       }
+    });
+
+    test('the options array carries no count constraint', () {
+      // minItems/maxItems are not part of what this build converts into a
+      // grammar, and a schema it cannot convert fails the request outright.
+      // One-or-two is enforced in validate() instead.
+      final options = (task.schema['properties'] as Map)['options'] as Map;
+      expect(options.containsKey('minItems'), isFalse);
+      expect(options.containsKey('maxItems'), isFalse);
     });
   });
 
@@ -265,6 +281,93 @@ void main() {
         task.validate(const {'evidence': 42, 'reply_body': 7}).evidence,
         '42',
       );
+    });
+  });
+
+  group('validate — the short replies', () {
+    DraftResult withOptions(Object? options) => task.validate({
+          'evidence': 'e',
+          'reply_body': 'the long one',
+          'options': options,
+        });
+
+    test('reads one option', () {
+      final result = withOptions([
+        {'stance': 'Confirm Thursday', 'reply_body': 'Thursday works.'},
+      ]);
+
+      expect(result.options.length, 1);
+      expect(result.options.single.stance, 'Confirm Thursday');
+      expect(result.options.single.body, 'Thursday works.');
+      // The long form is untouched by any of this.
+      expect(result.replyBody, 'the long one');
+    });
+
+    test('reads two, in the order the model wrote them', () {
+      final result = withOptions([
+        {'stance': 'Confirm Thursday', 'reply_body': 'Thursday works.'},
+        {'stance': 'Propose Monday', 'reply_body': 'Could we say Monday?'},
+      ]);
+
+      expect(
+        [for (final o in result.options) o.stance],
+        ['Confirm Thursday', 'Propose Monday'],
+      );
+    });
+
+    test('keeps the FIRST two and drops the rest', () {
+      // The prompt asks for one or two and the grammar cannot be made to
+      // insist, so this is where the ceiling is. First two, because the model
+      // is told to put the one it would actually send first.
+      final result = withOptions([
+        for (var i = 0; i < 5; i++)
+          {'stance': 'Stance $i', 'reply_body': 'Body $i'},
+      ]);
+
+      expect([for (final o in result.options) o.stance], ['Stance 0', 'Stance 1']);
+    });
+
+    test('drops an option with no stance, and one with no body', () {
+      final result = withOptions([
+        {'stance': '  ', 'reply_body': 'unlabelled'},
+        {'stance': 'Decline politely', 'reply_body': ''},
+        {'stance': 'Confirm Thursday', 'reply_body': 'Thursday works.'},
+      ]);
+
+      expect(result.options.single.stance, 'Confirm Thursday');
+    });
+
+    test('clamps a long stance and a runaway body', () {
+      final result = withOptions([
+        {'stance': 'S' * 200, 'reply_body': 'B' * 900},
+      ]);
+
+      expect(result.options.single.stance.length, 40);
+      expect(result.options.single.body.length, 500);
+    });
+
+    test('a missing, wrong-typed or half-written options key reads as none',
+        () {
+      // Never throws: the long-form reply is what this task exists for, and no
+      // cards is a state the UI already draws.
+      expect(
+        task.validate(const {'evidence': 'e', 'reply_body': 'r'}).options,
+        isEmpty,
+      );
+      expect(withOptions('two of them').options, isEmpty);
+      expect(withOptions(const []).options, isEmpty);
+      expect(withOptions(const ['just a string']).options, isEmpty);
+      expect(withOptions(const [{'stance': 'Only a stance'}]).options, isEmpty);
+    });
+  });
+
+  group('the drafting rules', () {
+    test('say what a second option has to be for', () {
+      // The decision this feature turns on: two options means two different
+      // commitments, not the same answer said twice.
+      expect(task.systemPrompt, contains('rewordings'));
+      expect(task.systemPrompt, contains('stance'));
+      expect(task.systemPrompt, contains('options'));
     });
   });
 }

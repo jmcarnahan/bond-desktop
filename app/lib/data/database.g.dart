@@ -7512,6 +7512,29 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _optionsJsonMeta = const VerificationMeta(
+    'optionsJson',
+  );
+  late final GeneratedColumn<String> optionsJson = GeneratedColumn<String>(
+    'options_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _optionsDismissedMeta = const VerificationMeta(
+    'optionsDismissed',
+  );
+  late final GeneratedColumn<int> optionsDismissed = GeneratedColumn<int>(
+    'options_dismissed',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -7524,6 +7547,8 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
     webLink,
     createdAt,
     updatedAt,
+    optionsJson,
+    optionsDismissed,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -7616,6 +7641,24 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
     } else if (isInserting) {
       context.missing(_updatedAtMeta);
     }
+    if (data.containsKey('options_json')) {
+      context.handle(
+        _optionsJsonMeta,
+        optionsJson.isAcceptableOrUnknown(
+          data['options_json']!,
+          _optionsJsonMeta,
+        ),
+      );
+    }
+    if (data.containsKey('options_dismissed')) {
+      context.handle(
+        _optionsDismissedMeta,
+        optionsDismissed.isAcceptableOrUnknown(
+          data['options_dismissed']!,
+          _optionsDismissedMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -7665,6 +7708,14 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
         DriftSqlType.string,
         data['${effectivePrefix}updated_at'],
       )!,
+      optionsJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}options_json'],
+      ),
+      optionsDismissed: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}options_dismissed'],
+      )!,
     );
   }
 
@@ -7694,6 +7745,24 @@ class Draft extends DataClass implements Insertable<Draft> {
   final String? webLink;
   final String createdAt;
   final String updatedAt;
+
+  /// Migration-added columns sit AFTER the originals: ALTER TABLE appends, so
+  /// this is the only position where an upgraded install and a fresh one get
+  /// identical table_info.
+  ///
+  /// `options_json` is a JSON array of at most two ready-to-send short replies,
+  /// `[{"stance": "…", "body": "…"}]`, written by the same model call that
+  /// writes `body` — the long form. A column rather than a table because
+  /// nothing ever queries INTO the options, and a second table would have to be
+  /// keyed by something other than (source, conversation_key), breaking the
+  /// one-draft-per-conversation primary key that `needsDraftKeys` and the
+  /// sync's draft invalidation both rely on.
+  ///
+  /// `options_dismissed` keeps the row when the user closes the suggestions,
+  /// the same trick `status = 'dismissed'` plays for the long form: deleting it
+  /// would let the auto-enqueue write the identical options straight back.
+  final String? optionsJson;
+  final int optionsDismissed;
   const Draft({
     required this.source,
     required this.conversationKey,
@@ -7705,6 +7774,8 @@ class Draft extends DataClass implements Insertable<Draft> {
     this.webLink,
     required this.createdAt,
     required this.updatedAt,
+    this.optionsJson,
+    required this.optionsDismissed,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -7725,6 +7796,10 @@ class Draft extends DataClass implements Insertable<Draft> {
     }
     map['created_at'] = Variable<String>(createdAt);
     map['updated_at'] = Variable<String>(updatedAt);
+    if (!nullToAbsent || optionsJson != null) {
+      map['options_json'] = Variable<String>(optionsJson);
+    }
+    map['options_dismissed'] = Variable<int>(optionsDismissed);
     return map;
   }
 
@@ -7746,6 +7821,10 @@ class Draft extends DataClass implements Insertable<Draft> {
           : Value(webLink),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
+      optionsJson: optionsJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(optionsJson),
+      optionsDismissed: Value(optionsDismissed),
     );
   }
 
@@ -7767,6 +7846,8 @@ class Draft extends DataClass implements Insertable<Draft> {
       webLink: serializer.fromJson<String?>(json['web_link']),
       createdAt: serializer.fromJson<String>(json['created_at']),
       updatedAt: serializer.fromJson<String>(json['updated_at']),
+      optionsJson: serializer.fromJson<String?>(json['options_json']),
+      optionsDismissed: serializer.fromJson<int>(json['options_dismissed']),
     );
   }
   @override
@@ -7783,6 +7864,8 @@ class Draft extends DataClass implements Insertable<Draft> {
       'web_link': serializer.toJson<String?>(webLink),
       'created_at': serializer.toJson<String>(createdAt),
       'updated_at': serializer.toJson<String>(updatedAt),
+      'options_json': serializer.toJson<String?>(optionsJson),
+      'options_dismissed': serializer.toJson<int>(optionsDismissed),
     };
   }
 
@@ -7797,6 +7880,8 @@ class Draft extends DataClass implements Insertable<Draft> {
     Value<String?> webLink = const Value.absent(),
     String? createdAt,
     String? updatedAt,
+    Value<String?> optionsJson = const Value.absent(),
+    int? optionsDismissed,
   }) => Draft(
     source: source ?? this.source,
     conversationKey: conversationKey ?? this.conversationKey,
@@ -7808,6 +7893,8 @@ class Draft extends DataClass implements Insertable<Draft> {
     webLink: webLink.present ? webLink.value : this.webLink,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
+    optionsJson: optionsJson.present ? optionsJson.value : this.optionsJson,
+    optionsDismissed: optionsDismissed ?? this.optionsDismissed,
   );
   Draft copyWithCompanion(DraftsCompanion data) {
     return Draft(
@@ -7827,6 +7914,12 @@ class Draft extends DataClass implements Insertable<Draft> {
       webLink: data.webLink.present ? data.webLink.value : this.webLink,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      optionsJson: data.optionsJson.present
+          ? data.optionsJson.value
+          : this.optionsJson,
+      optionsDismissed: data.optionsDismissed.present
+          ? data.optionsDismissed.value
+          : this.optionsDismissed,
     );
   }
 
@@ -7842,7 +7935,9 @@ class Draft extends DataClass implements Insertable<Draft> {
           ..write('graphDraftId: $graphDraftId, ')
           ..write('webLink: $webLink, ')
           ..write('createdAt: $createdAt, ')
-          ..write('updatedAt: $updatedAt')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('optionsJson: $optionsJson, ')
+          ..write('optionsDismissed: $optionsDismissed')
           ..write(')'))
         .toString();
   }
@@ -7859,6 +7954,8 @@ class Draft extends DataClass implements Insertable<Draft> {
     webLink,
     createdAt,
     updatedAt,
+    optionsJson,
+    optionsDismissed,
   );
   @override
   bool operator ==(Object other) =>
@@ -7873,7 +7970,9 @@ class Draft extends DataClass implements Insertable<Draft> {
           other.graphDraftId == this.graphDraftId &&
           other.webLink == this.webLink &&
           other.createdAt == this.createdAt &&
-          other.updatedAt == this.updatedAt);
+          other.updatedAt == this.updatedAt &&
+          other.optionsJson == this.optionsJson &&
+          other.optionsDismissed == this.optionsDismissed);
 }
 
 class DraftsCompanion extends UpdateCompanion<Draft> {
@@ -7887,6 +7986,8 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
   final Value<String?> webLink;
   final Value<String> createdAt;
   final Value<String> updatedAt;
+  final Value<String?> optionsJson;
+  final Value<int> optionsDismissed;
   final Value<int> rowid;
   const DraftsCompanion({
     this.source = const Value.absent(),
@@ -7899,6 +8000,8 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     this.webLink = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
+    this.optionsJson = const Value.absent(),
+    this.optionsDismissed = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   DraftsCompanion.insert({
@@ -7912,6 +8015,8 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     this.webLink = const Value.absent(),
     required String createdAt,
     required String updatedAt,
+    this.optionsJson = const Value.absent(),
+    this.optionsDismissed = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : conversationKey = Value(conversationKey),
        replyToMessageId = Value(replyToMessageId),
@@ -7929,6 +8034,8 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     Expression<String>? webLink,
     Expression<String>? createdAt,
     Expression<String>? updatedAt,
+    Expression<String>? optionsJson,
+    Expression<int>? optionsDismissed,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -7942,6 +8049,8 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
       if (webLink != null) 'web_link': webLink,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
+      if (optionsJson != null) 'options_json': optionsJson,
+      if (optionsDismissed != null) 'options_dismissed': optionsDismissed,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -7957,6 +8066,8 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     Value<String?>? webLink,
     Value<String>? createdAt,
     Value<String>? updatedAt,
+    Value<String?>? optionsJson,
+    Value<int>? optionsDismissed,
     Value<int>? rowid,
   }) {
     return DraftsCompanion(
@@ -7970,6 +8081,8 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
       webLink: webLink ?? this.webLink,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      optionsJson: optionsJson ?? this.optionsJson,
+      optionsDismissed: optionsDismissed ?? this.optionsDismissed,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -8007,6 +8120,12 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     if (updatedAt.present) {
       map['updated_at'] = Variable<String>(updatedAt.value);
     }
+    if (optionsJson.present) {
+      map['options_json'] = Variable<String>(optionsJson.value);
+    }
+    if (optionsDismissed.present) {
+      map['options_dismissed'] = Variable<int>(optionsDismissed.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -8026,6 +8145,8 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
           ..write('webLink: $webLink, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
+          ..write('optionsJson: $optionsJson, ')
+          ..write('optionsDismissed: $optionsDismissed, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -11692,6 +11813,8 @@ typedef $DraftsCreateCompanionBuilder =
       Value<String?> webLink,
       required String createdAt,
       required String updatedAt,
+      Value<String?> optionsJson,
+      Value<int> optionsDismissed,
       Value<int> rowid,
     });
 typedef $DraftsUpdateCompanionBuilder =
@@ -11706,6 +11829,8 @@ typedef $DraftsUpdateCompanionBuilder =
       Value<String?> webLink,
       Value<String> createdAt,
       Value<String> updatedAt,
+      Value<String?> optionsJson,
+      Value<int> optionsDismissed,
       Value<int> rowid,
     });
 
@@ -11764,6 +11889,16 @@ class $DraftsFilterComposer extends Composer<_$BondDatabase, Drafts> {
 
   ColumnFilters<String> get updatedAt => $composableBuilder(
     column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get optionsJson => $composableBuilder(
+    column: $table.optionsJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get optionsDismissed => $composableBuilder(
+    column: $table.optionsDismissed,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -11825,6 +11960,16 @@ class $DraftsOrderingComposer extends Composer<_$BondDatabase, Drafts> {
     column: $table.updatedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get optionsJson => $composableBuilder(
+    column: $table.optionsJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get optionsDismissed => $composableBuilder(
+    column: $table.optionsDismissed,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $DraftsAnnotationComposer extends Composer<_$BondDatabase, Drafts> {
@@ -11870,6 +12015,16 @@ class $DraftsAnnotationComposer extends Composer<_$BondDatabase, Drafts> {
 
   GeneratedColumn<String> get updatedAt =>
       $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get optionsJson => $composableBuilder(
+    column: $table.optionsJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get optionsDismissed => $composableBuilder(
+    column: $table.optionsDismissed,
+    builder: (column) => column,
+  );
 }
 
 class $DraftsTableManager
@@ -11910,6 +12065,8 @@ class $DraftsTableManager
                 Value<String?> webLink = const Value.absent(),
                 Value<String> createdAt = const Value.absent(),
                 Value<String> updatedAt = const Value.absent(),
+                Value<String?> optionsJson = const Value.absent(),
+                Value<int> optionsDismissed = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => DraftsCompanion(
                 source: source,
@@ -11922,6 +12079,8 @@ class $DraftsTableManager
                 webLink: webLink,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
+                optionsJson: optionsJson,
+                optionsDismissed: optionsDismissed,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -11936,6 +12095,8 @@ class $DraftsTableManager
                 Value<String?> webLink = const Value.absent(),
                 required String createdAt,
                 required String updatedAt,
+                Value<String?> optionsJson = const Value.absent(),
+                Value<int> optionsDismissed = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => DraftsCompanion.insert(
                 source: source,
@@ -11948,6 +12109,8 @@ class $DraftsTableManager
                 webLink: webLink,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
+                optionsJson: optionsJson,
+                optionsDismissed: optionsDismissed,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

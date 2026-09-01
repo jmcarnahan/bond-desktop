@@ -2053,12 +2053,17 @@ FROM storylines s''';
   /// Outlook draft holding text nobody can see any more. `created_at` survives
   /// — it says when this conversation first got a suggestion, which is the one
   /// fact a regenerate does not change.
+  ///
+  /// `options_dismissed` goes back to 0 for the same reason `graph_draft_id`
+  /// is nulled: a regenerate is a FRESH suggestion, and the user closing the
+  /// last set of short replies must not silence a set they have never seen.
   Future<void> upsertDraft({
     required String source,
     required String conversationKey,
     required String replyToMessageId,
     required String body,
     String? evidence,
+    String? optionsJson,
     String status = 'suggested',
   }) async {
     final now = _nowIso();
@@ -2066,8 +2071,9 @@ FROM storylines s''';
       '''
 INSERT INTO drafts (
   source, conversation_key, reply_to_message_id, body, evidence, status,
-  graph_draft_id, web_link, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+  graph_draft_id, web_link, created_at, updated_at, options_json,
+  options_dismissed
+) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)
 ON CONFLICT(source, conversation_key) DO UPDATE SET
   reply_to_message_id = excluded.reply_to_message_id,
   body = excluded.body,
@@ -2075,7 +2081,9 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   status = excluded.status,
   graph_draft_id = NULL,
   web_link = NULL,
-  updated_at = excluded.updated_at
+  updated_at = excluded.updated_at,
+  options_json = excluded.options_json,
+  options_dismissed = 0
 ''',
       variables: _args([
         source,
@@ -2086,7 +2094,22 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
         status,
         now,
         now,
+        optionsJson,
       ]),
+    );
+  }
+
+  /// Closes the short replies without closing the draft. The row stays — the
+  /// same reason `status = 'dismissed'` keeps it — so the auto-enqueue does not
+  /// immediately write the identical options back.
+  Future<void> dismissDraftOptions(
+    String source,
+    String conversationKey,
+  ) async {
+    await db.customUpdate(
+      'UPDATE drafts SET options_dismissed = 1, updated_at = ? '
+      'WHERE source = ? AND conversation_key = ?',
+      variables: _args([_nowIso(), source, conversationKey]),
     );
   }
 
