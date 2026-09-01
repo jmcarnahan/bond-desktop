@@ -434,3 +434,40 @@ class TriageResult {
     );
   }
 }
+
+/// The activity panel's header numbers, computed over one window of
+/// `activity_events` by [MessageStore.activityStats].
+///
+/// Everything here is derived — the rows are the truth — which is why this is
+/// a plain value object with no logic beyond holding what the queries found.
+@immutable
+class ActivityStats {
+  /// New messages ingested per source over the window: `'email' → 42`.
+  final Map<String, int> ingestedBySource;
+
+  /// AI work rows by kind then status: `'triage' → {'ok': 30, 'error': 2}`.
+  final Map<String, Map<String, int>> byKind;
+
+  /// Mean wall-clock milliseconds per successful item, by kind.
+  final Map<String, int> avgMsByKind;
+
+  /// Median of the same — the number to trust when one pathological message
+  /// drags the mean.
+  final Map<String, int> medianMsByKind;
+
+  /// Rows whose status is `error`. Parks are deliberately not errors: a model
+  /// server that is not running is a state, not a failure.
+  final int errorCount;
+
+  /// AI work rows in the window, every status counted.
+  final int aiItemCount;
+
+  const ActivityStats({
+    this.ingestedBySource = const {},
+    this.byKind = const {},
+    this.avgMsByKind = const {},
+    this.medianMsByKind = const {},
+    this.errorCount = 0,
+    this.aiItemCount = 0,
+  });
+}

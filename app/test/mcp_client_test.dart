@@ -1,8 +1,9 @@
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mcp_dart/mcp_dart.dart'
-    show McpError, McpProtocol, StaleSessionError;
+    show LogLevel, McpError, McpProtocol, StaleSessionError;
 
 /// The MCP wire client: how a tool result is read, and how a connection that
 /// the stateless server has forgotten is recovered.
@@ -117,6 +118,55 @@ void main() {
         () => decodeToolResult({'content': <dynamic>[], 'isError': false}),
         throwsA(isA<McpTransportException>()),
       );
+    });
+  });
+
+  group('the rerouted mcp_dart log stream', () {
+    List<String> captured() {
+      final lines = <String>[];
+      final previous = debugPrint;
+      debugPrint = (message, {wrapWidth}) {
+        if (message != null) lines.add(message);
+      };
+      addTearDown(() => debugPrint = previous);
+      resetMcpLogFolding();
+      return lines;
+    }
+
+    test('drops the package chatter, keeps warnings and errors', () {
+      final lines = captured();
+      handleMcpLog('mcp_dart.client', LogLevel.debug, 'initialized');
+      handleMcpLog('mcp_dart.client', LogLevel.info, 'ping handler set');
+      handleMcpLog('mcp_dart.client', LogLevel.error, 'it broke');
+      handleMcpLog('mcp_dart.client', LogLevel.warn, 'it wobbled');
+      expect(lines, ['mcp_dart error: it broke', 'mcp_dart warn: it wobbled']);
+    });
+
+    test('a repeating line is folded after one occurrence and one note', () {
+      // The wall-of-red scenario: the same 401 initialization failure on
+      // every sync attempt. The first tells the story; the rest are noise.
+      final lines = captured();
+      for (var i = 0; i < 5; i++) {
+        handleMcpLog('mcp_dart.client', LogLevel.error, 'HTTP 401 again');
+      }
+      expect(lines, [
+        'mcp_dart error: HTTP 401 again',
+        'mcp_dart: repeating — identical lines folded',
+      ]);
+    });
+
+    test('a different line resumes printing, and folding resets', () {
+      final lines = captured();
+      handleMcpLog('c', LogLevel.error, 'first');
+      handleMcpLog('c', LogLevel.error, 'first');
+      handleMcpLog('c', LogLevel.error, 'second');
+      handleMcpLog('c', LogLevel.error, 'first');
+      expect(lines, [
+        'mcp_dart error: first',
+        'mcp_dart: repeating — identical lines folded',
+        'mcp_dart error: second',
+        'mcp_dart error: first',
+      ]);
     });
   });
 
@@ -271,10 +321,62 @@ void main() {
       expect(sessions.first.disposals, 1);
     });
 
-    test('a second consecutive 401 is a real failure, not a loop', () async {
+    test('a second consecutive 401 WITH a bearer is a real failure', () async {
+      // A token was presented and refused twice. That is a rejected token, not
+      // a missing one, and it stays a transport failure — the sign-in screen
+      // is not where it belongs.
       var connects = 0;
       final client = BondMcpHttpClient(
         Uri.parse('https://example.test/mcp'),
+        getBearer: () async => 'the-jwt',
+        sessionFactory: (_, _) async {
+          connects++;
+          return _ScriptedSession([
+            const McpTransportException('invalid_token', statusCode: 401),
+          ]);
+        },
+      );
+
+      await expectLater(
+        client.callTool('list_mail_delta', const {}),
+        throwsA(isA<McpTransportException>()
+            .having((e) => e.statusCode, 'statusCode', 401)),
+      );
+      expect(connects, 2);
+    });
+
+    test('a bearer-less client refused 401 twice is NotSignedIn', () async {
+      // The local-mode premise disproven: this client has no token to offer
+      // and the server will not talk without one. Left as a transport failure
+      // it would surface as a network banner and nothing would recover it —
+      // NotSignedIn is what the app routes to the sign-in screen.
+      var connects = 0;
+      final client = BondMcpHttpClient(
+        Uri.parse('https://example.test/mcp'),
+        sessionFactory: (_, _) async {
+          connects++;
+          return _ScriptedSession([
+            const McpTransportException('invalid_token', statusCode: 401),
+          ]);
+        },
+      );
+
+      await expectLater(
+        client.callTool('list_mail_delta', const {}),
+        throwsA(isA<NotSignedIn>()),
+      );
+      expect(connects, 2);
+    });
+
+    test('a bearer that arrives on the reconnect is not NotSignedIn', () async {
+      // The signed-out-then-signed-in case: the first connection carried
+      // nothing, but the retry found a token. A 401 against a real token is a
+      // transport failure, whatever the first attempt looked like.
+      final bearers = <String?>[null, 'a-jwt'];
+      var connects = 0;
+      final client = BondMcpHttpClient(
+        Uri.parse('https://example.test/mcp'),
+        getBearer: () async => bearers[connects],
         sessionFactory: (_, _) async {
           connects++;
           return _ScriptedSession([

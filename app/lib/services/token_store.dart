@@ -2,7 +2,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-/// The three-method slice of key/value storage [GraphAuth] needs.
+/// The three-method slice of key/value storage the sign-in sessions need.
 ///
 /// It exists so the auth logic can be tested without a platform channel —
 /// `flutter_secure_storage` is a plugin, and its calls throw
@@ -13,6 +13,10 @@ abstract class TokenStore {
   /// A null [value] deletes the key.
   Future<void> write(String key, String? value);
 
+  /// Empties the store. Nothing in the app calls this, and ending a session
+  /// must not: one keychain now holds the direct-Graph session AND one slot
+  /// per MCP server, so a session that wiped the store would sign the user
+  /// out of every backend they have. Each clears its own keys by name.
   Future<void> deleteAll();
 }
 

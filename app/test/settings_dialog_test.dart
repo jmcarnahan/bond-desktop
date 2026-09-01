@@ -19,6 +19,8 @@ void main() {
     required void Function(String) onAboutMeChanged,
     Future<bool> Function(String)? hasScope,
     VoidCallback? onSignInAgain,
+    bool showActivityLog = false,
+    void Function(bool)? onShowActivityLogChanged,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -33,6 +35,8 @@ void main() {
                 aboutMe: aboutMe,
                 onThresholdChanged: onThresholdChanged,
                 onAboutMeChanged: onAboutMeChanged,
+                showActivityLog: showActivityLog,
+                onShowActivityLogChanged: onShowActivityLogChanged,
                 hasScope: hasScope,
                 onSignInAgain: onSignInAgain,
               ),
@@ -127,6 +131,24 @@ void main() {
     expect(saved, ['typed then dismissed']);
   });
 
+  testWidgets('but a text nobody touched is not saved at all', (tester) async {
+    // Not just an economy: a sign-in from this dialog that changes the
+    // identity wipes the previous person's about-me, and an unconditional
+    // save on close would write it right back.
+    final saved = <String>[];
+    await open(
+      tester,
+      aboutMe: 'the previous text',
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: saved.add,
+    );
+
+    await tester.tap(find.text('Done'));
+    await tester.pumpAndSettle();
+
+    expect(saved, isEmpty);
+  });
+
   testWidgets('it opens on what is already stored', (tester) async {
     await open(
       tester,
@@ -167,6 +189,59 @@ void main() {
     expect(store.getPref(aboutMeKey), 'I am a loan officer.');
     expect(double.parse(store.getPref(attentionThresholdKey)!), 1.0);
     expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
+  });
+
+  group('the activity log switch', () {
+    testWidgets('is absent when the host wires no callback', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+
+      expect(find.text('Show activity log'), findsNothing);
+      expect(find.byType(SwitchListTile), findsNothing);
+    });
+
+    testWidgets('renders on what is already stored', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        showActivityLog: true,
+        onShowActivityLogChanged: (_) {},
+      );
+
+      expect(find.text('Show activity log'), findsOneWidget);
+      expect(tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+          isTrue);
+    });
+
+    testWidgets('reports the flip immediately, not on the way out',
+        (tester) async {
+      // The icon this switch controls is on screen behind the dialog. A
+      // toggle whose effect only lands at dispose cannot be checked by the
+      // person who just flipped it.
+      final written = <bool>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onShowActivityLogChanged: written.add,
+      );
+
+      await tester.tap(find.byType(SwitchListTile));
+      await tester.pumpAndSettle();
+
+      expect(written, [true]);
+      expect(tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+          isTrue);
+
+      await tester.tap(find.byType(SwitchListTile));
+      await tester.pumpAndSettle();
+
+      expect(written, [true, false]);
+    });
   });
 
   group('Microsoft permissions', () {

@@ -6,6 +6,35 @@ import 'package:sqlite3/sqlite3.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 
+/// Which Microsoft identity the mail rows in this database belong to, stored in
+/// `app_prefs` alongside the settings but emphatically not one of them: it is
+/// ownership metadata, written by `IdentityGuard` and cleared by [wipeAll],
+/// never something a user sets. Declared here because [wipeAll] is what has to
+/// clear it, and this layer imports nothing above itself.
+const String dbOwnerKey = 'db_owner';
+
+/// The user's own words about who they are, fed to the AI on their behalf.
+/// A user setting like any other — except it is one PERSON'S text, not the
+/// machine's configuration, so [wipeAll] clears it along with their mail.
+/// Declared here beside [dbOwnerKey] for the same reason: the wipe is what
+/// has to name it, and this layer imports nothing above itself.
+/// `prefs_provider.dart` re-exports it for everything that reads or writes
+/// the setting normally.
+const String aboutMeKey = 'about_me';
+
+/// When each background pass last completed, ISO-8601 UTC.
+///
+/// They live in `app_prefs` rather than being derived from `activity_events`
+/// because the events they describe are the ones that DO NOT get written: a
+/// sync that brought nothing in records no row (see `ActivityLog.record`), and
+/// "nothing has arrived for three hours" is exactly the fact the activity panel
+/// has to be able to state. Written on every `ok` pass, suppressed or not, and
+/// wiped by [MessageStore.wipeAll] along with everything else about this
+/// mailbox — a fresh identity has not synced yet.
+const String activityLastSyncMailKey = 'activity_last_sync_mail';
+const String activityLastSyncTeamsKey = 'activity_last_sync_teams';
+const String activityLastSweepKey = 'activity_last_sweep';
+
 /// Every SQL statement in the app except the schema itself lives here. Screens
 /// and providers call methods; they never build a query.
 ///
@@ -712,11 +741,17 @@ LIMIT ?
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` goes too. Its rows (attention threshold, volume slider) are
-  /// the previous user's calibration, and stale cursors hiding in a kept
-  /// table is exactly the class of bug this method exists to rule out —
-  /// everything or nothing is the only policy that stays correct as tables
-  /// are added.
+  /// `app_prefs` SURVIVES, with two exceptions. What this method isolates is
+  /// one person's presence: which backend the app talks through, which server
+  /// it points at, and where the slider sits are the machine's configuration,
+  /// not the previous account's data, and wiping them turned every account
+  /// switch into a re-setup. The exceptions are [dbOwnerKey] — the identity
+  /// claim on these rows, which must not outlive the rows it describes, or
+  /// the next sign-in would read the wiped mailbox as still owned — and
+  /// [aboutMeKey], which is one person's self-description and would otherwise
+  /// be inherited by the next identity and steer THEIR triage. Both callers
+  /// depend on the first: sign-out leaves the database unclaimed, and
+  /// `IdentityGuard` writes the new owner immediately after.
   void wipeAll() {
     const tables = [
       'messages',
@@ -729,8 +764,8 @@ LIMIT ?
       'storyline_members',
       'storyline_member_blocks',
       'feedback_events',
+      'activity_events',
       'sender_prefs',
-      'app_prefs',
       'drafts',
     ];
     db.execute('BEGIN');
@@ -738,6 +773,10 @@ LIMIT ?
       for (final table in tables) {
         db.execute('DELETE FROM $table');
       }
+      db.execute(
+        'DELETE FROM app_prefs WHERE key IN (?, ?)',
+        [dbOwnerKey, aboutMeKey],
+      );
       db.execute('COMMIT');
     } catch (_) {
       db.execute('ROLLBACK');
@@ -1092,6 +1131,159 @@ SELECT conversation_key FROM (
       '(scope, scope_key, direction, origin, created_at) '
       'VALUES (?, ?, ?, ?, ?)',
       [scope, scopeKey, direction, origin, _nowIso()],
+    );
+  }
+
+  // ── activity ─────────────────────────────────────────────────────────
+
+  /// The AI work kinds [activityStats] aggregates. A module-level fact rather
+  /// than inline strings so the stats queries and their tests agree on the set.
+  static const List<String> activityWorkKinds = [
+    'triage',
+    'extract',
+    'storyline',
+    'storyline_sweep',
+    'draft',
+  ];
+
+  /// Appends one thing the app did. INSERT only, like [recordFeedback] — the
+  /// activity log is history, and history does not get edited.
+  ///
+  /// [count] and [durationMs] must be Dart ints: the table is STRICT and an
+  /// INTEGER column rejects a double at write time.
+  void recordActivity({
+    required String kind,
+    required String status,
+    String? source,
+    String? entityId,
+    int? count,
+    int? durationMs,
+    String? detailJson,
+    String? createdAt,
+  }) {
+    db.execute(
+      'INSERT INTO activity_events '
+      '(kind, source, status, entity_id, count, duration_ms, detail_json, '
+      'created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        kind,
+        source,
+        status,
+        entityId,
+        count,
+        durationMs,
+        detailJson,
+        createdAt ?? _nowIso(),
+      ],
+    );
+  }
+
+  /// The newest events first. Bounded by [limit] because the panel that reads
+  /// this runs on the UI isolate against a synchronous database.
+  List<Map<String, Object?>> recentActivity({
+    int limit = 300,
+    String? sinceIso,
+  }) {
+    final result = sinceIso == null
+        ? db.select(
+            'SELECT * FROM activity_events ORDER BY id DESC LIMIT ?',
+            [limit],
+          )
+        : db.select(
+            'SELECT * FROM activity_events WHERE created_at >= ? '
+            'ORDER BY id DESC LIMIT ?',
+            [sinceIso, limit],
+          );
+    return [for (final row in result) Map<String, Object?>.from(row)];
+  }
+
+  /// Deletes what is older than [keepDays], then whatever is left beyond
+  /// [maxRows]. Two rules rather than one: the age is what a user would
+  /// expect "history" to mean, and the row cap is what stops a first sync of
+  /// a large mailbox from filling the window with thousands of rows. Returns
+  /// how many rows went.
+  int pruneActivity({int keepDays = 30, int maxRows = 5000}) {
+    final cutoff = DateTime.now()
+        .toUtc()
+        .subtract(Duration(days: keepDays))
+        .toIso8601String();
+    db.execute(
+      'DELETE FROM activity_events WHERE created_at < ?',
+      [cutoff],
+    );
+    var pruned = db.updatedRows;
+    db.execute(
+      'DELETE FROM activity_events WHERE id NOT IN '
+      '(SELECT id FROM activity_events ORDER BY id DESC LIMIT ?)',
+      [maxRows],
+    );
+    pruned += db.updatedRows;
+    return pruned;
+  }
+
+  /// The activity panel's header numbers, over everything since [sinceIso].
+  ///
+  /// Three queries and a Dart finish: sqlite has no median, and under the
+  /// prune cap the ordered read is a few thousand rows at worst.
+  ActivityStats activityStats({required String sinceIso}) {
+    final kinds = _placeholders(activityWorkKinds.length);
+
+    final ingested = <String, int>{};
+    for (final row in db.select(
+      'SELECT source, SUM(count) AS n FROM activity_events '
+      "WHERE kind IN ('sync_mail', 'sync_teams') AND status = 'ok' "
+      'AND created_at >= ? GROUP BY source',
+      [sinceIso],
+    )) {
+      final source = row['source'] as String?;
+      final n = (row['n'] as num?)?.toInt() ?? 0;
+      if (source != null && n > 0) ingested[source] = n;
+    }
+
+    final byKind = <String, Map<String, int>>{};
+    var errorCount = 0;
+    var aiItemCount = 0;
+    for (final row in db.select(
+      'SELECT kind, status, COUNT(*) AS n FROM activity_events '
+      'WHERE kind IN ($kinds) AND created_at >= ? GROUP BY kind, status',
+      [...activityWorkKinds, sinceIso],
+    )) {
+      final kind = row['kind'] as String;
+      final status = row['status'] as String;
+      final n = (row['n'] as num).toInt();
+      (byKind[kind] ??= {})[status] = n;
+      aiItemCount += n;
+      if (status == 'error') errorCount += n;
+    }
+
+    final durations = <String, List<int>>{};
+    for (final row in db.select(
+      'SELECT kind, duration_ms FROM activity_events '
+      "WHERE kind IN ($kinds) AND duration_ms IS NOT NULL AND status = 'ok' "
+      'AND created_at >= ? ORDER BY kind ASC, duration_ms ASC',
+      [...activityWorkKinds, sinceIso],
+    )) {
+      (durations[row['kind'] as String] ??= [])
+          .add((row['duration_ms'] as num).toInt());
+    }
+    final avg = <String, int>{};
+    final median = <String, int>{};
+    durations.forEach((kind, sorted) {
+      avg[kind] =
+          (sorted.reduce((a, b) => a + b) / sorted.length).round();
+      final mid = sorted.length ~/ 2;
+      median[kind] = sorted.length.isOdd
+          ? sorted[mid]
+          : ((sorted[mid - 1] + sorted[mid]) / 2).round();
+    });
+
+    return ActivityStats(
+      ingestedBySource: ingested,
+      byKind: byKind,
+      avgMsByKind: avg,
+      medianMsByKind: median,
+      errorCount: errorCount,
+      aiItemCount: aiItemCount,
     );
   }
 

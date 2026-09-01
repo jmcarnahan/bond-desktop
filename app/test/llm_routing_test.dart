@@ -186,7 +186,11 @@ void main() {
 
   group('providers', () {
     test('the two clients point at different servers', () {
-      final container = ProviderContainer();
+      // Both client providers now watch the activity log, which watches the
+      // store — so even this read-only test needs a real database under it.
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
       addTearDown(container.dispose);
 
       expect(container.read(llmClientProvider).baseUrl, LlmClient.defaultBaseUrl);

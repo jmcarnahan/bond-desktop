@@ -240,6 +240,14 @@ hostname deliberately never appears in this repository: which cluster a
 company runs is environment configuration, and it rides the same git-ignored
 `MS_ENV` file as the Azure ids.
 
+**Switching servers.** Every backend and server keeps its own session, so
+switching never costs a sign-out. Pick the target in Settings and the dialog
+says whether you are signed in to it; **Sign in…** and **Sign out of this
+server** act right there, in place, and the permission rows re-answer for
+whatever is selected. Nothing changes behind the dialog until you act — the
+app's own sign-in screen appears only at launch, when the current target has
+no session yet.
+
 **Working against a local server.** Start bond-mcps with its own `make dev`,
 then Settings → Bond server → **Local**, and sign in. The local server asks for
 no token at all, so that sign-in is instant — no browser round trip.

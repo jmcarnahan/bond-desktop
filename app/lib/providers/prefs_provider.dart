@@ -5,6 +5,8 @@ import '../data/message_store.dart';
 import '../services/attention.dart';
 import 'app_providers.dart';
 
+export '../data/message_store.dart' show aboutMeKey;
+
 /// Which Microsoft backend the app talks through.
 ///
 /// [backendModeMcp] goes through the Bond MCP server, which holds the Microsoft
@@ -61,11 +63,18 @@ class AppPrefs {
   /// either way so switching back does not lose a hand-typed server.
   final String mcpServerUrl;
 
+  /// Whether the rail offers the activity log. Off by default: what the sync
+  /// and the local model did is diagnostic detail, and an inbox that ships
+  /// with its own machine-room door open invites reading it instead of the
+  /// mail.
+  final bool showActivityLog;
+
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
     this.backendMode = backendModeMcp,
     this.mcpServerUrl = defaultMcpServerUrl,
+    this.showActivityLog = false,
   });
 
   AppPrefs copyWith({
@@ -73,21 +82,26 @@ class AppPrefs {
     String? aboutMe,
     String? backendMode,
     String? mcpServerUrl,
+    bool? showActivityLog,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
         aboutMe: aboutMe ?? this.aboutMe,
         backendMode: backendMode ?? this.backendMode,
         mcpServerUrl: mcpServerUrl ?? this.mcpServerUrl,
+        showActivityLog: showActivityLog ?? this.showActivityLog,
       );
 }
 
 /// Keys in `app_prefs`. Constants because they are typed in two places — the
 /// read below and the tests that assert what landed in the table.
+/// [aboutMeKey] lives in `message_store.dart` — `wipeAll` has to clear it and
+/// that layer imports nothing above itself — and is re-exported here so this
+/// file stays where prefs keys are found.
 const String attentionThresholdKey = 'attention_threshold';
-const String aboutMeKey = 'about_me';
 const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
+const String showActivityLogKey = 'show_activity_log';
 
 class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   final MessageStore _store;
@@ -106,6 +120,9 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       aboutMe: store.getPref(aboutMeKey) ?? '',
       backendMode: _mode(store.getPref(backendModeKey)),
       mcpServerUrl: _serverUrl(store.getPref(mcpServerUrlKey)),
+      // Anything that is not the string this notifier writes reads as off,
+      // an absent key included — which is the state every install starts in.
+      showActivityLog: store.getPref(showActivityLogKey) == 'true',
     );
   }
 
@@ -149,6 +166,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     final url = _serverUrl(value);
     _store.setPref(mcpServerUrlKey, url);
     state = state.copyWith(mcpServerUrl: url);
+  }
+
+  void setShowActivityLog(bool value) {
+    _store.setPref(showActivityLogKey, value.toString());
+    state = state.copyWith(showActivityLog: value);
   }
 }
 

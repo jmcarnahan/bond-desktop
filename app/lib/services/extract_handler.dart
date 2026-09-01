@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import '../data/message_store.dart';
 import '../models/message_models.dart';
+import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attention.dart';
 import 'conversation_state.dart';
@@ -23,8 +24,14 @@ class ExtractHandler extends WorkHandler {
   final MessageStore _store;
   final LlmClient _client;
   final EmbeddingsClient _embeddings;
+  final ActivityLog _log;
 
-  ExtractHandler(this._store, this._client, this._embeddings);
+  ExtractHandler(
+    this._store,
+    this._client,
+    this._embeddings, {
+    ActivityLog? activityLog,
+  }) : _log = activityLog ?? ActivityLog.disabled();
 
   @override
   String get kind => 'extract';
@@ -53,8 +60,15 @@ class ExtractHandler extends WorkHandler {
 
     final row = _store.getMessageRow(source, id);
     // Queued, then deleted before the worker reached it. Nothing to extract
-    // and nothing wrong — the item is done, not failed.
-    if (row == null) return;
+    // and nothing wrong — the item is done, not failed. The worker would
+    // otherwise write `ok` on a row where no model ran, so it is told
+    // `skipped` instead.
+    if (row == null) {
+      _log
+        ..noteStatus('skipped')
+        ..note({'reason': 'deleted'});
+      return;
+    }
 
     // Queued, then GATED before the worker reached it. Extraction is enqueued
     // at sync time, while every fresh message is still `pending`; triage runs
@@ -67,6 +81,9 @@ class ExtractHandler extends WorkHandler {
     // judged them worthless.
     if (row['triage_status'] == 'skipped' &&
         row['gate_reason'] != 'teams_source') {
+      _log
+        ..noteStatus('skipped')
+        ..note({'reason': 'gated'});
       return;
     }
 
@@ -80,6 +97,14 @@ class ExtractHandler extends WorkHandler {
       temperature: 0,
     );
     _store.writeExtraction(source, id, jsonEncode(result.toJson()));
+    // Enough of the answer to make the activity row readable without opening
+    // the extraction itself. Five topics, because the row is one line.
+    _log.note({
+      'intent': result.intent,
+      'importance': result.importance,
+      'topics': result.topics.take(5).toList(),
+      if (result.project.isNotEmpty) 'project': result.project,
+    });
 
     _fileBucket(source, row, result);
     await _refreshCard(source, row, result);

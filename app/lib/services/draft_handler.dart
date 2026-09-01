@@ -1,6 +1,6 @@
 import '../data/message_store.dart';
 import '../models/message_models.dart';
-import '../providers/prefs_provider.dart' show aboutMeKey;
+import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'llm/draft_task.dart';
 import 'llm/json_task.dart';
@@ -27,8 +27,10 @@ class DraftHandler extends WorkHandler {
 
   final MessageStore _store;
   final LlmClient _client;
+  final ActivityLog _log;
 
-  DraftHandler(this._store, this._client);
+  DraftHandler(this._store, this._client, {ActivityLog? activityLog})
+      : _log = activityLog ?? ActivityLog.disabled();
 
   @override
   String get kind => 'draft';
@@ -41,12 +43,22 @@ class DraftHandler extends WorkHandler {
     // Already drafted. Two enqueues racing to the same conversation is
     // benign — the first one's suggestion is as good as the second's — and
     // returning here spends no model time discovering that.
-    if (_store.getDraft(source, key) != null) return;
+    if (_store.getDraft(source, key) != null) {
+      _log
+        ..noteStatus('skipped')
+        ..note({'reason': 'already_drafted'});
+      return;
+    }
 
     final replyToRow = _store.newestInboundMessage(source, key);
     // Queued, then the thread's mail went away. Nothing to reply to and
     // nothing wrong: the item is done, not failed.
-    if (replyToRow == null) return;
+    if (replyToRow == null) {
+      _log
+        ..noteStatus('skipped')
+        ..note({'reason': 'no_reply_target'});
+      return;
+    }
     final replyTo = Message.fromRow(replyToRow);
 
     final result = await runTask(
@@ -82,6 +94,7 @@ class DraftHandler extends WorkHandler {
       evidence: result.evidence,
       status: 'suggested',
     );
+    _log.note({'chars': result.replyBody.length});
   }
 
   /// The LO's own recent replies to this sender, as writing samples.
