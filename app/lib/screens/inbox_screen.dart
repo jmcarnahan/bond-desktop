@@ -189,7 +189,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // composer must find that out NOW, not on the next AI progress event —
       // a stale suggestion left on screen gets sent as a reply to a message
       // that is no longer the newest one.
-      ref.read(draftProvider(selected).notifier).load();
+      ref
+          .read(
+            draftProvider(
+              (
+                source: _selectedSource ?? 'email',
+                conversationKey: selected,
+              ),
+            ).notifier,
+          )
+          .load();
     }
     final storyline = _selectedStorylineId;
     if (storyline != null) {
@@ -258,10 +267,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // else, and a hard-coded `'email'` would mark a chat read against a thread
     // that does not exist.
     final loaded = ref.read(conversationsProvider);
+    var resolvedSource = source;
     if (loaded is ConversationsLoaded) {
       for (final c in loaded.conversations) {
         if (c.id != id) continue;
         if (source != null && c.source != source) continue;
+        resolvedSource = c.source;
         ref.read(conversationsProvider.notifier).markRead(c.source, id);
         break;
       }
@@ -270,7 +281,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // Reads what the queue has already written for this thread. It never asks
     // for a new one — a draft is written by the background queue or by the
     // user's own button, never by opening a thread.
-    ref.read(draftProvider(id).notifier).load();
+    ref
+        .read(
+          draftProvider(
+            (source: resolvedSource ?? 'email', conversationKey: id),
+          ).notifier,
+        )
+        .load();
   }
 
   void _selectStoryline(String id) {
@@ -1121,7 +1138,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             const SizedBox(height: BondSpacing.s12),
             _replyTargetPicker(replyKey, targets),
             const SizedBox(height: BondSpacing.s8),
-            _composer(replyKey),
+            // Storyline reply targets are mail threads by construction — see
+            // [_emailTargets] — so the source is not in doubt here.
+            _composer((source: 'email', conversationKey: replyKey)),
           ] else if (episodes.isNotEmpty) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
@@ -1254,7 +1273,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           // threading headers, and none of that exists for a chat. A composer
           // here would be a box that cannot send.
           if (selected.source == 'email')
-            _composer(selected.id)
+            _composer((source: selected.source, conversationKey: selected.id))
           else
             _replyElsewhere(),
         ],
@@ -1285,9 +1304,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// Every argument that can reach a send is a callback the user's own click
   /// invokes. Nothing on this path runs on a timer or on a state change.
-  Widget _composer(String conversationKey) {
-    final draft = ref.watch(draftProvider(conversationKey));
-    final notifier = ref.read(draftProvider(conversationKey).notifier);
+  Widget _composer(DraftTarget target) {
+    final conversationKey = target.conversationKey;
+    final draft = ref.watch(draftProvider(target));
+    final notifier = ref.read(draftProvider(target).notifier);
 
     final composer = Composer(
       // Keyed on the conversation so switching threads builds a fresh field
@@ -1300,7 +1320,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       generating: draft.generating,
       sending: draft.sending,
       capability: draft.capability,
-      onSend: (body) => _send(conversationKey, body),
+      onSend: (body) => _send(target, body),
       onGenerate: notifier.generate,
       onDismiss: notifier.dismiss,
       onEdited: notifier.markEdited,
@@ -1329,9 +1349,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The one place a click becomes a send. It says what happened, including
   /// when what happened was a copy.
-  Future<void> _send(String conversationKey, String body) async {
-    final outcome =
-        await ref.read(draftProvider(conversationKey).notifier).send(body);
+  Future<void> _send(DraftTarget target, String body) async {
+    final outcome = await ref.read(draftProvider(target).notifier).send(body);
     if (!mounted) return;
     switch (outcome) {
       case SendOutcome.sent:

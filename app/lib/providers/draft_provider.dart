@@ -24,6 +24,14 @@ import 'conversations_provider.dart';
 /// the stored draft — so a send can only ever carry text that was on screen in
 /// front of whoever pressed the button.
 
+/// Which conversation a draft belongs to.
+///
+/// The source rides along with the key because a conversation key is only
+/// unique WITHIN a source — chats will be drafted for too, and a bare key
+/// would collide a chat with the mail thread that happens to share it. A
+/// record, so the family keys on value rather than identity.
+typedef DraftTarget = ({String source, String conversationKey});
+
 /// What a send actually did, so the screen can say so.
 enum SendOutcome {
   /// The reply left the building.
@@ -126,8 +134,6 @@ class DraftState {
 }
 
 class DraftNotifier extends StateNotifier<DraftState> {
-  static const String _source = 'email';
-
   /// Matches the inbox's own reload debounce: the worker reports every item it
   /// finishes, and a full re-read behind each one would be a burst of queries
   /// for one row.
@@ -147,6 +153,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// browser.
   final Future<bool> Function(Uri url) _launch;
 
+  /// Which source's conversation this is — `email` today, and the reason the
+  /// family key carries it.
+  final String _source;
+
   final String conversationKey;
 
   StreamSubscription<WorkProgress>? _progress;
@@ -156,11 +166,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
     this._store,
     this._auth,
     this._mail,
-    this.conversationKey, {
+    DraftTarget target, {
     AiWorker? worker,
     Future<void> Function()? onSent,
     Future<bool> Function(Uri url)? launch,
-  })  : _worker = worker,
+  })  : _source = target.source,
+        conversationKey = target.conversationKey,
+        _worker = worker,
         _onSent = onSent,
         _launch = launch ??
             ((url) => launchUrl(url, mode: LaunchMode.externalApplication)),
@@ -431,12 +443,12 @@ class DraftNotifier extends StateNotifier<DraftState> {
 /// Deliberately NOT autoDispose, matching `threadProvider`: clicking back to a
 /// thread should show the draft that was already written for it.
 final draftProvider =
-    StateNotifierProvider.family<DraftNotifier, DraftState, String>(
-  (ref, conversationKey) => DraftNotifier(
+    StateNotifierProvider.family<DraftNotifier, DraftState, DraftTarget>(
+  (ref, target) => DraftNotifier(
     ref.watch(messageStoreProvider),
     ref.watch(authSessionProvider),
     ref.watch(mailBackendProvider),
-    conversationKey,
+    target,
     worker: ref.watch(aiWorkerProvider),
     onSent: () => ref.read(conversationsProvider.notifier).load(),
   ),

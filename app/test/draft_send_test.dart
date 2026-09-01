@@ -122,7 +122,7 @@ void main() {
       store,
       GraphAuth(httpClient: never, store: tokens),
       mail,
-      key,
+      (source: 'email', conversationKey: key),
       onSent: () async => syncsAfterSend++,
       launch: (url) async {
         launched.add(url);
