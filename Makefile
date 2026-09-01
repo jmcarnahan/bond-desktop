@@ -52,6 +52,17 @@ SETUP_WAIT   ?= 1800
 EMBED_PORT   ?= 8081
 EMBED_HF     ?= ggml-org/embeddinggemma-300M-GGUF
 
+# The third server: the bulk-work model. Triage, extraction and
+# storyline-confirm all run here; the 27B on :$(MODEL_PORT) keeps drafting and
+# naming, where prose quality is the product. Same chat-completions wire, its
+# own port — the app picks a server per task, and a task whose server is down
+# parks exactly as it always has.
+FAST_PORT    ?= 8082
+FAST_HF      ?= ggml-org/Qwen3-4B-Instruct-2507-Q8_0-GGUF
+# 1 until phase 4 makes the drains concurrent — see SLOTS above for why more
+# slots against a strictly-serial client is slot roulette rather than speed.
+FAST_SLOTS   ?= 1
+
 # Where llama-server's -hf flag parks the weights: the repo half of MODEL_HF
 # (everything before the ':'), with '/' turned into '--' the way huggingface's
 # cache names its directories.
@@ -72,18 +83,20 @@ RESET  := \033[0m
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
-        setup verify clean-model _wait-model _wait-embed \
-        embed embed-stop \
-        app-install app-run app-test app-analyze app-build bench
+        setup verify clean-model _wait-model _wait-embed _wait-fast \
+        embed embed-stop fast fast-stop \
+        app-install app-run app-test app-analyze app-build bench ab
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
-	@printf "  make setup        → install + model + wait + verify + smoke (start here)\n"
+	@printf "  make setup        → install + model + fast + verify + smoke (start here)\n"
 	@printf "  make install      → brew install llama.cpp + dart pub get in agent/\n"
 	@printf "  make model        → start llama-server :$(MODEL_PORT) ($(MODEL_HF))\n"
 	@printf "  make stop         → stop the model server on :$(MODEL_PORT)\n"
 	@printf "  make embed        → start the embedding server :$(EMBED_PORT) ($(EMBED_HF))\n"
 	@printf "  make embed-stop   → stop the embedding server on :$(EMBED_PORT)\n"
+	@printf "  make fast         → start the bulk-work server :$(FAST_PORT) ($(FAST_HF))\n"
+	@printf "  make fast-stop    → stop the bulk-work server on :$(FAST_PORT)\n"
 	@printf "  make status       → are the servers up? [up]/[down] + pid\n"
 	@printf "  make logs         → tail $(LOG_DIR)/model-$(MODEL_PORT).log\n"
 	@printf "  make smoke        → one chat completion against :$(MODEL_PORT)\n"
@@ -94,7 +107,8 @@ help:
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
 	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
-	@printf "  make bench        → live model benchmark (needs make model up)\n"
+	@printf "  make bench        → live model benchmark (needs make fast up)\n"
+	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make app-build    → release build of the macOS app\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
@@ -111,21 +125,24 @@ install:
 # it calls is idempotent, so re-running it on a live server is a no-op plus
 # two smoke tests.
 #
-# The `-` on the model line is load-bearing: on a first run `make model`
-# launches llama-server and then exits NON-ZERO after WAIT_TIMEOUT seconds
-# because the ~19GB download has not finished and the port is not bound yet.
-# That is the expected first-run outcome, not a failure — the download keeps
-# going in the background and the poll below is what actually waits for it.
+# The `-` on the model and fast launch lines is load-bearing: on a first run
+# `make model` / `make fast` launch llama-server and then exit NON-ZERO after
+# WAIT_TIMEOUT seconds because the download (~19GB / ~4.3GB) has not finished
+# and the port is not bound yet. That is the expected first-run outcome, not a
+# failure — the download keeps going in the background and the polls below are
+# what actually wait for it. Both servers, not just the 27B: triage PARKS
+# rather than degrades when the fast server is down, so a setup that skipped
+# it would hand over an inbox whose AI silently never runs.
 setup:
-	@printf "$(BLUE)==>$(RESET) [1/5] installing prerequisites\n"
+	@printf "$(BLUE)==>$(RESET) [1/7] installing prerequisites\n"
 	@$(MAKE) --no-print-directory install
-	@printf "$(BLUE)==>$(RESET) [2/5] model server on :$(MODEL_PORT)\n"
+	@printf "$(BLUE)==>$(RESET) [2/7] model server on :$(MODEL_PORT)\n"
 	-@if curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health; then \
 	   printf "  $(GREEN)✓$(RESET) model already up — skipping launch\n"; \
 	 else \
 	   $(MAKE) --no-print-directory model; \
 	 fi
-	@printf "$(BLUE)==>$(RESET) [3/5] waiting for /health (up to $(SETUP_WAIT)s)\n"
+	@printf "$(BLUE)==>$(RESET) [3/7] waiting for /health (up to $(SETUP_WAIT)s)\n"
 	@waited=0; \
 	 while [ $$waited -lt $(SETUP_WAIT) ]; do \
 	   if curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health; then \
@@ -141,9 +158,31 @@ setup:
 	 printf "  $(RED)✗$(RESET) model never answered /health in $(SETUP_WAIT)s\n"; \
 	 printf "    check the server log:  make logs\n"; \
 	 exit 1
-	@printf "$(BLUE)==>$(RESET) [4/5] verifying the downloaded weights\n"
+	@printf "$(BLUE)==>$(RESET) [4/7] fast server on :$(FAST_PORT)\n"
+	-@if curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health; then \
+	   printf "  $(GREEN)✓$(RESET) fast already up — skipping launch\n"; \
+	 else \
+	   $(MAKE) --no-print-directory fast; \
+	 fi
+	@printf "$(BLUE)==>$(RESET) [5/7] waiting for fast /health (up to $(SETUP_WAIT)s)\n"
+	@waited=0; \
+	 while [ $$waited -lt $(SETUP_WAIT) ]; do \
+	   if curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health; then \
+	     printf "  $(GREEN)✓$(RESET) fast /health answering after %ss\n" "$$waited"; \
+	     exit 0; \
+	   fi; \
+	   sleep 10; \
+	   waited=$$((waited + 10)); \
+	   if [ $$((waited % 60)) -eq 0 ]; then \
+	     printf "  $(YELLOW)…$(RESET) fast still downloading/loading — %ss elapsed\n" "$$waited"; \
+	   fi; \
+	 done; \
+	 printf "  $(RED)✗$(RESET) fast never answered /health in $(SETUP_WAIT)s\n"; \
+	 printf "    check the log:  tail -f $(LOG_DIR)/model-$(FAST_PORT).log\n"; \
+	 exit 1
+	@printf "$(BLUE)==>$(RESET) [6/7] verifying the downloaded weights\n"
 	@$(MAKE) --no-print-directory verify
-	@printf "$(BLUE)==>$(RESET) [5/5] smoke test\n"
+	@printf "$(BLUE)==>$(RESET) [7/7] smoke test\n"
 	@$(MAKE) --no-print-directory smoke
 	@printf "$(GREEN)setup complete — try: make chat$(RESET)\n"
 
@@ -214,8 +253,8 @@ stop:
 	 if [ -z "$$pid" ]; then \
 	   printf "  $(RED)[down]$(RESET) nothing holds :$(MODEL_PORT)\n"; \
 	   if pgrep -x llama-server >/dev/null 2>&1; then \
-	     printf "    a llama-server is alive but has not bound it — either the\n"; \
-	     printf "    embedding server (make embed-stop) or a first run still\n"; \
+	     printf "    a llama-server is alive but has not bound it — another server\n"; \
+	     printf "    (make embed-stop / make fast-stop) or a first run still\n"; \
 	     printf "    downloading (watch: make logs; kill it by pid to cancel)\n"; \
 	   fi; \
 	   exit 0; \
@@ -292,6 +331,61 @@ embed-stop:
 	 fi; \
 	 printf "  $(GREEN)✓$(RESET) :$(EMBED_PORT) free\n"
 
+# No draft or spec seams, unlike MODEL_FLAGS: this model is already the small
+# one, so there is nothing cheaper to draft with. Everything else matches —
+# same context, same flash attention, same mmap+mlock reason (a model that
+# gets paged out during idle is slow on exactly the first call after a quiet
+# stretch, which for bulk work is every sync).
+FAST_FLAGS := --jinja -ngl 99 -c $(CTX_SIZE) -fa on --load-mode mmap+mlock \
+  --parallel $(FAST_SLOTS)
+
+# The bulk-work server. Same port guard as `model:` and `embed:`, same split
+# between the launch line and the wait line so `make -n fast` stays a dry run.
+fast:
+	@pid=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -n "$$pid" ]; then \
+	   cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	   case "$$cmd" in \
+	     *llama-server*) exit 0 ;; \
+	     *) printf "  $(YELLOW)!$(RESET) :$(FAST_PORT) is held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd"; \
+	        printf "    not ours to reuse — free it, or: make fast FAST_PORT=<other>\n"; \
+	        exit 1 ;; \
+	   esac; \
+	 fi; \
+	 mkdir -p $(LOG_DIR); \
+	 printf "→ llama-server on :$(FAST_PORT)  ($(FAST_HF), ctx $(CTX_SIZE))\n"; \
+	 nohup llama-server -hf $(FAST_HF) $(FAST_FLAGS) --port $(FAST_PORT) \
+	   > $(LOG_DIR)/model-$(FAST_PORT).log 2>&1 &
+	@$(MAKE) --no-print-directory _wait-fast
+
+# Port-based only, for the reason `stop:` is: killing by name would take the
+# other two servers down with it.
+fast-stop:
+	@pid=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -z "$$pid" ]; then \
+	   printf "  $(RED)[down]$(RESET) nothing holds :$(FAST_PORT)\n"; \
+	   exit 0; \
+	 fi; \
+	 cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	 case "$$cmd" in \
+	   *llama-server*) ;; \
+	   *) printf "  $(YELLOW)[skip]$(RESET) :$(FAST_PORT) held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd" >&2; \
+	      exit 0 ;; \
+	 esac; \
+	 printf "  stopping llama-server :$(FAST_PORT) (pid %s)\n" "$$pid"; \
+	 kill -TERM $$pid 2>/dev/null || true; \
+	 for i in 1 2 3 4 5 6 7 8 9 10; do \
+	   rem=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	   [ -z "$$rem" ] && break; \
+	   sleep 1; \
+	 done; \
+	 rem=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	 if [ -n "$$rem" ]; then \
+	   printf "  $(RED)✗$(RESET) :$(FAST_PORT) still held after 10s (pid %s)\n" "$$rem"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) :$(FAST_PORT) free\n"
+
 # pgrep -x, NOT `ps ax | grep llama-server`: this recipe's own /bin/sh -c
 # command line contains the literal string "llama-server" (in the printf
 # below), and ps shows that shell, so a full-command-line grep matches the
@@ -299,13 +393,14 @@ embed-stop:
 # `make status`, even with no server anywhere. -x matches the executable
 # name only, which is the thing we actually mean.
 #
-# The loading hint is reported only when NEITHER port is bound. With two
-# servers a live llama-server is no longer evidence that something is still
-# loading — it is usually just the other one.
+# The loading hint is reported only when NO port is bound. With three servers
+# a live llama-server is no longer evidence that something is still loading —
+# it is usually just one of the others.
 status:
 	@printf "$(BLUE)=== bond-desktop ===$(RESET)\n"
 	@mpid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 epid=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 fpid=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 if [ -n "$$mpid" ]; then \
 	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "model" "$(MODEL_PORT)" "$$mpid"; \
 	 else \
@@ -316,7 +411,12 @@ status:
 	 else \
 	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "embed" "$(EMBED_PORT)"; \
 	 fi; \
-	 if [ -z "$$mpid" ] && [ -z "$$epid" ]; then \
+	 if [ -n "$$fpid" ]; then \
+	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "fast" "$(FAST_PORT)" "$$fpid"; \
+	 else \
+	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "fast" "$(FAST_PORT)"; \
+	 fi; \
+	 if [ -z "$$mpid" ] && [ -z "$$epid" ] && [ -z "$$fpid" ]; then \
 	   lpid=$$(pgrep -x llama-server 2>/dev/null | head -1); \
 	   if [ -n "$$lpid" ]; then \
 	     printf "  $(YELLOW)[..]$(RESET)   llama-server (pid %s) is loading/downloading — watch: make logs\n" "$$lpid"; \
@@ -358,12 +458,13 @@ clean:
 	@printf "removed $(LOG_DIR)\n"
 
 # ── $(APP_DIR)/ — the Flutter desktop inbox ────────────────────────────
-# The app talks to BOTH servers above: :$(MODEL_PORT) for triage and
-# extraction, :$(EMBED_PORT) for conversation embeddings. Neither is required
-# to run it — with a server down the work queues simply park and retry on the
-# next sync — but `make model` and `make embed` are what make it do anything
-# intelligent. Override the URLs with --dart-define=LLAMA_URL=... /
-# --dart-define=EMBED_URL=... .
+# The app talks to ALL THREE servers above: :$(FAST_PORT) for triage,
+# extraction and storyline membership, :$(MODEL_PORT) for drafts and storyline
+# names, :$(EMBED_PORT) for conversation embeddings. None is required to run it
+# — with a server down the work that needs it simply parks and retries on the
+# next sync — but `make model`, `make fast` and `make embed` are what make it do
+# anything intelligent. Override the URLs with --dart-define=LLAMA_URL=... /
+# --dart-define=FAST_LLAMA_URL=... / --dart-define=EMBED_URL=... .
 
 # Dev-stage Microsoft auth: the app registration's client id, tenant id, and
 # (because the shared Azure registration has no public-client platform, and
@@ -407,13 +508,26 @@ app-test:
 	@cd $(APP_DIR) && $(FLUTTER) test
 
 # Live, not a gate: replays the fixture corpus through the real task prompts
-# against the llama-server on :$(MODEL_PORT) and prints a latency table. The
-# test file is @Skip'd so `make app-test` never depends on a server being up;
-# --run-skipped is what actually runs it here.
+# and prints a latency table. The test file is @Skip'd so `make app-test` never
+# depends on a server being up; --run-skipped is what actually runs it here.
+#
+# Guards :$(FAST_PORT), not :$(MODEL_PORT): after phase 3 triage and extraction
+# are the fast server's work, so benching them anywhere else would be measuring
+# a path the app no longer takes.
 bench:
+	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
+	   printf "$(RED)✗$(RESET) model not reachable — run: make fast\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_bench_live_test.dart --run-skipped
+
+# Side-by-side: the same corpus through triage and extraction on BOTH servers,
+# printing where the 4B and the 27B disagree and what each cost. Live and never
+# a gate — agreement is a judgement about labels, not a defect to fail on.
+ab:
 	@curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health || { \
 	   printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_bench_live_test.dart --run-skipped
+	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
+	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_ab_live_test.dart --run-skipped
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
@@ -517,4 +631,23 @@ _wait-embed:
 	 printf "    (~600MB) — much smaller than the chat model, so give it a\n"; \
 	 printf "    moment and re-run. Otherwise the log has the reason:\n"; \
 	 printf "    tail -f $(LOG_DIR)/model-$(EMBED_PORT).log\n"; \
+	 exit 1
+
+# Between the two: ~4.3GB is a real download but not a $(SETUP_WAIT)-sized one,
+# so a timeout here is worth a look at the log rather than assumed to be the
+# first run.
+_wait-fast:
+	@for i in $$(seq 1 $(WAIT_TIMEOUT)); do \
+	   pid=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	   if [ -n "$$pid" ]; then \
+	     printf "  $(GREEN)✓$(RESET) fast bound :$(FAST_PORT) (pid $$pid)\n"; \
+	     exit 0; \
+	   fi; \
+	   sleep 1; \
+	 done; \
+	 printf "  $(YELLOW)!$(RESET) fast has not bound :$(FAST_PORT) after $(WAIT_TIMEOUT)s\n"; \
+	 printf "    On the FIRST run it is downloading $(FAST_HF)\n"; \
+	 printf "    (~4.3GB) — give it a few minutes and re-run. Otherwise the\n"; \
+	 printf "    log has the reason:\n"; \
+	 printf "    tail -f $(LOG_DIR)/model-$(FAST_PORT).log\n"; \
 	 exit 1

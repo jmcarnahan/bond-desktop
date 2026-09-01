@@ -1,4 +1,4 @@
-@Skip('live — needs llama-server on :8080. Run: make bench (or '
+@Skip('live — needs the FAST llama-server on :8082. Run: make bench (or '
     'flutter test test/llm_bench_live_test.dart --run-skipped)')
 library;
 
@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/bench_stats.dart';
 import 'fixtures/corpus.dart';
 
 /// The number every perf phase is judged against.
@@ -18,33 +19,23 @@ import 'fixtures/corpus.dart';
 /// to answer the same seventeen emails, every time, so two phases' numbers can
 /// be put next to each other and mean something.
 ///
+/// It runs against the FAST server on :8082, not the 27B, because since phase 3
+/// that is where triage and extraction actually happen. Benching them on the
+/// server the app no longer uses for them would compare a phase's number
+/// against a path nobody takes; `make ab` is where the two servers are put
+/// side by side deliberately.
+///
 /// It prints rather than asserts, almost entirely on purpose. A small model's
 /// category is a judgement, and a test that pinned it would fail on the next
 /// model swap for no defect. What is asserted is shape — a result that came
 /// back empty is a broken call, not a debatable label — and the one thing that
 /// is never a judgement call: that `enable_thinking: false` was honoured.
 
-/// p-th percentile, nearest rank. Small n, so nothing fancier would mean more.
-int percentile(List<int> sorted, double p) {
-  if (sorted.isEmpty) return 0;
-  final rank = (p * sorted.length).ceil().clamp(1, sorted.length);
-  return sorted[rank - 1];
-}
-
-String row(String task, List<int> samples) {
-  final sorted = [...samples]..sort();
-  final total = samples.fold(0, (sum, ms) => sum + ms);
-  final mean = samples.isEmpty ? 0 : total ~/ samples.length;
-  return '| $task | ${samples.length} | ${percentile(sorted, 0.5)} '
-      '| ${percentile(sorted, 0.95)} | $mean '
-      '| ${(total / 1000).toStringAsFixed(1)} |';
-}
-
 void main() {
   test(
     'the corpus through triage and extraction, timed',
     () async {
-      final client = LlmClient();
+      final client = LlmClient(baseUrl: LlmClient.fastBaseUrl);
       var leaks = 0;
       client.onReasoningLeak = () => leaks++;
 

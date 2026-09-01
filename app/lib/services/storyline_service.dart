@@ -63,12 +63,24 @@ class StorylineService {
   final MessageStore _store;
   final LlmClient _client;
 
+  /// Where membership questions go. Deciding whether one thread belongs to a
+  /// group is a label under a tight schema, re-checked in Dart — the small
+  /// model answers it in a fraction of the time and the app is not measurably
+  /// worse for it. Naming stays on [_client] because a title and a summary are
+  /// prose a person reads, and there the bigger model shows.
+  ///
+  /// Defaults to [_client], so a caller that passes one client gets the
+  /// single-server behaviour this service had before there were two.
+  final LlmClient _confirmClient;
+
   /// Cryptographic randomness for ids. Not for secrecy — for the guarantee
   /// that two ids generated in the same millisecond differ, which a
   /// time-seeded generator does not give.
   static final math.Random _random = math.Random.secure();
 
-  StorylineService(this._store, this._client);
+  StorylineService(this._store, LlmClient client, {LlmClient? confirmClient})
+      : _client = client,
+        _confirmClient = confirmClient ?? client;
 
   // ── automatic: one thread ──────────────────────────────────────────────
 
@@ -148,7 +160,7 @@ class StorylineService {
     if (best == null) return;
 
     final result = await runTask(
-      _client,
+      _confirmClient,
       const ConfirmMembershipTask(),
       ConfirmInput(
         storyline: best,
