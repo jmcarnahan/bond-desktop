@@ -9,6 +9,7 @@ import '../services/ai_worker.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/backend_types.dart';
+import '../services/read_ack_queue.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
@@ -111,6 +112,12 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// scores and buckets were last written.
   final AttentionService? _attention;
 
+  /// Tells the server what [markRead] has already flipped locally. Reached
+  /// ONLY from [markRead] — never from [load], which a sixty-second timer
+  /// calls: this queue carries Teams acks too, and Microsoft's terms forbid a
+  /// timer reaching those endpoints. `teams_refresh_test.dart` holds that line.
+  final ReadAckQueue? _readAcks;
+
   StreamSubscription<TriageProgress>? _triageProgress;
   Timer? _triageReload;
 
@@ -124,11 +131,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     TriageQueue? triage,
     AiWorker? aiWorker,
     AttentionService? attention,
+    ReadAckQueue? readAcks,
     Future<String?>? userAddress,
   })  : _teamsSync = teamsSync,
         _triage = triage,
         _aiWorker = aiWorker,
         _attention = attention,
+        _readAcks = readAcks,
         super(const ConversationsInitial()) {
     final queue = triage;
     if (queue == null) return;
@@ -391,6 +400,16 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
     try {
       await _store.markConversationRead(source, conversationKey);
+      // Fire-and-forget, on the success path only: the queue drains the row
+      // that write just left, and there is nothing to drain if it did not
+      // land. Nothing on screen waits for the ack — the thread is already
+      // unbold, and this is the app telling Microsoft about it afterwards.
+      final ack = _readAcks?.pump();
+      if (ack != null) {
+        unawaited(
+          ack.catchError((Object e) => debugPrint('read-ack pump failed: $e')),
+        );
+      }
     } catch (_) {
       await load(syncFirst: false);
     }
@@ -558,6 +577,7 @@ final conversationsProvider =
     triage: ref.watch(triageQueueProvider),
     aiWorker: ref.watch(aiWorkerProvider),
     attention: ref.watch(attentionServiceProvider),
+    readAcks: ref.watch(readAckQueueProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
     userAddress: ref.watch(authSessionProvider).storedAccount.then(

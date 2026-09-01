@@ -23,6 +23,7 @@ import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
+import '../services/read_ack_queue.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
@@ -114,6 +115,21 @@ final mailBackendProvider = Provider<MailBackend>((ref) {
   return mode == backendModeSdk
       ? GraphMail(ref.watch(graphAuthProvider))
       : McpMailBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// Tells the server about reads that already happened locally.
+///
+/// Held apart from the AI worker although both drain `work_items`, and for the
+/// reason [ReadAckQueue] documents: an ack must not queue behind model work.
+/// It owns no timer — the two things that pump it are opening a thread and
+/// pressing refresh.
+final readAckQueueProvider = Provider<ReadAckQueue>((ref) {
+  return ReadAckQueue(
+    ref.watch(messageStoreProvider),
+    ref.watch(mailBackendProvider),
+    ref.watch(authSessionProvider),
+    activityLog: ref.watch(activityLogProvider),
+  );
 });
 
 /// Ranking and deferral. Stateless beyond its store, and cheap enough to run

@@ -72,6 +72,7 @@ class ActivityLogPanel extends StatefulWidget {
     'triage': 'Triage',
     'extract': 'Extract',
     'draft': 'Draft',
+    'mark_read': 'Mark read',
     'storyline': 'Storylines',
     'storyline_sweep': 'Storyline sweep',
     'storyline_recruit': 'Storyline recruit',
@@ -164,6 +165,11 @@ class ActivityLogPanel extends StatefulWidget {
         return chars is num
             ? 'Draft written — ${chars.toInt()} chars'
             : 'Draft written';
+      case 'mark_read':
+        final count = e.count ?? 0;
+        return count == 1
+            ? '$label — 1 message'
+            : '$label — $count messages';
       case 'storyline':
         return 'Storylines updated';
       case 'storyline_sweep':

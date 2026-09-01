@@ -45,4 +45,13 @@ abstract class MailBackend {
   /// Sends an existing draft. Nothing in this app calls this except a Send
   /// button the user pressed.
   Future<void> sendDraft(String draftId);
+
+  /// Marks messages read (or unread) on the server.
+  ///
+  /// A best-effort ACK of a decision the local store has already made: the
+  /// caller has flipped its own rows and is telling Microsoft afterwards.
+  /// Returns the ids it could not update — a message deleted between the open
+  /// and the ack is gone, not failed, and is NOT in the returned list; only
+  /// ids worth retrying come back.
+  Future<List<String>> markRead(List<String> messageIds, {bool isRead = true});
 }

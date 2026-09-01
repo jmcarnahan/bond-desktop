@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../backend/backend_types.dart';
 import '../backend/mail_backend.dart';
 import '../graph_mail.dart';
@@ -132,6 +134,47 @@ class McpMailBackend implements MailBackend {
   @override
   Future<void> sendDraft(String draftId) async {
     await _call('send_draft', {'draft_id': draftId});
+  }
+
+  /// Marks messages read (or unread) and returns the ids worth trying again.
+  ///
+  /// The ids travel as a JSON string and the flag as `'true'`/`'false'`,
+  /// because every argument this server takes is a string — the tools' own
+  /// convention, not a quirk of this call.
+  ///
+  /// The server answers per id, so this method's whole job is deciding which
+  /// of its `failed` entries deserve another attempt. An entry whose error
+  /// names Graph's 404 or 410 does not: the message was deleted between the
+  /// user opening the thread and the ack going out, and there is no read flag
+  /// left to set. Same judgement `SyncService` makes about a vanished body,
+  /// through the same parse.
+  ///
+  /// A whole-call `error` beside an empty `failed` — the shape the server uses
+  /// for input it could not read — also returns nothing to retry. That input
+  /// would be identical on every attempt, so parking the row on it would only
+  /// cost three requests to reach the same answer.
+  @override
+  Future<List<String>> markRead(
+    List<String> messageIds, {
+    bool isRead = true,
+  }) async {
+    final result = await _call('mark_mail_read_json', {
+      'message_ids': jsonEncode(messageIds),
+      'is_read': isRead ? 'true' : 'false',
+    });
+
+    final failed = result['failed'];
+    final retry = <String>[];
+    for (final entry in failed is List ? failed : const []) {
+      if (entry is! Map) continue;
+      final id = entry['id'];
+      if (id is! String || id.isEmpty) continue;
+      final error = entry['error'];
+      final status = error is String ? _statusFromToolError(error) : null;
+      if (status == 404 || status == 410) continue;
+      retry.add(id);
+    }
+    return retry;
   }
 
   /// One tool call, with this file's whole error policy in it.

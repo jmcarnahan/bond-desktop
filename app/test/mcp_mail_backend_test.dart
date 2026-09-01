@@ -282,6 +282,103 @@ void main() {
     });
   });
 
+  group('read acks', () {
+    test('the ids travel as a JSON array and the flag as a word', () async {
+      // Every argument this server takes is a string — the tools' own
+      // convention, and the reason the list is encoded rather than passed.
+      final mcp = _FakeMcp({
+        'mark_mail_read_json': [
+          {'updated': 2, 'failed': const []},
+        ],
+      });
+
+      final failed = await McpMailBackend(mcp).markRead(['m1', 'm2']);
+
+      expect(mcp.argsFor('mark_mail_read_json'), {
+        'message_ids': '["m1","m2"]',
+        'is_read': 'true',
+      });
+      expect(failed, isEmpty);
+    });
+
+    test('unread is the same call with the flag turned over', () async {
+      final mcp = _FakeMcp({
+        'mark_mail_read_json': [
+          {'updated': 1, 'failed': const []},
+        ],
+      });
+
+      await McpMailBackend(mcp).markRead(['m1'], isRead: false);
+
+      expect(mcp.argsFor('mark_mail_read_json')['is_read'], 'false');
+    });
+
+    test('a failed id comes back to be retried', () async {
+      final mcp = _FakeMcp({
+        'mark_mail_read_json': [
+          {
+            'updated': 1,
+            'failed': [
+              {'id': 'm2', 'error': 'Graph API error 503 (ServiceUnavailable)'},
+            ],
+          },
+        ],
+      });
+
+      expect(await McpMailBackend(mcp).markRead(['m1', 'm2']), ['m2']);
+    });
+
+    test('a message that has since been deleted does not', () async {
+      // The same judgement SyncService makes about a vanished body, through
+      // the same parse: there is no read flag left to set, so retrying forever
+      // is the only thing calling this a failure would buy.
+      final mcp = _FakeMcp({
+        'mark_mail_read_json': [
+          {
+            'updated': 0,
+            'failed': [
+              {'id': 'm1', 'error': 'Graph API error 404 (ErrorItemNotFound)'},
+              {'id': 'm2', 'error': 'Graph API error 410 (ErrorGone)'},
+              {'id': 'm3', 'error': 'Graph API error 500 (InternalError)'},
+            ],
+          },
+        ],
+      });
+
+      expect(await McpMailBackend(mcp).markRead(['m1', 'm2', 'm3']), ['m3']);
+    });
+
+    test('input the server could not read is not worth retrying', () async {
+      // Its shape: a whole-call error with an empty `failed`. The same input
+      // would come back the same way three times over.
+      final mcp = _FakeMcp({
+        'mark_mail_read_json': [
+          {
+            'updated': 0,
+            'failed': const [],
+            'error': 'message_ids must be a JSON array of strings',
+          },
+        ],
+      });
+
+      expect(await McpMailBackend(mcp).markRead(['m1']), isEmpty);
+    });
+
+    test('an unconnected workspace is a sign-in problem, not a mail one',
+        () async {
+      final mcp = _FakeMcp({
+        'mark_mail_read_json': [
+          {'error': 'not_connected', 'connect_url': 'https://connect'},
+        ],
+      });
+
+      await expectLater(
+        McpMailBackend(mcp).markRead(['m1']),
+        throwsA(isA<ReconsentRequired>()),
+      );
+    });
+  });
+
   group('failures', () {
     test('a Graph status inside a tool error is carried through', () async {
       final mcp = _FakeMcp({

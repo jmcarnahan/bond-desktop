@@ -199,8 +199,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// What the refresh button does: the mail refresh the timer also runs, plus
   /// the Teams pull the timer must never run.
+  ///
+  /// The read-acks are pumped from HERE rather than from [_refresh], for the
+  /// same reason [_refreshTeams] is: the queue carries chat acks as well as
+  /// mail ones, and every call on it has to trace back to something the user
+  /// did. Refresh is the second way a parked ack gets another go — the first
+  /// is reopening the thread.
   Future<void> _refreshAll() async {
     _refresh();
+    unawaited(ref.read(readAckQueueProvider).pump());
     await _refreshTeams();
   }
 

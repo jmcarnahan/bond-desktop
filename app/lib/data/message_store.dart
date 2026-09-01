@@ -964,11 +964,18 @@ RETURNING *
   /// Attempts are deliberately NOT reset: the drain errors a row again at its
   /// next failed attempt, so each revival buys exactly one more try, and the
   /// [maxAttempts] ceiling is where a genuinely bad item stays down for good.
-  Future<int> reviveErroredWork({int maxAttempts = 6}) {
+  ///
+  /// [kind] narrows the revival to one queue. Absent it revives every kind,
+  /// which is what the sync path wants; a queue that pumps on its own — the
+  /// read-acks do, off a thread open — passes its own kind so that reviving
+  /// its rows does not quietly hand a second chance to the model queues it
+  /// shares the table with.
+  Future<int> reviveErroredWork({int maxAttempts = 6, String? kind}) {
     return db.customUpdate(
       "UPDATE work_items SET status = 'pending', updated_at = ? "
-      "WHERE status = 'error' AND attempts < ?",
-      variables: _args([_nowIso(), maxAttempts]),
+      "WHERE status = 'error' AND attempts < ?"
+      '${kind == null ? '' : ' AND task_kind = ?'}',
+      variables: _args([_nowIso(), maxAttempts, ?kind]),
     );
   }
 

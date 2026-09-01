@@ -66,6 +66,13 @@ class FakeMail implements MailBackend {
 
   @override
   Future<void> sendDraft(String draftId) async {}
+
+  @override
+  Future<List<String>> markRead(
+    List<String> messageIds, {
+    bool isRead = true,
+  }) async =>
+      const [];
 }
 
 /// A [TeamsBackend] that answers from a fixed chat list and counts what it was
