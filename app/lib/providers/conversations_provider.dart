@@ -217,15 +217,15 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
     final List<Conversation> rows;
     try {
-      // Synchronous, and immediately before the read rather than on a timer of
-      // its own: it is four indexed queries and some arithmetic, and running it
-      // anywhere else would mean the rows about to render could carry scores
+      // Immediately before the read rather than on a timer of its own: it is
+      // four indexed queries and some arithmetic, and running it anywhere
+      // else would mean the rows about to render could carry scores
       // computed against a sender rule the user has since changed. Inside the
       // same try as the read because both are the same database — a failure in
       // either is "could not read the local inbox".
-      _attention?.recomputeAll(sources: inboxSources);
-      rows = _store.loadConversations(sources: inboxSources);
-      _enqueueDrafts();
+      await _attention?.recomputeAll(sources: inboxSources);
+      rows = await _store.loadConversations(sources: inboxSources);
+      await _enqueueDrafts();
     } catch (e) {
       // The database itself failed. There is no stale-but-valid answer to
       // fall back to beyond whatever is already on screen.
@@ -308,13 +308,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// runs, and letting a failed queue write fall into the "could not read the
   /// local inbox" path would cost the user the mail they can see over a
   /// suggestion they have not asked for yet.
-  void _enqueueDrafts() {
+  Future<void> _enqueueDrafts() async {
     try {
-      final stored = _store.getPref(attentionThresholdKey);
+      final stored = await _store.getPref(attentionThresholdKey);
       final threshold = (stored == null ? null : double.tryParse(stored)) ??
           AttentionTuning.defaultThreshold;
-      for (final key in _store.needsDraftKeys(threshold: threshold)) {
-        _store.requeueWork('draft', 'email', key);
+      for (final key in await _store.needsDraftKeys(threshold: threshold)) {
+        await _store.requeueWork('draft', 'email', key);
       }
     } catch (e) {
       debugPrint('draft enqueue failed: $e');
@@ -348,7 +348,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     ], current.loadError);
 
     try {
-      _store.setConversationState(
+      await _store.setConversationState(
         source,
         conversationKey,
         ConversationState.done,
@@ -357,7 +357,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       // with this" the LO ever gives, and it is worth recording — but recording
       // one for a write that failed would teach the app from something that
       // never happened.
-      _logImplicit('thread', conversationKey, 'down');
+      await _logImplicit('thread', conversationKey, 'down');
     } catch (_) {
       final latest = state;
       if (latest is! ConversationsLoaded) return;
@@ -384,14 +384,15 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// address would move nothing and report zero.
   Future<int> keepSenderInInbox(String address,
       {String source = 'email'}) async {
-    _store.recordFeedback(
+    await _store.recordFeedback(
       scope: 'sender',
       scopeKey: address.toLowerCase(),
       direction: 'up',
       origin: 'explicit',
     );
-    _store.setSenderPref(address, 'keep');
-    final affected = _store.rebucketSender(address, bucket: null, source: source);
+    await _store.setSenderPref(address, 'keep');
+    final affected =
+        await _store.rebucketSender(address, bucket: null, source: source);
     await load(syncFirst: false);
     return affected;
   }
@@ -400,15 +401,15 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// moved. [source] as on [keepSenderInInbox].
   Future<int> sendSenderToLater(String address,
       {String source = 'email'}) async {
-    _store.recordFeedback(
+    await _store.recordFeedback(
       scope: 'sender',
       scopeKey: address.toLowerCase(),
       direction: 'down',
       origin: 'explicit',
     );
-    _store.setSenderPref(address, 'later');
+    await _store.setSenderPref(address, 'later');
     final affected =
-        _store.rebucketSender(address, bucket: 'later', source: source);
+        await _store.rebucketSender(address, bucket: 'later', source: source);
     await load(syncFirst: false);
     return affected;
   }
@@ -425,7 +426,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// mean a second history table for a button pressed seconds ago.
   Future<void> restoreSenderPref(String address, String? disposition,
       {String source = 'email'}) async {
-    _store.recordFeedback(
+    await _store.recordFeedback(
       scope: 'sender',
       scopeKey: address.toLowerCase(),
       // An undo is itself a correction, in the opposite direction of whatever
@@ -434,8 +435,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       direction: disposition == 'later' ? 'down' : 'up',
       origin: 'explicit',
     );
-    _store.setSenderPref(address, disposition);
-    _store.rebucketSender(
+    await _store.setSenderPref(address, disposition);
+    await _store.rebucketSender(
       address,
       bucket: disposition == 'later' ? 'later' : null,
       source: source,
@@ -452,13 +453,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// is a newer instruction about a wider set, and the person giving it means
   /// all of that sender's mail.
   Future<void> keepThreadInInbox(String source, String conversationKey) async {
-    _store.recordFeedback(
+    await _store.recordFeedback(
       scope: 'thread',
       scopeKey: conversationKey,
       direction: 'up',
       origin: 'explicit',
     );
-    _store.setConversationBucket(
+    await _store.setConversationBucket(
       source,
       conversationKey,
       bucket: null,
@@ -470,13 +471,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// This one thread belongs in Later. The `user` reason is what tells the
   /// scoring sweep to leave it alone in both directions.
   Future<void> sendThreadToLater(String source, String conversationKey) async {
-    _store.recordFeedback(
+    await _store.recordFeedback(
       scope: 'thread',
       scopeKey: conversationKey,
       direction: 'down',
       origin: 'explicit',
     );
-    _store.setConversationBucket(
+    await _store.setConversationBucket(
       source,
       conversationKey,
       bucket: 'later',
@@ -487,7 +488,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
   /// The sender's rule as it stands, so a caller can capture it before
   /// overwriting and hand it back to [restoreSenderPref].
-  String? senderPref(String address) => _store.getSenderPref(address);
+  Future<String?> senderPref(String address) => _store.getSenderPref(address);
 
   /// Records something the LO did rather than something they said — opening a
   /// thread, closing one. Fire-and-forget and never reloads: these fire on
@@ -497,9 +498,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// It swallows its own failures for the same reason. A correction that fails
   /// is worth telling someone about; a background signal that fails is not
   /// worth interrupting them mid-click.
-  void _logImplicit(String scope, String scopeKey, String direction) {
+  Future<void> _logImplicit(
+    String scope,
+    String scopeKey,
+    String direction,
+  ) async {
     try {
-      _store.recordFeedback(
+      await _store.recordFeedback(
         scope: scope,
         scopeKey: scopeKey,
         direction: direction,
@@ -512,7 +517,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
   /// The LO opened this thread. The weakest positive signal there is, and the
   /// most plentiful.
-  void noteThreadOpened(String conversationKey) =>
+  Future<void> noteThreadOpened(String conversationKey) =>
       _logImplicit('thread', conversationKey, 'up');
 }
 
@@ -598,7 +603,8 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
 
     final List<Message> messages;
     try {
-      messages = _store.loadThread(conversationKey, sources: inboxSources);
+      messages =
+          await _store.loadThread(conversationKey, sources: inboxSources);
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;

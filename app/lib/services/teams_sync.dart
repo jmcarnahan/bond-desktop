@@ -101,7 +101,8 @@ class TeamsSync {
 
   /// When the last refresh finished, as an ISO-8601 UTC string, or null when
   /// none ever has.
-  String? get lastSyncedAt => _store.getSyncedAt(folder, source: source);
+  Future<String?> get lastSyncedAt =>
+      _store.getSyncedAt(folder, source: source);
 
   /// One pass over the chat list. Silent and free when Teams is unavailable.
   Future<void> syncNow() async {
@@ -110,7 +111,7 @@ class TeamsSync {
       // call: a Teams refresh only ever happens because the user asked for
       // one, so a tenant without `Chat.Read` gets one row per button press
       // instead of one per poll tick.
-      _log.record(
+      await _log.record(
         'sync_teams',
         status: 'skipped',
         source: source,
@@ -137,7 +138,7 @@ class TeamsSync {
         if (key == null || key.isEmpty) continue;
         chatsSeen++;
 
-        final stored = _store.getConversationRow(source, key);
+        final stored = await _store.getConversationRow(source, key);
         final previewAt = _previewTimestamp(chat['lastMessagePreview']);
 
         // The whole reason the chat list expands its preview: a chat whose
@@ -164,7 +165,7 @@ class TeamsSync {
             : const <Map<String, dynamic>>[];
 
         chatsFetched++;
-        newMessages += _ingestChat(
+        newMessages += await _ingestChat(
           chat,
           key,
           messages,
@@ -174,7 +175,7 @@ class TeamsSync {
         );
       }
 
-      _store.setSyncedAt(folder, _nowIso(), source: source);
+      await _store.setSyncedAt(folder, _nowIso(), source: source);
 
       // Extraction, for the chat messages a person actually wrote. `OR IGNORE`
       // makes it idempotent, so it both picks up what just arrived and refills
@@ -184,7 +185,7 @@ class TeamsSync {
       // mail ones: chat messages never enter triage, so the default
       // `pending/processing/triaged` filter would match none of them, and a
       // bare `skipped` filter would drag the bots back in.
-      final queued = _store.enqueueExtractBacklog(
+      final queued = await _store.enqueueExtractBacklog(
         cap: _extractCap,
         sinceIso: floor,
         source: source,
@@ -198,7 +199,7 @@ class TeamsSync {
       // storylines — extraction requeues per-conversation `storyline` work,
       // and `assignConversation` takes a source — they simply never start one.
 
-      _log.record(
+      await _log.record(
         'sync_teams',
         source: source,
         count: newMessages,
@@ -213,7 +214,7 @@ class TeamsSync {
       // The last frame in which the exception object still exists — the caller
       // collapses it into a banner string. Recorded, then rethrown so that
       // banner still appears.
-      _log.record(
+      await _log.record(
         'sync_teams',
         status: 'error',
         source: source,
@@ -244,13 +245,14 @@ class TeamsSync {
   ///
   /// The transaction is what makes the CHAT the unit of resumability — see the
   /// class comment. Every network call this needs has already happened by the
-  /// time it starts: sqlite is synchronous here, and a transaction held open
-  /// across an await is a transaction held open across a stalled socket.
+  /// time it starts, and must: the awaits inside are sqlite's own, and a
+  /// transaction held open across a Graph call is one held open across a
+  /// stalled socket.
   ///
   /// The count is RETURNED rather than recorded here, for the same reason the
   /// mail drain returns its own: an activity row written inside this
   /// transaction would roll back with the chat.
-  int _ingestChat(
+  Future<int> _ingestChat(
     Map<String, dynamic> chat,
     String key,
     List<Map<String, dynamic>> raw,
@@ -258,10 +260,9 @@ class TeamsSync {
     required String myId,
     required bool firstSight,
   }) {
-    _store.db.execute('BEGIN');
-    var newMessages = 0;
-    try {
-      final work = _ChatWork.from(_store.getConversationRow(source, key));
+    return _store.db.transaction(() async {
+      var newMessages = 0;
+      final work = _ChatWork.from(await _store.getConversationRow(source, key));
 
       if (firstSight) {
         for (final member in members) {
@@ -283,9 +284,9 @@ class TeamsSync {
         final id = row['source_message_id'] as String;
         // Asked before the write, because the fold below must see each message
         // exactly once — see the class comment. The upsert itself still runs.
-        final firstSighting = !_store.hasMessage(source, id);
+        final firstSighting = !await _store.hasMessage(source, id);
 
-        _store.upsertMessage(row);
+        await _store.upsertMessage(row);
         if (!firstSighting) continue;
         newMessages++;
 
@@ -297,13 +298,9 @@ class TeamsSync {
         );
       }
 
-      _writeConversation(key, work, chat, firstSight: firstSight);
-      _store.db.execute('COMMIT');
-    } catch (_) {
-      _store.db.execute('ROLLBACK');
-      rethrow;
-    }
-    return newMessages;
+      await _writeConversation(key, work, chat, firstSight: firstSight);
+      return newMessages;
+    });
   }
 
   /// One Graph chat message as a `messages` row, or null when it is not one.
@@ -386,16 +383,16 @@ class TeamsSync {
   ///
   /// A chat with only system events, or one whose every message was already
   /// stored, leaves the row exactly as it was — including its `updated_at`.
-  void _writeConversation(
+  Future<void> _writeConversation(
     String key,
     _ChatWork work,
     Map<String, dynamic> chat, {
     required bool firstSight,
-  }) {
+  }) async {
     final snapshot = work.snapshot;
     if (snapshot == null) return;
 
-    _store.upsertConversation({
+    await _store.upsertConversation({
       'source': source,
       'conversation_key': key,
       // A renamed group chat follows its topic; an unnamed one is named after
@@ -419,7 +416,7 @@ class TeamsSync {
       'last_message_at': snapshot.lastMessageAt,
       'last_message_preview': snapshot.lastMessagePreview,
     });
-    _store.recomputeConversationCounts(source, key);
+    await _store.recomputeConversationCounts(source, key);
   }
 
   static String? _subjectFor(

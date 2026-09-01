@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'data/db.dart';
 import 'data/message_store.dart';
 import 'providers/app_providers.dart';
+import 'providers/prefs_provider.dart';
 import 'screens/inbox_screen.dart';
 import 'screens/sign_in_screen.dart';
 import 'theme/bond_theme.dart';
@@ -26,14 +27,22 @@ Future<void> main() async {
   // whole policy: the table only grows while the app is running, and a prune
   // on every write would be a delete per sync on a database the UI isolate
   // reads synchronously.
-  MessageStore(db)
-    ..resetInterruptedTriage()
-    ..resetInterruptedWork()
-    ..pruneActivity();
+  final store = MessageStore(db);
+  await store.resetInterruptedTriage();
+  await store.resetInterruptedWork();
+  await store.pruneActivity();
+
+  // Read before the first frame rather than a microtask into it: every backend
+  // provider watches the stored mode, and a frame on the defaults would build
+  // — and immediately dispose — a session pointed at the wrong server.
+  final prefs = await AppPrefsNotifier.read(store);
 
   runApp(
     ProviderScope(
-      overrides: [dbProvider.overrideWithValue(db)],
+      overrides: [
+        dbProvider.overrideWithValue(db),
+        initialAppPrefsProvider.overrideWithValue(prefs),
+      ],
       child: const BondInboxApp(),
     ),
   );

@@ -1,14 +1,16 @@
 import 'dart:async';
 
-import 'package:bond_inbox/data/db.dart';
+// `show`: drift generates an `ActivityEvent` row class from the
+// `activity_events` table, and this file means the log's own.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
 
 import 'fixtures/fake_llama_server.dart';
+import 'fixtures/test_db.dart';
 
 /// The activity log under the concurrent drains — the exact break its
 /// original single-slot design predicted for itself ("if a future phase
@@ -67,23 +69,23 @@ class HeldLlm extends LlmClient {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late ActivityLog log;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     log = ActivityLog(store);
   });
 
-  tearDown(() {
+  tearDown(() async {
     log.dispose();
-    db.close();
+    await db.close();
   });
 
-  void seedMessage(String id) {
-    store.upsertMessage({
+  Future<void> seedMessage(String id) async {
+    await store.upsertMessage({
       'source': 'email',
       'source_message_id': id,
       'conversation_key': 'conv-$id',
@@ -97,15 +99,15 @@ void main() {
     });
   }
 
-  Map<String, ActivityEvent> triageEventsById() => {
-        for (final row in store.recentActivity(limit: 20))
+  Future<Map<String, ActivityEvent>> triageEventsById() async => {
+        for (final row in await store.recentActivity(limit: 20))
           if (row['kind'] == 'triage')
             ActivityEvent.fromRow(row).entityId!: ActivityEvent.fromRow(row),
       };
 
   test('three concurrent messages each keep their own model tally', () async {
     for (final id in ['m0', 'm1', 'm2']) {
-      seedMessage(id);
+      await seedMessage(id);
     }
     final llm = HeldLlm(log);
     final queue = TriageQueue(store, llm, activityLog: log);
@@ -118,7 +120,7 @@ void main() {
     llm.release.complete();
     await drain;
 
-    final events = triageEventsById();
+    final events = await triageEventsById();
     expect(events.keys, unorderedEquals(['m0', 'm1', 'm2']));
     for (final entry in llm.reported.entries) {
       final event = events[entry.key]!;
@@ -150,13 +152,13 @@ void main() {
       },
     ]);
     for (final id in ['m0', 'm1', 'm2']) {
-      seedMessage(id);
+      await seedMessage(id);
     }
 
     final client = LlmClient(baseUrl: fake.chatUrl, onCall: log.noteLlmCall);
     await TriageQueue(store, client, activityLog: log).pump();
 
-    final events = triageEventsById();
+    final events = await triageEventsById();
     expect(events.keys, unorderedEquals(['m0', 'm1', 'm2']));
     for (final event in events.values) {
       // Exactly one observed call per row. The single-slot design would have
@@ -166,7 +168,7 @@ void main() {
     }
   });
 
-  test('the root slot still serves a caller outside any span', () {
+  test('the root slot still serves a caller outside any span', () async {
     log.note({'chats_seen': 4});
     log.noteLlmCall(const LlmCallRecord(
       label: 'triage',
@@ -174,9 +176,9 @@ void main() {
       outcome: 'ok',
       completionTokens: 40,
     ));
-    log.record('triage', source: 'email', entityId: 'solo');
+    await log.record('triage', source: 'email', entityId: 'solo');
 
-    final event = triageEventsById()['solo']!;
+    final event = (await triageEventsById())['solo']!;
     expect(event.detail['llm_calls'], 1);
     expect(event.detail['llm_ms'], 250);
     expect(event.detail['chats_seen'], 4);

@@ -2,11 +2,12 @@
     'Run: flutter test test/llm_drain_live_test.dart --run-skipped')
 library;
 
-import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/test_db.dart';
 
 import 'fixtures/corpus.dart';
 
@@ -33,7 +34,7 @@ import 'fixtures/corpus.dart';
 void main() {
   /// One whole drain over a fresh store. Returns its wall clock.
   Future<Duration> drainCorpus(int concurrency) async {
-    final db = openDbAt(':memory:');
+    final db = testDb();
     final store = MessageStore(db);
     try {
       // Body, headers and all, the way a delta page plus a detail fetch would
@@ -41,7 +42,7 @@ void main() {
       // here is all it will ever have to read.
       for (final entry in emailCorpus) {
         final message = entry.message;
-        store.upsertMessage({
+        await store.upsertMessage({
           'source': message.source,
           'source_message_id': entry.id,
           'conversation_key': entry.conversationKey,
@@ -71,11 +72,8 @@ void main() {
       // The only assertion, and it is about correctness rather than speed: a
       // drain that went faster by dropping messages has not got faster.
       for (final entry in emailCorpus.where((e) => e.expectedGate == null)) {
-        final row = db.select(
-          'SELECT triage_status FROM messages WHERE source_message_id = ?',
-          [entry.id],
-        ).single;
-        expect(row['triage_status'], 'triaged', reason: entry.id);
+        final row = await store.getMessageRow('email', entry.id);
+        expect(row!['triage_status'], 'triaged', reason: entry.id);
       }
 
       return watch.elapsed;

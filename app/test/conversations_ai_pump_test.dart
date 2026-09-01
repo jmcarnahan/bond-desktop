@@ -1,4 +1,4 @@
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
@@ -6,7 +6,8 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// How the inbox kicks its two queues.
 ///
@@ -80,20 +81,20 @@ class LoggingLlm extends LlmClient {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late FakeSync sync;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     sync = FakeSync();
   });
 
   tearDown(() => db.close());
 
-  void seedPendingMessage(String id) {
-    store.upsertMessage({
+  Future<void> seedPendingMessage(String id) async {
+    await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': 'conv-1',
       'direction': 'inbound',
@@ -112,8 +113,8 @@ void main() {
   }
 
   test('the AI queue runs after triage, never beside it', () async {
-    seedPendingMessage('m1');
-    store.enqueueWork('extract', 'email', 'm1');
+    await seedPendingMessage('m1');
+    await store.enqueueWork('extract', 'email', 'm1');
     final log = <String>[];
     final triage = TriageQueue(store, LoggingLlm(log));
     final worker = AiWorker(
@@ -134,7 +135,7 @@ void main() {
   });
 
   test('with no triage queue wired, the AI queue still runs', () async {
-    store.enqueueWork('extract', 'email', 'm1');
+    await store.enqueueWork('extract', 'email', 'm1');
     final log = <String>[];
     final worker = AiWorker(
       store,
@@ -149,11 +150,11 @@ void main() {
     await settle();
 
     expect(log, ['ai:start', 'ai:end']);
-    expect(store.workCounts('extract'), {'done': 1});
+    expect(await store.workCounts('extract'), {'done': 1});
   });
 
   test('a sync that failed kicks neither queue', () async {
-    store.enqueueWork('extract', 'email', 'm1');
+    await store.enqueueWork('extract', 'email', 'm1');
     final log = <String>[];
     final worker = AiWorker(
       store,
@@ -170,11 +171,11 @@ void main() {
 
     // Nothing new arrived to work on, and the inbox still renders what it has.
     expect(log, isEmpty);
-    expect(store.workCounts('extract'), {'pending': 1});
+    expect(await store.workCounts('extract'), {'pending': 1});
   });
 
   test('a load that skips the sync kicks neither queue', () async {
-    store.enqueueWork('extract', 'email', 'm1');
+    await store.enqueueWork('extract', 'email', 'm1');
     final log = <String>[];
     final worker = AiWorker(
       store,

@@ -1,30 +1,30 @@
 import 'dart:convert';
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
-  setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+  setUp(() async {
+    db = testDb();
     store = MessageStore(db);
   });
 
   tearDown(() => db.close());
 
-  void seedConversation(
+  Future<void> seedConversation(
     String key, {
     String state = 'waiting',
     String lastMessageAt = '2026-08-28T10:00:00Z',
     String? lastInboundAt,
-  }) {
-    store.upsertConversation({
+  }) async {
+    await store.upsertConversation({
       'conversation_key': key,
       'subject': key,
       'state': state,
@@ -33,14 +33,14 @@ void main() {
     });
   }
 
-  void seedMessage(
+  Future<void> seedMessage(
     String key,
     String id, {
     String direction = 'inbound',
     String? from,
     String receivedAt = '2026-08-28T10:00:00Z',
-  }) {
-    store.upsertMessage({
+  }) async {
+    await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
       'direction': direction,
@@ -49,29 +49,29 @@ void main() {
     });
   }
 
-  List<Map<String, Object?>> events() => [
-        for (final row in db.select(
-          'SELECT * FROM feedback_events ORDER BY id ASC',
-        ))
-          Map<String, Object?>.from(row),
+  Future<List<Map<String, Object?>>> events() async => [
+        for (final row in await db
+            .customSelect('SELECT * FROM feedback_events ORDER BY id ASC')
+            .get())
+          Map<String, Object?>.from(row.data),
       ];
 
   group('feedback_events', () {
-    test('appends, and appends again rather than replacing', () {
-      store.recordFeedback(
+    test('appends, and appends again rather than replacing', () async {
+      await store.recordFeedback(
         scope: 'sender',
         scopeKey: 'eric@x.com',
         direction: 'down',
         origin: 'explicit',
       );
-      store.recordFeedback(
+      await store.recordFeedback(
         scope: 'sender',
         scopeKey: 'eric@x.com',
         direction: 'up',
         origin: 'explicit',
       );
 
-      final rows = events();
+      final rows = await events();
       expect(rows, hasLength(2));
       expect(rows.map((r) => r['direction']), ['down', 'up']);
       // The history is the point: a table that kept only the latest answer
@@ -79,15 +79,15 @@ void main() {
       expect(rows.first['id'], isNot(rows.last['id']));
     });
 
-    test('carries scope, key, direction, origin and a stamp', () {
-      store.recordFeedback(
+    test('carries scope, key, direction, origin and a stamp', () async {
+      await store.recordFeedback(
         scope: 'thread',
         scopeKey: 'c1',
         direction: 'up',
         origin: 'implicit',
       );
 
-      final row = events().single;
+      final row = (await events()).single;
       expect(row['scope'], 'thread');
       expect(row['scope_key'], 'c1');
       expect(row['direction'], 'up');
@@ -97,103 +97,106 @@ void main() {
   });
 
   group('sender_prefs', () {
-    test('round-trips through whatever casing the mail carried', () {
-      store.setSenderPref('Eric.Nolan@X.com', 'later');
+    test('round-trips through whatever casing the mail carried', () async {
+      await store.setSenderPref('Eric.Nolan@X.com', 'later');
 
-      expect(store.getSenderPref('eric.nolan@x.com'), 'later');
-      expect(store.getSenderPref('ERIC.NOLAN@X.COM'), 'later');
-      expect(store.allSenderPrefs(), {'eric.nolan@x.com': 'later'});
+      expect(await store.getSenderPref('eric.nolan@x.com'), 'later');
+      expect(await store.getSenderPref('ERIC.NOLAN@X.COM'), 'later');
+      expect(await store.allSenderPrefs(), {'eric.nolan@x.com': 'later'});
     });
 
-    test('a second write replaces rather than duplicating', () {
-      store.setSenderPref('eric@x.com', 'later');
-      store.setSenderPref('eric@x.com', 'keep');
+    test('a second write replaces rather than duplicating', () async {
+      await store.setSenderPref('eric@x.com', 'later');
+      await store.setSenderPref('eric@x.com', 'keep');
 
-      expect(store.getSenderPref('eric@x.com'), 'keep');
-      expect(store.allSenderPrefs(), hasLength(1));
+      expect(await store.getSenderPref('eric@x.com'), 'keep');
+      expect(await store.allSenderPrefs(), hasLength(1));
     });
 
-    test('null deletes the rule, which is not the same as storing one', () {
-      store.setSenderPref('eric@x.com', 'later');
-      store.setSenderPref('eric@x.com', null);
+    test('null deletes the rule, which is not the same as storing one',
+        () async {
+      await store.setSenderPref('eric@x.com', 'later');
+      await store.setSenderPref('eric@x.com', null);
 
-      expect(store.getSenderPref('eric@x.com'), isNull);
-      expect(store.allSenderPrefs(), isEmpty);
+      expect(await store.getSenderPref('eric@x.com'), isNull);
+      expect(await store.allSenderPrefs(), isEmpty);
     });
 
-    test('deleting a rule nobody set is harmless', () {
-      store.setSenderPref('nobody@x.com', null);
-      expect(store.allSenderPrefs(), isEmpty);
+    test('deleting a rule nobody set is harmless', () async {
+      await store.setSenderPref('nobody@x.com', null);
+      expect(await store.allSenderPrefs(), isEmpty);
     });
 
-    test('a sender nobody has ruled on has no rule', () {
-      expect(store.getSenderPref('stranger@x.com'), isNull);
+    test('a sender nobody has ruled on has no rule', () async {
+      expect(await store.getSenderPref('stranger@x.com'), isNull);
     });
   });
 
   group('app_prefs', () {
-    test('set then get', () {
-      store.setPref('attention_threshold', '0.7');
-      expect(store.getPref('attention_threshold'), '0.7');
+    test('set then get', () async {
+      await store.setPref('attention_threshold', '0.7');
+      expect(await store.getPref('attention_threshold'), '0.7');
     });
 
-    test('a second set overwrites', () {
-      store.setPref('about_me', 'first');
-      store.setPref('about_me', 'second');
-      expect(store.getPref('about_me'), 'second');
+    test('a second set overwrites', () async {
+      await store.setPref('about_me', 'first');
+      await store.setPref('about_me', 'second');
+      expect(await store.getPref('about_me'), 'second');
     });
 
-    test('an unset key is null, not an empty string', () {
-      expect(store.getPref('never_written'), isNull);
+    test('an unset key is null, not an empty string', () async {
+      expect(await store.getPref('never_written'), isNull);
     });
   });
 
   group('setConversationBucket', () {
-    test('writes bucket and reason, creating the ai row if needed', () {
-      seedConversation('c1');
-      store.setConversationBucket('email', 'c1',
+    test('writes bucket and reason, creating the ai row if needed', () async {
+      await seedConversation('c1');
+      await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'low_value');
 
-      final ai = store.getConversationAi('email', 'c1')!;
+      final ai = (await store.getConversationAi('email', 'c1'))!;
       expect(ai['bucket'], 'later');
       expect(ai['bucket_reason'], 'low_value');
     });
 
-    test('null clears both columns', () {
-      seedConversation('c1');
-      store.setConversationBucket('email', 'c1',
+    test('null clears both columns', () async {
+      await seedConversation('c1');
+      await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'user');
-      store.setConversationBucket('email', 'c1', bucket: null);
+      await store.setConversationBucket('email', 'c1', bucket: null);
 
-      final ai = store.getConversationAi('email', 'c1')!;
+      final ai = (await store.getConversationAi('email', 'c1'))!;
       expect(ai['bucket'], isNull);
       expect(ai['bucket_reason'], isNull);
     });
 
-    test('leaves an embedding on the same row alone', () {
-      seedConversation('c1');
-      store.upsertConversationAi('email', 'c1', embeddedHash: 'h1');
-      store.setConversationBucket('email', 'c1',
+    test('leaves an embedding on the same row alone', () async {
+      await seedConversation('c1');
+      await store.upsertConversationAi('email', 'c1', embeddedHash: 'h1');
+      await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'user');
 
-      expect(store.getConversationAi('email', 'c1')!['embedded_hash'], 'h1');
+      expect((await store.getConversationAi('email', 'c1'))!['embedded_hash'],
+          'h1');
     });
   });
 
   group('writeAttentionScore', () {
-    test('writes, and creating the ai row if needed', () {
-      seedConversation('c1');
-      store.writeAttentionScore('email', 'c1', 1.25);
-      expect(store.getConversationAi('email', 'c1')!['attention_score'], 1.25);
+    test('writes, and creating the ai row if needed', () async {
+      await seedConversation('c1');
+      await store.writeAttentionScore('email', 'c1', 1.25);
+      expect((await store.getConversationAi('email', 'c1'))!['attention_score'],
+          1.25);
     });
 
-    test('does not disturb a bucket sitting on the same row', () {
-      seedConversation('c1');
-      store.setConversationBucket('email', 'c1',
+    test('does not disturb a bucket sitting on the same row', () async {
+      await seedConversation('c1');
+      await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'user');
-      store.writeAttentionScore('email', 'c1', 0.5);
+      await store.writeAttentionScore('email', 'c1', 0.5);
 
-      final ai = store.getConversationAi('email', 'c1')!;
+      final ai = (await store.getConversationAi('email', 'c1'))!;
       expect(ai['bucket'], 'later');
       expect(ai['bucket_reason'], 'user');
       expect(ai['attention_score'], 0.5);
@@ -201,266 +204,277 @@ void main() {
   });
 
   group('bucketReasons', () {
-    test('lists only the threads that are actually bucketed', () {
-      seedConversation('c1');
-      seedConversation('c2');
-      seedConversation('c3');
-      store.setConversationBucket('email', 'c1',
+    test('lists only the threads that are actually bucketed', () async {
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await seedConversation('c3');
+      await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'user');
-      store.setConversationBucket('email', 'c2',
+      await store.setConversationBucket('email', 'c2',
           bucket: 'later', reason: 'low_value');
-      store.writeAttentionScore('email', 'c3', 1);
+      await store.writeAttentionScore('email', 'c3', 1);
 
-      expect(store.bucketReasons(), {'c1': 'user', 'c2': 'low_value'});
+      expect(await store.bucketReasons(), {'c1': 'user', 'c2': 'low_value'});
     });
   });
 
   group('loadConversations carries the AI columns', () {
-    test('bucket and attention score come back on the row', () {
-      seedConversation('c1');
-      store.setConversationBucket('email', 'c1',
+    test('bucket and attention score come back on the row', () async {
+      await seedConversation('c1');
+      await store.setConversationBucket('email', 'c1',
           bucket: 'later', reason: 'user');
-      store.writeAttentionScore('email', 'c1', 1.5);
+      await store.writeAttentionScore('email', 'c1', 1.5);
 
-      final conversation = store.loadConversations().single;
+      final conversation = (await store.loadConversations()).single;
       expect(conversation.bucket, 'later');
       expect(conversation.attentionScore, 1.5);
     });
 
-    test('a thread with no ai row still loads, with both null', () {
-      seedConversation('c1');
-      final conversation = store.loadConversations().single;
+    test('a thread with no ai row still loads, with both null', () async {
+      await seedConversation('c1');
+      final conversation = (await store.loadConversations()).single;
       expect(conversation.bucket, isNull);
       expect(conversation.attentionScore, isNull);
     });
 
-    test('the ordering is unchanged by the join', () {
-      seedConversation('old', lastMessageAt: '2026-08-01T10:00:00Z');
-      seedConversation('new', lastMessageAt: '2026-08-28T10:00:00Z');
-      store.setConversationBucket('email', 'new', bucket: 'later');
+    test('the ordering is unchanged by the join', () async {
+      await seedConversation('old', lastMessageAt: '2026-08-01T10:00:00Z');
+      await seedConversation('new', lastMessageAt: '2026-08-28T10:00:00Z');
+      await store.setConversationBucket('email', 'new', bucket: 'later');
 
-      expect(store.loadConversations().map((c) => c.id), ['new', 'old']);
+      expect((await store.loadConversations()).map((c) => c.id),
+          ['new', 'old']);
     });
 
-    test('the state filter still works', () {
-      seedConversation('c1', state: 'needs_reply');
-      seedConversation('c2', state: 'waiting');
+    test('the state filter still works', () async {
+      await seedConversation('c1', state: 'needs_reply');
+      await seedConversation('c2', state: 'waiting');
 
-      final rows = store.loadConversations(state: ConversationState.needsReply);
+      final rows =
+          await store.loadConversations(state: ConversationState.needsReply);
       expect(rows.map((c) => c.id), ['c1']);
     });
   });
 
   group('rebucketSender', () {
-    test('moves exactly the threads that sender owns, and counts them', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'eric@x.com');
-      seedConversation('c2');
-      seedMessage('c2', 'm2', from: 'eric@x.com');
-      seedConversation('c3');
-      seedMessage('c3', 'm3', from: 'dana@y.com');
+    test('moves exactly the threads that sender owns, and counts them',
+        () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'eric@x.com');
+      await seedConversation('c2');
+      await seedMessage('c2', 'm2', from: 'eric@x.com');
+      await seedConversation('c3');
+      await seedMessage('c3', 'm3', from: 'dana@y.com');
 
-      final affected = store.rebucketSender('eric@x.com', bucket: 'later');
+      final affected = await store.rebucketSender('eric@x.com',
+          bucket: 'later');
 
       expect(affected, 2);
       final buckets = {
-        for (final c in store.loadConversations()) c.id: c.bucket,
+        for (final c in await store.loadConversations()) c.id: c.bucket,
       };
       expect(buckets, {'c1': 'later', 'c2': 'later', 'c3': null});
-      expect(store.bucketReasons(), {'c1': 'sender_pref', 'c2': 'sender_pref'});
+      expect(await store.bucketReasons(),
+          {'c1': 'sender_pref', 'c2': 'sender_pref'});
     });
 
-    test('matches whatever casing the message carried', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'Eric@X.com');
+    test('matches whatever casing the message carried', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'Eric@X.com');
 
-      expect(store.rebucketSender('eric@x.com', bucket: 'later'), 1);
+      expect(await store.rebucketSender('eric@x.com', bucket: 'later'), 1);
     });
 
-    test('the LATEST inbound sender owns the thread', () {
+    test('the LATEST inbound sender owns the thread', () async {
       // A newsletter the LO forwarded on, answered by a colleague. Silencing
       // the newsletter must not bury the colleague's reply.
-      seedConversation('c1');
-      seedMessage('c1', 'm1',
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1',
           from: 'news@bulk.com', receivedAt: '2026-08-01T10:00:00Z');
-      seedMessage('c1', 'm2',
+      await seedMessage('c1', 'm2',
           from: 'dana@y.com', receivedAt: '2026-08-28T10:00:00Z');
 
-      expect(store.rebucketSender('news@bulk.com', bucket: 'later'), 0);
-      expect(store.loadConversations().single.bucket, isNull);
+      expect(await store.rebucketSender('news@bulk.com', bucket: 'later'), 0);
+      expect((await store.loadConversations()).single.bucket, isNull);
 
-      expect(store.rebucketSender('dana@y.com', bucket: 'later'), 1);
-      expect(store.loadConversations().single.bucket, 'later');
+      expect(await store.rebucketSender('dana@y.com', bucket: 'later'), 1);
+      expect((await store.loadConversations()).single.bucket, 'later');
     });
 
-    test('outbound mail never makes anyone the owner', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1',
+    test('outbound mail never makes anyone the owner', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1',
           from: 'eric@x.com', receivedAt: '2026-08-01T10:00:00Z');
-      seedMessage('c1', 'm2',
+      await seedMessage('c1', 'm2',
           direction: 'outbound',
           from: 'me@lo.com',
           receivedAt: '2026-08-28T10:00:00Z');
 
-      expect(store.rebucketSender('me@lo.com', bucket: 'later'), 0);
-      expect(store.rebucketSender('eric@x.com', bucket: 'later'), 1);
+      expect(await store.rebucketSender('me@lo.com', bucket: 'later'), 0);
+      expect(await store.rebucketSender('eric@x.com', bucket: 'later'), 1);
     });
 
-    test('null clears the bucket and its reason', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'eric@x.com');
-      store.rebucketSender('eric@x.com', bucket: 'later');
+    test('null clears the bucket and its reason', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'eric@x.com');
+      await store.rebucketSender('eric@x.com', bucket: 'later');
 
-      expect(store.rebucketSender('eric@x.com', bucket: null), 1);
-      expect(store.loadConversations().single.bucket, isNull);
-      expect(store.bucketReasons(), isEmpty);
+      expect(await store.rebucketSender('eric@x.com', bucket: null), 1);
+      expect((await store.loadConversations()).single.bucket, isNull);
+      expect(await store.bucketReasons(), isEmpty);
     });
 
-    test('a sender with no mail changes nothing and reports nothing', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'eric@x.com');
+    test('a sender with no mail changes nothing and reports nothing', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'eric@x.com');
 
-      expect(store.rebucketSender('stranger@x.com', bucket: 'later'), 0);
+      expect(await store.rebucketSender('stranger@x.com', bucket: 'later'), 0);
     });
 
-    test('running it twice reports the same count both times', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'eric@x.com');
+    test('running it twice reports the same count both times', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'eric@x.com');
 
-      expect(store.rebucketSender('eric@x.com', bucket: 'later'), 1);
-      expect(store.rebucketSender('eric@x.com', bucket: 'later'), 1);
+      expect(await store.rebucketSender('eric@x.com', bucket: 'later'), 1);
+      expect(await store.rebucketSender('eric@x.com', bucket: 'later'), 1);
     });
   });
 
   group('senderReplyRates', () {
-    test('counts a sender answered in every thread as 1.0', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'eric@x.com');
-      seedMessage('c1', 'm2', direction: 'outbound', from: 'me@lo.com');
+    test('counts a sender answered in every thread as 1.0', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'eric@x.com');
+      await seedMessage('c1', 'm2', direction: 'outbound', from: 'me@lo.com');
 
-      expect(store.senderReplyRates()['eric@x.com'], 1.0);
+      expect((await store.senderReplyRates())['eric@x.com'], 1.0);
     });
 
-    test('and one never answered as 0', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'news@bulk.com');
+    test('and one never answered as 0', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'news@bulk.com');
 
-      expect(store.senderReplyRates()['news@bulk.com'], 0.0);
+      expect((await store.senderReplyRates())['news@bulk.com'], 0.0);
     });
 
-    test('one of two threads answered is a half', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'eric@x.com');
-      seedMessage('c1', 'm2', direction: 'outbound', from: 'me@lo.com');
-      seedConversation('c2');
-      seedMessage('c2', 'm3', from: 'eric@x.com');
+    test('one of two threads answered is a half', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'eric@x.com');
+      await seedMessage('c1', 'm2', direction: 'outbound', from: 'me@lo.com');
+      await seedConversation('c2');
+      await seedMessage('c2', 'm3', from: 'eric@x.com');
 
-      expect(store.senderReplyRates()['eric@x.com'], 0.5);
+      expect((await store.senderReplyRates())['eric@x.com'], 0.5);
     });
 
-    test('two messages in one thread still count as one thread', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1',
+    test('two messages in one thread still count as one thread', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1',
           from: 'eric@x.com', receivedAt: '2026-08-01T10:00:00Z');
-      seedMessage('c1', 'm2',
+      await seedMessage('c1', 'm2',
           from: 'eric@x.com', receivedAt: '2026-08-02T10:00:00Z');
 
-      expect(store.senderReplyRates()['eric@x.com'], 0.0);
+      expect((await store.senderReplyRates())['eric@x.com'], 0.0);
     });
 
-    test('casing is folded together', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'Eric@X.com');
-      seedConversation('c2');
-      seedMessage('c2', 'm2', from: 'eric@x.com');
-      seedMessage('c2', 'm3', direction: 'outbound', from: 'me@lo.com');
+    test('casing is folded together', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'Eric@X.com');
+      await seedConversation('c2');
+      await seedMessage('c2', 'm2', from: 'eric@x.com');
+      await seedMessage('c2', 'm3', direction: 'outbound', from: 'me@lo.com');
 
-      expect(store.senderReplyRates(), {'eric@x.com': 0.5});
+      expect(await store.senderReplyRates(), {'eric@x.com': 0.5});
     });
 
-    test('mail with no sender address is skipped, not keyed on empty', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1');
+    test('mail with no sender address is skipped, not keyed on empty',
+        () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1');
 
-      expect(store.senderReplyRates(), isEmpty);
+      expect(await store.senderReplyRates(), isEmpty);
     });
   });
 
   group('latestInboundMeta', () {
-    test('returns the newest inbound message per conversation', () {
-      seedConversation('c1');
-      seedMessage('c1', 'old',
+    test('returns the newest inbound message per conversation', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'old',
           from: 'a@x.com', receivedAt: '2026-08-01T10:00:00Z');
-      seedMessage('c1', 'new',
+      await seedMessage('c1', 'new',
           from: 'b@x.com', receivedAt: '2026-08-28T10:00:00Z');
 
-      final meta = store.latestInboundMeta()['c1']!;
+      final meta = (await store.latestInboundMeta())['c1']!;
       expect(meta['source_message_id'], 'new');
       expect(meta['from_address'], 'b@x.com');
       expect(meta['received_at'], '2026-08-28T10:00:00Z');
     });
 
-    test('ignores outbound mail however recent', () {
-      seedConversation('c1');
-      seedMessage('c1', 'in',
+    test('ignores outbound mail however recent', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'in',
           from: 'a@x.com', receivedAt: '2026-08-01T10:00:00Z');
-      seedMessage('c1', 'out',
+      await seedMessage('c1', 'out',
           direction: 'outbound',
           from: 'me@lo.com',
           receivedAt: '2026-08-28T10:00:00Z');
 
-      expect(store.latestInboundMeta()['c1']!['source_message_id'], 'in');
+      expect((await store.latestInboundMeta())['c1']!['source_message_id'],
+          'in');
     });
 
-    test('joins the extraction of that message and no other', () {
-      seedConversation('c1');
-      seedMessage('c1', 'old',
+    test('joins the extraction of that message and no other', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'old',
           from: 'a@x.com', receivedAt: '2026-08-01T10:00:00Z');
-      seedMessage('c1', 'new',
+      await seedMessage('c1', 'new',
           from: 'a@x.com', receivedAt: '2026-08-28T10:00:00Z');
-      store.writeExtraction('email', 'old', jsonEncode({'intent': 'request'}));
-      store.writeExtraction('email', 'new', jsonEncode({'intent': 'fyi'}));
+      await store.writeExtraction(
+          'email', 'old', jsonEncode({'intent': 'request'}));
+      await store.writeExtraction('email', 'new', jsonEncode({'intent': 'fyi'}));
 
-      final raw = store.latestInboundMeta()['c1']!['extraction_json'] as String;
+      final raw =
+          (await store.latestInboundMeta())['c1']!['extraction_json'] as String;
       expect(jsonDecode(raw), {'intent': 'fyi'});
     });
 
-    test('a message with no extraction comes back with a null blob', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'a@x.com');
+    test('a message with no extraction comes back with a null blob', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'a@x.com');
 
-      expect(store.latestInboundMeta()['c1']!['extraction_json'], isNull);
+      expect((await store.latestInboundMeta())['c1']!['extraction_json'],
+          isNull);
     });
 
-    test('a thread with only outbound mail is absent entirely', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', direction: 'outbound', from: 'me@lo.com');
+    test('a thread with only outbound mail is absent entirely', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', direction: 'outbound', from: 'me@lo.com');
 
-      expect(store.latestInboundMeta(), isEmpty);
+      expect(await store.latestInboundMeta(), isEmpty);
     });
 
-    test('the tie-break is deterministic across reads', () {
-      seedConversation('c1');
-      seedMessage('c1', 'aaa',
+    test('the tie-break is deterministic across reads', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'aaa',
           from: 'a@x.com', receivedAt: '2026-08-28T10:00:00Z');
-      seedMessage('c1', 'zzz',
+      await seedMessage('c1', 'zzz',
           from: 'z@x.com', receivedAt: '2026-08-28T10:00:00Z');
 
       // Same second, so `source_message_id DESC` decides — and must decide the
       // same way every time, or a sender rule would apply on one pass and not
       // the next.
       for (var i = 0; i < 5; i++) {
-        expect(store.latestInboundMeta()['c1']!['from_address'], 'z@x.com');
+        expect((await store.latestInboundMeta())['c1']!['from_address'],
+            'z@x.com');
       }
-      expect(store.rebucketSender('z@x.com', bucket: 'later'), 1);
-      expect(store.rebucketSender('a@x.com', bucket: 'later'), 0);
+      expect(await store.rebucketSender('z@x.com', bucket: 'later'), 1);
+      expect(await store.rebucketSender('a@x.com', bucket: 'later'), 0);
     });
 
-    test('an empty source list reads nothing rather than everything', () {
-      seedConversation('c1');
-      seedMessage('c1', 'm1', from: 'a@x.com');
+    test('an empty source list reads nothing rather than everything', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', from: 'a@x.com');
 
-      expect(store.latestInboundMeta(sources: const []), isEmpty);
+      expect(await store.latestInboundMeta(sources: const []), isEmpty);
     });
   });
 }

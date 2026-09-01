@@ -4,15 +4,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
+import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
-import '../services/activity_log.dart';
 import '../services/backend/backend_types.dart';
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
@@ -107,6 +106,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// When Teams was last pulled, by any route. Null until the first one.
   DateTime? _lastTeamsRefresh;
 
+  /// The stored "Teams last synced" stamp, read once and re-read only after a
+  /// pull. See [_teamsFreshness].
+  Future<String?>? _teamsSyncedAt;
+
   Timer? _poll;
 
   /// Set once the sign-out route is under way, so a second notification
@@ -193,6 +196,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (!mounted) return;
     _lastTeamsRefresh = DateTime.now();
     await ref.read(conversationsProvider.notifier).refreshTeams();
+    if (!mounted) return;
+    setState(() => _teamsSyncedAt = null);
   }
 
   Future<void> _signOut() async {
@@ -201,7 +206,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // file holds its mailbox, and the providers hold that in memory. A
     // different account signing in next must find neither — mail from two
     // mailboxes interleaved in one inbox is the bug this line rules out.
-    ref.read(messageStoreProvider).wipeAll();
+    await ref.read(messageStoreProvider).wipeAll();
+    if (!mounted) return;
     ref.invalidate(conversationsProvider);
     ref.invalidate(storylinesProvider);
     ref.invalidate(threadProvider);
@@ -447,7 +453,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final notifier = ref.read(conversationsProvider.notifier);
     // Captured BEFORE the write. The undo restores this exact value, including
     // "there was no rule", which is a different state from "the rule was keep".
-    final previous = notifier.senderPref(address);
+    final previous = await notifier.senderPref(address);
     final affected = await notifier.keepSenderInInbox(address, source: source);
     _toast(
       'Keeping $address in your inbox — ${_threads(affected)} moved back.',
@@ -457,7 +463,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Future<void> _laterSender(String address, String source) async {
     final notifier = ref.read(conversationsProvider.notifier);
-    final previous = notifier.senderPref(address);
+    final previous = await notifier.senderPref(address);
     final affected = await notifier.sendSenderToLater(address, source: source);
     _toast(
       '$address goes to Later — ${_threads(affected)} moved.',
@@ -590,15 +596,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// changes it — chats do not arrive on their own here, and a caption saying
   /// so is the difference between "quiet" and "stale".
   Widget _teamsFreshness() {
-    final label =
-        relativeTime(ref.read(teamsSyncProvider).lastSyncedAt, DateTime.now());
-    if (label == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: BondSpacing.s4),
-      child: Text(
-        'Teams updated $label',
-        style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
-      ),
+    // Held rather than re-read on every build: it is a stored read and so a
+    // future now, and a fresh future per build would restart the FutureBuilder
+    // — blanking the caption for a frame every time anything on this screen
+    // changed. [_refreshTeams] drops it, which is the only thing that can
+    // change the answer.
+    final future = _teamsSyncedAt ??= ref.read(teamsSyncProvider).lastSyncedAt;
+    return FutureBuilder<String?>(
+      future: future,
+      builder: (context, snapshot) {
+        final label = relativeTime(snapshot.data, DateTime.now());
+        if (label == null) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: BondSpacing.s4),
+          child: Text(
+            'Teams updated $label',
+            style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
+          ),
+        );
+      },
     );
   }
 
@@ -879,7 +895,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       messages: messages,
       keyByMessageId: keys,
       subjectByKey: subjects,
-      members: ref.read(messageStoreProvider).membersOf(storyline.id),
+      // Empty for the frame before the read lands — the same thing the pane
+      // shows for a storyline whose members have not been written yet.
+      members:
+          ref.watch(storylineMembersProvider(storyline.id)).valueOrNull ??
+              const [],
       onBack: () => setState(() => _selectedStorylineId = null),
       onRename: (title) => notifier.rename(storyline.id, title),
       onRemoveThread: (source, key) async {
@@ -1065,10 +1085,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // So are the storylines this thread is already in — an "Add to" that
       // does nothing reads as a broken menu item.
       storylineChoices: () {
+        // Empty until the read lands, which leaves every storyline offered for
+        // one frame. Adding a thread it is already in is a no-op in the store,
+        // so the worst that frame can cost is a redundant write.
         final already = ref
-            .read(messageStoreProvider)
-            .storylineIdsFor(selected.source, selected.id)
-            .toSet();
+                .watch(storylineThreadIdsProvider(
+                  (source: selected.source, conversationKey: selected.id),
+                ))
+                .valueOrNull ??
+            const <String>{};
         return [
           for (final storyline in _storylines())
             if (!storyline.isSuggested && !already.contains(storyline.id))
@@ -1208,20 +1233,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// What the sync and the local model have been doing, over the last week.
   ///
-  /// The [StreamBuilder] ticks once per recorded event, so a sync landing while
-  /// the panel is open appears without a refresh. It also ticks on the events
-  /// the recorder SUPPRESSED — a poll that brought nothing in emits a transient
-  /// tick and writes no row — and that is what keeps the panel's relative times
-  /// honest: the "last sync" tiles are read from prefs on every rebuild, so
-  /// without a tick roughly once a minute they would freeze at whatever they
-  /// said when the panel opened.
+  /// [activitySnapshotProvider] re-reads once per recorded event, so a sync
+  /// landing while the panel is open appears without a refresh. It also
+  /// re-reads on the events the recorder SUPPRESSED — a poll that brought
+  /// nothing in emits a transient tick and writes no row — and that is what
+  /// keeps the panel's relative times honest: the "last sync" tiles come from
+  /// prefs read in that same pass, so without a tick roughly once a minute they
+  /// would freeze at whatever they said when the panel opened.
   ///
-  /// Each tick costs two indexed reads against a synchronous database on the UI
-  /// isolate, plus one pref read per tile. Even a first sync of a large mailbox
-  /// records one row per drained item, not per message. If a future drain ever
-  /// ticks fast enough to be felt here, the debounce in
+  /// Each re-read is a handful of indexed queries. Even a first sync of a large
+  /// mailbox records one row per drained item, not per message. If a future
+  /// drain ever ticks fast enough to be felt here, the debounce in
   /// `conversations_provider` is the documented pattern to copy.
   Widget _activityLog() {
+    // The previous snapshot is carried through a reload, so this is null only
+    // before the very first read of the pane.
+    final snapshot = ref.watch(activitySnapshotProvider).valueOrNull;
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
       child: Column(
@@ -1230,52 +1257,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Text('Activity', style: BondType.title),
           const SizedBox(height: BondSpacing.s16),
           Expanded(
-            child: StreamBuilder<ActivityEvent>(
-              stream: ref.watch(activityLogProvider).events,
-              builder: (context, _) {
-                final store = ref.watch(messageStoreProvider);
-                final sinceIso = DateTime.now()
-                    .toUtc()
-                    .subtract(const Duration(days: 7))
-                    .toIso8601String();
-                return ActivityLogPanel(
-                  stats: store.activityStats(sinceIso: sinceIso),
-                  events: [
-                    for (final row in store.recentActivity(limit: 300))
-                      ActivityEvent.fromRow(row),
-                  ],
-                  now: DateTime.now(),
-                  lastMailSyncIso: store.getPref(activityLastSyncMailKey),
-                  lastTeamsSyncIso: store.getPref(activityLastSyncTeamsKey),
-                  lastSweepIso: store.getPref(activityLastSweepKey),
-                  entityLabel: (event) => _activityEntityLabel(store, event),
-                );
-              },
-            ),
+            child: snapshot == null
+                ? const Center(child: CircularProgressIndicator())
+                : ActivityLogPanel(
+                    stats: snapshot.stats,
+                    events: snapshot.events,
+                    now: DateTime.now(),
+                    lastMailSyncIso: snapshot.lastMailSyncIso,
+                    lastTeamsSyncIso: snapshot.lastTeamsSyncIso,
+                    lastSweepIso: snapshot.lastSweepIso,
+                    entityLabel: snapshot.labelFor,
+                  ),
           ),
         ],
       ),
     );
-  }
-
-  /// The subject of the thread an activity row was about, or null.
-  ///
-  /// Null is the common answer and not a failure: triage records a MESSAGE id,
-  /// which is not a conversation key, and a thread can be deleted after the row
-  /// that named it was written. Wrapped besides, because this runs inside a
-  /// build and the panel is the last place in the app that should be able to
-  /// throw.
-  static String? _activityEntityLabel(MessageStore store, ActivityEvent event) {
-    final entityId = event.entityId;
-    if (entityId == null) return null;
-    try {
-      final row = store.getConversationRow(event.source ?? 'email', entityId);
-      if (row == null) return null;
-      final subject = Conversation.fromRow(row).subject;
-      return subject != null && subject.isNotEmpty ? subject : null;
-    } catch (_) {
-      return null;
-    }
   }
 
   Widget _overview(List<Conversation> conversations, String? loadError) {

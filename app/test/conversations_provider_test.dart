@@ -1,6 +1,6 @@
 import 'dart:async';
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
@@ -9,7 +9,8 @@ import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// A [MailSync] that never touches a socket. [manual] holds each call open on
 /// a completer so a test can finish two loads out of order on purpose.
@@ -61,26 +62,26 @@ class UnwritableStore extends MessageStore {
   UnwritableStore(super.db);
 
   @override
-  void setConversationState(
+  Future<void> setConversationState(
     String source,
     String conversationKey,
     ConversationState state,
-  ) {
+  ) async {
     throw StateError('disk is full');
   }
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late FakeSync sync;
 
-  void seedConversation(
+  Future<void> seedConversation(
     String key, {
     String state = 'needs_reply',
     String lastMessageAt = '2026-08-28T10:00:00Z',
-  }) {
-    store.upsertConversation({
+  }) async {
+    await store.upsertConversation({
       'conversation_key': key,
       'subject': key,
       'state': state,
@@ -88,8 +89,8 @@ void main() {
     });
   }
 
-  void seedMessage(String key, String id) {
-    store.upsertMessage({
+  Future<void> seedMessage(String key, String id) async {
+    await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'inbound',
@@ -99,8 +100,7 @@ void main() {
   }
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
     sync = FakeSync();
   });
@@ -109,7 +109,7 @@ void main() {
 
   group('load', () {
     test('a first load ends Loaded with the stored rows', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(store, sync);
       expect(notifier.state, isA<ConversationsInitial>());
 
@@ -122,12 +122,12 @@ void main() {
     });
 
     test('a failed refresh keeps the inbox and explains itself', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(store, sync);
       await notifier.load();
 
       sync.syncError = Exception('socket closed');
-      seedConversation('c2', lastMessageAt: '2026-08-29T10:00:00Z');
+      await seedConversation('c2', lastMessageAt: '2026-08-29T10:00:00Z');
       await notifier.load();
 
       final state = notifier.state as ConversationsLoaded;
@@ -138,7 +138,7 @@ void main() {
     });
 
     test('a refresh never falls back to a spinner', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(store, sync);
       await notifier.load();
 
@@ -153,7 +153,7 @@ void main() {
     });
 
     test('syncFirst false reads the store without a network call', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(store, sync);
 
       await notifier.load(syncFirst: false);
@@ -166,7 +166,7 @@ void main() {
   group('out-of-order loads', () {
     test('a slow load that fails cannot stamp its error on a newer one',
         () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(store, sync);
       sync.manual = true;
 
@@ -190,7 +190,7 @@ void main() {
     });
 
     test('a slow load that succeeds is discarded too', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(store, sync);
       sync.manual = true;
 
@@ -231,7 +231,7 @@ void main() {
 
     test('a dead session with an inbox already stored keeps the inbox',
         () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(store, sync);
       await notifier.load();
 
@@ -259,7 +259,7 @@ void main() {
 
   group('markDone', () {
     test('flips the row and writes it through', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(store, sync);
       await notifier.load();
 
@@ -270,13 +270,13 @@ void main() {
         ConversationState.done,
       );
       expect(
-        store.loadConversations(sources: const ['email']).single.state,
+        (await store.loadConversations(sources: const ['email'])).single.state,
         ConversationState.done,
       );
     });
 
     test('a failed write puts the row back', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = ConversationsNotifier(UnwritableStore(db), sync);
       await notifier.load();
 
@@ -296,7 +296,7 @@ void main() {
 
   group('thread', () {
     test('fetches bodies then reads the transcript', () async {
-      seedMessage('c1', 'm1');
+      await seedMessage('c1', 'm1');
       final notifier = ThreadNotifier(store, sync, 'c1');
 
       await notifier.load();
@@ -308,7 +308,7 @@ void main() {
     });
 
     test('a failed body fetch still shows what is stored', () async {
-      seedMessage('c1', 'm1');
+      await seedMessage('c1', 'm1');
       final notifier = ThreadNotifier(store, sync, 'c1');
       sync.bodiesError = Exception('offline');
 
@@ -320,7 +320,7 @@ void main() {
     });
 
     test('a later failure does not blank an already-loaded thread', () async {
-      seedMessage('c1', 'm1');
+      await seedMessage('c1', 'm1');
       final notifier = ThreadNotifier(store, sync, 'c1');
       await notifier.load();
 
@@ -331,7 +331,7 @@ void main() {
     });
 
     test('fetchBodies false skips the network', () async {
-      seedMessage('c1', 'm1');
+      await seedMessage('c1', 'm1');
       final notifier = ThreadNotifier(store, sync, 'c1');
 
       await notifier.load(fetchBodies: false);
@@ -341,7 +341,7 @@ void main() {
     });
 
     test('a stale thread load writes nothing', () async {
-      seedMessage('c1', 'm1');
+      await seedMessage('c1', 'm1');
       final notifier = ThreadNotifier(store, sync, 'c1');
       sync.manualBodies = true;
 
@@ -364,7 +364,7 @@ void main() {
 
   group('provider wiring', () {
     test('the providers build against an overridden db and sync', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final container = ProviderContainer(overrides: [
         dbProvider.overrideWithValue(db),
         syncServiceProvider.overrideWithValue(sync),

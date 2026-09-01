@@ -106,23 +106,43 @@ const String showActivityLogKey = 'show_activity_log';
 class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   final MessageStore _store;
 
-  AppPrefsNotifier(this._store) : super(_read(_store));
+  /// Completes when the stored settings have replaced the defaults this
+  /// notifier starts on. Already complete when [initial] was supplied.
+  late final Future<void> ready;
 
-  /// Reads every setting once, at construction. A stored value that does not
-  /// parse — hand-edited, or written by a build that meant something else by
-  /// the key — falls back to the default rather than throwing: a bad
-  /// preference must not be able to stop the app from starting.
-  static AppPrefs _read(MessageStore store) {
-    final raw = store.getPref(attentionThresholdKey);
+  /// [initial] is what `main()` read before the first frame, and passing it is
+  /// what keeps the app from starting on the defaults: every backend provider
+  /// watches [backendMode], so a frame of "MCP" under a stored SDK setting
+  /// would build — and immediately dispose — the wrong session.
+  ///
+  /// Without it the settings arrive one microtask later and [ready] is how a
+  /// caller waits for them.
+  AppPrefsNotifier(this._store, {AppPrefs? initial})
+      : super(initial ?? const AppPrefs()) {
+    ready = initial != null ? Future.value() : _load();
+  }
+
+  Future<void> _load() async {
+    final prefs = await read(_store);
+    if (!mounted) return;
+    state = prefs;
+  }
+
+  /// Reads every setting once. A stored value that does not parse —
+  /// hand-edited, or written by a build that meant something else by the key —
+  /// falls back to the default rather than throwing: a bad preference must not
+  /// be able to stop the app from starting.
+  static Future<AppPrefs> read(MessageStore store) async {
+    final raw = await store.getPref(attentionThresholdKey);
     return AppPrefs(
       attentionThreshold: (raw == null ? null : double.tryParse(raw)) ??
           AttentionTuning.defaultThreshold,
-      aboutMe: store.getPref(aboutMeKey) ?? '',
-      backendMode: _mode(store.getPref(backendModeKey)),
-      mcpServerUrl: _serverUrl(store.getPref(mcpServerUrlKey)),
+      aboutMe: await store.getPref(aboutMeKey) ?? '',
+      backendMode: _mode(await store.getPref(backendModeKey)),
+      mcpServerUrl: _serverUrl(await store.getPref(mcpServerUrlKey)),
       // Anything that is not the string this notifier writes reads as off,
       // an absent key included — which is the state every install starts in.
-      showActivityLog: store.getPref(showActivityLogKey) == 'true',
+      showActivityLog: await store.getPref(showActivityLogKey) == 'true',
     );
   }
 
@@ -140,15 +160,22 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
 
   /// Clamped to the slider's own range, so a value that somehow arrived from
   /// outside it cannot make Needs You permanently empty.
-  void setAttentionThreshold(double value) {
+  ///
+  /// State first, then the write — the reverse of the order this had while the
+  /// store was synchronous. Everything on screen reads the state, and making a
+  /// slider wait a round trip on the database before it moves would be a frame
+  /// of lag on the one control whose whole point is watching the list change
+  /// under it. The returned future is the write; the setters below are the
+  /// same shape.
+  Future<void> setAttentionThreshold(double value) async {
     final clamped = value.clamp(0.0, 1.0);
-    _store.setPref(attentionThresholdKey, clamped.toString());
     state = state.copyWith(attentionThreshold: clamped);
+    await _store.setPref(attentionThresholdKey, clamped.toString());
   }
 
-  void setAboutMe(String value) {
-    _store.setPref(aboutMeKey, value);
+  Future<void> setAboutMe(String value) async {
     state = state.copyWith(aboutMe: value);
+    await _store.setPref(aboutMeKey, value);
   }
 
   /// Switches which backend the app talks through.
@@ -156,24 +183,31 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// The state change is the whole mechanism: the session and both backend
   /// providers watch this field, so setting it rebuilds every one of them and
   /// whatever was built on top.
-  void setBackendMode(String value) {
+  Future<void> setBackendMode(String value) async {
     final mode = _mode(value);
-    _store.setPref(backendModeKey, mode);
     state = state.copyWith(backendMode: mode);
+    await _store.setPref(backendModeKey, mode);
   }
 
-  void setMcpServerUrl(String value) {
+  Future<void> setMcpServerUrl(String value) async {
     final url = _serverUrl(value);
-    _store.setPref(mcpServerUrlKey, url);
     state = state.copyWith(mcpServerUrl: url);
+    await _store.setPref(mcpServerUrlKey, url);
   }
 
-  void setShowActivityLog(bool value) {
-    _store.setPref(showActivityLogKey, value.toString());
+  Future<void> setShowActivityLog(bool value) async {
     state = state.copyWith(showActivityLog: value);
+    await _store.setPref(showActivityLogKey, value.toString());
   }
 }
 
+/// What `main()` read from the database before the first frame, or null where
+/// nothing preloaded them — see [AppPrefsNotifier]'s constructor.
+final initialAppPrefsProvider = Provider<AppPrefs?>((ref) => null);
+
 final appPrefsProvider = StateNotifierProvider<AppPrefsNotifier, AppPrefs>(
-  (ref) => AppPrefsNotifier(ref.watch(messageStoreProvider)),
+  (ref) => AppPrefsNotifier(
+    ref.watch(messageStoreProvider),
+    initial: ref.watch(initialAppPrefsProvider),
+  ),
 );

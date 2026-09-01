@@ -87,7 +87,7 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop \
-        app-install app-run app-test app-analyze app-build bench ab
+        app-install app-run app-test app-gen app-analyze app-build bench ab
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -109,6 +109,7 @@ help:
 	@printf "  make clean        → rm $(LOG_DIR)\n\n"
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
 	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
+	@printf "  make app-gen      → regenerate Drift code + migration snapshots\n"
 	@printf "  make bench        → live model benchmark (needs make fast up)\n"
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make app-build    → release build of the macOS app\n\n"
@@ -508,6 +509,13 @@ app-run:
 
 app-test:
 	@cd $(APP_DIR) && $(FLUTTER) test
+
+# Regenerates Drift's code (*.g.dart) and migration snapshots. The output is
+# COMMITTED: app-analyze and app-test must stay green from a clean checkout
+# without running codegen, so a schema change that skips this target fails
+# loudly in review instead of silently drifting from the generated code.
+app-gen:
+	@cd $(APP_DIR) && dart run build_runner build --delete-conflicting-outputs
 
 # Live, not a gate: replays the fixture corpus through the real task prompts
 # and prints a latency table. The test file is @Skip'd so `make app-test` never

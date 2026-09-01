@@ -1,6 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:sqlite3/sqlite3.dart';
 
+// `show BondDatabase`: drift generates row classes (Message, Conversation,
+// Storyline, …) whose names collide with the app's models.
+import '../data/database.dart' show BondDatabase;
 import '../data/message_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
@@ -82,7 +84,7 @@ final authSessionProvider = Provider<AuthSession>((ref) {
 /// It throws rather than defaulting because opening the real file is async
 /// and a Provider body cannot be: a default that silently opened `:memory:`
 /// would give a release build an inbox that empties itself on every launch.
-final dbProvider = Provider<Database>(
+final dbProvider = Provider<BondDatabase>(
   (ref) => throw UnimplementedError(
     'dbProvider must be overridden with an open database (see main()).',
   ),
@@ -240,9 +242,12 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
     // guard is for the read itself — against a torn-down container it throws,
     // and this callback sits inside the failure path of a client whose whole
     // contract is that failure costs nothing.
-    onFail: (reason) {
+    // Async so the catch still covers the write itself: `record` returns a
+    // future, and a fire-and-forget call would put its failure outside this
+    // try. The callback's own return value is discarded either way.
+    onFail: (reason) async {
       try {
-        ref.read(activityLogProvider).record(
+        await ref.read(activityLogProvider).record(
               'embed_fail',
               status: 'error',
               detail: {'reason': reason},

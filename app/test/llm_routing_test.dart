@@ -1,6 +1,6 @@
 import 'dart:math' as math;
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -8,7 +8,8 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// Which server each model job goes to.
 ///
@@ -79,19 +80,19 @@ Map<String, dynamic> nameAnswer() => {
     };
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
   });
 
   tearDown(() => db.close());
 
-  void seed(String key, {List<double>? vector, String? lastMessageAt}) {
-    store.upsertConversation({
+  Future<void> seed(String key,
+      {List<double>? vector, String? lastMessageAt}) async {
+    await store.upsertConversation({
       'conversation_key': key,
       'subject': 'Subject for $key',
       'state': 'waiting',
@@ -99,7 +100,7 @@ void main() {
       'participants_json': '[{"name":"Sarah Chen"}]',
     });
     if (vector == null) return;
-    store.upsertConversationAi(
+    await store.upsertConversationAi(
       'email',
       key,
       embedding: encodeEmbedding(vector),
@@ -111,22 +112,22 @@ void main() {
   /// A storyline with one embedded member and NO summary, so an assignment
   /// that confirms goes straight on to name it — which is what puts both
   /// halves of the split in one flow.
-  void seedUnnamedStoryline() {
-    seed('member', vector: vectorAt(1));
-    store.insertStoryline(
+  Future<void> seedUnnamedStoryline() async {
+    await seed('member', vector: vectorAt(1));
+    await store.insertStoryline(
       id: 'sl-1',
       title: 'Willow St purchase',
       status: 'active',
       createdBy: 'auto',
     );
-    store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
+    await store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
   }
 
   group('StorylineService', () {
     test('membership goes to the confirm client, naming to the primary',
         () async {
-      seedUnnamedStoryline();
-      seed('c1', vector: vectorAt(0.9));
+      await seedUnnamedStoryline();
+      await seed('c1', vector: vectorAt(0.9));
       final primary = FakeLlm('primary', {
         'storyline_name': [nameAnswer()],
       });
@@ -142,8 +143,8 @@ void main() {
       expect(fast.schemas, ['storyline_membership']);
       expect(primary.schemas, ['storyline_name']);
       // And it did the work, rather than routing tidily past a no-op.
-      expect(store.membersOf('sl-1'), hasLength(2));
-      expect(store.getStoryline('sl-1')!.summary,
+      expect(await store.membersOf('sl-1'), hasLength(2));
+      expect((await store.getStoryline('sl-1'))!.summary,
           'Underwriting is reviewing the appraisal.');
     });
 
@@ -151,10 +152,10 @@ void main() {
       // Four unassigned threads, two of which link — the sweep proposes one
       // storyline and names it. No membership is judged: a cluster IS the
       // claim, so nothing here belongs on the fast server.
-      seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
-      seed('c2', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
-      seed('c3', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
-      seed('c4', vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
+      await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed('c2', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed('c3', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
+      await seed('c4', vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
       final primary = FakeLlm('primary', {
         'storyline_name': [nameAnswer()],
       });
@@ -164,13 +165,13 @@ void main() {
 
       expect(primary.callsFor('storyline_name'), 1);
       expect(fast.schemas, isEmpty);
-      expect(store.loadStorylines(), hasLength(1));
+      expect(await store.loadStorylines(), hasLength(1));
     });
 
     test('without a confirm client everything stays on the one it was given',
         () async {
-      seedUnnamedStoryline();
-      seed('c1', vector: vectorAt(0.9));
+      await seedUnnamedStoryline();
+      await seed('c1', vector: vectorAt(0.9));
       final only = FakeLlm('only', {
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
@@ -205,8 +206,8 @@ void main() {
     });
 
     test('storylineServiceProvider wires the split', () async {
-      seedUnnamedStoryline();
-      seed('c1', vector: vectorAt(0.9));
+      await seedUnnamedStoryline();
+      await seed('c1', vector: vectorAt(0.9));
       final primary = FakeLlm('primary', {
         'storyline_name': [nameAnswer()],
       });

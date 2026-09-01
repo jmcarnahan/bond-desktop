@@ -33,19 +33,19 @@ class IdentityGuard {
     // name would hand the database to a label rather than to a person.
     if (identity == null) return false;
 
-    final owner = _store.getPref(dbOwnerKey);
+    final owner = await _store.getPref(dbOwnerKey);
     if (owner == identity) return false;
     if (owner == null) {
       // First claim on an unowned database — the state every fresh install and
       // every post-sign-out database is in. Silent: there is nothing to lose.
-      _store.setPref(dbOwnerKey, identity);
+      await _store.setPref(dbOwnerKey, identity);
       return false;
     }
 
     // The one case this class exists for. The wipe clears db_owner along with
     // the mail, so the claim below is the write that re-establishes ownership.
-    _store.wipeAll();
-    _store.setPref(dbOwnerKey, identity);
+    await _store.wipeAll();
+    await _store.setPref(dbOwnerKey, identity);
     return true;
   }
 

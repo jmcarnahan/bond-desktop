@@ -133,7 +133,8 @@ class TriageQueue {
   /// Clears claims a previous run left behind. Startup only — it must not run
   /// while a worker holds a claim, or it would hand that message to a second
   /// drain.
-  void resetInterrupted() => _store.resetInterruptedTriage(source: _source);
+  Future<void> resetInterrupted() =>
+      _store.resetInterruptedTriage(source: _source);
 
   void dispose() {
     _stopped = true;
@@ -152,7 +153,7 @@ class TriageQueue {
     // Before the first message, not after it: the header counter would
     // otherwise sit blank for the seventeen seconds that message takes, which
     // is exactly when a user with a fresh backlog is looking for it.
-    _emit();
+    await _emit();
     try {
       await _gate.run(_drain);
     } finally {
@@ -162,25 +163,23 @@ class TriageQueue {
 
   /// Up to [_concurrency] messages at the model server at once.
   ///
-  /// What makes that safe is the claim: [_triageOne] writes `processing`
-  /// SYNCHRONOUSLY before its first await, and there is no await between
-  /// [MessageStore.nextPendingTriage] and the call to it, so the row is off
-  /// the pending list before this loop can ask for another one. A message can
-  /// never be handed to two futures. Do not put an await between those two
-  /// statements.
+  /// What makes that safe is the claim: [MessageStore.claimPendingTriage] is
+  /// one UPDATE…RETURNING, so choosing a message and taking it off the pending
+  /// list are the same indivisible step. Two concurrent drains — or two
+  /// iterations of this loop, which suspends on the claim now — can never see
+  /// the same row: whichever claim lands second finds nothing pending to match
+  /// and comes back null.
   Future<void> _drain() async {
     final inFlight = <Future<void>>{};
     var parked = false;
     while (!_stopped && !parked) {
       while (inFlight.length < _concurrency && !_stopped && !parked) {
-        final row = _store.nextPendingTriage(sources: const [_source]);
+        final row = await _store.claimPendingTriage(sources: const [_source]);
         if (row == null) break;
         late final Future<void> future;
         // [ActivityLog.inSpan] gives this message its own tally, so three
         // concurrent messages' model calls land on three activity rows
-        // instead of whichever records first. It runs its body synchronously,
-        // so the claim inside [_triageOne] still happens before this loop
-        // continues.
+        // instead of whichever records first.
         future = _log.inSpan(() => _triageOne(row)).then((carryOn) {
           if (!carryOn) parked = true;
         }).whenComplete(() => inFlight.remove(future));
@@ -202,11 +201,10 @@ class TriageQueue {
     var current = row;
     var message = Message.fromRow(current);
 
-    // Claimed before the first await. A crash mid-model-call therefore leaves
-    // the row in `processing`, which is exactly what [resetInterrupted]
-    // looks for at the next launch — and what keeps a re-entrant pump from
-    // handing the same message to two drains.
-    _store.writeTriage(_source, id, status: 'processing');
+    // The row arrives already claimed — the statement that picked it is the
+    // statement that wrote its `processing`. A crash mid-model-call therefore
+    // leaves it claimed, which is exactly what [resetInterrupted] looks for at
+    // the next launch.
     final sw = Stopwatch()..start();
 
     // Tier one, on the delta page's own fields. Free, and it is what keeps
@@ -217,8 +215,13 @@ class TriageQueue {
       // means the model was consulted, and a gate is the mechanism that keeps
       // it from being — one row per newsletter would bury the work the panel
       // exists to show under the mail that never cost anything.
-      _store.writeTriage(_source, id, status: 'skipped', gateReason: senderGate);
-      _emit();
+      await _store.writeTriage(
+        _source,
+        id,
+        status: 'skipped',
+        gateReason: senderGate,
+      );
+      await _emit();
       return true;
     }
 
@@ -229,7 +232,7 @@ class TriageQueue {
         (message.bodyText?.isNotEmpty != true || message.headers.isEmpty)) {
       try {
         await fetch(id);
-        current = _store.getMessageRow(_source, id) ?? current;
+        current = await _store.getMessageRow(_source, id) ?? current;
         message = Message.fromRow(current);
       } on NotSignedIn {
         return _parkForSession(id, sw.elapsedMilliseconds);
@@ -246,8 +249,13 @@ class TriageQueue {
     // the single place a gate decision is made.
     final headerGate = gateFor(message, userAddress: _userAddress);
     if (headerGate != null) {
-      _store.writeTriage(_source, id, status: 'skipped', gateReason: headerGate);
-      _emit();
+      await _store.writeTriage(
+        _source,
+        id,
+        status: 'skipped',
+        gateReason: headerGate,
+      );
+      await _emit();
       return true;
     }
 
@@ -257,11 +265,11 @@ class TriageQueue {
         const TriageTask(),
         TriageInput(message, DateTime.now()),
       );
-      _store.writeTriage(_source, id, status: 'triaged', result: result);
-      _foldUp(current, message, result);
+      await _store.writeTriage(_source, id, status: 'triaged', result: result);
+      await _foldUp(current, message, result);
       // What the model decided, on the row. The `llm_*` tally the call itself
       // reported folds in from the log's pending slot.
-      _log.record(
+      await _log.record(
         'triage',
         source: _source,
         entityId: id,
@@ -273,7 +281,7 @@ class TriageQueue {
           'action_items': result.actionItems.length,
         },
       );
-      _emit();
+      await _emit();
       return true;
     } on LlmUnavailableException {
       // Nothing about this message failed, so it does not spend an attempt.
@@ -282,8 +290,8 @@ class TriageQueue {
       // laptop where the model server is not running. Triage is one kind on
       // one server, so unlike the AI worker there is no other queue here that
       // a different server could still be answering for.
-      _store.writeTriage(_source, id, status: 'pending');
-      _log.record(
+      await _store.writeTriage(_source, id, status: 'pending');
+      await _log.record(
         'triage',
         status: 'parked',
         source: _source,
@@ -291,7 +299,7 @@ class TriageQueue {
         durationMs: sw.elapsedMilliseconds,
         detail: {'reason': 'model_unavailable'},
       );
-      _emit();
+      await _emit();
       return false;
     } on LlmException catch (e) {
       return _recordFailure(current, id, e, e.statusCode, sw.elapsedMilliseconds);
@@ -305,9 +313,9 @@ class TriageQueue {
   /// attempt — nothing is wrong with the message — and the drain parks. The
   /// sign-out routing lives in the inbox notifier; triage's whole job here is
   /// to stop burning model time on previews it cannot improve on.
-  bool _parkForSession(String id, int durationMs) {
-    _store.writeTriage(_source, id, status: 'pending');
-    _log.record(
+  Future<bool> _parkForSession(String id, int durationMs) async {
+    await _store.writeTriage(_source, id, status: 'pending');
+    await _log.record(
       'triage',
       status: 'parked',
       source: _source,
@@ -315,23 +323,23 @@ class TriageQueue {
       durationMs: durationMs,
       detail: {'reason': 'session'},
     );
-    _emit();
+    await _emit();
     return false;
   }
 
-  bool _recordFailure(
+  Future<bool> _recordFailure(
     Map<String, Object?> row,
     String id,
     Object error,
     int? statusCode,
     int durationMs,
-  ) {
+  ) async {
     final attempts = ((row['triage_attempts'] as num?)?.toInt() ?? 0) + 1;
     // A 400 from a json_schema request is this app's schema being wrong, not
     // the model's answer. It is identical on every retry, so retrying it
     // burns model time to reproduce a bug.
     final fatal = statusCode == 400 || attempts >= _maxAttempts;
-    _store.writeTriage(
+    await _store.writeTriage(
       _source,
       id,
       status: fatal ? 'error' : 'pending',
@@ -341,7 +349,7 @@ class TriageQueue {
     // `retry` while the message still has an attempt left, `error` once it
     // does not — the row says which of the two this was, where the message's
     // own `pending` status cannot.
-    _log.record(
+    await _log.record(
       'triage',
       status: fatal ? 'error' : 'retry',
       source: _source,
@@ -353,7 +361,7 @@ class TriageQueue {
         'status_code': ?statusCode,
       },
     );
-    _emit();
+    await _emit();
     return true;
   }
 
@@ -363,14 +371,14 @@ class TriageQueue {
   /// Without that check a backlog would end up showing the wrong ask: the
   /// worker runs newest-first, so an older message finishing later would
   /// overwrite a current CTA with one from last week.
-  void _foldUp(
+  Future<void> _foldUp(
     Map<String, Object?> row,
     Message message,
     TriageResult result,
-  ) {
+  ) async {
     final key = row['conversation_key'] as String?;
     if (key == null || key.isEmpty) return;
-    final conversation = _store.getConversationRow(_source, key);
+    final conversation = await _store.getConversationRow(_source, key);
     if (conversation == null) return;
 
     final lastInbound = conversation['last_inbound_at'] as String?;
@@ -389,7 +397,7 @@ class TriageQueue {
         ? result.actionItems.first
         : (result.needsAction ? result.summary : null);
 
-    _store.updateConversationTriage(
+    await _store.updateConversationTriage(
       _source,
       key,
       ctaText: (ask == null || ask.isEmpty)
@@ -400,10 +408,13 @@ class TriageQueue {
     );
   }
 
-  void _emit() {
+  /// Awaited by every caller, never fired and forgotten: the counts are read
+  /// from the rows, so an unawaited emit would be free to report a queue that
+  /// has already moved on.
+  Future<void> _emit() async {
     if (_progress.isClosed) return;
-    _progress.add(
-      TriageProgress(_store.triageCounts(sources: const [_source])),
-    );
+    final counts = await _store.triageCounts(sources: const [_source]);
+    if (_progress.isClosed) return;
+    _progress.add(TriageProgress(counts));
   }
 }

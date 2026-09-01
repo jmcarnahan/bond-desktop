@@ -1,6 +1,8 @@
 import 'dart:convert';
 
-import 'package:bond_inbox/data/db.dart';
+// `show BondDatabase`: drift generates row classes whose names collide with
+// the app's own models.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/main.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
@@ -21,7 +23,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// One session per SERVER, in one shared keychain.
 ///
@@ -304,12 +307,11 @@ void main() {
   });
 
   group('the gate decides at launch', () {
-    late Database db;
+    late BondDatabase db;
     late MessageStore store;
 
     setUp(() {
-      db = sqlite3.openInMemory();
-      applySchema(db);
+      db = testDb();
       store = MessageStore(db);
     });
 
@@ -328,9 +330,15 @@ void main() {
       required Set<String> signedInAt,
     }) async {
       final built = <String, _FakeSession>{};
+      // The gate asks ONCE, from a field initializer, so the stored server has
+      // to be in the preferences before the first frame — which is exactly
+      // what `main()` arranges. Left to load a microtask later, the gate would
+      // decide against a session for the DEFAULT server and never re-ask.
+      final prefs = await AppPrefsNotifier.read(store);
       await tester.pumpWidget(ProviderScope(
         overrides: [
           dbProvider.overrideWithValue(db),
+          initialAppPrefsProvider.overrideWithValue(prefs),
           syncServiceProvider.overrideWithValue(_FakeSync()),
           teamsBackendProvider.overrideWithValue(_FakeTeams()),
           // One session per (mode, server), which is what the real provider
@@ -354,7 +362,7 @@ void main() {
     testWidgets('a signed-in slot opens the inbox', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1400, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
-      store.setPref(mcpServerUrlKey, _serverA);
+      await store.setPref(mcpServerUrlKey, _serverA);
 
       await pumpGate(tester, signedInAt: {'$backendModeMcp:$_serverA'});
 
@@ -364,7 +372,7 @@ void main() {
     testWidgets('an unsigned slot opens the sign-in screen', (tester) async {
       await tester.binding.setSurfaceSize(const Size(1400, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
-      store.setPref(mcpServerUrlKey, _serverA);
+      await store.setPref(mcpServerUrlKey, _serverA);
 
       await pumpGate(tester, signedInAt: const {});
 
@@ -380,7 +388,7 @@ void main() {
       // empty until the new server is signed in to.
       await tester.binding.setSurfaceSize(const Size(1400, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
-      store.setPref(mcpServerUrlKey, _serverA);
+      await store.setPref(mcpServerUrlKey, _serverA);
 
       final sessions =
           await pumpGate(tester, signedInAt: {'$backendModeMcp:$_serverA'});
@@ -388,7 +396,7 @@ void main() {
 
       final container =
           ProviderScope.containerOf(tester.element(find.byType(AuthGate)));
-      container.read(appPrefsProvider.notifier).setMcpServerUrl(_serverB);
+      await container.read(appPrefsProvider.notifier).setMcpServerUrl(_serverB);
       await tester.pump();
       await tester.pump();
 
@@ -411,7 +419,7 @@ void main() {
       // out.
       await tester.binding.setSurfaceSize(const Size(1400, 1000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
-      store.setPref(mcpServerUrlKey, _serverA);
+      await store.setPref(mcpServerUrlKey, _serverA);
 
       await pumpGate(tester, signedInAt: {'$backendModeMcp:$_serverA'});
       await tester.tap(find.byTooltip('Settings'));

@@ -67,13 +67,25 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   final MessageStore _store;
   final StorylineService _service;
 
+  /// Called at the end of every list read. Membership is read by providers of
+  /// its own now, and they cache — so without this the member strip would keep
+  /// showing what was true before the user's last action or the assignment
+  /// pass. Supplied by the provider below, which is the layer that holds a
+  /// `Ref`; the notifier itself has no business knowing what a provider is.
+  final void Function()? _onMembersChanged;
+
   StreamSubscription<WorkProgress>? _progress;
   Timer? _reload;
 
   int _fetchSeq = 0;
 
-  StorylinesNotifier(this._store, this._service, {AiWorker? aiWorker})
-      : super(const StorylinesInitial()) {
+  StorylinesNotifier(
+    this._store,
+    this._service, {
+    AiWorker? aiWorker,
+    void Function()? onMembersChanged,
+  })  : _onMembersChanged = onMembersChanged,
+        super(const StorylinesInitial()) {
     final worker = aiWorker;
     if (worker == null) return;
     _progress = worker.progress.listen((progress) {
@@ -105,7 +117,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
 
     final List<Storyline> rows;
     try {
-      rows = _store.loadStorylines();
+      rows = await _store.loadStorylines();
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;
@@ -116,6 +128,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     }
 
     if (seq != _fetchSeq) return;
+    _onMembersChanged?.call();
     state = StorylinesLoaded(rows);
   }
 
@@ -128,22 +141,22 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   // would disagree with the database within one action.
 
   Future<void> keep(String id) async {
-    _service.keepSuggestion(id);
+    await _service.keepSuggestion(id);
     await load();
   }
 
   Future<void> dismiss(String id) async {
-    _service.dismissSuggestion(id);
+    await _service.dismissSuggestion(id);
     await load();
   }
 
   Future<void> rename(String id, String title) async {
-    _service.rename(id, title);
+    await _service.rename(id, title);
     await load();
   }
 
   Future<void> addThread(String id, String source, String conversationKey) async {
-    _service.addThread(id, source, conversationKey);
+    await _service.addThread(id, source, conversationKey);
     await load();
   }
 
@@ -152,7 +165,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     String source,
     String conversationKey,
   ) async {
-    _service.removeThread(id, source, conversationKey);
+    await _service.removeThread(id, source, conversationKey);
     await load();
   }
 
@@ -163,7 +176,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     required String conversationKey,
     String source = _source,
   }) async {
-    final id = _service.createStoryline(
+    final id = await _service.createStoryline(
       title,
       source: source,
       conversationKey: conversationKey,
@@ -179,7 +192,34 @@ final storylinesProvider =
     ref.watch(messageStoreProvider),
     ref.watch(storylineServiceProvider),
     aiWorker: ref.watch(aiWorkerProvider),
+    onMembersChanged: () {
+      ref.invalidate(storylineMembersProvider);
+      ref.invalidate(storylineThreadIdsProvider);
+    },
   ),
+);
+
+/// One storyline's member threads.
+///
+/// A provider rather than a read the timeline pane makes for itself: the store
+/// is asynchronous and a widget build cannot await one. The strip renders empty
+/// for the frame before the read lands, which is what the pane already showed
+/// for a storyline with no members yet.
+///
+/// Dropped and re-read after every list load — see [StorylinesNotifier].
+final storylineMembersProvider =
+    FutureProvider.autoDispose.family<List<StorylineMember>, String>(
+  (ref, id) => ref.watch(messageStoreProvider).membersOf(id),
+);
+
+/// The storylines one thread is already filed under, so the "Add to storyline"
+/// menu can leave them out. Same caching rules as [storylineMembersProvider].
+final storylineThreadIdsProvider = FutureProvider.autoDispose
+    .family<Set<String>, ({String source, String conversationKey})>(
+  (ref, thread) async => (await ref
+          .watch(messageStoreProvider)
+          .storylineIdsFor(thread.source, thread.conversationKey))
+      .toSet(),
 );
 
 // ── one storyline's merged transcript ──────────────────────────────────
@@ -248,7 +288,8 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
       // Every connector, not just mail: a chat thread can join a storyline
       // through the assignment pass, and a timeline that dropped its messages
       // would show a member strip listing a thread with nothing in it.
-      rows = _store.storylineTimeline(storylineId, sources: inboxSources);
+      rows =
+          await _store.storylineTimeline(storylineId, sources: inboxSources);
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;

@@ -75,8 +75,8 @@ enum _RunOutcome {
 /// at a time.
 ///
 /// This is `TriageQueue`'s protocol, generalised over a task kind — the same
-/// claim-before-await, the same failure policy, the same park-on-unavailable —
-/// and it is a COPY rather than a shared base class on purpose. Triage is
+/// atomic claim, the same failure policy, the same park-on-unavailable — and
+/// it is a COPY rather than a shared base class on purpose. Triage is
 /// hard-wired to the `messages` table by decision: its queue, its gates and
 /// its fold-up are one thing, and the seam that would let them be shared is
 /// not worth the coupling.
@@ -154,7 +154,7 @@ class AiWorker {
   /// Clears claims a previous run left behind, across every kind. Startup only
   /// — it must not run while a worker holds a claim, or it would hand that
   /// item to a second drain.
-  void resetInterrupted() => _store.resetInterruptedWork();
+  Future<void> resetInterrupted() => _store.resetInterruptedWork();
 
   void dispose() {
     _stopped = true;
@@ -191,15 +191,16 @@ class AiWorker {
         // Before the first item of each kind, not after it: a counter that
         // appears only once the first item lands is blank for exactly the
         // seconds someone would be looking at it.
-        _emit(handler.kind);
+        await _emit(handler.kind);
 
         // Up to [WorkHandler.concurrency] items of this kind at the server at
-        // once. What makes that safe is the claim: [_runOne] writes
-        // `processing` SYNCHRONOUSLY before its first await, and there is no
-        // await between [nextPendingWork] and the call to it, so the row is
-        // off the pending list before this loop can ask for another one. An
-        // item can never be handed to two futures. Do not put an await
-        // between those two statements.
+        // once. What makes that safe is the claim:
+        // [MessageStore.claimPendingWork] is one UPDATE…RETURNING, so choosing
+        // an item and taking it off the pending list are the same indivisible
+        // step. Two concurrent drains — or two iterations of this loop, which
+        // suspends on the claim now — can never see the same row: whichever
+        // claim lands second finds nothing pending to match and comes back
+        // null.
         final inFlight = <Future<void>>{};
         var parkedKind = false;
         var parkedDrain = false;
@@ -208,7 +209,7 @@ class AiWorker {
               !_stopped &&
               !parkedKind &&
               !parkedDrain) {
-            final item = _store.nextPendingWork(
+            final item = await _store.claimPendingWork(
               handler.kind,
               sources: _sources,
             );
@@ -216,8 +217,7 @@ class AiWorker {
             late final Future<void> future;
             // [ActivityLog.inSpan] gives this item its own tally, so
             // concurrent items' notes and model calls land on their own
-            // activity rows. It runs its body synchronously, so the claim
-            // inside [_runOne] still happens before this loop continues.
+            // activity rows.
             future = _log.inSpan(() => _runOne(handler, item)).then((outcome) {
               parkedKind |= outcome == _RunOutcome.parkKind;
               parkedDrain |= outcome == _RunOutcome.parkDrain;
@@ -249,29 +249,27 @@ class AiWorker {
     final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
 
-    // Claimed before the first await. A crash mid-model-call therefore leaves
-    // the row in `processing`, which is exactly what [resetInterrupted] looks
-    // for at the next launch — and what keeps a re-entrant pump, or the
-    // sibling futures of this same drain, from handing the same item out
-    // twice.
-    _store.writeWork(handler.kind, source, id, status: 'processing');
+    // The item arrives already claimed — the statement that picked it is the
+    // statement that wrote its `processing`. A crash mid-model-call therefore
+    // leaves it claimed, which is exactly what [resetInterrupted] looks for at
+    // the next launch.
     final sw = Stopwatch()..start();
 
     try {
       await handler.run(item);
-      _store.writeWork(handler.kind, source, id, status: 'done');
+      await _store.writeWork(handler.kind, source, id, status: 'done');
       // The work row is `done` either way; the activity row is where a
       // handler that early-returned gets to say so. [ActivityLog.note] and
       // [ActivityLog.noteStatus] are how it does that without throwing, and
       // both are folded in and cleared by this one call.
-      _log.record(
+      await _log.record(
         handler.kind,
         status: _log.pendingStatusOr('ok'),
         source: source,
         entityId: id,
         durationMs: sw.elapsedMilliseconds,
       );
-      _emit(handler.kind);
+      await _emit(handler.kind);
       return _RunOutcome.ok;
     } on LlmUnavailableException {
       // Nothing about this item failed, so it does not spend an attempt. This
@@ -320,16 +318,16 @@ class AiWorker {
   /// Back to `pending` without spending an attempt. The session ending or the
   /// server being down says nothing about this item; [outcome] says how far
   /// the park reaches and [reason] tells the activity row why.
-  _RunOutcome _park(
+  Future<_RunOutcome> _park(
     String kind,
     String source,
     String id,
     _RunOutcome outcome,
     String reason,
     int durationMs,
-  ) {
-    _store.writeWork(kind, source, id, status: 'pending');
-    _log.record(
+  ) async {
+    await _store.writeWork(kind, source, id, status: 'pending');
+    await _log.record(
       kind,
       status: 'parked',
       source: source,
@@ -337,17 +335,17 @@ class AiWorker {
       durationMs: durationMs,
       detail: {'reason': reason},
     );
-    _emit(kind);
+    await _emit(kind);
     return outcome;
   }
 
-  _RunOutcome _recordFailure(
+  Future<_RunOutcome> _recordFailure(
     String kind,
     Map<String, Object?> item,
     Object error,
     int? statusCode,
     int durationMs,
-  ) {
+  ) async {
     final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
     final attempts = ((item['attempts'] as num?)?.toInt() ?? 0) + 1;
@@ -355,7 +353,7 @@ class AiWorker {
     // the model's answer. It is identical on every retry, so retrying it
     // burns model time to reproduce a bug.
     final fatal = statusCode == 400 || attempts >= _maxAttempts;
-    _store.writeWork(
+    await _store.writeWork(
       kind,
       source,
       id,
@@ -365,7 +363,7 @@ class AiWorker {
     );
     // `retry` while the item still has an attempt left, `error` once it does
     // not — the work row's `pending` cannot tell those apart after the fact.
-    _log.record(
+    await _log.record(
       kind,
       status: fatal ? 'error' : 'retry',
       source: source,
@@ -377,14 +375,17 @@ class AiWorker {
         'status_code': ?statusCode,
       },
     );
-    _emit(kind);
+    await _emit(kind);
     return _RunOutcome.ok;
   }
 
-  void _emit(String kind) {
+  /// Awaited by every caller, never fired and forgotten: the counts are read
+  /// from the rows, so an unawaited emit would be free to report a queue that
+  /// has already moved on.
+  Future<void> _emit(String kind) async {
     if (_progress.isClosed) return;
-    _progress.add(
-      WorkProgress(kind, _store.workCounts(kind, sources: _sources)),
-    );
+    final counts = await _store.workCounts(kind, sources: _sources);
+    if (_progress.isClosed) return;
+    _progress.add(WorkProgress(kind, counts));
   }
 }

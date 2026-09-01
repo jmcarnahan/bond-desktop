@@ -43,14 +43,14 @@ class DraftHandler extends WorkHandler {
     // Already drafted. Two enqueues racing to the same conversation is
     // benign — the first one's suggestion is as good as the second's — and
     // returning here spends no model time discovering that.
-    if (_store.getDraft(source, key) != null) {
+    if (await _store.getDraft(source, key) != null) {
       _log
         ..noteStatus('skipped')
         ..note({'reason': 'already_drafted'});
       return;
     }
 
-    final replyToRow = _store.newestInboundMessage(source, key);
+    final replyToRow = await _store.newestInboundMessage(source, key);
     // Queued, then the thread's mail went away. Nothing to reply to and
     // nothing wrong: the item is done, not failed.
     if (replyToRow == null) {
@@ -65,11 +65,11 @@ class DraftHandler extends WorkHandler {
       _client,
       const DraftTask(),
       DraftInput(
-        thread: _store.loadThread(key, sources: [source]),
+        thread: await _store.loadThread(key, sources: [source]),
         replyTo: replyTo,
-        styleExamples: _styleExamplesFor(source, replyTo.fromAddress),
-        storylineSummary: _storylineSummaryFor(source, key),
-        aboutMe: _store.getPref(aboutMeKey),
+        styleExamples: await _styleExamplesFor(source, replyTo.fromAddress),
+        storylineSummary: await _storylineSummaryFor(source, key),
+        aboutMe: await _store.getPref(aboutMeKey),
         now: DateTime.now(),
       ),
       // Zero, like extraction: pressing Regenerate should change the draft
@@ -86,7 +86,7 @@ class DraftHandler extends WorkHandler {
       throw const LlmFormatException('The local model drafted an empty reply.');
     }
 
-    _store.upsertDraft(
+    await _store.upsertDraft(
       source: source,
       conversationKey: key,
       replyToMessageId: replyTo.id,
@@ -98,9 +98,9 @@ class DraftHandler extends WorkHandler {
   }
 
   /// The LO's own recent replies to this sender, as writing samples.
-  List<String> _styleExamplesFor(String source, String? address) {
+  Future<List<String>> _styleExamplesFor(String source, String? address) async {
     if (address == null || address.isEmpty) return const [];
-    final rows = _store.recentOutboundToSender(
+    final rows = await _store.recentOutboundToSender(
       source,
       address,
       limit: _styleExamples,
@@ -124,9 +124,9 @@ class DraftHandler extends WorkHandler {
   /// rather than best: `storylineIdsFor` returns them in join order, a thread
   /// is almost always in exactly one, and picking between two summaries is a
   /// judgement this handler has no basis for.
-  String? _storylineSummaryFor(String source, String key) {
-    final ids = _store.storylineIdsFor(source, key);
+  Future<String?> _storylineSummaryFor(String source, String key) async {
+    final ids = await _store.storylineIdsFor(source, key);
     if (ids.isEmpty) return null;
-    return _store.getStoryline(ids.first)?.summary;
+    return (await _store.getStoryline(ids.first))?.summary;
   }
 }

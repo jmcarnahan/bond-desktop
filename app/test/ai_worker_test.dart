@@ -1,11 +1,15 @@
-import 'package:bond_inbox/data/db.dart';
+import 'dart:async';
+
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/drain_gate.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// A [WorkHandler] that answers from a script and does no work.
 ///
@@ -20,9 +24,10 @@ class ScriptedHandler extends WorkHandler {
   /// is a success. The last entry repeats once the script runs out.
   final List<Object?> script;
 
-  /// Run inside [run], before the suspension — for the assertions that are
-  /// about what is true WHILE an item is being worked on.
-  final void Function(Map<String, Object?> item)? onRun;
+  /// Run inside [run], before the scripted suspension — for the assertions
+  /// that are about what is true WHILE an item is being worked on. [FutureOr]
+  /// because what those assertions want to look at is a query now.
+  final FutureOr<void> Function(Map<String, Object?> item)? onRun;
 
   final List<String> seen = [];
   int inFlight = 0;
@@ -40,7 +45,7 @@ class ScriptedHandler extends WorkHandler {
     inFlight++;
     if (inFlight > maxInFlight) maxInFlight = inFlight;
     try {
-      onRun?.call(item);
+      await onRun?.call(item);
       // A real handler suspends; without a suspension here two overlapping
       // pumps could interleave in a way the fake would never see.
       await Future<void>.delayed(const Duration(milliseconds: 1));
@@ -54,28 +59,33 @@ class ScriptedHandler extends WorkHandler {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
-  Map<String, Object?> workRow(String kind, String entityId) =>
+  Future<Map<String, Object?>> workRow(String kind, String entityId) async =>
       Map<String, Object?>.from(
-        db.select(
-          'SELECT * FROM work_items WHERE task_kind = ? AND entity_id = ?',
-          [kind, entityId],
-        ).single,
+        (await db
+                .customSelect(
+                  'SELECT * FROM work_items '
+                  'WHERE task_kind = ? AND entity_id = ?',
+                  variables: [Variable(kind), Variable(entityId)],
+                )
+                .get())
+            .single
+            .data,
       );
 
   group('drain', () {
     test('runs strictly one item at a time', () async {
       for (final id in ['a', 'b', 'c']) {
-        store.enqueueWork('extract', 'email', id);
+        await store.enqueueWork('extract', 'email', id);
       }
       final handler = ScriptedHandler('extract');
       final worker = AiWorker(store, handlers: [handler]);
@@ -86,12 +96,12 @@ void main() {
 
       expect(handler.maxInFlight, 1);
       expect(handler.seen.length, 3);
-      expect(store.workCounts('extract'), {'done': 3});
+      expect(await store.workCounts('extract'), {'done': 3});
     });
 
     test('stops when nothing is pending, having called nothing', () async {
-      store.enqueueWork('extract', 'email', 'a');
-      store.writeWork('extract', 'email', 'a', status: 'done');
+      await store.enqueueWork('extract', 'email', 'a');
+      await store.writeWork('extract', 'email', 'a', status: 'done');
       final handler = ScriptedHandler('extract');
 
       await AiWorker(store, handlers: [handler]).pump();
@@ -100,8 +110,8 @@ void main() {
     });
 
     test('drains the handlers in list order', () async {
-      store.enqueueWork('second', 'email', 'b');
-      store.enqueueWork('first', 'email', 'a');
+      await store.enqueueWork('second', 'email', 'b');
+      await store.enqueueWork('first', 'email', 'a');
       final order = <String>[];
       final first = ScriptedHandler('first', onRun: (_) => order.add('first'));
       final second = ScriptedHandler('second', onRun: (_) => order.add('second'));
@@ -112,23 +122,23 @@ void main() {
     });
 
     test('a queued kind with no handler is left alone', () async {
-      store.enqueueWork('extract', 'email', 'mine');
-      store.enqueueWork('unknown', 'email', 'theirs');
+      await store.enqueueWork('extract', 'email', 'mine');
+      await store.enqueueWork('unknown', 'email', 'theirs');
       final handler = ScriptedHandler('extract');
 
       await AiWorker(store, handlers: [handler]).pump();
 
       expect(handler.seen, ['mine']);
-      expect(workRow('unknown', 'theirs')['status'], 'pending');
+      expect((await workRow('unknown', 'theirs'))['status'], 'pending');
     });
 
     test('an item is claimed before the handler suspends', () async {
-      store.enqueueWork('extract', 'email', 'm1');
+      await store.enqueueWork('extract', 'email', 'm1');
       var statusDuringRun = '';
       final handler = ScriptedHandler(
         'extract',
-        onRun: (_) {
-          statusDuringRun = workRow('extract', 'm1')['status'] as String;
+        onRun: (_) async {
+          statusDuringRun = (await workRow('extract', 'm1'))['status'] as String;
         },
       );
 
@@ -137,14 +147,14 @@ void main() {
       // The claim is what keeps a re-entrant pump — or a crash — from handing
       // the same item to a second drain.
       expect(statusDuringRun, 'processing');
-      expect(workRow('extract', 'm1')['status'], 'done');
+      expect((await workRow('extract', 'm1'))['status'], 'done');
     });
   });
 
   group('parking', () {
     test('a model server that is down costs the item nothing', () async {
-      store.enqueueWork('extract', 'email', 'a');
-      store.enqueueWork('extract', 'email', 'b');
+      await store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'b');
       final handler = ScriptedHandler(
         'extract',
         script: [const LlmUnavailableException('not reachable')],
@@ -155,14 +165,14 @@ void main() {
       // One call, then the drain gives up: the item behind it would have
       // failed identically.
       expect(handler.seen.length, 1);
-      expect(store.workCounts('extract'), {'pending': 2});
-      expect(workRow('extract', handler.seen.single)['attempts'], 0);
+      expect(await store.workCounts('extract'), {'pending': 2});
+      expect((await workRow('extract', handler.seen.single))['attempts'], 0);
     });
 
     test('a downed server parks its own kind and lets the next kind run',
         () async {
-      store.enqueueWork('first', 'email', 'a');
-      store.enqueueWork('second', 'email', 'b');
+      await store.enqueueWork('first', 'email', 'a');
+      await store.enqueueWork('second', 'email', 'b');
       final first = ScriptedHandler(
         'first',
         script: [const LlmUnavailableException('not reachable')],
@@ -174,16 +184,16 @@ void main() {
       // The kinds do not share a server any more — extraction is on the fast
       // one, drafting on the 27B — so "this kind's server is not answering"
       // is no evidence at all about the next kind's.
-      expect(workRow('first', 'a')['status'], 'pending');
-      expect(workRow('first', 'a')['attempts'], 0);
+      expect((await workRow('first', 'a'))['status'], 'pending');
+      expect((await workRow('first', 'a'))['attempts'], 0);
       expect(second.seen, ['b']);
-      expect(workRow('second', 'b')['status'], 'done');
+      expect((await workRow('second', 'b'))['status'], 'done');
     });
 
     test('a dead session parks the whole drain, kinds behind it included',
         () async {
-      store.enqueueWork('first', 'email', 'a');
-      store.enqueueWork('second', 'email', 'b');
+      await store.enqueueWork('first', 'email', 'a');
+      await store.enqueueWork('second', 'email', 'b');
       final first =
           ScriptedHandler('first', script: [const NotSignedIn()]);
       final second = ScriptedHandler('second');
@@ -193,34 +203,34 @@ void main() {
       // The other side of the same coin: a session that is over fails every
       // kind's Graph-dependent work identically, whatever server it sits on.
       expect(second.seen, isEmpty);
-      expect(workRow('first', 'a')['status'], 'pending');
-      expect(workRow('second', 'b')['status'], 'pending');
+      expect((await workRow('first', 'a'))['status'], 'pending');
+      expect((await workRow('second', 'b'))['status'], 'pending');
     });
 
     test('a dead session stops the items behind it in its own kind', () async {
-      store.enqueueWork('extract', 'email', 'a');
-      store.enqueueWork('extract', 'email', 'b');
+      await store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'b');
       final handler = ScriptedHandler('extract', script: [const NotSignedIn()]);
 
       await AiWorker(store, handlers: [handler]).pump();
 
       expect(handler.seen.length, 1);
-      expect(store.workCounts('extract'), {'pending': 2});
+      expect(await store.workCounts('extract'), {'pending': 2});
     });
 
     test('missing consent parks the drain the same way', () async {
-      store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'a');
       final handler =
           ScriptedHandler('extract', script: [const ReconsentRequired()]);
 
       await AiWorker(store, handlers: [handler]).pump();
 
-      expect(workRow('extract', 'a')['status'], 'pending');
-      expect(workRow('extract', 'a')['attempts'], 0);
+      expect((await workRow('extract', 'a'))['status'], 'pending');
+      expect((await workRow('extract', 'a'))['attempts'], 0);
     });
 
     test('the next pump picks up where a downed server left off', () async {
-      store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'a');
       final handler = ScriptedHandler(
         'extract',
         script: [const LlmUnavailableException('not reachable'), null],
@@ -228,16 +238,16 @@ void main() {
       final worker = AiWorker(store, handlers: [handler]);
 
       await worker.pump();
-      expect(workRow('extract', 'a')['status'], 'pending');
+      expect((await workRow('extract', 'a'))['status'], 'pending');
 
       await worker.pump();
-      expect(workRow('extract', 'a')['status'], 'done');
+      expect((await workRow('extract', 'a'))['status'], 'done');
     });
   });
 
   group('failure', () {
     test('a schema 400 is this app\'s bug and is never retried', () async {
-      store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'a');
       final handler = ScriptedHandler(
         'extract',
         script: [const LlmException('JSON schema conversion failed', 400)],
@@ -246,14 +256,14 @@ void main() {
       await AiWorker(store, handlers: [handler]).pump();
 
       expect(handler.seen.length, 1);
-      final row = workRow('extract', 'a');
+      final row = await workRow('extract', 'a');
       expect(row['status'], 'error');
       expect(row['attempts'], 1);
       expect(row['error'], contains('JSON schema conversion failed'));
     });
 
     test('any other failure is retried once, then left as an error', () async {
-      store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'a');
       final handler = ScriptedHandler(
         'extract',
         script: [const LlmFormatException('not json')],
@@ -262,13 +272,13 @@ void main() {
       await AiWorker(store, handlers: [handler]).pump();
 
       expect(handler.seen.length, 2);
-      final row = workRow('extract', 'a');
+      final row = await workRow('extract', 'a');
       expect(row['status'], 'error');
       expect(row['attempts'], 2);
     });
 
     test('a retry that succeeds stores the result', () async {
-      store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'a');
       final handler = ScriptedHandler(
         'extract',
         script: [const LlmFormatException('not json'), null],
@@ -276,13 +286,13 @@ void main() {
 
       await AiWorker(store, handlers: [handler]).pump();
 
-      final row = workRow('extract', 'a');
+      final row = await workRow('extract', 'a');
       expect(row['status'], 'done');
       expect(row['attempts'], 1);
     });
 
     test('a thrown Error is caught like any other failure', () async {
-      store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'a');
       final handler = ScriptedHandler(
         'extract',
         script: [StateError('the database moved')],
@@ -292,15 +302,15 @@ void main() {
 
       // A StateError is an Error, not an Exception. Nothing about it should
       // escape the drain and take the whole pump down with it.
-      final row = workRow('extract', 'a');
+      final row = await workRow('extract', 'a');
       expect(row['status'], 'error');
       expect(row['attempts'], 2);
       expect(row['error'], contains('the database moved'));
     });
 
     test('a failure does not stop the drain behind it', () async {
-      store.enqueueWork('extract', 'email', 'a');
-      store.enqueueWork('extract', 'email', 'b');
+      await store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'b');
       final handler = ScriptedHandler(
         'extract',
         script: [const LlmException('boom', 400), null],
@@ -308,31 +318,31 @@ void main() {
 
       await AiWorker(store, handlers: [handler]).pump();
 
-      expect(store.workCounts('extract'), {'error': 1, 'done': 1});
+      expect(await store.workCounts('extract'), {'error': 1, 'done': 1});
     });
   });
 
   group('interruption', () {
     test('resetInterrupted returns a claimed item to the queue', () async {
-      store.enqueueWork('extract', 'email', 'a');
-      store.writeWork('extract', 'email', 'a', status: 'processing');
+      await store.enqueueWork('extract', 'email', 'a');
+      await store.writeWork('extract', 'email', 'a', status: 'processing');
       final handler = ScriptedHandler('extract');
       final worker = AiWorker(store, handlers: [handler]);
 
-      expect(store.nextPendingWork('extract'), isNull);
-      worker.resetInterrupted();
-      expect(store.nextPendingWork('extract'), isNotNull);
+      expect(await store.nextPendingWork('extract'), isNull);
+      await worker.resetInterrupted();
+      expect(await store.nextPendingWork('extract'), isNotNull);
 
       await worker.pump();
 
-      expect(workRow('extract', 'a')['status'], 'done');
+      expect((await workRow('extract', 'a'))['status'], 'done');
     });
   });
 
   group('progress', () {
     test('emits before the first item and after every one', () async {
-      store.enqueueWork('extract', 'email', 'a');
-      store.enqueueWork('extract', 'email', 'b');
+      await store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'b');
       final worker = AiWorker(store, handlers: [ScriptedHandler('extract')]);
       final seen = <int>[];
       final subscription = worker.progress.listen((p) => seen.add(p.remaining));
@@ -347,8 +357,8 @@ void main() {
     });
 
     test('counts are the rows, so done and total add up', () async {
-      store.enqueueWork('extract', 'email', 'a');
-      store.enqueueWork('extract', 'email', 'b');
+      await store.enqueueWork('extract', 'email', 'a');
+      await store.enqueueWork('extract', 'email', 'b');
       final handler = ScriptedHandler(
         'extract',
         script: [const LlmException('boom', 400), null],
@@ -370,8 +380,8 @@ void main() {
   });
 
   test('stop ends the drain after the item in flight', () async {
-    store.enqueueWork('extract', 'email', 'a');
-    store.enqueueWork('extract', 'email', 'b');
+    await store.enqueueWork('extract', 'email', 'a');
+    await store.enqueueWork('extract', 'email', 'b');
     late AiWorker worker;
     final handler = ScriptedHandler('extract', onRun: (_) => worker.stop());
     worker = AiWorker(store, handlers: [handler]);
@@ -379,7 +389,7 @@ void main() {
     await worker.pump();
 
     expect(handler.seen.length, 1);
-    expect(store.workCounts('extract'), {'done': 1, 'pending': 1});
+    expect(await store.workCounts('extract'), {'done': 1, 'pending': 1});
   });
 
   group('mid-drain pump', () {
@@ -388,14 +398,14 @@ void main() {
       // The user's Regenerate lands while a drain is busy on a LATER kind:
       // its pump must not be a silent no-op that leaves the new work for the
       // next sync.
-      store.enqueueWork('draft', 'email', 'd1');
+      await store.enqueueWork('draft', 'email', 'd1');
       late AiWorker worker;
       Future<void>? repump;
       final extractHandler = ScriptedHandler('extract');
-      final draftHandler = ScriptedHandler('draft', onRun: (_) {
+      final draftHandler = ScriptedHandler('draft', onRun: (_) async {
         // Mid-draft (the last kind), new extract work appears and someone
         // pumps — exactly what DraftNotifier.generate does.
-        store.enqueueWork('extract', 'email', 'e-late');
+        await store.enqueueWork('extract', 'email', 'e-late');
         repump = worker.pump();
       });
       worker = AiWorker(store, handlers: [extractHandler, draftHandler]);
@@ -404,7 +414,7 @@ void main() {
       await repump;
 
       expect(extractHandler.seen, ['e-late']);
-      expect(store.workCounts('extract'), {'done': 1});
+      expect(await store.workCounts('extract'), {'done': 1});
       // One drain did both passes: at no point were two loops at the server.
       expect(extractHandler.maxInFlight, 1);
       expect(draftHandler.maxInFlight, 1);
@@ -427,9 +437,9 @@ void main() {
       final workerA = AiWorker(store, handlers: [aHandler], gate: gate);
       final workerB = AiWorker(store, handlers: [bHandler], gate: gate);
 
-      store.enqueueWork('extract', 'email', 'a1');
-      store.enqueueWork('extract', 'email', 'a2');
-      store.enqueueWork('draft', 'email', 'b1');
+      await store.enqueueWork('extract', 'email', 'a1');
+      await store.enqueueWork('extract', 'email', 'a2');
+      await store.enqueueWork('draft', 'email', 'b1');
 
       final first = workerA.pump();
       final second = workerB.pump();

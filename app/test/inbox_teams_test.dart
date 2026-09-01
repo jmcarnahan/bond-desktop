@@ -1,4 +1,6 @@
-import 'package:bond_inbox/data/db.dart';
+// `show`: drift generates row classes named Message/Conversation from the
+// tables, and this file means the app's own models.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -15,7 +17,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// The whole screen, with sqlite real and every socket faked.
 ///
@@ -77,7 +80,7 @@ const String _coreScopes =
 const String _withChat = '$_coreScopes https://graph.microsoft.com/Chat.Read';
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late _FakeSync sync;
   late _RecordingTeams teams;
@@ -86,8 +89,7 @@ void main() {
   var httpCalls = 0;
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
     sync = _FakeSync();
     httpCalls = 0;
@@ -95,8 +97,8 @@ void main() {
 
   tearDown(() => db.close());
 
-  void seedChat(String key, {String subject = 'Sarah Whitfield'}) {
-    store.upsertMessage({
+  Future<void> seedChat(String key, {String subject = 'Sarah Whitfield'}) async {
+    await store.upsertMessage({
       'source': 'teams',
       'source_message_id': '$key-m1',
       'conversation_key': key,
@@ -109,7 +111,7 @@ void main() {
       'triage_status': 'skipped',
       'gate_reason': teamsSourceGate,
     });
-    store.upsertConversation({
+    await store.upsertConversation({
       'source': 'teams',
       'conversation_key': key,
       'subject': subject,
@@ -119,11 +121,11 @@ void main() {
       'last_inbound_at': '2026-08-28T11:00:00Z',
       'last_message_preview': 'Any word on the CD?',
     });
-    store.recomputeConversationCounts('teams', key);
+    await store.recomputeConversationCounts('teams', key);
   }
 
-  void seedMail(String key, {String subject = 'Appraisal review'}) {
-    store.upsertMessage({
+  Future<void> seedMail(String key, {String subject = 'Appraisal review'}) async {
+    await store.upsertMessage({
       'source_message_id': '$key-m1',
       'conversation_key': key,
       'direction': 'inbound',
@@ -132,7 +134,7 @@ void main() {
       'received_at': '2026-08-28T09:00:00Z',
       'body_text': 'The appraisal is in.',
     });
-    store.upsertConversation({
+    await store.upsertConversation({
       'conversation_key': key,
       'subject': subject,
       'participants_json': '[{"name":"Eric Vance","email":"eric@harborline.com"}]',
@@ -140,7 +142,7 @@ void main() {
       'last_message_at': '2026-08-28T09:00:00Z',
       'last_inbound_at': '2026-08-28T09:00:00Z',
     });
-    store.recomputeConversationCounts('email', key);
+    await store.recomputeConversationCounts('email', key);
   }
 
   Future<void> pumpScreen(
@@ -166,11 +168,19 @@ void main() {
     // and the app's default is now the MCP one, whose session would answer the
     // scope question by asking a server that is not there. Said in the store
     // because that is where the app reads it, once, at construction.
-    store.setPref(backendModeKey, backendModeSdk);
+    await store.setPref(backendModeKey, backendModeSdk);
+    // Read here rather than left to load a microtask into the first frame,
+    // which is what `main()` does and for the same reason: every backend
+    // provider watches the mode, so a stored setting arriving late rebuilds
+    // the session — and with it the inbox's read model, which would then sit
+    // at its initial state, spinning, with the load that this screen kicks
+    // from `initState` having landed on the notifier that was replaced.
+    final prefs = await AppPrefsNotifier.read(store);
 
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        initialAppPrefsProvider.overrideWithValue(prefs),
         graphAuthProvider.overrideWithValue(auth),
         syncServiceProvider.overrideWithValue(sync),
         teamsSyncProvider.overrideWithValue(teams),
@@ -178,14 +188,18 @@ void main() {
       child: const MaterialApp(home: InboxScreen()),
     ));
     // The launch refresh is a microtask; two pumps settle it and the loads
-    // behind it without advancing the poll timer.
+    // behind it without advancing the poll timer. A third for the reads
+    // themselves, which are round trips through drift now — and pumps rather
+    // than a settle, because this screen owns a sixty-second periodic timer
+    // and an unbounded settle would never come back.
+    await tester.pump();
     await tester.pump();
     await tester.pump();
   }
 
   group('the poll timer', () {
     testWidgets('refreshes mail and never Teams', (tester) async {
-      seedMail('c1');
+      await seedMail('c1');
       await pumpScreen(tester);
 
       final atLaunch = teams.calls;
@@ -206,7 +220,7 @@ void main() {
     });
 
     testWidgets('the refresh button does reach Teams', (tester) async {
-      seedMail('c1');
+      await seedMail('c1');
       await pumpScreen(tester);
       final before = teams.calls;
 
@@ -220,7 +234,7 @@ void main() {
 
   group('a chat thread', () {
     testWidgets('offers no composer, and says where to reply', (tester) async {
-      seedChat('chat-1');
+      await seedChat('chat-1');
       await pumpScreen(tester);
 
       await tester.tap(find.text('💬 Sarah Whitfield').first);
@@ -233,7 +247,7 @@ void main() {
     });
 
     testWidgets('a mail thread still has one', (tester) async {
-      seedMail('c1');
+      await seedMail('c1');
       await pumpScreen(tester);
 
       await tester.tap(find.text('Eric Vance').first);
@@ -247,8 +261,8 @@ void main() {
 
   group('the source filter', () {
     testWidgets('narrows the whole screen, rail included', (tester) async {
-      seedMail('c1');
-      seedChat('chat-1');
+      await seedMail('c1');
+      await seedChat('chat-1');
       await pumpScreen(tester);
 
       expect(find.text('Eric Vance'), findsWidgets);
@@ -275,7 +289,7 @@ void main() {
 
     testWidgets('without Chat.Read the Teams pill is dead rather than gone',
         (tester) async {
-      seedMail('c1');
+      await seedMail('c1');
       await pumpScreen(tester, grantedScopes: _coreScopes);
       // The scope is a keychain read behind a FutureBuilder.
       await tester.pump();
@@ -292,11 +306,11 @@ void main() {
   group('the freshness caption', () {
     testWidgets('says nothing before the first pull, and how old after',
         (tester) async {
-      seedMail('c1');
+      await seedMail('c1');
       await pumpScreen(tester);
       expect(find.textContaining('Teams updated'), findsNothing);
 
-      store.setSyncedAt(
+      await store.setSyncedAt(
         TeamsSync.folder,
         DateTime.now().toUtc().subtract(const Duration(minutes: 4))
             .toIso8601String(),

@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
@@ -11,7 +12,8 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// An [LlmClient] that answers from a script and never opens a socket.
 class FakeLlm extends LlmClient {
@@ -85,22 +87,22 @@ Map<String, dynamic> answer({
     };
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
-  void seedMessage({
+  Future<void> seedMessage({
     String id = 'm1',
     String conversationKey = 'conv-1',
     String? summary,
-  }) {
-    store.upsertMessage({
+  }) async {
+    await store.upsertMessage({
       'source': 'email',
       'source_message_id': id,
       'conversation_key': conversationKey,
@@ -112,7 +114,7 @@ void main() {
       'body_text': 'Can we extend the lock through Friday?',
     });
     if (summary != null) {
-      store.writeTriage(
+      await store.writeTriage(
         'email',
         id,
         status: 'triaged',
@@ -127,8 +129,8 @@ void main() {
     }
   }
 
-  void seedConversation({String key = 'conv-1'}) {
-    store.upsertConversation({
+  Future<void> seedConversation({String key = 'conv-1'}) async {
+    await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
       'subject': 'Rate lock',
@@ -150,9 +152,9 @@ void main() {
       // message is still `pending`; triage then gates it. The handler must
       // honour the verdict, or every newsletter gets an embedding and the
       // sweep clusters them into junk storyline suggestions.
-      seedMessage();
-      seedConversation();
-      store.writeTriage('email', 'm1',
+      await seedMessage();
+      await seedConversation();
+      await store.writeTriage('email', 'm1',
           status: 'skipped', gateReason: 'newsletter');
       final llm = FakeLlm([answer()]);
       final embeddings = FakeEmbeddings();
@@ -160,13 +162,13 @@ void main() {
       await runOne(ExtractHandler(store, llm, embeddings.client));
 
       expect(llm.userMessages, isEmpty, reason: 'gated mail is not extracted');
-      expect(store.getExtraction('email', 'm1'), isNull);
+      expect(await store.getExtraction('email', 'm1'), isNull);
       expect(embeddings.inputs, isEmpty);
     });
 
     test('a teams row is skipped-by-birth, not gated — it still extracts',
         () async {
-      store.upsertMessage({
+      await store.upsertMessage({
         'source': 'teams',
         'source_message_id': 't1',
         'conversation_key': 'chat-1',
@@ -178,7 +180,7 @@ void main() {
         'triage_status': 'skipped',
         'gate_reason': 'teams_source',
       });
-      store.upsertConversation({
+      await store.upsertConversation({
         'source': 'teams',
         'conversation_key': 'chat-1',
         'subject': 'Acme renewal',
@@ -192,18 +194,18 @@ void main() {
       );
 
       expect(llm.userMessages, hasLength(1));
-      expect(store.getExtraction('teams', 't1'), isNotNull);
+      expect(await store.getExtraction('teams', 't1'), isNotNull);
     });
 
     test('stores the model answer as JSON', () async {
-      seedMessage();
+      await seedMessage();
       final llm = FakeLlm([answer()]);
       final embeddings = FakeEmbeddings();
 
       await runOne(ExtractHandler(store, llm, embeddings.client));
 
       final stored =
-          jsonDecode(store.getExtraction('email', 'm1')!) as Map<String, dynamic>;
+          jsonDecode((await store.getExtraction('email', 'm1'))!) as Map<String, dynamic>;
       expect(stored['evidence'], 'Sarah is asking to extend the rate lock.');
       expect(stored['topics'], ['rate lock']);
       expect(stored['intent'], 'request');
@@ -212,7 +214,7 @@ void main() {
 
     test('runs at temperature 0 — the same email twice is the same facts',
         () async {
-      seedMessage();
+      await seedMessage();
       final llm = FakeLlm([answer()]);
 
       await runOne(ExtractHandler(store, llm, FakeEmbeddings().client));
@@ -226,25 +228,25 @@ void main() {
       await runOne(ExtractHandler(store, llm, FakeEmbeddings().client));
 
       expect(llm.userMessages, isEmpty);
-      expect(store.getExtraction('email', 'm1'), isNull);
+      expect(await store.getExtraction('email', 'm1'), isNull);
     });
 
     test('a model failure surfaces, so the worker can retry it', () async {
-      seedMessage();
+      await seedMessage();
       final llm = FakeLlm([const LlmFormatException('not json')]);
 
       await expectLater(
         runOne(ExtractHandler(store, llm, FakeEmbeddings().client)),
         throwsA(isA<LlmFormatException>()),
       );
-      expect(store.getExtraction('email', 'm1'), isNull);
+      expect(await store.getExtraction('email', 'm1'), isNull);
     });
   });
 
   group('conversation card', () {
     test('embeds the card and records the hash and the model', () async {
-      seedConversation();
-      seedMessage(summary: 'Sarah needs the lock extended.');
+      await seedConversation();
+      await seedMessage(summary: 'Sarah needs the lock extended.');
       final embeddings = FakeEmbeddings();
 
       await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
@@ -255,7 +257,7 @@ void main() {
         'Rate lock | Sarah Chen, escrow@title.com | rate lock | '
         'Sarah needs the lock extended.',
       );
-      final row = store.getConversationAi('email', 'conv-1')!;
+      final row = (await store.getConversationAi('email', 'conv-1'))!;
       expect(row['embedding'], encodeEmbedding(const [0.6, 0.8]));
       expect(row['embed_model'], EmbeddingsClient.modelTag);
       expect(row['embedded_hash'], isNotNull);
@@ -266,8 +268,8 @@ void main() {
     });
 
     test('an unchanged card is not embedded twice', () async {
-      seedConversation();
-      seedMessage();
+      await seedConversation();
+      await seedMessage();
       final embeddings = FakeEmbeddings();
       final handler = ExtractHandler(
         store,
@@ -284,8 +286,8 @@ void main() {
     });
 
     test('a changed card is re-embedded', () async {
-      seedConversation();
-      seedMessage();
+      await seedConversation();
+      await seedMessage();
       final embeddings = FakeEmbeddings();
       final handler = ExtractHandler(
         store,
@@ -305,51 +307,54 @@ void main() {
 
     test('an embedding server that is down does not cost the extraction',
         () async {
-      seedConversation();
-      seedMessage();
+      await seedConversation();
+      await seedMessage();
       final embeddings = FakeEmbeddings(vector: null);
 
       // Not a throw: the worker would mark the item failed and re-run the
       // model call that already succeeded, to retry an optimisation.
       await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
 
-      expect(store.getExtraction('email', 'm1'), isNotNull);
-      final row = store.getConversationAi('email', 'conv-1');
+      expect(await store.getExtraction('email', 'm1'), isNotNull);
+      final row = await store.getConversationAi('email', 'conv-1');
       // No row, no hash: nothing was written, so the next pass tries again.
       expect(row?['embedding'], isNull);
       expect(row?['embedded_hash'], isNull);
     });
 
     test('a message with no conversation row embeds nothing', () async {
-      seedMessage(conversationKey: 'orphan');
+      await seedMessage(conversationKey: 'orphan');
       final embeddings = FakeEmbeddings();
 
       await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
 
-      expect(store.getExtraction('email', 'm1'), isNotNull);
+      expect(await store.getExtraction('email', 'm1'), isNotNull);
       expect(embeddings.inputs, isEmpty);
-      expect(store.getConversationAi('email', 'orphan'), isNull);
+      expect(await store.getConversationAi('email', 'orphan'), isNull);
     });
 
     test('an embedding write leaves a bucket a later phase wrote alone',
         () async {
-      seedConversation();
-      seedMessage();
+      await seedConversation();
+      await seedMessage();
       final handler = ExtractHandler(
         store,
         FakeLlm([answer(), answer(topics: const ['appraisal'])]),
         FakeEmbeddings().client,
       );
       await runOne(handler);
-      db.execute(
+      await db.customUpdate(
         "UPDATE conversation_ai SET bucket = 'now' "
         'WHERE source = ? AND conversation_key = ?',
-        ['email', 'conv-1'],
+        variables: [const Variable('email'), const Variable('conv-1')],
       );
 
       await runOne(handler);
 
-      expect(store.getConversationAi('email', 'conv-1')!['bucket'], 'now');
+      expect(
+        (await store.getConversationAi('email', 'conv-1'))!['bucket'],
+        'now',
+      );
     });
   });
 
@@ -357,11 +362,11 @@ void main() {
     /// The same thread as [seedConversation], but with `last_inbound_at`
     /// stamped — the handler only files a thread on its NEWEST inbound
     /// message, and that is the column it checks against.
-    void seedCurrentConversation({
+    Future<void> seedCurrentConversation({
       String state = 'waiting',
       String lastInboundAt = '2026-08-29T10:00:00Z',
-    }) {
-      store.upsertConversation({
+    }) async {
+      await store.upsertConversation({
         'conversation_key': 'conv-1',
         'subject': 'Rate lock',
         'state': state,
@@ -370,10 +375,11 @@ void main() {
       });
     }
 
-    String? bucketOf() =>
-        store.getConversationAi('email', 'conv-1')?['bucket'] as String?;
-    String? reasonOf() =>
-        store.getConversationAi('email', 'conv-1')?['bucket_reason'] as String?;
+    Future<String?> bucketOf() async =>
+        (await store.getConversationAi('email', 'conv-1'))?['bucket'] as String?;
+    Future<String?> reasonOf() async =>
+        (await store.getConversationAi('email', 'conv-1'))?['bucket_reason']
+            as String?;
 
     ExtractHandler handlerFor(Map<String, dynamic> result) =>
         ExtractHandler(store, FakeLlm([result]), FakeEmbeddings().client);
@@ -381,111 +387,111 @@ void main() {
     test('a low-value fyi is deferred as the fact lands', () async {
       // Without this the row would appear in the inbox, sit there while the
       // queue drained, and then jump to Later under the reader's eyes.
-      seedCurrentConversation();
-      seedMessage();
+      await seedCurrentConversation();
+      await seedMessage();
 
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
 
-      expect(bucketOf(), 'later');
-      expect(reasonOf(), 'low_value');
+      expect(await bucketOf(), 'later');
+      expect(await reasonOf(), 'low_value');
     });
 
     test('a request is not', () async {
-      seedCurrentConversation();
-      seedMessage();
+      await seedCurrentConversation();
+      await seedMessage();
 
       await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
 
-      expect(bucketOf(), isNull);
+      expect(await bucketOf(), isNull);
     });
 
     test('a thread awaiting the LO is never deferred', () async {
-      seedCurrentConversation(state: 'needs_reply');
-      seedMessage();
+      await seedCurrentConversation(state: 'needs_reply');
+      await seedMessage();
 
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
 
-      expect(bucketOf(), isNull);
+      expect(await bucketOf(), isNull);
     });
 
     test('a later sender rule defers whatever the model said', () async {
-      seedCurrentConversation();
-      seedMessage();
-      store.setSenderPref('sarah@x.com', 'later');
+      await seedCurrentConversation();
+      await seedMessage();
+      await store.setSenderPref('sarah@x.com', 'later');
 
       await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
 
-      expect(bucketOf(), 'later');
-      expect(reasonOf(), 'sender_pref');
+      expect(await bucketOf(), 'later');
+      expect(await reasonOf(), 'sender_pref');
     });
 
     test('a keep sender rule beats a low-value verdict', () async {
-      seedCurrentConversation();
-      seedMessage();
-      store.setSenderPref('sarah@x.com', 'keep');
+      await seedCurrentConversation();
+      await seedMessage();
+      await store.setSenderPref('sarah@x.com', 'keep');
 
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
 
-      expect(bucketOf(), isNull);
+      expect(await bucketOf(), isNull);
     });
 
     test('it never overrules a bucket a person asked for', () async {
-      seedCurrentConversation();
-      seedMessage();
-      store.setConversationBucket('email', 'conv-1',
+      await seedCurrentConversation();
+      await seedMessage();
+      await store.setConversationBucket('email', 'conv-1',
           bucket: 'later', reason: 'user');
 
       await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
 
-      expect(bucketOf(), 'later');
-      expect(reasonOf(), 'user');
+      expect(await bucketOf(), 'later');
+      expect(await reasonOf(), 'user');
     });
 
     test('nor an exemption a person asked for', () async {
-      seedCurrentConversation();
-      seedMessage();
-      store.setConversationBucket('email', 'conv-1',
+      await seedCurrentConversation();
+      await seedMessage();
+      await store.setConversationBucket('email', 'conv-1',
           bucket: null, reason: 'user');
 
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
 
-      expect(bucketOf(), isNull);
-      expect(reasonOf(), 'user');
+      expect(await bucketOf(), isNull);
+      expect(await reasonOf(), 'user');
     });
 
     test('it withdraws its own earlier guess when the verdict changes',
         () async {
-      seedCurrentConversation();
-      seedMessage();
+      await seedCurrentConversation();
+      await seedMessage();
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
-      expect(bucketOf(), 'later');
+      expect(await bucketOf(), 'later');
 
       await runOne(handlerFor(answer(intent: 'request', importance: 'high')));
 
-      expect(bucketOf(), isNull);
-      expect(reasonOf(), isNull);
+      expect(await bucketOf(), isNull);
+      expect(await reasonOf(), isNull);
     });
 
     test('an older message does not get to file the thread', () async {
       // The queue drains newest-first, but a backlog can still hand this
       // handler a month-old message. Letting it decide would file the thread
       // on what its conversation stopped being about.
-      seedCurrentConversation(lastInboundAt: '2026-09-01T10:00:00Z');
-      seedMessage();
+      await seedCurrentConversation(lastInboundAt: '2026-09-01T10:00:00Z');
+      await seedMessage();
 
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
 
-      expect(bucketOf(), isNull);
+      expect(await bucketOf(), isNull);
       // The extraction itself still landed — only the filing was declined.
-      expect(store.getExtraction('email', 'm1'), isNotNull);
+      expect(await store.getExtraction('email', 'm1'), isNotNull);
     });
 
     test('a message with no conversation row files nothing', () async {
-      seedMessage(conversationKey: 'orphan');
+      await seedMessage(conversationKey: 'orphan');
 
       await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
 
-      expect(store.getConversationAi('email', 'orphan'), isNull);
+      expect(await store.getConversationAi('email', 'orphan'), isNull);
     });
   });
 
@@ -533,9 +539,9 @@ void main() {
 
   group('through the worker', () {
     test('a queued message is extracted, embedded and marked done', () async {
-      seedConversation();
-      seedMessage();
-      store.enqueueWork('extract', 'email', 'm1');
+      await seedConversation();
+      await seedMessage();
+      await store.enqueueWork('extract', 'email', 'm1');
       final embeddings = FakeEmbeddings();
       final worker = AiWorker(
         store,
@@ -544,14 +550,14 @@ void main() {
 
       await worker.pump();
 
-      expect(store.workCounts('extract'), {'done': 1});
-      expect(store.getExtraction('email', 'm1'), isNotNull);
+      expect(await store.workCounts('extract'), {'done': 1});
+      expect(await store.getExtraction('email', 'm1'), isNotNull);
       expect(embeddings.inputs.length, 1);
     });
 
     test('a model server that is down leaves the item queued', () async {
-      seedMessage();
-      store.enqueueWork('extract', 'email', 'm1');
+      await seedMessage();
+      await store.enqueueWork('extract', 'email', 'm1');
       final worker = AiWorker(
         store,
         handlers: [
@@ -565,8 +571,8 @@ void main() {
 
       await worker.pump();
 
-      expect(store.workCounts('extract'), {'pending': 1});
-      expect(store.getExtraction('email', 'm1'), isNull);
+      expect(await store.workCounts('extract'), {'pending': 1});
+      expect(await store.getExtraction('email', 'm1'), isNull);
     });
   });
 }

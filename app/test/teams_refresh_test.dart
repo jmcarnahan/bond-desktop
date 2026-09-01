@@ -1,4 +1,6 @@
-import 'package:bond_inbox/data/db.dart';
+// `show`: drift generates row classes named Message/Conversation from the
+// tables, and this file means the app's own models.
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
@@ -11,7 +13,8 @@ import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// The read model's half of the Teams rule.
 ///
@@ -78,7 +81,7 @@ class _RecordingTeams extends TeamsSync {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late _FakeSync sync;
   late _RecordingTeams teams;
@@ -87,8 +90,8 @@ void main() {
   /// file should move it off zero.
   var httpCalls = 0;
 
-  void seed(String key, {String source = 'email', String? at}) {
-    store.upsertConversation({
+  Future<void> seed(String key, {String source = 'email', String? at}) {
+    return store.upsertConversation({
       'source': source,
       'conversation_key': key,
       'subject': key,
@@ -98,8 +101,7 @@ void main() {
   }
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
     sync = _FakeSync();
     httpCalls = 0;
@@ -121,7 +123,7 @@ void main() {
 
   group('the poll path never reaches Teams', () {
     test('a full load, sync and all, leaves Teams untouched', () async {
-      seed('c1');
+      await seed('c1');
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
 
       await notifier.load();
@@ -133,7 +135,7 @@ void main() {
 
     test('sixty loads in a row — a full hour of the timer — still zero',
         () async {
-      seed('c1');
+      await seed('c1');
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
 
       for (var i = 0; i < 60; i++) {
@@ -145,7 +147,7 @@ void main() {
     });
 
     test('a local reload does not either', () async {
-      seed('c1');
+      await seed('c1');
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
 
       await notifier.load(syncFirst: false);
@@ -154,7 +156,7 @@ void main() {
     });
 
     test('nor does a correction, which reloads on its way out', () async {
-      seed('c1');
+      await seed('c1');
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
       await notifier.load();
 
@@ -169,7 +171,7 @@ void main() {
     test('pulls, then re-reads the list', () async {
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
       await notifier.load();
-      seed('chat-1', source: 'teams');
+      await seed('chat-1', source: 'teams');
 
       await notifier.refreshTeams();
 
@@ -181,7 +183,7 @@ void main() {
     });
 
     test('a failure keeps the rows and says which half went wrong', () async {
-      seed('c1');
+      await seed('c1');
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
       await notifier.load();
       teams.error = StateError('graph is down');
@@ -199,7 +201,7 @@ void main() {
 
     test('a dead session is reported the same way, not as a sign-out',
         () async {
-      seed('c1');
+      await seed('c1');
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
       await notifier.load();
       teams.error = const NotSignedIn();
@@ -214,7 +216,7 @@ void main() {
     });
 
     test('a build with no Teams connector does nothing at all', () async {
-      seed('c1');
+      await seed('c1');
       final notifier = ConversationsNotifier(store, sync);
 
       await notifier.refreshTeams();
@@ -226,8 +228,8 @@ void main() {
 
   group('two sources, one list', () {
     test('chats and mail come back together', () async {
-      seed('c1', at: '2026-08-28T09:00:00Z');
-      seed('chat-1', source: 'teams', at: '2026-08-28T11:00:00Z');
+      await seed('c1', at: '2026-08-28T09:00:00Z');
+      await seed('chat-1', source: 'teams', at: '2026-08-28T11:00:00Z');
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
 
       await notifier.load();
@@ -239,14 +241,14 @@ void main() {
 
     test('marking a chat done writes against the chat, not against mail',
         () async {
-      seed('chat-1', source: 'teams');
+      await seed('chat-1', source: 'teams');
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
       await notifier.load();
 
       await notifier.markDone('chat-1');
 
       expect(
-        store.getConversationRow('teams', 'chat-1')!['state'],
+        (await store.getConversationRow('teams', 'chat-1'))!['state'],
         'done',
       );
       expect(
@@ -255,8 +257,8 @@ void main() {
       );
     });
 
-    test('a thread transcript reads both sources', () {
-      store.upsertMessage({
+    test('a thread transcript reads both sources', () async {
+      await store.upsertMessage({
         'source': 'teams',
         'source_message_id': 'm1',
         'conversation_key': 'chat-1',
@@ -266,7 +268,7 @@ void main() {
       });
 
       expect(
-        store.loadThread('chat-1', sources: inboxSources).single.source,
+        (await store.loadThread('chat-1', sources: inboxSources)).single.source,
         'teams',
       );
     });

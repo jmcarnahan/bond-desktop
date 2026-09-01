@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
@@ -9,7 +9,8 @@ import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// What a newly arrived message does to a draft written before it.
 ///
@@ -111,7 +112,7 @@ class GraphStub {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late GraphStub graph;
   late SyncService sync;
@@ -120,7 +121,7 @@ void main() {
       DateTime.now().toUtc().subtract(ago).toIso8601String();
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     graph = GraphStub();
 
@@ -132,10 +133,10 @@ void main() {
     sync = SyncService(GraphMail(auth, httpClient: graph.client), store);
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
-  void seedDraft({String key = 'conv-1'}) {
-    store.upsertDraft(
+  Future<void> seedDraft({String key = 'conv-1'}) async {
+    await store.upsertDraft(
       source: 'email',
       conversationKey: key,
       replyToMessageId: 'old-message',
@@ -153,27 +154,27 @@ void main() {
   }
 
   test('a new inbound message deletes that conversation\'s draft', () async {
-    seedDraft();
+    await seedDraft();
     queueInbound([
       graphMessage(id: 'new-1', receivedDateTime: fresh(const Duration(hours: 1))),
     ]);
 
     await sync.syncNow();
 
-    expect(store.getDraft('email', 'conv-1'), isNull);
+    expect(await store.getDraft('email', 'conv-1'), isNull);
   });
 
   test('and leaves every other conversation\'s draft alone', () async {
-    seedDraft(key: 'conv-1');
-    seedDraft(key: 'conv-2');
+    await seedDraft(key: 'conv-1');
+    await seedDraft(key: 'conv-2');
     queueInbound([
       graphMessage(id: 'new-1', receivedDateTime: fresh(const Duration(hours: 1))),
     ]);
 
     await sync.syncNow();
 
-    expect(store.getDraft('email', 'conv-1'), isNull);
-    expect(store.getDraft('email', 'conv-2'), isNotNull);
+    expect(await store.getDraft('email', 'conv-1'), isNull);
+    expect(await store.getDraft('email', 'conv-2'), isNotNull);
   });
 
   test('a REPLAYED message leaves the draft standing', () async {
@@ -185,7 +186,7 @@ void main() {
       graphMessage(id: 'm1', receivedDateTime: fresh(const Duration(hours: 2))),
     ]);
     await sync.syncNow();
-    seedDraft();
+    await seedDraft();
 
     graph.queue('inbox', [
       () => jsonOk({
@@ -200,13 +201,13 @@ void main() {
     ]);
     await sync.syncNow();
 
-    expect(store.getDraft('email', 'conv-1'), isNotNull);
+    expect(await store.getDraft('email', 'conv-1'), isNotNull);
   });
 
   test('the LO\'s own sent mail does not invalidate the draft', () async {
     // A sent message means the thread moved on, but it does not make a draft
     // answer the wrong message — and the send path writes the status itself.
-    seedDraft();
+    await seedDraft();
     graph.queue('sentitems', [
       () => jsonOk({
             'value': [
@@ -222,14 +223,14 @@ void main() {
 
     await sync.syncNow();
 
-    expect(store.getDraft('email', 'conv-1'), isNotNull);
+    expect(await store.getDraft('email', 'conv-1'), isNotNull);
   });
 
   test('a sync that brings nothing new keeps the draft', () async {
-    seedDraft();
+    await seedDraft();
 
     await sync.syncNow();
 
-    expect(store.getDraft('email', 'conv-1'), isNotNull);
+    expect(await store.getDraft('email', 'conv-1'), isNotNull);
   });
 }

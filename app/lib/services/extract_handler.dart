@@ -58,7 +58,7 @@ class ExtractHandler extends WorkHandler {
     final source = item['source'] as String? ?? _source;
     final id = item['entity_id'] as String? ?? '';
 
-    final row = _store.getMessageRow(source, id);
+    final row = await _store.getMessageRow(source, id);
     // Queued, then deleted before the worker reached it. Nothing to extract
     // and nothing wrong — the item is done, not failed. The worker would
     // otherwise write `ok` on a row where no model ran, so it is told
@@ -96,7 +96,7 @@ class ExtractHandler extends WorkHandler {
       // reason a human could see.
       temperature: 0,
     );
-    _store.writeExtraction(source, id, jsonEncode(result.toJson()));
+    await _store.writeExtraction(source, id, jsonEncode(result.toJson()));
     // Enough of the answer to make the activity row readable without opening
     // the extraction itself. Five topics, because the row is one line.
     _log.note({
@@ -106,7 +106,7 @@ class ExtractHandler extends WorkHandler {
       if (result.project.isNotEmpty) 'project': result.project,
     });
 
-    _fileBucket(source, row, result);
+    await _fileBucket(source, row, result);
     await _refreshCard(source, row, result);
   }
 
@@ -122,14 +122,14 @@ class ExtractHandler extends WorkHandler {
   /// It shares [bucketFor] with the sweep rather than reimplementing the rule —
   /// two copies would drift, and the symptom would be a thread that changes
   /// bucket depending on which pass ran last.
-  void _fileBucket(
+  Future<void> _fileBucket(
     String source,
     Map<String, Object?> row,
     ExtractionResult result,
-  ) {
+  ) async {
     final key = row['conversation_key'] as String?;
     if (key == null || key.isEmpty) return;
-    final conversation = _store.getConversationRow(source, key);
+    final conversation = await _store.getConversationRow(source, key);
     if (conversation == null) return;
 
     // Only the thread's newest inbound message gets to file it. The queue
@@ -145,12 +145,12 @@ class ExtractHandler extends WorkHandler {
     // A bucket a person asked for is never re-decided here. `sender_pref` and
     // `user` are both written by an explicit correction, and the automatic pass
     // does not get to overrule someone by arriving later.
-    final stored = _store.getConversationAi(source, key);
+    final stored = await _store.getConversationAi(source, key);
     final reason = stored?['bucket_reason'] as String?;
     if (reason == 'user' || reason == 'sender_pref') return;
 
     final senderPref =
-        _store.getSenderPref(row['from_address'] as String? ?? '');
+        await _store.getSenderPref(row['from_address'] as String? ?? '');
     final bucket = bucketFor(
       senderPref: senderPref,
       intent: result.intent,
@@ -159,7 +159,7 @@ class ExtractHandler extends WorkHandler {
     );
 
     if (bucket != null) {
-      _store.setConversationBucket(
+      await _store.setConversationBucket(
         source,
         key,
         bucket: bucket,
@@ -168,7 +168,7 @@ class ExtractHandler extends WorkHandler {
     } else if (reason == 'low_value') {
       // The thread earned its way back: a message that is no longer low-value
       // clears the guess this pass made last time, and nothing else.
-      _store.setConversationBucket(source, key, bucket: null);
+      await _store.setConversationBucket(source, key, bucket: null);
     }
   }
 
@@ -186,7 +186,7 @@ class ExtractHandler extends WorkHandler {
   ) async {
     final key = row['conversation_key'] as String?;
     if (key == null || key.isEmpty) return;
-    final conversation = _store.getConversationRow(source, key);
+    final conversation = await _store.getConversationRow(source, key);
     if (conversation == null) return;
 
     final card = buildConversationCard(
@@ -201,7 +201,7 @@ class ExtractHandler extends WorkHandler {
 
     // The whole reason a hash is stored: re-extracting the same thread's tenth
     // message must not spend an embedding call to arrive at the same vector.
-    final stored = _store.getConversationAi(source, key);
+    final stored = await _store.getConversationAi(source, key);
     if (stored != null && stored['embedded_hash'] == hash) return;
 
     final vector = await _embeddings.embed(card);
@@ -211,7 +211,7 @@ class ExtractHandler extends WorkHandler {
     // already has to handle.
     if (vector == null) return;
 
-    _store.upsertConversationAi(
+    await _store.upsertConversationAi(
       source,
       key,
       embedding: encodeEmbedding(vector),
@@ -224,7 +224,7 @@ class ExtractHandler extends WorkHandler {
     // embedding, so every time that changes the answer may change with it.
     // `enqueueWork` would ignore the row after the first time it ran, which
     // would mean each thread is only ever considered on its first message.
-    _store.requeueWork('storyline', source, key);
+    await _store.requeueWork('storyline', source, key);
   }
 
   /// Display names, falling back to the address — what a human would call the

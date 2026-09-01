@@ -213,7 +213,7 @@ class ActivityLog {
   /// an open panel rebuilds and those relative times keep moving. Roughly once
   /// a minute, which is what makes the tile trustworthy: a stalled clock on a
   /// live panel would read as a stalled sync.
-  void record(
+  Future<void> record(
     String kind, {
     String status = 'ok',
     String? source,
@@ -221,15 +221,17 @@ class ActivityLog {
     int? count,
     int? durationMs,
     Map<String, Object?> detail = const {},
-  }) {
+  }) async {
     final store = _store;
     if (store == null) return;
     try {
+      // Before the first await, so the tally this event carries is drained in
+      // the zone that accumulated it and cannot pick up a sibling's notes.
       final merged = <String, Object?>{..._drainPending(), ...detail};
 
       final prefKey = _lastRunPrefKeys[kind];
       if (prefKey != null && status == 'ok') {
-        store.setPref(prefKey, DateTime.now().toUtc().toIso8601String());
+        await store.setPref(prefKey, DateTime.now().toUtc().toIso8601String());
       }
 
       if (_isQuiet(kind, status, count, merged)) {
@@ -250,7 +252,7 @@ class ActivityLog {
       }
 
       final json = merged.isEmpty ? null : jsonEncode(merged);
-      store.recordActivity(
+      await store.recordActivity(
         kind: kind,
         status: status,
         source: source,
@@ -261,8 +263,10 @@ class ActivityLog {
       );
       final events = _events;
       if (events != null && !events.isClosed) {
-        final rows = store.recentActivity(limit: 1);
-        if (rows.isNotEmpty) events.add(ActivityEvent.fromRow(rows.first));
+        final rows = await store.recentActivity(limit: 1);
+        if (rows.isNotEmpty && !events.isClosed) {
+          events.add(ActivityEvent.fromRow(rows.first));
+        }
       }
     } catch (e) {
       debugPrint('ActivityLog: dropped a $kind event: $e');

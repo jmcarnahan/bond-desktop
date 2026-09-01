@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
@@ -11,7 +11,8 @@ import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// End-to-end chat syncs: a scripted Graph on one side, a real sqlite database
 /// on the other, and the real [GraphAuth], [GraphTeams] and [TeamsSync] in
@@ -180,16 +181,16 @@ class _BreaksOn extends MessageStore {
   _BreaksOn(super.db, this.messageId);
 
   @override
-  void upsertMessage(Map<String, Object?> row) {
+  Future<void> upsertMessage(Map<String, Object?> row) {
     if (row['source_message_id'] == messageId) {
       throw StateError('disk is full');
     }
-    super.upsertMessage(row);
+    return super.upsertMessage(row);
   }
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late _GraphStub graph;
 
@@ -213,21 +214,15 @@ void main() {
   }
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
     graph = _GraphStub();
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
-  Map<String, Object?> row(String id) => Map<String, Object?>.from(
-        db.select(
-          "SELECT * FROM messages WHERE source = 'teams' "
-          'AND source_message_id = ?',
-          [id],
-        ).single,
-      );
+  Future<Map<String, Object?>> row(String id) async =>
+      (await store.getMessageRow('teams', id))!;
 
   group('message mapping', () {
     setUp(() {
@@ -243,7 +238,7 @@ void main() {
       graph.messages['chat-1'] = [_message(id: 'm1')];
       await build().syncNow();
 
-      final m = row('m1');
+      final m = await row('m1');
       expect(m['direction'], 'inbound');
       expect(m['from_name'], 'Sarah Whitfield');
       expect(m['from_address'], 'teams:u1');
@@ -260,8 +255,8 @@ void main() {
       ];
       await build().syncNow();
 
-      expect(row('m1')['direction'], 'outbound');
-      expect(row('m1')['from_address'], 'teams:$_myId');
+      expect((await row('m1'))['direction'], 'outbound');
+      expect((await row('m1'))['from_address'], 'teams:$_myId');
     });
 
     test('a message from an application is gated as auto-generated', () async {
@@ -276,10 +271,10 @@ void main() {
       ];
       await build().syncNow();
 
-      expect(row('bot')['gate_reason'], teamsBotGate);
-      expect(row('bot')['direction'], 'inbound');
-      expect(row('bot')['from_address'], 'teams:app-9');
-      expect(row('human')['gate_reason'], teamsSourceGate);
+      expect((await row('bot'))['gate_reason'], teamsBotGate);
+      expect((await row('bot'))['direction'], 'inbound');
+      expect((await row('bot'))['from_address'], 'teams:app-9');
+      expect((await row('human'))['gate_reason'], teamsSourceGate);
     });
 
     test('system events never become rows', () async {
@@ -290,9 +285,8 @@ void main() {
       await build().syncNow();
 
       expect(
-        db
-            .select('SELECT source_message_id FROM messages')
-            .map((r) => r['source_message_id'])
+        (await db.customSelect('SELECT source_message_id FROM messages').get())
+            .map((r) => r.data['source_message_id'])
             .toList(),
         ['said'],
       );
@@ -309,7 +303,7 @@ void main() {
       ];
       await build().syncNow();
 
-      final m = row('m1');
+      final m = await row('m1');
       expect(m['body_text'], 'Hi Bond LO\n$long');
       expect((m['body_preview'] as String).length, 160);
       expect(m['body_preview'], startsWith('Hi Bond LO\n'));
@@ -319,8 +313,8 @@ void main() {
       graph.messages['chat-1'] = [_message(id: 'm1', userId: null)];
       await build().syncNow();
 
-      expect(row('m1')['from_address'], isNull);
-      expect(row('m1')['direction'], 'inbound');
+      expect((await row('m1'))['from_address'], isNull);
+      expect((await row('m1'))['direction'], 'inbound');
     });
   });
 
@@ -338,7 +332,7 @@ void main() {
       await build().syncNow();
 
       final conversation =
-          store.loadConversations(sources: const ['teams']).single;
+          (await store.loadConversations(sources: const ['teams'])).single;
       expect(conversation.subject, 'Sarah Whitfield, Eric Vance');
       expect(
         conversation.participants.map((p) => p.email).toList(),
@@ -357,7 +351,7 @@ void main() {
       await build().syncNow();
 
       expect(
-        store.loadConversations(sources: const ['teams']).single.subject,
+        (await store.loadConversations(sources: const ['teams'])).single.subject,
         'Person 1, Person 2, Person 3…',
       );
     });
@@ -374,7 +368,7 @@ void main() {
       await build().syncNow();
 
       expect(
-        store.loadConversations(sources: const ['teams']).single.subject,
+        (await store.loadConversations(sources: const ['teams'])).single.subject,
         'Willow St closing',
       );
     });
@@ -388,7 +382,7 @@ void main() {
       await build().syncNow();
 
       expect(
-        store.loadConversations(sources: const ['teams']).single.state,
+        (await store.loadConversations(sources: const ['teams'])).single.state,
         ConversationState.needsReply,
       );
 
@@ -406,7 +400,7 @@ void main() {
       await build().syncNow();
 
       final conversation =
-          store.loadConversations(sources: const ['teams']).single;
+          (await store.loadConversations(sources: const ['teams'])).single;
       expect(conversation.state, ConversationState.waiting);
       expect(conversation.messageCount, 2);
       expect(conversation.inboundCount, 1);
@@ -431,7 +425,7 @@ void main() {
       await build().syncNow();
 
       expect(
-        store.loadConversations(sources: const ['teams']).single.state,
+        (await store.loadConversations(sources: const ['teams'])).single.state,
         ConversationState.done,
         reason: 'folding a replay would reopen a thread the user closed',
       );
@@ -445,7 +439,7 @@ void main() {
       ];
       await build().syncNow();
 
-      expect(store.loadConversations(sources: const ['teams']), isEmpty);
+      expect(await store.loadConversations(sources: const ['teams']), isEmpty);
     });
   });
 
@@ -516,8 +510,7 @@ void main() {
 
       expect(graph.memberRequests, isEmpty);
       expect(
-        store
-            .loadConversations(sources: const ['teams'])
+        (await store.loadConversations(sources: const ['teams']))
             .single
             .participants
             .single
@@ -536,7 +529,7 @@ void main() {
       expect(graph.calls, 0,
           reason: 'not even the token POST — the check is before the first '
               'call, so a tenant that said no sees nothing at all');
-      expect(store.loadConversations(sources: const ['teams']), isEmpty);
+      expect(await store.loadConversations(sources: const ['teams']), isEmpty);
     });
   });
 
@@ -557,17 +550,15 @@ void main() {
       await expectLater(sync.syncNow(), throwsA(isA<StateError>()));
 
       expect(
-        db
-            .select('SELECT source_message_id FROM messages ORDER BY 1')
-            .map((r) => r['source_message_id'])
+        (await db.customSelect('SELECT source_message_id FROM messages ORDER BY 1').get())
+            .map((r) => r.data['source_message_id'])
             .toList(),
         ['a1'],
         reason: 'b1 was written before the throw and must roll back with it',
       );
       expect(
-        db
-            .select('SELECT conversation_key FROM conversations ORDER BY 1')
-            .map((r) => r['conversation_key'])
+        (await db.customSelect('SELECT conversation_key FROM conversations ORDER BY 1').get())
+            .map((r) => r.data['conversation_key'])
             .toList(),
         ['chat-1'],
       );
@@ -587,9 +578,9 @@ void main() {
         throwsA(isA<GraphTeamsException>()),
       );
 
-      expect(store.loadConversations(sources: const ['teams']).single.id,
+      expect((await store.loadConversations(sources: const ['teams'])).single.id,
           'chat-1');
-      expect(store.getSyncedAt('chats', source: 'teams'), isNull,
+      expect(await store.getSyncedAt('chats', source: 'teams'), isNull,
           reason: 'a sync that did not finish must not claim it did');
     });
   });
@@ -603,11 +594,11 @@ void main() {
       graph.messages['chat-1'] = [_message(id: 'm1')];
       final sync = build();
 
-      expect(sync.lastSyncedAt, isNull);
+      expect(await sync.lastSyncedAt, isNull);
       await sync.syncNow();
-      expect(sync.lastSyncedAt, isNotNull);
+      expect(await sync.lastSyncedAt, isNotNull);
       expect(
-        DateTime.parse(sync.lastSyncedAt!)
+        DateTime.parse((await sync.lastSyncedAt)!)
             .difference(DateTime.now().toUtc())
             .abs(),
         lessThan(const Duration(minutes: 1)),
@@ -629,10 +620,9 @@ void main() {
       await build().syncNow();
 
       expect(
-        db
-            .select("SELECT entity_id FROM work_items WHERE task_kind = 'extract' "
-                "AND source = 'teams' ORDER BY 1")
-            .map((r) => r['entity_id'])
+        (await db.customSelect("SELECT entity_id FROM work_items WHERE task_kind = 'extract' "
+                "AND source = 'teams' ORDER BY 1").get())
+            .map((r) => r.data['entity_id'])
             .toList(),
         ['human'],
         reason: 'the bot is gated and the user’s own message is outbound',
@@ -645,10 +635,12 @@ void main() {
       await build().syncNow();
 
       expect(
-        db.select(
-          "SELECT 1 FROM work_items WHERE task_kind = 'storyline_sweep' "
-          "AND source = 'teams'",
-        ),
+        await db
+            .customSelect(
+              "SELECT 1 FROM work_items WHERE task_kind = 'storyline_sweep' "
+              "AND source = 'teams'",
+            )
+            .get(),
         isEmpty,
       );
     });
@@ -661,13 +653,13 @@ void main() {
       graph.messages['chat-1'] = [_message(id: 'm1')];
       await build().syncNow();
       // An email row of the same kind, as the control.
-      store.upsertMessage({
+      await store.upsertMessage({
         'source_message_id': 'e1',
         'conversation_key': 'c1',
         'direction': 'inbound',
         'received_at': _iso(const Duration(days: 1)),
       });
-      store.enqueueExtractBacklog(sinceIso: _iso(const Duration(days: 7)));
+      await store.enqueueExtractBacklog(sinceIso: _iso(const Duration(days: 7)));
 
       final drained = <String>[];
       await AiWorker(store, handlers: [_Recording('extract', drained)]).pump();
@@ -679,7 +671,7 @@ void main() {
   });
 
   group('enqueueExtractBacklog filters', () {
-    test('the email defaults are unchanged by the new parameters', () {
+    test('the email defaults are unchanged by the new parameters', () async {
       final fresh = _iso(const Duration(days: 1));
       final stale = _iso(const Duration(days: 30));
       for (final (id, status, at) in [
@@ -688,7 +680,7 @@ void main() {
         ('c', 'skipped', fresh),
         ('d', 'pending', stale),
       ]) {
-        store.upsertMessage({
+        await store.upsertMessage({
           'source_message_id': id,
           'conversation_key': 'c1',
           'direction': 'inbound',
@@ -697,32 +689,35 @@ void main() {
         });
       }
 
-      final added = store.enqueueExtractBacklog(
+      final added = await store.enqueueExtractBacklog(
         sinceIso: _iso(const Duration(days: 7)),
       );
 
       expect(added, 2);
       expect(
-        db
-            .select("SELECT entity_id FROM work_items WHERE task_kind = 'extract' "
-                'ORDER BY 1')
-            .map((r) => r['entity_id'])
+        (await db
+                .customSelect(
+                  "SELECT entity_id FROM work_items WHERE task_kind = 'extract' "
+                  'ORDER BY 1',
+                )
+                .get())
+            .map((r) => r.data['entity_id'])
             .toList(),
         ['a', 'b'],
       );
     });
 
     test('an empty status or reason list queues nothing rather than failing',
-        () {
+        () async {
       expect(
-        store.enqueueExtractBacklog(
+        await store.enqueueExtractBacklog(
           sinceIso: _iso(const Duration(days: 7)),
           triageStatuses: const [],
         ),
         0,
       );
       expect(
-        store.enqueueExtractBacklog(
+        await store.enqueueExtractBacklog(
           sinceIso: _iso(const Duration(days: 7)),
           gateReasons: const [],
         ),
@@ -732,14 +727,14 @@ void main() {
   });
 
   group('stripChatHtml', () {
-    test('a mention keeps the name and loses the tag', () {
+    test('a mention keeps the name and loses the tag', () async {
       expect(
         stripChatHtml('<div>Hey <at id="0">Bond LO</at>, any word?</div>'),
         'Hey Bond LO, any word?',
       );
     });
 
-    test('each block tag is one line break', () {
+    test('each block tag is one line break', () async {
       expect(
         stripChatHtml('<div>one</div><div>two</div><div>three</div>'),
         'one\ntwo\nthree',
@@ -748,7 +743,7 @@ void main() {
     });
 
     test('a run of block boundaries is one break, however many tags wrote it',
-        () {
+        () async {
       // The seam between two lines of a Teams message IS two tags.
       expect(stripChatHtml('<div>one</div>\n<div>two</div>'), 'one\ntwo');
       // Empty paragraphs collapse with it. Deliberate, and the one thing this
@@ -760,14 +755,14 @@ void main() {
       expect(stripChatHtml('<div>a</div><div><br></div><div>b</div>'), 'a\nb');
     });
 
-    test('formatting is dropped, its text is not', () {
+    test('formatting is dropped, its text is not', () async {
       expect(
         stripChatHtml('<p>The <strong>CD</strong> is <em>ready</em>.</p>'),
         'The CD is ready.',
       );
     });
 
-    test('script and style content never becomes text', () {
+    test('script and style content never becomes text', () async {
       expect(
         stripChatHtml('<style>p { color: red }</style><p>hello</p>'),
         'hello',
@@ -778,7 +773,7 @@ void main() {
       );
     });
 
-    test('entities decode, and a literal one a person typed survives', () {
+    test('entities decode, and a literal one a person typed survives', () async {
       expect(stripChatHtml('<p>Tom &amp; Jerry &lt;3</p>'), 'Tom & Jerry <3');
       expect(stripChatHtml('<p>&nbsp;spaced&nbsp;</p>'), 'spaced');
       expect(
@@ -789,7 +784,7 @@ void main() {
       );
     });
 
-    test('empty in, empty out', () {
+    test('empty in, empty out', () async {
       expect(stripChatHtml(null), '');
       expect(stripChatHtml(''), '');
       expect(stripChatHtml('<div></div>'), '');

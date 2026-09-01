@@ -1,4 +1,4 @@
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
@@ -6,11 +6,13 @@ import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/composer.dart' show SendCapability;
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// The send path, end to end below the widget.
 ///
@@ -90,7 +92,7 @@ const String _coreGrant =
     'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read';
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late InMemoryTokenStore tokens;
   late RecordingMail mail;
@@ -100,7 +102,7 @@ void main() {
   final never = MockClient((_) async => http.Response('never dialled', 500));
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     tokens = InMemoryTokenStore();
     tokens.values['refresh_token'] = 'rt';
@@ -131,8 +133,11 @@ void main() {
     return notifier;
   }
 
-  void seedDraft({String key = 'conv-1', String body = 'Friday works.'}) {
-    store.upsertDraft(
+  Future<void> seedDraft({
+    String key = 'conv-1',
+    String body = 'Friday works.',
+  }) async {
+    await store.upsertDraft(
       source: 'email',
       conversationKey: key,
       replyToMessageId: 'inbound-1',
@@ -176,7 +181,7 @@ void main() {
 
   group('send', () {
     test('creates, fills and sends — in that order', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
@@ -194,7 +199,7 @@ void main() {
     test('sends what it was handed, not what was stored', () async {
       // The whole reason the body is an argument: a send can only ever carry
       // the text that was on screen in front of whoever pressed the button.
-      seedDraft(body: 'the suggestion nobody approved');
+      await seedDraft(body: 'the suggestion nobody approved');
       final notifier = notifierFor();
       await notifier.load();
 
@@ -204,27 +209,27 @@ void main() {
     });
 
     test('marks the draft sent and records the implicit signal', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
       await notifier.send('Friday works.');
 
-      final draft = store.getDraft('email', 'conv-1')!;
+      final draft = (await store.getDraft('email', 'conv-1'))!;
       expect(draft['status'], 'sent');
       expect(draft['graph_draft_id'], 'graph-draft-1');
-      final feedback = db.select(
+      final feedback = await db.customSelect(
         'SELECT * FROM feedback_events WHERE scope_key = ?',
-        ['conv-1'],
-      );
-      expect(feedback.single['origin'], 'implicit');
-      expect(feedback.single['direction'], 'up');
+        variables: [Variable('conv-1')],
+      ).get();
+      expect(feedback.single.data['origin'], 'implicit');
+      expect(feedback.single.data['direction'], 'up');
     });
 
     test('refreshes the inbox afterwards rather than faking a row', () async {
       // No optimistic message is written: the sent mail lands in sentitems and
       // folds in normally, so nothing can be left behind if the sync disagrees.
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
@@ -232,14 +237,16 @@ void main() {
 
       expect(syncsAfterSend, 1);
       expect(
-        db.select("SELECT * FROM messages WHERE direction = 'outbound'"),
+        await db
+            .customSelect("SELECT * FROM messages WHERE direction = 'outbound'")
+            .get(),
         isEmpty,
       );
     });
 
     test('a Graph failure leaves the draft unsent, with a readable reason',
         () async {
-      seedDraft();
+      await seedDraft();
       mail.failure = const GraphMailException('Mailbox is over quota.');
       final notifier = notifierFor();
       await notifier.load();
@@ -249,12 +256,12 @@ void main() {
       expect(outcome, SendOutcome.failed);
       expect(notifier.state.error, 'Mailbox is over quota.');
       expect(notifier.state.sending, isFalse);
-      expect(store.getDraft('email', 'conv-1')!['status'], 'suggested');
+      expect((await store.getDraft('email', 'conv-1'))!['status'], 'suggested');
       expect(syncsAfterSend, 0);
     });
 
     test('an auth failure surfaces its own message', () async {
-      seedDraft();
+      await seedDraft();
       mail.failure = const NotSignedIn();
       final notifier = notifierFor();
       await notifier.load();
@@ -276,14 +283,14 @@ void main() {
       // Threads below the attention threshold never earn a generated draft,
       // but the LO can still reply to them — the send targets exactly what
       // the draft handler itself would have replied to.
-      store.upsertMessage({
+      await store.upsertMessage({
         'source': 'email',
         'source_message_id': 'older-inbound',
         'conversation_key': 'conv-1',
         'direction': 'inbound',
         'received_at': '2026-08-29T10:00:00Z',
       });
-      store.upsertMessage({
+      await store.upsertMessage({
         'source': 'email',
         'source_message_id': 'newest-inbound',
         'conversation_key': 'conv-1',
@@ -301,7 +308,7 @@ void main() {
     });
 
     test('a completed send retires the composer text for good', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
       final epochBefore = notifier.state.sendEpoch;
@@ -316,12 +323,12 @@ void main() {
 
       // The composer's trailing edit debounce can fire after the send lands;
       // it must not rewrite the record of what was actually sent.
-      notifier.markEdited('Friday works. — but different now');
-      expect(store.getDraft('email', 'conv-1')!['status'], 'sent');
+      await notifier.markEdited('Friday works. — but different now');
+      expect((await store.getDraft('email', 'conv-1'))!['status'], 'sent');
     });
 
     test('a failed send keeps the text on the table', () async {
-      seedDraft();
+      await seedDraft();
       mail.failure = const GraphMailException('Graph said no.');
       final notifier = notifierFor();
       await notifier.load();
@@ -333,7 +340,7 @@ void main() {
     });
 
     test('empty text never reaches Graph', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
@@ -346,7 +353,7 @@ void main() {
     test('Mail.ReadWrite saves to Outlook and opens it, without sending',
         () async {
       tokens.values['granted_scopes'] = _readWriteGrant;
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
@@ -359,7 +366,7 @@ void main() {
       ]);
       expect(mail.calls, isNot(contains('send:graph-draft-1')));
       expect(launched.single.toString(), 'https://outlook.example/draft-1');
-      final draft = store.getDraft('email', 'conv-1')!;
+      final draft = (await store.getDraft('email', 'conv-1'))!;
       // Not `sent` — it was not sent, and saying so would be a lie the next
       // reader acts on.
       expect(draft['status'], 'suggested');
@@ -382,7 +389,7 @@ void main() {
       );
 
       tokens.values['granted_scopes'] = _coreGrant;
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
@@ -395,7 +402,7 @@ void main() {
 
   group('the draft itself', () {
     test('loads what the queue wrote', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
 
       await notifier.load();
@@ -406,42 +413,46 @@ void main() {
     });
 
     test('an edit is stored and stops it being the model\'s', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
-      notifier.markEdited('Monday, actually.');
+      await notifier.markEdited('Monday, actually.');
 
-      final draft = store.getDraft('email', 'conv-1')!;
+      final draft = (await store.getDraft('email', 'conv-1'))!;
       expect(draft['status'], 'edited');
       expect(draft['body'], 'Monday, actually.');
       expect(notifier.state.body, 'Monday, actually.');
     });
 
     test('a dismissed draft reads as no draft, and the row survives', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
-      notifier.dismiss();
+      await notifier.dismiss();
 
       expect(notifier.state.body, isNull);
       // The row stays so the next list load does not immediately write another.
-      expect(store.getDraft('email', 'conv-1')!['status'], 'dismissed');
+      expect((await store.getDraft('email', 'conv-1'))!['status'], 'dismissed');
     });
 
     test('generate clears the old draft and queues a fresh one', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
       await notifier.generate();
 
-      expect(store.getDraft('email', 'conv-1'), isNull);
+      expect(await store.getDraft('email', 'conv-1'), isNull);
       expect(
-        db
-            .select("SELECT status FROM work_items WHERE task_kind = 'draft'")
-            .single['status'],
+        (await db
+                .customSelect(
+                  "SELECT status FROM work_items WHERE task_kind = 'draft'",
+                )
+                .get())
+            .single
+            .data['status'],
         'pending',
       );
       expect(notifier.state.body, isNull);
@@ -451,22 +462,25 @@ void main() {
   group('nothing sends on its own', () {
     test('constructing, loading, generating, editing and dismissing reach '
         'Graph never', () async {
-      seedDraft();
+      await seedDraft();
       final notifier = notifierFor();
 
       await notifier.load();
       await notifier.generate();
-      seedDraft();
+      await seedDraft();
       await notifier.load();
-      notifier.markEdited('a reply I never sent');
-      notifier.dismiss();
+      await notifier.markEdited('a reply I never sent');
+      await notifier.dismiss();
       // Well past every debounce and timer this notifier owns.
       await Future<void>.delayed(const Duration(milliseconds: 800));
 
       expect(mail.calls, isEmpty);
       expect(launched, isEmpty);
       expect(syncsAfterSend, 0);
-      expect(store.getDraft('email', 'conv-1')!['status'], isNot('sent'));
+      expect(
+        (await store.getDraft('email', 'conv-1'))!['status'],
+        isNot('sent'),
+      );
     });
   });
 }

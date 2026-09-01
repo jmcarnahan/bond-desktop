@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
@@ -10,7 +10,8 @@ import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// End-to-end drains: a scripted Graph on one side, a real sqlite database on
 /// the other, and the real [GraphAuth], [GraphMail] and [SyncService] in
@@ -158,14 +159,13 @@ class GraphStub {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late GraphStub graph;
   late SyncService sync;
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
     graph = GraphStub();
 
@@ -177,20 +177,17 @@ void main() {
     sync = SyncService(GraphMail(auth, httpClient: graph.client), store);
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
-  List<Map<String, Object?>> messageRows() => [
-        for (final row
-            in db.select('SELECT * FROM messages ORDER BY source_message_id'))
-          Map<String, Object?>.from(row),
+  Future<List<Map<String, Object?>>> messageRows() async => [
+        for (final row in await db
+            .customSelect('SELECT * FROM messages ORDER BY source_message_id')
+            .get())
+          Map<String, Object?>.from(row.data),
       ];
 
-  Map<String, Object?> messageRow(String id) => Map<String, Object?>.from(
-        db.select(
-          'SELECT * FROM messages WHERE source_message_id = ?',
-          [id],
-        ).single,
-      );
+  Future<Map<String, Object?>> messageRow(String id) async =>
+      (await store.getMessageRow('email', id))!;
 
   group('paging', () {
     test('walks nextLinks and persists only the closing deltaLink', () async {
@@ -212,10 +209,10 @@ void main() {
       await sync.syncNow();
 
       expect(
-        messageRows().map((r) => r['source_message_id']).toList(),
+        (await messageRows()).map((r) => r['source_message_id']).toList(),
         ['m1', 'm2', 'm3', 'm4'],
       );
-      expect(store.getDeltaLink('inbox', source: 'email'),
+      expect(await store.getDeltaLink('inbox', source: 'email'),
           deltaCursor('inbox', 'final'));
 
       final inboxRequests = graph.requestsFor('inbox');
@@ -247,9 +244,9 @@ void main() {
       expect(second.toString(), deltaCursor('inbox', 'c1'));
       expect(second.queryParameters[r'$filter'], isNull,
           reason: 'the cursor already carries the window it was born with');
-      expect(store.getDeltaLink('inbox', source: 'email'),
+      expect(await store.getDeltaLink('inbox', source: 'email'),
           deltaCursor('inbox', 'c2'));
-      expect(messageRows().length, 2);
+      expect((await messageRows()).length, 2);
     });
 
     test('the delta \$select never asks for a body', () async {
@@ -292,11 +289,15 @@ void main() {
 
       await sync.syncNow();
 
-      final rows = messageRows();
+      final rows = await messageRows();
       expect(rows.length, 1);
       expect(rows.single['body_preview'], 'second delivery');
       expect(rows.single['is_read'], 1);
-      expect(db.select('SELECT * FROM conversations').single['message_count'], 1);
+      expect(
+        (await db.customSelect('SELECT * FROM conversations').getSingle())
+            .data['message_count'],
+        1,
+      );
     });
 
     test('a failure mid-drain keeps the committed pages and the old cursor',
@@ -314,9 +315,9 @@ void main() {
       // The whole point of committing rows before advancing the cursor: the
       // work already done survives, and the next drain replays from where
       // the cursor still points.
-      expect(messageRows().map((r) => r['source_message_id']).toList(),
+      expect((await messageRows()).map((r) => r['source_message_id']).toList(),
           ['m1', 'm2']);
-      expect(store.getDeltaLink('inbox', source: 'email'), isNull);
+      expect(await store.getDeltaLink('inbox', source: 'email'), isNull);
     });
 
     test('drafts and removed tombstones never become rows', () async {
@@ -333,7 +334,7 @@ void main() {
 
       await sync.syncNow();
 
-      expect(messageRows().map((r) => r['source_message_id']).toList(), ['m1']);
+      expect((await messageRows()).map((r) => r['source_message_id']).toList(), ['m1']);
     });
   });
 
@@ -364,8 +365,8 @@ void main() {
             'its edge, forever',
       );
 
-      expect(messageRows().length, 1);
-      expect(store.getDeltaLink('inbox', source: 'email'),
+      expect((await messageRows()).length, 1);
+      expect(await store.getDeltaLink('inbox', source: 'email'),
           deltaCursor('inbox', 'fresh'));
     });
 
@@ -380,7 +381,7 @@ void main() {
         throwsA(isA<GraphMailException>()
             .having((e) => e.statusCode, 'statusCode', 410)),
       );
-      expect(store.getDeltaLink('inbox', source: 'email'), isNull);
+      expect(await store.getDeltaLink('inbox', source: 'email'), isNull);
     });
 
     test('a 429 is retried once, honouring Retry-After', () async {
@@ -393,7 +394,7 @@ void main() {
       await sync.syncNow();
 
       expect(graph.requestsFor('inbox').length, 2);
-      expect(messageRows().length, 1);
+      expect((await messageRows()).length, 1);
     });
 
     test('a second 429 fails the drain rather than looping', () async {
@@ -429,7 +430,7 @@ void main() {
 
       await sync.syncNow();
 
-      final row = messageRow('s1');
+      final row = await messageRow('s1');
       expect(row['direction'], 'outbound');
       expect(row['triage_status'], 'skipped');
       expect(row['gate_reason'], 'outbound');
@@ -459,10 +460,10 @@ void main() {
 
       await sync.syncNow();
 
-      expect(messageRow('fresh')['triage_status'], 'pending');
-      expect(messageRow('fresh')['gate_reason'], isNull);
-      expect(messageRow('stale')['triage_status'], 'skipped');
-      expect(messageRow('stale')['gate_reason'], 'backlog');
+      expect((await messageRow('fresh'))['triage_status'], 'pending');
+      expect((await messageRow('fresh'))['gate_reason'], isNull);
+      expect((await messageRow('stale'))['triage_status'], 'skipped');
+      expect((await messageRow('stale'))['gate_reason'], 'backlog');
     });
 
     test('a first run caps the triage queue, demoting the oldest', () async {
@@ -484,19 +485,23 @@ void main() {
 
       await sync.syncNow();
 
-      expect(store.triageCounts(sources: const ['email']),
+      expect(await store.triageCounts(sources: const ['email']),
           {'pending': firstRunTriageCap, 'skipped': 160 - firstRunTriageCap});
 
       // The ten demoted are the ten oldest, not an arbitrary ten.
-      final demoted = db
-          .select("SELECT source_message_id FROM messages "
-              "WHERE triage_status = 'skipped' ORDER BY source_message_id")
-          .map((r) => r['source_message_id'] as String)
+      final demoted = (await db
+              .customSelect("SELECT source_message_id FROM messages "
+                  "WHERE triage_status = 'skipped' ORDER BY source_message_id")
+              .get())
+          .map((r) => r.data['source_message_id'] as String)
           .toList();
       expect(demoted, [for (var i = 0; i < 10; i++) 'm${i.toString().padLeft(3, '0')}']);
       expect(
-        db.select("SELECT DISTINCT gate_reason FROM messages "
-            "WHERE triage_status = 'skipped'").single['gate_reason'],
+        (await db
+                .customSelect("SELECT DISTINCT gate_reason FROM messages "
+                    "WHERE triage_status = 'skipped'")
+                .getSingle())
+            .data['gate_reason'],
         'backlog',
       );
     });
@@ -507,7 +512,7 @@ void main() {
             deltaLink: deltaCursor('inbox', 'c1'))),
       ]);
       await sync.syncNow();
-      expect(messageRow('m1')['triage_status'], 'pending');
+      expect((await messageRow('m1'))['triage_status'], 'pending');
 
       // A later sync must not demote what the first one queued.
       graph.queue('inbox', [
@@ -516,8 +521,8 @@ void main() {
       ]);
       await sync.syncNow();
 
-      expect(messageRow('m1')['triage_status'], 'pending');
-      expect(messageRow('m2')['triage_status'], 'pending');
+      expect((await messageRow('m1'))['triage_status'], 'pending');
+      expect((await messageRow('m2'))['triage_status'], 'pending');
     });
   });
 
@@ -562,7 +567,7 @@ void main() {
 
       await sync.syncNow();
 
-      final conversation = store.loadConversations(sources: const ['email']).single;
+      final conversation = (await store.loadConversations(sources: const ['email'])).single;
       expect(conversation.id, 'conv-1');
       expect(conversation.state, ConversationState.needsReply);
       expect(conversation.messageCount, 3);
@@ -602,7 +607,7 @@ void main() {
       await sync.syncNow();
 
       expect(
-        store.loadConversations(sources: const ['email']).single.state,
+        (await store.loadConversations(sources: const ['email'])).single.state,
         ConversationState.waiting,
       );
     });
@@ -627,7 +632,7 @@ void main() {
       await sync.syncNow();
 
       expect(
-        store.loadConversations(sources: const ['email']).single.state,
+        (await store.loadConversations(sources: const ['email'])).single.state,
         ConversationState.done,
       );
     });
@@ -643,7 +648,7 @@ void main() {
       await sync.syncNow();
 
       expect(
-        store.loadConversations(sources: const ['email']).single.id,
+        (await store.loadConversations(sources: const ['email'])).single.id,
         'msg:loner',
       );
     });
@@ -686,7 +691,7 @@ void main() {
 
       await sync.ensureBodies('conv-1');
 
-      final m1 = messageRow('m1');
+      final m1 = await messageRow('m1');
       expect(m1['body_text'], 'Just my part of the thread.');
       expect(m1['has_attachments'], 1);
       final meta = jsonDecode(m1['source_meta_json'] as String);
@@ -694,7 +699,7 @@ void main() {
         'list-unsubscribe': '<mailto:x@y.com>',
         'auto-submitted': 'auto-generated',
       });
-      expect(messageRow('m2')['body_text'], 'Second body.');
+      expect((await messageRow('m2'))['body_text'], 'Second body.');
 
       // Newest first — the message the reader lands on fills in first.
       expect(
@@ -731,8 +736,8 @@ void main() {
 
       await sync.ensureBodies('conv-1');
 
-      expect(messageRow('m1')['body_text'], 'Still here.');
-      expect(messageRow('m2')['body_text'], isNull);
+      expect((await messageRow('m1'))['body_text'], 'Still here.');
+      expect((await messageRow('m2'))['body_text'], isNull);
     });
 
     test('a real failure surfaces', () async {
@@ -755,8 +760,8 @@ void main() {
           });
       await sync.ensureBodies('conv-1');
 
-      store.updateMessageDetail('email', 'm1', bodyText: null);
-      expect(messageRow('m1')['body_text'], 'The body.');
+      await store.updateMessageDetail('email', 'm1', bodyText: null);
+      expect((await messageRow('m1'))['body_text'], 'The body.');
     });
   });
 }

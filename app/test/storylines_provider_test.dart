@@ -1,4 +1,4 @@
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
@@ -8,7 +8,8 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// A handler that does nothing, so a [AiWorker.pump] emits one [WorkProgress]
 /// of the kind asked for and finishes. The real worker is used rather than a
@@ -36,34 +37,33 @@ class UnreadableStore extends MessageStore {
   bool broken = false;
 
   @override
-  List<Storyline> loadStorylines({
+  Future<List<Storyline>> loadStorylines({
     List<String> statuses = const ['suggested', 'active'],
-  }) {
+  }) async {
     if (broken) throw StateError('disk is gone');
     return super.loadStorylines(statuses: statuses);
   }
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late StorylineService service;
 
   setUp(() {
-    db = sqlite3.openInMemory();
-    applySchema(db);
+    db = testDb();
     store = MessageStore(db);
     service = StorylineService(store, UnusedLlm());
   });
 
   tearDown(() => db.close());
 
-  void seedStoryline(
+  Future<void> seedStoryline(
     String id, {
     String status = 'suggested',
     String title = 'Willow St purchase',
   }) {
-    store.insertStoryline(
+    return store.insertStoryline(
       id: id,
       title: title,
       status: status,
@@ -71,8 +71,8 @@ void main() {
     );
   }
 
-  void seedConversation(String key, {String? subject}) {
-    store.upsertConversation({
+  Future<void> seedConversation(String key, {String? subject}) {
+    return store.upsertConversation({
       'conversation_key': key,
       'subject': subject ?? key,
       'state': 'waiting',
@@ -80,13 +80,13 @@ void main() {
     });
   }
 
-  void seedMessage(
+  Future<void> seedMessage(
     String key,
     String id, {
     required String receivedAt,
     String? subject,
   }) {
-    store.upsertMessage({
+    return store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'inbound',
@@ -98,7 +98,7 @@ void main() {
 
   group('load', () {
     test('a first load ends Loaded with the stored rows', () async {
-      seedStoryline('sl-1');
+      await seedStoryline('sl-1');
       final notifier = StorylinesNotifier(store, service);
       expect(notifier.state, isA<StorylinesInitial>());
 
@@ -110,7 +110,7 @@ void main() {
     });
 
     test('dismissed storylines never reach the list', () async {
-      seedStoryline('sl-1', status: 'dismissed');
+      await seedStoryline('sl-1', status: 'dismissed');
       final notifier = StorylinesNotifier(store, service);
 
       await notifier.load();
@@ -119,7 +119,7 @@ void main() {
     });
 
     test('a failed re-read keeps the rows and explains itself', () async {
-      seedStoryline('sl-1');
+      await seedStoryline('sl-1');
       final broken = UnreadableStore(db);
       final notifier = StorylinesNotifier(broken, service);
       await notifier.load();
@@ -144,7 +144,7 @@ void main() {
 
   group('user actions', () {
     test('keep flips the status and reloads', () async {
-      seedStoryline('sl-1');
+      await seedStoryline('sl-1');
       final notifier = StorylinesNotifier(store, service);
       await notifier.load();
 
@@ -152,22 +152,22 @@ void main() {
 
       expect((notifier.state as StorylinesLoaded).storylines.single.status,
           'active');
-      expect(store.getStoryline('sl-1')!.status, 'active');
+      expect((await store.getStoryline('sl-1'))!.status, 'active');
     });
 
     test('dismiss takes it off the list entirely', () async {
-      seedStoryline('sl-1');
+      await seedStoryline('sl-1');
       final notifier = StorylinesNotifier(store, service);
       await notifier.load();
 
       await notifier.dismiss('sl-1');
 
       expect((notifier.state as StorylinesLoaded).storylines, isEmpty);
-      expect(store.getStoryline('sl-1')!.status, 'dismissed');
+      expect((await store.getStoryline('sl-1'))!.status, 'dismissed');
     });
 
     test('rename writes through and locks the title', () async {
-      seedStoryline('sl-1', status: 'active');
+      await seedStoryline('sl-1', status: 'active');
       final notifier = StorylinesNotifier(store, service);
       await notifier.load();
 
@@ -180,8 +180,8 @@ void main() {
     });
 
     test('add and remove move the member count', () async {
-      seedStoryline('sl-1', status: 'active');
-      seedConversation('c1');
+      await seedStoryline('sl-1', status: 'active');
+      await seedConversation('c1');
       final notifier = StorylinesNotifier(store, service);
       await notifier.load();
 
@@ -192,11 +192,11 @@ void main() {
       await notifier.removeThread('sl-1', 'email', 'c1');
       expect((notifier.state as StorylinesLoaded).storylines.single.memberCount,
           0);
-      expect(store.isMemberBlocked('sl-1', 'email', 'c1'), isTrue);
+      expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isTrue);
     });
 
     test('create returns the new id and lands it in the list', () async {
-      seedConversation('c1');
+      await seedConversation('c1');
       final notifier = StorylinesNotifier(store, service);
       await notifier.load();
 
@@ -224,7 +224,7 @@ void main() {
 
       // What an assignment landing looks like from the outside: a row appears
       // in the database and the worker reports.
-      seedStoryline('sl-1');
+      await seedStoryline('sl-1');
       await worker.pump();
       await settle();
 
@@ -239,7 +239,7 @@ void main() {
       addTearDown(notifier.dispose);
       await notifier.load();
 
-      seedStoryline('sl-1');
+      await seedStoryline('sl-1');
       await worker.pump();
       await settle();
 
@@ -255,7 +255,7 @@ void main() {
 
       // Extraction reports once per message. Reloading the storyline list on
       // every one of those would be a full read per email.
-      seedStoryline('sl-1');
+      await seedStoryline('sl-1');
       await worker.pump();
       await settle();
 
@@ -265,17 +265,17 @@ void main() {
 
   group('timeline', () {
     test('merges the member threads and names each one', () async {
-      seedConversation('c1', subject: 'Re: Appraisal review');
-      seedConversation('c2', subject: 'Rate lock');
-      seedMessage('c1', 'm1',
+      await seedConversation('c1', subject: 'Re: Appraisal review');
+      await seedConversation('c2', subject: 'Rate lock');
+      await seedMessage('c1', 'm1',
           receivedAt: '2026-08-01T09:00:00Z', subject: 'Re: Appraisal review');
-      seedMessage('c2', 'm2',
+      await seedMessage('c2', 'm2',
           receivedAt: '2026-08-01T10:00:00Z', subject: 'Rate lock');
-      seedMessage('c1', 'm3',
+      await seedMessage('c1', 'm3',
           receivedAt: '2026-08-01T11:00:00Z', subject: 'Re: Appraisal review');
-      seedStoryline('sl-1', status: 'active');
-      store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
-      store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
 
       final notifier = StorylineTimelineNotifier(store, 'sl-1');
       await notifier.load();
@@ -289,7 +289,7 @@ void main() {
     });
 
     test('an empty storyline loads as empty rather than erroring', () async {
-      seedStoryline('sl-1', status: 'active');
+      await seedStoryline('sl-1', status: 'active');
       final notifier = StorylineTimelineNotifier(store, 'sl-1');
 
       await notifier.load();
@@ -302,10 +302,10 @@ void main() {
 
   group('provider wiring', () {
     test('the providers build against an overridden db', () async {
-      seedStoryline('sl-1', status: 'active');
-      seedConversation('c1');
-      seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
-      store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await seedStoryline('sl-1', status: 'active');
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
 
       final container = ProviderContainer(overrides: [
         dbProvider.overrideWithValue(db),

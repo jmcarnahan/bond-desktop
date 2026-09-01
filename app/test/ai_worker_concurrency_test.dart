@@ -1,16 +1,18 @@
 import 'dart:async';
 
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/testing.dart';
 import 'package:http/http.dart' as http;
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// What the worker does with more than one item of a kind at the server at
 /// once, and what a park means now that the kinds do not share a server.
@@ -91,15 +93,15 @@ Map<String, dynamic> extraction() => {
     };
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
   /// The embedding server, absent. Every message below is seeded without a
   /// conversation row, so the card step returns before it would dial anything
@@ -112,27 +114,31 @@ void main() {
   /// One message plus its queued extraction. No conversation row on purpose:
   /// what this file is about is the drain, and a thread would drag the fold-up
   /// and the embedding in with it.
-  void seedQueued(String id) {
-    store.upsertMessage({
+  Future<void> seedQueued(String id) async {
+    await store.upsertMessage({
       'source': 'email',
       'source_message_id': id,
       'conversation_key': 'orphan-$id',
       'direction': 'inbound',
-      'subject': 'Re: Rate lock',
+      // Per-id, so a prompt can be traced back to the message that produced
+      // it — which is how the exactly-once assertion below is made.
+      'subject': 'Re: Rate lock $id',
       'from_name': 'Sarah',
       'from_address': 'sarah@x.com',
       'received_at': '2026-08-29T10:00:00Z',
       'body_text': 'Can we extend the lock through Friday?',
     });
-    store.enqueueWork('extract', 'email', id);
+    await store.enqueueWork('extract', 'email', id);
   }
 
-  List<Map<String, Object?>> workRows(String kind) => [
-        for (final row in db.select(
-          'SELECT * FROM work_items WHERE task_kind = ?',
-          [kind],
-        ))
-          Map<String, Object?>.from(row),
+  Future<List<Map<String, Object?>>> workRows(String kind) async => [
+        for (final row in await db
+            .customSelect(
+              'SELECT * FROM work_items WHERE task_kind = ?',
+              variables: [Variable(kind)],
+            )
+            .get())
+          Map<String, Object?>.from(row.data),
       ];
 
   ExtractHandler extractWith(FakeLlm llm) =>
@@ -141,7 +147,7 @@ void main() {
   group('per-handler concurrency', () {
     test('extraction runs three at a time and finishes all of them', () async {
       for (var i = 0; i < 6; i++) {
-        seedQueued('m$i');
+        await seedQueued('m$i');
       }
       final llm = FakeLlm([extraction()]);
 
@@ -152,12 +158,41 @@ void main() {
       // batching instead of idling between them.
       expect(llm.maxInFlight, 3);
       expect(llm.userMessages.length, 6);
-      expect(store.workCounts('extract'), {'done': 6});
+      expect(await store.workCounts('extract'), {'done': 6});
+    });
+
+    test('two drains over one backlog take every item exactly once', () async {
+      for (var i = 0; i < 9; i++) {
+        await seedQueued('m$i');
+      }
+      // Two workers rather than two pumps of one: `_draining` guards a worker
+      // against itself, and each carries its own [DrainGate], so these drains
+      // genuinely overlap. It is the case the atomic claim exists for —
+      // choosing an item and writing its `processing` are one statement, so
+      // whichever claim lands second cannot be handed a row the first took.
+      final first = FakeLlm([extraction()]);
+      final second = FakeLlm([extraction()]);
+
+      await Future.wait([
+        AiWorker(store, handlers: [extractWith(first)]).pump(),
+        AiWorker(store, handlers: [extractWith(second)]).pump(),
+      ]);
+
+      final asked = [...first.userMessages, ...second.userMessages];
+      expect(asked.length, 9);
+      for (var i = 0; i < 9; i++) {
+        expect(
+          asked.where((user) => user.contains('Re: Rate lock m$i')).length,
+          1,
+          reason: 'm$i',
+        );
+      }
+      expect(await store.workCounts('extract'), {'done': 9});
     });
 
     test('a handler that declares nothing is still serial', () async {
       for (final id in ['d1', 'd2', 'd3']) {
-        store.enqueueWork('draft', 'email', id);
+        await store.enqueueWork('draft', 'email', id);
       }
       final draft = DraftStub();
 
@@ -167,7 +202,7 @@ void main() {
       // prose on the 27B, and three of those at once would make the one the
       // user is waiting on slower, not faster.
       expect(draft.concurrency, 1);
-      expect(store.workCounts('draft'), {'done': 3});
+      expect(await store.workCounts('draft'), {'done': 3});
     });
   });
 
@@ -175,9 +210,9 @@ void main() {
     test('a downed server parks its kind; the next kind still drains',
         () async {
       for (var i = 0; i < 5; i++) {
-        seedQueued('m$i');
+        await seedQueued('m$i');
       }
-      store.enqueueWork('draft', 'email', 'd1');
+      await store.enqueueWork('draft', 'email', 'd1');
       final llm = FakeLlm([const LlmUnavailableException('not reachable')]);
       final draft = DraftStub();
 
@@ -185,22 +220,22 @@ void main() {
 
       // Three went out together and all three found the same dead server;
       // nothing was wrong with any of the five, so none spends an attempt.
-      expect(store.workCounts('extract'), {'pending': 5});
-      for (final row in workRows('extract')) {
+      expect(await store.workCounts('extract'), {'pending': 5});
+      for (final row in await workRows('extract')) {
         expect(row['attempts'], 0, reason: row['entity_id'] as String?);
       }
       // And the draft server is a DIFFERENT server. "Extraction's llama-server
       // is not running" is no evidence at all about the 27B's.
       expect(draft.seen, ['d1']);
-      expect(store.workCounts('draft'), {'done': 1});
+      expect(await store.workCounts('draft'), {'done': 1});
     });
 
     test('a dead session parks the whole drain, later kinds included',
         () async {
       for (var i = 0; i < 5; i++) {
-        seedQueued('m$i');
+        await seedQueued('m$i');
       }
-      store.enqueueWork('draft', 'email', 'd1');
+      await store.enqueueWork('draft', 'email', 'd1');
       final llm = FakeLlm([const NotSignedIn()]);
       final draft = DraftStub();
 
@@ -208,27 +243,27 @@ void main() {
 
       // The session is what every kind's Graph-dependent work runs on, so
       // there is no server left that could answer anything usefully.
-      expect(store.workCounts('extract'), {'pending': 5});
+      expect(await store.workCounts('extract'), {'pending': 5});
       expect(draft.seen, isEmpty);
-      expect(store.workCounts('draft'), {'pending': 1});
+      expect(await store.workCounts('draft'), {'pending': 1});
     });
 
     test('missing consent parks the whole drain the same way', () async {
-      seedQueued('m0');
-      store.enqueueWork('draft', 'email', 'd1');
+      await seedQueued('m0');
+      await store.enqueueWork('draft', 'email', 'd1');
       final llm = FakeLlm([const ReconsentRequired()]);
       final draft = DraftStub();
 
       await AiWorker(store, handlers: [extractWith(llm), draft]).pump();
 
-      expect(store.workCounts('extract'), {'pending': 1});
+      expect(await store.workCounts('extract'), {'pending': 1});
       expect(draft.seen, isEmpty);
     });
 
     test('the items already in flight when a kind parks keep their results',
         () async {
       for (var i = 0; i < 6; i++) {
-        seedQueued('m$i');
+        await seedQueued('m$i');
       }
       // The first and third of the batch are held open until the second has
       // found the server gone, so the park lands on siblings that are still
@@ -249,8 +284,8 @@ void main() {
       // remaining three items were never claimed. The two answers were paid
       // for either way and are kept rather than thrown away with the park.
       expect(llm.userMessages.length, 3);
-      expect(store.workCounts('extract'), {'done': 2, 'pending': 4});
-      for (final row in workRows('extract')) {
+      expect(await store.workCounts('extract'), {'done': 2, 'pending': 4});
+      for (final row in await workRows('extract')) {
         if (row['status'] != 'pending') continue;
         expect(row['attempts'], 0, reason: row['entity_id'] as String?);
       }
@@ -261,7 +296,7 @@ void main() {
     test('a schema 400 marks one item and the rest of the batch carries on',
         () async {
       for (var i = 0; i < 4; i++) {
-        seedQueued('m$i');
+        await seedQueued('m$i');
       }
       final llm = FakeLlm([
         const LlmException('JSON schema conversion failed', 400),
@@ -273,22 +308,23 @@ void main() {
       // Unchanged by concurrency: a 400 is this app's schema being wrong, so
       // it is fatal on the first attempt — and it is about that ONE request,
       // so the three beside it finish normally.
-      expect(store.workCounts('extract'), {'error': 1, 'done': 3});
-      final failed =
-          workRows('extract').where((r) => r['status'] == 'error').single;
+      expect(await store.workCounts('extract'), {'error': 1, 'done': 3});
+      final failed = (await workRows('extract'))
+          .where((r) => r['status'] == 'error')
+          .single;
       expect(failed['attempts'], 1);
       expect(failed['error'], contains('JSON schema conversion failed'));
     });
 
     test('any other failure is still retried once, then left as an error',
         () async {
-      seedQueued('m0');
+      await seedQueued('m0');
       final llm = FakeLlm([const LlmFormatException('not json')]);
 
       await AiWorker(store, handlers: [extractWith(llm)]).pump();
 
       expect(llm.userMessages.length, 2);
-      final row = workRows('extract').single;
+      final row = (await workRows('extract')).single;
       expect(row['status'], 'error');
       expect(row['attempts'], 2);
     });
@@ -296,20 +332,20 @@ void main() {
 
   test('resetInterrupted still returns claimed items to the queue', () async {
     for (var i = 0; i < 4; i++) {
-      seedQueued('m$i');
-      store.writeWork('extract', 'email', 'm$i', status: 'processing');
+      await seedQueued('m$i');
+      await store.writeWork('extract', 'email', 'm$i', status: 'processing');
     }
     final llm = FakeLlm([extraction()]);
     final worker = AiWorker(store, handlers: [extractWith(llm)]);
 
     // A crash mid-batch now leaves up to three rows claimed rather than one,
     // which is exactly the case this startup sweep exists for.
-    expect(store.nextPendingWork('extract'), isNull);
-    worker.resetInterrupted();
-    expect(store.nextPendingWork('extract'), isNotNull);
+    expect(await store.nextPendingWork('extract'), isNull);
+    await worker.resetInterrupted();
+    expect(await store.nextPendingWork('extract'), isNotNull);
 
     await worker.pump();
 
-    expect(store.workCounts('extract'), {'done': 4});
+    expect(await store.workCounts('extract'), {'done': 4});
   });
 }

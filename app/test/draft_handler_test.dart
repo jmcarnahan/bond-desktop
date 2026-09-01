@@ -1,10 +1,11 @@
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 /// An [LlmClient] that answers from a script, records what it was asked, and
 /// never opens a socket.
@@ -43,24 +44,24 @@ Map<String, dynamic> answer({
     {'evidence': evidence, 'reply_body': replyBody};
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
 
   setUp(() {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
   });
 
-  tearDown(() => db.close());
+  tearDown(() async => db.close());
 
-  void seedInbound({
+  Future<void> seedInbound({
     String id = 'm2',
     String key = 'conv-1',
     String receivedAt = '2026-08-29T10:00:00Z',
     String address = 'sarah@x.com',
     String body = 'Can we extend the lock through Friday?',
-  }) {
-    store.upsertMessage({
+  }) async {
+    await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'inbound',
@@ -72,14 +73,14 @@ void main() {
     });
   }
 
-  void seedOutbound({
+  Future<void> seedOutbound({
     String id = 'o1',
     String key = 'conv-1',
     String receivedAt = '2026-08-27T10:00:00Z',
     String to = 'sarah@x.com',
     String body = 'Thanks Sarah — I will check and come back to you. — Jo',
-  }) {
-    store.upsertMessage({
+  }) async {
+    await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'outbound',
@@ -95,13 +96,13 @@ void main() {
   group('the happy path', () {
     test('writes a suggested draft against the NEWEST inbound message',
         () async {
-      seedInbound(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
-      seedInbound(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
+      await seedInbound(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
+      await seedInbound(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
       final llm = FakeLlm([answer()]);
 
       await runOne(DraftHandler(store, llm));
 
-      final draft = store.getDraft('email', 'conv-1')!;
+      final draft = (await store.getDraft('email', 'conv-1'))!;
       expect(draft['status'], 'suggested');
       expect(draft['reply_to_message_id'], 'm2');
       expect(draft['body'], startsWith('Hi Sarah — Friday works.'));
@@ -115,7 +116,7 @@ void main() {
 
     test('runs at temperature 0 with a budget big enough for a reply',
         () async {
-      seedInbound();
+      await seedInbound();
       final llm = FakeLlm([answer()]);
 
       await runOne(DraftHandler(store, llm));
@@ -128,19 +129,19 @@ void main() {
 
     test('ties on received_at break on source_message_id, like everywhere else',
         () async {
-      seedInbound(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
-      seedInbound(id: 'm9', receivedAt: '2026-08-29T10:00:00Z');
+      await seedInbound(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
+      await seedInbound(id: 'm9', receivedAt: '2026-08-29T10:00:00Z');
 
       await runOne(DraftHandler(store, FakeLlm([answer()])));
 
-      expect(store.getDraft('email', 'conv-1')!['reply_to_message_id'], 'm9');
+      expect((await store.getDraft('email', 'conv-1'))!['reply_to_message_id'], 'm9');
     });
   });
 
   group('what goes into the prompt', () {
     test('the LO\'s past replies to this sender, as a tone sample', () async {
-      seedOutbound(body: 'Sounds good — I will confirm by noon. — Jo');
-      seedInbound();
+      await seedOutbound(body: 'Sounds good — I will confirm by noon. — Jo');
+      await seedInbound();
 
       final llm = FakeLlm([answer()]);
       await runOne(DraftHandler(store, llm));
@@ -150,8 +151,8 @@ void main() {
     });
 
     test('and nothing when the LO has never written to them', () async {
-      seedOutbound(to: 'someone.else@x.com');
-      seedInbound();
+      await seedOutbound(to: 'someone.else@x.com');
+      await seedInbound();
 
       final llm = FakeLlm([answer()]);
       await runOne(DraftHandler(store, llm));
@@ -160,8 +161,8 @@ void main() {
     });
 
     test('the about-me preference, read from the store', () async {
-      seedInbound();
-      store.setPref(aboutMeKey, 'I own rate locks and closing dates.');
+      await seedInbound();
+      await store.setPref(aboutMeKey, 'I own rate locks and closing dates.');
 
       final llm = FakeLlm([answer()]);
       await runOne(DraftHandler(store, llm));
@@ -171,15 +172,15 @@ void main() {
     });
 
     test('the storyline summary, when the thread is in one', () async {
-      seedInbound();
-      store.insertStoryline(
+      await seedInbound();
+      await store.insertStoryline(
         id: 's1',
         title: 'Willow St purchase',
         summary: 'Closing 9/15, lock expires 9/10.',
         status: 'active',
         createdBy: 'auto',
       );
-      store.addStorylineMember('s1', 'email', 'conv-1', addedBy: 'auto');
+      await store.addStorylineMember('s1', 'email', 'conv-1', addedBy: 'auto');
 
       final llm = FakeLlm([answer()]);
       await runOne(DraftHandler(store, llm));
@@ -189,8 +190,8 @@ void main() {
     });
 
     test('the whole thread, both directions', () async {
-      seedOutbound(body: 'What is the current expiry? — Jo');
-      seedInbound(body: 'It expires Wednesday.');
+      await seedOutbound(body: 'What is the current expiry? — Jo');
+      await seedInbound(body: 'It expires Wednesday.');
 
       final llm = FakeLlm([answer()]);
       await runOne(DraftHandler(store, llm));
@@ -202,8 +203,8 @@ void main() {
 
   group('the cases that spend no model time', () {
     test('a conversation that already has a draft is left alone', () async {
-      seedInbound();
-      store.upsertDraft(
+      await seedInbound();
+      await store.upsertDraft(
         source: 'email',
         conversationKey: 'conv-1',
         replyToMessageId: 'm2',
@@ -214,35 +215,35 @@ void main() {
       await runOne(DraftHandler(store, llm));
 
       expect(llm.userMessages, isEmpty);
-      expect(store.getDraft('email', 'conv-1')!['body'], 'an existing draft');
+      expect((await store.getDraft('email', 'conv-1'))!['body'], 'an existing draft');
     });
 
     test('a conversation with no inbound mail is done, not failed', () async {
-      seedOutbound();
+      await seedOutbound();
       final llm = FakeLlm([answer()]);
 
       await runOne(DraftHandler(store, llm));
 
       expect(llm.userMessages, isEmpty);
-      expect(store.getDraft('email', 'conv-1'), isNull);
+      expect(await store.getDraft('email', 'conv-1'), isNull);
     });
   });
 
   group('an empty draft', () {
     test('throws rather than storing a blank suggestion', () async {
-      seedInbound();
+      await seedInbound();
       final llm = FakeLlm([answer(replyBody: '   ')]);
 
       await expectLater(
         runOne(DraftHandler(store, llm)),
         throwsA(isA<LlmFormatException>()),
       );
-      expect(store.getDraft('email', 'conv-1'), isNull);
+      expect(await store.getDraft('email', 'conv-1'), isNull);
     });
 
     test('and the worker retries it once, then gives up', () async {
-      seedInbound();
-      store.enqueueWork('draft', 'email', 'conv-1');
+      await seedInbound();
+      await store.enqueueWork('draft', 'email', 'conv-1');
       final llm = FakeLlm([answer(replyBody: ''), answer(replyBody: '')]);
       final worker = AiWorker(store, handlers: [DraftHandler(store, llm)]);
       addTearDown(worker.dispose);
@@ -250,7 +251,7 @@ void main() {
       await worker.pump();
       await worker.pump();
 
-      expect(store.workCounts('draft'), {'error': 1});
+      expect(await store.workCounts('draft'), {'error': 1});
       expect(llm.userMessages, hasLength(2),
           reason: 'one retry, then the item is left alone');
     });
@@ -258,8 +259,8 @@ void main() {
 
   group('through the worker', () {
     test('a queued conversation is drafted and marked done', () async {
-      seedInbound();
-      store.enqueueWork('draft', 'email', 'conv-1');
+      await seedInbound();
+      await store.enqueueWork('draft', 'email', 'conv-1');
       final worker = AiWorker(
         store,
         handlers: [DraftHandler(store, FakeLlm([answer()]))],
@@ -268,14 +269,14 @@ void main() {
 
       await worker.pump();
 
-      expect(store.workCounts('draft'), {'done': 1});
-      expect(store.getDraft('email', 'conv-1'), isNotNull);
+      expect(await store.workCounts('draft'), {'done': 1});
+      expect(await store.getDraft('email', 'conv-1'), isNotNull);
     });
 
     test('a model server that is down leaves the item queued and undrafted',
         () async {
-      seedInbound();
-      store.enqueueWork('draft', 'email', 'conv-1');
+      await seedInbound();
+      await store.enqueueWork('draft', 'email', 'conv-1');
       final worker = AiWorker(
         store,
         handlers: [
@@ -289,8 +290,8 @@ void main() {
 
       await worker.pump();
 
-      expect(store.workCounts('draft'), {'pending': 1});
-      expect(store.getDraft('email', 'conv-1'), isNull);
+      expect(await store.workCounts('draft'), {'pending': 1});
+      expect(await store.getDraft('email', 'conv-1'), isNull);
     });
   });
 }

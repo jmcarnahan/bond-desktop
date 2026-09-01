@@ -34,6 +34,15 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  # Pinned exactly, and it has to be. `drift_dev` is held at 2.34.0 by the
+  # analyzer version this Flutter SDK ships, and drift_dev 2.34.0 does not
+  # compile against drift 2.34.1+ — `drift_dev make-migrations` fails on
+  # drift's moved `GeneratedDatabase` API. The two move together or not at
+  # all; raise both when the SDK's analyzer allows it.
+  drift: 2.34.0
+  # Still a direct dependency after the drift port: `adoptLegacyDatabase` has
+  # to read `user_version` off a pre-drift file before drift is allowed to
+  # open it and decide the schema is missing.
   sqlite3: ^3.5.2
   path_provider: ^2.1.4
   path: ^1.9.0
@@ -59,6 +68,8 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  drift_dev: ^2.34.0
+  build_runner: ^2.4.13
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

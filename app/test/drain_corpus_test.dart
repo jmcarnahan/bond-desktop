@@ -1,11 +1,11 @@
-import 'package:bond_inbox/data/db.dart';
+import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
 
 import 'fixtures/corpus.dart';
+import 'fixtures/test_db.dart';
 import 'fixtures/fake_llama_server.dart';
 
 /// A whole inbox drained end to end: the real queue, the real store, the real
@@ -41,7 +41,7 @@ List<CorpusEmail> byRecency(Iterable<CorpusEmail> entries) {
 }
 
 void main() {
-  late Database db;
+  late BondDatabase db;
   late MessageStore store;
   late FakeLlamaServer fake;
   late LlmClient client;
@@ -49,10 +49,10 @@ void main() {
   /// Every email entry, seeded the way a delta page plus a detail fetch would
   /// have left it — body, headers and all, so the queue's own fetch step has
   /// nothing to do and the gates have everything to read.
-  void seedCorpus(Iterable<CorpusEmail> entries) {
+  Future<void> seedCorpus(Iterable<CorpusEmail> entries) async {
     for (final entry in entries) {
       final message = entry.message;
-      store.upsertMessage({
+      await store.upsertMessage({
         'source': message.source,
         'source_message_id': entry.id,
         'conversation_key': entry.conversationKey,
@@ -69,8 +69,8 @@ void main() {
     }
   }
 
-  void seedConversation(String key, String lastInboundAt) {
-    store.upsertConversation({
+  Future<void> seedConversation(String key, String lastInboundAt) async {
+    await store.upsertConversation({
       'source': 'email',
       'conversation_key': key,
       'subject': 'Willow St purchase',
@@ -80,15 +80,11 @@ void main() {
     });
   }
 
-  Map<String, Object?> messageRow(String id) => Map<String, Object?>.from(
-        db.select(
-          'SELECT * FROM messages WHERE source_message_id = ?',
-          [id],
-        ).first,
-      );
+  Future<Map<String, Object?>> messageRow(String id) async =>
+      (await store.getMessageRow('email', id))!;
 
   setUp(() async {
-    db = openDbAt(':memory:');
+    db = testDb();
     store = MessageStore(db);
     fake = await FakeLlamaServer.start();
     client = LlmClient(baseUrl: fake.chatUrl);
@@ -105,10 +101,10 @@ void main() {
     final ungated = emails.where((entry) => entry.expectedGate == null).toList();
 
     setUp(() async {
-      seedCorpus(emails);
+      await seedCorpus(emails);
       // The Willow St thread's newest inbound is the rate-lock email, so that
       // is the message whose ask the row should end up carrying.
-      seedConversation('conv-willow-st', '2026-08-30T16:05:00Z');
+      await seedConversation('conv-willow-st', '2026-08-30T16:05:00Z');
       fake.scriptFor('triage', [
         triageAnswer(
           urgency: 'urgent',
@@ -120,18 +116,18 @@ void main() {
       await TriageQueue(store, client, userAddress: loAddress).pump();
     });
 
-    test('every gated message is skipped with its own reason', () {
+    test('every gated message is skipped with its own reason', () async {
       expect(gated, isNotEmpty);
       for (final entry in gated) {
-        final row = messageRow(entry.id);
+        final row = await messageRow(entry.id);
         expect(row['triage_status'], 'skipped', reason: entry.id);
         expect(row['gate_reason'], entry.expectedGate, reason: entry.id);
       }
     });
 
-    test('every message that reaches the model comes back triaged', () {
+    test('every message that reaches the model comes back triaged', () async {
       for (final entry in ungated) {
-        expect(messageRow(entry.id)['triage_status'], 'triaged',
+        expect((await messageRow(entry.id))['triage_status'], 'triaged',
             reason: entry.id);
       }
     });
@@ -142,8 +138,8 @@ void main() {
       expect(fake.requests.length, ungated.length);
     });
 
-    test('the newest inbound message\'s ask lands on the thread', () {
-      final row = store.getConversationRow('email', 'conv-willow-st')!;
+    test('the newest inbound message\'s ask lands on the thread', () async {
+      final row = (await store.getConversationRow('email', 'conv-willow-st'))!;
       expect(row['cta_text'], 'Extend the lock through Friday');
       expect(row['cta_urgency'], 'urgent');
       expect(row['category'], 'borrower');
@@ -157,7 +153,7 @@ void main() {
     final ungated = byRecency(
       emailCorpus.where((entry) => entry.expectedGate == null),
     );
-    seedCorpus(ungated);
+    await seedCorpus(ungated);
     fake.scriptFor('triage', [triageAnswer(), 503]);
 
     // Serial on purpose. The claims below are about drain SHAPE — which
@@ -168,17 +164,17 @@ void main() {
     await TriageQueue(store, client, userAddress: loAddress, concurrency: 1)
         .pump();
 
-    expect(messageRow(ungated.first.id)['triage_status'], 'triaged');
+    expect((await messageRow(ungated.first.id))['triage_status'], 'triaged');
 
     // Nothing was wrong with this message, so it goes back to the queue
     // whole — and the drain stops rather than marking every message behind it
     // against a server that is seconds from healthy.
-    final parked = messageRow(ungated[1].id);
+    final parked = await messageRow(ungated[1].id);
     expect(parked['triage_status'], 'pending');
     expect(parked['triage_attempts'], 0);
 
     for (final entry in ungated.skip(2)) {
-      final row = messageRow(entry.id);
+      final row = await messageRow(entry.id);
       expect(row['triage_status'], 'pending', reason: entry.id);
       expect(row['triage_attempts'], 0, reason: entry.id);
     }

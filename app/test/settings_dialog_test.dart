@@ -1,4 +1,3 @@
-import 'package:bond_inbox/data/db.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -6,7 +5,8 @@ import 'package:bond_inbox/widgets/settings_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:sqlite3/sqlite3.dart';
+
+import 'fixtures/test_db.dart';
 
 void main() {
   /// Opens the dialog over a host that can pop it, which is what the "saved on
@@ -161,8 +161,7 @@ void main() {
   });
 
   testWidgets('what the dialog writes lands in app_prefs', (tester) async {
-    final db = sqlite3.openInMemory();
-    applySchema(db);
+    final db = testDb();
     addTearDown(db.close);
     final store = MessageStore(db);
 
@@ -186,8 +185,8 @@ void main() {
     await tester.tap(find.text('Done'));
     await tester.pumpAndSettle();
 
-    expect(store.getPref(aboutMeKey), 'I am a loan officer.');
-    expect(double.parse(store.getPref(attentionThresholdKey)!), 1.0);
+    expect(await store.getPref(aboutMeKey), 'I am a loan officer.');
+    expect(double.parse((await store.getPref(attentionThresholdKey))!), 1.0);
     expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
   });
 
