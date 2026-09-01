@@ -12,8 +12,11 @@ import '../services/ai_worker.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/backend_types.dart';
 import '../services/backend/mail_backend.dart';
+import '../services/backend/teams_backend.dart';
 import '../services/graph_mail.dart';
+import '../services/graph_teams.dart' show GraphTeamsException;
 import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/teams_sync.dart' show TeamsSync;
 import '../widgets/composer.dart' show SendCapability;
 import 'app_providers.dart';
 import 'conversations_provider.dart';
@@ -22,10 +25,11 @@ import 'conversations_provider.dart';
 /// person — can trigger.
 ///
 /// The invariant this file exists to hold: [DraftNotifier.send] is the only
-/// method that reaches [GraphMail.sendDraft], it is not called from anywhere
-/// inside this file, and it takes the body as an argument rather than reading
-/// the stored draft — so a send can only ever carry text that was on screen in
-/// front of whoever pressed the button.
+/// method that reaches [GraphMail.sendDraft] or [TeamsBackend.sendChatMessage],
+/// nothing inside this file calls it except the undo timer a person started,
+/// and it takes the body as an argument rather than reading the stored draft —
+/// so a send can only ever carry text that was on screen in front of whoever
+/// pressed the button.
 
 /// Which conversation a draft belongs to.
 ///
@@ -196,6 +200,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
   final MessageStore _store;
   final AuthSession _auth;
   final MailBackend _mail;
+
+  /// Where a chat reply goes. Optional because only the Teams branch of [send]
+  /// reads it, so every test that exercises a mail draft can leave it out —
+  /// and a chat that reached [send] without one is a wiring bug, which is why
+  /// that branch throws rather than degrading.
+  final TeamsBackend? _teams;
+
   final AiWorker? _worker;
 
   /// Called after a successful send, so the sent message folds in from
@@ -227,12 +238,14 @@ class DraftNotifier extends StateNotifier<DraftState> {
     this._auth,
     this._mail,
     DraftTarget target, {
+    TeamsBackend? teams,
     AiWorker? worker,
     Future<void> Function()? onSent,
     Future<bool> Function(Uri url)? launch,
     Duration? undoWindow,
   })  : _source = target.source,
         conversationKey = target.conversationKey,
+        _teams = teams,
         _worker = worker,
         _onSent = onSent,
         _undoWindow = undoWindow ?? DraftNotifier.undoWindow,
@@ -297,10 +310,11 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// permission at all.
   ///
   /// A chat has two rungs rather than three: there is no Outlook drafts folder
-  /// to hand a Teams message off to, so the ladder is send-or-copy. Nothing in
-  /// this app sends a chat yet — the screen keeps chats away from the composer
-  /// — but a capability that claimed `draftToOutlook` for one would be a lie
-  /// the moment that changes.
+  /// to hand a Teams message off to, so the ladder is send-or-copy. It is also
+  /// what decides whether a chat thread gets a reply surface at all — the
+  /// screen renders one for a chat only on the top rung, so a grant without
+  /// `Chat.ReadWrite` sees the honest caption instead of a box that could not
+  /// send.
   Future<SendCapability> _capability() async {
     try {
       if (_source == 'teams') {
@@ -462,6 +476,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
       return SendOutcome.copied;
     }
 
+    // Before the mail path, because none of it applies: a chat has no draft to
+    // create, no message to reply TO, and no Outlook rung to fall back to.
+    if (_source == 'teams') return _sendChat(text);
+
     // A thread only earns a generated draft when it ranks high enough, but
     // the user can reply to ANY thread — so a missing draft row falls back to
     // the newest inbound message, which is exactly what the draft handler
@@ -538,6 +556,66 @@ class DraftNotifier extends StateNotifier<DraftState> {
     }
   }
 
+  /// Posts [text] to a chat and writes the reply into the transcript.
+  ///
+  /// **The one send in this app that writes its own outbound row**, and the
+  /// only one that can: a chat post answers with the message Graph stored, id
+  /// and all, so the row written here is byte for byte the row the next pull
+  /// would have folded — [TeamsSync.messageRow] builds both. That shared id is
+  /// what makes the fold happen exactly once: `TeamsSync` asks
+  /// [MessageStore.hasMessage] before folding, sees this row, and counts the
+  /// reply as history rather than as news that reopens the thread. Mail cannot
+  /// do any of this — `sendDraft` answers 202 with no body — which is why it
+  /// still waits for `sentitems`.
+  Future<SendOutcome> _sendChat(String text) async {
+    final teams = _teams;
+    if (teams == null) {
+      // Wiring, not a runtime condition: `draftProvider` always supplies the
+      // backend, and nothing but this branch reads it.
+      throw StateError('A chat draft was built without a Teams backend.');
+    }
+
+    state = state.copyWith(sending: true, error: null);
+    try {
+      final sent = await teams.sendChatMessage(conversationKey, text);
+      final row = TeamsSync.messageRow(sent, conversationKey, outbound: true);
+      // Null only if what came back is not a chat message — a shape this app
+      // cannot store. The reply still went, so it is not a failure: the next
+      // pull writes the transcript entry that this one could not.
+      if (row != null) {
+        await _store.upsertMessage(row);
+        await _store.recomputeConversationCounts(_source, conversationKey);
+      }
+      // Same two writes the mail path makes, and for the same reason: the reply
+      // leaving IS the needs-you exit and the CTA's answer, said now rather
+      // than whenever the user next refreshes Teams — which, under Microsoft's
+      // polling terms, may be a while.
+      await _store.setConversationState(
+        _source,
+        conversationKey,
+        ConversationState.waiting,
+      );
+      await _store.clearCta(_source, conversationKey);
+      await _logSent();
+      state = state.copyWith(
+        sending: false,
+        draft: await _store.getDraft(_source, conversationKey),
+        sendEpoch: state.sendEpoch + 1,
+      );
+      await _onSent?.call();
+      return SendOutcome.sent;
+    } on AuthException catch (e) {
+      state = state.copyWith(sending: false, error: e.message);
+      return SendOutcome.failed;
+    } on GraphTeamsException catch (e) {
+      state = state.copyWith(sending: false, error: e.message);
+      return SendOutcome.failed;
+    } catch (e) {
+      state = state.copyWith(sending: false, error: 'Could not send: $e');
+      return SendOutcome.failed;
+    }
+  }
+
   /// `Mail.ReadWrite` without `Mail.Send`: the reply exists in Outlook and the
   /// user finishes it there. The stored draft stays `suggested` — it was not
   /// sent, and marking it so would be a lie the next reader acts on.
@@ -588,6 +666,7 @@ final draftProvider =
     ref.watch(authSessionProvider),
     ref.watch(mailBackendProvider),
     target,
+    teams: ref.watch(teamsBackendProvider),
     worker: ref.watch(aiWorkerProvider),
     onSent: () => ref.read(conversationsProvider.notifier).load(),
   ),

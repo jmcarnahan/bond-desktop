@@ -1,10 +1,14 @@
-/// The Teams chat reads this app makes: the chat list, one chat's members, and
-/// a chat's messages since a cursor. Nothing here touches sqlite — `TeamsSync`
-/// owns the writes.
+/// The Teams chats this app reads and writes: the chat list, one chat's
+/// members, a chat's messages since a cursor, the read viewpoint, and a reply.
+/// Nothing here touches sqlite — `TeamsSync` and `DraftNotifier` own the writes.
 ///
 /// **Nothing here may be called from a timer.** Microsoft's terms for the Teams
 /// messaging endpoints forbid background polling: every call must trace back to
-/// something the user did. `TeamsSync` is the only caller and it enforces that.
+/// something the user did. The reads are made only by `TeamsSync`, which
+/// enforces that; the two writes below need no enforcing, because a send is a
+/// button press and a read-ack is queued by the act of opening a thread — a
+/// write is a user action by construction, which is exactly why it is allowed
+/// here at all.
 ///
 /// Channel messages are deliberately absent: reading a team's channels needs
 /// tenant-wide admin consent this app does not ask for, while 1:1 and group
@@ -38,4 +42,20 @@ abstract class TeamsBackend {
     String? sinceIso, {
     int maxPages = 40,
   });
+
+  /// Marks a chat read for the signed-in user, up to its newest message.
+  ///
+  /// Per CHAT, not per message: Teams read state is a viewpoint on the
+  /// conversation, so there is nothing here to enumerate. Requires
+  /// `chat.readwrite`; callers gate on the grant before calling.
+  Future<void> markChatRead(String chatId);
+
+  /// Posts a plain-text message to a chat, and returns it as stored.
+  ///
+  /// The returned message carries the id and timestamps Graph assigned, which
+  /// is what lets the caller write the outbound row itself instead of waiting
+  /// for the next user-triggered pull to discover its own reply. Its shape is
+  /// the one [chatMessagesSince] hands back, so the row built from it is the
+  /// row a sync would have built.
+  Future<Map<String, dynamic>> sendChatMessage(String chatId, String text);
 }

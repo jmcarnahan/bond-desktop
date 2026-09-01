@@ -6,6 +6,7 @@ import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
+import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/read_ack_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -74,6 +75,30 @@ class _FakeMail implements MailBackend {
   Future<void> sendDraft(String draftId) => throw UnimplementedError();
 }
 
+/// A [TeamsBackend] that records every chat it was told to mark read.
+///
+/// Only [markChatRead] is implemented, for [_FakeMail]'s reason: a chat ack is
+/// one call against the conversation, and anything else this queue reached for
+/// would be a bug worth an UnimplementedError.
+class _FakeTeams implements TeamsBackend {
+  /// One entry per [markChatRead] call, in order.
+  final List<String> acks = [];
+
+  /// Thrown instead of answering. Set after construction, since the queue is
+  /// built in `setUp` and a failure is a per-test decision.
+  Object? error;
+
+  @override
+  Future<void> markChatRead(String chatId) async {
+    acks.add(chatId);
+    final thrown = error;
+    if (thrown != null) throw thrown;
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
 /// A session that grants exactly what it was built with.
 class _FakeAuth implements AuthSession {
   final Set<String> scopes;
@@ -103,11 +128,13 @@ void main() {
   late BondDatabase db;
   late MessageStore store;
   late _FakeMail mail;
+  late _FakeTeams teams;
 
   setUp(() {
     db = testDb();
     store = MessageStore(db);
     mail = _FakeMail();
+    teams = _FakeTeams();
   });
 
   tearDown(() => db.close());
@@ -119,6 +146,7 @@ void main() {
       ReadAckQueue(
         store,
         mail,
+        teams,
         auth ?? _FakeAuth(),
         activityLog: log,
       );
@@ -350,24 +378,30 @@ void main() {
   });
 
   group('chats', () {
-    test('a Teams ack waits rather than draining or failing', () async {
-      // Phase 1 queues these already and the branch that sends them does not
-      // exist yet. What must not happen is either half of the obvious wrong
-      // answer: acking a chat through the MAIL backend, or burning the row's
-      // attempts against a call nobody makes.
+    test('are acked by the chat, through the Teams backend, not the mail one',
+        () async {
+      // The whole shape of a Teams ack. The entity id IS the chat, and the
+      // message ids the payload names are covered by construction: Teams keeps
+      // one read viewpoint per conversation and moving it to the newest message
+      // marks everything behind it read. Sending those ids anywhere — least of
+      // all to the MAIL backend — would be the wrong call entirely.
       await message('chat-m1', source: 'teams', conversationKey: 'chat-1');
+      await message('chat-m2',
+          source: 'teams',
+          conversationKey: 'chat-1',
+          receivedAt: '2026-08-28T11:00:00Z');
       await store.markConversationRead('teams', 'chat-1');
 
       await queueWith().pump();
 
+      expect(teams.acks, ['chat-1']);
       expect(mail.acks, isEmpty);
       final row = await workRow('chat-1', source: 'teams');
-      expect(row['status'], 'pending');
+      expect(row['status'], 'done');
       expect(row['attempts'], 0);
-      expect(row['error'], isNull);
     });
 
-    test('and does not hold up the mail beside it', () async {
+    test('and drain beside the mail rather than instead of it', () async {
       await message('chat-m1', source: 'teams', conversationKey: 'chat-1');
       await store.markConversationRead('teams', 'chat-1');
       await message('m1');
@@ -375,8 +409,85 @@ void main() {
 
       await queueWith().pump();
 
+      expect(teams.acks, ['chat-1']);
       expect(mail.acks.single, ['m1']);
       expect((await workRow('c1'))['status'], 'done');
+      expect((await workRow('chat-1', source: 'teams'))['status'], 'done');
+    });
+
+    test('a failed chat ack retries and then parks, like any other', () async {
+      await message('chat-m1', source: 'teams', conversationKey: 'chat-1');
+      await store.markConversationRead('teams', 'chat-1');
+      teams.error = StateError('the chat is gone');
+      final queue = queueWith();
+
+      await queue.pump();
+      var row = await workRow('chat-1', source: 'teams');
+      expect(row['status'], 'pending');
+      expect(row['attempts'], 1);
+      expect(row['error'], contains('the chat is gone'));
+
+      await queue.pump();
+      await queue.pump();
+
+      row = await workRow('chat-1', source: 'teams');
+      expect(row['status'], 'error');
+      expect(row['attempts'], 3);
+      expect(teams.acks, hasLength(3));
+    });
+
+    test('a chat.readwrite the grant lacks skips the row, spending nothing',
+        () async {
+      // The gate is per SOURCE: mail can be ackable in the same drain that a
+      // chat is not, because the two rest on different scopes.
+      await message('chat-m1', source: 'teams', conversationKey: 'chat-1');
+      await store.markConversationRead('teams', 'chat-1');
+      await message('m1');
+      await store.markConversationRead('email', 'c1');
+
+      await queueWith(
+        auth: _FakeAuth(scopes: const {'mail.read', 'mail.readwrite'}),
+      ).pump();
+
+      expect(teams.acks, isEmpty);
+      expect((await workRow('chat-1', source: 'teams'))['status'], 'skipped');
+      expect(mail.acks.single, ['m1']);
+      expect((await workRow('c1'))['status'], 'done');
+    });
+
+    test('a dead session parks the chat row, unattempted', () async {
+      await message('chat-m1', source: 'teams', conversationKey: 'chat-1');
+      await store.markConversationRead('teams', 'chat-1');
+      teams.error = const NotSignedIn();
+
+      await queueWith().pump();
+
+      final row = await workRow('chat-1', source: 'teams');
+      expect(row['status'], 'pending');
+      expect(row['attempts'], 0,
+          reason: 'the session broke, not the item');
+    });
+
+    test('the panel is told how many messages the read was worth', () async {
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      await message('chat-m1', source: 'teams', conversationKey: 'chat-1');
+      await message('chat-m2',
+          source: 'teams',
+          conversationKey: 'chat-1',
+          receivedAt: '2026-08-28T11:00:00Z');
+      await store.markConversationRead('teams', 'chat-1');
+
+      await queueWith(log: log).pump();
+
+      final event = (await store.recentActivity()).single;
+      expect(event['kind'], 'mark_read');
+      expect(event['status'], 'ok');
+      expect(event['source'], 'teams');
+      expect(event['entity_id'], 'chat-1');
+      // The ids are not sent anywhere — one viewpoint call covers them — but
+      // they are still what the read was worth, so the row says so.
+      expect(event['count'], 2);
     });
   });
 

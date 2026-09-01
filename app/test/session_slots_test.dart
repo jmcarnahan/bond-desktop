@@ -146,6 +146,13 @@ class _FakeTeams implements TeamsBackend {
     int maxPages = 40,
   }) async =>
       const [];
+
+  @override
+  Future<void> markChatRead(String chatId) async {}
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessage(String chatId, String text) =>
+      throw UnimplementedError();
 }
 
 /// Two endpoints that resolve without DNS and refuse instantly. The widget

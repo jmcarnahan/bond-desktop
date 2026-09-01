@@ -64,6 +64,7 @@ Map<String, dynamic> _chat({
   required String id,
   String? topic,
   String? previewAt,
+  String? readAt,
 }) =>
     {
       'id': id,
@@ -72,6 +73,11 @@ Map<String, dynamic> _chat({
       'lastMessagePreview': previewAt == null
           ? null
           : {'id': 'p', 'createdDateTime': previewAt},
+      // Absent unless a test says otherwise — which is the case that matters
+      // most, since a tenant that does not surface the viewpoint is the one the
+      // fail-quiet rule exists for.
+      'viewpoint':
+          readAt == null ? null : {'lastMessageReadDateTime': readAt},
     };
 
 Map<String, dynamic> _message({
@@ -244,7 +250,8 @@ void main() {
       expect(m['from_address'], 'teams:u1');
       expect(m['conversation_key'], 'chat-1');
       expect(m['subject'], isNull, reason: 'a chat message has no subject');
-      expect(m['is_read'], 1);
+      expect(m['is_read'], 1,
+          reason: 'this chat carries no viewpoint — see the read-state group');
       expect(m['triage_status'], 'skipped');
       expect(m['gate_reason'], teamsSourceGate);
     });
@@ -315,6 +322,112 @@ void main() {
 
       expect((await row('m1'))['from_address'], isNull);
       expect((await row('m1'))['direction'], 'inbound');
+    });
+  });
+
+  group('read state comes from the chat’s viewpoint', () {
+    /// One chat whose viewpoint says the user has read up to [readAt], holding
+    /// the two messages [_readState] asks about.
+    void seed({String? readAt}) {
+      graph.chats.add(_chat(
+        id: 'chat-1',
+        previewAt: _iso(Duration.zero),
+        readAt: readAt,
+      ));
+      graph.members['chat-1'] = [
+        {'userId': 'u1', 'displayName': 'Sarah Whitfield'},
+      ];
+    }
+
+    test('a message older than the viewpoint is read, a newer one is not',
+        () async {
+      // Teams keeps ONE read timestamp per chat, and this is the whole feature:
+      // projected back onto each message, it is what bolds a chat in the rail
+      // exactly as an unread mail thread is bolded — and what un-bolds it when
+      // the user reads the chat in Teams itself, since the viewpoint is server
+      // truth and arrives on the next pull for free.
+      seed(readAt: _iso(const Duration(hours: 2)));
+      graph.messages['chat-1'] = [
+        _message(id: 'seen', at: _iso(const Duration(hours: 3))),
+        _message(id: 'new', at: _iso(const Duration(hours: 1))),
+      ];
+
+      await build().syncNow();
+
+      expect((await row('seen'))['is_read'], 1);
+      expect((await row('new'))['is_read'], 0);
+    });
+
+    test('a message AT the viewpoint is read, not unread', () async {
+      // The viewpoint names the newest message the user has seen, so the
+      // boundary belongs on the read side of it.
+      final at = _iso(const Duration(hours: 2));
+      seed(readAt: at);
+      graph.messages['chat-1'] = [_message(id: 'm1', at: at)];
+
+      await build().syncNow();
+
+      expect((await row('m1'))['is_read'], 1);
+    });
+
+    test('the user’s own message is read whatever the viewpoint says',
+        () async {
+      seed(readAt: _iso(const Duration(hours: 5)));
+      graph.messages['chat-1'] = [
+        _message(
+          id: 'mine',
+          userId: _myId,
+          displayName: 'Bond LO',
+          at: _iso(const Duration(minutes: 1)),
+        ),
+      ];
+
+      await build().syncNow();
+
+      expect((await row('mine'))['is_read'], 1,
+          reason: 'a reply the user wrote is not news to them');
+    });
+
+    test('a chat with no viewpoint stores everything read', () async {
+      // The regression that matters: a tenant or a backend that does not
+      // surface the viewpoint gets exactly the behaviour this app had before it
+      // read viewpoints at all. The other way round — unread on a guess — is a
+      // thread that bolds itself forever and cannot be cleared by opening it.
+      seed();
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(minutes: 1))),
+      ];
+
+      await build().syncNow();
+
+      expect((await row('m1'))['is_read'], 1);
+    });
+
+    test('an unparseable timestamp falls the same way', () async {
+      seed(readAt: 'not a timestamp');
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(minutes: 1))),
+      ];
+
+      await build().syncNow();
+
+      expect((await row('m1'))['is_read'], 1);
+    });
+
+    test('an unread chat reaches the list as a bold row', () async {
+      // The end the whole chain is for: `loadConversations` counts unread
+      // inbound messages, and that count is what the rail renders in bold.
+      seed(readAt: _iso(const Duration(hours: 2)));
+      graph.messages['chat-1'] = [
+        _message(id: 'new', at: _iso(const Duration(hours: 1))),
+      ];
+
+      await build().syncNow();
+
+      final conversation =
+          (await store.loadConversations(sources: const ['teams'])).single;
+      expect(conversation.unreadCount, 1);
+      expect(conversation.hasUnread, isTrue);
     });
   });
 

@@ -218,6 +218,80 @@ class GraphTeams implements TeamsBackend {
     return messages;
   }
 
+  /// Marks a chat read for the signed-in user, up to its newest message.
+  ///
+  /// Per CHAT rather than per message, because that is what Teams stores: a
+  /// chat carries one `viewpoint.lastMessageReadDateTime` and Graph moves it to
+  /// the newest message. The ids the queue's payload names are therefore not
+  /// sent — they are covered by construction.
+  ///
+  /// The tenant rides along because `markChatReadForUser` takes a
+  /// `teamworkUserIdentity`, and [GraphAuth.tenantId] is the only tenant this
+  /// file can honestly name: the registration is single-tenant and its
+  /// authorize endpoint is built from that same constant. A build compiled
+  /// without it sends the id alone rather than an empty string, which Graph
+  /// would read as a tenant that does not exist.
+  ///
+  /// **Dormant in SDK mode.** Sign-in requests no `Chat.ReadWrite` — see
+  /// [GraphAuth.pendingAdminScopes] — so this exists for seam parity with the
+  /// MCP backend, which is where the grant actually lives.
+  @override
+  Future<void> markChatRead(String chatId) async {
+    final userId = await myUserId();
+    await _throttleChat(chatId);
+    final response = await _request(
+      'POST',
+      Uri.parse(
+        '$_base/chats/${Uri.encodeComponent(chatId)}/markChatReadForUser',
+      ),
+      jsonBody: {
+        'user': {
+          'id': userId,
+          if (GraphAuth.tenantId.isNotEmpty) 'tenantId': GraphAuth.tenantId,
+        },
+      },
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _describe(response, 'Could not mark a Teams chat read');
+    }
+  }
+
+  /// Posts a plain-text message to a chat, and returns it as Graph stored it.
+  ///
+  /// `contentType: 'text'` is stated rather than left to Graph's default: the
+  /// composer holds exactly what somebody typed, and letting it be read as HTML
+  /// would turn a typed `<` into markup.
+  ///
+  /// The decoded response is the whole point of returning anything — it carries
+  /// the id Graph assigned, which is what the caller writes into its own
+  /// outbound row so the next pull recognises the message as one it has.
+  ///
+  /// **Dormant in SDK mode**, for the reason [markChatRead] gives.
+  @override
+  Future<Map<String, dynamic>> sendChatMessage(
+    String chatId,
+    String text,
+  ) async {
+    await _throttleChat(chatId);
+    final response = await _request(
+      'POST',
+      Uri.parse('$_base/chats/${Uri.encodeComponent(chatId)}/messages'),
+      jsonBody: {
+        'body': {'contentType': 'text', 'content': text},
+      },
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _describe(response, 'Could not send your Teams message');
+    }
+    final message = _decodeObject(response);
+    if ((message['id'] as String?)?.isNotEmpty != true) {
+      throw const GraphTeamsException(
+        'Microsoft Graph stored the message but returned no id for it.',
+      );
+    }
+    return message;
+  }
+
   /// Whether this page's oldest message is at or before the cursor.
   ///
   /// An empty page ends the walk: there is nothing older to ask for. A page
@@ -286,20 +360,37 @@ class GraphTeams implements TeamsBackend {
   /// throttle and once for a 401. Same policy as graph_mail.dart, and for the
   /// same reasons — a token minted valid can still be rejected by a revoked
   /// session, and one more pass gives a concurrent refresh a chance to land.
-  Future<http.Response> _send(Uri uri) async {
+  Future<http.Response> _send(Uri uri) => _request('GET', uri);
+
+  /// One authenticated request of any method, under the retry policy above.
+  ///
+  /// [jsonBody] is encoded and sent with the JSON content type; omitting it
+  /// sends no body at all. Shaped after graph_mail.dart's `_request` so the two
+  /// files answer a throttle and a stale token the same way.
+  Future<http.Response> _request(
+    String method,
+    Uri uri, {
+    Map<String, dynamic>? jsonBody,
+  }) async {
     var retriedThrottle = false;
     var retriedAuth = false;
+    final body = jsonBody == null ? null : jsonEncode(jsonBody);
 
     while (true) {
       // Outside the try: an AuthException from here is not a transport
       // failure and must reach the caller as itself.
       final token = await _auth.getValidAccessToken();
+      final headers = {
+        'Authorization': 'Bearer $token',
+        if (body != null) 'Content-Type': 'application/json',
+      };
 
       final http.Response response;
       try {
-        response = await _http.get(uri, headers: {
-          'Authorization': 'Bearer $token',
-        });
+        response = switch (method) {
+          'POST' => await _http.post(uri, headers: headers, body: body),
+          _ => await _http.get(uri, headers: headers),
+        };
       } on http.ClientException catch (e) {
         throw GraphTeamsException(
           'Could not reach Microsoft Graph: ${e.message}',

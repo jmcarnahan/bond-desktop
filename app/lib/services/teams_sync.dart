@@ -172,6 +172,7 @@ class TeamsSync {
           members,
           myId: myId,
           firstSight: firstSight,
+          lastReadAt: _viewpointReadAt(chat['viewpoint']),
         );
       }
 
@@ -240,6 +241,12 @@ class TeamsSync {
   static String? _previewTimestamp(Object? raw) =>
       raw is Map ? raw['createdDateTime'] as String? : null;
 
+  /// How far this user has read the chat, or null when the tenant does not say.
+  ///
+  /// Null is a real answer and the safe one — see [_isRead] for what it buys.
+  static String? _viewpointReadAt(Object? raw) =>
+      raw is Map ? raw['lastMessageReadDateTime'] as String? : null;
+
   /// Stores one chat's messages and folds its conversation, all or nothing.
   /// Returns how many messages were seen for the first time.
   ///
@@ -259,6 +266,7 @@ class TeamsSync {
     List<Map<String, dynamic>> members, {
     required String myId,
     required bool firstSight,
+    required String? lastReadAt,
   }) {
     return _store.db.transaction(() async {
       var newMessages = 0;
@@ -278,7 +286,7 @@ class TeamsSync {
       }
 
       for (final message in raw) {
-        final row = _messageRow(message, key, myId);
+        final row = _messageRow(message, key, myId, lastReadAt);
         if (row == null) continue;
 
         final id = row['source_message_id'] as String;
@@ -303,16 +311,48 @@ class TeamsSync {
     });
   }
 
+  /// One chat message this sync pulled, as a `messages` row.
+  ///
+  /// Only the direction is this method's own: everything else is
+  /// [TeamsSync.messageRow], so a message the app sends itself stores exactly
+  /// the columns a message it pulled would.
+  Map<String, Object?>? _messageRow(
+    Map<String, dynamic> message,
+    String key,
+    String myId,
+    String? lastReadAt,
+  ) {
+    final (_, senderId, _) = _sender(message['from']);
+    return messageRow(
+      message,
+      key,
+      outbound: senderId != null && senderId == myId,
+      lastReadAt: lastReadAt,
+    );
+  }
+
   /// One Graph chat message as a `messages` row, or null when it is not one.
   ///
   /// Graph mixes system events into the same feed — someone joined, the topic
   /// changed, a call ended — and only `messageType: 'message'` is something a
   /// person said.
-  Map<String, Object?>? _messageRow(
+  ///
+  /// **The one place a chat message becomes a row**, called both by this sync
+  /// and by the composer's send — which is the point. A reply the app posts is
+  /// written locally from what Graph handed back, and if that row disagreed
+  /// with the one the next pull would build, the disagreement would live in the
+  /// database until somebody noticed a chat behaving unlike every other chat.
+  ///
+  /// [outbound] is passed rather than derived because the two callers know it
+  /// differently: the sync compares the sender against the signed-in user's id,
+  /// while the composer knows it wrote the message itself and must not depend
+  /// on Graph having echoed a `from` back at all.
+  static Map<String, Object?>? messageRow(
     Map<String, dynamic> message,
-    String key,
-    String myId,
-  ) {
+    String key, {
+    required bool outbound,
+    String? lastReadAt,
+  }) {
     if (message['messageType'] != 'message') return null;
     final id = message['id'] as String?;
     if (id == null || id.isEmpty) return null;
@@ -326,7 +366,7 @@ class TeamsSync {
       // The chat IS the thread. Unlike mail there is no separate conversation
       // id to fall back from, and a chat id is already unique.
       'conversation_key': key,
-      'direction': (senderId != null && senderId == myId) ? 'outbound' : 'inbound',
+      'direction': outbound ? 'outbound' : 'inbound',
       'from_name': name,
       'from_address': senderId == null ? null : teamsAddress(senderId),
       // A chat message has no subject and inventing one from its first line
@@ -337,13 +377,51 @@ class TeamsSync {
           ? bodyText.substring(0, _previewChars)
           : bodyText,
       'received_at': message['createdDateTime'] as String?,
-      // Read state is per-chat in Teams, not per-message, and this app never
-      // marks anything read. Stored read so nothing downstream renders a chat
-      // as unread mail.
-      'is_read': 1,
+      'is_read': _isRead(
+        message['createdDateTime'] as String?,
+        lastReadAt,
+        outbound: outbound,
+      )
+          ? 1
+          : 0,
       'triage_status': 'skipped',
       'gate_reason': fromApplication ? teamsBotGate : teamsSourceGate,
     };
+  }
+
+  /// Whether one chat message counts as already read.
+  ///
+  /// Teams keeps read state per CHAT, not per message: the chat carries one
+  /// `viewpoint.lastMessageReadDateTime`, and everything at or before it has
+  /// been seen. That single timestamp is projected back onto each message here,
+  /// which is what lets a chat bold the rail the way an unread mail thread does
+  /// — and what makes reading the chat in Teams itself un-bold it here, since
+  /// the viewpoint is server truth and arrives on the next pull for free.
+  ///
+  /// Every uncertain case answers READ, deliberately. A tenant whose chat list
+  /// carries no viewpoint, or a timestamp neither Graph nor this app can parse,
+  /// gets exactly the behaviour this app had before it read viewpoints at all.
+  /// The failure that matters is the other one: a thread called unread on a
+  /// guess bolds itself forever, and no amount of opening it helps. It is also
+  /// why no migration backfills anything: every Teams row already stored was
+  /// written read, which is exactly what this answers for a chat it cannot
+  /// place.
+  ///
+  /// Parsed rather than string-compared, unlike the rest of this file: the two
+  /// timestamps come from different Graph properties and need not agree on
+  /// fractional-second digits, which is enough to make `<=` on the strings
+  /// disagree with `<=` on the instants.
+  static bool _isRead(
+    String? createdAt,
+    String? lastReadAt, {
+    required bool outbound,
+  }) {
+    if (outbound) return true;
+    if (createdAt == null || lastReadAt == null) return true;
+    final created = DateTime.tryParse(createdAt);
+    final read = DateTime.tryParse(lastReadAt);
+    if (created == null || read == null) return true;
+    return !created.isAfter(read);
   }
 
   /// `(display name, graph id, sent by an application)`.

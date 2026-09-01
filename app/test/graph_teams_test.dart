@@ -45,12 +45,23 @@ http.Response _jsonOk(Object body) => http.Response(
       headers: const {'content-type': 'application/json'},
     );
 
-/// One request as it was seen: the URL, and when it left.
+/// One request as it was seen: the method, the URL, the body, and when it left.
 class _Sent {
+  final String method;
   final Uri url;
+  final String? body;
   final DateTime at;
 
-  _Sent(this.url, this.at);
+  _Sent(this.method, this.url, this.body, this.at);
+
+  /// The body decoded, or an empty map when there was none. Every write in
+  /// this file sends JSON.
+  Map<String, dynamic> get json {
+    final raw = body;
+    if (raw == null || raw.isEmpty) return const {};
+    final decoded = jsonDecode(raw);
+    return decoded is Map<String, dynamic> ? decoded : const {};
+  }
 }
 
 class _GraphStub {
@@ -59,7 +70,18 @@ class _GraphStub {
   final Map<String, List<http.Response Function()>> messagePages = {};
   http.Response Function()? members;
 
+  /// What a POST to a chat's `/messages` answers with — the message as Graph
+  /// stored it.
+  http.Response Function()? posted;
+
+  /// What `markChatReadForUser` answers with. Graph's own answer is a bare 204.
+  http.Response Function() markRead = () => http.Response('', 204);
+
   List<Uri> get urls => [for (final s in sent) s.url];
+
+  /// Every request whose URL ends in [suffix], in order.
+  List<_Sent> to(String suffix) =>
+      [for (final s in sent) if (s.url.path.endsWith(suffix)) s];
 
   /// The gap before the [i]th request, in milliseconds.
   int gapBefore(int i) =>
@@ -78,7 +100,7 @@ class _GraphStub {
 
         expect(request.headers['Authorization'], startsWith('Bearer '),
             reason: 'every Graph call carries the bearer token');
-        sent.add(_Sent(request.url, DateTime.now()));
+        sent.add(_Sent(request.method, request.url, request.body, DateTime.now()));
 
         final path = request.url.path;
         if (path.endsWith('/me')) return _jsonOk({'id': 'me-1'});
@@ -88,6 +110,10 @@ class _GraphStub {
         }
         if (path.endsWith('/members')) {
           return (members ?? () => _jsonOk({'value': const []}))();
+        }
+        if (path.endsWith('/markChatReadForUser')) return markRead();
+        if (path.endsWith('/messages') && request.method == 'POST') {
+          return (posted ?? () => _jsonOk({'id': 'posted-1'}))();
         }
         if (path.endsWith('/messages')) {
           final chatId = Uri.decodeComponent(
@@ -369,6 +395,87 @@ void main() {
 
       expect(graph.urls.length, 2);
       expect(graph.gapBefore(1), greaterThanOrEqualTo(gap.inMilliseconds - 10));
+    });
+  });
+
+  group('the writes', () {
+    test('marking a chat read names the user, per chat and not per message',
+        () async {
+      // Teams has no per-message read state to send: the chat carries one
+      // viewpoint and this call moves it to the newest message. So the body is
+      // a user, and the chat is in the URL.
+      await build().markChatRead('chat-1');
+
+      final post = graph.to('/markChatReadForUser').single;
+      expect(post.method, 'POST');
+      expect(post.url.path, endsWith('/chats/chat-1/markChatReadForUser'));
+      final user = post.json['user'] as Map<String, dynamic>;
+      expect(user['id'], 'me-1', reason: 'read by whom — /me answered it');
+      // The tenant is a compile-time constant, and this binary defines none.
+      // The id travels alone rather than beside an empty tenantId, which Graph
+      // would read as a tenant that does not exist; a build compiled with
+      // MS_TENANT_ID sends both.
+      expect(user.containsKey('tenantId'), GraphAuth.tenantId.isNotEmpty);
+    });
+
+    test('a 204 is the success shape, and a 403 is not', () async {
+      await build().markChatRead('chat-1');
+
+      graph.markRead = () => http.Response('no consent', 403);
+      await expectLater(
+        build().markChatRead('chat-1'),
+        throwsA(isA<GraphTeamsException>()
+            .having((e) => e.statusCode, 'statusCode', 403)),
+      );
+    });
+
+    test('a sent message is plain text, and comes back with Graph’s id',
+        () async {
+      // `contentType: text` is STATED. The composer holds what somebody typed,
+      // and letting Graph read it as HTML would turn a typed `<` into markup.
+      graph.posted = () => _jsonOk({
+            'id': 'sent-1',
+            'messageType': 'message',
+            'createdDateTime': '2026-08-28T12:00:00Z',
+            'body': {'contentType': 'text', 'content': 'On it.'},
+          });
+
+      final sent = await build().sendChatMessage('chat-1', 'On it.');
+
+      final post = graph.to('/messages').single;
+      expect(post.method, 'POST');
+      expect(post.url.path, endsWith('/chats/chat-1/messages'));
+      expect(post.json['body'], {'contentType': 'text', 'content': 'On it.'});
+      // The id is the whole reason anything is returned: the caller writes it
+      // into its own outbound row so the next pull knows the message already.
+      expect(sent['id'], 'sent-1');
+    });
+
+    test('a stored message with no id is a failure, not a silent one',
+        () async {
+      // Without the id the caller cannot write a row the next pull will
+      // recognise, and the reply would fold in a second time.
+      graph.posted = () => _jsonOk({'messageType': 'message'});
+
+      await expectLater(
+        build().sendChatMessage('chat-1', 'On it.'),
+        throwsA(isA<GraphTeamsException>()),
+      );
+    });
+
+    test('both sit behind the same per-chat floor the reads do', () async {
+      const gap = Duration(milliseconds: 120);
+      final teams = build(sameChatGap: gap);
+
+      await teams.chatMessagesSince('chat-1', null);
+      await teams.sendChatMessage('chat-1', 'On it.');
+
+      final posts = graph.to('/messages');
+      expect(posts, hasLength(2));
+      expect(
+        posts[1].at.difference(posts[0].at).inMilliseconds,
+        greaterThanOrEqualTo(gap.inMilliseconds - 10),
+      );
     });
   });
 

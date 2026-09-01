@@ -7,6 +7,7 @@ import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
+import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/read_ack_queue.dart';
@@ -88,12 +89,12 @@ class _RecordingTeams extends TeamsSync {
 /// test can count would put a seam in production code only the test needs.
 ///
 /// It matters here and not only in `read_ack_test.dart` because of what the
-/// queue will carry from phase 4 on: a Teams read-ack is a Graph call against
-/// a chat, and the sixty-second timer must not be able to reach it.
+/// queue now carries: a Teams read-ack is a Graph call against a chat, and the
+/// sixty-second timer must not be able to reach it.
 class _CountingAcks extends ReadAckQueue {
   int pumps = 0;
 
-  _CountingAcks(super.store, super.mail, super.auth);
+  _CountingAcks(super.store, super.mail, super.teams, super.auth);
 
   @override
   Future<void> pump() async => pumps++;
@@ -102,6 +103,13 @@ class _CountingAcks extends ReadAckQueue {
 /// A mail backend that would throw if the ack queue ever reached it. It never
 /// does: [_CountingAcks] answers first.
 class _UnreachableMail implements MailBackend {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
+/// And the chat half of the same thing — the one the ToU rule is actually
+/// about.
+class _UnreachableTeams implements TeamsBackend {
   @override
   dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
 }
@@ -140,7 +148,12 @@ void main() {
     db = testDb();
     store = MessageStore(db);
     sync = _FakeSync();
-    acks = _CountingAcks(store, _UnreachableMail(), _NoScopes());
+    acks = _CountingAcks(
+      store,
+      _UnreachableMail(),
+      _UnreachableTeams(),
+      _NoScopes(),
+    );
     httpCalls = 0;
 
     final client = MockClient((request) async {

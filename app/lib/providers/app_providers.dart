@@ -127,6 +127,7 @@ final readAckQueueProvider = Provider<ReadAckQueue>((ref) {
   return ReadAckQueue(
     ref.watch(messageStoreProvider),
     ref.watch(mailBackendProvider),
+    ref.watch(teamsBackendProvider),
     ref.watch(authSessionProvider),
     activityLog: ref.watch(activityLogProvider),
   );

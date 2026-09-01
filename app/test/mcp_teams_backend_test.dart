@@ -122,6 +122,7 @@ void main() {
                 'id': 'chat-1',
                 'topic': 'Website redesign',
                 'last_preview_at': '2026-08-28T11:00:00Z',
+                'last_read_at': '2026-08-28T10:30:00Z',
               },
               {'id': 'chat-2', 'topic': null, 'last_preview_at': null},
             ],
@@ -137,10 +138,22 @@ void main() {
           'id': 'chat-1',
           'topic': 'Website redesign',
           'lastMessagePreview': {'createdDateTime': '2026-08-28T11:00:00Z'},
+          // The read viewpoint is reshaped like the preview, because
+          // `teams_sync.dart` reads Graph's nested shape and the Graph backend
+          // hands it back untouched. A flat `last_read_at` reaching the sync
+          // would read as no viewpoint at all, and every chat would store read.
+          'viewpoint': {'lastMessageReadDateTime': '2026-08-28T10:30:00Z'},
         },
         // Null, not an empty object: "nothing known" is what makes the sync
-        // fetch the chat, and an empty object would read as a timestamp.
-        {'id': 'chat-2', 'topic': null, 'lastMessagePreview': null},
+        // fetch the chat, and an empty object would read as a timestamp. The
+        // same for the viewpoint — a server that does not send one leaves the
+        // chat's messages stored read, which is the fail-quiet answer.
+        {
+          'id': 'chat-2',
+          'topic': null,
+          'lastMessagePreview': null,
+          'viewpoint': null,
+        },
       ]);
     });
 
@@ -437,6 +450,100 @@ void main() {
     });
   });
 
+  group('marking a chat read', () {
+    test('names the chat and nothing else', () async {
+      // No message ids and no user: the server resolves the identity from the
+      // connected account, and Teams keeps one read viewpoint per chat.
+      final mcp = _FakeMcp({
+        'mark_chat_read_json': [
+          {'ok': true},
+        ],
+      });
+
+      await _build(mcp).markChatRead('chat-1');
+
+      expect(mcp.argsOf('mark_chat_read_json').single, {'chat_id': 'chat-1'});
+    });
+
+    test('an ok:false is a failure the queue must see, not a quiet no-op',
+        () async {
+      // The whole point of the ack queue is noticing a read that did not land.
+      // Swallowing this would leave the server's unread badge wrong forever
+      // with nothing recorded anywhere.
+      final mcp = _FakeMcp({
+        'mark_chat_read_json': [
+          {'ok': false, 'error': 'no_identity'},
+        ],
+      });
+
+      await expectLater(
+        _build(mcp).markChatRead('chat-1'),
+        throwsA(isA<GraphTeamsException>()
+            .having((e) => e.message, 'message', contains('no_identity'))),
+      );
+    });
+
+    test('an unconnected workspace is still a sign-in problem', () async {
+      final mcp = _FakeMcp({
+        'mark_chat_read_json': [
+          {'error': 'not_connected', 'connect_url': null},
+        ],
+      });
+
+      await expectLater(
+        _build(mcp).markChatRead('chat-1'),
+        throwsA(isA<ReconsentRequired>()),
+      );
+    });
+  });
+
+  group('sending a chat message', () {
+    test('carries the text, and answers in the shape a synced message has',
+        () async {
+      // Shape-identical on purpose: the caller writes this straight into
+      // `messages`, and a row built from a different shape would disagree with
+      // the one the next pull builds for the very same message.
+      final mcp = _FakeMcp({
+        'send_chat_message_json': [
+          {'message': _wireMessage(id: 'sent-1', fromUserId: 'me-1')},
+        ],
+      });
+
+      final sent = await _build(mcp).sendChatMessage('chat-1', 'On it.');
+
+      expect(mcp.argsOf('send_chat_message_json').single, {
+        'chat_id': 'chat-1',
+        'text': 'On it.',
+      });
+      expect(sent, {
+        'id': 'sent-1',
+        'messageType': 'message',
+        'createdDateTime': '2026-08-28T10:00:00Z',
+        'lastModifiedDateTime': '2026-08-28T10:00:00Z',
+        'body': {'contentType': 'text', 'content': 'hello'},
+        'from': {
+          'user': {'id': 'me-1', 'displayName': 'Sarah Whitfield'},
+        },
+      });
+    });
+
+    test('a null message is a send that did not happen', () async {
+      // Returning something empty here would put "sent" on screen over a chat
+      // that never received anything.
+      final mcp = _FakeMcp({
+        'send_chat_message_json': [
+          {'message': null, 'error': 'text must not be empty'},
+        ],
+      });
+
+      await expectLater(
+        _build(mcp).sendChatMessage('chat-1', ''),
+        throwsA(isA<GraphTeamsException>()
+            .having((e) => e.message, 'message', contains('must not be empty'))),
+      );
+    });
+  });
+
   group('the throttle floors', () {
     test('are the Graph backend’s own, not a second pair', () {
       // The ToU discipline is ours whichever transport carries the request.
@@ -464,6 +571,24 @@ void main() {
 
       expect(mcp.gapBefore(1), lessThan(400),
           reason: 'the floor is per chat, as the throttle is');
+    });
+
+    test('and the writes wait on it too, not only the reads', () async {
+      const gap = Duration(milliseconds: 120);
+      final mcp = _FakeMcp({
+        'mark_chat_read_json': [
+          {'ok': true},
+        ],
+        'send_chat_message_json': [
+          {'message': _wireMessage(id: 'sent-1')},
+        ],
+      });
+      final teams = _build(mcp, sameChatGap: gap);
+
+      await teams.markChatRead('chat-1');
+      await teams.sendChatMessage('chat-1', 'On it.');
+
+      expect(mcp.gapBefore(1), greaterThanOrEqualTo(gap.inMilliseconds - 10));
     });
 
     test('and the chat list has a floor of its own', () async {

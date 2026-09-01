@@ -1164,8 +1164,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       },
     );
 
-    // Chats are not reply targets — see [_replyElsewhere] for why. A storyline
-    // of only chats therefore offers the caption instead of a dropdown, and a
+    // A storyline replies to MAIL. A chat is answered in its own thread, where
+    // the reply goes to one conversation the user is looking at — picking a
+    // chat out of a dropdown of episodes is a different, riskier gesture. So a
+    // storyline of only chats offers the caption instead of a dropdown, and a
     // mixed one offers its mail threads.
     final targets = _emailTargets(episodes);
     final replyKey = _replyTargetFor(episodes, targets);
@@ -1277,14 +1279,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _ => (const <Message>[], null),
     };
 
-    // EMAIL ONLY, and the whole reply half of this pane turns on it. A reply
-    // to a chat is not a reply to an email: Graph builds a mail reply for this
-    // app through `createReply`, which knows the recipients, the subject and
-    // the threading headers, and none of that exists for a chat.
-    final email = selected.source == 'email';
     final target = (source: selected.source, conversationKey: selected.id);
-    final draft = email ? ref.watch(draftProvider(target)) : null;
-    final pending = draft?.pending;
+    final draft = ref.watch(draftProvider(target));
+    final pending = draft.pending;
+
+    // Whether this pane offers to reply at all. Mail always does — the ladder
+    // bottoms out at the clipboard, which needs no grant. A chat does only on
+    // the top rung: there is no draft folder and no clipboard rung worth
+    // showing for one, so without `Chat.ReadWrite` the pane says where to reply
+    // instead of offering a box that could not send.
+    final canReply = selected.source == 'email' ||
+        draft.capability == SendCapability.send;
 
     // Computed from the STORED transcript, before the optimistic bubble is
     // appended: a queued reply must not hide the bar that is offering to take
@@ -1319,8 +1324,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The reply affordance rides at the end of the transcript so it reads as
       // attached to the message it answers. After the user's OWN last message
       // there is nothing to answer, and it renders nothing.
-      afterTranscript: email && (answersSomebody || pending != null)
-          ? _quickReplies(selected, target, draft!)
+      afterTranscript: canReply && (answersSomebody || pending != null)
+          ? _quickReplies(selected, target, draft)
           : null,
       onAddToStoryline: () => setState(() => _pickingStorylineForThread =
           (source: selected.source, id: selected.id)),
@@ -1353,12 +1358,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Expanded(child: panel),
           // Collapsed is the default: the box appears when the user says they
           // are writing, and until then the transcript has the pane to itself.
-          if (email && _replyOpenFor == selected.id) ...[
+          if (canReply && _replyOpenFor == selected.id) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyHeader(selected),
             const SizedBox(height: BondSpacing.s4),
             _composer(target),
-          ] else if (!email) ...[
+          ] else if (!canReply) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
           ],
@@ -1454,8 +1459,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _toast('Reply sending.', onUndo: () => _cancelQueuedSend(target));
   }
 
-  /// What stands where the reply box would be on a chat thread. Quiet and
-  /// one line: it is an answer to "where do I reply?", not a feature.
+  /// What stands where the reply box would be when this build cannot send to a
+  /// chat — a grant without `Chat.ReadWrite`, and a storyline whose every
+  /// episode is a chat.
+  ///
+  /// A statement of capability rather than a dead end now: with the grant, a
+  /// chat gets the same reply surface a mail thread does. Quiet and one line
+  /// either way — it is an answer to "where do I reply?", not a feature.
   Widget _replyElsewhere() => Padding(
         padding: const EdgeInsets.symmetric(vertical: BondSpacing.s8),
         child: Text('Reply in Microsoft Teams', style: BondType.caption),
@@ -1494,7 +1504,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       sending: draft.sending,
       capability: draft.capability,
       onSend: (body) => _send(target, body),
-      onGenerate: notifier.generate,
+      // Null for a chat, which is what hides the button rather than offering
+      // one that does nothing: the drafting queue is email-only — a chat wants
+      // a one-line reply from a different prompt, and a second system prompt
+      // would thrash the single-slot model's cached prefix. A chat's composer
+      // is a plain box.
+      onGenerate: target.source == 'email' ? notifier.generate : null,
       onDismiss: notifier.dismiss,
       onEdited: notifier.markEdited,
     );
