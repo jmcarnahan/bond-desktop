@@ -93,6 +93,13 @@ class ActivityLog {
     'storyline_sweep',
   };
 
+  /// Detail keys that describe how much a pass LOOKED AT, not what it
+  /// changed. A connected Teams tenant always has chats to scan, so if the
+  /// scan tally counted as "something happened", no Teams sync would ever be
+  /// quiet and the panel would fill with "nothing new" rows from the one
+  /// connector that only syncs when the user asks.
+  static const Set<String> _scanKeys = {'chats_seen', 'chats_fetched'};
+
   /// Where each pass's completion time is stamped. `storyline` is absent on
   /// purpose: it is per-thread work, so "when did it last run" is a fact about
   /// whichever thread happened to be extracted, not about the mailbox.
@@ -246,11 +253,12 @@ class ActivityLog {
   /// Whether this event is a scheduled pass that came back empty-handed.
   ///
   /// The detail test is the careful half, and it is deliberately conservative:
-  /// a pass is quiet only when EVERY value it carries is a number equal to
-  /// zero. Anything else — a `resync: true`, a model tally, a storyline's
-  /// noted `assigned` — is something that happened, and the row survives to
-  /// say so. Erring this way costs an occasional dull row; erring the other
-  /// way would silently swallow the row that explained a slow morning.
+  /// a pass is quiet only when EVERY value it carries — the scan tallies in
+  /// [_scanKeys] aside — is a number equal to zero. Anything else — a
+  /// `resync: true`, a model tally, a storyline's noted `assigned` — is
+  /// something that happened, and the row survives to say so. Erring this way
+  /// costs an occasional dull row; erring the other way would silently
+  /// swallow the row that explained a slow morning.
   static bool _isQuiet(
     String kind,
     String status,
@@ -260,7 +268,9 @@ class ActivityLog {
     if (!_quietKinds.contains(kind)) return false;
     if (status != 'ok') return false;
     if ((count ?? 0) != 0) return false;
-    return detail.values.every((value) => value is num && value == 0);
+    return detail.entries.every((entry) =>
+        _scanKeys.contains(entry.key) ||
+        (entry.value is num && entry.value == 0));
   }
 
   void _touchPending() {

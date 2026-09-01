@@ -198,12 +198,19 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
   (ref) => EmbeddingsClient(
     // One row per distinct reason, which is what the client's own dedupe
     // already guarantees. `read` and not `watch`: the callback outlives this
-    // body and must not make the client depend on the log's lifetime.
-    onFail: (reason) => ref.read(activityLogProvider).record(
-          'embed_fail',
-          status: 'error',
-          detail: {'reason': reason},
-        ),
+    // body and must not make the client depend on the log's lifetime. The
+    // guard is for the read itself — against a torn-down container it throws,
+    // and this callback sits inside the failure path of a client whose whole
+    // contract is that failure costs nothing.
+    onFail: (reason) {
+      try {
+        ref.read(activityLogProvider).record(
+              'embed_fail',
+              status: 'error',
+              detail: {'reason': reason},
+            );
+      } catch (_) {}
+    },
   ),
 );
 

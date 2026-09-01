@@ -129,6 +129,32 @@ void main() {
       expect(store.getPref(activityLastSyncMailKey), isNotNull);
     });
 
+    test('a Teams walk that scanned chats and stored nothing is quiet', () {
+      // A connected tenant always has chats to scan, so if the scan tally
+      // counted as "something happened", no Teams sync would ever be quiet.
+      log.record(
+        'sync_teams',
+        source: 'teams',
+        count: 0,
+        durationMs: 350,
+        detail: {'chats_seen': 5, 'chats_fetched': 2, 'queued_extract': 0},
+      );
+
+      expect(store.recentActivity(), isEmpty);
+      expect(store.getPref(activityLastSyncTeamsKey), isNotNull);
+
+      // The same walk with a stored message keeps its row, scan tally intact.
+      log.record(
+        'sync_teams',
+        source: 'teams',
+        count: 1,
+        durationMs: 350,
+        detail: {'chats_seen': 5, 'chats_fetched': 2, 'queued_extract': 1},
+      );
+
+      expect(detailOf(only())['chats_seen'], 5);
+    });
+
     test('a detail value that is not a zero is something that happened', () {
       // A 410 recovery moved no mail and is still the most interesting thing
       // the sync did that week.

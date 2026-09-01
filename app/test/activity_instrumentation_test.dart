@@ -336,14 +336,15 @@ void main() {
 
       await sync.syncNow();
       // The same two messages again: Graph replays, and a replay ingested
-      // nothing.
+      // nothing — so it is quiet, even though it scanned and fetched the
+      // chat. The scan tally is how much was looked at, not what changed.
       await sync.syncNow();
 
-      final walks = rows('sync_teams');
-      expect([for (final row in walks) row.count], [0, 2]);
-      expect(walks.last.detail['chats_seen'], 1);
-      expect(walks.last.detail['chats_fetched'], 1);
-      expect(walks.last.detail['queued_extract'], 2);
+      final walk = rows('sync_teams').single;
+      expect(walk.count, 2);
+      expect(walk.detail['chats_seen'], 1);
+      expect(walk.detail['chats_fetched'], 1);
+      expect(walk.detail['queued_extract'], 2);
     });
   });
 
