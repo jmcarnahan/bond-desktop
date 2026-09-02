@@ -608,6 +608,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       laterCount: later.length,
       laterDays: laterDayCounts(conversations),
       attentionThreshold: ref.watch(appPrefsProvider).attentionThreshold,
+      processingSince: ref.watch(sessionStartProvider),
       // A thread, a storyline or a Later day being open means no section
       // overview is showing, so the rail must not highlight one.
       selectedSection: (_selectedId == null &&
@@ -1712,6 +1713,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       selectedId: _selectedId,
       onSelect: _select,
       sectionsOverride: sections,
+      processingSince: ref.watch(sessionStartProvider),
     );
   }
 

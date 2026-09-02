@@ -43,6 +43,10 @@ class ConversationListPane extends StatelessWidget {
   /// nothing else uses. Null leaves [filter] in charge.
   final List<(String, List<Conversation>)>? sectionsOverride;
 
+  /// When this session started, handed down to every row. Null shows no
+  /// processing hints at all.
+  final DateTime? processingSince;
+
   const ConversationListPane({
     super.key,
     required this.sources,
@@ -51,6 +55,7 @@ class ConversationListPane extends StatelessWidget {
     required this.selectedId,
     required this.onSelect,
     this.sectionsOverride,
+    this.processingSince,
   });
 
   List<Conversation> _inState(ConversationState state) => [
@@ -142,6 +147,7 @@ class ConversationListPane extends StatelessWidget {
                   conversation: c,
                   selected: c.id == selectedId,
                   onTap: () => onSelect(c.id),
+                  processingSince: processingSince,
                 ),
               ),
           ],

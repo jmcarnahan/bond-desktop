@@ -43,6 +43,15 @@ import 'prefs_provider.dart';
 /// those three bodies and nothing else.
 final graphAuthProvider = Provider<GraphAuth>((ref) => GraphAuth());
 
+/// When this run of the app started, or null where nothing has said.
+///
+/// Overridden with `DateTime.now()` in `main()`. The null default is what the
+/// processing indicator reads as "show nothing": a widget test that has not
+/// deliberately opted in gets the quiet answer, so the indicator arrives with
+/// zero churn across the existing suite rather than a hundred rows that
+/// suddenly say "thinking…".
+final sessionStartProvider = Provider<DateTime?>((ref) => null);
+
 /// The MCP session and the wire client under it, built together because they
 /// are circular: the client asks the session for a bearer token at every
 /// connect, and the session makes its `connection_status` and profile calls

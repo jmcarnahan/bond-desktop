@@ -330,6 +330,23 @@ void main() {
       );
     });
 
+    test('the busy subqueries leave the unread count alone', () async {
+      await store.upsertMessage(messageRow(id: 'm1', conversationKey: 'c-new'));
+      await store.upsertMessage(
+        messageRow(id: 'm2', conversationKey: 'c-new', isRead: 1),
+      );
+      // Three open pipeline steps against the same thread, none of which is
+      // anything to do with what the user has read.
+      await store.enqueueWork('extract', 'email', 'm1');
+      await store.enqueueWork('storyline', 'email', 'c-new');
+      await store.enqueueWork('draft', 'email', 'c-new');
+
+      final c =
+          (await store.loadConversations()).firstWhere((c) => c.id == 'c-new');
+      expect(c.unreadCount, 1);
+      expect(c.aiPendingCount, greaterThan(0));
+    });
+
     test('the same key under a different source is a different row', () async {
       await store
           .upsertConversation(conversationRow(key: 'c-new', source: 'teams'));

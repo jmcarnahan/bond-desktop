@@ -104,7 +104,6 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   final TriageQueue? _triage;
 
   /// The AI queue, kicked after triage rather than beside it — see [load].
-  /// Nothing on screen listens to its progress yet.
   final AiWorker? _aiWorker;
 
   /// Scores and re-files the mailbox immediately before every read. Null in
@@ -119,6 +118,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   final ReadAckQueue? _readAcks;
 
   StreamSubscription<TriageProgress>? _triageProgress;
+
+  /// The AI queue's progress, on the same debounce as triage's. Some cycles
+  /// have no triage in them at all — a CTA landing from extract, a thread
+  /// joining a storyline — and before this the list only found out about them
+  /// on the next sync.
+  StreamSubscription<WorkProgress>? _aiProgress;
+
   Timer? _triageReload;
 
   /// Incremented per [load]; a load whose number is stale writes nothing.
@@ -139,6 +145,10 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         _attention = attention,
         _readAcks = readAcks,
         super(const ConversationsInitial()) {
+    // Subscribed before the triage early-return below, because a notifier can
+    // be wired with an AI queue and no triage queue at all.
+    _aiProgress = aiWorker?.progress.listen((_) => _scheduleReload());
+
     final queue = triage;
     if (queue == null) return;
     if (userAddress != null) {
@@ -168,6 +178,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   void dispose() {
     _triageReload?.cancel();
     _triageProgress?.cancel();
+    _aiProgress?.cancel();
     super.dispose();
   }
 
@@ -199,7 +210,10 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         final pump = _triage?.pump();
         if (pump != null) {
           unawaited(
-            pump.then<void>((_) => _aiWorker?.pump()).catchError(
+            pump.then<void>((_) async {
+              await _aiWorker?.pump();
+              await _afterPump();
+            }).catchError(
               // Both pumps handle their own failures; anything reaching here
               // is a bug worth a trace, not worth crashing the zone over.
               (Object e) => debugPrint('queue pump chain failed: $e'),
@@ -207,7 +221,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
           );
         } else {
           final ai = _aiWorker?.pump();
-          if (ai != null) unawaited(ai);
+          if (ai != null) {
+            unawaited(
+              ai.then<void>((_) => _afterPump()).catchError(
+                (Object e) => debugPrint('queue pump chain failed: $e'),
+              ),
+            );
+          }
         }
       } on AuthException catch (e) {
         if (seq != _fetchSeq) return;
@@ -290,13 +310,22 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       final pump = _triage?.pump();
       if (pump != null) {
         unawaited(
-          pump.then<void>((_) => _aiWorker?.pump()).catchError(
+          pump.then<void>((_) async {
+            await _aiWorker?.pump();
+            await _afterPump();
+          }).catchError(
             (Object e) => debugPrint('queue pump chain failed: $e'),
           ),
         );
       } else {
         final ai = _aiWorker?.pump();
-        if (ai != null) unawaited(ai);
+        if (ai != null) {
+          unawaited(
+            ai.then<void>((_) => _afterPump()).catchError(
+              (Object e) => debugPrint('queue pump chain failed: $e'),
+            ),
+          );
+        }
       }
     } on AuthException {
       // Deliberately the same banner as any other failure: the inbox load is
@@ -317,7 +346,36 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
   }
 
-  /// Queues a suggested reply for the threads that have earned one.
+  /// The settle pass: what the inbox does once both queues have drained.
+  ///
+  /// [load] scores and enqueues BEFORE the pumps it starts have finished,
+  /// which is right for the frame the user is looking at and wrong for the
+  /// mail the model was still reading. A thread only crosses the draft
+  /// threshold once triage has said something about it, so scoring the
+  /// mailbox a second time here is what lets that thread be drafted in the
+  /// same cycle instead of waiting for the next sync — which on a quiet
+  /// afternoon is a minute away, and on a Teams-only session never comes.
+  ///
+  /// The load-time [AttentionService.recomputeAll] STAYS. It is the pass that
+  /// makes a sender correction show up in the frame the user made it in;
+  /// this one is about what the model learned since.
+  ///
+  /// The inner pump is deliberately NOT chained back into another settle pass.
+  /// One extra drain empties the drafts this pass just queued, and a settle
+  /// that re-settled itself would be a loop with a model call in it.
+  Future<void> _afterPump() async {
+    await _attention?.recomputeAll(sources: inboxSources);
+    final queued = await _enqueueDrafts();
+    if (queued > 0) {
+      await _aiWorker?.pump();
+    }
+    if (!mounted) return;
+    await load(syncFirst: false);
+  }
+
+  /// Queues a suggested reply for the threads that have earned one. Returns
+  /// how many threads it queued one for — what the settle pass reads to decide
+  /// whether there is anything new for the AI queue to drain.
   ///
   /// Immediately after the scoring pass, because it reads the scores that pass
   /// just wrote. On EVERY load rather than only after a sync, and that is
@@ -333,16 +391,20 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// runs, and letting a failed queue write fall into the "could not read the
   /// local inbox" path would cost the user the mail they can see over a
   /// suggestion they have not asked for yet.
-  Future<void> _enqueueDrafts() async {
+  Future<int> _enqueueDrafts() async {
     try {
       final stored = await _store.getPref(attentionThresholdKey);
       final threshold = (stored == null ? null : double.tryParse(stored)) ??
           AttentionTuning.defaultThreshold;
+      var queued = 0;
       for (final row in await _store.needsDraftKeys(threshold: threshold)) {
         await _store.requeueWork('draft', row.source, row.conversationKey);
+        queued++;
       }
+      return queued;
     } catch (e) {
       debugPrint('draft enqueue failed: $e');
+      return 0;
     }
   }
 

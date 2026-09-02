@@ -386,6 +386,23 @@ WHERE source = ? AND conversation_key = ?
   /// Outlook lands on them for free with the next delta page, and a maintained
   /// counter would drift with nothing to correct it. The subquery rides
   /// `ix_messages_conv`, which leads with the two columns it matches on.
+  ///
+  /// `ai_busy_messages` and `ai_busy_thread` count the pipeline steps still
+  /// open against the thread — per-message ones (triage, extract) and
+  /// thread-level ones (storyline, draft) — and are summed into
+  /// `Conversation.aiPendingCount`. Two columns rather than one because they
+  /// are keyed differently: message work is keyed by `source_message_id`,
+  /// thread work by `conversation_key`.
+  ///
+  /// The `task_kind` allowlist on the second one is load-bearing. `mark_read`
+  /// ack rows live in the same table under the SAME conversation key, and a
+  /// count that included them would tell the user the model is thinking about
+  /// a thread every time they opened one. (`storyline_sweep` is keyed to the
+  /// singleton `'sweep'`, so it never matches a conversation key regardless.)
+  ///
+  /// Both are counted at read time and both default to zero where the columns
+  /// are absent, because a read that cannot say must never claim the model is
+  /// busy — an indicator that lies in that direction never turns off.
   Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
@@ -403,7 +420,19 @@ WHERE source = ? AND conversation_key = ?
           'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score, '
           '  (SELECT COUNT(*) FROM messages m '
           '   WHERE m.source = c.source AND m.conversation_key = c.conversation_key '
-          "     AND m.direction = 'inbound' AND m.is_read = 0) AS unread_count "
+          "     AND m.direction = 'inbound' AND m.is_read = 0) AS unread_count, "
+          '  (SELECT COUNT(*) FROM messages m '
+          '   WHERE m.source = c.source AND m.conversation_key = c.conversation_key '
+          "     AND m.direction = 'inbound' "
+          "     AND (m.triage_status IN ('pending','processing') "
+          '          OR EXISTS (SELECT 1 FROM work_items w '
+          "                      WHERE w.task_kind = 'extract' AND w.source = m.source "
+          '                        AND w.entity_id = m.source_message_id '
+          "                        AND w.status IN ('pending','processing')))) AS ai_busy_messages, "
+          '  (SELECT COUNT(*) FROM work_items w '
+          '   WHERE w.source = c.source AND w.entity_id = c.conversation_key '
+          "     AND w.task_kind IN ('storyline','draft') "
+          "     AND w.status IN ('pending','processing')) AS ai_busy_thread "
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '

@@ -31,6 +31,7 @@ Conversation _conv({
   double? score,
   String? lastMessageAt,
   int unread = 0,
+  int pending = 0,
 }) {
   return Conversation(
     id: id,
@@ -42,6 +43,7 @@ Conversation _conv({
     attentionScore: score,
     lastMessageAt: lastMessageAt,
     unreadCount: unread,
+    aiPendingCount: pending,
   );
 }
 
@@ -667,6 +669,142 @@ void main() {
       // that row is the follow-up signal, not the unread one.
       expect(weightOf(tester, 'Owed'), FontWeight.w600);
       expect(weightOf(tester, 'Owed and unread'), FontWeight.w600);
+    });
+  });
+
+  group('AppRail processing grammar', () {
+    final since = DateTime.utc(2026, 8, 29, 12);
+    const arrivedThisSession = '2026-08-29T12:30:00Z';
+
+    Future<void> pumpRail(
+      WidgetTester tester,
+      List<Conversation> conversations, {
+      DateTime? processingSince,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        conversations: conversations,
+        selectedId: null,
+        selectedSection: null,
+        processingSince: processingSince,
+        onSelectConversation: (_) {},
+        onSelectSection: (_) {},
+      )));
+    }
+
+    /// The 8px leading dot on the row carrying [label].
+    BoxDecoration dotOf(WidgetTester tester, String label) {
+      final row =
+          find.ancestor(of: find.text(label), matching: find.byType(Row)).first;
+      final dot = find.descendant(of: row, matching: find.byType(Container));
+      return tester.widget<Container>(dot.first).decoration! as BoxDecoration;
+    }
+
+    Color? inkOf(WidgetTester tester, String label) =>
+        tester.widget<Text>(find.text(label)).style?.color;
+
+    testWidgets('a thread the model is still reading reads quiet',
+        (tester) async {
+      await pumpRail(
+        tester,
+        [
+          _conv(
+            id: 'a',
+            who: 'Half-read',
+            state: ConversationState.needsReply,
+            pending: 2,
+            lastMessageAt: arrivedThisSession,
+          ),
+        ],
+        processingSince: since,
+      );
+
+      // Needs You would normally render this loud. Whatever it says about
+      // itself is a half-formed answer until the model is done.
+      expect(inkOf(tester, 'Half-read'), BondColors.onDarkMuted);
+      final dot = dotOf(tester, 'Half-read');
+      expect(dot.color, isNull);
+      expect(dot.border, isNotNull);
+    });
+
+    testWidgets('a settled thread keeps its filled dot and its ink',
+        (tester) async {
+      await pumpRail(
+        tester,
+        [
+          _conv(
+            id: 'a',
+            who: 'Settled',
+            state: ConversationState.needsReply,
+            lastMessageAt: arrivedThisSession,
+          ),
+        ],
+        processingSince: since,
+      );
+
+      expect(inkOf(tester, 'Settled'), BondColors.onDarkPrimary);
+      final dot = dotOf(tester, 'Settled');
+      expect(dot.color, BondColors.seaGlassOnDark);
+      expect(dot.border, isNull);
+    });
+
+    testWidgets('a busy thread in Conversations reads quiet too',
+        (tester) async {
+      await pumpRail(
+        tester,
+        [
+          _conv(
+            id: 'a',
+            who: 'Chatty',
+            unread: 2,
+            pending: 1,
+            lastMessageAt: arrivedThisSession,
+          ),
+        ],
+        processingSince: since,
+      );
+
+      expect(inkOf(tester, 'Chatty'), BondColors.onDarkMuted);
+      expect(dotOf(tester, 'Chatty').border, isNotNull);
+    });
+
+    testWidgets('the first-run backlog is not a rail full of hollow dots',
+        (tester) async {
+      // Every row busy, every row older than the session: the rail's own
+      // caption owns that story, not two hundred outlined dots.
+      await pumpRail(
+        tester,
+        [
+          _conv(
+            id: 'a',
+            who: 'Backlog',
+            state: ConversationState.needsReply,
+            pending: 3,
+            lastMessageAt: '2026-08-01T09:00:00Z',
+          ),
+        ],
+        processingSince: since,
+      );
+
+      expect(inkOf(tester, 'Backlog'), BondColors.onDarkPrimary);
+      expect(dotOf(tester, 'Backlog').border, isNull);
+    });
+
+    testWidgets('a host that never opted in shows no processing state',
+        (tester) async {
+      await pumpRail(tester, [
+        _conv(
+          id: 'a',
+          who: 'Busy',
+          state: ConversationState.needsReply,
+          pending: 3,
+          lastMessageAt: arrivedThisSession,
+        ),
+      ]);
+
+      expect(inkOf(tester, 'Busy'), BondColors.onDarkPrimary);
+      expect(dotOf(tester, 'Busy').border, isNull);
     });
   });
 

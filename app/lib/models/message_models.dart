@@ -126,6 +126,14 @@ class Conversation {
   /// does not carry it, because absent data must never invent unread mail.
   final int unreadCount;
 
+  /// How many pipeline steps are still open against this thread — triage and
+  /// extraction on its own messages, storyline and draft work on the thread.
+  /// Summed at read time from the two subquery columns in `loadConversations`,
+  /// and zero on any read that does not run them, because absent data must
+  /// never claim the model is busy: an indicator that errs that way never
+  /// turns off.
+  final int aiPendingCount;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -144,6 +152,7 @@ class Conversation {
     this.bucket,
     this.attentionScore,
     this.unreadCount = 0,
+    this.aiPendingCount = 0,
   });
 
   /// First participant — the row's primary sender. Null when a conversation
@@ -156,6 +165,9 @@ class Conversation {
   /// Whether anything on this thread is still unread. What bolds a row in
   /// Conversations.
   bool get hasUnread => unreadCount > 0;
+
+  /// Whether the model is still working on this thread.
+  bool get isAiBusy => aiPendingCount > 0;
 
   /// Deliberately narrow: state and unread count are the only two fields a
   /// local action flips. Marking a thread done flips the state; opening one
@@ -179,6 +191,7 @@ class Conversation {
       bucket: bucket,
       attentionScore: attentionScore,
       unreadCount: unreadCount ?? this.unreadCount,
+      aiPendingCount: aiPendingCount,
     );
   }
 
@@ -205,6 +218,7 @@ class Conversation {
       bucket: bucket,
       attentionScore: attentionScore,
       unreadCount: unreadCount,
+      aiPendingCount: aiPendingCount,
     );
   }
 
@@ -260,6 +274,10 @@ class Conversation {
       // Counted by the same query's subquery, and absent from every read that
       // does not run it — which reads as "nothing unread", never as unread.
       unreadCount: (row['unread_count'] as num?)?.toInt() ?? 0,
+      // The two busy columns are one number to everything above here: the
+      // user is being told the model is working, not which queue it is in.
+      aiPendingCount: ((row['ai_busy_messages'] as num?)?.toInt() ?? 0) +
+          ((row['ai_busy_thread'] as num?)?.toInt() ?? 0),
     );
   }
 }
