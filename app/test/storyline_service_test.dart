@@ -133,8 +133,10 @@ void main() {
     String lastMessageAt = '2026-08-28T10:00:00Z',
     String? subject,
     String embedModel = EmbeddingsClient.modelTag,
+    String source = 'email',
   }) async {
     await into.upsertConversation({
+      'source': source,
       'conversation_key': key,
       'subject': subject ?? 'Subject for $key',
       'state': state,
@@ -144,7 +146,7 @@ void main() {
     });
     if (vector == null) return;
     await into.upsertConversationAi(
-      'email',
+      source,
       key,
       embedding: encodeEmbedding(vector),
       embeddedHash: 'h-$key',
@@ -847,6 +849,121 @@ void main() {
 
       expect(await clusterOf(a), await clusterOf(b));
     });
+
+    test('a mail thread and a chat about the same thing become one storyline',
+        () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 't1',
+          source: 'teams',
+          vector: vectorAt(0.9),
+          lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c3',
+          vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
+      await seed(store, 'c4',
+          vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
+      final llm = FakeLlm({'storyline_name': [nameAnswer()]});
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      final members = await store.membersOf(storyline.id);
+      expect(members.map((m) => m.conversationKey).toSet(), {'c1', 't1'});
+      // Each member carries the source it arrived through, so every later
+      // read of the storyline — the episode list, a membership re-check —
+      // goes to the right connector for it.
+      expect(
+        {for (final m in members) m.conversationKey: m.source},
+        {'c1': 'email', 't1': 'teams'},
+      );
+    });
+
+    test('a pair of chats can be the seed of a storyline on their own',
+        () async {
+      await seed(store, 't1',
+          source: 'teams',
+          vector: vectorAt(1),
+          lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 't2',
+          source: 'teams',
+          vector: vectorAt(0.9),
+          lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c3',
+          vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
+      await seed(store, 'c4',
+          vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
+      final llm = FakeLlm({'storyline_name': [nameAnswer()]});
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      final members = await store.membersOf(storyline.id);
+      expect(members.map((m) => m.conversationKey).toSet(), {'t1', 't2'});
+      expect(members.every((m) => m.source == 'teams'), isTrue);
+    });
+
+    /// A chat and its mail partner, plus a second pair with nothing to do with
+    /// them. Whatever happens to the chat, the second pair is still there to
+    /// be proposed — which is what makes "the chat was left out" an assertion
+    /// about the chat rather than about the sweep's floor.
+    Future<void> seedMixedMailbox(MessageStore into) async {
+      await seed(into, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T05:00:00Z');
+      await seed(into, 't1',
+          source: 'teams',
+          vector: vectorAt(0.9),
+          lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(into, 'c3',
+          vector: vectorAt(0), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(into, 'c4',
+          vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T02:00:00Z');
+      await seed(into, 'c5',
+          vector: vectorAt(-0.95), lastMessageAt: '2026-08-29T01:00:00Z');
+      await into.insertStoryline(
+        id: 'sl-existing',
+        title: 'Existing',
+        status: 'active',
+        createdBy: 'user',
+      );
+    }
+
+    test('a chat already in a storyline is not swept into a new one', () async {
+      await seedMixedMailbox(store);
+      await store.addStorylineMember('sl-existing', 'teams', 't1',
+          addedBy: 'user');
+      final llm = FakeLlm({'storyline_name': [nameAnswer()]});
+
+      await StorylineService(store, llm).sweep();
+
+      // t1 is spoken for, so c1 has no partner left. The unrelated pair is
+      // what gets proposed instead.
+      final proposed = (await store.loadStorylines(
+        statuses: const ['suggested'],
+      )).single;
+      expect((await store.membersOf(proposed.id))
+          .map((m) => m.conversationKey)
+          .toSet(), {'c4', 'c5'});
+    });
+
+    test('a chat the user pulled out of a storyline is not swept back in',
+        () async {
+      await seedMixedMailbox(store);
+      // Blocking without a membership to delete is how a removal records the
+      // user's "no" — and the sweep must honour it for a chat exactly as it
+      // does for a mail thread.
+      await store.removeStorylineMember('sl-existing', 'teams', 't1',
+          block: true);
+      final llm = FakeLlm({'storyline_name': [nameAnswer()]});
+
+      await StorylineService(store, llm).sweep();
+
+      final proposed = (await store.loadStorylines(
+        statuses: const ['suggested'],
+      )).single;
+      expect((await store.membersOf(proposed.id))
+          .map((m) => m.conversationKey)
+          .toSet(), {'c4', 'c5'});
+    });
   });
 
   group('user actions', () {
@@ -1061,6 +1178,24 @@ void main() {
           '2026-08-30T10:00:00Z');
       expect(detail['recruited'], 1);
       expect(detail['considered'], 1);
+    });
+
+    test('a chat is recruited into a storyline the same way a thread is',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 't1',
+          source: 'teams',
+          vector: vectorAt(0.8),
+          lastMessageAt: '2026-08-30T10:00:00Z');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.callsFor('storyline_membership'), 1);
+      final joined = (await store.membersOf('sl-1')).last;
+      expect(joined.conversationKey, 't1');
+      expect(joined.source, 'teams');
+      expect(detail['recruited'], 1);
     });
 
     test('the gate is the LOWER one even with nobody in common', () async {

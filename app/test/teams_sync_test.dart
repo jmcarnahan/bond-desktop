@@ -1067,20 +1067,24 @@ void main() {
       );
     });
 
-    test('no storyline sweep is requeued — the sweep is email-scoped',
+    test('chat ingest requeues the storyline sweep, as mail ingest does',
         () async {
       graph.messages['chat-1'] = [_message(id: 'm1')];
       await build().syncNow();
 
-      expect(
-        await db
-            .customSelect(
-              "SELECT 1 FROM work_items WHERE task_kind = 'storyline_sweep' "
-              "AND source = 'teams'",
-            )
-            .get(),
-        isEmpty,
-      );
+      final rows = await db
+          .customSelect(
+            "SELECT source, entity_id FROM work_items "
+            "WHERE task_kind = 'storyline_sweep'",
+          )
+          .get();
+
+      // One row, and its source says 'email' even though a chat sync wrote
+      // it: the column is the row's historical label, not a scope, and both
+      // syncs must land on the SAME row — there is one pool to sweep. A
+      // 'teams' label here would mean two sweeps racing each other.
+      expect(rows.map((r) => (r.data['source'], r.data['entity_id'])).toList(),
+          [('email', 'sweep')]);
     });
 
     /// The worker drains BOTH sources — this is what feeds chat threads into

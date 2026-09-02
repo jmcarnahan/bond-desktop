@@ -229,11 +229,15 @@ class TeamsSync {
         source: source,
       );
 
-      // NO `storyline_sweep` requeue. The sweep is email-scoped by
-      // construction (`StorylineService._source`), so seeding a new storyline
-      // from a chat is out of scope this phase. Chats still JOIN existing
-      // storylines — extraction requeues per-conversation `storyline` work,
-      // and `assignConversation` takes a source — they simply never start one.
+      // Chat ingest freshens discovery exactly as mail ingest does: the sweep
+      // reads both connectors, so a chat can now SEED a storyline and not only
+      // join one. A requeue rather than an enqueue, so the sweep that ran after
+      // the last sync runs again instead of staying `done` forever.
+      //
+      // The `'email'` is the work row's historical label, not a scope — see
+      // [StorylineService._workSource]. Both syncs write the same row, which is
+      // right: there is one pool to sweep, and one row for sweeping it.
+      await _store.requeueWork('storyline_sweep', 'email', 'sweep');
 
       await _log.record(
         'sync_teams',

@@ -1164,13 +1164,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       },
     );
 
-    // A storyline replies to MAIL. A chat is answered in its own thread, where
-    // the reply goes to one conversation the user is looking at — picking a
-    // chat out of a dropdown of episodes is a different, riskier gesture. So a
-    // storyline of only chats offers the caption instead of a dropdown, and a
-    // mixed one offers its mail threads.
-    final targets = _emailTargets(episodes);
+    // A storyline replies to any of its episodes, chats included: the group is
+    // the unit of work, and the answer belongs wherever the conversation
+    // actually is. The dropdown names them all.
+    final targets = _replyTargets(episodes);
     final replyKey = _replyTargetFor(episodes, targets);
+    final target = replyKey == null
+        ? null
+        : (source: targets[replyKey]!.source, conversationKey: replyKey);
+
+    // The same rung ladder the thread pane applies (see [_thread]): mail always
+    // offers a box because it bottoms out at the clipboard, a chat only on the
+    // top rung, because without `Chat.ReadWrite` there is nowhere for the text
+    // to go. A storyline whose only reachable episodes are chats this build
+    // cannot send to says where to reply instead.
+    final canReply = target != null &&
+        (target.source == 'email' ||
+            ref.watch(draftProvider(target)).capability == SendCapability.send);
 
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -1186,13 +1196,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             const SizedBox(height: BondSpacing.s12),
           ],
           Expanded(child: panel),
-          if (replyKey != null) ...[
+          if (target != null) ...[
             const SizedBox(height: BondSpacing.s12),
-            _replyTargetPicker(replyKey, targets),
+            // Above the box rather than inside the `canReply` branch: when the
+            // picked episode is a chat this build cannot answer, the picker is
+            // exactly how the user reaches the thread it can.
+            _replyTargetPicker(target.conversationKey, targets),
             const SizedBox(height: BondSpacing.s8),
-            // Storyline reply targets are mail threads by construction — see
-            // [_emailTargets] — so the source is not in doubt here.
-            _composer((source: 'email', conversationKey: replyKey)),
+            // The target carries its own source — a picked chat is drafted and
+            // sent down the chat path, a picked thread down the mail one.
+            if (canReply) _composer(target) else _replyElsewhere(),
           ] else if (episodes.isNotEmpty) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
@@ -1202,23 +1215,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// The member threads a reply can actually go to: the mail ones, by key and
-  /// the subject the dropdown names them with.
-  Map<String, String> _emailTargets(List<StorylineEpisode> episodes) {
+  /// Every member conversation a reply can go to: its source, and the subject
+  /// the dropdown names it with.
+  ///
+  /// Keyed on the conversation key alone, without its source, because
+  /// connector-issued keys are disjoint in practice — a Graph conversation id
+  /// and a chat id share no shape — and one flat key is what the picker's
+  /// selected value and [_storylineReplyKey] have always been.
+  Map<String, ({String source, String subject})> _replyTargets(
+    List<StorylineEpisode> episodes,
+  ) {
     return {
       for (final episode in episodes)
-        if (episode.source == 'email') episode.conversationKey: episode.subject,
+        episode.conversationKey: (
+          source: episode.source,
+          // A chat's messages carry no subject — Graph does not give them one
+          // — so an episode built out of them has none either. Named by who is
+          // on it instead, the way a chat is named everywhere else: without
+          // this a storyline holding two chats would offer the user two
+          // identical "(no subject)" rows to choose between.
+          subject: episode.subject.isEmpty
+              ? episode.participants.join(', ')
+              : episode.subject,
+        ),
     };
   }
 
-  /// Which member thread a storyline's composer answers.
+  /// Which member conversation a storyline's composer answers.
   ///
   /// The user's pick when they made one and it is still a member; otherwise the
-  /// newest mail episode, which is nearly always the one actually waiting on an
+  /// newest episode, which is nearly always the one actually waiting on an
   /// answer — the episodes arrive oldest first, so that is the last of them.
   String? _replyTargetFor(
     List<StorylineEpisode> episodes,
-    Map<String, String> targets,
+    Map<String, ({String source, String subject})> targets,
   ) {
     final picked = _storylineReplyKey;
     if (picked != null && targets.containsKey(picked)) return picked;
@@ -1232,7 +1262,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
-  Widget _replyTargetPicker(String selected, Map<String, String> subjects) {
+  Widget _replyTargetPicker(
+    String selected,
+    Map<String, ({String source, String subject})> targets,
+  ) {
     return Row(
       children: [
         Text('Reply to', style: BondType.caption),
@@ -1243,11 +1276,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             isExpanded: true,
             underline: const SizedBox.shrink(),
             items: [
-              for (final entry in subjects.entries)
+              for (final entry in targets.entries)
                 DropdownMenuItem<String>(
                   value: entry.key,
                   child: Text(
-                    entry.value.isEmpty ? '(no subject)' : entry.value,
+                    entry.value.subject.isEmpty
+                        ? '(no subject)'
+                        : entry.value.subject,
                     style: BondType.small,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
@@ -1460,8 +1495,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// What stands where the reply box would be when this build cannot send to a
-  /// chat — a grant without `Chat.ReadWrite`, and a storyline whose every
-  /// episode is a chat.
+  /// chat — a grant without `Chat.ReadWrite`, in the thread pane and in a
+  /// storyline whose reply target is one of those chats.
   ///
   /// A statement of capability rather than a dead end now: with the grant, a
   /// chat gets the same reply surface a mail thread does. Quiet and one line

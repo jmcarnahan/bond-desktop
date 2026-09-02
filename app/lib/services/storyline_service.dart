@@ -44,8 +44,9 @@ class StorylineTuning {
   /// proposals is not a feature; it is a chore, and it gets dismissed as one.
   static const int maxPendingSuggestions = 3;
 
-  /// Below this there is not enough unassigned mail for a cluster to mean
-  /// anything, and the sweep would be proposing groups out of noise.
+  /// Below this there is not enough unassigned conversation — mail or chat —
+  /// for a cluster to mean anything, and the sweep would be proposing groups
+  /// out of noise.
   static const int sweepMinUnassigned = 4;
 
   /// How many threads one recruit pass may put in front of the model. A
@@ -67,7 +68,23 @@ class StorylineTuning {
 /// person renaming, keeping, dismissing or re-filing a storyline is not a
 /// thing to ask a model about.
 class StorylineService {
-  static const String _source = 'email';
+  /// What the sweep and the recruit READ. Every embedded thread, whichever
+  /// connector it arrived through — a storyline is about a topic, not a
+  /// transport, and a mail-and-chat pair about the same launch is exactly the
+  /// cluster this exists to find.
+  static const List<String> _sources = ['email', 'teams'];
+
+  /// What the sweep and recruit WORK ROWS are labelled with, which is a
+  /// different thing entirely. The `source` column on those rows is a label,
+  /// not a scope — their entity ids are storyline ids and the literal
+  /// `'sweep'` — and every such row ever written carries `'email'`. Changing
+  /// the label would strand the existing rows' idempotence keys and re-run
+  /// work that is already done.
+  ///
+  /// Also the fallback for a conversation row that carries no source of its
+  /// own: such a row was written before there was a second connector, so it is
+  /// mail.
+  static const String _workSource = 'email';
 
   final MessageStore _store;
   final LlmClient _client;
@@ -307,12 +324,12 @@ class StorylineService {
     var index = 0;
     for (final row in await _store.conversationsWithEmbeddings(
       embedModel: EmbeddingsClient.modelTag,
-      sources: const [_source],
+      sources: _sources,
     )) {
       final order = index++;
       final key = row['conversation_key'] as String? ?? '';
       if (key.isEmpty) continue;
-      final rowSource = row['source'] as String? ?? _source;
+      final rowSource = row['source'] as String? ?? _workSource;
       if (context.memberThreads.contains(_threadKey(rowSource, key))) continue;
       if (await _store.isMemberBlocked(storylineId, rowSource, key)) continue;
       final blob = row['embedding'];
@@ -338,7 +355,7 @@ class StorylineService {
     var recruited = 0;
     for (final candidate in considered) {
       final row = candidate.row;
-      final rowSource = row['source'] as String? ?? _source;
+      final rowSource = row['source'] as String? ?? _workSource;
       final key = row['conversation_key'] as String? ?? '';
       final cardData = await _store.newestInboundCardData(rowSource, key);
 
@@ -387,22 +404,34 @@ class StorylineService {
 
   /// Proposes new storylines out of whatever is not in one yet.
   ///
-  /// Runs after every sync, and is a no-op nearly every time: it does nothing
-  /// while suggestions are already waiting, nothing when there is too little
-  /// unassigned mail to group, and nothing when the clusters it finds have all
-  /// been dismissed before.
+  /// Runs after every sync of either connector, and is a no-op nearly every
+  /// time: it does nothing while suggestions are already waiting, nothing when
+  /// there is too little unassigned conversation to group, and nothing when
+  /// the clusters it finds have all been dismissed before.
+  ///
+  /// Mail and chat are clustered together, in one pool. A thread and a chat
+  /// about the same launch are one story, and the pass that cannot see both
+  /// would propose the half it can.
   Future<void> sweep() async {
     final pending =
         (await _store.loadStorylines(statuses: const ['suggested'])).length;
     final room = StorylineTuning.maxPendingSuggestions - pending;
     if (room <= 0) return;
 
-    final taken = await _store.assignedOrBlockedKeys(_source);
+    // Asked per source and unioned. The keys are connector-issued and disjoint
+    // across sources in practice — Graph conversation ids and chat ids share
+    // no shape — so one flat set is safe to test membership against, and it is
+    // what keeps a chat already in a storyline out of the next sweep's
+    // clusters.
+    final taken = {
+      for (final source in _sources)
+        ...await _store.assignedOrBlockedKeys(source),
+    };
     final rows = <Map<String, Object?>>[];
     final vectors = <List<double>>[];
     for (final row in await _store.conversationsWithEmbeddings(
       embedModel: EmbeddingsClient.modelTag,
-      sources: const [_source],
+      sources: _sources,
     )) {
       final key = row['conversation_key'] as String? ?? '';
       if (key.isEmpty || taken.contains(key)) continue;
@@ -498,7 +527,7 @@ class StorylineService {
       cards.add(_namingCardForConversationRow(
         row,
         await _store.newestInboundCardData(
-          row['source'] as String? ?? _source,
+          row['source'] as String? ?? _workSource,
           row['conversation_key'] as String? ?? '',
         ),
       ));
@@ -526,7 +555,7 @@ class StorylineService {
       if (key.isEmpty) continue;
       await _store.addStorylineMember(
         id,
-        row['source'] as String? ?? _source,
+        row['source'] as String? ?? _workSource,
         key,
         addedBy: 'auto',
         // The cluster is its own reason: nothing judged these threads
@@ -592,7 +621,7 @@ class StorylineService {
       return;
     }
     await _store.updateStoryline(id, charter: trimmed, charterLocked: true);
-    await _store.requeueWork('storyline_recruit', _source, id);
+    await _store.requeueWork('storyline_recruit', _workSource, id);
   }
 
   Future<void> addThread(String id, String source, String key) async {

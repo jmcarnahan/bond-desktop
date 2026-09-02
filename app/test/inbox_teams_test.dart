@@ -139,6 +139,7 @@ void main() {
       'source_message_id': '$key-m1',
       'conversation_key': key,
       'direction': 'inbound',
+      'subject': subject,
       'from_name': 'Eric Vance',
       'from_address': 'eric@example.com',
       'received_at': '2026-08-28T09:00:00Z',
@@ -476,6 +477,104 @@ void main() {
       await tester.pump();
 
       expect(find.text('Teams updated 4m ago'), findsOneWidget);
+    });
+  });
+
+  /// A storyline holding one mail thread and one chat, and the reply bar under
+  /// it. The source the composer is routed with is not directly visible — but
+  /// the CAPABILITY is, and under `Chat.ReadWrite` alone the two sources sit on
+  /// different rungs: a chat can send, a mail thread can only be copied. So the
+  /// rung the box reports is the proof of which conversation it is answering.
+  group('a mixed storyline replies to the episode the user picked', () {
+    Future<void> openMixedStoryline(
+      WidgetTester tester, {
+      String grantedScopes = _withChatWrite,
+    }) async {
+      // The chat is the newer of the two, so it is the default target.
+      await seedMail('c1');
+      await seedChat('chat-1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'teams', 'chat-1',
+          addedBy: 'auto');
+
+      await pumpScreen(tester, grantedScopes: grantedScopes);
+      await tester.tap(find.text('Website redesign'));
+      // One for the tap, then the timeline read, then the capability read the
+      // reply surface waits on.
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('a chat is offered as a target and drafted down the chat path',
+        (tester) async {
+      await openMixedStoryline(tester);
+
+      // Both episodes are on offer, which is the change: a chat used to be
+      // filtered out of the list entirely. The newest is the default target,
+      // and here that is the chat.
+      final picker =
+          tester.widget<DropdownButton<String>>(find.byType(DropdownButton<String>));
+      expect(picker.items!.map((item) => item.value), ['c1', 'chat-1']);
+      expect(picker.value, 'chat-1');
+      // A chat message has no subject of its own, so the row is named by who
+      // is on it rather than by a blank.
+      expect(find.text('Sarah Whitfield'), findsWidgets);
+      expect(find.text('(no subject)'), findsNothing);
+
+      final composer = tester.widget<Composer>(find.byType(Composer));
+      expect(composer.capability, SendCapability.send,
+          reason: 'only the chat can send under this grant — a composer '
+              'routed at the mail thread would report copy-only');
+    });
+
+    testWidgets('picking the mail thread routes the box back to mail',
+        (tester) async {
+      await openMixedStoryline(tester);
+
+      await tester.tap(find.byType(DropdownButton<String>));
+      // The menu is a route with an opening animation; a bare pump lands
+      // mid-transition, with nothing hit-testable yet.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.text('Homepage copy').last);
+      await tester.pump();
+      await tester.pump();
+
+      final composer = tester.widget<Composer>(find.byType(Composer));
+      expect(composer.capability, SendCapability.copyOnly,
+          reason: 'this grant carries no Mail.Send and no Mail.ReadWrite');
+    });
+
+    testWidgets(
+        'without Chat.ReadWrite the chat says where to reply, and the mail '
+        'thread is still one pick away', (tester) async {
+      await openMixedStoryline(tester, grantedScopes: _withChat);
+
+      // The same ladder the thread pane applies: a box that could not send is
+      // worse than none, in a storyline as much as in a thread.
+      expect(find.byType(Composer), findsNothing);
+      expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
+
+      // The picker stays put above the caption, because it is the way to the
+      // episode this build CAN answer. Hiding it with the box would strand a
+      // storyline whose newest episode happens to be a chat.
+      await tester.tap(find.byType(DropdownButton<String>));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.text('Homepage copy').last);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Reply in Microsoft Teams'), findsNothing);
+      expect(find.byType(Composer), findsOneWidget);
     });
   });
 }
