@@ -419,7 +419,7 @@ void main() {
               [
                 graphMessage(
                   id: 's1',
-                  fromName: 'Bond LO',
+                  fromName: 'Jordan Bond',
                   fromAddress: 'lo@bond.com',
                   to: const ['sarah@example.com'],
                 )
@@ -554,7 +554,7 @@ void main() {
                 graphMessage(
                   id: 'out-1',
                   subject: 'Re: Project brief',
-                  fromName: 'Bond LO',
+                  fromName: 'Jordan Bond',
                   fromAddress: 'lo@bond.com',
                   to: const ['sarah@example.com'],
                   receivedDateTime: '2026-08-28T09:00:00Z',

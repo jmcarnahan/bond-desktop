@@ -92,7 +92,7 @@ class _FakeTeams implements TeamsBackend {
       'lastModifiedDateTime': '2026-08-28T22:00:00Z',
       'body': {'contentType': 'text', 'content': text},
       'from': {
-        'user': {'id': _myId, 'displayName': 'Bond LO'},
+        'user': {'id': _myId, 'displayName': 'Jordan Bond'},
       },
     };
     stored.add(message);

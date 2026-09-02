@@ -99,16 +99,18 @@ Map<String, dynamic> _message({
     'messageType': messageType,
     'createdDateTime': stamp,
     'lastModifiedDateTime': stamp,
-    // Absent unless a test asks for it, which is the shape the MCP server
-    // actually returns today.
+    // Graph's own nested shape — what the SDK wire carries, and what
+    // McpTeamsBackend rebuilds from its flat `mentioned_user_ids` field, so
+    // one helper serves for both backends. Absent unless a test asks for it:
+    // a message that named nobody.
     if (mentioning != null)
       'mentions': [
         for (final userId in mentioning)
           {
             'id': 0,
-            'mentionText': 'Bond LO',
+            'mentionText': 'Jordan Bond',
             'mentioned': {
-              'user': {'id': userId, 'displayName': 'Bond LO'},
+              'user': {'id': userId, 'displayName': 'Jordan Bond'},
             },
           },
       ],
@@ -249,7 +251,7 @@ void main() {
       graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
       graph.members['chat-1'] = [
         {'userId': 'u1', 'displayName': 'Sarah Whitfield'},
-        {'userId': _myId, 'displayName': 'Bond LO'},
+        {'userId': _myId, 'displayName': 'Jordan Bond'},
       ];
     });
 
@@ -275,7 +277,7 @@ void main() {
     test('the user’s own message is outbound, and skipped like sent mail',
         () async {
       graph.messages['chat-1'] = [
-        _message(id: 'm1', userId: _myId, displayName: 'Bond LO'),
+        _message(id: 'm1', userId: _myId, displayName: 'Jordan Bond'),
       ];
       await build().syncNow();
 
@@ -331,15 +333,15 @@ void main() {
         _message(
           id: 'm1',
           contentType: 'html',
-          content: '<div>Hi <at>Bond LO</at></div><div>$long</div>',
+          content: '<div>Hi <at>Jordan Bond</at></div><div>$long</div>',
         ),
       ];
       await build().syncNow();
 
       final m = await row('m1');
-      expect(m['body_text'], 'Hi Bond LO\n$long');
+      expect(m['body_text'], 'Hi Jordan Bond\n$long');
       expect((m['body_preview'] as String).length, 160);
-      expect(m['body_preview'], startsWith('Hi Bond LO\n'));
+      expect(m['body_preview'], startsWith('Hi Jordan Bond\n'));
     });
 
     test('a message with no sender at all still stores', () async {
@@ -361,7 +363,7 @@ void main() {
         previewAt: _iso(Duration.zero),
       ));
       graph.members[id] = [
-        {'userId': _myId, 'displayName': 'Bond LO'},
+        {'userId': _myId, 'displayName': 'Jordan Bond'},
         for (var i = 1; i <= others; i++)
           {'userId': 'u$i', 'displayName': 'Person $i'},
       ];
@@ -403,7 +405,7 @@ void main() {
     test('the user’s own message in a 1:1 is addressed to nobody', () async {
       seed('chat-1', 1);
       graph.messages['chat-1'] = [
-        _message(id: 'mine', userId: _myId, displayName: 'Bond LO'),
+        _message(id: 'mine', userId: _myId, displayName: 'Jordan Bond'),
       ];
 
       await build().syncNow();
@@ -517,8 +519,9 @@ void main() {
     });
 
     test('anything else is no mention at all, never a throw', () {
-      // The field is absent on the wire this app reads today, so "no mentions"
-      // has to be the cheapest possible answer at every level.
+      // The field can still arrive absent or malformed — an older server, a
+      // shape Graph changes under us — so "no mentions" has to be the
+      // cheapest possible answer at every level, never a throw.
       expect(TeamsSync.mentionedUserIds(null), isEmpty);
       expect(TeamsSync.mentionedUserIds(const []), isEmpty);
       expect(TeamsSync.mentionedUserIds('a mention'), isEmpty);
@@ -592,7 +595,7 @@ void main() {
         _message(
           id: 'mine',
           userId: _myId,
-          displayName: 'Bond LO',
+          displayName: 'Jordan Bond',
           at: _iso(const Duration(minutes: 1)),
         ),
       ];
@@ -653,7 +656,7 @@ void main() {
       graph.members['chat-1'] = [
         {'userId': 'u1', 'displayName': 'Sarah Whitfield'},
         {'userId': 'u2', 'displayName': 'Eric Vance'},
-        {'userId': _myId, 'displayName': 'Bond LO'},
+        {'userId': _myId, 'displayName': 'Jordan Bond'},
       ];
       graph.messages['chat-1'] = [_message(id: 'm1')];
 
@@ -721,7 +724,7 @@ void main() {
         _message(
           id: 'm2',
           userId: _myId,
-          displayName: 'Bond LO',
+          displayName: 'Jordan Bond',
           at: _iso(const Duration(hours: 1)),
         ),
       ];
@@ -755,7 +758,7 @@ void main() {
         _message(
           id: 'm2',
           userId: _myId,
-          displayName: 'Bond LO',
+          displayName: 'Jordan Bond',
           at: _iso(const Duration(hours: 1)),
         ),
       ];
@@ -854,7 +857,7 @@ void main() {
         _message(
           id: 'm2',
           userId: _myId,
-          displayName: 'Bond LO',
+          displayName: 'Jordan Bond',
           at: _iso(const Duration(hours: 1)),
         ),
       ]);
@@ -1293,8 +1296,8 @@ void main() {
   group('stripChatHtml', () {
     test('a mention keeps the name and loses the tag', () async {
       expect(
-        stripChatHtml('<div>Hey <at id="0">Bond LO</at>, any word?</div>'),
-        'Hey Bond LO, any word?',
+        stripChatHtml('<div>Hey <at id="0">Jordan Bond</at>, any word?</div>'),
+        'Hey Jordan Bond, any word?',
       );
     });
 
