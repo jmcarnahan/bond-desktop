@@ -1,15 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  keychain-access-groups is deliberately ABSENT. It is a restricted
-  entitlement: Xcode refuses to build a target carrying it under the ad-hoc
-  signing this project uses (CODE_SIGN_IDENTITY = "-"), failing with
-  "has entitlements that require signing with a development certificate"
-  even when the array is empty and therefore grants nothing.
+  keychain-access-groups is still ABSENT, and Manual signing does not change
+  that. Measured against this Xcode: the key present as
+  $(AppIdentifierPrefix)com.bondinbox.app fails the ad-hoc build with
+  "Runner requires a provisioning profile", and the key present as an empty
+  array fails identically — it is the key itself, not the group string, that
+  makes Xcode demand a profile. Removing the key builds clean.
 
-  Add it back — as <key>keychain-access-groups</key><array/> — in the same
-  change that provisions a real development certificate, which storing OAuth
-  tokens in the keychain will require anyway.
+  This file therefore stays key-less on purpose, so ad-hoc builds keep
+  working. The keyed variant already exists as ReleaseSigned.entitlements
+  (DebugProfile.entitlements has DebugProfileSigned.entitlements); a build
+  selects it by setting BOND_ENTITLEMENTS_SUFFIX = Signed in
+  Runner/Configs/SigningLocal.xcconfig alongside a real Apple Development
+  identity. Nothing to add here — keep the non-keychain keys in sync with the
+  Signed variant.
 -->
 <plist version="1.0">
 <dict>

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Real-signing variant of DebugProfile.entitlements. Identical to it except
+  for keychain-access-groups, which is why this file exists: that key makes
+  Xcode demand a provisioning profile, so it cannot live in the committed
+  default that ad-hoc builds use.
+
+  Selected by putting BOND_ENTITLEMENTS_SUFFIX = Signed in
+  Runner/Configs/SigningLocal.xcconfig (gitignored) alongside an Apple
+  Development identity, Automatic style, and a team id — automatic signing
+  with a real team resolves the profile the key requires. With the default
+  empty suffix this file is not referenced by any build.
+
+  Keep the non-keychain keys in sync with DebugProfile.entitlements.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)com.bondinbox.app</string>
+	</array>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

@@ -5,3 +5,6 @@
 # Xcode-related
 **/dgph
 **/xcuserdata/
+
+# Local signing overrides (per-developer, never committed)
+Runner/Configs/SigningLocal.xcconfig
