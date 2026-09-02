@@ -566,10 +566,11 @@ class TeamsSync {
   /// The Graph ids a chat message @mentions, in the order they appear.
   ///
   /// Graph nests them three deep — `[{'mentioned': {'user': {'id': …}}}]` —
-  /// and every level is checked, because the field is absent altogether on the
-  /// wire this app reads today (the MCP server predates it). Absent means no
-  /// mention signal and nothing else: a chat that carries no mentions degrades
-  /// to the 1:1 half of [addressed_me] rather than to a wrong answer.
+  /// and every level is checked, because the field can still arrive absent or
+  /// malformed: an MCP server older than `mentioned_user_ids`, or a shape
+  /// Graph changes under us. Absent means no mention signal and nothing else:
+  /// a chat that carries no mentions degrades to the 1:1 half of
+  /// [addressed_me] rather than to a wrong answer.
   static List<String> mentionedUserIds(Object? raw) {
     if (raw is! List) return const [];
     final ids = <String>[];
