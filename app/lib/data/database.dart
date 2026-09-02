@@ -36,7 +36,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -132,6 +132,34 @@ class BondDatabase extends _$BondDatabase {
                   await m.addColumn(schema.messages, schema.messages.deadline);
                 }
               },
+              // v6 — every message settles: an eligible inbound message gets a
+              // `message_notify` row the moment it lands, and that row moves
+              // from 'pending' to 'notified' or 'suppressed' exactly once,
+              // inside a deadline. The state lives on disk rather than in the
+              // notifier so a crash between "the model is still thinking" and
+              // "tell the user" cannot lose the message or announce it twice.
+              //
+              // `ix_messages_created` is on the OLD messages table — admission
+              // filters on `created_at`, which nothing indexed before.
+              from5To6: (m, schema) async {
+                if (!await _tableExists('message_notify')) {
+                  await m.createTable(schema.messageNotify);
+                }
+                // The generated `Index` entities carry bare `CREATE INDEX`,
+                // which throws on a replay over a torn state; `m.createIndex`
+                // has no guarded form, so the DDL is written out here with
+                // IF NOT EXISTS. The names and columns match the generated
+                // entities exactly, which is what the fresh-vs-migrated parity
+                // test compares.
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_message_notify_open '
+                  'ON message_notify(state, deadline_at)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_messages_created '
+                  'ON messages(created_at DESC)',
+                );
+              },
             ),
           ),
         ),
@@ -150,6 +178,16 @@ class BondDatabase extends _$BondDatabase {
     final rows = await customSelect(
       'SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2',
       variables: [Variable<String>(table), Variable<String>(column)],
+    ).get();
+    return rows.isNotEmpty;
+  }
+
+  /// Whether [table] exists at all — the same replay guard as [_columnExists],
+  /// for a step that adds a whole table rather than a column.
+  Future<bool> _tableExists(String table) async {
+    final rows = await customSelect(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+      variables: [Variable<String>(table)],
     ).get();
     return rows.isNotEmpty;
   }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
@@ -6,6 +8,7 @@ import '../data/database.dart' show BondDatabase;
 import '../data/message_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
+import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
@@ -23,6 +26,7 @@ import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
+import '../services/notification_coordinator.dart';
 import '../services/read_ack_queue.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_service.dart';
@@ -117,6 +121,26 @@ final activityLogProvider = Provider<ActivityLog>((ref) {
   final log = ActivityLog(ref.watch(messageStoreProvider));
   ref.onDispose(log.dispose);
   return log;
+});
+
+/// The settle machine. Watches ONLY the store and the log, so a backend
+/// switch — which rebuilds the session, both backends, the sync service and
+/// the queues — leaves it standing: rebuilding it would reset the arm and
+/// re-admit the switch-sync backlog as "new mail".
+final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) {
+  final store = ref.watch(messageStoreProvider);
+  final coordinator = NotificationCoordinator(
+    store,
+    activityLog: ref.watch(activityLogProvider),
+    attentionThreshold: () async {
+      final raw = await store.getPref(attentionThresholdKey);
+      return (raw == null ? null : double.tryParse(raw)) ??
+          AttentionTuning.defaultThreshold;
+    },
+  );
+  unawaited(coordinator.start());
+  ref.onDispose(coordinator.dispose);
+  return coordinator;
 });
 
 final mailBackendProvider = Provider<MailBackend>((ref) {

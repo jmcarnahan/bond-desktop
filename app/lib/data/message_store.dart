@@ -1500,6 +1500,7 @@ RETURNING *
       'activity_events',
       'sender_prefs',
       'drafts',
+      'message_notify',
     ];
     await db.transaction(() async {
       for (final table in tables) {
@@ -2805,6 +2806,181 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
           'AND m.source IN (${_placeholders(sources.length)}) '
           'ORDER BY m.received_at ASC, m.source_message_id ASC',
           variables: _args([storylineId, ...sources]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  // ── notifications ────────────────────────────────────────────────────
+
+  /// Opens a notification row for every inbound message that could still earn
+  /// a mention, and returns how many were opened.
+  ///
+  /// `INSERT OR IGNORE` on the message's own primary key is what makes this
+  /// safe to call on every sweep: a message admitted once — and since settled
+  /// — is not re-admitted, so a thread that keeps getting re-read cannot be
+  /// announced twice.
+  ///
+  /// The two time bounds answer two different failure modes:
+  /// - `created_at > armedAt` means "this row was written after the first
+  ///   successful sync of THIS process". The first-run backlog was written
+  ///   before that moment, so it admits nothing at all — the alternative is a
+  ///   fresh install announcing a mailbox.
+  /// - `received_at >= recencyFloorIso` is the guard `created_at` cannot give.
+  ///   A first Teams connect stores weeks of chat history with a `created_at`
+  ///   of right now; only the message's own timestamp says it is old. NULL
+  ///   `received_at` fails the comparison and is excluded, deliberately: a
+  ///   message with no time on it cannot be shown to be recent.
+  ///
+  /// `triage_status <> 'skipped'` is a pre-filter and nothing more — it saves
+  /// opening a row for mail the gate already threw out. A message that becomes
+  /// skipped AFTER admission is not deleted here; the sweep settles it
+  /// `suppressed`/`gated`, because every admitted row settles exactly once.
+  Future<int> admitNotifyCandidates({
+    required String armedAtIso,
+    required String recencyFloorIso,
+    required String deadlineIso,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (sources.isEmpty) return 0;
+    final now = _nowIso();
+    final inserted = await db.customWriteReturning(
+      '''
+INSERT OR IGNORE INTO message_notify
+  (source, source_message_id, conversation_key, state, reason, deadline_at,
+   settled_at, created_at, updated_at)
+SELECT m.source, m.source_message_id, m.conversation_key, 'pending', NULL, ?,
+   NULL, ?, ?
+FROM messages m
+WHERE m.direction = 'inbound'
+  AND m.source IN (${_placeholders(sources.length)})
+  AND m.triage_status <> 'skipped'
+  AND m.is_read = 0
+  AND m.created_at > ?
+  AND m.received_at >= ?
+RETURNING source_message_id
+''',
+      variables: _args([
+        deadlineIso,
+        now,
+        now,
+        ...sources,
+        armedAtIso,
+        recencyFloorIso,
+      ]),
+    );
+    return inserted.length;
+  }
+
+  /// Every still-open candidate with everything the sweep needs to decide it —
+  /// one read, no per-row follow-up queries, because the sweep runs on a timer
+  /// and a query per candidate would turn a quiet session into a busy one.
+  ///
+  /// The joins to `conversations` and `conversation_ai` are LEFT on purpose: a
+  /// message can outrun its own conversation row, and a candidate with no
+  /// attention score yet is not a candidate to drop — it is one to keep
+  /// waiting on.
+  ///
+  /// `storyline_open` is keyed by CONVERSATION rather than by message, which
+  /// over-waits when a sibling thread queued the work. That is the intended
+  /// trade: announcing a message under the wrong storyline is worse than
+  /// announcing it a few seconds late, and the deadline bounds how late.
+  Future<List<Map<String, Object?>>> openNotifyCandidates({
+    int limit = 50,
+  }) async {
+    final result = await db
+        .customSelect(
+          '''
+SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
+  m.subject, m.from_name, m.summary, m.urgency, m.deadline, m.needs_action,
+  m.reply_expected, m.is_read, m.triage_status, m.received_at,
+  m.updated_at AS message_updated_at,
+  c.cta_text, c.cta_urgency, c.state AS conversation_state,
+  ai.attention_score, ai.bucket, ai.updated_at AS ai_updated_at,
+  EXISTS (SELECT 1 FROM work_items w
+          WHERE w.task_kind = 'extract' AND w.source = n.source
+            AND w.entity_id = n.source_message_id
+            AND w.status IN ('pending','processing')) AS extract_open,
+  EXISTS (SELECT 1 FROM work_items w
+          WHERE w.task_kind = 'storyline' AND w.source = n.source
+            AND w.entity_id = n.conversation_key
+            AND w.status IN ('pending','processing')) AS storyline_open
+FROM message_notify n
+JOIN messages m ON m.source = n.source AND m.source_message_id = n.source_message_id
+LEFT JOIN conversations c ON c.source = n.source AND c.conversation_key = n.conversation_key
+LEFT JOIN conversation_ai ai ON ai.source = n.source AND ai.conversation_key = n.conversation_key
+WHERE n.state = 'pending'
+ORDER BY n.deadline_at ASC
+LIMIT ?
+''',
+          variables: _args([limit]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// Moves one candidate out of `pending`, and reports whether THIS call is
+  /// the one that moved it.
+  ///
+  /// The `AND state = 'pending'` in the UPDATE is the exactly-once guard, the
+  /// same trick [claimPendingTriage] plays: two settles racing for one row —
+  /// two app instances on one file, or the sweep timer overlapping the drain
+  /// hook — both run, but only the one that found the row still pending gets a
+  /// row back. The emission is gated on that `true`, so the user is told once
+  /// or not at all.
+  Future<bool> settleNotify(
+    String source,
+    String sourceMessageId, {
+    required String state,
+    required String reason,
+  }) async {
+    final now = _nowIso();
+    final rows = await db.customWriteReturning(
+      'UPDATE message_notify SET state = ?, reason = ?, settled_at = ?, '
+      'updated_at = ? '
+      "WHERE source = ? AND source_message_id = ? AND state = 'pending' "
+      'RETURNING source_message_id',
+      variables: _args([
+        state,
+        reason,
+        now,
+        now,
+        source,
+        sourceMessageId,
+      ]),
+    );
+    return rows.isNotEmpty;
+  }
+
+  /// Closes every row a dead process left open past its deadline, WITHOUT
+  /// anything being emitted for them, and returns how many that was.
+  ///
+  /// Restart hygiene: the state machine lives on disk precisely so a crash
+  /// cannot lose a message, but the flip side is that a row still `pending`
+  /// from a session that ended hours ago is not news any more. A fresh process
+  /// must not open with a burst of toasts about mail that settled while it was
+  /// not running, so those rows are suppressed on the way in.
+  Future<int> expireStaleNotify({required String nowIso}) {
+    final now = _nowIso();
+    return db.customUpdate(
+      "UPDATE message_notify SET state = 'suppressed', reason = 'stale', "
+      'settled_at = ?, updated_at = ? '
+      "WHERE state = 'pending' AND deadline_at < ?",
+      variables: _args([now, now, nowIso]),
+    );
+  }
+
+  /// What was announced recently — the backing read for the "what did I miss"
+  /// list, newest first.
+  Future<List<Map<String, Object?>>> recentNotified({
+    required String sinceIso,
+    int limit = 20,
+  }) async {
+    final result = await db
+        .customSelect(
+          "SELECT * FROM message_notify WHERE state = 'notified' "
+          'AND settled_at >= ? ORDER BY settled_at DESC LIMIT ?',
+          variables: _args([sinceIso, limit]),
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];

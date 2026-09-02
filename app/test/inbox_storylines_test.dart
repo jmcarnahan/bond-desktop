@@ -6,6 +6,7 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/storyline_pickers.dart';
@@ -86,6 +87,12 @@ void main() {
       dbProvider.overrideWithValue(db),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
+      // Unstarted, so it owns no sweep timer. This file's container outlives
+      // the widget tree — it is disposed in a tearDown, after flutter_test has
+      // already checked for leaked timers — and nothing here is about
+      // notifications.
+      notificationCoordinatorProvider
+          .overrideWithValue(NotificationCoordinator(store)),
     ]);
     addTearDown(container.dispose);
 

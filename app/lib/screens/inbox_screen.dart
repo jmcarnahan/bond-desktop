@@ -10,6 +10,7 @@ import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
+import '../providers/notification_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
@@ -1607,6 +1608,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // The previous snapshot is carried through a reload, so this is null only
     // before the very first read of the pane.
     final snapshot = ref.watch(activitySnapshotProvider).valueOrNull;
+    final health = ref.watch(pipelineHealthProvider).valueOrNull;
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
       child: Column(
@@ -1625,6 +1627,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                     lastTeamsSyncIso: snapshot.lastTeamsSyncIso,
                     lastSweepIso: snapshot.lastSweepIso,
                     entityLabel: snapshot.labelFor,
+                    deadItems:
+                        health == null ? 0 : health.triageDead + health.workDead,
                   ),
           ),
         ],

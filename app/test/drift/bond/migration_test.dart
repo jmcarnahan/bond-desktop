@@ -208,4 +208,40 @@ void main() {
     expect(row['reply_expected'], null);
     expect(row['deadline'], null);
   });
+
+  test('v5 to v6 adds message_notify empty and leaves the backlog alone',
+      () async {
+    final schema = await verifier.schemaAt(5);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, triage_status, created_at, updated_at)
+      VALUES ('email', 'm-1', 'c1', 'inbound', 'Closing Friday', 'triaged',
+        't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 6);
+    addTearDown(db.close);
+
+    // The step creates the table and nothing else: an upgrade must not admit
+    // the mail that was already sitting there, or the first launch after the
+    // update announces the whole backlog.
+    final pending = await db
+        .customSelect('SELECT COUNT(*) AS c FROM message_notify')
+        .getSingle();
+    expect(pending.data['c'], 0);
+
+    final subject = await db
+        .customSelect('SELECT subject FROM messages WHERE source_message_id = ?',
+            variables: [Variable('m-1')])
+        .getSingle();
+    expect(subject.data['subject'], 'Closing Friday');
+
+    final indexes = (await db
+            .customSelect("SELECT name FROM sqlite_master WHERE type = 'index'")
+            .get())
+        .map((r) => r.data['name'])
+        .toSet();
+    expect(indexes, containsAll(['ix_message_notify_open', 'ix_messages_created']));
+  });
 }

@@ -8323,6 +8323,587 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
   }
 }
 
+class MessageNotify extends Table
+    with TableInfo<MessageNotify, MessageNotifyData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  MessageNotify(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _conversationKeyMeta = const VerificationMeta(
+    'conversationKey',
+  );
+  late final GeneratedColumn<String> conversationKey = GeneratedColumn<String>(
+    'conversation_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _stateMeta = const VerificationMeta('state');
+  late final GeneratedColumn<String> state = GeneratedColumn<String>(
+    'state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _reasonMeta = const VerificationMeta('reason');
+  late final GeneratedColumn<String> reason = GeneratedColumn<String>(
+    'reason',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _deadlineAtMeta = const VerificationMeta(
+    'deadlineAt',
+  );
+  late final GeneratedColumn<String> deadlineAt = GeneratedColumn<String>(
+    'deadline_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _settledAtMeta = const VerificationMeta(
+    'settledAt',
+  );
+  late final GeneratedColumn<String> settledAt = GeneratedColumn<String>(
+    'settled_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    source,
+    sourceMessageId,
+    conversationKey,
+    state,
+    reason,
+    deadlineAt,
+    settledAt,
+    createdAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'message_notify';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MessageNotifyData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('conversation_key')) {
+      context.handle(
+        _conversationKeyMeta,
+        conversationKey.isAcceptableOrUnknown(
+          data['conversation_key']!,
+          _conversationKeyMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_conversationKeyMeta);
+    }
+    if (data.containsKey('state')) {
+      context.handle(
+        _stateMeta,
+        state.isAcceptableOrUnknown(data['state']!, _stateMeta),
+      );
+    }
+    if (data.containsKey('reason')) {
+      context.handle(
+        _reasonMeta,
+        reason.isAcceptableOrUnknown(data['reason']!, _reasonMeta),
+      );
+    }
+    if (data.containsKey('deadline_at')) {
+      context.handle(
+        _deadlineAtMeta,
+        deadlineAt.isAcceptableOrUnknown(data['deadline_at']!, _deadlineAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deadlineAtMeta);
+    }
+    if (data.containsKey('settled_at')) {
+      context.handle(
+        _settledAtMeta,
+        settledAt.isAcceptableOrUnknown(data['settled_at']!, _settledAtMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {source, sourceMessageId};
+  @override
+  MessageNotifyData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MessageNotifyData(
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      conversationKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}conversation_key'],
+      )!,
+      state: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}state'],
+      )!,
+      reason: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}reason'],
+      ),
+      deadlineAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}deadline_at'],
+      )!,
+      settledAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}settled_at'],
+      ),
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  MessageNotify createAlias(String alias) {
+    return MessageNotify(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(source, source_message_id)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class MessageNotifyData extends DataClass
+    implements Insertable<MessageNotifyData> {
+  final String source;
+  final String sourceMessageId;
+  final String conversationKey;
+  final String state;
+  final String? reason;
+  final String deadlineAt;
+  final String? settledAt;
+  final String createdAt;
+  final String updatedAt;
+  const MessageNotifyData({
+    required this.source,
+    required this.sourceMessageId,
+    required this.conversationKey,
+    required this.state,
+    this.reason,
+    required this.deadlineAt,
+    this.settledAt,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['conversation_key'] = Variable<String>(conversationKey);
+    map['state'] = Variable<String>(state);
+    if (!nullToAbsent || reason != null) {
+      map['reason'] = Variable<String>(reason);
+    }
+    map['deadline_at'] = Variable<String>(deadlineAt);
+    if (!nullToAbsent || settledAt != null) {
+      map['settled_at'] = Variable<String>(settledAt);
+    }
+    map['created_at'] = Variable<String>(createdAt);
+    map['updated_at'] = Variable<String>(updatedAt);
+    return map;
+  }
+
+  MessageNotifyCompanion toCompanion(bool nullToAbsent) {
+    return MessageNotifyCompanion(
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      conversationKey: Value(conversationKey),
+      state: Value(state),
+      reason: reason == null && nullToAbsent
+          ? const Value.absent()
+          : Value(reason),
+      deadlineAt: Value(deadlineAt),
+      settledAt: settledAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(settledAt),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory MessageNotifyData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MessageNotifyData(
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      conversationKey: serializer.fromJson<String>(json['conversation_key']),
+      state: serializer.fromJson<String>(json['state']),
+      reason: serializer.fromJson<String?>(json['reason']),
+      deadlineAt: serializer.fromJson<String>(json['deadline_at']),
+      settledAt: serializer.fromJson<String?>(json['settled_at']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'conversation_key': serializer.toJson<String>(conversationKey),
+      'state': serializer.toJson<String>(state),
+      'reason': serializer.toJson<String?>(reason),
+      'deadline_at': serializer.toJson<String>(deadlineAt),
+      'settled_at': serializer.toJson<String?>(settledAt),
+      'created_at': serializer.toJson<String>(createdAt),
+      'updated_at': serializer.toJson<String>(updatedAt),
+    };
+  }
+
+  MessageNotifyData copyWith({
+    String? source,
+    String? sourceMessageId,
+    String? conversationKey,
+    String? state,
+    Value<String?> reason = const Value.absent(),
+    String? deadlineAt,
+    Value<String?> settledAt = const Value.absent(),
+    String? createdAt,
+    String? updatedAt,
+  }) => MessageNotifyData(
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    conversationKey: conversationKey ?? this.conversationKey,
+    state: state ?? this.state,
+    reason: reason.present ? reason.value : this.reason,
+    deadlineAt: deadlineAt ?? this.deadlineAt,
+    settledAt: settledAt.present ? settledAt.value : this.settledAt,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  MessageNotifyData copyWithCompanion(MessageNotifyCompanion data) {
+    return MessageNotifyData(
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      conversationKey: data.conversationKey.present
+          ? data.conversationKey.value
+          : this.conversationKey,
+      state: data.state.present ? data.state.value : this.state,
+      reason: data.reason.present ? data.reason.value : this.reason,
+      deadlineAt: data.deadlineAt.present
+          ? data.deadlineAt.value
+          : this.deadlineAt,
+      settledAt: data.settledAt.present ? data.settledAt.value : this.settledAt,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageNotifyData(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('state: $state, ')
+          ..write('reason: $reason, ')
+          ..write('deadlineAt: $deadlineAt, ')
+          ..write('settledAt: $settledAt, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    source,
+    sourceMessageId,
+    conversationKey,
+    state,
+    reason,
+    deadlineAt,
+    settledAt,
+    createdAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MessageNotifyData &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          other.conversationKey == this.conversationKey &&
+          other.state == this.state &&
+          other.reason == this.reason &&
+          other.deadlineAt == this.deadlineAt &&
+          other.settledAt == this.settledAt &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class MessageNotifyCompanion extends UpdateCompanion<MessageNotifyData> {
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<String> conversationKey;
+  final Value<String> state;
+  final Value<String?> reason;
+  final Value<String> deadlineAt;
+  final Value<String?> settledAt;
+  final Value<String> createdAt;
+  final Value<String> updatedAt;
+  final Value<int> rowid;
+  const MessageNotifyCompanion({
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.conversationKey = const Value.absent(),
+    this.state = const Value.absent(),
+    this.reason = const Value.absent(),
+    this.deadlineAt = const Value.absent(),
+    this.settledAt = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  MessageNotifyCompanion.insert({
+    required String source,
+    required String sourceMessageId,
+    required String conversationKey,
+    this.state = const Value.absent(),
+    this.reason = const Value.absent(),
+    required String deadlineAt,
+    this.settledAt = const Value.absent(),
+    required String createdAt,
+    required String updatedAt,
+    this.rowid = const Value.absent(),
+  }) : source = Value(source),
+       sourceMessageId = Value(sourceMessageId),
+       conversationKey = Value(conversationKey),
+       deadlineAt = Value(deadlineAt),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<MessageNotifyData> custom({
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<String>? conversationKey,
+    Expression<String>? state,
+    Expression<String>? reason,
+    Expression<String>? deadlineAt,
+    Expression<String>? settledAt,
+    Expression<String>? createdAt,
+    Expression<String>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (conversationKey != null) 'conversation_key': conversationKey,
+      if (state != null) 'state': state,
+      if (reason != null) 'reason': reason,
+      if (deadlineAt != null) 'deadline_at': deadlineAt,
+      if (settledAt != null) 'settled_at': settledAt,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  MessageNotifyCompanion copyWith({
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<String>? conversationKey,
+    Value<String>? state,
+    Value<String?>? reason,
+    Value<String>? deadlineAt,
+    Value<String?>? settledAt,
+    Value<String>? createdAt,
+    Value<String>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return MessageNotifyCompanion(
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      conversationKey: conversationKey ?? this.conversationKey,
+      state: state ?? this.state,
+      reason: reason ?? this.reason,
+      deadlineAt: deadlineAt ?? this.deadlineAt,
+      settledAt: settledAt ?? this.settledAt,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (conversationKey.present) {
+      map['conversation_key'] = Variable<String>(conversationKey.value);
+    }
+    if (state.present) {
+      map['state'] = Variable<String>(state.value);
+    }
+    if (reason.present) {
+      map['reason'] = Variable<String>(reason.value);
+    }
+    if (deadlineAt.present) {
+      map['deadline_at'] = Variable<String>(deadlineAt.value);
+    }
+    if (settledAt.present) {
+      map['settled_at'] = Variable<String>(settledAt.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageNotifyCompanion(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('state: $state, ')
+          ..write('reason: $reason, ')
+          ..write('deadlineAt: $deadlineAt, ')
+          ..write('settledAt: $settledAt, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -8377,6 +8958,15 @@ abstract class _$BondDatabase extends GeneratedDatabase {
   late final SenderPrefs senderPrefs = SenderPrefs(this);
   late final AppPrefs appPrefs = AppPrefs(this);
   late final Drafts drafts = Drafts(this);
+  late final MessageNotify messageNotify = MessageNotify(this);
+  late final Index ixMessageNotifyOpen = Index(
+    'ix_message_notify_open',
+    'CREATE INDEX ix_message_notify_open ON message_notify (state, deadline_at)',
+  );
+  late final Index ixMessagesCreated = Index(
+    'ix_messages_created',
+    'CREATE INDEX ix_messages_created ON messages (created_at DESC)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -8405,6 +8995,9 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     senderPrefs,
     appPrefs,
     drafts,
+    messageNotify,
+    ixMessageNotifyOpen,
+    ixMessagesCreated,
   ];
 }
 
@@ -12366,6 +12959,288 @@ typedef $DraftsProcessedTableManager =
       Draft,
       PrefetchHooks Function()
     >;
+typedef $MessageNotifyCreateCompanionBuilder =
+    MessageNotifyCompanion Function({
+      required String source,
+      required String sourceMessageId,
+      required String conversationKey,
+      Value<String> state,
+      Value<String?> reason,
+      required String deadlineAt,
+      Value<String?> settledAt,
+      required String createdAt,
+      required String updatedAt,
+      Value<int> rowid,
+    });
+typedef $MessageNotifyUpdateCompanionBuilder =
+    MessageNotifyCompanion Function({
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<String> conversationKey,
+      Value<String> state,
+      Value<String?> reason,
+      Value<String> deadlineAt,
+      Value<String?> settledAt,
+      Value<String> createdAt,
+      Value<String> updatedAt,
+      Value<int> rowid,
+    });
+
+class $MessageNotifyFilterComposer
+    extends Composer<_$BondDatabase, MessageNotify> {
+  $MessageNotifyFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get state => $composableBuilder(
+    column: $table.state,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get reason => $composableBuilder(
+    column: $table.reason,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get deadlineAt => $composableBuilder(
+    column: $table.deadlineAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get settledAt => $composableBuilder(
+    column: $table.settledAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $MessageNotifyOrderingComposer
+    extends Composer<_$BondDatabase, MessageNotify> {
+  $MessageNotifyOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get state => $composableBuilder(
+    column: $table.state,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get reason => $composableBuilder(
+    column: $table.reason,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get deadlineAt => $composableBuilder(
+    column: $table.deadlineAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get settledAt => $composableBuilder(
+    column: $table.settledAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $MessageNotifyAnnotationComposer
+    extends Composer<_$BondDatabase, MessageNotify> {
+  $MessageNotifyAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get state =>
+      $composableBuilder(column: $table.state, builder: (column) => column);
+
+  GeneratedColumn<String> get reason =>
+      $composableBuilder(column: $table.reason, builder: (column) => column);
+
+  GeneratedColumn<String> get deadlineAt => $composableBuilder(
+    column: $table.deadlineAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get settledAt =>
+      $composableBuilder(column: $table.settledAt, builder: (column) => column);
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $MessageNotifyTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          MessageNotify,
+          MessageNotifyData,
+          $MessageNotifyFilterComposer,
+          $MessageNotifyOrderingComposer,
+          $MessageNotifyAnnotationComposer,
+          $MessageNotifyCreateCompanionBuilder,
+          $MessageNotifyUpdateCompanionBuilder,
+          (
+            MessageNotifyData,
+            BaseReferences<_$BondDatabase, MessageNotify, MessageNotifyData>,
+          ),
+          MessageNotifyData,
+          PrefetchHooks Function()
+        > {
+  $MessageNotifyTableManager(_$BondDatabase db, MessageNotify table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $MessageNotifyFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $MessageNotifyOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $MessageNotifyAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<String> conversationKey = const Value.absent(),
+                Value<String> state = const Value.absent(),
+                Value<String?> reason = const Value.absent(),
+                Value<String> deadlineAt = const Value.absent(),
+                Value<String?> settledAt = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => MessageNotifyCompanion(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                conversationKey: conversationKey,
+                state: state,
+                reason: reason,
+                deadlineAt: deadlineAt,
+                settledAt: settledAt,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String source,
+                required String sourceMessageId,
+                required String conversationKey,
+                Value<String> state = const Value.absent(),
+                Value<String?> reason = const Value.absent(),
+                required String deadlineAt,
+                Value<String?> settledAt = const Value.absent(),
+                required String createdAt,
+                required String updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => MessageNotifyCompanion.insert(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                conversationKey: conversationKey,
+                state: state,
+                reason: reason,
+                deadlineAt: deadlineAt,
+                settledAt: settledAt,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $MessageNotifyProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      MessageNotify,
+      MessageNotifyData,
+      $MessageNotifyFilterComposer,
+      $MessageNotifyOrderingComposer,
+      $MessageNotifyAnnotationComposer,
+      $MessageNotifyCreateCompanionBuilder,
+      $MessageNotifyUpdateCompanionBuilder,
+      (
+        MessageNotifyData,
+        BaseReferences<_$BondDatabase, MessageNotify, MessageNotifyData>,
+      ),
+      MessageNotifyData,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -12397,4 +13272,6 @@ class $BondDatabaseManager {
   $AppPrefsTableManager get appPrefs =>
       $AppPrefsTableManager(_db, _db.appPrefs);
   $DraftsTableManager get drafts => $DraftsTableManager(_db, _db.drafts);
+  $MessageNotifyTableManager get messageNotify =>
+      $MessageNotifyTableManager(_db, _db.messageNotify);
 }

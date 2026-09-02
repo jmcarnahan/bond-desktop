@@ -315,7 +315,7 @@ void main() {
             r['name'] as String,
         ];
     expect(tablesOf(fresh), tablesOf(legacy));
-    expect(tablesOf(fresh).length, 14);
+    expect(tablesOf(fresh).length, 15);
 
     for (final table in tablesOf(legacy)) {
       List<String> columnsOf(raw.Database db) => [

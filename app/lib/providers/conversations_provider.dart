@@ -9,6 +9,7 @@ import '../services/ai_worker.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/backend_types.dart';
+import '../services/notification_coordinator.dart';
 import '../services/read_ack_queue.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
@@ -117,6 +118,14 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// timer reaching those endpoints. `teams_refresh_test.dart` holds that line.
   final ReadAckQueue? _readAcks;
 
+  /// The settle machine, or null in tests that build this notifier directly.
+  ///
+  /// It OUTLIVES this notifier — it is held by a provider that a backend
+  /// switch does not rebuild — so nothing here owns it or disposes it. This
+  /// class only tells it two things: that a sync completed, and that a drain
+  /// finished writing.
+  final NotificationCoordinator? _notify;
+
   StreamSubscription<TriageProgress>? _triageProgress;
 
   /// The AI queue's progress, on the same debounce as triage's. Some cycles
@@ -138,12 +147,14 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     AiWorker? aiWorker,
     AttentionService? attention,
     ReadAckQueue? readAcks,
+    NotificationCoordinator? notify,
     Future<String?>? userAddress,
   })  : _teamsSync = teamsSync,
         _triage = triage,
         _aiWorker = aiWorker,
         _attention = attention,
         _readAcks = readAcks,
+        _notify = notify,
         super(const ConversationsInitial()) {
     // Subscribed before the triage early-return below, because a notifier can
     // be wired with an AI queue and no triage queue at all.
@@ -197,6 +208,10 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     if (syncFirst) {
       try {
         await _sync.syncNow();
+        // Arms notifications at the first sync that came back, and never
+        // before: everything already stored when this fires is backlog, and
+        // the backlog must not be announced.
+        _notify?.noteSyncCompleted();
         // Started, never awaited: triage takes about seventeen seconds a
         // message, and the mail that just synced must render now. Results
         // arrive later through the progress stream.
@@ -302,6 +317,9 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     String? error;
     try {
       await teams.syncNow();
+      // A Teams-only session arms here or not at all — its mail sync may never
+      // run, and an unarmed coordinator admits nothing.
+      _notify?.noteSyncCompleted();
       // The same chain [load] starts after a mail sync, for the same reason:
       // the chats this pull just re-pended should be triaged and drafted now,
       // not whenever the poll timer next happens to come round. Chained rather
@@ -369,6 +387,11 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     if (queued > 0) {
       await _aiWorker?.pump();
     }
+    // Above the `mounted` check on purpose: the drain's verdicts are written
+    // by now, and the coordinator outlives this notifier — a settle owed to
+    // the user must not be skipped because the list they were looking at went
+    // away.
+    await _notify?.noteDrainSettled();
     if (!mounted) return;
     await load(syncFirst: false);
   }
@@ -656,6 +679,7 @@ final conversationsProvider =
     aiWorker: ref.watch(aiWorkerProvider),
     attention: ref.watch(attentionServiceProvider),
     readAcks: ref.watch(readAckQueueProvider),
+    notify: ref.watch(notificationCoordinatorProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
     userAddress: ref.watch(authSessionProvider).storedAccount.then(

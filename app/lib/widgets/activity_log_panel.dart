@@ -53,6 +53,12 @@ class ActivityLogPanel extends StatefulWidget {
   /// point at rows that are not conversations or no longer exist.
   final String? Function(ActivityEvent event)? entityLabel;
 
+  /// How many pipeline items have been retried past their ceiling and given
+  /// up on. The error tile counts every failure, most of which a later sync
+  /// retries on its own; this is the subset nothing will try again, and it is
+  /// the one number a person can act on.
+  final int deadItems;
+
   const ActivityLogPanel({
     super.key,
     required this.stats,
@@ -62,6 +68,7 @@ class ActivityLogPanel extends StatefulWidget {
     this.lastTeamsSyncIso,
     this.lastSweepIso,
     this.entityLabel,
+    this.deadItems = 0,
   });
 
   /// How each kind is named to a person. The panel and [describe] read the
@@ -266,6 +273,18 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
       padding: const EdgeInsets.only(bottom: BondSpacing.s24),
       children: [
         _tiles(),
+        // Only when there is something to say — a "0 items given up on" line
+        // is an alarm about the absence of a problem.
+        if (widget.deadItems > 0)
+          Padding(
+            padding: const EdgeInsets.only(bottom: BondSpacing.s8),
+            child: Text(
+              widget.deadItems == 1
+                  ? '1 item given up on'
+                  : '${widget.deadItems} items given up on',
+              style: BondType.caption,
+            ),
+          ),
         if (events.isEmpty)
           Padding(
             padding: const EdgeInsets.all(BondSpacing.s32),
