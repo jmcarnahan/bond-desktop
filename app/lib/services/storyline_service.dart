@@ -33,8 +33,17 @@ class StorylineTuning {
   static const double assignCosineGateWithOverlap = 0.50;
 
   /// Cosine two conversations must reach to land in the same proposed cluster.
-  /// Higher than the assignment gates because a suggestion has no existing
-  /// group to be judged against — the cluster IS the claim.
+  /// Higher than the assignment gates because there is no existing group to
+  /// score a candidate against — the only thing holding a cluster together is
+  /// how close its members sit to each other.
+  ///
+  /// Still a filter and not a verdict: what the cluster produces is a
+  /// shortlist and a name, and every member of it is then confirmed against
+  /// that name one thread at a time, exactly as an assignment is. In a
+  /// mailbox where every thread shares the same boilerplate, neighbours at
+  /// this cosine can be about entirely different things, and the confirm
+  /// stage is what catches that — raising the number here would only make the
+  /// pass propose less.
   static const double clusterLinkThreshold = 0.65;
 
   /// A storyline of one is just a thread.
@@ -409,6 +418,11 @@ class StorylineService {
   /// there is too little unassigned conversation to group, and nothing when
   /// the clusters it finds have all been dismissed before.
   ///
+  /// A cluster is a shortlist, not a decision. Each one is named, and then
+  /// every thread in it is confirmed against that name individually — the same
+  /// question [assignConversation] asks — so a group that merely embeds alike
+  /// cannot ship as a storyline.
+  ///
   /// Mail and chat are clustered together, in one pool. A thread and a chat
   /// about the same launch are one story, and the pass that cannot see both
   /// would propose the half it can.
@@ -453,16 +467,35 @@ class StorylineService {
     // consumed a slot would consume that same slot on every future sweep and
     // permanently starve the genuinely new clusters ranked behind it.
     var proposed = 0;
+    var confirmed = 0;
+    var rejected = 0;
+    var attempted = 0;
     for (final cluster in _cluster(vectors)) {
       if (proposed >= room) break;
-      if (await _propose([for (final index in cluster) rows[index]])) {
-        proposed++;
-      }
+      final tally = await _propose([for (final index in cluster) rows[index]]);
+      attempted++;
+      if (tally.proposed) proposed++;
+      // Summed across every cluster the pass named, the tombstoned ones
+      // included: the model's rejections are work it did and an answer it
+      // gave, and a cluster that was thrown out entirely is the most
+      // interesting row this pass can write.
+      confirmed += tally.confirmed;
+      rejected += tally.rejected;
     }
 
     // Once at the end, not once per proposal: the sweep is one unit of work
     // and gets one row, so a per-cluster note would just overwrite itself.
-    if (proposed > 0) _log.note({'proposed': proposed});
+    // Zeroes included — the log decides what a person sees, and its
+    // quiet-kind check is what suppresses the all-zero pass as the genuine
+    // nothing it is. Skipped entirely when no cluster reached the model,
+    // because then there is not even a tally to be zero about.
+    if (attempted > 0) {
+      _log.note({
+        'proposed': proposed,
+        'confirmed': confirmed,
+        'rejected': rejected,
+      });
+    }
   }
 
   /// Single-link greedy agglomeration, in one pass.
@@ -512,15 +545,30 @@ class StorylineService {
     return kept;
   }
 
-  /// Names one cluster and stores it as a suggestion. Returns whether a
-  /// suggestion was actually created, so the sweep can budget its room on
-  /// results rather than attempts.
-  Future<bool> _propose(List<Map<String, Object?>> rows) async {
+  /// Names one cluster, asks whether each of its threads actually belongs
+  /// under that name, and stores the survivors as a suggestion.
+  ///
+  /// The naming call reads the whole cluster — a group is named after what
+  /// most of it is about, and hiding the outliers from that call would only
+  /// make the name worse. What comes back is then the criteria: the title, the
+  /// summary and above all the charter the model just wrote are what each
+  /// thread is confirmed against, one at a time. Before this, a cluster shipped
+  /// whole, and a naming pass that wrote "this excludes unrelated work
+  /// requests" would file the unrelated work requests anyway.
+  ///
+  /// Returns a tally rather than a bool: the sweep budgets its room on
+  /// proposals, but the activity row is about the judging, which happens
+  /// whether or not anything is proposed.
+  Future<({bool proposed, int confirmed, int rejected})> _propose(
+    List<Map<String, Object?>> rows,
+  ) async {
+    const nothing = (proposed: false, confirmed: 0, rejected: 0);
+
     final keys = [
       for (final row in rows) row['conversation_key'] as String? ?? '',
     ]..sort();
     final memberHash = cardHash(keys.join('\n'));
-    if (await _store.dismissedMemberHashExists(memberHash)) return false;
+    if (await _store.dismissedMemberHashExists(memberHash)) return nothing;
 
     final cards = <String>[];
     for (final row in rows) {
@@ -541,6 +589,86 @@ class StorylineService {
     );
 
     final id = newStorylineId();
+    // Never stored, and deliberately so: this exists only to give
+    // [ConfirmInput] the group to judge against, and the whole point of the
+    // pass is that some of these threads may not survive being judged. What
+    // reaches the database is decided below, once the answers are in.
+    final proposal = Storyline(
+      id: id,
+      title: result.title,
+      summary: result.summary,
+      charter: result.charter.isEmpty ? null : result.charter,
+      status: 'suggested',
+      createdBy: 'auto',
+    );
+
+    // Everyone in the cluster, computed once: all the candidates are judged
+    // against the same group, not against one that shrinks as its members are
+    // rejected out from under the later questions.
+    final seen = <String>{};
+    final storylineParticipants = <String>[];
+    for (final row in rows) {
+      for (final display in _displaysOf(Conversation.fromRow(row))) {
+        if (seen.add(display.toLowerCase())) storylineParticipants.add(display);
+      }
+    }
+
+    // No cap on how many of these a cluster may spend, unlike [recruit]'s
+    // eight. The cost is bounded by identity rather than by count: a cluster
+    // is confirmed once ever, because the hash checks above and the tombstone
+    // below mean the same set of threads never reaches this line twice — and
+    // the confirmations run on the small local model.
+    final survivors = <({Map<String, Object?> row, String evidence})>[];
+    var rejected = 0;
+    for (final row in rows) {
+      final source = row['source'] as String? ?? _workSource;
+      final key = row['conversation_key'] as String? ?? '';
+      if (key.isEmpty) continue;
+      final cardData = await _store.newestInboundCardData(source, key);
+
+      final confirm = await runTask(
+        _confirmClient,
+        const ConfirmMembershipTask(),
+        ConfirmInput(
+          storyline: proposal,
+          storylineParticipants: storylineParticipants,
+          candidateCard: enrichedCardForConversationRow(row, cardData),
+        ),
+        // Zero, for the reason the other two membership paths run at zero: the
+        // same thread judged against the same group twice must answer the same
+        // way, or a sweep re-run after a restart would propose a different
+        // storyline out of an unchanged mailbox.
+        temperature: 0,
+      );
+      // A `low` yes is a no — the identical rule [assignConversation] and
+      // [recruit] apply.
+      if (!confirm.belongs || confirm.confidence == 'low') {
+        rejected++;
+        continue;
+      }
+      survivors.add((row: row, evidence: confirm.evidence));
+    }
+
+    if (survivors.length < StorylineTuning.minClusterSize) {
+      // A tombstone rather than nothing at all. The cluster is deterministic
+      // and its members go straight back into the unassigned pool, so without
+      // a row carrying its hash this same group would re-spend a naming call
+      // and one confirmation per member on every sync, forever, to reach the
+      // same answer. Dismissed is exactly the right status for that: nothing
+      // renders it, and `dismissedMemberHashExists` above stops the rebuilt
+      // cluster before any model is dialled.
+      await _store.insertStoryline(
+        id: id,
+        title: result.title,
+        summary: result.summary,
+        charter: result.charter.isEmpty ? null : result.charter,
+        status: 'dismissed',
+        createdBy: 'auto',
+        memberHash: memberHash,
+      );
+      return (proposed: false, confirmed: survivors.length, rejected: rejected);
+    }
+
     await _store.insertStoryline(
       id: id,
       title: result.title,
@@ -548,27 +676,32 @@ class StorylineService {
       charter: result.charter.isEmpty ? null : result.charter,
       status: 'suggested',
       createdBy: 'auto',
+      // The CLUSTER's hash, not the stored members' — the two are no longer
+      // the same thing once confirmation drops a thread. It has to be the
+      // cluster's: dismissing this suggestion returns every member to the
+      // sweep pool (`assignedOrBlockedKeys` counts only suggested and active
+      // storylines), so the identical cluster re-forms on the next sweep, and
+      // only a hash over the whole of it is recognised by the cheap check
+      // above — before a single model call is spent re-deriving an answer the
+      // user already refused.
       memberHash: memberHash,
     );
-    for (final row in rows) {
-      final key = row['conversation_key'] as String? ?? '';
-      if (key.isEmpty) continue;
+    for (final survivor in survivors) {
       await _store.addStorylineMember(
         id,
-        row['source'] as String? ?? _workSource,
-        key,
+        survivor.row['source'] as String? ?? _workSource,
+        survivor.row['conversation_key'] as String? ?? '',
         addedBy: 'auto',
-        // The cluster is its own reason: nothing judged these threads
-        // individually, so claiming a per-thread justification would be
-        // inventing one.
-        evidence: 'clustered together',
+        // The model's own sentence about this thread, the same provenance the
+        // other two add paths record. The cluster is no longer its own reason.
+        evidence: survivor.evidence,
       );
-      final lastMessageAt = row['last_message_at'] as String?;
+      final lastMessageAt = survivor.row['last_message_at'] as String?;
       if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
         await _store.touchStorylineActivity(id, lastMessageAt);
       }
     }
-    return true;
+    return (proposed: true, confirmed: survivors.length, rejected: rejected);
   }
 
   // ── user actions ───────────────────────────────────────────────────────

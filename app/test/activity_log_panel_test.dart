@@ -627,6 +627,57 @@ void main() {
       );
     });
 
+    test('a sweep says how many threads it confirmed and turned away', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {'proposed': 1, 'confirmed': 2, 'rejected': 3},
+        )),
+        'Storyline sweep — 1 proposed, 2 threads confirmed, 3 rejected',
+      );
+      // A sweep that proposed nothing is the row worth reading, not one to
+      // hide: the model was asked five times and said no five times.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {'proposed': 0, 'confirmed': 0, 'rejected': 5},
+        )),
+        'Storyline sweep — 0 proposed, 0 threads confirmed, 5 rejected',
+      );
+      // A tombstoned cluster can leave exactly one confirmed thread behind.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {'proposed': 0, 'confirmed': 1, 'rejected': 2},
+        )),
+        'Storyline sweep — 0 proposed, 1 thread confirmed, 2 rejected',
+      );
+    });
+
+    test('a sweep row written before the confirm stage still reads', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {'proposed': 2},
+        )),
+        'Storyline sweep — 2 proposed',
+      );
+    });
+
+    test('a recruit says how many of its candidates it took', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_recruit',
+          detail: const {'recruited': 1, 'considered': 5},
+        )),
+        'Recruited 1 of 5 candidate threads',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'storyline_recruit')),
+        'Storyline recruit',
+      );
+    });
+
     test('model tallies stay out of the sentence', () {
       // They are on nearly every AI row; spending the one line on them would
       // bury the fact the row exists to report. The trailing duration is where
