@@ -282,6 +282,22 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     String? error;
     try {
       await teams.syncNow();
+      // The same chain [load] starts after a mail sync, for the same reason:
+      // the chats this pull just re-pended should be triaged and drafted now,
+      // not whenever the poll timer next happens to come round. Chained rather
+      // than run beside each other — one model server, one queue at a time,
+      // triage first because its output is what the user is looking at.
+      final pump = _triage?.pump();
+      if (pump != null) {
+        unawaited(
+          pump.then<void>((_) => _aiWorker?.pump()).catchError(
+            (Object e) => debugPrint('queue pump chain failed: $e'),
+          ),
+        );
+      } else {
+        final ai = _aiWorker?.pump();
+        if (ai != null) unawaited(ai);
+      }
     } on AuthException {
       // Deliberately the same banner as any other failure: the inbox load is
       // what routes a dead session to sign-in, and a second opinion from the
@@ -322,8 +338,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       final stored = await _store.getPref(attentionThresholdKey);
       final threshold = (stored == null ? null : double.tryParse(stored)) ??
           AttentionTuning.defaultThreshold;
-      for (final key in await _store.needsDraftKeys(threshold: threshold)) {
-        await _store.requeueWork('draft', 'email', key);
+      for (final row in await _store.needsDraftKeys(threshold: threshold)) {
+        await _store.requeueWork('draft', row.source, row.conversationKey);
       }
     } catch (e) {
       debugPrint('draft enqueue failed: $e');

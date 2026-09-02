@@ -805,6 +805,82 @@ void main() {
     });
   });
 
+  group('a newer message invalidates the draft', () {
+    // The same promise the mail sync makes, and it has to be the same one: a
+    // chat now drafts through the same queue, so a suggestion left standing
+    // over a newer message would be a reply to the wrong thing in either inbox.
+
+    Future<void> seedDraft({String key = 'chat-1'}) => store.upsertDraft(
+          source: 'teams',
+          conversationKey: key,
+          replyToMessageId: 'm1',
+          body: 'Sending it over this afternoon.',
+          optionsJson: '[{"stance":"Confirm","body":"On its way."}]',
+        );
+
+    /// A second sync of the same chat, carrying [messages] this time.
+    Future<void> syncAgain(List<Map<String, dynamic>> messages) async {
+      graph.chats
+        ..clear()
+        ..add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = messages;
+      await build().syncNow();
+    }
+
+    setUp(() async {
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(hours: 3))),
+      ];
+      await build().syncNow();
+    });
+
+    test('a NEW inbound chat message deletes that chat\'s draft', () async {
+      await seedDraft();
+
+      await syncAgain([_message(id: 'm2', at: _iso(const Duration(hours: 1)))]);
+
+      // The whole row goes, so the short replies go with it — they answered
+      // the message that is no longer the newest one.
+      expect(await store.getDraft('teams', 'chat-1'), isNull);
+    });
+
+    test('the user\'s own message does not', () async {
+      // The thread moved on, but a draft still answers the same inbound
+      // message it was written against — and the send path writes the status.
+      await seedDraft();
+
+      await syncAgain([
+        _message(
+          id: 'm2',
+          userId: _myId,
+          displayName: 'Bond LO',
+          at: _iso(const Duration(hours: 1)),
+        ),
+      ]);
+
+      expect(await store.getDraft('teams', 'chat-1'), isNotNull);
+    });
+
+    test('and a re-pulled message the store already has does not', () async {
+      // Every sync re-reads the chat's recent messages, so a draft that went
+      // on a replay would vanish on the next routine refresh.
+      await seedDraft();
+
+      await syncAgain([_message(id: 'm1', at: _iso(const Duration(hours: 3)))]);
+
+      expect(await store.getDraft('teams', 'chat-1'), isNotNull);
+    });
+
+    test('and it leaves another chat\'s draft alone', () async {
+      await seedDraft(key: 'chat-2');
+
+      await syncAgain([_message(id: 'm2', at: _iso(const Duration(hours: 1)))]);
+
+      expect(await store.getDraft('teams', 'chat-2'), isNotNull);
+    });
+  });
+
   group('what is fetched at all', () {
     test('a chat whose preview the store already has is never fetched',
         () async {

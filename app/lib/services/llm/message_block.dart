@@ -23,7 +23,7 @@ String buildMessageBlock(Message message) {
       ? body.substring(0, messageBlockBodyCap)
       : body;
 
-  return '${_sender(message)}\n'
+  return '${senderLine(message)}\n'
       '${_subjectLine(message)}'
       'Received: ${message.receivedAt ?? ''}\n'
       '\n'
@@ -33,7 +33,12 @@ String buildMessageBlock(Message message) {
 /// Mail identifies a sender by address; a chat cannot. A chat's `from_address`
 /// is `teams:<graph user id>` — a namespaced uuid the model can only be
 /// distracted by — so a chat sender is the display name and nothing else.
-String _sender(Message message) => switch (message.source) {
+///
+/// Public because the block is not the only place a sender is named: the
+/// drafting task renders its thread lines through here too, which is what
+/// keeps "a chat sender is a name, not an address" a fact this file holds
+/// rather than a rule two prompts each remember separately.
+String senderLine(Message message) => switch (message.source) {
       'teams' => 'From: ${message.fromName ?? ''}',
       _ => 'From: ${message.fromName ?? ''} <${message.fromAddress ?? ''}>',
     };

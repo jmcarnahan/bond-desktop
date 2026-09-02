@@ -352,10 +352,17 @@ class TeamsSync {
         if (!firstSighting) continue;
         newMessages++;
 
+        final outbound = row['direction'] == 'outbound';
+
+        // A draft answers the message that was newest when the model wrote it.
+        // The moment a newer inbound message lands, that draft is a reply to
+        // the wrong thing — so it goes, and the enqueue on the next list load
+        // writes a fresh one against what the sender actually just said.
+        if (!outbound) await _store.deleteDraft(source, key);
+
         // Asked BEFORE the fold advances the inbound watermark — a reply the
         // user sent from any Teams client resolves the standing ask, exactly
         // as the composer's send path does for a reply sent from here.
-        final outbound = row['direction'] == 'outbound';
         final resolvesAsk = outbound &&
             outboundResolves(work.snapshot, row['received_at'] as String?);
         work.snapshot = foldMessage(

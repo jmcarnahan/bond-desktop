@@ -70,7 +70,13 @@ class DraftHandler extends WorkHandler {
       DraftInput(
         thread: await _store.loadThread(key, sources: [source]),
         replyTo: replyTo,
-        styleExamples: await _styleExamplesFor(source, replyTo.fromAddress),
+        // Mail only. `recentOutboundToSender` matches on `to_json`, which a
+        // chat never writes ('[]'), so the skip only makes explicit what the
+        // LIKE would answer anyway — and a chat needs it less: the thread tail
+        // already carries the owner's own chat voice, turn by turn.
+        styleExamples: source == 'email'
+            ? await _styleExamplesFor(source, replyTo.fromAddress)
+            : const [],
         storylineSummary: await _storylineSummaryFor(source, key),
         aboutMe: await _store.getPref(aboutMeKey),
         now: DateTime.now(),

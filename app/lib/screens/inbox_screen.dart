@@ -1504,12 +1504,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       sending: draft.sending,
       capability: draft.capability,
       onSend: (body) => _send(target, body),
-      // Null for a chat, which is what hides the button rather than offering
-      // one that does nothing: the drafting queue is email-only — a chat wants
-      // a one-line reply from a different prompt, and a second system prompt
-      // would thrash the single-slot model's cached prefix. A chat's composer
-      // is a plain box.
-      onGenerate: target.source == 'email' ? notifier.generate : null,
+      // Both sources, unconditionally. A chat is drafted through the same
+      // queue and the same system prompt a mail is — only the channel's style
+      // rules differ, and those ride in the user message — so Regenerate means
+      // exactly the same thing on either kind of thread.
+      onGenerate: notifier.generate,
       onDismiss: notifier.dismiss,
       onEdited: notifier.markEdited,
     );

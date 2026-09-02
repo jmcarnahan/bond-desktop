@@ -268,9 +268,9 @@ void main() {
 
     testWidgets('with it, the chat gets the same reply surface mail does',
         (tester) async {
-      // No generated options — drafting stays email-only this round — so the
-      // bar is the `Reply…` affordance alone, and it opens the same collapsed
-      // composer a mail thread's does.
+      // Nothing drafted for this one yet, so the bar is the `Reply…`
+      // affordance alone, and it opens the same collapsed composer a mail
+      // thread's does.
       await seedChat('chat-1');
       await pumpScreen(tester, grantedScopes: _withChatWrite);
 
@@ -283,9 +283,31 @@ void main() {
       await tester.pump();
 
       expect(find.byType(Composer), findsOneWidget);
-      // A plain box: drafting stays email-only this round, so a chat gets no
-      // "Draft reply" button rather than one that would do nothing.
-      expect(find.text('Draft reply'), findsNothing);
+      // A chat drafts through the same queue and the same system prompt a mail
+      // does — only the channel's style rules differ, and those ride in the
+      // user message — so the button is reachable on either kind of thread.
+      expect(find.text('Draft reply'), findsOneWidget);
+    });
+
+    testWidgets('and its stored options reach the transcript as cards',
+        (tester) async {
+      // The other half of the same parity: a chat's draft row carries short
+      // replies now, so the bar draws them exactly as a mail thread's does.
+      await seedChat('chat-1');
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'chat-1',
+        replyToMessageId: 'chat-1-m1',
+        body: 'Sending it over this afternoon.',
+        optionsJson: '[{"stance":"Confirm today","body":"On its way today."},'
+            '{"stance":"Ask for a deadline","body":"When do you need it?"}]',
+      );
+      await pumpScreen(tester, grantedScopes: _withChatWrite);
+
+      await openChat(tester);
+
+      expect(find.text('Confirm today'), findsOneWidget);
+      expect(find.text('Ask for a deadline'), findsOneWidget);
     });
 
     testWidgets('a mail thread reaches one through Reply…', (tester) async {

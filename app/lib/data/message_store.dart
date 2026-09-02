@@ -2438,15 +2438,23 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// A thread with no attention score at all is excluded: `NULL >= ?` is NULL,
   /// which is not true. That is the wanted behaviour — a thread the scorer has
   /// never reached has not earned a model call yet.
-  Future<List<String>> needsDraftKeys({
+  ///
+  /// ONE list across every source, ranked purely by score. A chat and a mail
+  /// compete for the same seven slots on equal terms — there is no per-source
+  /// quota, because "which thread most deserves a suggestion" is a question
+  /// about the thread, not about the connector it arrived through. Each row
+  /// carries its own source, since that is what the work item is written
+  /// against.
+  Future<List<({String source, String conversationKey})>> needsDraftKeys({
     required double threshold,
     int limit = 7,
-    List<String> sources = const ['email'],
+    List<String> sources = const ['email', 'teams'],
   }) async {
     if (sources.isEmpty) return const [];
     final result = await db
         .customSelect(
-          'SELECT c.conversation_key AS conversation_key FROM conversations c '
+          'SELECT c.source AS source, '
+          'c.conversation_key AS conversation_key FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
           'LEFT JOIN drafts d '
@@ -2463,7 +2471,11 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
         )
         .get();
     return [
-      for (final row in result) row.data['conversation_key'] as String? ?? '',
+      for (final row in result)
+        (
+          source: row.data['source'] as String? ?? '',
+          conversationKey: row.data['conversation_key'] as String? ?? '',
+        ),
     ];
   }
 

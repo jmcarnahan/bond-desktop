@@ -40,21 +40,34 @@ void main() {
 
   Future<void> seedConversation({
     required String key,
+    String source = 'email',
     String state = 'needs_reply',
     double? score = 0.9,
     String? bucket,
   }) async {
     await store.upsertConversation({
+      'source': source,
       'conversation_key': key,
       'subject': key,
       'state': state,
       'last_message_at': '2026-08-29T10:00:00Z',
     });
-    if (score != null) await store.writeAttentionScore('email', key, score);
+    if (score != null) await store.writeAttentionScore(source, key, score);
     if (bucket != null) {
-      await store.setConversationBucket('email', key, bucket: bucket);
+      await store.setConversationBucket(source, key, bucket: bucket);
     }
   }
+
+  /// The records, as `source/key` strings — short enough to read in an
+  /// expectation, and it pins both halves of every row.
+  Future<List<String>> draftQueue({
+    double threshold = 0.5,
+    int limit = 7,
+  }) async => [
+        for (final row
+            in await store.needsDraftKeys(threshold: threshold, limit: limit))
+          '${row.source}/${row.conversationKey}',
+      ];
 
   group('the schema', () {
     test('drafts is STRICT, like every other table', () async {
@@ -423,12 +436,12 @@ void main() {
   });
 
   group('needsDraftKeys', () {
-    test('picks threads waiting on the LO that score high enough', () async {
+    test('picks threads waiting on the user that score high enough', () async {
       await seedConversation(key: 'hot', score: 0.9);
       await seedConversation(key: 'cold', score: 0.2);
       await seedConversation(key: 'answered', state: 'done', score: 0.9);
 
-      expect(await store.needsDraftKeys(threshold: 0.5), ['hot']);
+      expect(await draftQueue(), ['email/hot']);
     });
 
     test('excludes anything filed into Later, and keeps un-bucketed threads',
@@ -439,10 +452,7 @@ void main() {
 
       // `IS NOT 'later'` rather than `<> 'later'`: NULL <> 'later' is NULL,
       // which would drop every un-bucketed thread.
-      expect(
-        await store.needsDraftKeys(threshold: 0.5),
-        ['other-bucket', 'inbox'],
-      );
+      expect(await draftQueue(), ['email/other-bucket', 'email/inbox']);
     });
 
     test('excludes a thread that already has a draft', () async {
@@ -456,7 +466,7 @@ void main() {
       );
 
       // This is what makes the enqueue safe to run on every list load.
-      expect(await store.needsDraftKeys(threshold: 0.5), ['undrafted']);
+      expect(await draftQueue(), ['email/undrafted']);
     });
 
     test('a dismissed draft still counts as a draft', () async {
@@ -471,7 +481,7 @@ void main() {
 
       // Otherwise every list load would write back the suggestion the user
       // just closed.
-      expect(await store.needsDraftKeys(threshold: 0.5), isEmpty);
+      expect(await draftQueue(), isEmpty);
     });
 
     test('an unscored thread is excluded', () async {
@@ -479,7 +489,7 @@ void main() {
 
       // NULL >= threshold is NULL, not true — and a thread the scorer has never
       // reached has not earned a model call.
-      expect(await store.needsDraftKeys(threshold: 0.0), isEmpty);
+      expect(await draftQueue(threshold: 0.0), isEmpty);
     });
 
     test('orders by score and caps at the limit', () async {
@@ -487,8 +497,8 @@ void main() {
       await seedConversation(key: 'b', score: 0.9);
       await seedConversation(key: 'c', score: 0.7);
 
-      expect(await store.needsDraftKeys(threshold: 0.5), ['b', 'c', 'a']);
-      expect(await store.needsDraftKeys(threshold: 0.5, limit: 2), ['b', 'c']);
+      expect(await draftQueue(), ['email/b', 'email/c', 'email/a']);
+      expect(await draftQueue(limit: 2), ['email/b', 'email/c']);
     });
 
     test('no sources means no keys', () async {
@@ -496,6 +506,66 @@ void main() {
 
       expect(
           await store.needsDraftKeys(threshold: 0.5, sources: const []), isEmpty);
+    });
+  });
+
+  group('needsDraftKeys — chats queue on the same terms', () {
+    test('a chat waiting on the user comes back carrying its own source',
+        () async {
+      await seedConversation(key: 'chat-1', source: 'teams', score: 0.9);
+
+      // The source is what the work row is written against, so a bare key
+      // would send the handler looking for mail that is not there.
+      expect(await draftQueue(), ['teams/chat-1']);
+    });
+
+    test('a chat and a mail compete in ONE list, ranked purely by score',
+        () async {
+      await seedConversation(key: 'mail-low', score: 0.6);
+      await seedConversation(key: 'chat-high', source: 'teams', score: 0.95);
+      await seedConversation(key: 'mail-high', score: 0.8);
+      await seedConversation(key: 'chat-low', source: 'teams', score: 0.7);
+
+      // No per-source quota and no interleave: the seven slots go to the seven
+      // threads that most deserve an answer, whichever connector they arrived
+      // through.
+      expect(await draftQueue(), [
+        'teams/chat-high',
+        'email/mail-high',
+        'teams/chat-low',
+        'email/mail-low',
+      ]);
+    });
+
+    test('and the mail filters apply to a chat unchanged', () async {
+      await seedConversation(key: 'cold', source: 'teams', score: 0.2);
+      await seedConversation(
+          key: 'deferred', source: 'teams', score: 0.95, bucket: 'later');
+      await seedConversation(key: 'drafted', source: 'teams', score: 0.9);
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'drafted',
+        replyToMessageId: 'chat-1-m1',
+        body: 'already written',
+      );
+
+      expect(await draftQueue(), isEmpty);
+    });
+
+    test('asking for mail alone still leaves the chats out', () async {
+      await seedConversation(key: 'hot', score: 0.9);
+      await seedConversation(key: 'chat-1', source: 'teams', score: 0.95);
+
+      expect(
+        [
+          for (final row in await store.needsDraftKeys(
+            threshold: 0.5,
+            sources: const ['email'],
+          ))
+            '${row.source}/${row.conversationKey}',
+        ],
+        ['email/hot'],
+      );
     });
   });
 }

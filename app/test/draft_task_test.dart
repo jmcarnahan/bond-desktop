@@ -20,6 +20,23 @@ Message inbound({
       receivedAt: receivedAt,
     );
 
+Message chat({
+  String id = 'c1',
+  String from = 'Todd Ramsay',
+  String body = 'Can you send the CD?',
+  String receivedAt = '2026-08-29T10:00:00Z',
+}) =>
+    Message(
+      id: id,
+      source: 'teams',
+      outbound: false,
+      fromName: from,
+      // What the connector stores: a namespaced Graph id, not an address.
+      fromAddress: 'teams:8f2c-0091',
+      bodyText: body,
+      receivedAt: receivedAt,
+    );
+
 Message outbound({
   String id = 'o1',
   String body = 'Thanks Sarah — checking now.',
@@ -237,6 +254,44 @@ void main() {
 
       expect(message, contains('<untrusted_data source="thread">'));
       expect('<untrusted_data'.allMatches(message).length, 1);
+    });
+  });
+
+  group('the channel note', () {
+    test('a mail gets the email style rules, outside the fence', () {
+      final message = task.buildUserMessage(inputWith());
+
+      expect(message, contains('This is an email thread.'));
+      expect(message, contains('under 150 words'));
+      expect(
+        message.indexOf('This is an email thread.'),
+        lessThan(message.indexOf('<untrusted_data')),
+      );
+    });
+
+    test('a chat gets the chat style rules instead, and only those', () {
+      final target = chat();
+      final message = task.buildUserMessage(
+        inputWith(thread: [target], replyTo: target),
+      );
+
+      expect(message, contains('This is an instant-message chat.'));
+      expect(message, contains('under 50 words'));
+      expect(message, isNot(contains('This is an email thread.')));
+      expect(message, isNot(contains('sign-off ("Thanks,")')));
+    });
+
+    test('a chat sender is a name, and never the Graph id behind it', () {
+      // `senderLine` is what enforces it, so the address a chat row carries
+      // cannot reach the prompt for the model to be distracted by.
+      final target = chat();
+      final message = task.buildUserMessage(
+        inputWith(thread: [outbound(), target], replyTo: target),
+      );
+
+      expect(message, contains('From: Todd Ramsay'));
+      expect(message, isNot(contains('teams:8f2c-0091')));
+      expect(message, contains('From: you'));
     });
   });
 

@@ -42,30 +42,36 @@ void main() {
 
   Future<void> seedThread({
     required String key,
+    String source = 'email',
     String state = 'needs_reply',
     double score = 0.9,
     String? bucket,
   }) async {
     await store.upsertConversation({
+      'source': source,
       'conversation_key': key,
       'subject': key,
       'state': state,
       'last_message_at': '2026-08-29T10:00:00Z',
     });
-    await store.writeAttentionScore('email', key, score);
+    await store.writeAttentionScore(source, key, score);
     if (bucket != null) {
-      await store.setConversationBucket('email', key, bucket: bucket);
+      await store.setConversationBucket(source, key, bucket: bucket);
     }
   }
 
+  /// The queued work rows as `source/entity_id`. The source is half of what a
+  /// draft item IS — the handler reads the thread back out of it — so a
+  /// bare-key assertion could not tell a chat item from a mail one.
   Future<List<String>> queuedDrafts() async => [
         for (final row in await db
             .customSelect(
-              "SELECT entity_id FROM work_items WHERE task_kind = 'draft' "
-              "AND status = 'pending' ORDER BY entity_id",
+              "SELECT source, entity_id FROM work_items "
+              "WHERE task_kind = 'draft' AND status = 'pending' "
+              'ORDER BY entity_id',
             )
             .get())
-          row.data['entity_id'] as String,
+          '${row.data['source']}/${row.data['entity_id']}',
       ];
 
   ConversationsNotifier notifierFor({AttentionService? attention}) {
@@ -82,7 +88,26 @@ void main() {
 
     await notifierFor().load();
 
-    expect(await queuedDrafts(), ['hot']);
+    expect(await queuedDrafts(), ['email/hot']);
+  });
+
+  test('a chat that has earned one is queued against its OWN source', () async {
+    await seedThread(key: 'chat-1', source: 'teams');
+
+    await notifierFor().load();
+
+    // The item the handler picks up carries `teams`, so it reads the chat's
+    // thread rather than looking for mail under the same key.
+    expect(await queuedDrafts(), ['teams/chat-1']);
+  });
+
+  test('a mail and a chat both land, each with its own source', () async {
+    await seedThread(key: 'chat-1', source: 'teams', score: 0.95);
+    await seedThread(key: 'hot');
+
+    await notifierFor().load();
+
+    expect(await queuedDrafts(), ['teams/chat-1', 'email/hot']);
   });
 
   test('the stored threshold is what decides, not the default', () async {
@@ -91,7 +116,7 @@ void main() {
 
     await notifierFor().load();
 
-    expect(await queuedDrafts(), ['middling']);
+    expect(await queuedDrafts(), ['email/middling']);
   });
 
   test('an unparseable threshold falls back rather than throwing', () async {
@@ -100,7 +125,7 @@ void main() {
 
     await notifierFor().load();
 
-    expect(await queuedDrafts(), ['hot']);
+    expect(await queuedDrafts(), ['email/hot']);
   });
 
   test('a load that skips the sync still queues — it is a local read',
@@ -109,7 +134,7 @@ void main() {
 
     await notifierFor().load(syncFirst: false);
 
-    expect(await queuedDrafts(), ['hot']);
+    expect(await queuedDrafts(), ['email/hot']);
   });
 
   test('a second load queues nothing new once the draft exists', () async {
@@ -148,7 +173,7 @@ void main() {
     await store.deleteDraft('email', 'hot');
     await notifier.load();
 
-    expect(await queuedDrafts(), ['hot']);
+    expect(await queuedDrafts(), ['email/hot']);
   });
 
   test('it does not revive an item a worker is holding', () async {
@@ -186,6 +211,6 @@ void main() {
 
     await notifierFor(attention: AttentionService(store)).load();
 
-    expect(await queuedDrafts(), ['scored']);
+    expect(await queuedDrafts(), ['email/scored']);
   });
 }
