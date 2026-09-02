@@ -10,7 +10,9 @@ import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
+import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
+import '../providers/notify_routing.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
@@ -23,6 +25,7 @@ import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
+import '../widgets/notification_ribbon.dart';
 import '../widgets/quick_replies.dart';
 import '../widgets/settings_dialog.dart';
 import '../widgets/source_filter.dart';
@@ -248,6 +251,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   Future<void> _signOut() async {
+    // Before anything else: the ribbon holds one account's CTA text and the
+    // intent holds a thread in a database that is about to be wiped. Neither
+    // may survive into the next person's session.
+    ref.read(notificationRibbonProvider.notifier).dismiss();
+    ref.read(navIntentProvider.notifier).clear();
     await ref.read(authSessionProvider).signOut();
     // The keychain is not the only thing holding this account: the sqlite
     // file holds its mailbox, and the providers hold that in memory. A
@@ -432,9 +440,99 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       });
     }
 
+    // Where a notification's click lands. Nothing outside this State can call
+    // the three selection methods, so everything that navigates from outside
+    // the tree — the ribbon today, an OS notification next — asks here.
+    ref.listen<NavIntent?>(navIntentProvider, (_, intent) {
+      if (intent == null || !mounted) return;
+      switch (intent) {
+        case OpenThreadIntent(:final source, :final conversationKey):
+          _select(conversationKey, source: source);
+        case OpenStorylineIntent(:final storylineId):
+          _selectStoryline(storylineId);
+        case OpenSectionIntent(:final section):
+          _selectSection(section);
+      }
+      // Cleared after the frame, not inside the listener: writing to a
+      // notifier while it is notifying is a re-entrant write.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref.read(navIntentProvider.notifier).clear();
+      });
+    });
+
     final state = ref.watch(conversationsProvider);
 
-    return Scaffold(body: SafeArea(child: _body(state)));
+    return Scaffold(
+      body: SafeArea(
+        child: Stack(
+          // Expand, or the stack takes its size from the ribbon layer — which
+          // is nothing at all until something settles, and the inbox under it
+          // would lay out at zero.
+          fit: StackFit.expand,
+          children: [
+            Positioned.fill(child: _body(state)),
+            // A sibling ABOVE the body rather than something inside it: the
+            // pane swaps out from under every selection, and a ribbon mounted
+            // in there would be unmounted mid-announcement — and the narrow
+            // layout's rail overlay would cover it.
+            _ribbonLayer(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The banner that says a processed message needs the user.
+  Widget _ribbonLayer() {
+    final ribbon = ref.watch(notificationRibbonProvider);
+    final items = ribbon.items;
+    if (items.isEmpty) return const SizedBox.shrink();
+
+    // Announcing the thread the user is already reading is telling them what
+    // is on their screen. Only when it is the whole batch — a pile that
+    // happens to include it still has somewhere else to go.
+    final onScreen = items.length == 1 &&
+        items.single.conversationKey == _selectedId &&
+        (_selectedSource == null || items.single.source == _selectedSource);
+
+    final show = ribbon.visible && !onScreen;
+
+    return Positioned(
+      top: BondSpacing.s12,
+      left: 0,
+      right: 0,
+      child: Center(
+        // The child stays mounted while it animates out, so it must not be
+        // taking clicks the whole time it is invisible.
+        child: IgnorePointer(
+          ignoring: !show,
+          child: AnimatedSlide(
+            offset: show ? Offset.zero : const Offset(0, -1.4),
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            child: AnimatedOpacity(
+              opacity: show ? 1 : 0,
+              duration: const Duration(milliseconds: 180),
+              child: NotificationRibbon(
+                severity: ribbon.anyUrgent
+                    ? InlineAlertSeverity.error
+                    : InlineAlertSeverity.attention,
+                text: ribbon.text,
+                onTap: () {
+                  ref
+                      .read(navIntentProvider.notifier)
+                      .request(intentFor(items));
+                  ref.read(notificationRibbonProvider.notifier).dismiss();
+                },
+                onDismiss: () =>
+                    ref.read(notificationRibbonProvider.notifier).dismiss(),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _body(ConversationsState state) {
@@ -774,6 +872,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         showActivityLog: prefs.showActivityLog,
         onShowActivityLogChanged: (on) =>
             unawaited(notifier.setShowActivityLog(on)),
+        notifyRibbon: prefs.notifyRibbon,
+        onNotifyRibbonChanged: (on) =>
+            unawaited(notifier.setNotifyRibbon(on)),
         // BOTH sources are wired, and deliberately not bound to the mode the
         // dialog OPENED in: the toggle now switches backends without closing
         // the dialog, so which one answers is the dialog's live choice. Each

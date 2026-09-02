@@ -44,6 +44,13 @@ class SettingsDialog extends StatefulWidget {
   /// hides the row entirely — the same discipline [hasScope] follows.
   final void Function(bool value)? onShowActivityLogChanged;
 
+  /// Whether a settled message currently announces itself in the inbox.
+  final bool notifyRibbon;
+
+  /// Fired the instant the switch moves, for the same reason
+  /// [onShowActivityLogChanged] is. Null hides the row entirely.
+  final void Function(bool value)? onNotifyRibbonChanged;
+
   /// Answers "did Microsoft grant this bare scope". Null hides the whole
   /// permissions section, which is what a host with no auth wired wants — and
   /// what MCP mode passes, where [connectionStatus] answers instead.
@@ -121,6 +128,8 @@ class SettingsDialog extends StatefulWidget {
     required this.onAboutMeChanged,
     this.showActivityLog = false,
     this.onShowActivityLogChanged,
+    this.notifyRibbon = true,
+    this.onNotifyRibbonChanged,
     this.hasScope,
     this.onSignInAgain,
     this.backendMode = backendModeMcp,
@@ -157,6 +166,7 @@ class SettingsDialog extends StatefulWidget {
 class _SettingsDialogState extends State<SettingsDialog> {
   late double _threshold = widget.threshold.clamp(0.0, 1.0);
   late bool _showActivityLog = widget.showActivityLog;
+  late bool _notifyRibbon = widget.notifyRibbon;
   late final TextEditingController _aboutMe = TextEditingController(
     text: widget.aboutMe,
   );
@@ -358,6 +368,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 ),
               ),
               ..._activityLogSwitch(),
+              ..._notifyRibbonSwitch(),
               ..._connectionSection(),
               ..._permissionsSection(),
             ],
@@ -398,6 +409,33 @@ class _SettingsDialogState extends State<SettingsDialog> {
         ),
         onChanged: (value) {
           setState(() => _showActivityLog = value);
+          onChanged(value);
+        },
+      ),
+    ];
+  }
+
+  /// Whether the app speaks up when it finishes deciding a message needs the
+  /// user, or leaves them to find it in the list.
+  List<Widget> _notifyRibbonSwitch() {
+    final onChanged = widget.onNotifyRibbonChanged;
+    if (onChanged == null) return const [];
+    return [
+      const SizedBox(height: BondSpacing.s8),
+      SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        value: _notifyRibbon,
+        title: Text(
+          'In-app notifications',
+          style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Text(
+          'A ribbon appears when a processed message needs your attention.',
+          style: BondType.caption,
+        ),
+        onChanged: (value) {
+          setState(() => _notifyRibbon = value);
           onChanged(value);
         },
       ),

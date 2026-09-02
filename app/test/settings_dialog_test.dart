@@ -21,6 +21,8 @@ void main() {
     VoidCallback? onSignInAgain,
     bool showActivityLog = false,
     void Function(bool)? onShowActivityLogChanged,
+    bool notifyRibbon = true,
+    void Function(bool)? onNotifyRibbonChanged,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -37,6 +39,8 @@ void main() {
                 onAboutMeChanged: onAboutMeChanged,
                 showActivityLog: showActivityLog,
                 onShowActivityLogChanged: onShowActivityLogChanged,
+                notifyRibbon: notifyRibbon,
+                onNotifyRibbonChanged: onNotifyRibbonChanged,
                 hasScope: hasScope,
                 onSignInAgain: onSignInAgain,
               ),
@@ -240,6 +244,83 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(written, [true, false]);
+    });
+  });
+
+  group('the in-app notifications switch', () {
+    testWidgets('is absent when the host wires no callback', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+
+      expect(find.text('In-app notifications'), findsNothing);
+    });
+
+    testWidgets('renders on what is already stored', (tester) async {
+      // Off, which is the only state that took a decision to reach: this
+      // preference defaults on.
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        notifyRibbon: false,
+        onNotifyRibbonChanged: (_) {},
+      );
+
+      expect(find.text('In-app notifications'), findsOneWidget);
+      expect(
+        find.text(
+          'A ribbon appears when a processed message needs your attention.',
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+        isFalse,
+      );
+    });
+
+    testWidgets('reports the flip immediately', (tester) async {
+      final written = <bool>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onNotifyRibbonChanged: written.add,
+      );
+
+      await tester.tap(find.byType(SwitchListTile));
+      await tester.pumpAndSettle();
+
+      expect(written, [false]);
+      expect(
+        tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+        isFalse,
+      );
+
+      await tester.tap(find.byType(SwitchListTile));
+      await tester.pumpAndSettle();
+
+      expect(written, [false, true]);
+    });
+
+    testWidgets('sits beside the activity log switch, not instead of it',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onShowActivityLogChanged: (_) {},
+        onNotifyRibbonChanged: (_) {},
+      );
+
+      expect(find.byType(SwitchListTile), findsNWidgets(2));
+      expect(find.text('Show activity log'), findsOneWidget);
+      expect(find.text('In-app notifications'), findsOneWidget);
+      // Rows in the legacy dialog, never a dialog of their own.
+      expect(find.byType(AlertDialog), findsOneWidget);
     });
   });
 

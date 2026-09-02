@@ -75,6 +75,13 @@ class AppPrefs {
   /// someone who wants the latest at the top wants it everywhere.
   final bool storylineNewestFirst;
 
+  /// Whether a settled message announces itself in a ribbon at the top of the
+  /// inbox. On by default, unlike every other switch here: the app spends
+  /// minutes deciding a message needs the user, and finishing that in silence
+  /// unless someone goes looking for a setting would waste the whole point of
+  /// it.
+  final bool notifyRibbon;
+
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
@@ -82,6 +89,7 @@ class AppPrefs {
     this.mcpServerUrl = defaultMcpServerUrl,
     this.showActivityLog = false,
     this.storylineNewestFirst = false,
+    this.notifyRibbon = true,
   });
 
   AppPrefs copyWith({
@@ -91,6 +99,7 @@ class AppPrefs {
     String? mcpServerUrl,
     bool? showActivityLog,
     bool? storylineNewestFirst,
+    bool? notifyRibbon,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -100,6 +109,7 @@ class AppPrefs {
         showActivityLog: showActivityLog ?? this.showActivityLog,
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
+        notifyRibbon: notifyRibbon ?? this.notifyRibbon,
       );
 }
 
@@ -113,6 +123,7 @@ const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
 const String storylineNewestFirstKey = 'storyline_newest_first';
+const String notifyRibbonKey = 'notify_ribbon';
 
 class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   final MessageStore _store;
@@ -156,6 +167,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       showActivityLog: await store.getPref(showActivityLogKey) == 'true',
       storylineNewestFirst:
           await store.getPref(storylineNewestFirstKey) == 'true',
+      // The one bool here that DEFAULTS ON, so its read is the inverse of the
+      // two above: anything that is not the literal 'false' — an absent key,
+      // a hand-edited value — reads as on, because the state every install
+      // starts in is "tell me".
+      notifyRibbon: await store.getPref(notifyRibbonKey) != 'false',
     );
   }
 
@@ -216,6 +232,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setStorylineNewestFirst(bool value) async {
     state = state.copyWith(storylineNewestFirst: value);
     await _store.setPref(storylineNewestFirstKey, value.toString());
+  }
+
+  Future<void> setNotifyRibbon(bool value) async {
+    state = state.copyWith(notifyRibbon: value);
+    await _store.setPref(notifyRibbonKey, value.toString());
   }
 }
 
