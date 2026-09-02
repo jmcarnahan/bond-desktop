@@ -313,6 +313,13 @@ class SyncService implements MailSync {
           );
           work[key] = entry;
         }
+        // Asked BEFORE the fold advances the inbound watermark: a reply the
+        // user sent anywhere — Outlook, a phone — resolves the ask the CTA
+        // was holding, exactly as the composer's own send path does. An
+        // outbound older than the newest inbound answers nothing and clears
+        // nothing.
+        final resolvesAsk =
+            outbound && outboundResolves(entry.snapshot, receivedAt);
         entry.snapshot = foldMessage(
           entry.snapshot,
           outbound: outbound,
@@ -320,6 +327,7 @@ class SyncService implements MailSync {
           subject: subject,
           preview: preview,
         );
+        if (resolvesAsk) entry.clearCta();
         // Whoever is on the other end: the sender of mail that came in, the
         // recipients of mail that went out. Never the user.
         if (outbound) {
@@ -496,8 +504,8 @@ class _ConversationWork {
   ConvSnapshot? snapshot;
   final List<Map<String, Object?>> participants;
   final String? category;
-  final String? ctaText;
-  final String ctaUrgency;
+  String? ctaText;
+  String ctaUrgency;
 
   _ConversationWork({
     this.snapshot,
@@ -506,6 +514,13 @@ class _ConversationWork {
     this.ctaText,
     this.ctaUrgency = 'normal',
   });
+
+  /// The user's reply resolved the thread's standing ask. Mutates rather than
+  /// copies because the loop above accumulates into one instance per thread.
+  void clearCta() {
+    ctaText = null;
+    ctaUrgency = 'normal';
+  }
 
   /// Seeds from the stored row, or starts empty when the thread is new. The
   /// stored `state` is what carries a human's `done` into the fold.

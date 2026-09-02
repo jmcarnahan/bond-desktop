@@ -310,6 +310,12 @@ WHERE source = ? AND conversation_key = ?
   /// a query per row on a list that renders thousands. LEFT, not inner — a
   /// thread the AI has never looked at still belongs in the inbox, with both
   /// columns null.
+  ///
+  /// `unread_count` is counted here rather than kept on the thread's own row:
+  /// the messages ARE the truth about what has been read, a read made in
+  /// Outlook lands on them for free with the next delta page, and a maintained
+  /// counter would drift with nothing to correct it. The subquery rides
+  /// `ix_messages_conv`, which leads with the two columns it matches on.
   Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
@@ -324,7 +330,10 @@ WHERE source = ? AND conversation_key = ?
     }
     final result = await db
         .customSelect(
-          'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score '
+          'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score, '
+          '  (SELECT COUNT(*) FROM messages m '
+          '   WHERE m.source = c.source AND m.conversation_key = c.conversation_key '
+          "     AND m.direction = 'inbound' AND m.is_read = 0) AS unread_count "
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
@@ -347,6 +356,122 @@ WHERE source = ? AND conversation_key = ?
       'UPDATE conversations SET state = ?, state_changed_at = ?, updated_at = ? '
       'WHERE source = ? AND conversation_key = ?',
       variables: _args([state.wire, now, now, source, conversationKey]),
+    );
+  }
+
+  /// How many message ids one read-ack carries, newest first.
+  static const int _readAckCap = 100;
+
+  /// Marks every unread inbound message on one thread read, and queues the
+  /// server the ack it is owed. Returns how many messages the flip touched.
+  ///
+  /// Reading the ids and flipping them is ONE transaction because the ack's
+  /// payload is the set that WAS unread. Computed after the flip it would come
+  /// back empty every time; computed before it in a separate statement it could
+  /// name a message something else had already flipped in between.
+  ///
+  /// A thread with nothing unread returns 0 and writes nothing at all — no
+  /// UPDATE, no work row — so reopening mail that was already read costs one
+  /// indexed SELECT and queues no request.
+  ///
+  /// The flip is uncapped, the ack is capped: past [_readAckCap] the newest ids
+  /// are the ones the server hears about, and the tail is simply never acked —
+  /// it reads locally and stays unread on the server. Accepted: a single
+  /// thread carrying a hundred unread messages is being cleared in bulk, and
+  /// chunking requests to keep another client's badge exact is not worth it.
+  ///
+  /// The work row is hand-rolled rather than going through [requeueWork]
+  /// because that method only revives `done` and `error` rows and NULLs the
+  /// payload — and the payload is the whole point here. Ids merge into whatever
+  /// is still pending, so a second read while the first ack is queued acks both.
+  ///
+  /// Nothing drains `mark_read` yet: the queue behind it lands with the server
+  /// ack, and until then these rows accumulate at one per opened thread.
+  Future<int> markConversationRead(
+    String source,
+    String conversationKey,
+  ) async {
+    const String unreadInbound =
+        "source = ? AND conversation_key = ? AND direction = 'inbound' "
+        'AND is_read = 0';
+
+    return db.transaction(() async {
+      final unread = await db
+          .customSelect(
+            'SELECT source_message_id FROM messages WHERE $unreadInbound '
+            'ORDER BY received_at DESC LIMIT ?',
+            variables: _args([source, conversationKey, _readAckCap]),
+          )
+          .get();
+      if (unread.isEmpty) return 0;
+
+      final now = _nowIso();
+      final flipped = await db.customUpdate(
+        'UPDATE messages SET is_read = 1, updated_at = ? WHERE $unreadInbound',
+        variables: _args([now, source, conversationKey]),
+      );
+
+      final queued = await db
+          .customSelect(
+            'SELECT payload_json FROM work_items '
+            "WHERE task_kind = 'mark_read' AND source = ? AND entity_id = ?",
+            variables: _args([source, conversationKey]),
+          )
+          .get();
+      final ids = <String>[
+        for (final row in unread) row.data['source_message_id'] as String,
+      ];
+      if (queued.isNotEmpty) {
+        for (final id in _decodeIds(queued.first.data['payload_json'])) {
+          if (!ids.contains(id)) ids.add(id);
+        }
+      }
+
+      await db.customUpdate(
+        'INSERT INTO work_items '
+        '(task_kind, source, entity_id, status, attempts, error, payload_json, '
+        'created_at, updated_at) '
+        "VALUES ('mark_read', ?, ?, 'pending', 0, NULL, ?, ?, ?) "
+        'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
+        "status = 'pending', attempts = 0, error = NULL, "
+        'payload_json = excluded.payload_json, '
+        'updated_at = excluded.updated_at',
+        variables: _args([
+          source,
+          conversationKey,
+          jsonEncode(ids.take(_readAckCap).toList()),
+          now,
+          now,
+        ]),
+      );
+
+      return flipped;
+    });
+  }
+
+  /// The ids a queued read-ack is already carrying. A row that has none, or one
+  /// whose payload is not a JSON array of strings, carries nothing — a
+  /// malformed payload must not cost the caller the ids it came to add.
+  static List<String> _decodeIds(Object? raw) {
+    if (raw is! String || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return [
+        for (final id in decoded)
+          if (id is String) id,
+      ];
+    } on FormatException {
+      return const [];
+    }
+  }
+
+  /// Clears the model's ask off a thread. What "the CTA was answered" means.
+  Future<void> clearCta(String source, String conversationKey) async {
+    await db.customUpdate(
+      "UPDATE conversations SET cta_text = NULL, cta_urgency = 'normal', "
+      'updated_at = ? WHERE source = ? AND conversation_key = ?',
+      variables: _args([_nowIso(), source, conversationKey]),
     );
   }
 
@@ -839,11 +964,18 @@ RETURNING *
   /// Attempts are deliberately NOT reset: the drain errors a row again at its
   /// next failed attempt, so each revival buys exactly one more try, and the
   /// [maxAttempts] ceiling is where a genuinely bad item stays down for good.
-  Future<int> reviveErroredWork({int maxAttempts = 6}) {
+  ///
+  /// [kind] narrows the revival to one queue. Absent it revives every kind,
+  /// which is what the sync path wants; a queue that pumps on its own — the
+  /// read-acks do, off a thread open — passes its own kind so that reviving
+  /// its rows does not quietly hand a second chance to the model queues it
+  /// shares the table with.
+  Future<int> reviveErroredWork({int maxAttempts = 6, String? kind}) {
     return db.customUpdate(
       "UPDATE work_items SET status = 'pending', updated_at = ? "
-      "WHERE status = 'error' AND attempts < ?",
-      variables: _args([_nowIso(), maxAttempts]),
+      "WHERE status = 'error' AND attempts < ?"
+      '${kind == null ? '' : ' AND task_kind = ?'}',
+      variables: _args([_nowIso(), maxAttempts, ?kind]),
     );
   }
 
@@ -1921,12 +2053,17 @@ FROM storylines s''';
   /// Outlook draft holding text nobody can see any more. `created_at` survives
   /// — it says when this conversation first got a suggestion, which is the one
   /// fact a regenerate does not change.
+  ///
+  /// `options_dismissed` goes back to 0 for the same reason `graph_draft_id`
+  /// is nulled: a regenerate is a FRESH suggestion, and the user closing the
+  /// last set of short replies must not silence a set they have never seen.
   Future<void> upsertDraft({
     required String source,
     required String conversationKey,
     required String replyToMessageId,
     required String body,
     String? evidence,
+    String? optionsJson,
     String status = 'suggested',
   }) async {
     final now = _nowIso();
@@ -1934,8 +2071,9 @@ FROM storylines s''';
       '''
 INSERT INTO drafts (
   source, conversation_key, reply_to_message_id, body, evidence, status,
-  graph_draft_id, web_link, created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+  graph_draft_id, web_link, created_at, updated_at, options_json,
+  options_dismissed
+) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)
 ON CONFLICT(source, conversation_key) DO UPDATE SET
   reply_to_message_id = excluded.reply_to_message_id,
   body = excluded.body,
@@ -1943,7 +2081,9 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   status = excluded.status,
   graph_draft_id = NULL,
   web_link = NULL,
-  updated_at = excluded.updated_at
+  updated_at = excluded.updated_at,
+  options_json = excluded.options_json,
+  options_dismissed = 0
 ''',
       variables: _args([
         source,
@@ -1954,7 +2094,22 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
         status,
         now,
         now,
+        optionsJson,
       ]),
+    );
+  }
+
+  /// Closes the short replies without closing the draft. The row stays — the
+  /// same reason `status = 'dismissed'` keeps it — so the auto-enqueue does not
+  /// immediately write the identical options back.
+  Future<void> dismissDraftOptions(
+    String source,
+    String conversationKey,
+  ) async {
+    await db.customUpdate(
+      'UPDATE drafts SET options_dismissed = 1, updated_at = ? '
+      'WHERE source = ? AND conversation_key = ?',
+      variables: _args([_nowIso(), source, conversationKey]),
     );
   }
 

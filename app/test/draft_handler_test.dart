@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
@@ -40,8 +42,9 @@ class FakeLlm extends LlmClient {
 Map<String, dynamic> answer({
   String evidence = 'Jordan is asking whether the launch still lands on Thursday.',
   String replyBody = 'Hi Sarah — Friday works. I will send the addendum today.',
+  List<Map<String, String>> options = const [],
 }) =>
-    {'evidence': evidence, 'reply_body': replyBody};
+    {'evidence': evidence, 'reply_body': replyBody, 'options': options};
 
 void main() {
   late BondDatabase db;
@@ -123,8 +126,9 @@ void main() {
 
       expect(llm.temperatures, [0.0]);
       // The default 512 is enough to truncate a 150-word draft mid-sentence,
-      // and a cut-off draft is still grammar-valid.
-      expect(llm.tokenBudgets, [1024]);
+      // and a cut-off draft is still grammar-valid. The answer now carries the
+      // short options as well as the long form, so the ceiling went up with it.
+      expect(llm.tokenBudgets, [1536]);
     });
 
     test('ties on received_at break on source_message_id, like everywhere else',
@@ -229,7 +233,75 @@ void main() {
     });
   });
 
+  group('the short replies', () {
+    test('are stored beside the long form, stance and body', () async {
+      await seedInbound();
+      final llm = FakeLlm([
+        answer(options: const [
+          {'stance': 'Confirm Thursday', 'reply_body': 'Thursday still works.'},
+          {'stance': 'Propose Monday', 'reply_body': 'Could we say Monday?'},
+        ]),
+      ]);
+
+      await runOne(DraftHandler(store, llm));
+
+      final draft = (await store.getDraft('email', 'conv-1'))!;
+      final stored = jsonDecode(draft['options_json'] as String) as List;
+      expect(stored, [
+        {'stance': 'Confirm Thursday', 'body': 'Thursday still works.'},
+        {'stance': 'Propose Monday', 'body': 'Could we say Monday?'},
+      ]);
+      expect(draft['options_dismissed'], 0);
+      expect(draft['body'], startsWith('Hi Sarah — Friday works.'));
+    });
+
+    test('are null, not an empty array, when the model offered none', () async {
+      // The two spellings say the same thing to every reader, and one of them
+      // is shorter.
+      await seedInbound();
+
+      await runOne(DraftHandler(store, FakeLlm([answer()])));
+
+      expect((await store.getDraft('email', 'conv-1'))!['options_json'], isNull);
+    });
+
+    test('a half-written option does not reach the row', () async {
+      await seedInbound();
+      final llm = FakeLlm([
+        answer(options: const [
+          {'stance': '', 'reply_body': 'unlabelled'},
+          {'stance': 'Confirm Thursday', 'reply_body': 'Thursday still works.'},
+        ]),
+      ]);
+
+      await runOne(DraftHandler(store, llm));
+
+      final draft = (await store.getDraft('email', 'conv-1'))!;
+      expect(jsonDecode(draft['options_json'] as String), [
+        {'stance': 'Confirm Thursday', 'body': 'Thursday still works.'},
+      ]);
+    });
+  });
+
   group('an empty draft', () {
+    test('throws rather than storing a blank suggestion, options or not',
+        () async {
+      // The long form is the product; options that arrived alongside a blank
+      // reply are not a reason to store a draft the worker should retry.
+      await seedInbound();
+      final llm = FakeLlm([
+        answer(replyBody: '   ', options: const [
+          {'stance': 'Confirm Thursday', 'reply_body': 'Thursday works.'},
+        ]),
+      ]);
+
+      await expectLater(
+        runOne(DraftHandler(store, llm)),
+        throwsA(isA<LlmFormatException>()),
+      );
+      expect(await store.getDraft('email', 'conv-1'), isNull);
+    });
+
     test('throws rather than storing a blank suggestion', () async {
       await seedInbound();
       final llm = FakeLlm([answer(replyBody: '   ')]);

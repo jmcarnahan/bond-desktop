@@ -66,6 +66,13 @@ class FakeMail implements MailBackend {
 
   @override
   Future<void> sendDraft(String draftId) async {}
+
+  @override
+  Future<List<String>> markRead(
+    List<String> messageIds, {
+    bool isRead = true,
+  }) async =>
+      const [];
 }
 
 /// A [TeamsBackend] that answers from a fixed chat list and counts what it was
@@ -107,6 +114,15 @@ class FakeTeams implements TeamsBackend {
     calls++;
     return messages[chatId] ?? const [];
   }
+
+  @override
+  Future<void> markChatRead(String chatId) async {
+    calls++;
+  }
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessage(String chatId, String text) =>
+      throw UnimplementedError();
 }
 
 Map<String, dynamic> chatMessage(String id) => {

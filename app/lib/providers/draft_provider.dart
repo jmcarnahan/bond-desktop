@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter/services.dart' show Clipboard, ClipboardData;
@@ -6,11 +7,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart';
+import '../models/message_models.dart' show ConversationState;
 import '../services/ai_worker.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/backend_types.dart';
 import '../services/backend/mail_backend.dart';
+import '../services/backend/teams_backend.dart';
 import '../services/graph_mail.dart';
+import '../services/graph_teams.dart' show GraphTeamsException;
+import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/teams_sync.dart' show TeamsSync;
 import '../widgets/composer.dart' show SendCapability;
 import 'app_providers.dart';
 import 'conversations_provider.dart';
@@ -19,10 +25,27 @@ import 'conversations_provider.dart';
 /// person — can trigger.
 ///
 /// The invariant this file exists to hold: [DraftNotifier.send] is the only
-/// method that reaches [GraphMail.sendDraft], it is not called from anywhere
-/// inside this file, and it takes the body as an argument rather than reading
-/// the stored draft — so a send can only ever carry text that was on screen in
-/// front of whoever pressed the button.
+/// method that reaches [GraphMail.sendDraft] or [TeamsBackend.sendChatMessage],
+/// nothing inside this file calls it except the undo timer a person started,
+/// and it takes the body as an argument rather than reading the stored draft —
+/// so a send can only ever carry text that was on screen in front of whoever
+/// pressed the button.
+
+/// Which conversation a draft belongs to.
+///
+/// The source rides along with the key because a conversation key is only
+/// unique WITHIN a source — chats will be drafted for too, and a bare key
+/// would collide a chat with the mail thread that happens to share it. A
+/// record, so the family keys on value rather than identity.
+typedef DraftTarget = ({String source, String conversationKey});
+
+/// A send the user has triggered and can still take back: the exact text that
+/// will go out, and the moment it will.
+///
+/// It lives in memory and NOWHERE else. A queued send that a quit interrupts
+/// is simply lost, which is the right way round — the opposite would put mail
+/// in front of somebody after a restart the user believed had cancelled it.
+typedef PendingSend = ({String body, DateTime sendsAt});
 
 /// What a send actually did, so the screen can say so.
 enum SendOutcome {
@@ -67,6 +90,10 @@ class DraftState {
   /// click from going out a second time.
   final int sendEpoch;
 
+  /// Non-null exactly while an undo window is open — a send the user has asked
+  /// for that has not left yet.
+  final PendingSend? pending;
+
   const DraftState({
     this.draft,
     this.generating = false,
@@ -74,6 +101,7 @@ class DraftState {
     this.capability = SendCapability.copyOnly,
     this.error,
     this.sendEpoch = 0,
+    this.pending,
   });
 
   /// The draft's body, or null when there is none. A dismissed draft reads as
@@ -97,6 +125,36 @@ class DraftState {
     return value.isEmpty ? null : value;
   }
 
+  /// The short ready-to-send replies, at most two. Empty for the same three
+  /// states [body] is null in — no row, dismissed, sent — plus the fourth that
+  /// belongs to the options alone: the user closed the cards but kept the
+  /// draft. Malformed JSON reads as no options; a row written by a version
+  /// that did not have them reads the same way.
+  List<DraftOption> get options {
+    final row = draft;
+    if (row == null) return const [];
+    final status = row['status'] as String?;
+    if (status == 'dismissed' || status == 'sent') return const [];
+    if ((row['options_dismissed'] as int? ?? 0) == 1) return const [];
+    final raw = row['options_json'] as String? ?? '';
+    if (raw.isEmpty) return const [];
+    Object? decoded;
+    try {
+      decoded = jsonDecode(raw);
+    } on FormatException {
+      return const [];
+    }
+    if (decoded is! List) return const [];
+    return [
+      for (final entry in decoded)
+        if (entry is Map)
+          DraftOption(
+            stance: (entry['stance'] as Object?)?.toString() ?? '',
+            body: (entry['body'] as Object?)?.toString() ?? '',
+          ),
+    ];
+  }
+
   String? get graphDraftId => draft?['graph_draft_id'] as String?;
 
   String? get replyToMessageId => draft?['reply_to_message_id'] as String?;
@@ -108,6 +166,7 @@ class DraftState {
     SendCapability? capability,
     Object? error = _unset,
     int? sendEpoch,
+    Object? pending = _unset,
   }) =>
       DraftState(
         draft: identical(draft, _unset)
@@ -118,24 +177,36 @@ class DraftState {
         capability: capability ?? this.capability,
         error: identical(error, _unset) ? this.error : error as String?,
         sendEpoch: sendEpoch ?? this.sendEpoch,
+        pending: identical(pending, _unset)
+            ? this.pending
+            : pending as PendingSend?,
       );
 
   /// Separates "not passed" from "passed as null" on [copyWith], where the two
-  /// mean opposite things for both nullable fields.
+  /// mean opposite things for every nullable field.
   static const Object _unset = Object();
 }
 
 class DraftNotifier extends StateNotifier<DraftState> {
-  static const String _source = 'email';
-
   /// Matches the inbox's own reload debounce: the worker reports every item it
   /// finishes, and a full re-read behind each one would be a burst of queries
   /// for one row.
   static const Duration _reloadDelay = Duration(milliseconds: 400);
 
+  /// How long a queued send stays undoable. The snackbar reads its duration
+  /// FROM here so the bar cannot outlive the window it offers to cancel.
+  static const Duration undoWindow = Duration(seconds: 5);
+
   final MessageStore _store;
   final AuthSession _auth;
   final MailBackend _mail;
+
+  /// Where a chat reply goes. Optional because only the Teams branch of [send]
+  /// reads it, so every test that exercises a mail draft can leave it out —
+  /// and a chat that reached [send] without one is a wiring bug, which is why
+  /// that branch throws rather than degrading.
+  final TeamsBackend? _teams;
+
   final AiWorker? _worker;
 
   /// Called after a successful send, so the sent message folds in from
@@ -147,21 +218,37 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// browser.
   final Future<bool> Function(Uri url) _launch;
 
+  /// Which source's conversation this is — `email` today, and the reason the
+  /// family key carries it.
+  final String _source;
+
   final String conversationKey;
+
+  /// This notifier's own copy of [undoWindow]. Injectable so a test can hold a
+  /// fifty-millisecond window instead of blocking a suite for five seconds per
+  /// send; production never passes it.
+  final Duration _undoWindow;
 
   StreamSubscription<WorkProgress>? _progress;
   Timer? _reload;
+  Timer? _pendingSend;
 
   DraftNotifier(
     this._store,
     this._auth,
     this._mail,
-    this.conversationKey, {
+    DraftTarget target, {
+    TeamsBackend? teams,
     AiWorker? worker,
     Future<void> Function()? onSent,
     Future<bool> Function(Uri url)? launch,
-  })  : _worker = worker,
+    Duration? undoWindow,
+  })  : _source = target.source,
+        conversationKey = target.conversationKey,
+        _teams = teams,
+        _worker = worker,
         _onSent = onSent,
+        _undoWindow = undoWindow ?? DraftNotifier.undoWindow,
         _launch = launch ??
             ((url) => launchUrl(url, mode: LaunchMode.externalApplication)),
         super(const DraftState()) {
@@ -186,6 +273,11 @@ class DraftNotifier extends StateNotifier<DraftState> {
   void dispose() {
     _reload?.cancel();
     _progress?.cancel();
+    // Cancelled, NOT flushed. A thread closing while an undo window is open
+    // takes the queued reply with it: the last thing the user did was navigate
+    // away, and firing a send on the way out is the one behaviour nobody could
+    // have taken back.
+    _pendingSend?.cancel();
     super.dispose();
   }
 
@@ -216,8 +308,20 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// The best thing this grant can do with a reply. Falls to
   /// [SendCapability.copyOnly] on any failure, which is the rung that needs no
   /// permission at all.
+  ///
+  /// A chat has two rungs rather than three: there is no Outlook drafts folder
+  /// to hand a Teams message off to, so the ladder is send-or-copy. It is also
+  /// what decides whether a chat thread gets a reply surface at all — the
+  /// screen renders one for a chat only on the top rung, so a grant without
+  /// `Chat.ReadWrite` sees the honest caption instead of a box that could not
+  /// send.
   Future<SendCapability> _capability() async {
     try {
+      if (_source == 'teams') {
+        return await _auth.hasScope('chat.readwrite')
+            ? SendCapability.send
+            : SendCapability.copyOnly;
+      }
       if (await _auth.hasScope('mail.send')) return SendCapability.send;
       if (await _auth.hasScope('mail.readwrite')) {
         return SendCapability.draftToOutlook;
@@ -306,6 +410,56 @@ class DraftNotifier extends StateNotifier<DraftState> {
     state = state.copyWith(draft: row, error: null);
   }
 
+  /// Closes the short replies and leaves the draft alone. The row survives so
+  /// the next enqueue does not write the same two cards straight back.
+  Future<void> dismissOptions() async {
+    if (state.draft == null) return;
+    await _store.dismissDraftOptions(_source, conversationKey);
+    final row = await _store.getDraft(_source, conversationKey);
+    if (!mounted) return;
+    state = state.copyWith(draft: row, error: null);
+  }
+
+  /// Arms [send] to run in [undoWindow], and shows that it is armed.
+  ///
+  /// This is what a quick-reply card does, and it does not widen what the app
+  /// can do: [send] is still the only code that reaches the network, it is
+  /// still behind a human's click, and for five seconds that click is
+  /// reversible. NOTHING is persisted — see [PendingSend] — so a queued send
+  /// an app quit interrupts is lost rather than delivered later.
+  ///
+  /// Refused while a send is in flight or another is already queued: a second
+  /// pending send would need a second undo, and the bar only offers one.
+  Future<void> queueSend(String body) async {
+    if (state.sending || state.pending != null) return;
+    final text = body.trim();
+    if (text.isEmpty) return;
+
+    state = state.copyWith(
+      pending: (body: text, sendsAt: DateTime.now().add(_undoWindow)),
+      error: null,
+    );
+    _pendingSend?.cancel();
+    _pendingSend = Timer(_undoWindow, () {
+      if (!mounted) return;
+      // Cleared FIRST, so [cancelQueuedSend] arriving a millisecond late is a
+      // no-op against a send already on the wire rather than a cancel that
+      // appears to have worked.
+      state = state.copyWith(pending: null);
+      unawaited(send(text));
+    });
+  }
+
+  /// Takes back a queued send. Idempotent, and safe after the window has
+  /// closed — the timer clears the pending state before it sends, so a late
+  /// undo cancels nothing rather than half-cancelling a reply that has gone.
+  void cancelQueuedSend() {
+    _pendingSend?.cancel();
+    _pendingSend = null;
+    if (state.pending == null) return;
+    state = state.copyWith(pending: null);
+  }
+
   /// Sends, saves, or copies [body] — whichever this grant allows.
   ///
   /// **The only path in this app that puts mail in front of another person.**
@@ -321,6 +475,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
       await Clipboard.setData(ClipboardData(text: text));
       return SendOutcome.copied;
     }
+
+    // Before the mail path, because none of it applies: a chat has no draft to
+    // create, no message to reply TO, and no Outlook rung to fall back to.
+    if (_source == 'teams') return _sendChat(text);
 
     // A thread only earns a generated draft when it ranks high enough, but
     // the user can reply to ANY thread — so a missing draft row falls back to
@@ -365,6 +523,17 @@ class DraftNotifier extends StateNotifier<DraftState> {
       // The strongest positive signal the app collects, and implicit rather
       // than explicit: the user did not press a rating, they answered the mail.
       await _logSent();
+      // The reply leaving IS the needs-you exit, and it says so now rather
+      // than whenever the next sync gets around to folding the sent copy in.
+      // Both writes are idempotent: the sync's own fold to `waiting` lands on
+      // a thread already there, and clearing the CTA is exactly what "the ask
+      // was answered" means — the user just answered it.
+      await _store.setConversationState(
+        _source,
+        conversationKey,
+        ConversationState.waiting,
+      );
+      await _store.clearCta(_source, conversationKey);
       state = state.copyWith(
         sending: false,
         draft: await _store.getDraft(_source, conversationKey),
@@ -379,6 +548,66 @@ class DraftNotifier extends StateNotifier<DraftState> {
       state = state.copyWith(sending: false, error: e.message);
       return SendOutcome.failed;
     } on GraphMailException catch (e) {
+      state = state.copyWith(sending: false, error: e.message);
+      return SendOutcome.failed;
+    } catch (e) {
+      state = state.copyWith(sending: false, error: 'Could not send: $e');
+      return SendOutcome.failed;
+    }
+  }
+
+  /// Posts [text] to a chat and writes the reply into the transcript.
+  ///
+  /// **The one send in this app that writes its own outbound row**, and the
+  /// only one that can: a chat post answers with the message Graph stored, id
+  /// and all, so the row written here is byte for byte the row the next pull
+  /// would have folded — [TeamsSync.messageRow] builds both. That shared id is
+  /// what makes the fold happen exactly once: `TeamsSync` asks
+  /// [MessageStore.hasMessage] before folding, sees this row, and counts the
+  /// reply as history rather than as news that reopens the thread. Mail cannot
+  /// do any of this — `sendDraft` answers 202 with no body — which is why it
+  /// still waits for `sentitems`.
+  Future<SendOutcome> _sendChat(String text) async {
+    final teams = _teams;
+    if (teams == null) {
+      // Wiring, not a runtime condition: `draftProvider` always supplies the
+      // backend, and nothing but this branch reads it.
+      throw StateError('A chat draft was built without a Teams backend.');
+    }
+
+    state = state.copyWith(sending: true, error: null);
+    try {
+      final sent = await teams.sendChatMessage(conversationKey, text);
+      final row = TeamsSync.messageRow(sent, conversationKey, outbound: true);
+      // Null only if what came back is not a chat message — a shape this app
+      // cannot store. The reply still went, so it is not a failure: the next
+      // pull writes the transcript entry that this one could not.
+      if (row != null) {
+        await _store.upsertMessage(row);
+        await _store.recomputeConversationCounts(_source, conversationKey);
+      }
+      // Same two writes the mail path makes, and for the same reason: the reply
+      // leaving IS the needs-you exit and the CTA's answer, said now rather
+      // than whenever the user next refreshes Teams — which, under Microsoft's
+      // polling terms, may be a while.
+      await _store.setConversationState(
+        _source,
+        conversationKey,
+        ConversationState.waiting,
+      );
+      await _store.clearCta(_source, conversationKey);
+      await _logSent();
+      state = state.copyWith(
+        sending: false,
+        draft: await _store.getDraft(_source, conversationKey),
+        sendEpoch: state.sendEpoch + 1,
+      );
+      await _onSent?.call();
+      return SendOutcome.sent;
+    } on AuthException catch (e) {
+      state = state.copyWith(sending: false, error: e.message);
+      return SendOutcome.failed;
+    } on GraphTeamsException catch (e) {
       state = state.copyWith(sending: false, error: e.message);
       return SendOutcome.failed;
     } catch (e) {
@@ -431,12 +660,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
 /// Deliberately NOT autoDispose, matching `threadProvider`: clicking back to a
 /// thread should show the draft that was already written for it.
 final draftProvider =
-    StateNotifierProvider.family<DraftNotifier, DraftState, String>(
-  (ref, conversationKey) => DraftNotifier(
+    StateNotifierProvider.family<DraftNotifier, DraftState, DraftTarget>(
+  (ref, target) => DraftNotifier(
     ref.watch(messageStoreProvider),
     ref.watch(authSessionProvider),
     ref.watch(mailBackendProvider),
-    conversationKey,
+    target,
+    teams: ref.watch(teamsBackendProvider),
     worker: ref.watch(aiWorkerProvider),
     onSent: () => ref.read(conversationsProvider.notifier).load(),
   ),

@@ -18,7 +18,11 @@ You are drafting an email reply on behalf of the inbox's owner. You write as the
 
 Rules:
 - evidence: ONE sentence naming what the sender needs and what your reply commits to. Write it first — the reply below should follow from it.
-- reply_body: the reply itself, as plain text. No subject line, no markdown, no signature block beyond a sign-off.
+- options: one or two SHORT replies, ready to send as they stand, under 60 words each. The first is the one you would send if you had to send one right now.
+- Give TWO options ONLY when the message genuinely has two reasonable answers that commit to different things — accepting versus declining, confirming Friday versus proposing another day. Two rewordings of the same answer are ONE option.
+- stance: two to four words naming what the option does, phrased as an instruction ("Confirm Friday", "Propose Tuesday", "Decline politely").
+- Every option obeys the invention rule below. A short reply is not a licence to guess.
+- reply_body: the reply itself, as plain text. No subject line, no markdown, no signature block beyond a sign-off. It may expand on the first option.
 - Greet briefly, answer what was actually asked, and sign off the way the past replies do. When no past replies are provided, end with a short neutral sign-off ("Thanks,") and no name — never invent one.
 - NEVER invent facts, numbers, dates, names, or commitments that are not present in the thread. No made-up prices, no made-up dates, no promises about what someone else will do.
 - If the thread does not contain what is needed to answer, do not guess: write a short reply that asks the one clarifying question that would unblock it.
@@ -66,6 +70,19 @@ class DraftInput {
   });
 }
 
+/// One ready-to-send short reply, and the two-to-four words naming what
+/// sending it would commit to.
+///
+/// [stance] is what the card is labelled with, so it has to say what the reply
+/// DOES ("Propose Tuesday") rather than describe it ("A polite response").
+@immutable
+class DraftOption {
+  final String stance;
+  final String body;
+
+  const DraftOption({required this.stance, required this.body});
+}
+
 /// One drafted reply, and the sentence explaining what it is answering.
 @immutable
 class DraftResult {
@@ -76,7 +93,16 @@ class DraftResult {
   /// The reply text. May be EMPTY — see [DraftTask.validate].
   final String replyBody;
 
-  const DraftResult({required this.evidence, required this.replyBody});
+  /// At most two short replies, first one first. Empty is normal and fine —
+  /// it renders no quick-reply cards, which is a thread the user answers in
+  /// the composer like any other.
+  final List<DraftOption> options;
+
+  const DraftResult({
+    required this.evidence,
+    required this.replyBody,
+    this.options = const [],
+  });
 }
 
 /// Writes the reply the owner is about to edit and send.
@@ -100,6 +126,15 @@ class DraftTask implements JsonTask<DraftResult> {
   static const int _aboutMeCap = 600;
   static const int _evidenceCap = 300;
 
+  /// A stance is a label on a card. Two to four words is what the prompt asks
+  /// for; forty characters is the width the card can actually show.
+  static const int _optionStanceCap = 40;
+
+  /// Long enough for the sixty words the prompt asks for, short enough that a
+  /// model that ignored the instruction and wrote an essay does not land one
+  /// in a card.
+  static const int _optionBodyCap = 500;
+
   static final DateFormat _date = DateFormat('yyyy-MM-dd');
   static final DateFormat _weekday = DateFormat('EEEE');
 
@@ -116,7 +151,14 @@ class DraftTask implements JsonTask<DraftResult> {
   /// `evidence` first is load-bearing. A grammar emits fields in schema order,
   /// so the model has to state what the sender needs before it starts writing
   /// the reply — which is the difference between answering the question and
-  /// writing something that sounds like an answer.
+  /// writing something that sounds like an answer. `options` sits between the
+  /// two for the same reason: the short answers are committed before the long
+  /// form, so the expansion follows a decision that has already been made
+  /// rather than the other way round.
+  ///
+  /// No `minItems`/`maxItems` on `options` — this build converts only part of
+  /// JSON Schema into a grammar, and a count constraint it cannot express
+  /// fails the request outright. One-or-two is enforced in [validate].
   @override
   Map<String, dynamic> get schema => {
         'type': 'object',
@@ -126,12 +168,24 @@ class DraftTask implements JsonTask<DraftResult> {
             'description': 'one sentence naming what the sender needs and '
                 'what your reply commits to',
           },
+          'options': {
+            'type': 'array',
+            'items': {
+              'type': 'object',
+              'properties': {
+                'stance': {'type': 'string'},
+                'reply_body': {'type': 'string'},
+              },
+              'required': ['stance', 'reply_body'],
+              'additionalProperties': false,
+            },
+          },
           'reply_body': {
             'type': 'string',
             'description': 'the plain-text reply, under 150 words',
           },
         },
-        'required': ['evidence', 'reply_body'],
+        'required': ['evidence', 'options', 'reply_body'],
         'additionalProperties': false,
       };
 
@@ -237,7 +291,32 @@ class DraftTask implements JsonTask<DraftResult> {
           ? ''
           : _clamp(evidence.toString().trim(), _evidenceCap),
       replyBody: body is String ? body.trim() : '',
+      options: _options(json['options']),
     );
+  }
+
+  /// The short replies, cleaned up. Absent, wrong-typed or half-written
+  /// options come back empty rather than throwing: the long-form reply is the
+  /// product this task exists for, and no cards is a state the UI already
+  /// draws. Only the first two well-formed entries survive — the prompt asks
+  /// for one or two, and the grammar cannot be made to insist.
+  static List<DraftOption> _options(Object? raw) {
+    if (raw is! List) return const [];
+    final options = <DraftOption>[];
+    for (final entry in raw) {
+      if (entry is! Map) continue;
+      final stance = (entry['stance'] as Object?)?.toString().trim() ?? '';
+      final body = (entry['reply_body'] as Object?)?.toString().trim() ?? '';
+      // A card with no label, or a label with nothing behind it, is not an
+      // option the user can act on.
+      if (stance.isEmpty || body.isEmpty) continue;
+      options.add(DraftOption(
+        stance: _clamp(stance, _optionStanceCap),
+        body: _clamp(body, _optionBodyCap),
+      ));
+      if (options.length == 2) break;
+    }
+    return options;
   }
 
   static String _clamp(String value, int cap) =>

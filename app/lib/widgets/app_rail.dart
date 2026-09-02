@@ -32,15 +32,26 @@ String _stripReplyPrefixes(String subject) {
   return out.trim();
 }
 
-/// What the user is on the hook for, loudest first.
+/// Whether one thread is the user's to answer.
 ///
-/// Three filters and a sort:
-/// - anything awaiting their reply, plus anything triage left an ask on that is
-///   not already closed;
-/// - nothing deferred to Later, which is the whole point of Later;
-/// - nothing scoring below [threshold], which is what the volume slider moves.
-///   A thread cut here is NOT hidden — it is still in Conversations, which
-///   shows every open thread whatever it scores.
+/// THE predicate the two sections partition on: Needs You is everything this
+/// returns true for, Conversations is every live thread it returns false for.
+/// One function rather than a filter in each, because two filters that were
+/// meant to be complements are two filters that will eventually disagree — and
+/// the symptom is mail in both sections, or in neither.
+///
+/// Three tests: nothing deferred to Later, which is the whole point of Later;
+/// nothing already closed; nothing scoring below [threshold], which is what the
+/// volume slider moves.
+bool isNeedsYou(Conversation c, {double threshold = 0}) {
+  if (c.bucket == 'later') return false;
+  if (c.state == ConversationState.done) return false;
+  if ((c.attentionScore ?? 0) < threshold) return false;
+  return c.state == ConversationState.needsReply ||
+      (c.ctaText?.isNotEmpty == true);
+}
+
+/// What the user is on the hook for, loudest first — [isNeedsYou], sorted.
 ///
 /// The sort is needs-reply first, then score. Two blocks rather than one
 /// ordering because they answer different questions: the top block is work the
@@ -55,11 +66,7 @@ List<Conversation> needsYouRows(
   final rows = <(int, Conversation)>[];
   var index = 0;
   for (final c in all) {
-    final eligible = c.state == ConversationState.needsReply ||
-        (c.state != ConversationState.done && c.ctaText?.isNotEmpty == true);
-    if (!eligible) continue;
-    if (c.bucket == 'later') continue;
-    if ((c.attentionScore ?? 0) < threshold) continue;
+    if (!isNeedsYou(c, threshold: threshold)) continue;
     rows.add((index++, c));
   }
 
@@ -83,13 +90,25 @@ int _needsReplyRank(Conversation c) =>
 /// somebody else, and rendered dimmed so the two halves read apart at a glance.
 bool isWaitingRow(Conversation c) => c.state != ConversationState.needsReply;
 
-/// Every live thread: resolved ones dropped, deferred ones dropped.
+/// Every live thread the user does not owe an answer: resolved ones dropped,
+/// deferred ones dropped, and everything Needs You claimed dropped.
 ///
-/// Deferred threads are absent here and present in [laterRows], so exactly one
-/// section claims each thread and the counts on the rail add up.
-List<Conversation> conversationRows(List<Conversation> all) => [
+/// The complement of [isNeedsYou], not a second opinion about it — exactly one
+/// section claims each thread, so the counts on the rail add up and nothing is
+/// asked for twice. Since it is the complement at the SAME [threshold], a
+/// thread the slider cut out of Needs You lands here rather than nowhere: that
+/// is what makes turning the slider up safe. The mail moves down a section, it
+/// never disappears.
+List<Conversation> conversationRows(
+  List<Conversation> all, {
+  double threshold = 0,
+}) =>
+    [
       for (final c in all)
-        if (c.state != ConversationState.done && c.bucket != 'later') c,
+        if (c.state != ConversationState.done &&
+            c.bucket != 'later' &&
+            !isNeedsYou(c, threshold: threshold))
+          c,
     ];
 
 /// Everything deferred, in the order it was handed over.
@@ -278,7 +297,10 @@ class _AppRailState extends State<AppRail> {
       widget.conversations,
       threshold: widget.attentionThreshold,
     );
-    final open = conversationRows(widget.conversations);
+    final open = conversationRows(
+      widget.conversations,
+      threshold: widget.attentionThreshold,
+    );
 
     // The badge counts everything that qualified, the list shows the top
     // handful. A badge that agreed with the truncated list would understate
@@ -304,7 +326,8 @@ class _AppRailState extends State<AppRail> {
                   ..._section(
                     RailSection.needsYou,
                     rows: [
-                      for (final c in shown) _item(c, dimmed: isWaitingRow(c)),
+                      for (final c in shown)
+                        _item(c, dimmed: isWaitingRow(c), bold: true),
                       if (overflow > 0) _more(overflow),
                     ],
                     badge: needsYou.isEmpty
@@ -321,7 +344,7 @@ class _AppRailState extends State<AppRail> {
                   ),
                   ..._section(
                     RailSection.conversations,
-                    rows: [for (final c in open) _item(c)],
+                    rows: [for (final c in open) _item(c, bold: c.hasUnread)],
                   ),
                   ..._section(
                     RailSection.later,
@@ -438,13 +461,15 @@ class _AppRailState extends State<AppRail> {
   /// One thread. [dimmed] drops it to the muted ink used for the quieter half
   /// of Needs You — a thread on the list because someone else is late, not
   /// because the user is.
-  Widget _item(Conversation c, {bool dimmed = false}) {
+  Widget _item(Conversation c, {required bool bold, bool dimmed = false}) {
     final selected = widget.selectedId == c.id;
-    final needsReply = c.state == ConversationState.needsReply;
 
-    // Bold is the whole grammar: a thread that wants the user reads heavier
-    // than one that is merely open. Nothing else in the rail is bold.
-    final color = (selected || needsReply)
+    // Bold is the whole grammar, and it says a different thing in each section
+    // because the sections ask different questions. In Needs You every row is
+    // bold: you owe this. In Conversations bold means you have not read this.
+    // Nothing else in the rail is bold, and the caller decides which question
+    // this row is answering.
+    final color = (selected || (bold && !dimmed))
         ? BondColors.onDarkPrimary
         : (dimmed ? BondColors.onDarkMuted : BondColors.onDarkSecondary);
 
@@ -470,7 +495,7 @@ class _AppRailState extends State<AppRail> {
                     height: BondSpacing.s8,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: needsReply
+                      color: bold
                           ? BondColors.seaGlassOnDark
                           : BondColors.onDarkBorder,
                     ),
@@ -481,8 +506,7 @@ class _AppRailState extends State<AppRail> {
                       railTitleFor(c),
                       style: BondType.small.copyWith(
                         color: color,
-                        fontWeight:
-                            needsReply ? FontWeight.w600 : FontWeight.w500,
+                        fontWeight: bold ? FontWeight.w600 : FontWeight.w500,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,

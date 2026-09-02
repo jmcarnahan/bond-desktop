@@ -179,6 +179,38 @@ class GraphMail implements MailBackend {
     }
   }
 
+  /// Marks each of [messageIds] read (or unread), one PATCH at a time, and
+  /// returns the ids worth trying again.
+  ///
+  /// Sequential rather than a `$batch`: an ack is a handful of ids that nobody
+  /// is waiting on, and one request per id keeps each id's outcome its own —
+  /// which is the whole return value. Batching is a later optimization, and
+  /// only if a thread with a hundred unread messages stops being rare.
+  ///
+  /// A 404 or a 410 is DROPPED rather than returned. The user read a message
+  /// that has since been deleted somewhere else; there is no read flag left to
+  /// set, and retrying forever is the only thing calling that a failure would
+  /// buy.
+  @override
+  Future<List<String>> markRead(
+    List<String> messageIds, {
+    bool isRead = true,
+  }) async {
+    final failed = <String>[];
+    for (final id in messageIds) {
+      final response = await _request(
+        'PATCH',
+        Uri.parse('$_base/me/messages/${Uri.encodeComponent(id)}'),
+        jsonBody: {'isRead': isRead},
+      );
+      final status = response.statusCode;
+      if (status >= 200 && status < 300) continue;
+      if (status == 404 || status == 410) continue;
+      failed.add(id);
+    }
+    return failed;
+  }
+
   /// The local zone, as a `Prefer` header. Rebuilt per call rather than held
   /// as a constant: a laptop that crosses a time zone should not keep quoting
   /// timestamps in the one it left.

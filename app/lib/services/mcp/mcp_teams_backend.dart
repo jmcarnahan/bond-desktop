@@ -5,13 +5,16 @@ import '../backend/teams_backend.dart';
 import '../graph_teams.dart';
 import 'bond_mcp_client.dart';
 
-/// The Teams chat reads, made by asking the Bond MCP server rather than
-/// Microsoft. Nothing here touches sqlite — [TeamsSync] owns the writes.
+/// The Teams chat reads and writes, made by asking the Bond MCP server rather
+/// than Microsoft. Nothing here touches sqlite — [TeamsSync] and
+/// `DraftNotifier` own the writes to it.
 ///
 /// **Nothing here may be called from a timer.** Microsoft's terms for the Teams
 /// messaging endpoints forbid background polling, and moving the request to a
 /// server changes nothing about that: the calls are still made with the user's
-/// delegated consent. [TeamsSync] is the only caller and it enforces it.
+/// delegated consent. [TeamsSync] is the only caller of the reads and it
+/// enforces it; the two writes are a button press and a thread being opened,
+/// so each already traces back to a person.
 ///
 /// The throttle floors are kept here too, for the same reason — the ToU
 /// discipline is ours whichever transport carries the request — and they are
@@ -185,6 +188,53 @@ class McpTeamsBackend implements TeamsBackend {
     return messages;
   }
 
+  /// Marks a chat read for the signed-in user, up to its newest message.
+  ///
+  /// The server resolves the identity from the connected account, so there is
+  /// no user id to pass — and `no_identity` coming back means it could not,
+  /// which is a retryable failure rather than a read that quietly did not
+  /// happen. Every `ok: false` is thrown for that reason: the queue's whole job
+  /// is to notice an ack that did not land.
+  @override
+  Future<void> markChatRead(String chatId) async {
+    await _throttleChat(chatId);
+    final result = await _call('mark_chat_read_json', {'chat_id': chatId});
+    if (result['ok'] != true) {
+      throw GraphTeamsException(
+        'Could not mark a Teams chat read: ${result['error'] ?? 'unknown'}',
+      );
+    }
+  }
+
+  /// Posts a plain-text message to a chat, and returns it as stored.
+  ///
+  /// The reply comes back through [_messageShape], so what the caller writes
+  /// into its own outbound row is shape-identical to a message the sync would
+  /// have folded in — id included, which is what keeps the next pull from
+  /// folding this reply a second time.
+  ///
+  /// A null `message` means the send did not happen, and throwing is the only
+  /// honest answer: the alternative is a screen that says a reply went out and
+  /// a chat that never received one.
+  @override
+  Future<Map<String, dynamic>> sendChatMessage(
+    String chatId,
+    String text,
+  ) async {
+    await _throttleChat(chatId);
+    final result = await _call('send_chat_message_json', {
+      'chat_id': chatId,
+      'text': text,
+    });
+    final message = result['message'];
+    if (message is! Map) {
+      throw GraphTeamsException(
+        'Could not send your Teams message: ${result['error'] ?? 'unknown'}',
+      );
+    }
+    return _messageShape(message);
+  }
+
   /// Whether this page's oldest message is at or before the cursor.
   ///
   /// An empty page ends the walk: there is nothing older to ask for. A page
@@ -198,13 +248,25 @@ class McpTeamsBackend implements TeamsBackend {
     return oldest.compareTo(sinceIso) <= 0;
   }
 
+  /// One flat wire chat as the nested object `TeamsSync` reads.
+  ///
+  /// The read viewpoint gets the same treatment as the preview, and for the
+  /// same reason: `teams_sync.dart` reads Graph's nested shape, so the wire's
+  /// flat `last_read_at` becomes the `viewpoint.lastMessageReadDateTime` the
+  /// Graph backend hands back untouched. Absent stays NULL rather than becoming
+  /// an empty object — a chat whose viewpoint is unknown must read as unknown,
+  /// which is what makes its messages fall to "read" instead of being called
+  /// unread on a guess.
   static Map<String, dynamic> _chatShape(Map chat) {
     final previewAt = chat['last_preview_at'];
+    final readAt = chat['last_read_at'];
     return {
       'id': chat['id'],
       'topic': chat['topic'],
       'lastMessagePreview':
           previewAt == null ? null : {'createdDateTime': previewAt},
+      'viewpoint':
+          readAt == null ? null : {'lastMessageReadDateTime': readAt},
     };
   }
 

@@ -30,6 +30,7 @@ Conversation _conv({
   String? bucket,
   double? score,
   String? lastMessageAt,
+  int unread = 0,
 }) {
   return Conversation(
     id: id,
@@ -40,6 +41,7 @@ Conversation _conv({
     bucket: bucket,
     attentionScore: score,
     lastMessageAt: lastMessageAt,
+    unreadCount: unread,
   );
 }
 
@@ -167,7 +169,7 @@ void main() {
   group('conversationRows', () {
     test('drops done threads and keeps the rest in order', () {
       final rows = conversationRows([
-        _conv(id: 'a', state: ConversationState.needsReply),
+        _conv(id: 'a', state: ConversationState.waiting),
         _conv(id: 'b', state: ConversationState.done),
         _conv(id: 'c', state: ConversationState.waiting),
       ]);
@@ -176,10 +178,72 @@ void main() {
 
     test('drops deferred threads too — exactly one section claims each', () {
       final rows = conversationRows([
-        _conv(id: 'a', state: ConversationState.needsReply),
+        _conv(id: 'a', state: ConversationState.waiting),
         _conv(id: 'b', state: ConversationState.waiting, bucket: 'later'),
       ]);
       expect(rows.map((c) => c.id), ['a']);
+    });
+
+    test('drops what Needs You claimed, and keeps what its threshold cut', () {
+      final all = [
+        _conv(id: 'loud', state: ConversationState.needsReply, score: 0.9),
+        _conv(id: 'quiet', state: ConversationState.needsReply, score: 0.1),
+      ];
+
+      expect(conversationRows(all), isEmpty);
+      // The slider moved one down a section rather than out of the app.
+      expect(
+        conversationRows(all, threshold: 0.5).map((c) => c.id),
+        ['quiet'],
+      );
+    });
+  });
+
+  group('the two sections partition', () {
+    final mixed = [
+      _conv(id: 'loud-reply', state: ConversationState.needsReply, score: 0.9),
+      _conv(id: 'quiet-reply', state: ConversationState.needsReply, score: 0.1),
+      _conv(
+        id: 'cta',
+        state: ConversationState.waiting,
+        cta: 'Send the homepage copy',
+        score: 0.8,
+      ),
+      _conv(id: 'waiting', state: ConversationState.waiting, score: 0.7),
+      _conv(id: 'done', state: ConversationState.done, cta: 'Ignored'),
+      _conv(
+        id: 'deferred',
+        state: ConversationState.needsReply,
+        bucket: 'later',
+      ),
+    ];
+
+    /// Everything neither closed nor deferred — what the two sections have to
+    /// account for between them, whatever the slider is set to.
+    final live = {'loud-reply', 'quiet-reply', 'cta', 'waiting'};
+
+    for (final threshold in [0.0, 0.5]) {
+      test('at threshold $threshold each live thread is in exactly one', () {
+        final needsYou =
+            needsYouRows(mixed, threshold: threshold).map((c) => c.id).toSet();
+        final open = conversationRows(mixed, threshold: threshold)
+            .map((c) => c.id)
+            .toSet();
+
+        expect(needsYou.union(open), live);
+        expect(needsYou.intersection(open), isEmpty);
+      });
+    }
+
+    test('the threshold moves a thread between them, it never hides one', () {
+      expect(
+        needsYouRows(mixed, threshold: 0.5).map((c) => c.id),
+        isNot(contains('quiet-reply')),
+      );
+      expect(
+        conversationRows(mixed, threshold: 0.5).map((c) => c.id),
+        contains('quiet-reply'),
+      );
     });
   });
 
@@ -317,8 +381,8 @@ void main() {
       final selected = <String>[];
       await pumpRail(tester, onSelectConversation: selected.add);
 
-      // Cleo is in Needs You and in Conversations; either one means the row.
-      await tester.tap(find.text('Cleo').first);
+      // Cleo has an ask on her, so Needs You is the one section she is in.
+      await tester.tap(find.text('Cleo'));
       expect(selected, ['c']);
     });
 
@@ -335,13 +399,16 @@ void main() {
       final sections = <RailSection>[];
       await pumpRail(tester, onSelectSection: sections.add);
 
-      expect(find.text('Alice'), findsNWidgets(2));
+      expect(find.text('Alice'), findsOneWidget);
 
       // The first chevron belongs to Needs You.
       await tester.tap(find.byIcon(Icons.expand_more).first);
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice'), findsOneWidget);
+      // Alice was in Needs You and is gone with it; Bruno's section is
+      // untouched, so it was that one section that closed and not the list.
+      expect(find.text('Alice'), findsNothing);
+      expect(find.text('Bruno'), findsOneWidget);
       expect(sections, isEmpty);
     });
   });
@@ -471,10 +538,12 @@ void main() {
         (tester) async {
       await pumpRail(tester, conversations: manyNeedsReply(10));
 
-      expect(find.text('Person 0'), findsNWidgets(2)); // Needs You + open list
-      expect(find.text('Person 6'), findsNWidgets(2));
-      // Person 7..9 are past the cap: only the Conversations section has them.
-      expect(find.text('Person 7'), findsOneWidget);
+      expect(find.text('Person 0'), findsOneWidget);
+      expect(find.text('Person 6'), findsOneWidget);
+      // Person 7..9 are past the cap, and Needs You claimed them so
+      // Conversations does not carry them either: the overflow row is the only
+      // way to them, which is what makes it load-bearing rather than decorative.
+      expect(find.text('Person 7'), findsNothing);
       expect(find.text('+3 more'), findsOneWidget);
       // The badge still counts all ten. It must never flatter the workload.
       expect(find.text('10'), findsOneWidget);
@@ -519,9 +588,9 @@ void main() {
         ],
       );
 
-      expect(find.text('Loud'), findsNWidgets(2));
-      // Cut from Needs You, still in Conversations. Nothing is ever hidden
-      // entirely by the slider.
+      // One row each, in one section each: Loud in Needs You, Quiet in
+      // Conversations. Nothing is ever hidden entirely by the slider.
+      expect(find.text('Loud'), findsOneWidget);
       expect(find.text('Quiet'), findsOneWidget);
     });
 
@@ -544,12 +613,60 @@ void main() {
       ]);
 
       // Present, and quieter than the row above it.
-      expect(find.text('Waiting'), findsNWidgets(2));
-      final dimmed = tester.widget<Text>(find.text('Waiting').first);
+      expect(find.text('Waiting'), findsOneWidget);
+      final dimmed = tester.widget<Text>(find.text('Waiting'));
       expect(dimmed.style?.color, BondColors.onDarkMuted);
 
-      final loud = tester.widget<Text>(find.text('Owed').first);
+      final loud = tester.widget<Text>(find.text('Owed'));
       expect(loud.style?.color, BondColors.onDarkPrimary);
+    });
+  });
+
+  group('AppRail bold grammar', () {
+    Future<void> pumpRail(
+      WidgetTester tester,
+      List<Conversation> conversations,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        conversations: conversations,
+        selectedId: null,
+        selectedSection: null,
+        onSelectConversation: (_) {},
+        onSelectSection: (_) {},
+      )));
+    }
+
+    FontWeight? weightOf(WidgetTester tester, String label) =>
+        tester.widget<Text>(find.text(label)).style?.fontWeight;
+
+    testWidgets('in Conversations, bold means unread', (tester) async {
+      await pumpRail(tester, [
+        _conv(id: 'a', who: 'Unread', unread: 1),
+        _conv(id: 'b', who: 'Read'),
+      ]);
+
+      expect(weightOf(tester, 'Unread'), FontWeight.w600);
+      expect(weightOf(tester, 'Read'), FontWeight.w500);
+    });
+
+    testWidgets('in Needs You, bold means you owe it — read or not',
+        (tester) async {
+      await pumpRail(tester, [
+        _conv(id: 'a', who: 'Owed', state: ConversationState.needsReply),
+        _conv(
+          id: 'b',
+          who: 'Owed and unread',
+          state: ConversationState.needsReply,
+          unread: 3,
+        ),
+      ]);
+
+      // A needs-you thread staying bold after it has been read is the point:
+      // that row is the follow-up signal, not the unread one.
+      expect(weightOf(tester, 'Owed'), FontWeight.w600);
+      expect(weightOf(tester, 'Owed and unread'), FontWeight.w600);
     });
   });
 

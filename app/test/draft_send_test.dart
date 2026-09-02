@@ -122,7 +122,7 @@ void main() {
       store,
       GraphAuth(httpClient: never, store: tokens),
       mail,
-      key,
+      (source: 'email', conversationKey: key),
       onSent: () async => syncsAfterSend++,
       launch: (url) async {
         launched.add(url);
@@ -173,6 +173,39 @@ void main() {
     test('and so can a signed-out app', () async {
       tokens.values.clear();
       final notifier = notifierFor();
+      await notifier.load();
+
+      expect(notifier.state.capability, SendCapability.copyOnly);
+    });
+
+    test('a chat asks about Chat.ReadWrite, not about mail', () async {
+      // Two rungs rather than three: there is no Outlook drafts folder to hand
+      // a Teams message off to.
+      tokens.values['granted_scopes'] =
+          '$_sendGrant https://graph.microsoft.com/Chat.ReadWrite';
+      final notifier = DraftNotifier(
+        store,
+        GraphAuth(httpClient: never, store: tokens),
+        mail,
+        (source: 'teams', conversationKey: 'chat-1'),
+      );
+      addTearDown(notifier.dispose);
+
+      await notifier.load();
+
+      expect(notifier.state.capability, SendCapability.send);
+    });
+
+    test('and drops to copy without it, however good the mail grant is',
+        () async {
+      final notifier = DraftNotifier(
+        store,
+        GraphAuth(httpClient: never, store: tokens),
+        mail,
+        (source: 'teams', conversationKey: 'chat-1'),
+      );
+      addTearDown(notifier.dispose);
+
       await notifier.load();
 
       expect(notifier.state.capability, SendCapability.copyOnly);
@@ -456,6 +489,84 @@ void main() {
         'pending',
       );
       expect(notifier.state.body, isNull);
+    });
+  });
+
+  group('the short replies', () {
+    const options =
+        '[{"stance":"Confirm Friday","body":"Friday works."},'
+        '{"stance":"Propose Tuesday","body":"Could we say Tuesday?"}]';
+
+    Future<void> seedWithOptions({String? json = options}) async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'inbound-1',
+        body: 'Friday works.',
+        evidence: 'Sarah wants the lock extended.',
+        optionsJson: json,
+      );
+    }
+
+    test('decode in the order they were written', () async {
+      await seedWithOptions();
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(
+        [for (final o in notifier.state.options) o.stance],
+        ['Confirm Friday', 'Propose Tuesday'],
+      );
+      expect(notifier.state.options.first.body, 'Friday works.');
+    });
+
+    test('a draft with none, and no draft at all, both read as none', () async {
+      await seedWithOptions(json: null);
+      final withDraft = notifierFor();
+      await withDraft.load();
+      expect(withDraft.state.options, isEmpty);
+
+      expect(const DraftState().options, isEmpty);
+    });
+
+    test('malformed JSON reads as none rather than throwing', () async {
+      await seedWithOptions(json: 'not json at all');
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(notifier.state.options, isEmpty);
+      // The long form is untouched by the options failing to parse.
+      expect(notifier.state.body, 'Friday works.');
+    });
+
+    test('dismissOptions hides them and keeps the draft', () async {
+      await seedWithOptions();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.dismissOptions();
+
+      expect(notifier.state.options, isEmpty);
+      expect(notifier.state.body, 'Friday works.',
+          reason: 'closing the cards is not closing the draft');
+      expect((await store.getDraft('email', 'conv-1'))!['options_dismissed'], 1);
+    });
+
+    test('a dismissed or sent draft offers none either', () async {
+      // Same rule as [DraftState.body]: the reply is out, or the user threw it
+      // away, and offering its short forms again is how a duplicate is sent.
+      await seedWithOptions();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.dismiss();
+      expect(notifier.state.options, isEmpty);
+
+      await store.updateDraftStatus('email', 'conv-1', status: 'sent');
+      await notifier.load();
+      expect(notifier.state.options, isEmpty);
     });
   });
 

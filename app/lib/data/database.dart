@@ -36,7 +36,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -91,6 +91,21 @@ class BondDatabase extends _$BondDatabase {
                   await m.addColumn(
                     schema.storylines,
                     schema.storylines.charterLocked,
+                  );
+                }
+              },
+              // v4 — a draft carries the short answers as well as the long
+              // one: up to two ready-to-send replies in `options_json`, and
+              // `options_dismissed` so closing them keeps the row instead of
+              // handing the auto-enqueue an excuse to write them again.
+              from3To4: (m, schema) async {
+                if (!await _columnExists('drafts', 'options_json')) {
+                  await m.addColumn(schema.drafts, schema.drafts.optionsJson);
+                }
+                if (!await _columnExists('drafts', 'options_dismissed')) {
+                  await m.addColumn(
+                    schema.drafts,
+                    schema.drafts.optionsDismissed,
                   );
                 }
               },

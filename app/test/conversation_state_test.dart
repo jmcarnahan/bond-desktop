@@ -273,4 +273,31 @@ void main() {
       expect(conversationKeyFor('', 'x'), 'msg:x');
     });
   });
+
+  group('outboundResolves', () {
+    // Mirrors foldMessage's outbound guard exactly — including the `<=` tie
+    // rule — so ingest can clear side state (the CTA) on the same transition
+    // the fold takes to waiting, and never on any other.
+    test('answers everything when there is no inbound at all', () {
+      expect(outboundResolves(null, '2026-09-01T10:00:00Z'), isTrue);
+      expect(outboundResolves(ConvSnapshot(), '2026-09-01T10:00:00Z'), isTrue);
+    });
+
+    test('a reply at or after the newest inbound resolves', () {
+      final s = ConvSnapshot(lastInboundAt: '2026-09-01T10:00:00Z');
+      expect(outboundResolves(s, '2026-09-01T11:00:00Z'), isTrue);
+      // The tie goes to the reply, exactly as the fold's `<=` does.
+      expect(outboundResolves(s, '2026-09-01T10:00:00Z'), isTrue);
+    });
+
+    test('a reply older than the newest inbound resolves nothing', () {
+      final s = ConvSnapshot(lastInboundAt: '2026-09-01T10:00:00Z');
+      expect(outboundResolves(s, '2026-09-01T09:00:00Z'), isFalse);
+    });
+
+    test('an undated reply can be ordered against nothing', () {
+      expect(outboundResolves(ConvSnapshot(), null), isFalse);
+      expect(outboundResolves(ConvSnapshot(), ''), isFalse);
+    });
+  });
 }

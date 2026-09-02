@@ -29,10 +29,15 @@ import 'fixtures/test_db.dart';
 ///   for the Teams messaging endpoints forbid background polling, and the only
 ///   place that rule can actually be broken is here, where the timer is
 ///   created and the refresh button is wired.
-/// - **a chat thread has no composer.** Drafting and sending are email-only:
-///   Graph builds a mail reply for this app through `createReply`, and there is
-///   no equivalent for a chat, so a reply box on one would be a box that
-///   cannot send.
+/// - **a chat thread's reply surface follows the GRANT.** With
+///   `Chat.ReadWrite` it gets the same bar and collapsible composer a mail
+///   thread does; without it, a box that could not send would be worse than
+///   none, so the pane says where to reply instead. Only the assembled screen
+///   knows both the capability and the pane.
+/// - **the reply surface a mail thread DOES get**: the stored short replies
+///   reaching the transcript, and the composer staying collapsed until asked
+///   for. Both are wiring between the draft row and the pane, which is only
+///   assembled here.
 
 class _Tokens implements TokenStore {
   final Map<String, String> values = {};
@@ -78,6 +83,11 @@ class _RecordingTeams extends TeamsSync {
 const String _coreScopes =
     'https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read';
 const String _withChat = '$_coreScopes https://graph.microsoft.com/Chat.Read';
+
+/// Reading chats and answering them — what the MCP backend's grant carries,
+/// and the only grant under which a chat thread offers a reply box.
+const String _withChatWrite =
+    '$_coreScopes https://graph.microsoft.com/Chat.ReadWrite';
 
 void main() {
   late BondDatabase db;
@@ -233,20 +243,52 @@ void main() {
   });
 
   group('a chat thread', () {
-    testWidgets('offers no composer, and says where to reply', (tester) async {
-      await seedChat('chat-1');
-      await pumpScreen(tester);
-
+    Future<void> openChat(WidgetTester tester) async {
       await tester.tap(find.text('💬 Sarah Whitfield').first);
       await tester.pump();
       await tester.pump();
+      // The capability is a keychain read, and the reply surface waits on it.
+      await tester.pump();
+    }
+
+    testWidgets('without Chat.ReadWrite says where to reply instead',
+        (tester) async {
+      // `_withChat` is Chat.Read: this build can see the chat and could not
+      // answer it, and the caption is the honest version of that.
+      await seedChat('chat-1');
+      await pumpScreen(tester);
+
+      await openChat(tester);
 
       expect(find.byType(Composer), findsNothing,
           reason: 'a reply box that cannot send is worse than none');
+      expect(find.text('Reply…'), findsNothing);
       expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
     });
 
-    testWidgets('a mail thread still has one', (tester) async {
+    testWidgets('with it, the chat gets the same reply surface mail does',
+        (tester) async {
+      // No generated options — drafting stays email-only this round — so the
+      // bar is the `Reply…` affordance alone, and it opens the same collapsed
+      // composer a mail thread's does.
+      await seedChat('chat-1');
+      await pumpScreen(tester, grantedScopes: _withChatWrite);
+
+      await openChat(tester);
+
+      expect(find.text('Reply in Microsoft Teams'), findsNothing);
+      expect(find.byType(Composer), findsNothing, reason: 'collapsed by default');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+
+      expect(find.byType(Composer), findsOneWidget);
+      // A plain box: drafting stays email-only this round, so a chat gets no
+      // "Draft reply" button rather than one that would do nothing.
+      expect(find.text('Draft reply'), findsNothing);
+    });
+
+    testWidgets('a mail thread reaches one through Reply…', (tester) async {
       await seedMail('c1');
       await pumpScreen(tester);
 
@@ -254,8 +296,99 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.byType(Composer), findsOneWidget);
+      // Collapsed is the DEFAULT: a thread opens as something to read.
+      expect(find.byType(Composer), findsNothing);
       expect(find.text('Reply in Microsoft Teams'), findsNothing);
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+
+      expect(find.byType(Composer), findsOneWidget);
+    });
+
+    testWidgets('and the reply window closes again on its ×', (tester) async {
+      await seedMail('c1');
+      await pumpScreen(tester);
+
+      await tester.tap(find.text('Eric Vance').first);
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pump();
+
+      expect(find.byType(Composer), findsNothing);
+      expect(find.text('Reply…'), findsOneWidget);
+    });
+  });
+
+  group('the quick replies', () {
+    Future<void> seedOptions(String key) async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: key,
+        replyToMessageId: '$key-m1',
+        body: 'Thanks Eric — the copy looks good, I will review it today.',
+        optionsJson: '[{"stance":"Confirm receipt","body":"Got it, thanks."},'
+            '{"stance":"Ask for a deadline","body":"When do you need this by?"}]',
+      );
+    }
+
+    Future<void> openThread(WidgetTester tester) async {
+      await tester.tap(find.text('Eric Vance').first);
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('the stored options reach the end of the transcript',
+        (tester) async {
+      await seedMail('c1');
+      await seedOptions('c1');
+      await pumpScreen(tester);
+
+      await openThread(tester);
+
+      expect(find.text('Confirm receipt'), findsOneWidget);
+      expect(find.text('Ask for a deadline'), findsOneWidget);
+    });
+
+    testWidgets('without a send grant a card opens the composer instead',
+        (tester) async {
+      // The honest version of the gesture: nothing in this build could put
+      // that mail in front of anyone, so nothing pretends to.
+      await seedMail('c1');
+      await seedOptions('c1');
+      await pumpScreen(tester);
+      await openThread(tester);
+
+      await tester.tap(find.text('Confirm receipt'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(Composer), findsOneWidget);
+      expect(find.widgetWithText(Composer, 'Got it, thanks.'), findsOneWidget);
+    });
+
+    testWidgets('after the user\'s OWN last message there is nothing to answer',
+        (tester) async {
+      await seedMail('c1');
+      await seedOptions('c1');
+      await store.upsertMessage({
+        'source_message_id': 'c1-m2',
+        'conversation_key': 'c1',
+        'direction': 'outbound',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'Already answered this one.',
+      });
+      await pumpScreen(tester);
+
+      await openThread(tester);
+
+      expect(find.text('Confirm receipt'), findsNothing);
+      expect(find.text('Reply…'), findsNothing);
     });
   });
 

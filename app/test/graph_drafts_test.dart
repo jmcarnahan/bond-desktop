@@ -241,4 +241,62 @@ void main() {
       expect(seen, isEmpty);
     });
   });
+
+  group('markRead', () {
+    test('PATCHes each id in turn and reports none failed', () async {
+      final mail = mailWith((_) => jsonOk({'id': 'm'}));
+
+      expect(await mail.markRead(['m1', 'm2']), isEmpty);
+
+      expect(seen.map((r) => r.method).toList(), ['PATCH', 'PATCH']);
+      expect(
+        seen.map((r) => r.url.toString()).toList(),
+        [
+          'https://graph.microsoft.com/v1.0/me/messages/m1',
+          'https://graph.microsoft.com/v1.0/me/messages/m2',
+        ],
+      );
+      expect(seen.first.json, {'isRead': true});
+    });
+
+    test('marking unread is the same call with the flag turned over', () async {
+      final mail = mailWith((_) => jsonOk({'id': 'm'}));
+
+      await mail.markRead(['m1'], isRead: false);
+
+      expect(seen.single.json, {'isRead': false});
+    });
+
+    test('a message deleted since the user read it is dropped, not failed',
+        () async {
+      // There is no read flag left to set. Returning the id would have the
+      // queue retrying it until its attempts ran out.
+      final mail = mailWith(
+        (r) => r.url.path.endsWith('m2')
+            ? jsonOk({'error': 'ErrorItemNotFound'}, 404)
+            : jsonOk({'id': 'm'}),
+      );
+
+      expect(await mail.markRead(['m1', 'm2', 'm3']), isEmpty);
+      expect(seen, hasLength(3), reason: 'one refusal stops nothing');
+    });
+
+    test('anything else comes back as an id worth retrying', () async {
+      final mail = mailWith(
+        (r) => r.url.path.endsWith('m2')
+            ? jsonOk({'error': 'InternalServerError'}, 500)
+            : jsonOk({'id': 'm'}),
+      );
+
+      expect(await mail.markRead(['m1', 'm2']), ['m2']);
+    });
+
+    test('an auth failure passes through UNWRAPPED here too', () async {
+      tokens.values.remove('refresh_token');
+      final mail = mailWith((_) => jsonOk({'id': 'm'}));
+
+      await expectLater(mail.markRead(['m1']), throwsA(isA<NotSignedIn>()));
+      expect(seen, isEmpty);
+    });
+  });
 }

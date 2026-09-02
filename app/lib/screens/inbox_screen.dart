@@ -13,6 +13,7 @@ import '../providers/draft_provider.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
+import '../services/llm/draft_task.dart' show DraftOption;
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
@@ -21,6 +22,7 @@ import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
+import '../widgets/quick_replies.dart';
 import '../widgets/settings_dialog.dart';
 import '../widgets/source_filter.dart';
 import '../widgets/storyline_pickers.dart';
@@ -106,6 +108,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The thread the add-to-storyline pane is filing. Same overlay contract.
   ({String source, String id})? _pickingStorylineForThread;
 
+  /// The thread whose reply window is open, if any. Collapsed is the DEFAULT:
+  /// a thread opens as something to read, and the composer appears when the
+  /// user says they are writing. Cleared wherever the selection moves — a
+  /// window opened on one thread must not be open on the next.
+  String? _replyOpenFor;
+
+  /// The thread a queued reply is going to, held until the send lands so the
+  /// result can be announced even if the user has moved on to another thread
+  /// meanwhile. Only [_pickQuickReply] sets it, which is what keeps the
+  /// composer's own send — which reports its outcome directly — from being
+  /// announced twice.
+  DraftTarget? _announceSendFor;
+
   /// Which member thread a storyline's composer replies to, when the user has
   /// picked one. Null means "the thread the newest message is in", which is
   /// what the dropdown shows by default — a storyline has no inbox of its own
@@ -189,7 +204,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // composer must find that out NOW, not on the next AI progress event —
       // a stale suggestion left on screen gets sent as a reply to a message
       // that is no longer the newest one.
-      ref.read(draftProvider(selected).notifier).load();
+      ref
+          .read(
+            draftProvider(
+              (
+                source: _selectedSource ?? 'email',
+                conversationKey: selected,
+              ),
+            ).notifier,
+          )
+          .load();
     }
     final storyline = _selectedStorylineId;
     if (storyline != null) {
@@ -199,8 +223,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// What the refresh button does: the mail refresh the timer also runs, plus
   /// the Teams pull the timer must never run.
+  ///
+  /// The read-acks are pumped from HERE rather than from [_refresh], for the
+  /// same reason [_refreshTeams] is: the queue carries chat acks as well as
+  /// mail ones, and every call on it has to trace back to something the user
+  /// did. Refresh is the second way a parked ack gets another go — the first
+  /// is reopening the thread.
   Future<void> _refreshAll() async {
     _refresh();
+    unawaited(ref.read(readAckQueueProvider).pump());
     await _refreshTeams();
   }
 
@@ -241,16 +272,38 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
+      _replyOpenFor = null;
     });
     // The quietest signal the app collects: opening a thread is the user saying
     // this one was worth their time. Fire-and-forget, and nothing on screen
     // reads it yet.
     ref.read(conversationsProvider.notifier).noteThreadOpened(id);
+    // Opening it IS reading it. The row's own source, resolved from the loaded
+    // list the way [_selected] resolves it — the rail passes an id and nothing
+    // else, and a hard-coded `'email'` would mark a chat read against a thread
+    // that does not exist.
+    final loaded = ref.read(conversationsProvider);
+    var resolvedSource = source;
+    if (loaded is ConversationsLoaded) {
+      for (final c in loaded.conversations) {
+        if (c.id != id) continue;
+        if (source != null && c.source != source) continue;
+        resolvedSource = c.source;
+        ref.read(conversationsProvider.notifier).markRead(c.source, id);
+        break;
+      }
+    }
     ref.read(threadProvider(id).notifier).load();
     // Reads what the queue has already written for this thread. It never asks
     // for a new one — a draft is written by the background queue or by the
     // user's own button, never by opening a thread.
-    ref.read(draftProvider(id).notifier).load();
+    ref
+        .read(
+          draftProvider(
+            (source: resolvedSource ?? 'email', conversationKey: id),
+          ).notifier,
+        )
+        .load();
   }
 
   void _selectStoryline(String id) {
@@ -263,6 +316,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
+      _replyOpenFor = null;
       // The reply target belongs to the storyline that was open, not to this
       // one; the default below picks the newest thread in the new timeline.
       _storylineReplyKey = null;
@@ -281,6 +335,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
+      _replyOpenFor = null;
     });
   }
 
@@ -297,6 +352,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
+      _replyOpenFor = null;
     });
   }
 
@@ -313,6 +369,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
+      _replyOpenFor = null;
     });
   }
 
@@ -348,6 +405,31 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _signOut();
       }
     });
+
+    // A queued reply leaves on a timer, so nothing is awaiting its outcome the
+    // way the composer's own send is. Listening from HERE rather than from the
+    // thread pane is what lets it be announced after the user has moved on:
+    // the target outlives the selection, and the notifier behind it is not
+    // autoDispose.
+    final announce = _announceSendFor;
+    if (announce != null) {
+      ref.listen<DraftState>(draftProvider(announce), (previous, next) {
+        if (previous == null || !mounted) return;
+        if (next.sendEpoch > previous.sendEpoch) {
+          setState(() => _announceSendFor = null);
+          _toast('Reply sent.');
+          return;
+        }
+        // The reply window is closed on a quick reply, so the inline alert the
+        // composer would have shown this on is not on screen. The bar is the
+        // only place left to say it.
+        final error = next.error;
+        if (error != null && error != previous.error && !next.sending) {
+          setState(() => _announceSendFor = null);
+          _toast(error);
+        }
+      });
+    }
 
     final state = ref.watch(conversationsProvider);
 
@@ -458,7 +540,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// How long the undo stays reachable. Long enough to notice the bar and
   /// react, short enough not to sit over the mail.
-  static const Duration _undoDuration = Duration(seconds: 5);
+  ///
+  /// Read FROM [DraftNotifier.undoWindow] rather than repeated as a number:
+  /// one of these bars offers to cancel a send that fires on exactly that
+  /// timer, and a bar that outlived its window would leave an Undo on screen
+  /// that no longer undoes anything.
+  static const Duration _undoDuration = DraftNotifier.undoWindow;
 
   void _toast(String message, {VoidCallback? onUndo}) {
     if (!mounted) return;
@@ -1077,8 +1164,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       },
     );
 
-    // Chats are not reply targets — see [_replyElsewhere] for why. A storyline
-    // of only chats therefore offers the caption instead of a dropdown, and a
+    // A storyline replies to MAIL. A chat is answered in its own thread, where
+    // the reply goes to one conversation the user is looking at — picking a
+    // chat out of a dropdown of episodes is a different, riskier gesture. So a
+    // storyline of only chats offers the caption instead of a dropdown, and a
     // mixed one offers its mail threads.
     final targets = _emailTargets(episodes);
     final replyKey = _replyTargetFor(episodes, targets);
@@ -1101,7 +1190,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             const SizedBox(height: BondSpacing.s12),
             _replyTargetPicker(replyKey, targets),
             const SizedBox(height: BondSpacing.s8),
-            _composer(replyKey),
+            // Storyline reply targets are mail threads by construction — see
+            // [_emailTargets] — so the source is not in doubt here.
+            _composer((source: 'email', conversationKey: replyKey)),
           ] else if (episodes.isNotEmpty) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
@@ -1188,16 +1279,54 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _ => (const <Message>[], null),
     };
 
+    final target = (source: selected.source, conversationKey: selected.id);
+    final draft = ref.watch(draftProvider(target));
+    final pending = draft.pending;
+
+    // Whether this pane offers to reply at all. Mail always does — the ladder
+    // bottoms out at the clipboard, which needs no grant. A chat does only on
+    // the top rung: there is no draft folder and no clipboard rung worth
+    // showing for one, so without `Chat.ReadWrite` the pane says where to reply
+    // instead of offering a box that could not send.
+    final canReply = selected.source == 'email' ||
+        draft.capability == SendCapability.send;
+
+    // Computed from the STORED transcript, before the optimistic bubble is
+    // appended: a queued reply must not hide the bar that is offering to take
+    // it back.
+    final answersSomebody = messages.isNotEmpty && messages.last.inbound;
+
+    final shown = pending == null
+        ? messages
+        : [
+            ...messages,
+            Message(
+              id: 'pending-send',
+              outbound: true,
+              source: selected.source,
+              bodyText: pending.body,
+              receivedAt: DateTime.now().toIso8601String(),
+              pendingSend: true,
+            ),
+          ];
+
     final panel = ThreadDetailPanel(
       key: ValueKey(selected.id),
       conversation: selected,
-      messages: messages,
+      messages: shown,
       onMarkDone: () =>
           ref.read(conversationsProvider.notifier).markDone(selected.id),
       onBack: () => setState(() {
         _selectedId = null;
         _selectedSource = null;
+        _replyOpenFor = null;
       }),
+      // The reply affordance rides at the end of the transcript so it reads as
+      // attached to the message it answers. After the user's OWN last message
+      // there is nothing to answer, and it renders nothing.
+      afterTranscript: canReply && (answersSomebody || pending != null)
+          ? _quickReplies(selected, target, draft)
+          : null,
       onAddToStoryline: () => setState(() => _pickingStorylineForThread =
           (source: selected.source, id: selected.id)),
       // Sender-scoped, because the screen is the layer that knows the address
@@ -1227,23 +1356,116 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             const SizedBox(height: BondSpacing.s12),
           ],
           Expanded(child: panel),
-          const SizedBox(height: BondSpacing.s12),
-          // Drafting and sending are EMAIL ONLY. A reply to a chat is not a
-          // reply to an email: Graph builds a mail reply for this app through
-          // `createReply`, which knows the recipients, the subject and the
-          // threading headers, and none of that exists for a chat. A composer
-          // here would be a box that cannot send.
-          if (selected.source == 'email')
-            _composer(selected.id)
-          else
+          // Collapsed is the default: the box appears when the user says they
+          // are writing, and until then the transcript has the pane to itself.
+          if (canReply && _replyOpenFor == selected.id) ...[
+            const SizedBox(height: BondSpacing.s12),
+            _replyHeader(selected),
+            const SizedBox(height: BondSpacing.s4),
+            _composer(target),
+          ] else if (!canReply) ...[
+            const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
+          ],
         ],
       ),
     );
   }
 
-  /// What stands where the reply box would be on a chat thread. Quiet and
-  /// one line: it is an answer to "where do I reply?", not a feature.
+  /// Who the open reply window is answering, and the way out of it.
+  ///
+  /// The sender's name where there is one, the subject where there is not:
+  /// "Reply to (no subject)" is a poor line, but it is still an answer to
+  /// "which thread am I typing into", which is what this row is for.
+  Widget _replyHeader(Conversation selected) {
+    final named = [
+      for (final p in selected.participants)
+        if (p.display.isNotEmpty) p.display,
+    ];
+    final who = named.isNotEmpty
+        ? named.first
+        : (selected.subject?.isNotEmpty == true
+            ? selected.subject!
+            : 'this thread');
+
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            'Reply to $who',
+            style: BondType.caption,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        IconButton(
+          onPressed: () => setState(() => _replyOpenFor = null),
+          icon: const Icon(Icons.close),
+          iconSize: 16,
+          tooltip: 'Close',
+          padding: const EdgeInsets.all(BondSpacing.s4),
+          constraints: const BoxConstraints(),
+          visualDensity: VisualDensity.compact,
+        ),
+      ],
+    );
+  }
+
+  /// The suggestions under the transcript, and everything a tap on one can do.
+  Widget _quickReplies(
+    Conversation selected,
+    DraftTarget target,
+    DraftState draft,
+  ) {
+    final notifier = ref.read(draftProvider(target).notifier);
+    return QuickReplyBar(
+      options: draft.options,
+      armed: draft.capability == SendCapability.send,
+      onPick: (option) => unawaited(_pickQuickReply(selected, option)),
+      onReply: () => setState(() => _replyOpenFor = selected.id),
+      onDismiss: () => unawaited(notifier.dismissOptions()),
+      pending: draft.pending,
+      onUndo: () => _cancelQueuedSend(target),
+    );
+  }
+
+  /// Takes back a queued reply, from either of the two places that offer to —
+  /// the snackbar and the bar under the transcript. Both have to forget the
+  /// announcement as well as cancel the timer, or a send that never happened
+  /// leaves a listener waiting for it.
+  void _cancelQueuedSend(DraftTarget target) {
+    ref.read(draftProvider(target).notifier).cancelQueuedSend();
+    if (!mounted) return;
+    setState(() => _announceSendFor = null);
+  }
+
+  /// A card was tapped.
+  ///
+  /// Under a real send grant this queues the reply and says so, with an undo
+  /// for as long as the send is still cancellable. Without one it opens the
+  /// reply window with the text already in it — the honest version of the same
+  /// gesture, since nothing in this build could put that mail in front of
+  /// anyone anyway.
+  Future<void> _pickQuickReply(Conversation c, DraftOption option) async {
+    final target = (source: c.source, conversationKey: c.id);
+    final notifier = ref.read(draftProvider(target).notifier);
+    if (ref.read(draftProvider(target)).capability != SendCapability.send) {
+      setState(() => _replyOpenFor = c.id);
+      await notifier.markEdited(option.body);
+      return;
+    }
+    setState(() => _announceSendFor = target);
+    await notifier.queueSend(option.body);
+    _toast('Reply sending.', onUndo: () => _cancelQueuedSend(target));
+  }
+
+  /// What stands where the reply box would be when this build cannot send to a
+  /// chat — a grant without `Chat.ReadWrite`, and a storyline whose every
+  /// episode is a chat.
+  ///
+  /// A statement of capability rather than a dead end now: with the grant, a
+  /// chat gets the same reply surface a mail thread does. Quiet and one line
+  /// either way — it is an answer to "where do I reply?", not a feature.
   Widget _replyElsewhere() => Padding(
         padding: const EdgeInsets.symmetric(vertical: BondSpacing.s8),
         child: Text('Reply in Microsoft Teams', style: BondType.caption),
@@ -1265,9 +1487,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// Every argument that can reach a send is a callback the user's own click
   /// invokes. Nothing on this path runs on a timer or on a state change.
-  Widget _composer(String conversationKey) {
-    final draft = ref.watch(draftProvider(conversationKey));
-    final notifier = ref.read(draftProvider(conversationKey).notifier);
+  Widget _composer(DraftTarget target) {
+    final conversationKey = target.conversationKey;
+    final draft = ref.watch(draftProvider(target));
+    final notifier = ref.read(draftProvider(target).notifier);
 
     final composer = Composer(
       // Keyed on the conversation so switching threads builds a fresh field
@@ -1280,8 +1503,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       generating: draft.generating,
       sending: draft.sending,
       capability: draft.capability,
-      onSend: (body) => _send(conversationKey, body),
-      onGenerate: notifier.generate,
+      onSend: (body) => _send(target, body),
+      // Null for a chat, which is what hides the button rather than offering
+      // one that does nothing: the drafting queue is email-only — a chat wants
+      // a one-line reply from a different prompt, and a second system prompt
+      // would thrash the single-slot model's cached prefix. A chat's composer
+      // is a plain box.
+      onGenerate: target.source == 'email' ? notifier.generate : null,
       onDismiss: notifier.dismiss,
       onEdited: notifier.markEdited,
     );
@@ -1309,9 +1537,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The one place a click becomes a send. It says what happened, including
   /// when what happened was a copy.
-  Future<void> _send(String conversationKey, String body) async {
-    final outcome =
-        await ref.read(draftProvider(conversationKey).notifier).send(body);
+  Future<void> _send(DraftTarget target, String body) async {
+    final outcome = await ref.read(draftProvider(target).notifier).send(body);
     if (!mounted) return;
     switch (outcome) {
       case SendOutcome.sent:
@@ -1430,7 +1657,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ),
         ],
-      RailSection.conversations => [('OPEN', conversationRows(conversations))],
+      RailSection.conversations => [
+          (
+            'OPEN',
+            conversationRows(
+              conversations,
+              threshold: ref.watch(appPrefsProvider).attentionThreshold,
+            ),
+          ),
+        ],
       RailSection.later ||
       RailSection.storylines =>
         const <(String, List<Conversation>)>[],

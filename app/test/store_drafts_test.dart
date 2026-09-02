@@ -190,6 +190,106 @@ void main() {
     });
   });
 
+  group('quick-reply options', () {
+    const options =
+        '[{"stance":"Confirm Friday","body":"Friday works."},'
+        '{"stance":"Propose Tuesday","body":"Could we say Tuesday?"}]';
+
+    test('round-trips the options JSON, undismissed', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'the long one',
+        optionsJson: options,
+      );
+
+      final draft = (await store.getDraft('email', 'conv-1'))!;
+      expect(draft['options_json'], options);
+      expect(draft['options_dismissed'], 0);
+    });
+
+    test('a draft written without options reads as none', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'the long one',
+      );
+
+      final draft = (await store.getDraft('email', 'conv-1'))!;
+      expect(draft['options_json'], isNull);
+      expect(draft['options_dismissed'], 0);
+    });
+
+    test('dismissDraftOptions sets the flag and keeps the row', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'the long one',
+        optionsJson: options,
+      );
+
+      await store.dismissDraftOptions('email', 'conv-1');
+
+      final draft = (await store.getDraft('email', 'conv-1'))!;
+      expect(draft['options_dismissed'], 1);
+      // The row survives, the same way a dismissed draft does — deleting it
+      // would let the auto-enqueue write the identical options straight back.
+      expect(draft['options_json'], options);
+      expect(draft['body'], 'the long one');
+    });
+
+    test('a regenerate replaces the options AND clears the dismissal',
+        () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'first',
+        optionsJson: options,
+      );
+      await store.dismissDraftOptions('email', 'conv-1');
+
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm2',
+        body: 'second',
+        optionsJson: '[{"stance":"Decline politely","body":"Not this week."}]',
+      );
+
+      final draft = (await store.getDraft('email', 'conv-1'))!;
+      expect(
+        draft['options_json'],
+        '[{"stance":"Decline politely","body":"Not this week."}]',
+      );
+      // Closing the LAST set of cards must not silence a set the user has
+      // never seen.
+      expect(draft['options_dismissed'], 0);
+    });
+
+    test('a regenerate that offers none clears the stored options', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'first',
+        optionsJson: options,
+      );
+
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm2',
+        body: 'second',
+      );
+
+      expect((await store.getDraft('email', 'conv-1'))!['options_json'], isNull);
+    });
+  });
+
   group('newestInboundMessage', () {
     test('is the latest inbound one, outbound ignored', () async {
       await seedMessage(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');

@@ -261,6 +261,31 @@ void main() {
       expect(await store.loadConversations(sources: const []), isEmpty);
     });
 
+    test('unread_count counts the unread inbound mail and nothing else',
+        () async {
+      await store.upsertMessage(messageRow(id: 'm1', conversationKey: 'c-new'));
+      await store.upsertMessage(messageRow(id: 'm2', conversationKey: 'c-new'));
+      await store.upsertMessage(
+        messageRow(id: 'm3', conversationKey: 'c-new', isRead: 1),
+      );
+      // Outbound mail is never unread — the user wrote it.
+      await store.upsertMessage(messageRow(
+        id: 'm4',
+        conversationKey: 'c-new',
+        direction: 'outbound',
+      ));
+
+      final conversations = await store.loadConversations();
+      final c = conversations.firstWhere((c) => c.id == 'c-new');
+      expect(c.unreadCount, 2);
+      expect(c.hasUnread, isTrue);
+      // A thread with no messages stored has nothing unread, not null.
+      expect(
+        conversations.firstWhere((c) => c.id == 'c-old').unreadCount,
+        0,
+      );
+    });
+
     test('the same key under a different source is a different row', () async {
       await store
           .upsertConversation(conversationRow(key: 'c-new', source: 'teams'));

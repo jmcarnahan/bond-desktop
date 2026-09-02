@@ -9,6 +9,7 @@ import '../services/ai_worker.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/backend_types.dart';
+import '../services/read_ack_queue.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
@@ -111,6 +112,12 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// scores and buckets were last written.
   final AttentionService? _attention;
 
+  /// Tells the server what [markRead] has already flipped locally. Reached
+  /// ONLY from [markRead] — never from [load], which a sixty-second timer
+  /// calls: this queue carries Teams acks too, and Microsoft's terms forbid a
+  /// timer reaching those endpoints. `teams_refresh_test.dart` holds that line.
+  final ReadAckQueue? _readAcks;
+
   StreamSubscription<TriageProgress>? _triageProgress;
   Timer? _triageReload;
 
@@ -124,11 +131,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     TriageQueue? triage,
     AiWorker? aiWorker,
     AttentionService? attention,
+    ReadAckQueue? readAcks,
     Future<String?>? userAddress,
   })  : _teamsSync = teamsSync,
         _triage = triage,
         _aiWorker = aiWorker,
         _attention = attention,
+        _readAcks = readAcks,
         super(const ConversationsInitial()) {
     final queue = triage;
     if (queue == null) return;
@@ -368,6 +377,44 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
   }
 
+  /// The user opened this thread, so it is read. Locally first and instantly —
+  /// the server ack is a queued row somebody else drains.
+  ///
+  /// Optimistic for [markDone]'s reason, and with the same fallback: the store
+  /// is the truth about what is unread, so a failed write is answered by
+  /// re-reading it rather than by guessing what the count went back to.
+  ///
+  /// [source] is passed rather than resolved from the list because the caller
+  /// already knows it — the screen resolved the row before it opened it.
+  Future<void> markRead(String source, String conversationKey) async {
+    final current = state;
+    if (current is! ConversationsLoaded) return;
+
+    state = current.withRows([
+      for (final c in current.conversations)
+        if (c.id == conversationKey && c.source == source)
+          c.copyWith(unreadCount: 0)
+        else
+          c,
+    ], current.loadError);
+
+    try {
+      await _store.markConversationRead(source, conversationKey);
+      // Fire-and-forget, on the success path only: the queue drains the row
+      // that write just left, and there is nothing to drain if it did not
+      // land. Nothing on screen waits for the ack — the thread is already
+      // unbold, and this is the app telling Microsoft about it afterwards.
+      final ack = _readAcks?.pump();
+      if (ack != null) {
+        unawaited(
+          ack.catchError((Object e) => debugPrint('read-ack pump failed: $e')),
+        );
+      }
+    } catch (_) {
+      await load(syncFirst: false);
+    }
+  }
+
   // ── corrections ──────────────────────────────────────────────────────
   //
   // Every explicit correction does the same three things in the same order:
@@ -530,6 +577,7 @@ final conversationsProvider =
     triage: ref.watch(triageQueueProvider),
     aiWorker: ref.watch(aiWorkerProvider),
     attention: ref.watch(attentionServiceProvider),
+    readAcks: ref.watch(readAckQueueProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
     userAddress: ref.watch(authSessionProvider).storedAccount.then(

@@ -136,4 +136,45 @@ void main() {
     expect(edited['charter'], 'Planning the Tahoe trip.');
     expect(edited['charter_locked'], 1);
   });
+
+  test('v3 to v4 adds draft option columns and keeps the draft', () async {
+    final schema = await verifier.schemaAt(3);
+    schema.rawDatabase.execute("""
+      INSERT INTO drafts (source, conversation_key, reply_to_message_id, body,
+        evidence, status, created_at, updated_at)
+      VALUES ('email', 'c1', 'm-1', 'Sounds good — Friday works.',
+        'They asked which day suits.', 'suggested', 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 4);
+    addTearDown(db.close);
+
+    Future<Map<String, Object?>> draftRow() async => (await db
+            .customSelect(
+                'SELECT body, options_json, options_dismissed FROM drafts '
+                'WHERE conversation_key = ?',
+                variables: [Variable('c1')])
+            .getSingle())
+        .data;
+
+    // A draft written before the options existed keeps its long form and
+    // reads as "no suggestions, none dismissed" — the state a thread the model
+    // has not revisited is supposed to be in.
+    final migrated = await draftRow();
+    expect(migrated['body'], 'Sounds good — Friday works.');
+    expect(migrated['options_json'], null);
+    expect(migrated['options_dismissed'], 0);
+
+    await db.customStatement(
+        'UPDATE drafts SET options_json = ?, options_dismissed = 1 '
+        'WHERE conversation_key = ?',
+        [r'[{"stance":"Confirm Friday","body":"Friday works."}]', 'c1']);
+    final written = await draftRow();
+    expect(
+      written['options_json'],
+      r'[{"stance":"Confirm Friday","body":"Friday works."}]',
+    );
+    expect(written['options_dismissed'], 1);
+  });
 }

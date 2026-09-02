@@ -161,6 +161,21 @@ void main() {
       // The original is untouched.
       expect(c.state, ConversationState.needsReply);
     });
+
+    test('copyWith carries the unread count, and clears it when asked', () {
+      final c = Conversation.fromRow(const {
+        'conversation_key': 'conv-1',
+        'state': 'needs_reply',
+        'unread_count': 2,
+      });
+
+      expect(c.copyWith(state: ConversationState.done).unreadCount, 2);
+
+      final read = c.copyWith(unreadCount: 0);
+      expect(read.hasUnread, isFalse);
+      expect(read.state, ConversationState.needsReply);
+      expect(c.unreadCount, 2);
+    });
   });
 
   group('Conversation.fromRow', () {
@@ -187,6 +202,18 @@ void main() {
       expect(c.participants.length, 2);
       expect(c.participants.first.display, 'Tomas');
       expect(c.participants[1].display, 'b@x.com');
+    });
+
+    test('unread_count reads the subquery column, and absent is zero', () {
+      expect(
+        Conversation.fromRow(const {'unread_count': 3}).unreadCount,
+        3,
+      );
+      expect(Conversation.fromRow(const {'unread_count': 3}).hasUnread, isTrue);
+      // A read that did not run the subquery says nothing is unread rather
+      // than bolding the whole rail.
+      expect(Conversation.fromRow(const {}).unreadCount, 0);
+      expect(Conversation.fromRow(const {}).hasUnread, isFalse);
     });
 
     test('malformed or non-list participants_json yields no participants', () {
@@ -325,6 +352,14 @@ void main() {
       expect(Message.fromRow(const {'needs_action': 1}).needsAction, isTrue);
       expect(Message.fromRow(const {'needs_action': null}).needsAction, isNull);
       expect(Message.fromRow(const {}).needsAction, isNull);
+    });
+
+    test('only an is_read 0 reads as unread; absent and null read as read', () {
+      expect(Message.fromRow(const {'is_read': 0}).isRead, isFalse);
+      expect(Message.fromRow(const {'is_read': 1}).isRead, isTrue);
+      // Nothing to go on is not evidence of new mail.
+      expect(Message.fromRow(const {'is_read': null}).isRead, isTrue);
+      expect(Message.fromRow(const {}).isRead, isTrue);
     });
 
     test('malformed JSON columns decode to empty lists', () {

@@ -4,9 +4,13 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
+import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/backend/mail_backend.dart';
+import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
+import 'package:bond_inbox/services/read_ack_queue.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/token_store.dart';
@@ -80,11 +84,51 @@ class _RecordingTeams extends TeamsSync {
   }
 }
 
+/// A [ReadAckQueue] that counts pumps instead of making any. Subclassed for
+/// [_RecordingTeams]'s reason — there is no interface, and inventing one so a
+/// test can count would put a seam in production code only the test needs.
+///
+/// It matters here and not only in `read_ack_test.dart` because of what the
+/// queue now carries: a Teams read-ack is a Graph call against a chat, and the
+/// sixty-second timer must not be able to reach it.
+class _CountingAcks extends ReadAckQueue {
+  int pumps = 0;
+
+  _CountingAcks(super.store, super.mail, super.teams, super.auth);
+
+  @override
+  Future<void> pump() async => pumps++;
+}
+
+/// A mail backend that would throw if the ack queue ever reached it. It never
+/// does: [_CountingAcks] answers first.
+class _UnreachableMail implements MailBackend {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
+/// And the chat half of the same thing — the one the ToU rule is actually
+/// about.
+class _UnreachableTeams implements TeamsBackend {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
+/// A session that grants nothing, for the same reason.
+class _NoScopes implements AuthSession {
+  @override
+  Future<bool> hasScope(String bareScope) async => false;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
 void main() {
   late BondDatabase db;
   late MessageStore store;
   late _FakeSync sync;
   late _RecordingTeams teams;
+  late _CountingAcks acks;
 
   /// Counts every socket the Teams client would have opened. Nothing in this
   /// file should move it off zero.
@@ -104,6 +148,12 @@ void main() {
     db = testDb();
     store = MessageStore(db);
     sync = _FakeSync();
+    acks = _CountingAcks(
+      store,
+      _UnreachableMail(),
+      _UnreachableTeams(),
+      _NoScopes(),
+    );
     httpCalls = 0;
 
     final client = MockClient((request) async {
@@ -163,6 +213,54 @@ void main() {
       await notifier.sendSenderToLater('sarah@example.com');
       await notifier.keepThreadInInbox('email', 'c1');
 
+      expect(teams.calls, 0);
+    });
+
+    test('and the timer never pumps the read-acks', () async {
+      // The queue carries chat acks as well as mail ones, so a `load` that
+      // pumped it would put Graph chat calls on the sixty-second timer by a
+      // path nobody looking at [TeamsSync] would ever find.
+      await seed('c1');
+      final notifier = ConversationsNotifier(
+        store,
+        sync,
+        teamsSync: teams,
+        readAcks: acks,
+      );
+
+      await notifier.load();
+      await notifier.load(syncFirst: false);
+      await notifier.keepThreadInInbox('email', 'c1');
+
+      expect(acks.pumps, 0);
+    });
+  });
+
+  group('opening a thread', () {
+    test('pumps the acks the read just queued', () async {
+      // The other half of the rule: the pump belongs to the gesture, not to
+      // the timer. Nothing awaits it — the thread is already unbold.
+      await store.upsertMessage({
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'is_read': 0,
+        'received_at': '2026-08-28T10:00:00Z',
+      });
+      await seed('c1');
+      final notifier = ConversationsNotifier(
+        store,
+        sync,
+        teamsSync: teams,
+        readAcks: acks,
+      );
+      await notifier.load();
+
+      await notifier.markRead('email', 'c1');
+      // The pump is fired and forgotten, so it lands a microtask later.
+      await Future<void>.delayed(Duration.zero);
+
+      expect(acks.pumps, 1);
       expect(teams.calls, 0);
     });
   });
