@@ -391,6 +391,14 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
           draft.conversationKey,
         );
         if (seq != _fetchSeq) return;
+        // The card data carries the summary but not the thread's state or its
+        // ask — those live on the conversation row, and without them a thread
+        // sitting in NEEDS YOU would appear here with no trace of it.
+        final conversationRow = await _store.getConversationRow(
+          draft.source,
+          draft.conversationKey,
+        );
+        if (seq != _fetchSeq) return;
         final summary = card?['summary'] as String?;
         episodes.add(StorylineEpisode(
           source: draft.source,
@@ -402,6 +410,13 @@ class StorylineTimelineNotifier extends StateNotifier<StorylineTimelineState> {
           // An empty summary is a triage pass that had nothing to say, which
           // the card renders the same way as one that has not run.
           summary: summary?.isEmpty == true ? null : summary,
+          // A thread with no conversation row reads as waiting: fromWire maps
+          // null and anything unrecognized there, so a missing row asks the
+          // user for nothing.
+          state: ConversationState.fromWire(
+            conversationRow?['state'] as String?,
+          ),
+          ctaText: conversationRow?['cta_text'] as String?,
         ));
       }
     } catch (e) {

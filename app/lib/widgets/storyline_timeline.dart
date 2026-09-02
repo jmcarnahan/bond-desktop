@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
+import 'inline_alert.dart';
 import 'message_row.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
@@ -246,6 +247,14 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
       ?relativeTime(episode.latestAt, DateTime.now()),
     ].join(' · ');
     final summary = episode.summary ?? '';
+    // Byte-for-byte the rule `thread_detail_panel` renders its CTA banner by,
+    // and deliberately shared with it: the two surfaces can never disagree
+    // about whether a thread needs the user, and a waiting thread shows no CTA
+    // anywhere.
+    final cta = episode.ctaText;
+    final showCta = episode.state == ConversationState.needsReply &&
+        cta != null &&
+        cta.isNotEmpty;
 
     return InkWell(
       onTap: () => setState(
@@ -285,7 +294,20 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                   ),
-                  if (summary.isNotEmpty) ...[
+                  // The ask replaces the summary rather than stacking above
+                  // it: they are the same fact in two moods, and a card that
+                  // spent four lines saying it twice would crowd the spine.
+                  if (showCta) ...[
+                    const SizedBox(height: BondSpacing.s4),
+                    Tooltip(
+                      message: cta,
+                      child: InlineAlert(
+                        severity: InlineAlertSeverity.attention,
+                        text: cta,
+                        maxLines: 2,
+                      ),
+                    ),
+                  ] else if (summary.isNotEmpty) ...[
                     const SizedBox(height: 2),
                     Text(
                       summary,
