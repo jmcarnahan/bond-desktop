@@ -10,6 +10,8 @@ import 'package:bond_inbox/providers/notification_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
+import 'package:bond_inbox/services/notify/desktop_notification_service.dart';
+import 'package:bond_inbox/services/notify/desktop_notifier.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/notification_ribbon.dart';
@@ -94,9 +96,11 @@ void main() {
   }
 
   /// Runs out the 400ms reload debounce the triage and AI queues arm when they
-  /// report, so the test does not end with one pending.
+  /// report, AND the OS dispatcher's coalesce window, which a settle arms.
+  /// Neither may be left pending when a test ends.
   Future<void> settleQueues(WidgetTester tester) =>
-      tester.pump(const Duration(milliseconds: 500));
+      tester.pump(DesktopNotificationService.defaultCoalesceWindow +
+          const Duration(milliseconds: 500));
 
   Future<void> pumpScreen(WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
@@ -114,6 +118,11 @@ void main() {
       notificationCoordinatorProvider
           .overrideWithValue(NotificationCoordinator(store)),
       settledEventsProvider.overrideWithValue(settles.stream),
+      // The OS dispatcher reads the same stream this file drives by hand, so
+      // every settle below would otherwise reach a real notification centre
+      // over a method channel. It gets the seam's unsupported implementation
+      // instead — this file is about where a click LANDS, not about toasts.
+      desktopNotifierProvider.overrideWithValue(const NoopDesktopNotifier()),
     ]);
     addTearDown(container.dispose);
 
@@ -357,7 +366,7 @@ void main() {
     testWidgets('with the preference off, nothing is announced',
         (tester) async {
       await seedThread('c1', 'Homepage copy');
-      await store.setPref(notifyRibbonKey, 'false');
+      await store.setPref(notifyStyleKey, 'off');
       await pumpScreen(tester);
 
       settles.add(settled());

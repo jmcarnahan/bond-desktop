@@ -38,6 +38,16 @@ const String mcpLocalUrl = 'http://localhost:18001/mcp';
 const String defaultMcpServerUrl =
     mcpDeployedUrl != '' ? mcpDeployedUrl : mcpLocalUrl;
 
+/// How a settled message announces itself: not at all, in the in-app ribbon
+/// only, or through the operating system's notification centre.
+///
+/// [native] does not replace the ribbon, it adds to it. macOS presents no
+/// banner while the app is frontmost — which is deliberate, see
+/// `LocalDesktopNotifier` — so the ribbon is still what a user looking at the
+/// window sees, and it is also the whole answer on a platform with no
+/// notification centre this app can reach.
+enum NotifyStyle { off, inApp, native }
+
 /// The settings the user controls, held in memory so the widgets that read them
 /// rebuild the moment one changes.
 ///
@@ -75,12 +85,11 @@ class AppPrefs {
   /// someone who wants the latest at the top wants it everywhere.
   final bool storylineNewestFirst;
 
-  /// Whether a settled message announces itself in a ribbon at the top of the
-  /// inbox. On by default, unlike every other switch here: the app spends
-  /// minutes deciding a message needs the user, and finishing that in silence
-  /// unless someone goes looking for a setting would waste the whole point of
-  /// it.
-  final bool notifyRibbon;
+  /// How a settled message announces itself. [NotifyStyle.native] by default,
+  /// unlike every other switch here: the app spends minutes deciding a message
+  /// needs the user, and finishing that in silence unless someone goes looking
+  /// for a setting would waste the whole point of it.
+  final NotifyStyle notifyStyle;
 
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
@@ -89,8 +98,14 @@ class AppPrefs {
     this.mcpServerUrl = defaultMcpServerUrl,
     this.showActivityLog = false,
     this.storylineNewestFirst = false,
-    this.notifyRibbon = true,
+    this.notifyStyle = NotifyStyle.native,
   });
+
+  /// Whether the in-app ribbon runs. It does in BOTH remaining modes — it is
+  /// the whole of in-app mode and the frontmost fallback of native mode — so
+  /// the only question it has to ask is "not off", and every existing reader of
+  /// this name keeps working unchanged.
+  bool get notifyRibbon => notifyStyle != NotifyStyle.off;
 
   AppPrefs copyWith({
     double? attentionThreshold,
@@ -99,7 +114,7 @@ class AppPrefs {
     String? mcpServerUrl,
     bool? showActivityLog,
     bool? storylineNewestFirst,
-    bool? notifyRibbon,
+    NotifyStyle? notifyStyle,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -109,7 +124,7 @@ class AppPrefs {
         showActivityLog: showActivityLog ?? this.showActivityLog,
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
-        notifyRibbon: notifyRibbon ?? this.notifyRibbon,
+        notifyStyle: notifyStyle ?? this.notifyStyle,
       );
 }
 
@@ -123,6 +138,11 @@ const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
 const String storylineNewestFirstKey = 'storyline_newest_first';
+const String notifyStyleKey = 'notify_style';
+
+/// The switch [notifyStyleKey] replaced. Still read — and only read — so an
+/// install that had turned the ribbon off stays quiet across the upgrade
+/// instead of being handed OS notifications it never asked for.
 const String notifyRibbonKey = 'notify_ribbon';
 
 class AppPrefsNotifier extends StateNotifier<AppPrefs> {
@@ -167,13 +187,38 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       showActivityLog: await store.getPref(showActivityLogKey) == 'true',
       storylineNewestFirst:
           await store.getPref(storylineNewestFirstKey) == 'true',
-      // The one bool here that DEFAULTS ON, so its read is the inverse of the
-      // two above: anything that is not the literal 'false' — an absent key,
-      // a hand-edited value — reads as on, because the state every install
-      // starts in is "tell me".
-      notifyRibbon: await store.getPref(notifyRibbonKey) != 'false',
+      // The one setting here that DEFAULTS ON, so its read is the inverse of
+      // the two above — see [_style].
+      notifyStyle: _style(
+        await store.getPref(notifyStyleKey),
+        await store.getPref(notifyRibbonKey),
+      ),
     );
   }
+
+  /// The stored style, or what the switch it replaced said, or on.
+  ///
+  /// Anything this notifier did not write falls through to [legacyRibbon],
+  /// which is the only place a decision to be silent could have been recorded:
+  /// a stored `'false'` there means the user asked for quiet and still gets it.
+  /// Everything else — an absent key, a hand-edited value, a fresh install —
+  /// reads as [NotifyStyle.native], because the state every install starts in
+  /// is "tell me".
+  static NotifyStyle _style(String? raw, String? legacyRibbon) =>
+      switch (raw) {
+        'off' => NotifyStyle.off,
+        'in_app' => NotifyStyle.inApp,
+        'native' => NotifyStyle.native,
+        _ => legacyRibbon == 'false' ? NotifyStyle.off : NotifyStyle.native,
+      };
+
+  /// The stored spelling of each style. Written here, parsed by [_style], and
+  /// never seen above this file — everything else compares [NotifyStyle]s.
+  static String _styleName(NotifyStyle value) => switch (value) {
+        NotifyStyle.off => 'off',
+        NotifyStyle.inApp => 'in_app',
+        NotifyStyle.native => 'native',
+      };
 
   /// Anything that is not the direct-Graph mode reads as MCP — including an
   /// unset key, which is the state every existing install is in.
@@ -234,9 +279,9 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(storylineNewestFirstKey, value.toString());
   }
 
-  Future<void> setNotifyRibbon(bool value) async {
-    state = state.copyWith(notifyRibbon: value);
-    await _store.setPref(notifyRibbonKey, value.toString());
+  Future<void> setNotifyStyle(NotifyStyle value) async {
+    state = state.copyWith(notifyStyle: value);
+    await _store.setPref(notifyStyleKey, _styleName(value));
   }
 }
 

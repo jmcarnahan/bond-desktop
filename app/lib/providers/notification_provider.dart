@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/message_store.dart';
 import '../models/message_models.dart' show CtaUrgency;
 import '../services/notification_coordinator.dart';
+import '../services/notify/desktop_notification_service.dart';
 import '../services/notify/settled_event.dart';
 import 'activity_provider.dart';
 import 'app_providers.dart';
@@ -241,3 +242,21 @@ final notificationRibbonProvider =
     enabled: () => ref.read(appPrefsProvider).notifyRibbon,
   ),
 );
+
+/// The OS notification dispatcher, wired to the same settle seam as the ribbon.
+///
+/// [DesktopNotificationService._enabled] READS the preference for the same
+/// reason the ribbon's does: a watch would rebuild this provider when the
+/// setting moved, tearing the service down mid-window and losing a batch that
+/// was about to be posted. Only [NotifyStyle.native] gets this far — the other
+/// two styles are the ribbon's business and never reach the operating system.
+final desktopNotificationServiceProvider =
+    Provider<DesktopNotificationService>((ref) {
+  final service = DesktopNotificationService(
+    events: ref.watch(settledEventsProvider),
+    notifier: ref.watch(desktopNotifierProvider),
+    enabled: () => ref.read(appPrefsProvider).notifyStyle == NotifyStyle.native,
+  );
+  ref.onDispose(service.dispose);
+  return service;
+});

@@ -1,5 +1,6 @@
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/notify_routing.dart';
+import 'package:bond_inbox/services/notify/desktop_notifier.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:flutter_test/flutter_test.dart';
@@ -80,5 +81,49 @@ void main() {
 
   test('nothing to announce has nowhere to go', () {
     expect(() => intentFor(const []), throwsArgumentError);
+  });
+
+  /// The same rule table, read off a payload instead of off the settles.
+  ///
+  /// A tapped toast has no list to look at — only what fitted in its payload —
+  /// so the count it was posted with is the whole of what it can route on.
+  group('a tapped toast', () {
+    test('standing for one thread opens that thread', () {
+      final intent = intentForTarget(const NotificationTarget(
+        source: 'teams',
+        conversationKey: 'shared',
+      ));
+
+      expect(intent, isA<OpenThreadIntent>());
+      final thread = intent as OpenThreadIntent;
+      expect(thread.source, 'teams');
+      expect(thread.conversationKey, 'shared');
+    });
+
+    test('standing for several opens Needs You', () {
+      final intent = intentForTarget(const NotificationTarget(
+        source: 'email',
+        conversationKey: 'c1',
+        count: 2,
+      ));
+
+      // Even though the payload names one: it is the newest of a pile, not the
+      // thing the user was told about.
+      expect(intent, isA<OpenSectionIntent>());
+      expect((intent as OpenSectionIntent).section, RailSection.needsYou);
+    });
+
+    test('carrying a storyline still opens the thread', () {
+      // The storyline is payload, not trigger — the same rule [intentFor]
+      // follows for a single settle.
+      final intent = intentForTarget(const NotificationTarget(
+        source: 'email',
+        conversationKey: 'c1',
+        storylineId: 'sl-1',
+      ));
+
+      expect(intent, isA<OpenThreadIntent>());
+      expect((intent as OpenThreadIntent).conversationKey, 'c1');
+    });
   });
 }

@@ -27,12 +27,16 @@ import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/notification_coordinator.dart';
+import '../services/notify/desktop_notifier.dart';
+import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
+import 'navigation_provider.dart';
+import 'notify_routing.dart';
 import 'prefs_provider.dart';
 
 /// One [GraphAuth] for the whole app. Sharing the instance is what makes the
@@ -149,6 +153,24 @@ final mailBackendProvider = Provider<MailBackend>((ref) {
       ? GraphMail(ref.watch(graphAuthProvider))
       : McpMailBackend(ref.watch(mcpStackProvider).client);
 });
+
+/// The operating system's notification centre, as this app reaches it.
+///
+/// Always the REAL notifier, with no test-shaped default: it reports itself
+/// unsupported off macOS and Windows, and touches no method channel until
+/// something first asks it to authorize or to show — so a test that never
+/// settles anything can build this provider freely. A test that DOES settle
+/// overrides it with a fake, which is the seam doing its job.
+///
+/// The tap callback is where navigation is wired in. It lives here rather than
+/// in the notifier because `services/` never imports `providers/`: the OS side
+/// knows it has a target and nothing about where a thread lives.
+final desktopNotifierProvider = Provider<DesktopNotifier>(
+  (ref) => LocalDesktopNotifier(
+    onTap: (target) =>
+        ref.read(navIntentProvider.notifier).request(intentForTarget(target)),
+  ),
+);
 
 /// Tells the server about reads that already happened locally.
 ///

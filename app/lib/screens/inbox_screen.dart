@@ -162,6 +162,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   @override
   void initState() {
     super.initState();
+    // Built here, once, because nothing renders it: the OS dispatcher only
+    // exists if something instantiates it, and the inbox is the screen whose
+    // lifetime it should share.
+    ref.read(desktopNotificationServiceProvider);
     WidgetsBinding.instance.addObserver(this);
     // A microtask, not a direct call: a provider must not be written to
     // while the first frame's widgets are still being built.
@@ -872,9 +876,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         showActivityLog: prefs.showActivityLog,
         onShowActivityLogChanged: (on) =>
             unawaited(notifier.setShowActivityLog(on)),
-        notifyRibbon: prefs.notifyRibbon,
-        onNotifyRibbonChanged: (on) =>
-            unawaited(notifier.setNotifyRibbon(on)),
+        notifyStyle: prefs.notifyStyle,
+        onNotifyStyleChanged: (style) =>
+            unawaited(notifier.setNotifyStyle(style)),
         // BOTH sources are wired, and deliberately not bound to the mode the
         // dialog OPENED in: the toggle now switches backends without closing
         // the dialog, so which one answers is the dialog's live choice. Each

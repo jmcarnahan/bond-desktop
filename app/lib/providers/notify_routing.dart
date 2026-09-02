@@ -1,3 +1,4 @@
+import '../services/notify/desktop_notifier.dart';
 import '../services/notify/settled_event.dart';
 import '../widgets/app_rail.dart' show RailSection;
 import 'navigation_provider.dart';
@@ -32,4 +33,18 @@ NavIntent intentFor(List<MessageSettled> items) {
   }
 
   return OpenSectionIntent(RailSection.needsYou);
+}
+
+/// Where a click on an OS notification lands.
+///
+/// The same restraint [intentFor] shows, decided off the one thing that
+/// survived the trip through the notification centre: a toast standing for
+/// several threads opens the section, never a thread picked on the user's
+/// behalf, even though the payload happens to name the newest of them. A
+/// single-thread toast opens that thread — and the payload carries the SOURCE
+/// as well as the key, so a key shared across two connectors still opens the
+/// right transcript.
+NavIntent intentForTarget(NotificationTarget target) {
+  if (target.count > 1) return OpenSectionIntent(RailSection.needsYou);
+  return OpenThreadIntent(target.source, target.conversationKey);
 }

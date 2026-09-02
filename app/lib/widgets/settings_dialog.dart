@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../providers/prefs_provider.dart'
     show
+        NotifyStyle,
         backendModeMcp,
         backendModeSdk,
         defaultMcpServerUrl,
@@ -44,12 +45,12 @@ class SettingsDialog extends StatefulWidget {
   /// hides the row entirely — the same discipline [hasScope] follows.
   final void Function(bool value)? onShowActivityLogChanged;
 
-  /// Whether a settled message currently announces itself in the inbox.
-  final bool notifyRibbon;
+  /// How a settled message currently announces itself.
+  final NotifyStyle notifyStyle;
 
-  /// Fired the instant the switch moves, for the same reason
+  /// Fired the instant the selection moves, for the same reason
   /// [onShowActivityLogChanged] is. Null hides the row entirely.
-  final void Function(bool value)? onNotifyRibbonChanged;
+  final void Function(NotifyStyle value)? onNotifyStyleChanged;
 
   /// Answers "did Microsoft grant this bare scope". Null hides the whole
   /// permissions section, which is what a host with no auth wired wants — and
@@ -128,8 +129,8 @@ class SettingsDialog extends StatefulWidget {
     required this.onAboutMeChanged,
     this.showActivityLog = false,
     this.onShowActivityLogChanged,
-    this.notifyRibbon = true,
-    this.onNotifyRibbonChanged,
+    this.notifyStyle = NotifyStyle.native,
+    this.onNotifyStyleChanged,
     this.hasScope,
     this.onSignInAgain,
     this.backendMode = backendModeMcp,
@@ -166,7 +167,7 @@ class SettingsDialog extends StatefulWidget {
 class _SettingsDialogState extends State<SettingsDialog> {
   late double _threshold = widget.threshold.clamp(0.0, 1.0);
   late bool _showActivityLog = widget.showActivityLog;
-  late bool _notifyRibbon = widget.notifyRibbon;
+  late NotifyStyle _notifyStyle = widget.notifyStyle;
   late final TextEditingController _aboutMe = TextEditingController(
     text: widget.aboutMe,
   );
@@ -368,7 +369,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                 ),
               ),
               ..._activityLogSwitch(),
-              ..._notifyRibbonSwitch(),
+              ..._notifyStyleRow(),
               ..._connectionSection(),
               ..._permissionsSection(),
             ],
@@ -415,29 +416,47 @@ class _SettingsDialogState extends State<SettingsDialog> {
     ];
   }
 
-  /// Whether the app speaks up when it finishes deciding a message needs the
-  /// user, or leaves them to find it in the list.
-  List<Widget> _notifyRibbonSwitch() {
-    final onChanged = widget.onNotifyRibbonChanged;
+  /// How loudly the app speaks up when it finishes deciding a message needs the
+  /// user — and whether it does at all.
+  ///
+  /// Reported to the host the instant the selection changes, for the same
+  /// reason [_activityLogSwitch] is: the next settle is what the choice
+  /// governs, and one could arrive while this dialog is still open.
+  List<Widget> _notifyStyleRow() {
+    final onChanged = widget.onNotifyStyleChanged;
     if (onChanged == null) return const [];
     return [
+      const SizedBox(height: BondSpacing.s24),
+      Text(
+        'Notifications',
+        style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+      ),
       const SizedBox(height: BondSpacing.s8),
-      SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        dense: true,
-        value: _notifyRibbon,
-        title: Text(
-          'In-app notifications',
-          style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: SegmentedButton<NotifyStyle>(
+          // No tick on the selected segment, matching the backend picker below.
+          showSelectedIcon: false,
+          segments: const [
+            ButtonSegment(value: NotifyStyle.off, label: Text('Off')),
+            ButtonSegment(value: NotifyStyle.inApp, label: Text('In-app')),
+            ButtonSegment(value: NotifyStyle.native, label: Text('Native')),
+          ],
+          selected: {_notifyStyle},
+          onSelectionChanged: (selection) {
+            setState(() => _notifyStyle = selection.first);
+            onChanged(selection.first);
+          },
         ),
-        subtitle: Text(
-          'A ribbon appears when a processed message needs your attention.',
-          style: BondType.caption,
-        ),
-        onChanged: (value) {
-          setState(() => _notifyRibbon = value);
-          onChanged(value);
-        },
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      // The one thing about Native that is not obvious from its name, and that
+      // a user would otherwise report as a bug: it is silent while they are
+      // looking at the app, on purpose.
+      Text(
+        'Native uses system notifications when the app is in the background '
+        'and falls back to the in-app ribbon when it is frontmost.',
+        style: BondType.caption,
       ),
     ];
   }
