@@ -131,49 +131,57 @@ class QuickReplyBar extends StatelessWidget {
   Widget _card(DraftOption option) {
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: _cardWidth),
-      child: InkWell(
-        onTap: () => onPick(option),
-        borderRadius: BondRadii.smAll,
-        child: Container(
-          padding: const EdgeInsets.all(BondSpacing.s8),
-          decoration: BoxDecoration(
-            borderRadius: BondRadii.smAll,
-            border: Border.all(color: BondColors.border),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Row(
-                children: [
-                  Icon(
-                    armed ? Icons.send_outlined : Icons.edit_outlined,
-                    size: 14,
-                    color: BondColors.primary,
-                  ),
-                  const SizedBox(width: BondSpacing.s4),
-                  Expanded(
-                    child: Text(
-                      option.stance,
-                      style: BondType.label.copyWith(
-                        fontWeight: FontWeight.w600,
-                        color: BondColors.primary,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+      // Its own transparent Material, because ink paints on the nearest
+      // Material ANCESTOR — which is behind this bar's opaque surface tile,
+      // where no hover could ever show. On its own layer the card lights up
+      // under the mouse like every other clickable thing in the app.
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          onTap: () => onPick(option),
+          borderRadius: BondRadii.smAll,
+          hoverColor: BondColors.primaryTint,
+          child: Container(
+            padding: const EdgeInsets.all(BondSpacing.s8),
+            decoration: BoxDecoration(
+              borderRadius: BondRadii.smAll,
+              border: Border.all(color: BondColors.border),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Icon(
+                      armed ? Icons.send_outlined : Icons.edit_outlined,
+                      size: 14,
+                      color: BondColors.primary,
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 2),
-              Text(
-                option.body,
-                style: BondType.caption.copyWith(
-                  color: BondColors.ink
-                      .withValues(alpha: Composer.suggestedOpacity),
+                    const SizedBox(width: BondSpacing.s4),
+                    Expanded(
+                      child: Text(
+                        option.stance,
+                        style: BondType.label.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: BondColors.primary,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
-              ),
-            ],
+                const SizedBox(height: 2),
+                Text(
+                  option.body,
+                  style: BondType.caption.copyWith(
+                    color: BondColors.ink
+                        .withValues(alpha: Composer.suggestedOpacity),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

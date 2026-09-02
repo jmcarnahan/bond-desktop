@@ -1,6 +1,8 @@
 import 'package:bond_inbox/providers/draft_provider.dart' show PendingSend;
 import 'package:bond_inbox/services/llm/draft_task.dart' show DraftOption;
+import 'package:bond_inbox/theme/tokens.dart' show BondColors;
 import 'package:bond_inbox/widgets/quick_replies.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -130,6 +132,37 @@ void main() {
       final text = tester.widget<Text>(find.text(long.body));
       expect(text.maxLines, isNull);
       expect(text.overflow, isNot(TextOverflow.ellipsis));
+    });
+
+    testWidgets('a card lights up under the mouse', (tester) async {
+      // Ink paints on the nearest Material ancestor. The bar's tile is an
+      // opaque Container, so without a transparent Material of its own the
+      // hover would render underneath it — set, but never seen.
+      await pumpBar(tester);
+
+      final inkWells = tester.widgetList<InkWell>(find.byType(InkWell));
+      final cards = inkWells.where((w) => w.hoverColor != null).toList();
+      expect(cards, hasLength(2));
+      for (final card in cards) {
+        expect(card.hoverColor, BondColors.primaryTint);
+      }
+      expect(
+        find.ancestor(
+          of: find.text('Confirm Friday'),
+          matching: find.byWidgetPredicate(
+            (w) => w is Material && w.type == MaterialType.transparency,
+          ),
+        ),
+        findsOneWidget,
+      );
+
+      // And the mouse actually reaching a card must not throw.
+      final gesture =
+          await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await gesture.moveTo(tester.getCenter(find.text('Confirm Friday')));
+      await tester.pumpAndSettle();
     });
   });
 
