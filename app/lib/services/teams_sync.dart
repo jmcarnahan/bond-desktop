@@ -298,12 +298,19 @@ class TeamsSync {
         if (!firstSighting) continue;
         newMessages++;
 
+        // Asked BEFORE the fold advances the inbound watermark — a reply the
+        // user sent from any Teams client resolves the standing ask, exactly
+        // as the composer's send path does for a reply sent from here.
+        final outbound = row['direction'] == 'outbound';
+        final resolvesAsk = outbound &&
+            outboundResolves(work.snapshot, row['received_at'] as String?);
         work.snapshot = foldMessage(
           work.snapshot,
-          outbound: row['direction'] == 'outbound',
+          outbound: outbound,
           receivedAt: row['received_at'] as String?,
           preview: row['body_preview'] as String?,
         );
+        if (resolvesAsk) work.clearCta();
       }
 
       await _writeConversation(key, work, chat, firstSight: firstSight);
@@ -527,8 +534,8 @@ class _ChatWork {
   ConvSnapshot? snapshot;
   final List<Map<String, Object?>> participants;
   final String? category;
-  final String? ctaText;
-  final String ctaUrgency;
+  String? ctaText;
+  String ctaUrgency;
 
   _ChatWork({
     this.snapshot,
@@ -537,6 +544,13 @@ class _ChatWork {
     this.ctaText,
     this.ctaUrgency = 'normal',
   });
+
+  /// The user's reply resolved the chat's standing ask. Mutates rather than
+  /// copies because the ingest loop accumulates into one instance per chat.
+  void clearCta() {
+    ctaText = null;
+    ctaUrgency = 'normal';
+  }
 
   /// Seeds from the stored row, or starts empty when the chat is new. The
   /// stored `state` is what carries a human's `done` into the fold.

@@ -519,6 +519,40 @@ void main() {
       expect(conversation.inboundCount, 1);
     });
 
+    test('the user’s reply clears the chat’s CTA — same promise mail makes',
+        () async {
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(hours: 2))),
+      ];
+      await build().syncNow();
+      await store.updateConversationTriage(
+        'teams',
+        'chat-1',
+        ctaText: 'Confirm the meeting time',
+        ctaUrgency: 'high',
+      );
+
+      graph.chats
+        ..clear()
+        ..add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(
+          id: 'm2',
+          userId: _myId,
+          displayName: 'Bond LO',
+          at: _iso(const Duration(hours: 1)),
+        ),
+      ];
+      await build().syncNow();
+
+      final conversation =
+          (await store.loadConversations(sources: const ['teams'])).single;
+      expect(conversation.state, ConversationState.waiting);
+      expect(conversation.ctaText, isNull,
+          reason: 'the reply resolved the standing ask, wherever it was sent');
+    });
+
     test('a replayed message is stored again but folded only once', () async {
       final at = _iso(const Duration(hours: 2));
       graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));

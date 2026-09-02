@@ -137,6 +137,22 @@ ConvSnapshot foldMessage(
   return next;
 }
 
+/// Whether an outbound message at [receivedAt] answers everything [existing]
+/// has heard — the same timestamp guard [foldMessage] uses to fold the thread
+/// to [stateWaiting], exposed so ingest can resolve side state (the CTA) on
+/// exactly the transition the fold takes, without the fold growing an opinion
+/// about fields it deliberately does not carry.
+///
+/// A reply is an answer to the ask the thread was holding, wherever it was
+/// written — this app's composer, Outlook, a phone. The composer's own send
+/// path clears the CTA directly; this is how a reply made anywhere else gets
+/// the same treatment when sync pulls it in.
+bool outboundResolves(ConvSnapshot? existing, String? receivedAt) {
+  if (receivedAt == null || receivedAt.isEmpty) return false;
+  final lastInbound = existing?.lastInboundAt;
+  return lastInbound == null || lastInbound.compareTo(receivedAt) <= 0;
+}
+
 /// The thread key for a message. Graph groups a thread with `conversationId`;
 /// a message without one is its own thread, namespaced so a bare message id
 /// can never collide with a real conversation id.
