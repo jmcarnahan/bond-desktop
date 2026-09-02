@@ -2,6 +2,7 @@ import 'package:intl/intl.dart';
 
 import '../../models/message_models.dart';
 import 'json_task.dart';
+import 'message_block.dart';
 import 'prompt_guard.dart';
 
 /// The rules half of the triage system prompt. Const, and never interpolated
@@ -42,9 +43,6 @@ class TriageInput {
 class TriageTask implements JsonTask<TriageResult> {
   const TriageTask();
 
-  /// Enough of a body for the model to judge intent. Past this it is quoted
-  /// thread and signatures, which cost tokens and add nothing.
-  static const int _bodyCap = 4000;
   static const int _summaryCap = 500;
   static const int _actionItemCap = 200;
   static const int _maxActionItems = 3;
@@ -104,27 +102,14 @@ class TriageTask implements JsonTask<TriageResult> {
         'additionalProperties': false,
       };
 
+  /// The date anchor is ours and sits outside the fence; the message is the
+  /// sender's and sits inside it, in whatever shape its channel gives it —
+  /// see [buildMessageBlock].
   @override
   String buildUserMessage(TriageInput input) {
-    final message = input.message;
-    final body = message.bodyText?.isNotEmpty == true
-        ? message.bodyText!
-        : (message.bodyPreview ?? '');
-    final clipped =
-        body.length > _bodyCap ? body.substring(0, _bodyCap) : body;
-
-    // Every line of this — the headers included — is the sender's text, so
-    // the whole block goes inside the fence rather than just the body.
-    final email = 'From: ${message.fromName ?? ''} '
-        '<${message.fromAddress ?? ''}>\n'
-        'Subject: ${message.subject ?? ''}\n'
-        'Received: ${message.receivedAt ?? ''}\n'
-        '\n'
-        'Body:\n$clipped';
-
     return 'Today is ${_date.format(input.now)} '
         '(${_weekday.format(input.now)}).\n'
-        '${wrapUntrusted('inbound_email', email)}';
+        '${wrapUntrusted('inbound_email', buildMessageBlock(input.message))}';
   }
 
   /// Clamps every field to something the inbox can render.

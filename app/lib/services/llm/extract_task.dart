@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../../models/message_models.dart';
 import 'json_task.dart';
+import 'message_block.dart';
 import 'prompt_guard.dart';
 
 /// The rules half of the extraction system prompt. Const, and never
@@ -116,8 +117,6 @@ class ExtractionInput {
 class ExtractTask implements JsonTask<ExtractionResult> {
   const ExtractTask();
 
-  /// Matches `TriageTask`: past this it is quoted thread and signatures.
-  static const int _bodyCap = 4000;
   static const int _evidenceCap = 300;
   static const int _projectCap = 60;
   static const int _entryCap = 80;
@@ -193,27 +192,15 @@ class ExtractTask implements JsonTask<ExtractionResult> {
         'additionalProperties': false,
       };
 
-  /// Mirrors `TriageTask.buildUserMessage` deliberately: the date anchor sits
-  /// outside the fence because it is ours, and every line of the email —
-  /// headers included — sits inside it because all of it is the sender's text.
+  /// Mirrors `TriageTask.buildUserMessage` deliberately, down to sharing
+  /// [buildMessageBlock] with it: the date anchor sits outside the fence
+  /// because it is ours, and every line of the message — headers included —
+  /// sits inside it because all of it is the sender's text.
   @override
   String buildUserMessage(ExtractionInput input) {
-    final message = input.message;
-    final body = message.bodyText?.isNotEmpty == true
-        ? message.bodyText!
-        : (message.bodyPreview ?? '');
-    final clipped = body.length > _bodyCap ? body.substring(0, _bodyCap) : body;
-
-    final email = 'From: ${message.fromName ?? ''} '
-        '<${message.fromAddress ?? ''}>\n'
-        'Subject: ${message.subject ?? ''}\n'
-        'Received: ${message.receivedAt ?? ''}\n'
-        '\n'
-        'Body:\n$clipped';
-
     return 'Today is ${_date.format(input.now)} '
         '(${_weekday.format(input.now)}).\n'
-        '${wrapUntrusted('inbound_email', email)}';
+        '${wrapUntrusted('inbound_email', buildMessageBlock(input.message))}';
   }
 
   /// Clamps every field, and re-checks both enums in Dart.

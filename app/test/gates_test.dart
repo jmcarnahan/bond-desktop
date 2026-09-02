@@ -251,4 +251,86 @@ void main() {
       expect(gateFor(noreply, userAddress: null), isNull);
     });
   });
+
+  group('triageStatusOnInsert', () {
+    const cutoff = '2026-08-22T00:00:00Z';
+
+    test('an inbound message inside the window is queued', () {
+      expect(
+        triageStatusOnInsert(
+          outbound: false,
+          receivedAt: '2026-08-29T10:00:00Z',
+          backlogCutoff: cutoff,
+        ),
+        ('pending', null),
+      );
+    });
+
+    test('the reader’s own message is skipped whatever its date', () {
+      expect(
+        triageStatusOnInsert(
+          outbound: true,
+          receivedAt: '2026-08-29T10:00:00Z',
+          backlogCutoff: cutoff,
+        ),
+        ('skipped', 'outbound'),
+      );
+      // Outbound is asked first: a sent message older than the window is still
+      // "outbound", which is the reason a reader would recognise.
+      expect(
+        triageStatusOnInsert(
+          outbound: true,
+          receivedAt: '2026-01-01T10:00:00Z',
+          backlogCutoff: cutoff,
+        ),
+        ('skipped', 'outbound'),
+      );
+    });
+
+    test('an inbound message older than the cutoff is backlog', () {
+      expect(
+        triageStatusOnInsert(
+          outbound: false,
+          receivedAt: '2026-08-21T23:59:59Z',
+          backlogCutoff: cutoff,
+        ),
+        ('skipped', 'backlog'),
+      );
+      // The boundary belongs to the window, matching the mail drain's own
+      // `>=` comparison everywhere else.
+      expect(
+        triageStatusOnInsert(
+          outbound: false,
+          receivedAt: cutoff,
+          backlogCutoff: cutoff,
+        ),
+        ('pending', null),
+      );
+    });
+
+    test('a date nobody recorded is never backlog', () {
+      expect(
+        triageStatusOnInsert(outbound: false, backlogCutoff: cutoff),
+        ('pending', null),
+      );
+      expect(
+        triageStatusOnInsert(
+          outbound: false,
+          receivedAt: '',
+          backlogCutoff: cutoff,
+        ),
+        ('pending', null),
+      );
+    });
+
+    test('no cutoff never backlogs — the chat ingest passes none', () {
+      expect(
+        triageStatusOnInsert(
+          outbound: false,
+          receivedAt: '2020-01-01T00:00:00Z',
+        ),
+        ('pending', null),
+      );
+    });
+  });
 }

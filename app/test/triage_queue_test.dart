@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
@@ -112,22 +113,28 @@ void main() {
 
   tearDown(() async => db.close());
 
+  /// [source] defaults to email because most of this file is about the drain
+  /// rather than the channel; a chat row is the same seed with the columns a
+  /// chat actually has — no subject, a `teams:` pseudo-address, and never any
+  /// headers.
   Future<void> seedMessage({
     required String id,
+    String source = 'email',
     String conversationKey = 'conv-1',
     String direction = 'inbound',
     String? from = 'sarah@example.com',
-    String subject = 'Launch date',
+    String? subject = 'Launch date',
     String receivedAt = '2026-08-29T10:00:00Z',
     String triageStatus = 'pending',
     // False is what a message looks like straight off a delta page: a
     // preview, and no body until something fetches its detail.
     bool withBody = true,
+    String? bodyText,
     String? bodyPreview,
     Map<String, String>? headers,
   }) async {
     await store.upsertMessage({
-      'source': 'email',
+      'source': source,
       'source_message_id': id,
       'conversation_key': conversationKey,
       'direction': direction,
@@ -136,20 +143,43 @@ void main() {
       'from_address': from,
       'received_at': receivedAt,
       'body_preview': bodyPreview,
-      'body_text': withBody ? 'Body of $id' : null,
+      'body_text': withBody ? (bodyText ?? 'Body of $id') : null,
       'source_meta_json':
           headers == null ? null : jsonEncode({'headers': headers}),
       'triage_status': triageStatus,
     });
   }
 
+  Future<void> seedChat({
+    required String id,
+    String conversationKey = 'chat-1',
+    String direction = 'inbound',
+    String receivedAt = '2026-08-29T10:00:00Z',
+    String triageStatus = 'pending',
+    bool withBody = true,
+    String? bodyText,
+  }) =>
+      seedMessage(
+        id: id,
+        source: 'teams',
+        conversationKey: conversationKey,
+        direction: direction,
+        from: 'teams:u1',
+        subject: null,
+        receivedAt: receivedAt,
+        triageStatus: triageStatus,
+        withBody: withBody,
+        bodyText: bodyText,
+      );
+
   Future<void> seedConversation({
     String key = 'conv-1',
+    String source = 'email',
     String? lastInboundAt = '2026-08-29T10:00:00Z',
     String state = 'needs_reply',
   }) async {
     await store.upsertConversation({
-      'source': 'email',
+      'source': source,
       'conversation_key': key,
       'subject': 'Launch date',
       'state': state,
@@ -158,8 +188,9 @@ void main() {
     });
   }
 
-  Future<Map<String, Object?>> messageRow(String id) async =>
-      (await store.getMessageRow('email', id))!;
+  Future<Map<String, Object?>> messageRow(String id,
+          {String source = 'email'}) async =>
+      (await store.getMessageRow(source, id))!;
 
   Future<Map<String, Object?>> conversationRow([String key = 'conv-1']) async =>
       (await store.getConversationRow('email', key))!;
@@ -484,6 +515,109 @@ void main() {
 
       expect(llm.userMessages.single, contains('Short preview'));
       expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+  });
+
+  group('chats', () {
+    test('a chat is claimed and triaged like mail, and stays a chat', () async {
+      await seedChat(id: 'c1', bodyText: 'Can you send the CD today?');
+      final llm = FakeLlm([answer()]);
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await TriageQueue(store, llm, activityLog: log).pump();
+
+      expect(llm.userMessages.single, contains('Can you send the CD today?'));
+      final row = await messageRow('c1', source: 'teams');
+      expect(row['triage_status'], 'triaged');
+      expect(row['urgency'], 'high');
+      // Every write the drain makes is keyed `(source, id)`, so a source read
+      // off the wrong place would silently update nothing at all.
+      final event = (await store.recentActivity())
+          .firstWhere((r) => r['kind'] == 'triage');
+      expect(event['source'], 'teams');
+      expect(event['entity_id'], 'c1');
+    });
+
+    test('a chat never asks for a mail detail fetch', () async {
+      // Body stored, headers absent — which for a chat is not "detail is
+      // missing" but "this source has no such thing": `source_meta_json` is
+      // the mail sync's column. An unguarded fetch fires on every chat and can
+      // only fail.
+      await seedChat(id: 'c1');
+      // The control, and the proof the fetcher is live: a bodyless mail row
+      // beside it, which does get fetched.
+      await seedMessage(
+        id: 'm1',
+        receivedAt: '2026-08-29T09:00:00Z',
+        withBody: false,
+        bodyPreview: 'Short preview',
+      );
+      final llm = FakeLlm([answer()]);
+      final fetch = FakeDetailFetch(store, bodyText: 'The full body');
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      expect(fetch.fetched, ['m1']);
+      expect((await messageRow('c1', source: 'teams'))['triage_status'],
+          'triaged');
+    });
+
+    test('a chat that stripped down to nothing is gated, not modelled',
+        () async {
+      // What a lone emoji reaction or an image-only post leaves behind.
+      await seedChat(id: 'c1', withBody: false);
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages, isEmpty);
+      final row = await messageRow('c1', source: 'teams');
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'empty');
+    });
+
+    test('the fold-up lands on the chat’s own conversation', () async {
+      await seedConversation(key: 'chat-1', source: 'teams');
+      // Same conversation_key under email, to catch a fold-up that writes the
+      // right key against the wrong source.
+      await seedConversation(key: 'chat-1');
+      await seedChat(id: 'c1');
+      final llm = FakeLlm([
+        answer(urgency: 'urgent', actionItems: const ['Send the CD']),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      final chat = (await store.getConversationRow('teams', 'chat-1'))!;
+      expect(chat['cta_text'], 'Send the CD');
+      expect(chat['cta_urgency'], 'urgent');
+      expect((await store.getConversationRow('email', 'chat-1'))!['cta_text'],
+          isNull);
+    });
+
+    test('one drain empties both sources, newest first', () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-29T09:00:00Z');
+      await seedChat(id: 'c1', receivedAt: '2026-08-29T11:00:00Z');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      expect(llm.userMessages.length, 2);
+      expect(llm.userMessages.first, contains('Body of c1'));
+      expect(await store.triageCounts(sources: TriageQueue.sources),
+          {'triaged': 2});
+    });
+
+    test('resetInterrupted frees a claimed chat too', () async {
+      await seedChat(id: 'c1', triageStatus: 'processing');
+      await seedMessage(id: 'm1', triageStatus: 'processing');
+
+      await TriageQueue(store, FakeLlm([answer()])).resetInterrupted();
+
+      expect((await messageRow('c1', source: 'teams'))['triage_status'],
+          'pending');
+      expect((await messageRow('m1'))['triage_status'], 'pending');
     });
   });
 

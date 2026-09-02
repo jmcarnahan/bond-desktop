@@ -3,14 +3,17 @@ import 'dart:convert';
 import '../data/message_store.dart';
 import 'activity_log.dart';
 import 'conversation_state.dart';
+import 'gates.dart';
 import 'backend/teams_backend.dart';
 
-/// What a Teams message carries instead of a triage decision.
+/// LEGACY. Nothing writes this any more.
 ///
-/// Triage is email-only by construction — `triage_queue.dart` reads and writes
-/// nothing else — so every chat message is stored `skipped` with this reason.
-/// It is also the marker extraction keys off: a message reasoned about here is
-/// one a human plausibly wrote.
+/// It marked what a chat message carried instead of a triage decision, back
+/// when triage was email-only and every chat was stored `skipped` with this
+/// reason. Chats now enter the queue like mail, so the constant survives for
+/// exactly two readers: the one-time backfill in [TeamsSync.syncNow] that
+/// finds the rows written before the change, and `ExtractHandler`'s tolerance
+/// of a straggler that the backfill's window did not reach.
 const String teamsSourceGate = 'teams_source';
 
 /// A chat message posted by a bot or a connector rather than a person. Skipped
@@ -178,20 +181,36 @@ class TeamsSync {
 
       await _store.setSyncedAt(folder, _nowIso(), source: source);
 
+      // Chat messages stored before chats joined the triage queue. They are
+      // `skipped` for a reason that no longer exists, and nothing else would
+      // ever look at them again.
+      //
+      // BEFORE the enqueue below, which now selects on triage status: a row
+      // this flips to `pending` is a row that enqueue picks up in the same
+      // pass rather than one refresh later. Self-exhausting — nothing writes
+      // [teamsSourceGate] any more, so the next sync flips nothing.
+      final repended = await _store.rependGatedTriage(
+        source: source,
+        gateReason: teamsSourceGate,
+        sinceIso: floor,
+      );
+
+      // A transient failure — the model server mid-load, two timeouts in a row
+      // — must not remove a chat from the AI pipeline forever, exactly as it
+      // must not for mail (`sync_service.dart`).
+      final revivedTriage = await _store.reviveErroredTriage(source: source);
+
       // Extraction, for the chat messages a person actually wrote. `OR IGNORE`
       // makes it idempotent, so it both picks up what just arrived and refills
       // a queue a crash left short.
       //
-      // The statuses and reasons are spelled out because the defaults are the
-      // mail ones: chat messages never enter triage, so the default
-      // `pending/processing/triaged` filter would match none of them, and a
-      // bare `skipped` filter would drag the bots back in.
+      // The mail defaults now, because a chat is triaged like mail: the
+      // `pending/processing/triaged` filter is what leaves out the bots and
+      // the user's own messages, which triage already skipped at ingest.
       final queued = await _store.enqueueExtractBacklog(
         cap: _extractCap,
         sinceIso: floor,
         source: source,
-        triageStatuses: const ['skipped'],
-        gateReasons: const [teamsSourceGate],
       );
 
       // NO `storyline_sweep` requeue. The sweep is email-scoped by
@@ -209,6 +228,8 @@ class TeamsSync {
           'chats_seen': chatsSeen,
           'chats_fetched': chatsFetched,
           'queued_extract': queued,
+          'revived_triage': revivedTriage,
+          if (repended > 0) 'repended_triage': repended,
         },
       );
     } catch (e) {
@@ -366,6 +387,20 @@ class TeamsSync {
 
     final (name, senderId, fromApplication) = _sender(message['from']);
     final bodyText = _bodyText(message['body']);
+    // A bot never gets the model's time — a build notification has no urgency
+    // and asks the reader for nothing — and everything else takes exactly the
+    // rule mail takes.
+    //
+    // No backlog cutoff, unlike mail: [syncFloorDays] already bounds how far
+    // back a chat message can arrive from, so nothing older than the window
+    // reaches here. Mail needs its own cap because a first sync of a real
+    // mailbox can hand over a hundred thousand messages at once.
+    final (triageStatus, gateReason) = fromApplication
+        ? ('skipped', teamsBotGate)
+        : triageStatusOnInsert(
+            outbound: outbound,
+            receivedAt: message['createdDateTime'] as String?,
+          );
 
     return {
       'source': source,
@@ -391,8 +426,8 @@ class TeamsSync {
       )
           ? 1
           : 0,
-      'triage_status': 'skipped',
-      'gate_reason': fromApplication ? teamsBotGate : teamsSourceGate,
+      'triage_status': triageStatus,
+      'gate_reason': gateReason,
     };
   }
 

@@ -658,6 +658,29 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     );
   }
 
+  /// Puts inbound messages a retired gate reason skipped back in the queue,
+  /// and returns how many that was.
+  ///
+  /// For a gate this app has stopped writing: the rows it already wrote would
+  /// otherwise stay `skipped` forever, because nothing re-examines a message
+  /// triage has finished with. Scoped to [sinceIso] so a retired gate cannot
+  /// hand the model a year of archive, and self-exhausting — once no code
+  /// writes [gateReason], the second call matches nothing.
+  Future<int> rependGatedTriage({
+    required String source,
+    required String gateReason,
+    required String sinceIso,
+  }) {
+    return db.customUpdate(
+      "UPDATE messages SET triage_status = 'pending', gate_reason = NULL, "
+      'updated_at = ? '
+      "WHERE source = ? AND direction = 'inbound' "
+      "AND triage_status = 'skipped' AND gate_reason = ? "
+      'AND received_at >= ?',
+      variables: _args([_nowIso(), source, gateReason, sinceIso]),
+    );
+  }
+
   /// Folds one message's triage result up onto its conversation.
   ///
   /// A targeted UPDATE rather than [upsertConversation] on purpose: that
@@ -789,13 +812,12 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// [enqueueWork] rows stamp wall-clock time instead; for freshly synced
   /// mail the two orderings agree.)
   ///
-  /// [triageStatuses] and [gateReasons] exist for the second connector, and
-  /// their defaults are exactly the email behaviour described above. Teams
-  /// messages never enter triage at all — they are stored `skipped` with a
-  /// `teams_source` reason — so the mail filter would exclude every one of
-  /// them. A caller that widens the statuses should narrow the reasons to
-  /// match, or a `skipped` status would also drag in the bulk senders and
-  /// backlog the mail path deliberately leaves out.
+  /// [triageStatuses] and [gateReasons] narrow that for a caller whose
+  /// messages reach this table some other way; both connectors take the
+  /// defaults, because both now put their inbound messages through triage. A
+  /// caller that widens the statuses should narrow the reasons to match, or a
+  /// `skipped` status would drag in the bulk senders and backlog the defaults
+  /// deliberately leave out.
   Future<int> enqueueExtractBacklog({
     int cap = 150,
     required String sinceIso,

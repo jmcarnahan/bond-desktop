@@ -252,18 +252,26 @@ void main() {
       expect(m['subject'], isNull, reason: 'a chat message has no subject');
       expect(m['is_read'], 1,
           reason: 'this chat carries no viewpoint — see the read-state group');
-      expect(m['triage_status'], 'skipped');
-      expect(m['gate_reason'], teamsSourceGate);
+      // The same queue mail joins, on the same terms: a person wrote this and
+      // nothing at ingest knows whether it needs the reader.
+      expect(m['triage_status'], 'pending');
+      expect(m['gate_reason'], isNull);
     });
 
-    test('the user’s own message is outbound', () async {
+    test('the user’s own message is outbound, and skipped like sent mail',
+        () async {
       graph.messages['chat-1'] = [
         _message(id: 'm1', userId: _myId, displayName: 'Bond LO'),
       ];
       await build().syncNow();
 
-      expect((await row('m1'))['direction'], 'outbound');
-      expect((await row('m1'))['from_address'], 'teams:$_myId');
+      final m = await row('m1');
+      expect(m['direction'], 'outbound');
+      expect(m['from_address'], 'teams:$_myId');
+      // Triage answers "does this need me?", and the user's own message never
+      // does — the same reason and the same wording mail's own sent items get.
+      expect(m['triage_status'], 'skipped');
+      expect(m['gate_reason'], 'outbound');
     });
 
     test('a message from an application is gated as auto-generated', () async {
@@ -278,10 +286,14 @@ void main() {
       ];
       await build().syncNow();
 
+      expect((await row('bot'))['triage_status'], 'skipped');
       expect((await row('bot'))['gate_reason'], teamsBotGate);
       expect((await row('bot'))['direction'], 'inbound');
       expect((await row('bot'))['from_address'], 'teams:app-9');
-      expect((await row('human'))['gate_reason'], teamsSourceGate);
+      // The bot is the only inbound chat message ingest decides about: the
+      // person beside it goes to the model like any mail.
+      expect((await row('human'))['triage_status'], 'pending');
+      expect((await row('human'))['gate_reason'], isNull);
     });
 
     test('system events never become rows', () async {
@@ -814,6 +826,94 @@ void main() {
       expect(drained, unorderedEquals(['e1', 'm1']),
           reason: 'both sources feed one model queue; a chat message left '
               'pending here never reaches extraction or storylines');
+    });
+
+    /// Rows stored before chats joined the triage queue. Nothing looks at a
+    /// message triage has finished with, so without this pass they would carry
+    /// a retired verdict forever.
+    test('legacy teams_source rows are put back in the queue, once', () async {
+      Future<void> legacy(
+        String id, {
+        String direction = 'inbound',
+        String gateReason = teamsSourceGate,
+        Duration age = const Duration(days: 2),
+      }) =>
+          store.upsertMessage({
+            'source': 'teams',
+            'source_message_id': id,
+            'conversation_key': 'chat-legacy',
+            'direction': direction,
+            'received_at': _iso(age),
+            'triage_status': 'skipped',
+            'gate_reason': gateReason,
+          });
+
+      await legacy('in-window');
+      await legacy('mine', direction: 'outbound', gateReason: 'outbound');
+      await legacy('bot', gateReason: teamsBotGate);
+      await legacy('ancient', age: const Duration(days: 40));
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+
+      await build().syncNow();
+
+      expect((await row('in-window'))['triage_status'], 'pending');
+      expect((await row('in-window'))['gate_reason'], isNull);
+      // Everything else was skipped on a judgement that still stands, or is
+      // older than the window this connector syncs at all.
+      for (final id in ['mine', 'bot', 'ancient']) {
+        expect((await row(id))['triage_status'], 'skipped', reason: id);
+      }
+      expect((await row('mine'))['gate_reason'], 'outbound');
+      expect((await row('bot'))['gate_reason'], teamsBotGate);
+
+      // Self-exhausting: nothing writes `teams_source` any more, so the next
+      // refresh must not drag a message triage has since finished with back
+      // into the queue.
+      await store.writeTriage('teams', 'in-window', status: 'triaged');
+      await build().syncNow();
+      expect((await row('in-window'))['triage_status'], 'triaged');
+    });
+
+    test('a re-pulled chat message keeps its triage verdict', () async {
+      // Chats have no delta link: a refresh re-pulls the window and re-upserts
+      // rows the store already has, boundary message included. The upsert's
+      // conflict clause leaves the triage columns alone (INSERT-only), and
+      // this is where that contract is now load-bearing — without it every
+      // refresh would put an already-judged chat back through the model.
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(hours: 2))),
+      ];
+      await build().syncNow();
+      expect((await row('m1'))['triage_status'], 'pending');
+
+      await store.writeTriage('teams', 'm1', status: 'triaged');
+      graph.messages['chat-1']!.add(
+        _message(id: 'm2', at: _iso(const Duration(minutes: 5))),
+      );
+      await build().syncNow();
+
+      expect((await row('m1'))['triage_status'], 'triaged',
+          reason: 'a re-pull must not send a judged message back to the model');
+      expect((await row('m2'))['triage_status'], 'pending');
+    });
+
+    test('a chat the model failed on gets one more try', () async {
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'errored',
+        'conversation_key': 'chat-legacy',
+        'direction': 'inbound',
+        'received_at': _iso(const Duration(days: 1)),
+        'triage_status': 'error',
+        'triage_attempts': 2,
+      });
+
+      await build().syncNow();
+
+      expect((await row('errored'))['triage_status'], 'pending',
+          reason: 'the same revival mail gets on every sync');
     });
   });
 

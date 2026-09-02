@@ -5,6 +5,7 @@ import 'activity_log.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
+import 'gates.dart';
 import 'graph_mail.dart';
 
 /// How far back a mailbox that has never synced reaches. Two weeks is enough
@@ -260,7 +261,7 @@ class SyncService implements MailSync {
         final (fromName, fromAddress) = _address(message['from']);
         final recipients = _recipients(message['toRecipients']);
 
-        final (triageStatus, gateReason) = _triageOnInsert(
+        final (triageStatus, gateReason) = triageStatusOnInsert(
           outbound: outbound,
           receivedAt: receivedAt,
           backlogCutoff: backlogCutoff,
@@ -375,24 +376,6 @@ class SyncService implements MailSync {
       'last_message_preview': snapshot.lastMessagePreview,
     });
     await _store.recomputeConversationCounts(_source, key);
-  }
-
-  /// The triage columns a message gets the first time it is stored. Both are
-  /// ignored on a re-sync of a message already present.
-  (String, String?) _triageOnInsert({
-    required bool outbound,
-    required String? receivedAt,
-    required String backlogCutoff,
-  }) {
-    // Triage answers "does this need me?" — the user's own sent mail never
-    // does.
-    if (outbound) return ('skipped', 'outbound');
-    if (receivedAt != null &&
-        receivedAt.isNotEmpty &&
-        receivedAt.compareTo(backlogCutoff) < 0) {
-      return ('skipped', 'backlog');
-    }
-    return ('pending', null);
   }
 
   /// Fills in the bodies of an opened thread, newest first.

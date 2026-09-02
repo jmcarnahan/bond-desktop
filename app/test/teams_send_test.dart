@@ -242,9 +242,10 @@ void main() {
       expect(reply['received_at'], '2026-08-28T22:00:00Z');
       expect(reply['is_read'], 1, reason: 'the user wrote it');
       // The same columns the sync would have written, because the same code
-      // wrote them — a chat message never enters triage.
+      // wrote them — and triage never asks whether the user's own message
+      // needs the user.
       expect(reply['triage_status'], 'skipped');
-      expect(reply['gate_reason'], teamsSourceGate);
+      expect(reply['gate_reason'], 'outbound');
     });
 
     test('flips the thread to waiting and answers the CTA', () async {

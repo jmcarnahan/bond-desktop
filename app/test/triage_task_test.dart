@@ -110,6 +110,37 @@ void main() {
       );
       expect('</untrusted_data>'.allMatches(user).length, 1);
     });
+
+    test('a chat is a name and a body — no subject, no pseudo-address', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          Message(
+            id: 'c1',
+            source: 'teams',
+            outbound: false,
+            fromName: 'Todd Ramsay',
+            // What every chat row carries: a namespaced Graph id, and no
+            // subject at all.
+            fromAddress: 'teams:8f2c-…',
+            bodyText: 'Can you send the CD?',
+            receivedAt: '2026-08-29T16:05:00Z',
+          ),
+          DateTime(2026, 8, 29),
+        ),
+      );
+
+      expect(user, contains('From: Todd Ramsay\n'));
+      expect(user, isNot(contains('teams:')));
+      // Not an empty `Subject:` line either — that would tell the model a
+      // title went missing rather than that this channel has none.
+      expect(user, isNot(contains('Subject:')));
+      expect(user, contains('Received: 2026-08-29T16:05:00Z'));
+      expect(user, contains('Can you send the CD?'));
+      // The fence and the anchor are the task's, not the channel's; the tag
+      // stays `inbound_email` until the prompts are unified.
+      expect(user, startsWith('Today is 2026-08-29 (Saturday).\n'));
+      expect(user, contains('<untrusted_data source="inbound_email">'));
+    });
   });
 
   group('system prompt', () {

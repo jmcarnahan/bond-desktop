@@ -7,6 +7,7 @@ import 'providers/app_providers.dart';
 import 'providers/prefs_provider.dart';
 import 'screens/inbox_screen.dart';
 import 'screens/sign_in_screen.dart';
+import 'services/triage_queue.dart';
 import 'theme/bond_theme.dart';
 
 Future<void> main() async {
@@ -28,7 +29,11 @@ Future<void> main() async {
   // on every write would be a delete per sync on a database the UI isolate
   // reads synchronously.
   final store = MessageStore(db);
-  await store.resetInterruptedTriage();
+  // Every source the queue drains, so a chat claimed at the moment of a crash
+  // is freed exactly as an email is.
+  for (final source in TriageQueue.sources) {
+    await store.resetInterruptedTriage(source: source);
+  }
   await store.resetInterruptedWork();
   await store.pruneActivity();
 
