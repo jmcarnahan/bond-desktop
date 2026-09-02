@@ -68,6 +68,14 @@ class AttentionTuning {
   /// morning's real question.
   static const double keepBoost = 1.25;
 
+  /// What a message addressed to the user singularly is multiplied by. The
+  /// product rule it encodes: a message sent to them alone, or that @mentions
+  /// them by name, gets particular attention — it is never the one that gets
+  /// missed. A boost rather than a floor, for the same reason [keepBoost] is:
+  /// being addressed directly does not make a three-week-old thread today's
+  /// work.
+  static const double directBoost = 1.25;
+
   /// The intents that count as the sender asking for something.
   static const Set<String> askingIntents = {'question', 'request', 'approval'};
 
@@ -82,25 +90,58 @@ class AttentionTuning {
 /// 1. A `later` sender rule, or a thread the user closed, scores exactly 0. Both
 ///    are a person having already answered the question this function asks.
 /// 2. A base by state: [AttentionTuning.needsReplyBase] for a thread awaiting
-///    their reply, [AttentionTuning.waitingBase] for anything else still open.
+///    their reply, [AttentionTuning.waitingBase] for anything else still open —
+///    and also for a QUIET FYI, a needs-reply thread triage judged nobody is
+///    waiting on. See below.
 /// 3. Multiplied by the ask's urgency, as triage read it.
 /// 4. Plus [AttentionTuning.questionBonus] when the newest inbound message's
 ///    intent is one of [AttentionTuning.askingIntents].
-/// 5. Plus up to [AttentionTuning.replyRateMax] for a sender the user answers.
+/// 5. Plus up to [AttentionTuning.replyRateMax] for a sender the user answers —
+///    skipped entirely on a quiet FYI.
 /// 6. Multiplied by recency, halving every
 ///    [AttentionTuning.recencyHalfLifeDays].
 /// 7. Multiplied by [AttentionTuning.keepBoost] for a `keep` sender.
-/// 8. Clamped.
+/// 8. Multiplied by [AttentionTuning.directBoost] when the message was
+///    addressed to the user singularly and nothing said no reply is wanted.
+/// 9. Clamped.
+///
+/// **The quiet temper (steps 2 and 5).** A thread can sit in `needsReply`
+/// because the state machine saw an unanswered inbound message, while triage
+/// read that message and found nobody actually waiting: a broadcast to a group
+/// chat, a receipt, a heads-up. Such a thread scores from
+/// [AttentionTuning.waitingBase] instead, and skips the reply-rate bonus. The
+/// skip is the load-bearing half: the answer-rate nudge exists to ORDER live
+/// asks against each other, and 0.35 + 0.2 = 0.55 would carry a well-answered
+/// sender's quiet FYI straight back over the 0.5 threshold — the exact thread
+/// the temper exists to quiet. The question bonus needs no such guard, because
+/// [AttentionTuning.askingIntents] and [AttentionTuning.quietIntents] are
+/// disjoint: an intent that tempers can never be an intent that earns it.
+///
+/// The urgency multiplier still applies through the temper, deliberately. A
+/// thread triage rated urgent survives it (0.35 × 1.5 = 0.525) and stays in
+/// Needs You — showing one quiet thread too many is the failure this is willing
+/// to have.
+///
+/// [latestReplyExpected] false is a POSITIVE judgment and the only thing that
+/// tempers. Null means triage v2 never looked at this message, which is not the
+/// same as it having looked and said no — an unjudged thread scores exactly as
+/// it did before any of this existed.
 ///
 /// [latestIntent] is the intent from the newest inbound message's extraction,
 /// null when nothing has extracted it yet. [senderReplyRate] is a 0..1 fraction
 /// and is clamped, so a caller cannot push a thread up by handing over a rate
-/// of 40. [senderPref] is `'keep'`, `'later'`, or null.
+/// of 40. [senderPref] is `'keep'`, `'later'`, or null. [latestNeedsAction],
+/// [latestDeadline] and [addressedMe] all describe that same newest inbound
+/// message.
 double attentionScore({
   required Conversation conversation,
   String? latestIntent,
   double senderReplyRate = 0,
   String? senderPref,
+  bool? latestReplyExpected,
+  bool? latestNeedsAction,
+  String? latestDeadline,
+  bool addressedMe = false,
   required DateTime now,
 }) {
   // Both hard zeros, checked before anything else: a thread the user has
@@ -108,7 +149,18 @@ double attentionScore({
   if (senderPref == 'later') return 0;
   if (conversation.state == ConversationState.done) return 0;
 
-  var score = conversation.state == ConversationState.needsReply
+  // Every clause is a separate reason to leave the thread alone, so every one
+  // of them has to agree before the temper fires: triage said no reply is
+  // wanted, it named no action and no date, and the extraction read the message
+  // as an FYI rather than an ask.
+  final quietFyi = conversation.state == ConversationState.needsReply &&
+      latestReplyExpected == false &&
+      latestNeedsAction != true &&
+      (latestDeadline == null || latestDeadline.isEmpty) &&
+      latestIntent != null &&
+      AttentionTuning.quietIntents.contains(latestIntent);
+
+  var score = conversation.state == ConversationState.needsReply && !quietFyi
       ? AttentionTuning.needsReplyBase
       : AttentionTuning.waitingBase;
 
@@ -125,11 +177,24 @@ double attentionScore({
     score += AttentionTuning.questionBonus;
   }
 
-  score += senderReplyRate.clamp(0.0, 1.0) * AttentionTuning.replyRateMax;
+  // Skipped under the temper: see the doc comment. Nothing guards the question
+  // bonus above, because the asking and quiet intent sets are disjoint and a
+  // tempered thread cannot have earned it.
+  if (!quietFyi) {
+    score += senderReplyRate.clamp(0.0, 1.0) * AttentionTuning.replyRateMax;
+  }
 
   score *= _recencyFactor(conversation.lastMessageAt, now);
 
   if (senderPref == 'keep') score *= AttentionTuning.keepBoost;
+
+  // `!= false` rather than `== true` on purpose: a direct message triage has
+  // never judged still gets the boost, and only an explicit "nobody is waiting
+  // on this" declines it. That also makes this mutually exclusive with the
+  // temper by construction, which requires the explicit false.
+  if (addressedMe && latestReplyExpected != false) {
+    score *= AttentionTuning.directBoost;
+  }
 
   return score.clamp(0.0, AttentionTuning.maxScore);
 }
