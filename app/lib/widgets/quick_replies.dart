@@ -79,17 +79,19 @@ class QuickReplyBar extends StatelessWidget {
               for (final option in options) _card(option),
             ],
           ),
-          // Said once, above the button, only when it needs saying: without a
-          // send grant a card opens the reply window with its text in it, and
-          // a card that looked like a send button and was not would be the
+          // Said once, above the button, both ways: a card that sends and a
+          // card that prefills look identical, so the words are the only thing
+          // separating "one tap and this is on its way" from "one tap and you
+          // are editing it" — and guessing wrong in either direction is the
           // dishonest version of this bar.
-          if (!armed) ...[
-            const SizedBox(height: BondSpacing.s8),
-            Text(
-              'Tap a reply to open it in the composer.',
-              style: BondType.caption,
-            ),
-          ],
+          const SizedBox(height: BondSpacing.s8),
+          Text(
+            armed
+                ? 'Tap a suggestion to send it — you can undo for a few '
+                    'seconds.'
+                : 'Tap a reply to open it in the composer.',
+            style: BondType.caption,
+          ),
           const SizedBox(height: BondSpacing.s4),
           _replyRow(),
         ],
@@ -119,42 +121,59 @@ class QuickReplyBar extends StatelessWidget {
     );
   }
 
+  /// One suggestion, whole: the full reply is the thing being offered, and a
+  /// tap may SEND it — nobody should commit to words they could only read
+  /// three lines of. No tooltip for the rest; the card just takes the height
+  /// its words need.
+  ///
+  /// The header is the action: an icon that says what the tap does (send when
+  /// [armed], compose when not) beside the stance in the app's action color.
   Widget _card(DraftOption option) {
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: _cardWidth),
-      child: Tooltip(
-        message: option.body,
-        child: InkWell(
-          onTap: () => onPick(option),
-          borderRadius: BondRadii.smAll,
-          child: Container(
-            padding: const EdgeInsets.all(BondSpacing.s8),
-            decoration: BoxDecoration(
-              borderRadius: BondRadii.smAll,
-              border: Border.all(color: BondColors.border),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  option.stance,
-                  style: BondType.label.copyWith(fontWeight: FontWeight.w600),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  option.body,
-                  style: BondType.caption.copyWith(
-                    color: BondColors.ink
-                        .withValues(alpha: Composer.suggestedOpacity),
+      child: InkWell(
+        onTap: () => onPick(option),
+        borderRadius: BondRadii.smAll,
+        child: Container(
+          padding: const EdgeInsets.all(BondSpacing.s8),
+          decoration: BoxDecoration(
+            borderRadius: BondRadii.smAll,
+            border: Border.all(color: BondColors.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    armed ? Icons.send_outlined : Icons.edit_outlined,
+                    size: 14,
+                    color: BondColors.primary,
                   ),
-                  maxLines: 3,
-                  overflow: TextOverflow.ellipsis,
+                  const SizedBox(width: BondSpacing.s4),
+                  Expanded(
+                    child: Text(
+                      option.stance,
+                      style: BondType.label.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color: BondColors.primary,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 2),
+              Text(
+                option.body,
+                style: BondType.caption.copyWith(
+                  color: BondColors.ink
+                      .withValues(alpha: Composer.suggestedOpacity),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),

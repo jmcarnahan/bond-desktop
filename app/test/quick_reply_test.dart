@@ -94,12 +94,42 @@ void main() {
 
       expect(find.text('Tap a reply to open it in the composer.'),
           findsOneWidget);
+      // The icon agrees with the words: composing, not sending.
+      expect(find.byIcon(Icons.edit_outlined), findsNWidgets(2));
+      expect(find.byIcon(Icons.send_outlined), findsNothing);
     });
 
-    testWidgets('an armed bar does not explain itself', (tester) async {
+    testWidgets('an armed bar says a tap sends, and wears the send icon',
+        (tester) async {
       await pumpBar(tester);
 
-      expect(find.text('Tap a reply to open it in the composer.'), findsNothing);
+      expect(
+        find.text(
+            'Tap a suggestion to send it — you can undo for a few seconds.'),
+        findsOneWidget,
+      );
+      expect(find.text('Tap a reply to open it in the composer.'),
+          findsNothing);
+      expect(find.byIcon(Icons.send_outlined), findsNWidgets(2));
+    });
+
+    testWidgets('the whole reply is visible — no tooltip, no truncation',
+        (tester) async {
+      // A tap may SEND these words, so all of them are on screen. The long
+      // body must lay out unclipped rather than hide its tail behind a hover.
+      const long = DraftOption(
+        stance: 'Decline politely',
+        body: 'Thanks so much for thinking of me — unfortunately I have a '
+            'prior commitment on Friday evening that I cannot move, so I '
+            'will have to miss this one. I would love to join the next '
+            'dinner, and I hope you all have a wonderful time together.',
+      );
+      await pumpBar(tester, options: const [long]);
+
+      expect(find.byType(Tooltip), findsNothing);
+      final text = tester.widget<Text>(find.text(long.body));
+      expect(text.maxLines, isNull);
+      expect(text.overflow, isNot(TextOverflow.ellipsis));
     });
   });
 
