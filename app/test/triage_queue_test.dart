@@ -180,6 +180,7 @@ void main() {
     String key = 'conv-1',
     String source = 'email',
     String? lastInboundAt = '2026-08-29T10:00:00Z',
+    String? lastOutboundAt,
     String state = 'needs_reply',
   }) async {
     await store.upsertConversation({
@@ -188,7 +189,8 @@ void main() {
       'subject': 'Launch date',
       'state': state,
       'last_inbound_at': lastInboundAt,
-      'last_message_at': lastInboundAt,
+      'last_outbound_at': lastOutboundAt,
+      'last_message_at': lastOutboundAt ?? lastInboundAt,
     });
   }
 
@@ -930,6 +932,76 @@ void main() {
       final row = await conversationRow();
       expect(row['cta_text'], 'Send the project brief');
       expect(row['cta_urgency'], 'urgent');
+    });
+
+    test('an ask the user already answered never comes back as a CTA',
+        () async {
+      // The resurrection case: the CTA was cleared when the user's reply
+      // synced in, then a re-judgment backfill (or an error revive, or a
+      // reply that beat the first drain) sends the same inbound message
+      // through triage again. The fold must not write the dead ask back —
+      // nor the urgency multiplier that would push an answered thread into
+      // Needs You.
+      await seedConversation(
+        lastInboundAt: '2026-08-29T10:00:00Z',
+        lastOutboundAt: '2026-08-29T11:00:00Z',
+        state: 'waiting',
+      );
+      await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
+      final llm = FakeLlm([
+        answer(
+          urgency: 'urgent',
+          actionItems: const ['Confirm attendance'],
+          deadline: 'Friday',
+        ),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      // The message itself is still judged — its own columns are what the
+      // scorer and a future re-judgment read.
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      final row = await conversationRow();
+      expect(row['cta_text'], isNull);
+      expect(row['cta_urgency'], 'normal');
+      expect(row['state'], 'waiting');
+    });
+
+    test('a reply at the same instant as the ask still counts as the answer',
+        () async {
+      // Ties resolve toward the reply, exactly as outboundResolves reads
+      // them when it clears the CTA at ingest — the two guards must agree on
+      // the boundary or a same-second pair would clear and resurrect in turn.
+      await seedConversation(
+        lastInboundAt: '2026-08-29T10:00:00Z',
+        lastOutboundAt: '2026-08-29T10:00:00Z',
+        state: 'waiting',
+      );
+      await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
+      final llm = FakeLlm([
+        answer(actionItems: const ['Confirm attendance']),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect((await conversationRow())['cta_text'], isNull);
+    });
+
+    test('an ask newer than the last reply still folds up', () async {
+      // The inverse must keep working: the user replied, then the sender
+      // asked again. That newer ask is unanswered and owns the thread.
+      await seedConversation(
+        lastInboundAt: '2026-08-29T12:00:00Z',
+        lastOutboundAt: '2026-08-29T11:00:00Z',
+      );
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T12:00:00Z');
+      final llm = FakeLlm([
+        answer(actionItems: const ['Send the revised draft']),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect((await conversationRow())['cta_text'], 'Send the revised draft');
     });
 
     test('a message with no conversation row folds up into nothing', () async {

@@ -422,11 +422,21 @@ class TriageQueue {
   }
 
   /// Copies one message's result up onto its conversation — but only when the
-  /// message is the thread's newest inbound.
+  /// message is the thread's newest inbound, and only while the user has not
+  /// already replied to it.
   ///
-  /// Without that check a backlog would end up showing the wrong ask: the
-  /// worker runs newest-first, so an older message finishing later would
-  /// overwrite a current CTA with one from last week.
+  /// Without the newest-inbound check a backlog would end up showing the wrong
+  /// ask: the worker runs newest-first, so an older message finishing later
+  /// would overwrite a current CTA with one from last week.
+  ///
+  /// Without the already-replied check a RE-triage would resurrect a dead ask.
+  /// Ingest clears the CTA on exactly the outbound that answers it
+  /// ([outboundResolves]); anything that sends the same message through triage
+  /// again afterwards — a re-judgment backfill, an error revive, a reply that
+  /// lands before the first drain gets there — would write that ask straight
+  /// back, along with the urgency multiplier that pushes an answered thread
+  /// into Needs You. The tie goes to the reply, matching [outboundResolves]:
+  /// an outbound at the same instant as the inbound counts as the answer.
   Future<void> _foldUp(
     String source,
     Map<String, Object?> row,
@@ -443,6 +453,13 @@ class TriageQueue {
     if (lastInbound != null &&
         lastInbound.isNotEmpty &&
         receivedAt.compareTo(lastInbound) < 0) {
+      return;
+    }
+
+    final lastOutbound = conversation['last_outbound_at'] as String?;
+    if (lastOutbound != null &&
+        lastOutbound.isNotEmpty &&
+        lastOutbound.compareTo(receivedAt) >= 0) {
       return;
     }
 
