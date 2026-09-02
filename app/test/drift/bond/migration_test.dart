@@ -177,4 +177,35 @@ void main() {
     );
     expect(written['options_dismissed'], 1);
   });
+
+  test('v4 to v5 adds the triage v2 columns and keeps the message', () async {
+    final schema = await verifier.schemaAt(4);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, triage_status, created_at, updated_at)
+      VALUES ('email', 'm-1', 'c1', 'inbound', 'Closing Friday', 'triaged',
+        't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 5);
+    addTearDown(db.close);
+
+    final row = (await db
+            .customSelect(
+                'SELECT subject, addressed_me, reply_expected, deadline '
+                'FROM messages WHERE source_message_id = ?',
+                variables: [Variable('m-1')])
+            .getSingle())
+        .data;
+
+    expect(row['subject'], 'Closing Friday');
+    // A message stored before triage v2 existed was addressed to nobody in
+    // particular as far as this app can tell, and carries no judgement at all
+    // — `reply_expected` NULL is what `rejudgeStaleTriage` looks for, and it
+    // must never arrive as a 0 that reads like a decided "no".
+    expect(row['addressed_me'], 0);
+    expect(row['reply_expected'], null);
+    expect(row['deadline'], null);
+  });
 }

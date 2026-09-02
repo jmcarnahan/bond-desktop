@@ -281,11 +281,28 @@ class TriageQueue {
       return true;
     }
 
+    // The thread is context for `reply_expected`: an unanswered question a few
+    // messages back still expects an answer, and this message on its own does
+    // not say so. Only what came BEFORE it — a later message is not context
+    // for a judgement about this one. TriageTask takes the last few.
+    var thread = const <Message>[];
+    final key = current['conversation_key'] as String?;
+    if (key != null && key.isNotEmpty) {
+      final loaded = await _store.loadThread(key, sources: [source]);
+      final receivedAt = message.receivedAt ?? '';
+      thread = [
+        for (final m in loaded)
+          if (m.id != message.id &&
+              (m.receivedAt ?? '').compareTo(receivedAt) <= 0)
+            m,
+      ];
+    }
+
     try {
       final result = await runTask(
         _client,
         const TriageTask(),
-        TriageInput(message, DateTime.now()),
+        TriageInput(message, DateTime.now(), thread: thread),
       );
       await _store.writeTriage(source, id, status: 'triaged', result: result);
       await _foldUp(source, current, message, result);
@@ -301,6 +318,8 @@ class TriageQueue {
           'category': result.category,
           'needs_action': result.needsAction,
           'action_items': result.actionItems.length,
+          'reply_expected': result.replyExpected,
+          if (result.deadline.isNotEmpty) 'deadline': result.deadline,
         },
       );
       await _emit();
@@ -431,9 +450,17 @@ class TriageQueue {
     // for. With no items, a summary stands in only when the message actually
     // needs something — a summary shown as a CTA on mail that needs nothing
     // reads as work that isn't there.
-    final ask = result.actionItems.isNotEmpty
+    var ask = result.actionItems.isNotEmpty
         ? result.actionItems.first
         : (result.needsAction ? result.summary : null);
+
+    // The deadline rides the banner for free — "Send the invoice — by Friday"
+    // is the line the row wanted anyway. Appended BEFORE the clamp below, so
+    // the pair stays honest: a long ask loses its own tail rather than ending
+    // up with a deadline the cap would have cut in half.
+    if (ask != null && ask.isNotEmpty && result.deadline.isNotEmpty) {
+      ask = '$ask — by ${result.deadline}';
+    }
 
     await _store.updateConversationTriage(
       source,

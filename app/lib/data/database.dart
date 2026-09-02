@@ -36,7 +36,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -107,6 +107,29 @@ class BondDatabase extends _$BondDatabase {
                     schema.drafts,
                     schema.drafts.optionsDismissed,
                   );
+                }
+              },
+              // v5 — triage v2 asks about the person, not just the text: was
+              // the reader singled out (`addressed_me`, written at ingest by
+              // each connector), does the sender expect an answer
+              // (`reply_expected`), and by when (`deadline`). Every migrated
+              // row reads "nobody singled me out, never judged, no date",
+              // which is what the re-judgement pass in each sync looks for.
+              from4To5: (m, schema) async {
+                if (!await _columnExists('messages', 'addressed_me')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.addressedMe,
+                  );
+                }
+                if (!await _columnExists('messages', 'reply_expected')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.replyExpected,
+                  );
+                }
+                if (!await _columnExists('messages', 'deadline')) {
+                  await m.addColumn(schema.messages, schema.messages.deadline);
                 }
               },
             ),

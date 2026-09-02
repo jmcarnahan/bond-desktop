@@ -246,6 +246,10 @@ void main() {
       // needs the user.
       expect(reply['triage_status'], 'skipped');
       expect(reply['gate_reason'], 'outbound');
+      // Nothing the user wrote was addressed to the user, whatever kind of
+      // chat it went into — which is why the send path passes none of the
+      // params that decide the flag and still writes the right one.
+      expect(reply['addressed_me'], 0);
     });
 
     test('flips the thread to waiting and answers the CTA', () async {

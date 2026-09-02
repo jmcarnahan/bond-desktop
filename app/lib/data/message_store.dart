@@ -79,6 +79,16 @@ class MessageStore {
   /// what makes the sync's backlog rule ("everything older than a week
   /// arrives already skipped") safe to evaluate on every page: a message
   /// seen again — or already triaged — keeps whatever it has.
+  ///
+  /// `addressed_me` is the one exception to that rule, and it moves on
+  /// conflict — but only UP. A richer re-pull may raise it (the wire starts
+  /// carrying mentions, and an already-stored chat message gains its @mention
+  /// flag), while a thinner one must not lower it: a backend switched before
+  /// the server sends mentions, or a sync whose keychain read failed, hands
+  /// this exact code a payload that honestly computed 0 for a message that
+  /// honestly earned its 1. The only real downgrade — an edit that removes an
+  /// @mention — is rare, and keeping the flag errs toward attention, which is
+  /// the direction this column exists to err in.
   Future<void> upsertMessage(Map<String, Object?> row) async {
     final now = _nowIso();
     await db.customUpdate(
@@ -87,14 +97,15 @@ INSERT INTO messages (
   source, source_message_id, internet_message_id, conversation_key, direction,
   subject, from_name, from_address, to_json, received_at, is_read,
   body_preview, body_text, has_attachments, source_meta_json,
-  triage_status, gate_reason,
+  triage_status, gate_reason, addressed_me,
   created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(source, source_message_id) DO UPDATE SET
   is_read = excluded.is_read,
   subject = COALESCE(excluded.subject, messages.subject),
   body_preview = COALESCE(excluded.body_preview, messages.body_preview),
   body_text = COALESCE(excluded.body_text, messages.body_text),
+  addressed_me = MAX(messages.addressed_me, excluded.addressed_me),
   updated_at = excluded.updated_at
 ''',
       variables: _args([
@@ -115,6 +126,7 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
         row['source_meta_json'],
         row['triage_status'] ?? 'pending',
         row['gate_reason'],
+        row['addressed_me'] ?? 0,
         row['created_at'] ?? now,
         row['updated_at'] ?? now,
       ]),
@@ -681,6 +693,134 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     );
   }
 
+  /// Puts the newest inbound message of each conversation back in the triage
+  /// queue when triage v2 has never judged it, and returns how many that was.
+  ///
+  /// Three predicates, each carrying its own weight:
+  /// - `reply_expected IS NULL` is what makes this self-exhausting. v2 writes
+  ///   that column on every result, so a row it has judged — 0 included — is
+  ///   out of reach on the next pass and the model is never asked twice.
+  /// - only the NEWEST inbound per conversation, which bounds the spend: the
+  ///   whole point is the standing ask on a thread, and the message that
+  ///   carries it is the last one the other side sent. Ties break on
+  ///   `source_message_id DESC`, the same way [latestInboundMeta] breaks them,
+  ///   so both agree on which message that is.
+  /// - `received_at >= sinceIso`, so a v1 archive cannot hand the model a year
+  ///   of history to re-judge.
+  Future<int> rejudgeStaleTriage({
+    required String source,
+    required String sinceIso,
+  }) {
+    return db.customUpdate(
+      "UPDATE messages SET triage_status = 'pending', updated_at = ? "
+      "WHERE source = ? AND direction = 'inbound' "
+      "AND triage_status = 'triaged' "
+      'AND reply_expected IS NULL AND received_at >= ? '
+      'AND NOT EXISTS ('
+      '  SELECT 1 FROM messages m2 '
+      '  WHERE m2.source = messages.source '
+      '    AND m2.conversation_key = messages.conversation_key '
+      "    AND m2.direction = 'inbound' "
+      '    AND (m2.received_at > messages.received_at '
+      '         OR (m2.received_at = messages.received_at '
+      '             AND m2.source_message_id > messages.source_message_id)))',
+      variables: _args([_nowIso(), source, sinceIso]),
+    );
+  }
+
+  /// A JSON-encoded TEXT column as a list, tolerating null, empty string,
+  /// malformed JSON and a payload that decodes to something else. The two
+  /// backfills below read columns written by two different connectors, and
+  /// neither may throw over a row it cannot parse.
+  ///
+  /// Not [_decodeIds], which is stricter on purpose: it drops everything that
+  /// is not a string, and `participants_json` holds objects.
+  static List<dynamic> _decodeJsonList(Object? raw) {
+    if (raw is! String || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is List ? decoded : const [];
+    } on FormatException {
+      return const [];
+    }
+  }
+
+  /// Marks the stored mail that was addressed to the user alone, and returns
+  /// how many rows that was.
+  ///
+  /// The one-time catch-up for [addressed_me], which only exists from the sync
+  /// that started writing it onward. Sole To: recipient and nothing else — CC
+  /// never reaches `to_json`, which IS the rule the ingest applies.
+  ///
+  /// Decoded in Dart rather than matched in SQL: `to_json` is a JSON array, and
+  /// a LIKE against its text would call `sarah@x.com` a match for a message to
+  /// `not-sarah@x.com`.
+  Future<int> backfillEmailAddressedMe({
+    required String userAddress,
+    required String sinceIso,
+  }) async {
+    final rows = await db
+        .customSelect(
+          'SELECT source_message_id, to_json FROM messages '
+          "WHERE source = 'email' AND direction = 'inbound' "
+          'AND received_at >= ?',
+          variables: _args([sinceIso]),
+        )
+        .get();
+
+    final me = userAddress.toLowerCase();
+    final ids = <String>[];
+    for (final row in rows) {
+      final recipients = _decodeJsonList(row.data['to_json']);
+      if (recipients.length != 1) continue;
+      if (recipients.first.toString().toLowerCase() != me) continue;
+      final id = row.data['source_message_id'] as String?;
+      if (id != null) ids.add(id);
+    }
+    if (ids.isEmpty) return 0;
+
+    return db.customUpdate(
+      'UPDATE messages SET addressed_me = 1, updated_at = ? '
+      "WHERE source = 'email' "
+      'AND source_message_id IN (${_placeholders(ids.length)})',
+      variables: _args([_nowIso(), ...ids]),
+    );
+  }
+
+  /// Marks the stored chat messages that arrived in a 1:1 chat, and returns how
+  /// many rows that was.
+  ///
+  /// Only the 1:1 half of the signal: an @mention was never stored anywhere, so
+  /// there is nothing on disk to read it back out of. Mentions start counting
+  /// from the first sync that writes them, and the history stays quiet rather
+  /// than being guessed at.
+  ///
+  /// A 1:1 chat is one whose stored participants number exactly one — the
+  /// roster is written without the user themselves.
+  Future<int> backfillTeamsAddressedMe({required String sinceIso}) async {
+    final rows = await db
+        .customSelect(
+          "SELECT conversation_key, participants_json FROM conversations "
+          "WHERE source = 'teams'",
+        )
+        .get();
+
+    final keys = [
+      for (final row in rows)
+        if (_decodeJsonList(row.data['participants_json']).length == 1)
+          if (row.data['conversation_key'] case final String key) key,
+    ];
+    if (keys.isEmpty) return 0;
+
+    return db.customUpdate(
+      'UPDATE messages SET addressed_me = 1, updated_at = ? '
+      "WHERE source = 'teams' AND direction = 'inbound' "
+      'AND received_at >= ? '
+      'AND conversation_key IN (${_placeholders(keys.length)})',
+      variables: _args([_nowIso(), sinceIso, ...keys]),
+    );
+  }
+
   /// Folds one message's triage result up onto its conversation.
   ///
   /// A targeted UPDATE rather than [upsertConversation] on purpose: that
@@ -733,6 +873,8 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
         'summary = ?',
         'needs_action = ?',
         'action_items_json = ?',
+        'reply_expected = ?',
+        'deadline = ?',
       ]);
       args.addAll([
         result.urgency,
@@ -744,6 +886,12 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
         // An explicit int — `needs_action` is read back as `row != 0`.
         result.needsAction ? 1 : 0,
         jsonEncode(result.actionItems),
+        // Writing this is what takes a row out of `rejudgeStaleTriage`'s
+        // reach: NULL means v2 never looked, and 0 is a judgement it made.
+        result.replyExpected ? 1 : 0,
+        // NULL, not '': the same rule `label` takes, and it means the message
+        // named no date rather than naming an empty one.
+        result.deadline.isEmpty ? null : result.deadline,
       ]);
     }
     if (error != null) {

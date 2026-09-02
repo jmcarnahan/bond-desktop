@@ -93,6 +93,8 @@ Map<String, dynamic> answer({
   String summary = 'Jordan asks about the launch date.',
   bool needsAction = true,
   List<String> actionItems = const ['Call Sarah about the lock'],
+  bool replyExpected = false,
+  String deadline = '',
 }) =>
     {
       'urgency': urgency,
@@ -100,6 +102,8 @@ Map<String, dynamic> answer({
       'summary': summary,
       'needs_action': needsAction,
       'action_items': actionItems,
+      'reply_expected': replyExpected,
+      'deadline': deadline,
     };
 
 void main() {
@@ -216,8 +220,15 @@ void main() {
 
     test('two drains over one backlog take every message exactly once',
         () async {
+      // A thread each, so "who asked for m5's body" has exactly one answer:
+      // on one shared thread every message quotes the ones before it, and the
+      // per-body count below could not tell a second claim from a quote.
       for (var i = 0; i < 9; i++) {
-        await seedMessage(id: 'm$i', receivedAt: '2026-08-29T1$i:00:00Z');
+        await seedMessage(
+          id: 'm$i',
+          conversationKey: 'conv-$i',
+          receivedAt: '2026-08-29T1$i:00:00Z',
+        );
       }
       // Two queues rather than two pumps of one: the `_running` flag guards a
       // queue against itself, and each queue carries its own [DrainGate], so
@@ -621,6 +632,103 @@ void main() {
     });
   });
 
+  group('thread context', () {
+    test('the judged message carries what came before it on its thread',
+        () async {
+      await seedMessage(
+        id: 'first',
+        receivedAt: '2026-08-29T09:00:00Z',
+        bodyText: 'Can you still make Thursday?',
+      );
+      await seedMessage(
+        id: 'second',
+        receivedAt: '2026-08-29T10:00:00Z',
+        bodyText: 'Any word on that?',
+      );
+      final llm = FakeLlm([answer()]);
+
+      // Serial, because the assertion is about WHICH request carried what:
+      // newest first, so `second` goes out before `first`.
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      final judgingSecond = llm.userMessages.first;
+      expect(judgingSecond, contains('<untrusted_data source="thread">'));
+      // The earlier message is quoted as context — this is what lets the model
+      // see that a question a message back never got answered.
+      expect(
+        judgingSecond.indexOf('Can you still make Thursday?'),
+        lessThan(judgingSecond.indexOf('Judge ONLY this message:')),
+      );
+      expect(
+        judgingSecond.indexOf('Any word on that?'),
+        greaterThan(judgingSecond.indexOf('Judge ONLY this message:')),
+      );
+    });
+
+    test('the oldest message on a thread has no thread to quote', () async {
+      await seedMessage(
+        id: 'first',
+        receivedAt: '2026-08-29T09:00:00Z',
+        bodyText: 'Can you still make Thursday?',
+      );
+      await seedMessage(
+        id: 'second',
+        receivedAt: '2026-08-29T10:00:00Z',
+        bodyText: 'Any word on that?',
+      );
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      // Only what came BEFORE: a later message is not context for a judgement
+      // about an earlier one.
+      final judgingFirst = llm.userMessages.last;
+      expect(judgingFirst, isNot(contains('source="thread"')));
+      expect(judgingFirst, isNot(contains('Any word on that?')));
+    });
+
+    test('a thread of one — the message itself is never its own context',
+        () async {
+      await seedMessage(id: 'm1', bodyText: 'The only message.');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages.single, isNot(contains('source="thread"')));
+      expect('The only message.'.allMatches(llm.userMessages.single).length, 1);
+    });
+
+    test('a chat quotes its own thread and not the mail sharing its key',
+        () async {
+      await seedChat(
+        id: 'c1',
+        receivedAt: '2026-08-29T09:00:00Z',
+        bodyText: 'Did the CD go out?',
+      );
+      await seedChat(
+        id: 'c2',
+        receivedAt: '2026-08-29T10:00:00Z',
+        bodyText: 'Bumping this.',
+      );
+      // Same conversation_key under email, to catch a thread load that reads
+      // the right key against the wrong source.
+      await seedMessage(
+        id: 'm1',
+        conversationKey: 'chat-1',
+        receivedAt: '2026-08-29T08:00:00Z',
+        bodyText: 'A mail that merely shares the key.',
+        triageStatus: 'triaged',
+      );
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      final judgingC2 = llm.userMessages.first;
+      expect(judgingC2, contains('Did the CD go out?'));
+      expect(judgingC2, isNot(contains('A mail that merely shares the key.')));
+    });
+  });
+
   group('results', () {
     test('a success writes every result column', () async {
       await seedMessage(id: 'm1');
@@ -645,6 +753,20 @@ void main() {
         jsonDecode(row['action_items_json'] as String),
         ['Send the final copy', 'Call Marisa'],
       );
+    });
+
+    test('reply_expected reaches the row, so a NULL becomes a judgement',
+        () async {
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([answer(replyExpected: true, deadline: 'Friday')]);
+
+      await TriageQueue(store, llm).pump();
+
+      final row = await messageRow('m1');
+      // 0/1, because STRICT sqlite has no bool — and the point is that it is
+      // no longer NULL: something has now judged this message.
+      expect(row['reply_expected'], 1);
+      expect(row['deadline'], 'Friday');
     });
 
     test('a nonsense answer is clamped rather than stored raw', () async {
@@ -702,6 +824,64 @@ void main() {
         (await conversationRow())['cta_text'],
         'Sarah is waiting on the lock extension.',
       );
+    });
+
+    test('a deadline rides along on the CTA', () async {
+      await seedConversation();
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([
+        answer(
+          actionItems: const ['Send the final invoice'],
+          deadline: 'Friday',
+        ),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(
+        (await conversationRow())['cta_text'],
+        'Send the final invoice — by Friday',
+      );
+    });
+
+    test('a CTA with its deadline still fits the cap', () async {
+      await seedConversation();
+      await seedMessage(id: 'm1');
+      // An ask already at the cap: appending the deadline must cost the ask
+      // its tail rather than push the pair over.
+      final llm = FakeLlm([
+        answer(actionItems: ['a' * 200], deadline: 'Friday'),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      final cta = (await conversationRow())['cta_text'] as String;
+      expect(cta.length, 200);
+      expect(cta, startsWith('aaa'));
+    });
+
+    test('no deadline leaves the ask exactly as the model wrote it', () async {
+      await seedConversation();
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([answer(actionItems: const ['Send the invoice'])]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect((await conversationRow())['cta_text'], 'Send the invoice');
+    });
+
+    test('a deadline with nothing to hang it on adds no CTA', () async {
+      await seedConversation();
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([
+        answer(needsAction: false, actionItems: const [], deadline: 'Friday'),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      // " — by Friday" on its own is not an ask, and a row showing one would
+      // be advertising work the message never asked for.
+      expect((await conversationRow())['cta_text'], isNull);
     });
 
     test('a message that needs nothing leaves no CTA', () async {
@@ -997,7 +1177,11 @@ void main() {
     await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
     late TriageQueue queue;
     final llm = _InspectingLlm(() => queue.stop());
-    queue = TriageQueue(store, llm);
+    // Serial, so "the message in flight" is exactly one message: at three at a
+    // time the drain has legitimately launched siblings before the stop lands,
+    // and what happens to those is the park test's subject rather than this
+    // one's. The claim here is that stop launches nothing FURTHER.
+    queue = TriageQueue(store, llm, concurrency: 1);
 
     await queue.pump();
 

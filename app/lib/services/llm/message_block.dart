@@ -38,6 +38,31 @@ String _sender(Message message) => switch (message.source) {
       _ => 'From: ${message.fromName ?? ''} <${message.fromAddress ?? ''}>',
     };
 
+/// How directly this message came at the reader, in one line.
+///
+/// Derived from the `addressed_me` the connector wrote at ingest — sole To:
+/// recipient for mail, a 1:1 chat or an @mention for Teams — plus the To: count
+/// the row already carries. It is the APP's own statement about the message,
+/// not the sender's, which is why callers put it OUTSIDE the fence: it is a
+/// fact the model may act on rather than text it must only analyse.
+///
+/// A NULL or false `addressed_me` collapses into the quiet case deliberately.
+/// A connector that never wrote the column, and one that wrote "no", both mean
+/// the same thing here — nothing knows this message singled the reader out —
+/// and reading either as "yes" would push a group broadcast up the list.
+String buildDirectnessLine(Message message) {
+  if (message.source == 'teams') {
+    return message.addressedMe
+        ? 'Addressed to: you directly (a 1:1 chat, or you are @mentioned).'
+        : 'Addressed to: a group chat, not you specifically.';
+  }
+  if (message.addressedMe) return 'Addressed to: only you.';
+  if (message.to.length > 1) {
+    return 'Addressed to: you and ${message.to.length - 1} others.';
+  }
+  return 'Addressed to: you indirectly (CC, a list, or unknown).';
+}
+
 /// A chat has no subject, ever (`TeamsSync.messageRow` stores null rather than
 /// inventing one from the first line). An empty `Subject:` line would tell the
 /// model a title was missing rather than that this channel has none.

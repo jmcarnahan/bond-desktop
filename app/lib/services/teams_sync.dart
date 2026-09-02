@@ -195,6 +195,22 @@ class TeamsSync {
         sinceIso: floor,
       );
 
+      // Chat messages the first triage judged before it asked whether a reply
+      // is expected. Same position and same reason as the re-pend above: what
+      // this flips to `pending` the enqueue below picks up in this pass.
+      // Self-exhausting — see [MessageStore.rejudgeStaleTriage].
+      final rejudged =
+          await _store.rejudgeStaleTriage(source: source, sinceIso: floor);
+
+      // The one-time catch-up for chats stored before ingest wrote
+      // `addressed_me`. Null until it runs, so the activity row can tell "ran
+      // and found nothing" from "did not run".
+      int? backfilled;
+      if (await _store.getPref('backfill_addressed_me_teams') == null) {
+        backfilled = await _store.backfillTeamsAddressedMe(sinceIso: floor);
+        await _store.setPref('backfill_addressed_me_teams', '1');
+      }
+
       // A transient failure — the model server mid-load, two timeouts in a row
       // — must not remove a chat from the AI pipeline forever, exactly as it
       // must not for mail (`sync_service.dart`).
@@ -230,6 +246,8 @@ class TeamsSync {
           'queued_extract': queued,
           'revived_triage': revivedTriage,
           if (repended > 0) 'repended_triage': repended,
+          if (rejudged > 0) 'rejudged_triage': rejudged,
+          'backfilled_addressed_me': ?backfilled,
         },
       );
     } catch (e) {
@@ -291,7 +309,21 @@ class TeamsSync {
   }) {
     return _store.db.transaction(() async {
       var newMessages = 0;
-      final work = _ChatWork.from(await _store.getConversationRow(source, key));
+      final storedRow = await _store.getConversationRow(source, key);
+      final work = _ChatWork.from(storedRow);
+
+      // Asked once per chat, and from two different places on purpose: the
+      // roster is fetched only at first sight (a deliberate request budget —
+      // see the call site), so every later sync reads the answer back off the
+      // participants that first sight stored. A 1:1 chat stores exactly one
+      // participant, because the roster is written without the user.
+      final oneOnOne = firstSight
+          ? members.where((m) {
+              final id = m['userId'] as String?;
+              return id != null && id.isNotEmpty && id != myId;
+            }).length ==
+              1
+          : _participantCount(storedRow) == 1;
 
       if (firstSight) {
         for (final member in members) {
@@ -307,7 +339,8 @@ class TeamsSync {
       }
 
       for (final message in raw) {
-        final row = _messageRow(message, key, myId, lastReadAt);
+        final row = _messageRow(message, key, myId, lastReadAt,
+            oneOnOne: oneOnOne);
         if (row == null) continue;
 
         final id = row['source_message_id'] as String;
@@ -339,6 +372,20 @@ class TeamsSync {
     });
   }
 
+  /// How many people a stored chat row lists, defensively. A row that is not
+  /// there, or whose `participants_json` will not decode, counts zero — which
+  /// reads as "not a 1:1", the quiet answer.
+  static int _participantCount(Map<String, Object?>? row) {
+    final raw = row?['participants_json'];
+    if (raw is! String || raw.isEmpty) return 0;
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is List ? decoded.length : 0;
+    } on FormatException {
+      return 0;
+    }
+  }
+
   /// One chat message this sync pulled, as a `messages` row.
   ///
   /// Only the direction is this method's own: everything else is
@@ -348,14 +395,18 @@ class TeamsSync {
     Map<String, dynamic> message,
     String key,
     String myId,
-    String? lastReadAt,
-  ) {
+    String? lastReadAt, {
+    required bool oneOnOne,
+  }) {
     final (_, senderId, _) = _sender(message['from']);
     return messageRow(
       message,
       key,
       outbound: senderId != null && senderId == myId,
       lastReadAt: lastReadAt,
+      oneOnOne: oneOnOne,
+      mentions: mentionedUserIds(message['mentions']),
+      myId: myId,
     );
   }
 
@@ -375,11 +426,17 @@ class TeamsSync {
   /// differently: the sync compares the sender against the signed-in user's id,
   /// while the composer knows it wrote the message itself and must not depend
   /// on Graph having echoed a `from` back at all.
+  /// [oneOnOne], [mentions] and [myId] are what decide `addressed_me`, and all
+  /// three default to "nothing known": the composer's send path passes none of
+  /// them, and an outbound row is not addressed to its own author anyway.
   static Map<String, Object?>? messageRow(
     Map<String, dynamic> message,
     String key, {
     required bool outbound,
     String? lastReadAt,
+    bool oneOnOne = false,
+    List<String> mentions = const [],
+    String? myId,
   }) {
     if (message['messageType'] != 'message') return null;
     final id = message['id'] as String?;
@@ -401,6 +458,12 @@ class TeamsSync {
             outbound: outbound,
             receivedAt: message['createdDateTime'] as String?,
           );
+
+    // A chat message singles the reader out two ways: it was sent to them and
+    // nobody else, or it named them. A bot's message computes this the same
+    // way and gets the same answer — it is inbound-gated regardless.
+    final addressedMe = !outbound &&
+        (oneOnOne || (myId != null && mentions.contains(myId)));
 
     return {
       'source': source,
@@ -428,6 +491,7 @@ class TeamsSync {
           : 0,
       'triage_status': triageStatus,
       'gate_reason': gateReason,
+      'addressed_me': addressedMe ? 1 : 0,
     };
   }
 
@@ -486,6 +550,28 @@ class TeamsSync {
       );
     }
     return (null, null, false);
+  }
+
+  /// The Graph ids a chat message @mentions, in the order they appear.
+  ///
+  /// Graph nests them three deep — `[{'mentioned': {'user': {'id': …}}}]` —
+  /// and every level is checked, because the field is absent altogether on the
+  /// wire this app reads today (the MCP server predates it). Absent means no
+  /// mention signal and nothing else: a chat that carries no mentions degrades
+  /// to the 1:1 half of [addressed_me] rather than to a wrong answer.
+  static List<String> mentionedUserIds(Object? raw) {
+    if (raw is! List) return const [];
+    final ids = <String>[];
+    for (final entry in raw) {
+      if (entry is! Map) continue;
+      final mentioned = entry['mentioned'];
+      if (mentioned is! Map) continue;
+      final user = mentioned['user'];
+      if (user is! Map) continue;
+      final id = user['id'] as String?;
+      if (id != null && id.isNotEmpty) ids.add(id);
+    }
+    return ids;
   }
 
   /// A chat message's body as text. Graph sends `html` for anything with

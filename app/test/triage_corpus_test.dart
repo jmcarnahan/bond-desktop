@@ -72,7 +72,7 @@ void main() {
         // The anchor is ours and sits OUTSIDE the fence; everything the
         // sender wrote sits inside it.
         expect(user, startsWith('Today is 2026-08-31 ('));
-        expect(user, contains('<untrusted_data source="inbound_email">'));
+        expect(user, contains('<untrusted_data source="inbound_message">'));
         expect(user, contains('</untrusted_data>'));
         expect(user, contains(escaped(promptBody(entry))));
       });
