@@ -173,7 +173,19 @@ class ActivityLogPanel extends StatefulWidget {
       case 'storyline':
         return 'Storylines updated';
       case 'storyline_sweep':
-        return 'Storyline sweep';
+        final proposed = detail['proposed'];
+        final confirmed = detail['confirmed'];
+        final rejected = detail['rejected'];
+        if (proposed is! num) return label;
+        // The tallies the confirm stage added, when the row carries them. Rows
+        // written before it existed have only `proposed`, and they still read
+        // as the sentence they were written as.
+        if (confirmed is! num || rejected is! num) {
+          return '$label — ${proposed.toInt()} proposed';
+        }
+        return '$label — ${proposed.toInt()} proposed, '
+            '${confirmed.toInt()} ${confirmed == 1 ? 'thread' : 'threads'} '
+            'confirmed, ${rejected.toInt()} rejected';
       case 'storyline_recruit':
         final recruited = detail['recruited'];
         final considered = detail['considered'];

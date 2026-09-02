@@ -1,7 +1,10 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/attention.dart';
 import 'package:bond_inbox/services/attention_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -16,6 +19,14 @@ void main() {
   final now = DateTime.utc(2026, 8, 29, 12);
   const String justNow = '2026-08-29T11:00:00Z';
 
+  /// What a message [justNow] — one hour before [now] — is multiplied by.
+  /// Small, but it is why the scores below are not round numbers.
+  final decay = math.exp(-math.ln2 * (1 / 24) / AttentionTuning.recencyHalfLifeDays);
+
+  /// Both sources, for the tests that seed a Teams thread. The default is
+  /// email-only, the same as production's mail-only configuration.
+  const both = ['email', 'teams'];
+
   setUp(() {
     db = testDb();
     store = MessageStore(db);
@@ -25,16 +36,28 @@ void main() {
   tearDown(() async => db.close());
 
   /// One thread with one inbound message and, optionally, an extraction on it.
+  ///
+  /// [replyExpected] null is the important default: it leaves the message
+  /// untriaged, which is how the columns read for every thread that predates
+  /// triage v2. Passing either value writes a triage result and puts the
+  /// message on the judged side of that line.
   Future<void> seed(
     String key, {
+    String source = 'email',
     String state = 'waiting',
     String from = 'eric@x.com',
     String? intent,
     String? importance,
     String receivedAt = justNow,
     String? ctaText,
+    bool addressedMe = false,
+    bool? replyExpected,
+    bool needsAction = false,
+    String deadline = '',
+    bool answered = false,
   }) async {
     await store.upsertConversation({
+      'source': source,
       'conversation_key': key,
       'subject': key,
       'state': state,
@@ -43,15 +66,43 @@ void main() {
       'last_inbound_at': receivedAt,
     });
     await store.upsertMessage({
+      'source': source,
       'source_message_id': '$key-m1',
       'conversation_key': key,
       'direction': 'inbound',
       'from_address': from,
       'received_at': receivedAt,
+      'addressed_me': addressedMe ? 1 : 0,
     });
+    if (answered) {
+      await store.upsertMessage({
+        'source': source,
+        'source_message_id': '$key-out',
+        'conversation_key': key,
+        'direction': 'outbound',
+        'from_address': 'me@x.com',
+        'received_at': receivedAt,
+      });
+    }
+    if (replyExpected != null) {
+      await store.writeTriage(
+        source,
+        '$key-m1',
+        status: 'done',
+        result: TriageResult(
+          urgency: 'normal',
+          category: 'other',
+          summary: key,
+          needsAction: needsAction,
+          actionItems: const [],
+          replyExpected: replyExpected,
+          deadline: deadline,
+        ),
+      );
+    }
     if (intent == null && importance == null) return;
     await store.writeExtraction(
-      'email',
+      source,
       '$key-m1',
       jsonEncode({
         'intent': intent ?? 'fyi',
@@ -60,12 +111,12 @@ void main() {
     );
   }
 
-  Future<String?> bucketOf(String key) async =>
-      (await store.getConversationAi('email', key))?['bucket'] as String?;
-  Future<String?> reasonOf(String key) async =>
-      (await store.getConversationAi('email', key))?['bucket_reason'] as String?;
-  Future<double?> scoreOf(String key) async =>
-      ((await store.getConversationAi('email', key))?['attention_score'] as num?)
+  Future<String?> bucketOf(String key, {String source = 'email'}) async =>
+      (await store.getConversationAi(source, key))?['bucket'] as String?;
+  Future<String?> reasonOf(String key, {String source = 'email'}) async =>
+      (await store.getConversationAi(source, key))?['bucket_reason'] as String?;
+  Future<double?> scoreOf(String key, {String source = 'email'}) async =>
+      ((await store.getConversationAi(source, key))?['attention_score'] as num?)
           ?.toDouble();
 
   group('scoring', () {
@@ -78,7 +129,7 @@ void main() {
       expect(await scoreOf('c2'), isNotNull);
     });
 
-    test('skips threads the LO has closed', () async {
+    test('skips threads the user has closed', () async {
       await seed('c1', state: 'done');
 
       expect(await service.recomputeAll(now: now), 0);
@@ -150,6 +201,187 @@ void main() {
     });
   });
 
+  group('triage v2 judgments reach the score', () {
+    test('a group-chat FYI nobody is waiting on drops out of Needs You',
+        () async {
+      // The thread this whole temper exists for: a Teams group chat where
+      // somebody said something to the room, not to the user. The state machine
+      // still calls it needs-reply — an inbound message went unanswered — but
+      // triage read it and found no one waiting.
+      await seed(
+        'tc-todd',
+        source: 'teams',
+        state: 'needs_reply',
+        from: 'teams:todd',
+        addressedMe: false,
+        replyExpected: false,
+        intent: 'fyi',
+        importance: 'low',
+      );
+
+      await service.recomputeAll(sources: both, now: now);
+
+      expect(
+        (await scoreOf('tc-todd', source: 'teams'))!,
+        closeTo(AttentionTuning.waitingBase * decay, 1e-9),
+      );
+      expect(
+        (await scoreOf('tc-todd', source: 'teams'))!,
+        lessThan(AttentionTuning.defaultThreshold),
+      );
+      // And it is still in the inbox — the temper quiets the rail, it does not
+      // file anything into Later.
+      expect(await bucketOf('tc-todd', source: 'teams'), isNull);
+    });
+
+    test('while an @mention asking a question steps forward', () async {
+      await seed(
+        'tc-mention',
+        source: 'teams',
+        state: 'needs_reply',
+        from: 'teams:todd',
+        addressedMe: true,
+        replyExpected: true,
+        intent: 'question',
+        importance: 'normal',
+      );
+      await seed(
+        'tc-todd',
+        source: 'teams',
+        state: 'needs_reply',
+        from: 'teams:todd',
+        replyExpected: false,
+        intent: 'fyi',
+        importance: 'low',
+      );
+
+      await service.recomputeAll(sources: both, now: now);
+
+      // Base 1.0, the question bonus, then the direct boost.
+      expect(
+        (await scoreOf('tc-mention', source: 'teams'))!,
+        closeTo(
+          (1.0 + AttentionTuning.questionBonus) *
+              decay *
+              AttentionTuning.directBoost,
+          1e-9,
+        ),
+      );
+      expect(
+        (await scoreOf('tc-mention', source: 'teams'))!,
+        greaterThan((await scoreOf('tc-todd', source: 'teams'))!),
+      );
+    });
+
+    test('a sole-recipient email is boosted the same way', () async {
+      await seed('c-sole',
+          state: 'needs_reply', addressedMe: true, replyExpected: true);
+
+      await service.recomputeAll(now: now);
+
+      expect(
+        (await scoreOf('c-sole'))!,
+        closeTo(decay * AttentionTuning.directBoost, 1e-9),
+      );
+    });
+
+    test('a named deadline reaches the scorer and blocks the temper', () async {
+      // Pins the `deadline` column riding through latestInboundMeta: without
+      // it this thread would temper to 0.35 on its fyi intent alone.
+      await seed(
+        'c-deadline',
+        state: 'needs_reply',
+        replyExpected: false,
+        deadline: 'by Friday',
+        intent: 'fyi',
+        importance: 'low',
+      );
+
+      await service.recomputeAll(now: now);
+
+      expect((await scoreOf('c-deadline'))!, closeTo(decay, 1e-9));
+    });
+
+    test('and so does a needed action', () async {
+      await seed(
+        'c-action',
+        state: 'needs_reply',
+        replyExpected: false,
+        needsAction: true,
+        intent: 'fyi',
+        importance: 'low',
+      );
+
+      await service.recomputeAll(now: now);
+
+      expect((await scoreOf('c-action'))!, closeTo(decay, 1e-9));
+    });
+
+    test('a thread triage v2 never judged scores exactly as it did before',
+        () async {
+      // The columns read NULL for every thread that predates v2, and NULL is
+      // never treated as "no reply expected". This is the untempered chain,
+      // unchanged: base 1.0 plus the question bonus, decayed.
+      await seed('c-legacy', state: 'needs_reply', intent: 'question');
+
+      await service.recomputeAll(now: now);
+
+      expect(
+        (await scoreOf('c-legacy'))!,
+        closeTo((1.0 + AttentionTuning.questionBonus) * decay, 1e-9),
+      );
+    });
+
+    test('Teams reply rates reach the score too', () async {
+      // Proves the second senderReplyRates call is wired: only the rate bonus
+      // can push a plain needs-reply thread above 1.0, and only a Teams-source
+      // query can find the rate for a `teams:` address.
+      await seed('tc-answered',
+          source: 'teams',
+          state: 'needs_reply',
+          from: 'teams:nina',
+          answered: true);
+      await seed('tc-quiet',
+          source: 'teams', state: 'needs_reply', from: 'teams:pat');
+
+      await service.recomputeAll(sources: both, now: now);
+
+      expect(
+        (await scoreOf('tc-answered', source: 'teams'))!,
+        closeTo((1.0 + AttentionTuning.replyRateMax) * decay, 1e-9),
+      );
+      expect((await scoreOf('tc-answered', source: 'teams'))!, greaterThan(1.0));
+      expect((await scoreOf('tc-quiet', source: 'teams'))!, lessThan(1.0));
+    });
+
+    test('but a tempered thread gets no rate nudge', () async {
+      // The regression the temper is written around, through the store this
+      // time: 0.35 + 0.2 would land at 0.55 and put this thread straight back
+      // into Needs You.
+      await seed(
+        'tc-answered-fyi',
+        source: 'teams',
+        state: 'needs_reply',
+        from: 'teams:nina',
+        answered: true,
+        replyExpected: false,
+        intent: 'fyi',
+        importance: 'low',
+      );
+
+      await service.recomputeAll(sources: both, now: now);
+
+      expect(
+        (await scoreOf('tc-answered-fyi', source: 'teams'))!,
+        closeTo(AttentionTuning.waitingBase * decay, 1e-9),
+      );
+      expect(
+        (await scoreOf('tc-answered-fyi', source: 'teams'))!,
+        lessThan(AttentionTuning.defaultThreshold),
+      );
+    });
+  });
+
   group('bucket sweep', () {
     test('files a low-value fyi into Later', () async {
       await seed('c1', intent: 'fyi', importance: 'low');
@@ -175,7 +407,7 @@ void main() {
       expect(await reasonOf('c1'), isNull);
     });
 
-    test('never defers a thread awaiting the LO', () async {
+    test('never defers a thread awaiting the user', () async {
       await seed('c1', state: 'needs_reply', intent: 'fyi', importance: 'low');
       await service.recomputeAll(now: now);
 

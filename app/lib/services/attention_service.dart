@@ -7,7 +7,8 @@ import 'llm/extract_task.dart';
 
 /// Scores and files the whole mailbox in one pass.
 ///
-/// Two jobs rather than one because they need exactly the same four reads —
+/// Two jobs rather than one because they need exactly the same handful of
+/// reads —
 /// the threads, each one's newest inbound message and extraction, the sender
 /// answer rates, and the sender rules — and doing them separately would mean
 /// running all four twice.
@@ -42,10 +43,16 @@ class AttentionService {
     final meta = await _store.latestInboundMeta(sources: sources);
     final prefs = await _store.allSenderPrefs();
     final reasons = await _store.bucketReasons(sources: sources);
-    // Reply rates are per-source, and email is the only source that has one.
-    // A second connector gets its own call here rather than a merged map, so
-    // an address that appears in both does not average across them.
-    final replyRates = await _store.senderReplyRates();
+    // One rate map, built from a call per source rather than one merged query:
+    // each source's denominator stays its own, so a mailbox the user answers
+    // and a chat backlog they do not cannot average into a middling nudge for
+    // both. Spreading them together is safe because a Teams address always
+    // carries the `teams:` prefix, which makes a cross-source key collision
+    // impossible by construction.
+    final replyRates = {
+      ...await _store.senderReplyRates(),
+      ...await _store.senderReplyRates(source: 'teams'),
+    };
 
     var scored = 0;
     for (final conversation in conversations) {
@@ -64,6 +71,10 @@ class AttentionService {
             latestIntent: extraction?.intent,
             senderReplyRate: replyRates[address] ?? 0,
             senderPref: senderPref,
+            latestReplyExpected: _tristate(latest?['reply_expected']),
+            latestNeedsAction: _tristate(latest?['needs_action']),
+            latestDeadline: latest?['deadline'] as String?,
+            addressedMe: ((latest?['addressed_me'] as num?) ?? 0) != 0,
             now: at,
           ),
         );
@@ -138,6 +149,18 @@ class AttentionService {
       reason: reason,
     );
   }
+
+  /// One of triage's 0/1/NULL judgment columns, as a nullable bool.
+  ///
+  /// The null has to survive the trip intact: it means v2 never judged this
+  /// message, which the scorer treats as a different thing from v2 having
+  /// judged it and said no. Anything that is not a number reads as null for
+  /// the same reason a corrupt extraction does — "nothing is known here" is the
+  /// conservative answer, and it is the one the scorer already handles.
+  ///
+  /// (`message_models.dart` has the identical conversion as `_boolFromInt`, but
+  /// it is library-private and not worth widening for two call sites.)
+  static bool? _tristate(Object? raw) => raw is num ? raw != 0 : null;
 
   /// The stored extraction, or null when there is none and when what is stored
   /// does not parse. A corrupt blob reads as "not extracted yet", which every

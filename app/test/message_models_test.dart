@@ -315,6 +315,23 @@ void main() {
       });
       expect(m.to, ['a@x.com', '42', 'null']);
     });
+
+    test('the triage v2 fields read through, and default quietly', () {
+      final judged = Message.fromJson(const {
+        'addressed_me': true,
+        'reply_expected': true,
+        'deadline': 'Friday',
+      });
+      expect(judged.addressedMe, isTrue);
+      expect(judged.replyExpected, isTrue);
+      expect(judged.deadline, 'Friday');
+
+      final bare = Message.fromJson(const {});
+      expect(bare.addressedMe, isFalse);
+      // Null, not false: a payload that says nothing has not judged.
+      expect(bare.replyExpected, isNull);
+      expect(bare.deadline, isNull);
+    });
   });
 
   group('Message.fromRow', () {
@@ -354,6 +371,25 @@ void main() {
       expect(Message.fromRow(const {}).needsAction, isNull);
     });
 
+    test('addressed_me and reply_expected read their 0/1 columns apart', () {
+      expect(Message.fromRow(const {'addressed_me': 1}).addressedMe, isTrue);
+      expect(Message.fromRow(const {'addressed_me': 0}).addressedMe, isFalse);
+      // A column nobody wrote says nobody singled the reader out.
+      expect(Message.fromRow(const {}).addressedMe, isFalse);
+
+      expect(Message.fromRow(const {'reply_expected': 1}).replyExpected, isTrue);
+      expect(
+          Message.fromRow(const {'reply_expected': 0}).replyExpected, isFalse);
+      // Load-bearing: NULL is "triage v2 never judged this", which the
+      // re-judgement pass acts on and a false would hide.
+      expect(Message.fromRow(const {'reply_expected': null}).replyExpected,
+          isNull);
+      expect(Message.fromRow(const {}).replyExpected, isNull);
+
+      expect(Message.fromRow(const {'deadline': 'Friday'}).deadline, 'Friday');
+      expect(Message.fromRow(const {}).deadline, isNull);
+    });
+
     test('only an is_read 0 reads as unread; absent and null read as read', () {
       expect(Message.fromRow(const {'is_read': 0}).isRead, isFalse);
       expect(Message.fromRow(const {'is_read': 1}).isRead, isTrue);
@@ -380,6 +416,8 @@ void main() {
       expect(r.summary, '');
       expect(r.needsAction, isFalse);
       expect(r.actionItems, isEmpty);
+      expect(r.replyExpected, isFalse);
+      expect(r.deadline, '');
     });
 
     test('fromJson defaults match the fallback on an empty payload', () {
@@ -389,6 +427,17 @@ void main() {
       expect(r.summary, '');
       expect(r.needsAction, isFalse);
       expect(r.actionItems, isEmpty);
+      expect(r.replyExpected, isFalse);
+      expect(r.deadline, '');
+    });
+
+    test('fromJson reads the v2 answers when the model gives them', () {
+      final r = TriageResult.fromJson(const {
+        'reply_expected': true,
+        'deadline': 'end of the week',
+      });
+      expect(r.replyExpected, isTrue);
+      expect(r.deadline, 'end of the week');
     });
   });
 }

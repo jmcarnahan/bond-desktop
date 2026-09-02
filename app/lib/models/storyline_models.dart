@@ -156,6 +156,18 @@ class StorylineEpisode {
   /// The newest inbound message's triage summary; null until triage has run.
   final String? summary;
 
+  /// Where the thread sits in the reply lifecycle, read from its conversation
+  /// row when the episode is assembled. It rides on the episode so a card can
+  /// say the thread needs the user by the SAME rule the thread panel uses,
+  /// rather than by a second one that could drift from it. Defaults to
+  /// [ConversationState.waiting] — a thread with no row demands nothing.
+  final ConversationState state;
+
+  /// The ask the triage pass wrote for the thread, from the same conversation
+  /// row as [state]. Null until triage has found one; only ever rendered
+  /// together with a [ConversationState.needsReply] state.
+  final String? ctaText;
+
   const StorylineEpisode({
     required this.source,
     required this.conversationKey,
@@ -164,6 +176,8 @@ class StorylineEpisode {
     required this.messages,
     this.latestAt,
     this.summary,
+    this.state = ConversationState.waiting,
+    this.ctaText,
   });
 
   /// The composite a storyline's membership is keyed on. A conversation key is

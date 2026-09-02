@@ -147,6 +147,13 @@ final syncServiceProvider = Provider<MailSync>(
     ref.watch(mailBackendProvider),
     ref.watch(messageStoreProvider),
     activityLog: ref.watch(activityLogProvider),
+    // A callback, not a value: the account is a keychain read, and this
+    // provider is built by plenty that never syncs. The sync asks once, on its
+    // first pass; until the answer arrives no message is marked as addressed
+    // to the user.
+    userAddress: () => ref.read(authSessionProvider).storedAccount.then(
+          (account) => account?.mail ?? account?.userPrincipalName,
+        ),
   ),
 );
 

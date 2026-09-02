@@ -279,6 +279,17 @@ class McpTeamsBackend implements TeamsBackend {
   /// as a person with no name. A bot's display name is null because the wire
   /// carries no `from_application_display`; the reader tolerates that, and a
   /// bot message is gated out of extraction either way.
+  ///
+  /// `mentions` gets the same treatment as `from`, and it is the clearest case
+  /// for why this file exists at all: the wire carries `mentioned_user_ids`, a
+  /// flat list, because "who was named" is the only thing the desktop ever asks
+  /// of a mention, while `TeamsSync.mentionedUserIds` reads Graph's
+  /// `[{mentioned: {user: {id}}}]`. Rebuilding the nested shape here is what
+  /// keeps the two backends indistinguishable to the sync.
+  ///
+  /// Absent on the wire leaves the key out entirely rather than writing an
+  /// empty list — an older server that does not send mentions yet must read as
+  /// "no mentions", which is what the parser already answers for a missing key.
   static Map<String, dynamic> _messageShape(Map message) {
     final userId = message['from_user_id'];
     final applicationId = message['from_application_id'];
@@ -300,6 +311,16 @@ class McpTeamsBackend implements TeamsBackend {
             'user': {'id': userId, 'displayName': message['from_user_display']},
           },
       },
+      if (message['mentioned_user_ids'] case final List mentionedUserIds)
+        'mentions': [
+          for (final id in mentionedUserIds)
+            if (id is String && id.isNotEmpty)
+              {
+                'mentioned': {
+                  'user': {'id': id},
+                },
+              },
+        ],
     };
   }
 

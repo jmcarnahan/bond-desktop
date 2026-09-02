@@ -1,6 +1,7 @@
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/widgets/chips.dart';
+import 'package:bond_inbox/widgets/inline_alert.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:flutter/material.dart';
@@ -32,6 +33,8 @@ StorylineEpisode _episode({
   List<String> participants = const ['Sarah Chen'],
   String? latestAt,
   String? summary,
+  ConversationState state = ConversationState.waiting,
+  String? ctaText,
 }) =>
     StorylineEpisode(
       source: source,
@@ -41,6 +44,8 @@ StorylineEpisode _episode({
       messages: messages,
       latestAt: latestAt ?? messages.last.receivedAt,
       summary: summary,
+      state: state,
+      ctaText: ctaText,
     );
 
 /// The messages actually on screen, in order — which is what "expanded" means
@@ -288,6 +293,63 @@ void main() {
       await pumpPanel(tester, only: const []);
 
       expect(find.text('No messages in this storyline.'), findsOneWidget);
+    });
+  });
+
+  group('the ask on a card', () {
+    testWidgets('a thread that needs a reply says what it is waiting for',
+        (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        summary: 'The studio wants the hero paragraph cut.',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm the hero paragraph can go — by Friday',
+        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
+      );
+      await pumpPanel(tester, only: [asking]);
+
+      expect(find.byType(InlineAlert), findsOneWidget);
+      expect(find.text('Confirm the hero paragraph can go — by Friday'),
+          findsOneWidget);
+      // The ask replaces the summary rather than stacking on it — the same
+      // fact in two moods, and the card only has room for one of them.
+      expect(find.text('The studio wants the hero paragraph cut.'),
+          findsNothing);
+    });
+
+    testWidgets('a waiting thread shows its summary and no ask',
+        (tester) async {
+      final waiting = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        summary: 'The studio wants the hero paragraph cut.',
+        // The thread panel's rule, shared: a thread that no longer needs the
+        // user shows no CTA anywhere, even though the text is still on the row.
+        ctaText: 'Confirm the hero paragraph can go — by Friday',
+        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
+      );
+      await pumpPanel(tester, only: [waiting]);
+
+      expect(find.byType(InlineAlert), findsNothing);
+      expect(find.text('The studio wants the hero paragraph cut.'),
+          findsOneWidget);
+    });
+
+    testWidgets('a needs-reply thread with no ask keeps its summary',
+        (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        summary: 'The studio wants the hero paragraph cut.',
+        state: ConversationState.needsReply,
+        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
+      );
+      await pumpPanel(tester, only: [asking]);
+
+      expect(find.byType(InlineAlert), findsNothing);
+      expect(find.text('The studio wants the hero paragraph cut.'),
+          findsOneWidget);
     });
   });
 

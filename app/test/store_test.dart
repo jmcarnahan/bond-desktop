@@ -21,6 +21,8 @@ Map<String, Object?> messageRow({
   int isRead = 0,
   String? bodyPreview = 'Preview',
   String? bodyText = 'Body',
+  int addressedMe = 0,
+  String triageStatus = 'pending',
 }) =>
     {
       'source': source,
@@ -35,6 +37,8 @@ Map<String, Object?> messageRow({
       'is_read': isRead,
       'body_preview': bodyPreview,
       'body_text': bodyText,
+      'addressed_me': addressedMe,
+      'triage_status': triageStatus,
     };
 
 Map<String, Object?> conversationRow({
@@ -178,6 +182,46 @@ void main() {
       await store.upsertMessage(messageRow(id: 'shared-id', source: 'teams'));
 
       expect((await db.customSelect('SELECT * FROM messages').get()).length, 2);
+    });
+
+    test('addressed_me rises with a richer ingest and survives a thinner one',
+        () async {
+      // The deliberate exception to the INSERT-only rule the triage columns
+      // take — but a one-way one. A connector that starts carrying mentions
+      // can mark a message it already stored; a re-pull that computed 0 (a
+      // backend switched before the server sends mentions, a keychain that
+      // failed to answer this sync) must not take a flag back that an earlier,
+      // richer pass earned.
+      await store.upsertMessage(messageRow(id: 'm1'));
+      expect((await store.getMessageRow('email', 'm1'))!['addressed_me'], 0);
+
+      await store.upsertMessage(messageRow(id: 'm1', addressedMe: 1));
+      expect((await store.getMessageRow('email', 'm1'))!['addressed_me'], 1);
+
+      await store.upsertMessage(messageRow(id: 'm1'));
+      expect((await store.getMessageRow('email', 'm1'))!['addressed_me'], 1);
+    });
+
+    test('a re-sync leaves the triage v2 columns where triage put them',
+        () async {
+      await store.upsertMessage(messageRow(id: 'm1'));
+      await store.writeTriage('email', 'm1',
+          status: 'triaged',
+          result: const TriageResult(
+            urgency: 'normal',
+            category: 'work',
+            summary: 'Wants the CD by Friday',
+            needsAction: true,
+            actionItems: [],
+            replyExpected: true,
+            deadline: 'Friday',
+          ));
+
+      await store.upsertMessage(messageRow(id: 'm1', isRead: 1));
+
+      final row = (await store.getMessageRow('email', 'm1'))!;
+      expect(row['reply_expected'], 1);
+      expect(row['deadline'], 'Friday');
     });
   });
 
@@ -462,6 +506,75 @@ void main() {
       expect(m.triageStatus, 'done');
     });
 
+    test('writeTriage round-trips reply_expected and the deadline', () async {
+      await store.upsertMessage(messageRow(id: 'm1'));
+      await store.writeTriage(
+        'email',
+        'm1',
+        status: 'triaged',
+        result: const TriageResult(
+          urgency: 'normal',
+          category: 'work',
+          summary: 'Needs the signed CD',
+          needsAction: true,
+          actionItems: [],
+          replyExpected: true,
+          deadline: 'Friday',
+        ),
+      );
+
+      final message = (await store.loadThread('conv-1')).single;
+      expect(message.replyExpected, isTrue);
+      expect(message.deadline, 'Friday');
+    });
+
+    test('a deadline the model did not offer is stored as NULL, not empty',
+        () async {
+      await store.upsertMessage(messageRow(id: 'm1'));
+      await store.writeTriage('email', 'm1',
+          status: 'triaged', result: TriageResult.fallback());
+
+      final row = (await store.getMessageRow('email', 'm1'))!;
+      // The same rule `label` takes: a blank column and a column nobody wrote
+      // must read alike, or every reader needs two empty cases.
+      expect(row['deadline'], isNull);
+      // A judgement of "no" is still a judgement, and it is what takes this
+      // row out of the re-judgement pass's reach.
+      expect(row['reply_expected'], 0);
+    });
+
+    test('a status-only write leaves an earlier reply_expected alone', () async {
+      await store.upsertMessage(messageRow(id: 'm1'));
+      await store.writeTriage('email', 'm1',
+          status: 'triaged',
+          result: const TriageResult(
+            urgency: 'normal',
+            category: 'work',
+            summary: '',
+            needsAction: false,
+            actionItems: [],
+            replyExpected: true,
+            deadline: 'Monday',
+          ));
+      await store.writeTriage('email', 'm1', status: 'stale');
+
+      final row = (await store.getMessageRow('email', 'm1'))!;
+      expect(row['reply_expected'], 1);
+      expect(row['deadline'], 'Monday');
+    });
+
+    test('a message triage v2 never judged reads null, never false', () async {
+      await store.upsertMessage(messageRow(id: 'legacy'));
+
+      final message = (await store.loadThread('conv-1')).single;
+      // Load-bearing: "nobody asked" and "asked, and no reply is expected" are
+      // opposite facts, and the re-judgement pass is the code that acts on the
+      // difference.
+      expect(message.replyExpected, isNull);
+      expect(message.deadline, isNull);
+      expect(message.addressedMe, isFalse);
+    });
+
     test('writeTriage records an error and a gate reason without a result',
         () async {
       await store.upsertMessage(messageRow(id: 'm1'));
@@ -523,6 +636,224 @@ void main() {
       expect(await store.triageCounts(sources: ['email', 'teams']),
           {'pending': 2});
       expect(await store.triageCounts(sources: const []), isEmpty);
+    });
+  });
+
+  group('rejudgeStaleTriage', () {
+    String ago(Duration age) =>
+        DateTime.now().toUtc().subtract(age).toIso8601String();
+
+    late String window;
+
+    setUp(() => window = ago(const Duration(days: 7)));
+
+    Future<String?> statusOf(String id, {String source = 'email'}) async =>
+        (await store.getMessageRow(source, id))?['triage_status'] as String?;
+
+    /// A message triage v1 finished with: judged, and carrying no answer to
+    /// the question v2 asks.
+    Future<void> judgedByV1(
+      String id, {
+      String source = 'email',
+      String conversationKey = 'conv-1',
+      String direction = 'inbound',
+      Duration age = const Duration(days: 1),
+    }) =>
+        store.upsertMessage(messageRow(
+          id: id,
+          source: source,
+          conversationKey: conversationKey,
+          direction: direction,
+          receivedAt: ago(age),
+          triageStatus: 'triaged',
+        ));
+
+    test('only the newest inbound message of a thread goes back in the queue',
+        () async {
+      await judgedByV1('older', age: const Duration(days: 3));
+      await judgedByV1('newest', age: const Duration(hours: 2));
+      await judgedByV1('other-thread', conversationKey: 'conv-2');
+
+      expect(
+        await store.rejudgeStaleTriage(source: 'email', sinceIso: window),
+        2,
+      );
+
+      // The standing ask lives on the last thing the other side said; asking
+      // the model about the rest of the thread is spend with no answer in it.
+      expect(await statusOf('newest'), 'pending');
+      expect(await statusOf('other-thread'), 'pending');
+      expect(await statusOf('older'), 'triaged');
+    });
+
+    test('a message v2 has already judged is never asked again', () async {
+      await judgedByV1('judged');
+      await store.writeTriage('email', 'judged',
+          status: 'triaged', result: TriageResult.fallback());
+
+      expect(
+        await store.rejudgeStaleTriage(source: 'email', sinceIso: window),
+        0,
+      );
+      // `reply_expected = 0` is an answer, not an absence — the predicate that
+      // makes this pass self-exhausting reads NULL only.
+      expect(await statusOf('judged'), 'triaged');
+    });
+
+    test('nothing older than the window is re-judged', () async {
+      await judgedByV1('ancient', age: const Duration(days: 40));
+
+      expect(
+        await store.rejudgeStaleTriage(source: 'email', sinceIso: window),
+        0,
+      );
+      expect(await statusOf('ancient'), 'triaged');
+    });
+
+    test('the user’s own messages stay out of it', () async {
+      await judgedByV1('mine',
+          conversationKey: 'conv-sent', direction: 'outbound');
+
+      expect(
+        await store.rejudgeStaleTriage(source: 'email', sinceIso: window),
+        0,
+      );
+      expect(await statusOf('mine'), 'triaged');
+    });
+
+    test('the other source is left alone', () async {
+      await judgedByV1('chat', source: 'teams', conversationKey: 'chat-1');
+
+      expect(
+        await store.rejudgeStaleTriage(source: 'email', sinceIso: window),
+        0,
+      );
+      expect(await statusOf('chat', source: 'teams'), 'triaged');
+    });
+
+    test('a second pass flips nothing once v2 has answered', () async {
+      await judgedByV1('m1');
+      expect(
+        await store.rejudgeStaleTriage(source: 'email', sinceIso: window),
+        1,
+      );
+
+      // What the triage worker does with the row this pass queued.
+      await store.writeTriage('email', 'm1',
+          status: 'triaged', result: TriageResult.fallback());
+
+      expect(
+        await store.rejudgeStaleTriage(source: 'email', sinceIso: window),
+        0,
+        reason: 'the pass must exhaust itself rather than loop the mailbox '
+            'through the model on every sync',
+      );
+      expect(await statusOf('m1'), 'triaged');
+    });
+  });
+
+  group('addressed_me backfills', () {
+    String ago(Duration age) =>
+        DateTime.now().toUtc().subtract(age).toIso8601String();
+
+    late String window;
+
+    setUp(() => window = ago(const Duration(days: 7)));
+
+    Future<Object?> addressedMe(String id, {String source = 'email'}) async =>
+        (await store.getMessageRow(source, id))?['addressed_me'];
+
+    test('mail addressed to the user alone is marked, and nothing else',
+        () async {
+      await store.upsertMessage(messageRow(
+          id: 'sole', toJson: '["lo@bond.com"]', receivedAt: ago(const Duration(days: 1))));
+      await store.upsertMessage(messageRow(
+          id: 'cased', toJson: '["LO@Bond.com"]', receivedAt: ago(const Duration(days: 1))));
+      await store.upsertMessage(messageRow(
+          id: 'two-up',
+          toJson: '["lo@bond.com","sarah@x.com"]',
+          receivedAt: ago(const Duration(days: 1))));
+      await store.upsertMessage(messageRow(
+          id: 'somebody-else',
+          toJson: '["sarah@x.com"]',
+          receivedAt: ago(const Duration(days: 1))));
+      await store.upsertMessage(messageRow(
+          id: 'ancient',
+          toJson: '["lo@bond.com"]',
+          receivedAt: ago(const Duration(days: 40))));
+      await store.upsertMessage(messageRow(
+          id: 'mine',
+          direction: 'outbound',
+          toJson: '["lo@bond.com"]',
+          receivedAt: ago(const Duration(days: 1))));
+
+      expect(
+        await store.backfillEmailAddressedMe(
+            userAddress: 'lo@bond.com', sinceIso: window),
+        2,
+      );
+
+      expect(await addressedMe('sole'), 1);
+      expect(await addressedMe('cased'), 1,
+          reason: 'addresses are compared case-insensitively');
+      for (final id in ['two-up', 'somebody-else', 'ancient', 'mine']) {
+        expect(await addressedMe(id), 0, reason: id);
+      }
+    });
+
+    test('a recipient list that will not decode marks nothing', () async {
+      await store.upsertMessage(messageRow(
+          id: 'garbled', toJson: 'not json', receivedAt: ago(const Duration(days: 1))));
+
+      expect(
+        await store.backfillEmailAddressedMe(
+            userAddress: 'lo@bond.com', sinceIso: window),
+        0,
+      );
+      expect(await addressedMe('garbled'), 0);
+    });
+
+    test('inbound chat in a 1:1 is marked; a group chat is not', () async {
+      await store.upsertConversation(conversationRow(
+        source: 'teams',
+        key: 'chat-1on1',
+        participantsJson: '[{"name":"Sarah","email":"teams:u1"}]',
+      ));
+      await store.upsertConversation(conversationRow(
+        source: 'teams',
+        key: 'chat-group',
+        participantsJson:
+            '[{"name":"Sarah","email":"teams:u1"},{"name":"Ed","email":"teams:u2"}]',
+      ));
+
+      Future<void> chat(String id, String key,
+              {String direction = 'inbound',
+              Duration age = const Duration(days: 1)}) =>
+          store.upsertMessage(messageRow(
+            id: id,
+            source: 'teams',
+            conversationKey: key,
+            direction: direction,
+            receivedAt: ago(age),
+          ));
+
+      await chat('direct', 'chat-1on1');
+      await chat('direct-mine', 'chat-1on1', direction: 'outbound');
+      await chat('direct-ancient', 'chat-1on1', age: const Duration(days: 40));
+      await chat('group', 'chat-group');
+
+      expect(await store.backfillTeamsAddressedMe(sinceIso: window), 1);
+
+      expect(await addressedMe('direct', source: 'teams'), 1);
+      // The roster is stored without the user, so two participants is a group
+      // — and an @mention inside one was never stored anywhere to be read back.
+      expect(await addressedMe('group', source: 'teams'), 0);
+      expect(await addressedMe('direct-mine', source: 'teams'), 0);
+      expect(await addressedMe('direct-ancient', source: 'teams'), 0);
+    });
+
+    test('a teams database with no chats at all backfills nothing', () async {
+      expect(await store.backfillTeamsAddressedMe(sinceIso: window), 0);
     });
   });
 

@@ -76,9 +76,10 @@ class ExtractHandler extends WorkHandler {
     // `skipped`. Honouring that verdict here is what keeps a newsletter from
     // costing a model call, growing an embedding, and — since one sender's
     // newsletters are all alike — clustering into a junk storyline
-    // suggestion. Teams rows are the exception: they are born `skipped`
-    // (`teams_source`) because triage is email-only, not because anything
-    // judged them worthless.
+    // suggestion. The `teams_source` exception is legacy tolerance: chats are
+    // triaged like mail now, but a row stored before that change is `skipped`
+    // for a reason no judgement stands behind, and a straggler the sync's
+    // backfill window missed should still get its facts pulled.
     if (row['triage_status'] == 'skipped' &&
         row['gate_reason'] != 'teams_source') {
       _log

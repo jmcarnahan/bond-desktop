@@ -311,6 +311,22 @@ class Message {
   final List<String> actionItems;
   final String triageStatus;
 
+  /// Whether this message singled the user out — sole To: recipient for mail,
+  /// a 1:1 chat or an @mention for Teams. Written at ingest by the connector,
+  /// so it says something about the message rather than about the model.
+  /// False when nothing knows better, which is the quiet answer.
+  final bool addressedMe;
+
+  /// Whether the sender is waiting on an answer, as triage v2 judged it. Null
+  /// means no v2 pass has ever judged this message — NOT "no reply expected".
+  /// The two read the same to a careless caller and mean opposite things, so
+  /// anything acting on this must check for null first.
+  final bool? replyExpected;
+
+  /// The date or timeframe triage read out of the message, in the sender's own
+  /// words ("Friday", "before the 15th"). Null when the message named none.
+  final String? deadline;
+
   /// Local-only optimistic bubble.
   final bool pendingSend;
 
@@ -335,6 +351,9 @@ class Message {
     this.needsAction,
     this.actionItems = const [],
     this.triageStatus = 'pending',
+    this.addressedMe = false,
+    this.replyExpected,
+    this.deadline,
     this.pendingSend = false,
   });
 
@@ -393,6 +412,9 @@ class Message {
         for (final a in rawActionItems ?? const []) a.toString(),
       ],
       triageStatus: json['triage_status'] as String? ?? 'pending',
+      addressedMe: json['addressed_me'] as bool? ?? false,
+      replyExpected: json['reply_expected'] as bool?,
+      deadline: json['deadline'] as String?,
     );
   }
 
@@ -427,6 +449,11 @@ class Message {
         for (final a in _decodeJsonList(row['action_items_json'])) a.toString(),
       ],
       triageStatus: row['triage_status'] as String? ?? 'pending',
+      addressedMe: _boolFromInt(row['addressed_me']) ?? false,
+      // Null survives as null: a row triage v2 has never judged is not a row
+      // it judged "no".
+      replyExpected: _boolFromInt(row['reply_expected']),
+      deadline: row['deadline'] as String?,
     );
   }
 }
@@ -446,6 +473,15 @@ class TriageResult {
   final bool needsAction;
   final List<String> actionItems;
 
+  /// Whether the sender is waiting on an answer from the owner. Stored as the
+  /// message's `reply_expected`, which is what turns a NULL (never judged by
+  /// v2) into a judgement.
+  final bool replyExpected;
+
+  /// The date or timeframe the message named, in its own words. Empty when it
+  /// named none — the store writes that as NULL, the same rule [label] takes.
+  final String deadline;
+
   const TriageResult({
     required this.urgency,
     required this.category,
@@ -453,6 +489,8 @@ class TriageResult {
     required this.summary,
     required this.needsAction,
     required this.actionItems,
+    this.replyExpected = false,
+    this.deadline = '',
   });
 
   /// What a message gets when the model fails or answers unparseably: the
@@ -464,6 +502,8 @@ class TriageResult {
         summary: '',
         needsAction: false,
         actionItems: [],
+        replyExpected: false,
+        deadline: '',
       );
 
   factory TriageResult.fromJson(Map<String, dynamic> json) {
@@ -477,6 +517,8 @@ class TriageResult {
       actionItems: [
         for (final a in rawActionItems ?? const []) a.toString(),
       ],
+      replyExpected: json['reply_expected'] as bool? ?? false,
+      deadline: json['deadline'] as String? ?? '',
     );
   }
 }

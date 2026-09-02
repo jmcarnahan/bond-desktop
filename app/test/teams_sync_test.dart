@@ -90,6 +90,7 @@ Map<String, dynamic> _message({
   String contentType = 'text',
   String content = 'Can you send the CD?',
   String? at,
+  List<String>? mentioning,
 }) {
   final stamp = at ?? _iso(const Duration(hours: 1));
   return {
@@ -98,6 +99,21 @@ Map<String, dynamic> _message({
     'messageType': messageType,
     'createdDateTime': stamp,
     'lastModifiedDateTime': stamp,
+    // Graph's own nested shape — what the SDK wire carries, and what
+    // McpTeamsBackend rebuilds from its flat `mentioned_user_ids` field, so
+    // one helper serves for both backends. Absent unless a test asks for it:
+    // a message that named nobody.
+    if (mentioning != null)
+      'mentions': [
+        for (final userId in mentioning)
+          {
+            'id': 0,
+            'mentionText': 'Jordan Bond',
+            'mentioned': {
+              'user': {'id': userId, 'displayName': 'Jordan Bond'},
+            },
+          },
+      ],
     'from': applicationId != null
         ? {
             'user': null,
@@ -235,7 +251,7 @@ void main() {
       graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
       graph.members['chat-1'] = [
         {'userId': 'u1', 'displayName': 'Sarah Whitfield'},
-        {'userId': _myId, 'displayName': 'Bond LO'},
+        {'userId': _myId, 'displayName': 'Jordan Bond'},
       ];
     });
 
@@ -252,18 +268,26 @@ void main() {
       expect(m['subject'], isNull, reason: 'a chat message has no subject');
       expect(m['is_read'], 1,
           reason: 'this chat carries no viewpoint — see the read-state group');
-      expect(m['triage_status'], 'skipped');
-      expect(m['gate_reason'], teamsSourceGate);
+      // The same queue mail joins, on the same terms: a person wrote this and
+      // nothing at ingest knows whether it needs the reader.
+      expect(m['triage_status'], 'pending');
+      expect(m['gate_reason'], isNull);
     });
 
-    test('the user’s own message is outbound', () async {
+    test('the user’s own message is outbound, and skipped like sent mail',
+        () async {
       graph.messages['chat-1'] = [
-        _message(id: 'm1', userId: _myId, displayName: 'Bond LO'),
+        _message(id: 'm1', userId: _myId, displayName: 'Jordan Bond'),
       ];
       await build().syncNow();
 
-      expect((await row('m1'))['direction'], 'outbound');
-      expect((await row('m1'))['from_address'], 'teams:$_myId');
+      final m = await row('m1');
+      expect(m['direction'], 'outbound');
+      expect(m['from_address'], 'teams:$_myId');
+      // Triage answers "does this need me?", and the user's own message never
+      // does — the same reason and the same wording mail's own sent items get.
+      expect(m['triage_status'], 'skipped');
+      expect(m['gate_reason'], 'outbound');
     });
 
     test('a message from an application is gated as auto-generated', () async {
@@ -278,10 +302,14 @@ void main() {
       ];
       await build().syncNow();
 
+      expect((await row('bot'))['triage_status'], 'skipped');
       expect((await row('bot'))['gate_reason'], teamsBotGate);
       expect((await row('bot'))['direction'], 'inbound');
       expect((await row('bot'))['from_address'], 'teams:app-9');
-      expect((await row('human'))['gate_reason'], teamsSourceGate);
+      // The bot is the only inbound chat message ingest decides about: the
+      // person beside it goes to the model like any mail.
+      expect((await row('human'))['triage_status'], 'pending');
+      expect((await row('human'))['gate_reason'], isNull);
     });
 
     test('system events never become rows', () async {
@@ -305,15 +333,15 @@ void main() {
         _message(
           id: 'm1',
           contentType: 'html',
-          content: '<div>Hi <at>Bond LO</at></div><div>$long</div>',
+          content: '<div>Hi <at>Jordan Bond</at></div><div>$long</div>',
         ),
       ];
       await build().syncNow();
 
       final m = await row('m1');
-      expect(m['body_text'], 'Hi Bond LO\n$long');
+      expect(m['body_text'], 'Hi Jordan Bond\n$long');
       expect((m['body_preview'] as String).length, 160);
-      expect(m['body_preview'], startsWith('Hi Bond LO\n'));
+      expect(m['body_preview'], startsWith('Hi Jordan Bond\n'));
     });
 
     test('a message with no sender at all still stores', () async {
@@ -322,6 +350,196 @@ void main() {
 
       expect((await row('m1'))['from_address'], isNull);
       expect((await row('m1'))['direction'], 'inbound');
+    });
+  });
+
+  group('addressed_me', () {
+    /// A chat with [others] people on it besides the user. One is a 1:1;
+    /// anything more is a group.
+    void seed(String id, int others) {
+      graph.chats.add(_chat(
+        id: id,
+        topic: others > 1 ? 'Closing crew' : null,
+        previewAt: _iso(Duration.zero),
+      ));
+      graph.members[id] = [
+        {'userId': _myId, 'displayName': 'Jordan Bond'},
+        for (var i = 1; i <= others; i++)
+          {'userId': 'u$i', 'displayName': 'Person $i'},
+      ];
+    }
+
+    test('a message in a 1:1 chat singled the user out', () async {
+      seed('chat-1', 1);
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+
+      await build().syncNow();
+
+      expect((await row('m1'))['addressed_me'], 1);
+    });
+
+    test('a message to the whole group did not', () async {
+      seed('chat-1', 2);
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+
+      await build().syncNow();
+
+      expect((await row('m1'))['addressed_me'], 0,
+          reason: 'a group chat message is aimed at the room');
+    });
+
+    test('a group message that @mentions the user did', () async {
+      seed('chat-1', 2);
+      graph.messages['chat-1'] = [
+        _message(id: 'named', mentioning: const [_myId]),
+        _message(id: 'somebody-else', mentioning: const ['u2']),
+      ];
+
+      await build().syncNow();
+
+      expect((await row('named'))['addressed_me'], 1);
+      expect((await row('somebody-else'))['addressed_me'], 0,
+          reason: 'a mention of a colleague is not a mention of the reader');
+    });
+
+    test('the user’s own message in a 1:1 is addressed to nobody', () async {
+      seed('chat-1', 1);
+      graph.messages['chat-1'] = [
+        _message(id: 'mine', userId: _myId, displayName: 'Jordan Bond'),
+      ];
+
+      await build().syncNow();
+
+      expect((await row('mine'))['addressed_me'], 0);
+    });
+
+    test('a later sync of a known 1:1 reads the answer off the stored roster',
+        () async {
+      // Members are fetched at first sight only — the request-budget rule the
+      // 'members are read once per chat, ever' test pins. Every sync after it
+      // has to reach the same answer from the participants that sync stored,
+      // or the signal would arrive on a chat's first message and never again.
+      seed('chat-1', 1);
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(hours: 2))),
+      ];
+      await build().syncNow();
+
+      graph.requests.clear();
+      graph.chats
+        ..clear()
+        ..add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(id: 'm2', at: _iso(const Duration(hours: 1))),
+      ];
+      await build().syncNow();
+
+      expect(graph.memberRequests, isEmpty);
+      expect((await row('m2'))['addressed_me'], 1);
+    });
+
+    test('historical 1:1 chats are backfilled once', () async {
+      /// A chat and one message in it as the pre-`addressed_me` syncs left
+      /// them: the roster stored, the flag flat.
+      Future<void> historical(String id, String key, String participants) async {
+        await store.upsertConversation({
+          'source': 'teams',
+          'conversation_key': key,
+          'participants_json': participants,
+          'state': 'waiting',
+          'cta_urgency': 'normal',
+          'message_count': 1,
+          'inbound_count': 1,
+          'last_message_at': _iso(const Duration(days: 2)),
+        });
+        await store.upsertMessage({
+          'source': 'teams',
+          'source_message_id': id,
+          'conversation_key': key,
+          'direction': 'inbound',
+          'received_at': _iso(const Duration(days: 2)),
+        });
+      }
+
+      await historical(
+          'direct', 'chat-old-1on1', '[{"name":"Sarah","email":"teams:u1"}]');
+      await historical('grouped', 'chat-old-group',
+          '[{"name":"Sarah","email":"teams:u1"},{"name":"Ed","email":"teams:u2"}]');
+
+      seed('chat-1', 1);
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(hours: 2))),
+      ];
+      await build().syncNow();
+
+      expect((await row('direct'))['addressed_me'], 1);
+      expect((await row('grouped'))['addressed_me'], 0,
+          reason: 'a mention inside a group chat was never stored, so the '
+              'backfill covers the 1:1 half of the signal and no more');
+      expect(await store.getPref('backfill_addressed_me_teams'), '1');
+
+      // Once means once: a flat row written after the pref is set stays flat,
+      // because the pass never runs again.
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'later',
+        'conversation_key': 'chat-old-1on1',
+        'direction': 'inbound',
+        'received_at': _iso(const Duration(days: 2)),
+      });
+      graph.chats
+        ..clear()
+        ..add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(id: 'm2', at: _iso(const Duration(hours: 1))),
+      ];
+      await build().syncNow();
+
+      expect((await row('later'))['addressed_me'], 0);
+    });
+  });
+
+  group('mentionedUserIds', () {
+    test('reads the ids out of Graph’s nested shape', () {
+      expect(
+        TeamsSync.mentionedUserIds([
+          {
+            'mentioned': {
+              'user': {'id': 'u1'},
+            },
+          },
+          {
+            'mentioned': {
+              'user': {'id': 'u2'},
+            },
+          },
+        ]),
+        ['u1', 'u2'],
+      );
+    });
+
+    test('anything else is no mention at all, never a throw', () {
+      // The field can still arrive absent or malformed — an older server, a
+      // shape Graph changes under us — so "no mentions" has to be the
+      // cheapest possible answer at every level, never a throw.
+      expect(TeamsSync.mentionedUserIds(null), isEmpty);
+      expect(TeamsSync.mentionedUserIds(const []), isEmpty);
+      expect(TeamsSync.mentionedUserIds('a mention'), isEmpty);
+      expect(TeamsSync.mentionedUserIds([const {}]), isEmpty);
+      expect(
+        TeamsSync.mentionedUserIds([
+          {'mentioned': null},
+          {
+            'mentioned': {'tag': 'everyone'},
+          },
+          {
+            'mentioned': {
+              'user': {'id': ''},
+            },
+          },
+        ]),
+        isEmpty,
+      );
     });
   });
 
@@ -377,7 +595,7 @@ void main() {
         _message(
           id: 'mine',
           userId: _myId,
-          displayName: 'Bond LO',
+          displayName: 'Jordan Bond',
           at: _iso(const Duration(minutes: 1)),
         ),
       ];
@@ -438,7 +656,7 @@ void main() {
       graph.members['chat-1'] = [
         {'userId': 'u1', 'displayName': 'Sarah Whitfield'},
         {'userId': 'u2', 'displayName': 'Eric Vance'},
-        {'userId': _myId, 'displayName': 'Bond LO'},
+        {'userId': _myId, 'displayName': 'Jordan Bond'},
       ];
       graph.messages['chat-1'] = [_message(id: 'm1')];
 
@@ -506,7 +724,7 @@ void main() {
         _message(
           id: 'm2',
           userId: _myId,
-          displayName: 'Bond LO',
+          displayName: 'Jordan Bond',
           at: _iso(const Duration(hours: 1)),
         ),
       ];
@@ -540,7 +758,7 @@ void main() {
         _message(
           id: 'm2',
           userId: _myId,
-          displayName: 'Bond LO',
+          displayName: 'Jordan Bond',
           at: _iso(const Duration(hours: 1)),
         ),
       ];
@@ -587,6 +805,82 @@ void main() {
       await build().syncNow();
 
       expect(await store.loadConversations(sources: const ['teams']), isEmpty);
+    });
+  });
+
+  group('a newer message invalidates the draft', () {
+    // The same promise the mail sync makes, and it has to be the same one: a
+    // chat now drafts through the same queue, so a suggestion left standing
+    // over a newer message would be a reply to the wrong thing in either inbox.
+
+    Future<void> seedDraft({String key = 'chat-1'}) => store.upsertDraft(
+          source: 'teams',
+          conversationKey: key,
+          replyToMessageId: 'm1',
+          body: 'Sending it over this afternoon.',
+          optionsJson: '[{"stance":"Confirm","body":"On its way."}]',
+        );
+
+    /// A second sync of the same chat, carrying [messages] this time.
+    Future<void> syncAgain(List<Map<String, dynamic>> messages) async {
+      graph.chats
+        ..clear()
+        ..add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = messages;
+      await build().syncNow();
+    }
+
+    setUp(() async {
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(hours: 3))),
+      ];
+      await build().syncNow();
+    });
+
+    test('a NEW inbound chat message deletes that chat\'s draft', () async {
+      await seedDraft();
+
+      await syncAgain([_message(id: 'm2', at: _iso(const Duration(hours: 1)))]);
+
+      // The whole row goes, so the short replies go with it — they answered
+      // the message that is no longer the newest one.
+      expect(await store.getDraft('teams', 'chat-1'), isNull);
+    });
+
+    test('the user\'s own message does not', () async {
+      // The thread moved on, but a draft still answers the same inbound
+      // message it was written against — and the send path writes the status.
+      await seedDraft();
+
+      await syncAgain([
+        _message(
+          id: 'm2',
+          userId: _myId,
+          displayName: 'Jordan Bond',
+          at: _iso(const Duration(hours: 1)),
+        ),
+      ]);
+
+      expect(await store.getDraft('teams', 'chat-1'), isNotNull);
+    });
+
+    test('and a re-pulled message the store already has does not', () async {
+      // Every sync re-reads the chat's recent messages, so a draft that went
+      // on a replay would vanish on the next routine refresh.
+      await seedDraft();
+
+      await syncAgain([_message(id: 'm1', at: _iso(const Duration(hours: 3)))]);
+
+      expect(await store.getDraft('teams', 'chat-1'), isNotNull);
+    });
+
+    test('and it leaves another chat\'s draft alone', () async {
+      await seedDraft(key: 'chat-2');
+
+      await syncAgain([_message(id: 'm2', at: _iso(const Duration(hours: 1)))]);
+
+      expect(await store.getDraft('teams', 'chat-2'), isNotNull);
     });
   });
 
@@ -776,20 +1070,24 @@ void main() {
       );
     });
 
-    test('no storyline sweep is requeued — the sweep is email-scoped',
+    test('chat ingest requeues the storyline sweep, as mail ingest does',
         () async {
       graph.messages['chat-1'] = [_message(id: 'm1')];
       await build().syncNow();
 
-      expect(
-        await db
-            .customSelect(
-              "SELECT 1 FROM work_items WHERE task_kind = 'storyline_sweep' "
-              "AND source = 'teams'",
-            )
-            .get(),
-        isEmpty,
-      );
+      final rows = await db
+          .customSelect(
+            "SELECT source, entity_id FROM work_items "
+            "WHERE task_kind = 'storyline_sweep'",
+          )
+          .get();
+
+      // One row, and its source says 'email' even though a chat sync wrote
+      // it: the column is the row's historical label, not a scope, and both
+      // syncs must land on the SAME row — there is one pool to sweep. A
+      // 'teams' label here would mean two sweeps racing each other.
+      expect(rows.map((r) => (r.data['source'], r.data['entity_id'])).toList(),
+          [('email', 'sweep')]);
     });
 
     /// The worker drains BOTH sources — this is what feeds chat threads into
@@ -814,6 +1112,128 @@ void main() {
       expect(drained, unorderedEquals(['e1', 'm1']),
           reason: 'both sources feed one model queue; a chat message left '
               'pending here never reaches extraction or storylines');
+    });
+
+    /// Rows stored before chats joined the triage queue. Nothing looks at a
+    /// message triage has finished with, so without this pass they would carry
+    /// a retired verdict forever.
+    test('legacy teams_source rows are put back in the queue, once', () async {
+      Future<void> legacy(
+        String id, {
+        String direction = 'inbound',
+        String gateReason = teamsSourceGate,
+        Duration age = const Duration(days: 2),
+      }) =>
+          store.upsertMessage({
+            'source': 'teams',
+            'source_message_id': id,
+            'conversation_key': 'chat-legacy',
+            'direction': direction,
+            'received_at': _iso(age),
+            'triage_status': 'skipped',
+            'gate_reason': gateReason,
+          });
+
+      await legacy('in-window');
+      await legacy('mine', direction: 'outbound', gateReason: 'outbound');
+      await legacy('bot', gateReason: teamsBotGate);
+      await legacy('ancient', age: const Duration(days: 40));
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+
+      await build().syncNow();
+
+      expect((await row('in-window'))['triage_status'], 'pending');
+      expect((await row('in-window'))['gate_reason'], isNull);
+      // Everything else was skipped on a judgement that still stands, or is
+      // older than the window this connector syncs at all.
+      for (final id in ['mine', 'bot', 'ancient']) {
+        expect((await row(id))['triage_status'], 'skipped', reason: id);
+      }
+      expect((await row('mine'))['gate_reason'], 'outbound');
+      expect((await row('bot'))['gate_reason'], teamsBotGate);
+
+      // Self-exhausting: nothing writes `teams_source` any more, so the next
+      // refresh must not drag a message triage has since finished with back
+      // into the queue. Finished means a result, not just a status — a row
+      // carrying a status and no verdict is what the v2 re-judgement pass
+      // beside this one exists to pick up.
+      await store.writeTriage('teams', 'in-window',
+          status: 'triaged', result: TriageResult.fallback());
+      await build().syncNow();
+      expect((await row('in-window'))['triage_status'], 'triaged');
+    });
+
+    test('a re-pulled chat message keeps its triage verdict', () async {
+      // Chats have no delta link: a refresh re-pulls the window and re-upserts
+      // rows the store already has, boundary message included. The upsert's
+      // conflict clause leaves the triage columns alone (INSERT-only), and
+      // this is where that contract is now load-bearing — without it every
+      // refresh would put an already-judged chat back through the model.
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(hours: 2))),
+      ];
+      await build().syncNow();
+      expect((await row('m1'))['triage_status'], 'pending');
+
+      await store.writeTriage('teams', 'm1', status: 'triaged');
+      graph.messages['chat-1']!.add(
+        _message(id: 'm2', at: _iso(const Duration(minutes: 5))),
+      );
+      await build().syncNow();
+
+      expect((await row('m1'))['triage_status'], 'triaged',
+          reason: 'a re-pull must not send a judged message back to the model');
+      expect((await row('m2'))['triage_status'], 'pending');
+    });
+
+    test('a chat triage v1 judged goes back for the v2 questions, once',
+        () async {
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+      // The newest inbound message of a chat this app judged before triage
+      // asked whether a reply is expected: `reply_expected` is NULL, and
+      // nothing else would ever look at the row again.
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'v1-judged',
+        'conversation_key': 'chat-legacy',
+        'direction': 'inbound',
+        'received_at': _iso(const Duration(days: 1)),
+        'triage_status': 'triaged',
+      });
+
+      await build().syncNow();
+
+      expect((await row('v1-judged'))['triage_status'], 'pending');
+
+      // Self-exhausting, exactly like the gate re-pend above it: once v2 has
+      // answered, the next refresh leaves the row alone.
+      await store.writeTriage('teams', 'v1-judged',
+          status: 'triaged', result: TriageResult.fallback());
+      graph.chats
+        ..clear()
+        ..add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      await build().syncNow();
+
+      expect((await row('v1-judged'))['triage_status'], 'triaged');
+    });
+
+    test('a chat the model failed on gets one more try', () async {
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'errored',
+        'conversation_key': 'chat-legacy',
+        'direction': 'inbound',
+        'received_at': _iso(const Duration(days: 1)),
+        'triage_status': 'error',
+        'triage_attempts': 2,
+      });
+
+      await build().syncNow();
+
+      expect((await row('errored'))['triage_status'], 'pending',
+          reason: 'the same revival mail gets on every sync');
     });
   });
 
@@ -876,8 +1296,8 @@ void main() {
   group('stripChatHtml', () {
     test('a mention keeps the name and loses the tag', () async {
       expect(
-        stripChatHtml('<div>Hey <at id="0">Bond LO</at>, any word?</div>'),
-        'Hey Bond LO, any word?',
+        stripChatHtml('<div>Hey <at id="0">Jordan Bond</at>, any word?</div>'),
+        'Hey Jordan Bond, any word?',
       );
     });
 

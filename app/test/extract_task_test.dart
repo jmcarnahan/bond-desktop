@@ -136,11 +136,11 @@ void main() {
       );
     });
 
-    test('the whole email — headers included — sits inside the fence', () {
+    test('the whole message — headers included — sits inside the fence', () {
       final user = task.buildUserMessage(
         ExtractionInput(email(), DateTime(2026, 8, 29)),
       );
-      final open = user.indexOf('<untrusted_data source="inbound_email">');
+      final open = user.indexOf('<untrusted_data source="inbound_message">');
       final close = user.indexOf('</untrusted_data>');
 
       expect(open, greaterThan(0));
@@ -204,6 +204,28 @@ void main() {
 
       expect(user, isNot(contains('null')));
       expect(user, contains('From:  &lt;&gt;'));
+    });
+
+    test('a chat is a name and a body — the same block triage renders', () {
+      final user = task.buildUserMessage(
+        ExtractionInput(
+          Message(
+            id: 'c1',
+            source: 'teams',
+            outbound: false,
+            fromName: 'Todd Ramsay',
+            fromAddress: 'teams:8f2c-…',
+            bodyText: 'Can you send the CD?',
+            receivedAt: '2026-08-29T16:05:00Z',
+          ),
+          DateTime(2026, 8, 29),
+        ),
+      );
+
+      expect(user, contains('From: Todd Ramsay\n'));
+      expect(user, isNot(contains('teams:')));
+      expect(user, isNot(contains('Subject:')));
+      expect(user, contains('Can you send the CD?'));
     });
   });
 

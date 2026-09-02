@@ -2,6 +2,7 @@ import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
 import 'package:bond_inbox/services/mcp/mcp_teams_backend.dart';
+import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -59,12 +60,15 @@ McpTeamsBackend _build(
       sameChatGap: sameChatGap ?? Duration.zero,
     );
 
+/// [mentionedUserIds] is null by default, which is an older server that does
+/// not send the key at all — the case the reshape has to degrade quietly for.
 Map<String, dynamic> _wireMessage({
   required String id,
   String lastModified = '2026-08-28T10:00:00Z',
   String? fromUserId = 'u-1',
   String? fromUserDisplay = 'Sarah Whitfield',
   String? fromApplicationId,
+  List<Object?>? mentionedUserIds,
 }) =>
     {
       'id': id,
@@ -76,6 +80,7 @@ Map<String, dynamic> _wireMessage({
       'body_content_type': 'text',
       'created': lastModified,
       'last_modified': lastModified,
+      'mentioned_user_ids': ?mentionedUserIds,
     };
 
 void main() {
@@ -447,6 +452,62 @@ void main() {
       ));
 
       expect(message['from'], isNull);
+    });
+
+    test('flat mention ids become the nested shape TeamsSync parses', () async {
+      final message = await only(
+        _wireMessage(id: 'm1', mentionedUserIds: const ['u-7', 'u-9']),
+      );
+
+      expect(message['mentions'], [
+        {
+          'mentioned': {
+            'user': {'id': 'u-7'},
+          },
+        },
+        {
+          'mentioned': {
+            'user': {'id': 'u-9'},
+          },
+        },
+      ]);
+      // The reshape's whole purpose: the parser that reads Graph's own shape
+      // must read this one identically, or `addressed_me` means one thing on
+      // the Graph backend and another here.
+      expect(TeamsSync.mentionedUserIds(message['mentions']), ['u-7', 'u-9']);
+    });
+
+    test('an empty mention list is a message that named nobody', () async {
+      final message = await only(_wireMessage(id: 'm1', mentionedUserIds: const []));
+
+      expect(message['mentions'], isEmpty);
+      expect(TeamsSync.mentionedUserIds(message['mentions']), isEmpty);
+    });
+
+    test('a junk entry is dropped rather than nested around', () async {
+      // Nothing on the wire should look like this, and a `{'mentioned': null}`
+      // reaching the parser would be a mention of nobody rather than no
+      // mention.
+      final message = await only(
+        _wireMessage(id: 'm1', mentionedUserIds: const ['u-7', '', 42, null]),
+      );
+
+      expect(message['mentions'], [
+        {
+          'mentioned': {'user': {'id': 'u-7'}},
+        },
+      ]);
+    });
+
+    test('no mentions on the wire leaves the key out entirely', () async {
+      // The server may not be deployed yet. Absent must read as "no mentions",
+      // which is what the parser already answers for a missing key — an empty
+      // list written here would be the same answer said louder, and would
+      // claim knowledge the wire did not carry.
+      final message = await only(_wireMessage(id: 'm1'));
+
+      expect(message.containsKey('mentions'), isFalse);
+      expect(TeamsSync.mentionedUserIds(message['mentions']), isEmpty);
     });
   });
 

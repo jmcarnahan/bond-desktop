@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
@@ -92,6 +93,8 @@ Map<String, dynamic> answer({
   String summary = 'Jordan asks about the launch date.',
   bool needsAction = true,
   List<String> actionItems = const ['Call Sarah about the lock'],
+  bool replyExpected = false,
+  String deadline = '',
 }) =>
     {
       'urgency': urgency,
@@ -99,6 +102,8 @@ Map<String, dynamic> answer({
       'summary': summary,
       'needs_action': needsAction,
       'action_items': actionItems,
+      'reply_expected': replyExpected,
+      'deadline': deadline,
     };
 
 void main() {
@@ -112,22 +117,28 @@ void main() {
 
   tearDown(() async => db.close());
 
+  /// [source] defaults to email because most of this file is about the drain
+  /// rather than the channel; a chat row is the same seed with the columns a
+  /// chat actually has — no subject, a `teams:` pseudo-address, and never any
+  /// headers.
   Future<void> seedMessage({
     required String id,
+    String source = 'email',
     String conversationKey = 'conv-1',
     String direction = 'inbound',
     String? from = 'sarah@example.com',
-    String subject = 'Launch date',
+    String? subject = 'Launch date',
     String receivedAt = '2026-08-29T10:00:00Z',
     String triageStatus = 'pending',
     // False is what a message looks like straight off a delta page: a
     // preview, and no body until something fetches its detail.
     bool withBody = true,
+    String? bodyText,
     String? bodyPreview,
     Map<String, String>? headers,
   }) async {
     await store.upsertMessage({
-      'source': 'email',
+      'source': source,
       'source_message_id': id,
       'conversation_key': conversationKey,
       'direction': direction,
@@ -136,30 +147,56 @@ void main() {
       'from_address': from,
       'received_at': receivedAt,
       'body_preview': bodyPreview,
-      'body_text': withBody ? 'Body of $id' : null,
+      'body_text': withBody ? (bodyText ?? 'Body of $id') : null,
       'source_meta_json':
           headers == null ? null : jsonEncode({'headers': headers}),
       'triage_status': triageStatus,
     });
   }
 
+  Future<void> seedChat({
+    required String id,
+    String conversationKey = 'chat-1',
+    String direction = 'inbound',
+    String receivedAt = '2026-08-29T10:00:00Z',
+    String triageStatus = 'pending',
+    bool withBody = true,
+    String? bodyText,
+  }) =>
+      seedMessage(
+        id: id,
+        source: 'teams',
+        conversationKey: conversationKey,
+        direction: direction,
+        from: 'teams:u1',
+        subject: null,
+        receivedAt: receivedAt,
+        triageStatus: triageStatus,
+        withBody: withBody,
+        bodyText: bodyText,
+      );
+
   Future<void> seedConversation({
     String key = 'conv-1',
+    String source = 'email',
     String? lastInboundAt = '2026-08-29T10:00:00Z',
+    String? lastOutboundAt,
     String state = 'needs_reply',
   }) async {
     await store.upsertConversation({
-      'source': 'email',
+      'source': source,
       'conversation_key': key,
       'subject': 'Launch date',
       'state': state,
       'last_inbound_at': lastInboundAt,
-      'last_message_at': lastInboundAt,
+      'last_outbound_at': lastOutboundAt,
+      'last_message_at': lastOutboundAt ?? lastInboundAt,
     });
   }
 
-  Future<Map<String, Object?>> messageRow(String id) async =>
-      (await store.getMessageRow('email', id))!;
+  Future<Map<String, Object?>> messageRow(String id,
+          {String source = 'email'}) async =>
+      (await store.getMessageRow(source, id))!;
 
   Future<Map<String, Object?>> conversationRow([String key = 'conv-1']) async =>
       (await store.getConversationRow('email', key))!;
@@ -185,8 +222,15 @@ void main() {
 
     test('two drains over one backlog take every message exactly once',
         () async {
+      // A thread each, so "who asked for m5's body" has exactly one answer:
+      // on one shared thread every message quotes the ones before it, and the
+      // per-body count below could not tell a second claim from a quote.
       for (var i = 0; i < 9; i++) {
-        await seedMessage(id: 'm$i', receivedAt: '2026-08-29T1$i:00:00Z');
+        await seedMessage(
+          id: 'm$i',
+          conversationKey: 'conv-$i',
+          receivedAt: '2026-08-29T1$i:00:00Z',
+        );
       }
       // Two queues rather than two pumps of one: the `_running` flag guards a
       // queue against itself, and each queue carries its own [DrainGate], so
@@ -487,6 +531,206 @@ void main() {
     });
   });
 
+  group('chats', () {
+    test('a chat is claimed and triaged like mail, and stays a chat', () async {
+      await seedChat(id: 'c1', bodyText: 'Can you send the CD today?');
+      final llm = FakeLlm([answer()]);
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await TriageQueue(store, llm, activityLog: log).pump();
+
+      expect(llm.userMessages.single, contains('Can you send the CD today?'));
+      final row = await messageRow('c1', source: 'teams');
+      expect(row['triage_status'], 'triaged');
+      expect(row['urgency'], 'high');
+      // Every write the drain makes is keyed `(source, id)`, so a source read
+      // off the wrong place would silently update nothing at all.
+      final event = (await store.recentActivity())
+          .firstWhere((r) => r['kind'] == 'triage');
+      expect(event['source'], 'teams');
+      expect(event['entity_id'], 'c1');
+    });
+
+    test('a chat never asks for a mail detail fetch', () async {
+      // Body stored, headers absent — which for a chat is not "detail is
+      // missing" but "this source has no such thing": `source_meta_json` is
+      // the mail sync's column. An unguarded fetch fires on every chat and can
+      // only fail.
+      await seedChat(id: 'c1');
+      // The control, and the proof the fetcher is live: a bodyless mail row
+      // beside it, which does get fetched.
+      await seedMessage(
+        id: 'm1',
+        receivedAt: '2026-08-29T09:00:00Z',
+        withBody: false,
+        bodyPreview: 'Short preview',
+      );
+      final llm = FakeLlm([answer()]);
+      final fetch = FakeDetailFetch(store, bodyText: 'The full body');
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      expect(fetch.fetched, ['m1']);
+      expect((await messageRow('c1', source: 'teams'))['triage_status'],
+          'triaged');
+    });
+
+    test('a chat that stripped down to nothing is gated, not modelled',
+        () async {
+      // What a lone emoji reaction or an image-only post leaves behind.
+      await seedChat(id: 'c1', withBody: false);
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages, isEmpty);
+      final row = await messageRow('c1', source: 'teams');
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'empty');
+    });
+
+    test('the fold-up lands on the chat’s own conversation', () async {
+      await seedConversation(key: 'chat-1', source: 'teams');
+      // Same conversation_key under email, to catch a fold-up that writes the
+      // right key against the wrong source.
+      await seedConversation(key: 'chat-1');
+      await seedChat(id: 'c1');
+      final llm = FakeLlm([
+        answer(urgency: 'urgent', actionItems: const ['Send the CD']),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      final chat = (await store.getConversationRow('teams', 'chat-1'))!;
+      expect(chat['cta_text'], 'Send the CD');
+      expect(chat['cta_urgency'], 'urgent');
+      expect((await store.getConversationRow('email', 'chat-1'))!['cta_text'],
+          isNull);
+    });
+
+    test('one drain empties both sources, newest first', () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-29T09:00:00Z');
+      await seedChat(id: 'c1', receivedAt: '2026-08-29T11:00:00Z');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      expect(llm.userMessages.length, 2);
+      expect(llm.userMessages.first, contains('Body of c1'));
+      expect(await store.triageCounts(sources: TriageQueue.sources),
+          {'triaged': 2});
+    });
+
+    test('resetInterrupted frees a claimed chat too', () async {
+      await seedChat(id: 'c1', triageStatus: 'processing');
+      await seedMessage(id: 'm1', triageStatus: 'processing');
+
+      await TriageQueue(store, FakeLlm([answer()])).resetInterrupted();
+
+      expect((await messageRow('c1', source: 'teams'))['triage_status'],
+          'pending');
+      expect((await messageRow('m1'))['triage_status'], 'pending');
+    });
+  });
+
+  group('thread context', () {
+    test('the judged message carries what came before it on its thread',
+        () async {
+      await seedMessage(
+        id: 'first',
+        receivedAt: '2026-08-29T09:00:00Z',
+        bodyText: 'Can you still make Thursday?',
+      );
+      await seedMessage(
+        id: 'second',
+        receivedAt: '2026-08-29T10:00:00Z',
+        bodyText: 'Any word on that?',
+      );
+      final llm = FakeLlm([answer()]);
+
+      // Serial, because the assertion is about WHICH request carried what:
+      // newest first, so `second` goes out before `first`.
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      final judgingSecond = llm.userMessages.first;
+      expect(judgingSecond, contains('<untrusted_data source="thread">'));
+      // The earlier message is quoted as context — this is what lets the model
+      // see that a question a message back never got answered.
+      expect(
+        judgingSecond.indexOf('Can you still make Thursday?'),
+        lessThan(judgingSecond.indexOf('Judge ONLY this message:')),
+      );
+      expect(
+        judgingSecond.indexOf('Any word on that?'),
+        greaterThan(judgingSecond.indexOf('Judge ONLY this message:')),
+      );
+    });
+
+    test('the oldest message on a thread has no thread to quote', () async {
+      await seedMessage(
+        id: 'first',
+        receivedAt: '2026-08-29T09:00:00Z',
+        bodyText: 'Can you still make Thursday?',
+      );
+      await seedMessage(
+        id: 'second',
+        receivedAt: '2026-08-29T10:00:00Z',
+        bodyText: 'Any word on that?',
+      );
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      // Only what came BEFORE: a later message is not context for a judgement
+      // about an earlier one.
+      final judgingFirst = llm.userMessages.last;
+      expect(judgingFirst, isNot(contains('source="thread"')));
+      expect(judgingFirst, isNot(contains('Any word on that?')));
+    });
+
+    test('a thread of one — the message itself is never its own context',
+        () async {
+      await seedMessage(id: 'm1', bodyText: 'The only message.');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages.single, isNot(contains('source="thread"')));
+      expect('The only message.'.allMatches(llm.userMessages.single).length, 1);
+    });
+
+    test('a chat quotes its own thread and not the mail sharing its key',
+        () async {
+      await seedChat(
+        id: 'c1',
+        receivedAt: '2026-08-29T09:00:00Z',
+        bodyText: 'Did the CD go out?',
+      );
+      await seedChat(
+        id: 'c2',
+        receivedAt: '2026-08-29T10:00:00Z',
+        bodyText: 'Bumping this.',
+      );
+      // Same conversation_key under email, to catch a thread load that reads
+      // the right key against the wrong source.
+      await seedMessage(
+        id: 'm1',
+        conversationKey: 'chat-1',
+        receivedAt: '2026-08-29T08:00:00Z',
+        bodyText: 'A mail that merely shares the key.',
+        triageStatus: 'triaged',
+      );
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm, concurrency: 1).pump();
+
+      final judgingC2 = llm.userMessages.first;
+      expect(judgingC2, contains('Did the CD go out?'));
+      expect(judgingC2, isNot(contains('A mail that merely shares the key.')));
+    });
+  });
+
   group('results', () {
     test('a success writes every result column', () async {
       await seedMessage(id: 'm1');
@@ -511,6 +755,20 @@ void main() {
         jsonDecode(row['action_items_json'] as String),
         ['Send the final copy', 'Call Marisa'],
       );
+    });
+
+    test('reply_expected reaches the row, so a NULL becomes a judgement',
+        () async {
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([answer(replyExpected: true, deadline: 'Friday')]);
+
+      await TriageQueue(store, llm).pump();
+
+      final row = await messageRow('m1');
+      // 0/1, because STRICT sqlite has no bool — and the point is that it is
+      // no longer NULL: something has now judged this message.
+      expect(row['reply_expected'], 1);
+      expect(row['deadline'], 'Friday');
     });
 
     test('a nonsense answer is clamped rather than stored raw', () async {
@@ -570,6 +828,64 @@ void main() {
       );
     });
 
+    test('a deadline rides along on the CTA', () async {
+      await seedConversation();
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([
+        answer(
+          actionItems: const ['Send the final invoice'],
+          deadline: 'Friday',
+        ),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(
+        (await conversationRow())['cta_text'],
+        'Send the final invoice — by Friday',
+      );
+    });
+
+    test('a CTA with its deadline still fits the cap', () async {
+      await seedConversation();
+      await seedMessage(id: 'm1');
+      // An ask already at the cap: appending the deadline must cost the ask
+      // its tail rather than push the pair over.
+      final llm = FakeLlm([
+        answer(actionItems: ['a' * 200], deadline: 'Friday'),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      final cta = (await conversationRow())['cta_text'] as String;
+      expect(cta.length, 200);
+      expect(cta, startsWith('aaa'));
+    });
+
+    test('no deadline leaves the ask exactly as the model wrote it', () async {
+      await seedConversation();
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([answer(actionItems: const ['Send the invoice'])]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect((await conversationRow())['cta_text'], 'Send the invoice');
+    });
+
+    test('a deadline with nothing to hang it on adds no CTA', () async {
+      await seedConversation();
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([
+        answer(needsAction: false, actionItems: const [], deadline: 'Friday'),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      // " — by Friday" on its own is not an ask, and a row showing one would
+      // be advertising work the message never asked for.
+      expect((await conversationRow())['cta_text'], isNull);
+    });
+
     test('a message that needs nothing leaves no CTA', () async {
       await seedConversation();
       await seedMessage(id: 'm1');
@@ -616,6 +932,76 @@ void main() {
       final row = await conversationRow();
       expect(row['cta_text'], 'Send the project brief');
       expect(row['cta_urgency'], 'urgent');
+    });
+
+    test('an ask the user already answered never comes back as a CTA',
+        () async {
+      // The resurrection case: the CTA was cleared when the user's reply
+      // synced in, then a re-judgment backfill (or an error revive, or a
+      // reply that beat the first drain) sends the same inbound message
+      // through triage again. The fold must not write the dead ask back —
+      // nor the urgency multiplier that would push an answered thread into
+      // Needs You.
+      await seedConversation(
+        lastInboundAt: '2026-08-29T10:00:00Z',
+        lastOutboundAt: '2026-08-29T11:00:00Z',
+        state: 'waiting',
+      );
+      await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
+      final llm = FakeLlm([
+        answer(
+          urgency: 'urgent',
+          actionItems: const ['Confirm attendance'],
+          deadline: 'Friday',
+        ),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      // The message itself is still judged — its own columns are what the
+      // scorer and a future re-judgment read.
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+      final row = await conversationRow();
+      expect(row['cta_text'], isNull);
+      expect(row['cta_urgency'], 'normal');
+      expect(row['state'], 'waiting');
+    });
+
+    test('a reply at the same instant as the ask still counts as the answer',
+        () async {
+      // Ties resolve toward the reply, exactly as outboundResolves reads
+      // them when it clears the CTA at ingest — the two guards must agree on
+      // the boundary or a same-second pair would clear and resurrect in turn.
+      await seedConversation(
+        lastInboundAt: '2026-08-29T10:00:00Z',
+        lastOutboundAt: '2026-08-29T10:00:00Z',
+        state: 'waiting',
+      );
+      await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
+      final llm = FakeLlm([
+        answer(actionItems: const ['Confirm attendance']),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect((await conversationRow())['cta_text'], isNull);
+    });
+
+    test('an ask newer than the last reply still folds up', () async {
+      // The inverse must keep working: the user replied, then the sender
+      // asked again. That newer ask is unanswered and owns the thread.
+      await seedConversation(
+        lastInboundAt: '2026-08-29T12:00:00Z',
+        lastOutboundAt: '2026-08-29T11:00:00Z',
+      );
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T12:00:00Z');
+      final llm = FakeLlm([
+        answer(actionItems: const ['Send the revised draft']),
+      ]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect((await conversationRow())['cta_text'], 'Send the revised draft');
     });
 
     test('a message with no conversation row folds up into nothing', () async {
@@ -863,7 +1249,11 @@ void main() {
     await seedMessage(id: 'm2', receivedAt: '2026-08-29T11:00:00Z');
     late TriageQueue queue;
     final llm = _InspectingLlm(() => queue.stop());
-    queue = TriageQueue(store, llm);
+    // Serial, so "the message in flight" is exactly one message: at three at a
+    // time the drain has legitimately launched siblings before the stop lands,
+    // and what happens to those is the park test's subject rather than this
+    // one's. The claim here is that stop launches nothing FURTHER.
+    queue = TriageQueue(store, llm, concurrency: 1);
 
     await queue.pump();
 

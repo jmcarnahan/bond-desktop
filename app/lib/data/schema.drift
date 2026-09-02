@@ -42,6 +42,22 @@ CREATE TABLE messages (
   -- this is the only position where an upgraded install and a fresh one get
   -- identical table_info — which the parity test compares in order.
   label TEXT,
+  -- `addressed_me` is 1 when this inbound message singled the user out: the
+  -- sole To: recipient for mail, a 1:1 chat or an @mention for Teams. Written
+  -- at ingest, from what the connector knows — it is a fact about the message,
+  -- not a verdict about it.
+  --
+  -- `reply_expected` is triage v2's judgement of whether the sender is waiting
+  -- on an answer from the owner. NULL means no v2 pass has ever judged this
+  -- row, which is NOT the same as "no reply expected" — the re-judgement
+  -- backfill keys off exactly that distinction, so nothing may read NULL as 0.
+  --
+  -- `deadline` is the date or timeframe triage read out of the message, free
+  -- text as the sender wrote it ("Friday", "end of month"). NULL when the
+  -- message named none.
+  addressed_me INTEGER NOT NULL DEFAULT 0,
+  reply_expected INTEGER,
+  deadline TEXT,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
 

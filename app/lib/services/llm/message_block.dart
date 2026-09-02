@@ -1,0 +1,77 @@
+import '../../models/message_models.dart';
+
+/// Enough of a body for a model to judge intent. Past this it is quoted thread
+/// and signatures, which cost tokens and add nothing.
+const int messageBlockBodyCap = 4000;
+
+/// One inbound message, rendered for a prompt.
+///
+/// **The one place a channel's shape is known.** Every task that puts a
+/// message in front of the model — triage, extraction, and whatever comes
+/// next — renders it through here, so "a chat has no subject line, and its
+/// address is a Graph id nobody should read" is a fact this file holds and no
+/// task repeats. A per-task copy of the block is how the two sources would
+/// quietly drift apart.
+///
+/// The whole block is the sender's own text, headers included, which is why
+/// callers fence all of it rather than just the body.
+String buildMessageBlock(Message message) {
+  final body = message.bodyText?.isNotEmpty == true
+      ? message.bodyText!
+      : (message.bodyPreview ?? '');
+  final clipped = body.length > messageBlockBodyCap
+      ? body.substring(0, messageBlockBodyCap)
+      : body;
+
+  return '${senderLine(message)}\n'
+      '${_subjectLine(message)}'
+      'Received: ${message.receivedAt ?? ''}\n'
+      '\n'
+      'Body:\n$clipped';
+}
+
+/// Mail identifies a sender by address; a chat cannot. A chat's `from_address`
+/// is `teams:<graph user id>` — a namespaced uuid the model can only be
+/// distracted by — so a chat sender is the display name and nothing else.
+///
+/// Public because the block is not the only place a sender is named: the
+/// drafting task renders its thread lines through here too, which is what
+/// keeps "a chat sender is a name, not an address" a fact this file holds
+/// rather than a rule two prompts each remember separately.
+String senderLine(Message message) => switch (message.source) {
+      'teams' => 'From: ${message.fromName ?? ''}',
+      _ => 'From: ${message.fromName ?? ''} <${message.fromAddress ?? ''}>',
+    };
+
+/// How directly this message came at the reader, in one line.
+///
+/// Derived from the `addressed_me` the connector wrote at ingest — sole To:
+/// recipient for mail, a 1:1 chat or an @mention for Teams — plus the To: count
+/// the row already carries. It is the APP's own statement about the message,
+/// not the sender's, which is why callers put it OUTSIDE the fence: it is a
+/// fact the model may act on rather than text it must only analyse.
+///
+/// A NULL or false `addressed_me` collapses into the quiet case deliberately.
+/// A connector that never wrote the column, and one that wrote "no", both mean
+/// the same thing here — nothing knows this message singled the reader out —
+/// and reading either as "yes" would push a group broadcast up the list.
+String buildDirectnessLine(Message message) {
+  if (message.source == 'teams') {
+    return message.addressedMe
+        ? 'Addressed to: you directly (a 1:1 chat, or you are @mentioned).'
+        : 'Addressed to: a group chat, not you specifically.';
+  }
+  if (message.addressedMe) return 'Addressed to: only you.';
+  if (message.to.length > 1) {
+    return 'Addressed to: you and ${message.to.length - 1} others.';
+  }
+  return 'Addressed to: you indirectly (CC, a list, or unknown).';
+}
+
+/// A chat has no subject, ever (`TeamsSync.messageRow` stores null rather than
+/// inventing one from the first line). An empty `Subject:` line would tell the
+/// model a title was missing rather than that this channel has none.
+String _subjectLine(Message message) => switch (message.source) {
+      'teams' => '',
+      _ => 'Subject: ${message.subject ?? ''}\n',
+    };

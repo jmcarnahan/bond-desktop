@@ -5,6 +5,7 @@ import 'activity_log.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
+import 'gates.dart';
 import 'graph_mail.dart';
 
 /// How far back a mailbox that has never synced reaches. Two weeks is enough
@@ -57,11 +58,28 @@ class SyncService implements MailSync {
   final MessageStore _store;
   final ActivityLog _log;
 
-  SyncService(this._mail, this._store, {ActivityLog? activityLog})
-      : _log = activityLog ?? ActivityLog.disabled();
+  /// How to find out which mailbox this is. A callback rather than a future,
+  /// so the keychain is read on the first sync rather than when this object is
+  /// built: the provider that wires it is read by things that never sync, and
+  /// a Future would have to be created — and its read started — at that point.
+  final Future<String?> Function()? _userAddressReader;
+
+  /// The resolved address, or null while it is still unknown. Null is a real
+  /// state, not a placeholder: until it resolves, nothing can say a message
+  /// was addressed to the user, so nothing does.
+  String? _userAddress;
+
+  SyncService(
+    this._mail,
+    this._store, {
+    ActivityLog? activityLog,
+    Future<String?> Function()? userAddress,
+  })  : _log = activityLog ?? ActivityLog.disabled(),
+        _userAddressReader = userAddress;
 
   @override
   Future<void> syncNow() async {
+    _userAddress ??= await _resolveUserAddress();
     final sw = Stopwatch()..start();
     try {
       final (inbox, inboxResync) = await _syncFolder('inbox', 'inbound');
@@ -73,6 +91,33 @@ class SyncService implements MailSync {
       // below is `OR IGNORE`, so nothing here double-queues.
       final revivedTriage = await _store.reviveErroredTriage(source: _source);
       final revivedWork = await _store.reviveErroredWork();
+
+      // Mail the first triage judged before it asked whether a reply is
+      // expected. BEFORE the enqueue below for the same reason the teams sync
+      // orders its re-pend first: a row this flips to `pending` is one the
+      // enqueue picks up in the same pass rather than a refresh later.
+      // Self-exhausting — see [MessageStore.rejudgeStaleTriage].
+      final rejudged = await _store.rejudgeStaleTriage(
+        source: _source,
+        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+      );
+
+      // The one-time catch-up for mail stored before ingest wrote
+      // `addressed_me`. Skipped WITHOUT setting the pref while the address is
+      // unknown, so a keychain that has not answered yet costs a retry next
+      // sync rather than the backfill altogether. The count stays null until
+      // it runs — "did not run" and "ran and found nothing" are different
+      // facts, and the activity row says which.
+      int? backfilled;
+      final backfillDone =
+          await _store.getPref('backfill_addressed_me_email') != null;
+      if (!backfillDone && _userAddress != null) {
+        backfilled = await _store.backfillEmailAddressedMe(
+          userAddress: _userAddress!,
+          sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        );
+        await _store.setPref('backfill_addressed_me_email', '1');
+      }
 
       // After both drains, so the window it queues from is the mailbox as it
       // stands rather than as it stood mid-sync. `OR IGNORE` on the work table
@@ -102,6 +147,8 @@ class SyncService implements MailSync {
           'queued_extract': queued,
           'revived_triage': revivedTriage,
           'revived_work': revivedWork,
+          if (rejudged > 0) 'rejudged_triage': rejudged,
+          'backfilled_addressed_me': ?backfilled,
           if (inboxResync || sentResync) 'resync': true,
         },
       );
@@ -117,6 +164,20 @@ class SyncService implements MailSync {
         detail: {'error': '$e'},
       );
       rethrow;
+    }
+  }
+
+  /// The signed-in address, or null when there is not one to be had.
+  ///
+  /// Every failure answers null. The address is a keychain read behind a
+  /// callback this class did not write, and a locked keychain or a rejected
+  /// prompt must cost the mailbox one signal, never the whole sync.
+  Future<String?> _resolveUserAddress() async {
+    if (_userAddressReader == null) return null;
+    try {
+      return await _userAddressReader();
+    } catch (_) {
+      return null;
     }
   }
 
@@ -260,7 +321,15 @@ class SyncService implements MailSync {
         final (fromName, fromAddress) = _address(message['from']);
         final recipients = _recipients(message['toRecipients']);
 
-        final (triageStatus, gateReason) = _triageOnInsert(
+        // The user was singled out when they are the ONLY name on the To:
+        // line. `recipients` comes from `toRecipients`, so a CC never reaches
+        // here — which is the rule, not an accident of the data: mail copied
+        // to the user is not mail aimed at them.
+        final soleRecipient = _userAddress != null &&
+            recipients.length == 1 &&
+            recipients.first.toLowerCase() == _userAddress!.toLowerCase();
+
+        final (triageStatus, gateReason) = triageStatusOnInsert(
           outbound: outbound,
           receivedAt: receivedAt,
           backlogCutoff: backlogCutoff,
@@ -293,6 +362,7 @@ class SyncService implements MailSync {
           'has_attachments': 0,
           'triage_status': triageStatus,
           'gate_reason': gateReason,
+          'addressed_me': direction == 'inbound' && soleRecipient ? 1 : 0,
         });
 
         if (!firstSighting) continue;
@@ -375,24 +445,6 @@ class SyncService implements MailSync {
       'last_message_preview': snapshot.lastMessagePreview,
     });
     await _store.recomputeConversationCounts(_source, key);
-  }
-
-  /// The triage columns a message gets the first time it is stored. Both are
-  /// ignored on a re-sync of a message already present.
-  (String, String?) _triageOnInsert({
-    required bool outbound,
-    required String? receivedAt,
-    required String backlogCutoff,
-  }) {
-    // Triage answers "does this need me?" — the user's own sent mail never
-    // does.
-    if (outbound) return ('skipped', 'outbound');
-    if (receivedAt != null &&
-        receivedAt.isNotEmpty &&
-        receivedAt.compareTo(backlogCutoff) < 0) {
-      return ('skipped', 'backlog');
-    }
-    return ('pending', null);
   }
 
   /// Fills in the bodies of an opened thread, newest first.

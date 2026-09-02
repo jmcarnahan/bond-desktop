@@ -419,7 +419,7 @@ void main() {
               [
                 graphMessage(
                   id: 's1',
-                  fromName: 'Bond LO',
+                  fromName: 'Jordan Bond',
                   fromAddress: 'lo@bond.com',
                   to: const ['sarah@example.com'],
                 )
@@ -554,7 +554,7 @@ void main() {
                 graphMessage(
                   id: 'out-1',
                   subject: 'Re: Project brief',
-                  fromName: 'Bond LO',
+                  fromName: 'Jordan Bond',
                   fromAddress: 'lo@bond.com',
                   to: const ['sarah@example.com'],
                   receivedDateTime: '2026-08-28T09:00:00Z',
@@ -762,6 +762,167 @@ void main() {
 
       await store.updateMessageDetail('email', 'm1', bodyText: null);
       expect((await messageRow('m1'))['body_text'], 'The body.');
+    });
+  });
+
+  group('addressed_me', () {
+    const me = 'lo@bond.com';
+
+    /// A sync that knows (or does not know) which mailbox it is draining. The
+    /// address arrives as a future because in the app it is a keychain read.
+    SyncService syncKnowing(Future<String?> Function() address) {
+      final tokens = InMemoryTokenStore();
+      tokens.values['refresh_token'] = 'rt-initial';
+      tokens.values['granted_scopes'] = _grantedScopes;
+      final auth = GraphAuth(httpClient: graph.client, store: tokens);
+      return SyncService(
+        GraphMail(auth, httpClient: graph.client),
+        store,
+        userAddress: address,
+      );
+    }
+
+    String ago(Duration age) =>
+        DateTime.now().toUtc().subtract(age).toIso8601String();
+
+    void queueInbox(List<Map<String, dynamic>> messages) {
+      graph.queue('inbox', [
+        () => jsonOk(deltaBody(messages, deltaLink: deltaCursor('inbox', 'c1'))),
+      ]);
+    }
+
+    test('mail with the user as its only To: recipient singled them out',
+        () async {
+      queueInbox([
+        graphMessage(id: 'sole', to: const [me]),
+        graphMessage(
+            id: 'two-up', conversationId: 'conv-2', to: const [me, 'ops@x.com']),
+        graphMessage(
+            id: 'not-me', conversationId: 'conv-3', to: const ['ops@x.com']),
+      ]);
+
+      await syncKnowing(() async => me).syncNow();
+
+      expect((await messageRow('sole'))['addressed_me'], 1);
+      // Two names on the To: line is a message to a group, however small.
+      expect((await messageRow('two-up'))['addressed_me'], 0);
+      expect((await messageRow('not-me'))['addressed_me'], 0);
+    });
+
+    test('a CC does not cost the user the To: line', () async {
+      // `_recipients` reads `toRecipients` and nothing else, which IS the rule:
+      // mail copied to somebody is not mail aimed at them, and mail aimed at
+      // the user does not stop being so because other people were copied.
+      queueInbox([
+        {
+          ...graphMessage(id: 'cc-others', to: const [me]),
+          'ccRecipients': [
+            {
+              'emailAddress': {'name': null, 'address': 'ops@x.com'},
+            },
+          ],
+        },
+      ]);
+
+      await syncKnowing(() async => me).syncNow();
+
+      expect((await messageRow('cc-others'))['addressed_me'], 1);
+    });
+
+    test('the address is matched case-insensitively', () async {
+      queueInbox([graphMessage(id: 'shouty', to: const ['LO@Bond.com'])]);
+
+      await syncKnowing(() async => me).syncNow();
+
+      expect((await messageRow('shouty'))['addressed_me'], 1);
+    });
+
+    test('the user’s own sent mail is addressed to nobody', () async {
+      graph.queue('sentitems', [
+        () => jsonOk(deltaBody(
+              [graphMessage(id: 's1', fromAddress: me, to: const [me])],
+              deltaLink: deltaCursor('sentitems', 'c1'),
+            )),
+      ]);
+
+      await syncKnowing(() async => me).syncNow();
+
+      expect((await messageRow('s1'))['addressed_me'], 0);
+    });
+
+    test('an address the keychain never gives up marks nothing, and leaves '
+        'the backfill for next time', () async {
+      queueInbox([graphMessage(id: 'sole', to: const [me])]);
+
+      await syncKnowing(() async => null).syncNow();
+
+      expect((await messageRow('sole'))['addressed_me'], 0);
+      // NOT set: the backfill is one-shot, and burning its one shot while the
+      // address is unknown would mark the stored mailbox never.
+      expect(await store.getPref('backfill_addressed_me_email'), isNull);
+    });
+
+    test('a keychain that throws costs the signal, never the sync', () async {
+      queueInbox([graphMessage(id: 'sole', to: const [me])]);
+
+      await syncKnowing(() async => throw StateError('keychain locked')).syncNow();
+
+      expect((await messageRow('sole'))['addressed_me'], 0);
+      expect(await store.getPref('backfill_addressed_me_email'), isNull);
+    });
+
+    test('stored mail is backfilled once, inside the window', () async {
+      /// A row as the pre-`addressed_me` sync left it: recipients stored, flag
+      /// flat.
+      Future<void> stored(String id, List<String> to, Duration age) =>
+          store.upsertMessage({
+            'source_message_id': id,
+            'conversation_key': 'conv-stored',
+            'direction': 'inbound',
+            'to_json': jsonEncode(to),
+            'received_at': ago(age),
+          });
+
+      await stored('historical', const [me], const Duration(days: 2));
+      await stored('historical-group', const [me, 'ops@x.com'],
+          const Duration(days: 2));
+      await stored('ancient', const [me], const Duration(days: 40));
+
+      queueInbox([graphMessage(id: 'fresh', to: const [me])]);
+      await syncKnowing(() async => me).syncNow();
+
+      expect((await messageRow('historical'))['addressed_me'], 1);
+      expect((await messageRow('historical-group'))['addressed_me'], 0);
+      expect((await messageRow('ancient'))['addressed_me'], 0,
+          reason: 'the triage window bounds the catch-up, as it bounds '
+              'everything else this sync reaches back for');
+      expect(await store.getPref('backfill_addressed_me_email'), '1');
+
+      // Once means once: a flat row written after the pref is set stays flat.
+      await stored('later', const [me], const Duration(days: 2));
+      graph.queue('inbox', [
+        () => jsonOk(deltaBody(const [], deltaLink: deltaCursor('inbox', 'c2'))),
+      ]);
+      await syncKnowing(() async => me).syncNow();
+
+      expect((await messageRow('later'))['addressed_me'], 0);
+    });
+
+    test('mail triage v1 judged goes back for the v2 questions', () async {
+      await store.upsertMessage({
+        'source_message_id': 'v1-judged',
+        'conversation_key': 'conv-old',
+        'direction': 'inbound',
+        'received_at': ago(const Duration(days: 1)),
+        'triage_status': 'triaged',
+      });
+
+      queueInbox(const []);
+      await syncKnowing(() async => me).syncNow();
+
+      // `reply_expected` is NULL on anything the first triage judged, and
+      // nothing else would ever look at the row again.
+      expect((await messageRow('v1-judged'))['triage_status'], 'pending');
     });
   });
 }

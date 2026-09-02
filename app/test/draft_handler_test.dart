@@ -93,8 +93,32 @@ void main() {
     });
   }
 
-  Future<void> runOne(DraftHandler handler, {String key = 'conv-1'}) =>
-      handler.run({'task_kind': 'draft', 'source': 'email', 'entity_id': key});
+  Future<void> seedChat({
+    String id = 'chat-1-m1',
+    String key = 'chat-1',
+    String receivedAt = '2026-08-29T10:00:00Z',
+    String body = 'Any word on the CD?',
+  }) async {
+    await store.upsertMessage({
+      'source': 'teams',
+      'source_message_id': id,
+      'conversation_key': key,
+      'direction': 'inbound',
+      'from_name': 'Sarah Whitfield',
+      // A namespaced Graph id, which is what the connector stores. There is no
+      // address to match a past reply against.
+      'from_address': 'teams:u1',
+      'received_at': receivedAt,
+      'body_text': body,
+    });
+  }
+
+  Future<void> runOne(
+    DraftHandler handler, {
+    String key = 'conv-1',
+    String source = 'email',
+  }) =>
+      handler.run({'task_kind': 'draft', 'source': source, 'entity_id': key});
 
   group('the happy path', () {
     test('writes a suggested draft against the NEWEST inbound message',
@@ -202,6 +226,74 @@ void main() {
 
       expect(llm.userMessages.single, contains('What is the current expiry?'));
       expect(llm.userMessages.single, contains('It expires Wednesday.'));
+    });
+
+    test('the email channel note, alongside the style fence', () async {
+      await seedOutbound(body: 'Sounds good — I will confirm by noon. — Jo');
+      await seedInbound();
+
+      final llm = FakeLlm([answer()]);
+      await runOne(DraftHandler(store, llm));
+
+      expect(llm.userMessages.single, contains('This is an email thread.'));
+      expect(llm.userMessages.single, contains('style_examples'));
+    });
+  });
+
+  group('a chat drafts through the same handler', () {
+    test('and gets the chat channel note, not the email one', () async {
+      await seedChat();
+      final llm = FakeLlm([answer(replyBody: 'Sending it over now.')]);
+
+      await runOne(DraftHandler(store, llm), key: 'chat-1', source: 'teams');
+
+      expect(
+        llm.userMessages.single,
+        contains('This is an instant-message chat.'),
+      );
+      expect(
+        llm.userMessages.single,
+        isNot(contains('This is an email thread.')),
+      );
+      expect((await store.getDraft('teams', 'chat-1'))!['body'],
+          'Sending it over now.');
+    });
+
+    test('with no style fence — a chat has no addressed past replies',
+        () async {
+      // `recentOutboundToSender` matches on `to_json`, which a chat never
+      // writes, so this is the skip made visible: the sample the LIKE could
+      // never have found does not appear as an empty fence either.
+      await seedChat();
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'chat-1-o1',
+        'conversation_key': 'chat-1',
+        'direction': 'outbound',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'On it — will check this afternoon.',
+      });
+      final llm = FakeLlm([answer()]);
+
+      await runOne(DraftHandler(store, llm), key: 'chat-1', source: 'teams');
+
+      expect(llm.userMessages.single, isNot(contains('style_examples')));
+      // The owner's own chat voice is already in the thread, turn by turn.
+      expect(
+        llm.userMessages.single,
+        contains('On it — will check this afternoon.'),
+      );
+    });
+
+    test('and its thread lines name the sender rather than the Graph id',
+        () async {
+      await seedChat();
+      final llm = FakeLlm([answer()]);
+
+      await runOne(DraftHandler(store, llm), key: 'chat-1', source: 'teams');
+
+      expect(llm.userMessages.single, contains('From: Sarah Whitfield'));
+      expect(llm.userMessages.single, isNot(contains('teams:u1')));
     });
   });
 

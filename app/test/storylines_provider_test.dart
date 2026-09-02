@@ -83,11 +83,17 @@ void main() {
     );
   }
 
-  Future<void> seedConversation(String key, {String? subject}) {
+  Future<void> seedConversation(
+    String key, {
+    String? subject,
+    String state = 'waiting',
+    String? ctaText,
+  }) {
     return store.upsertConversation({
       'conversation_key': key,
       'subject': subject ?? key,
-      'state': 'waiting',
+      'state': state,
+      'cta_text': ctaText,
       'last_message_at': '2026-08-28T10:00:00Z',
     });
   }
@@ -439,6 +445,54 @@ void main() {
 
       final state = notifier.state as StorylineTimelineLoaded;
       expect(state.episodes.single.summary, isNull);
+    });
+
+    test('the episode carries the thread\'s state and its ask', () async {
+      await seedConversation('c1',
+          state: 'needs_reply',
+          ctaText: 'Confirm availability for dinner on Friday');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+      await notifier.load();
+
+      // Straight off the conversation row, so the card can say the thread
+      // needs the user by the same rule the thread panel uses.
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(state.episodes.single.state, ConversationState.needsReply);
+      expect(state.episodes.single.ctaText,
+          'Confirm availability for dinner on Friday');
+    });
+
+    test('a thread with no conversation row asks for nothing', () async {
+      // Messages and membership without the conversation row the fold writes:
+      // the episode still renders, and it demands nothing of the user.
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+      await notifier.load();
+
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(state.episodes.single.state, ConversationState.waiting);
+      expect(state.episodes.single.ctaText, isNull);
+    });
+
+    test('a needs-reply thread with no ask carries none', () async {
+      await seedConversation('c1', state: 'needs_reply');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final notifier = StorylineTimelineNotifier(store, 'sl-1');
+      await notifier.load();
+
+      final state = notifier.state as StorylineTimelineLoaded;
+      expect(state.episodes.single.state, ConversationState.needsReply);
+      expect(state.episodes.single.ctaText, isNull);
     });
 
     test('a failed re-read keeps the episodes and explains itself', () async {

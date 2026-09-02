@@ -60,6 +60,35 @@ String? gateFor(Message message, {required String? userAddress}) =>
       _ => null,
     };
 
+/// The triage columns a message gets the first time it is stored, for BOTH
+/// connectors. Ignored on a re-sync of a message already present.
+///
+/// One function rather than one per ingest because the rule is about the
+/// message, not the channel: the user's own sent message never asks the user
+/// for anything, and a message older than the caller's window is history the
+/// model should not spend seventeen seconds on.
+///
+/// [backlogCutoff] null means "no cap", which is what the chat ingest passes:
+/// its own sync floor already bounds how far back messages can arrive from.
+/// The mail cap exists because a mailbox can hand over a hundred thousand
+/// messages on a first sync; a chat list cannot.
+(String, String?) triageStatusOnInsert({
+  required bool outbound,
+  String? receivedAt,
+  String? backlogCutoff,
+}) {
+  // Triage answers "does this need me?" — the user's own sent message never
+  // does.
+  if (outbound) return ('skipped', 'outbound');
+  if (backlogCutoff != null &&
+      receivedAt != null &&
+      receivedAt.isNotEmpty &&
+      receivedAt.compareTo(backlogCutoff) < 0) {
+    return ('skipped', 'backlog');
+  }
+  return ('pending', null);
+}
+
 /// One check, and that is the honest size of it.
 ///
 /// Everything the email gates work out from an address or a header is already
@@ -70,11 +99,10 @@ String? gateFor(Message message, {required String? userAddress}) =>
 /// whose body stripped down to nothing, which is what a lone emoji reaction or
 /// an image-only post leaves behind.
 ///
-/// It is currently reached by nobody: chat messages never enter triage, and
-/// extraction is queued straight from SQL that already filters on
-/// `gate_reason`. It exists so the dispatch above has a real arm rather than
-/// falling through to "no gate", which is the answer for a source this app has
-/// never heard of and should not be the answer for one it has.
+/// That single check is therefore the WHOLE chat gate, and it runs on every
+/// chat message the triage queue claims: bot and self exclusion happened at
+/// ingest, so anything reaching here is a person talking to the user and the
+/// only reason to refuse it the model is having nothing to read.
 String? _teamsGate(Message message) {
   final body = message.bodyText ?? message.bodyPreview ?? '';
   return body.trim().isEmpty ? 'empty' : null;

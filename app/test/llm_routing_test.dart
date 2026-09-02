@@ -148,10 +148,13 @@ void main() {
           'The studio is reviewing the homepage copy.');
     });
 
-    test('the sweep names on the primary even with a confirm client', () async {
+    test('the sweep names on the primary and confirms on the fast client',
+        () async {
       // Four unassigned threads, two of which link — the sweep proposes one
-      // storyline and names it. No membership is judged: a cluster IS the
-      // claim, so nothing here belongs on the fast server.
+      // storyline and names it. The cluster is a shortlist, not a verdict, so
+      // each of its two threads is then confirmed against that name, and
+      // membership is a membership question wherever it is asked from: it goes
+      // to the small server exactly as an assignment's does.
       await seed('c1', vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
       await seed('c2', vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
       await seed('c3', vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
@@ -159,12 +162,14 @@ void main() {
       final primary = FakeLlm('primary', {
         'storyline_name': [nameAnswer()],
       });
-      final fast = FakeLlm('fast', const {});
+      final fast = FakeLlm('fast', {
+        'storyline_membership': [confirmAnswer()],
+      });
 
       await StorylineService(store, primary, confirmClient: fast).sweep();
 
-      expect(primary.callsFor('storyline_name'), 1);
-      expect(fast.schemas, isEmpty);
+      expect(primary.schemas, ['storyline_name']);
+      expect(fast.schemas, ['storyline_membership', 'storyline_membership']);
       expect(await store.loadStorylines(), hasLength(1));
     });
 
