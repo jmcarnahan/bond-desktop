@@ -216,6 +216,27 @@ class TeamsSync {
       // must not for mail (`sync_service.dart`).
       final revivedTriage = await _store.reviveErroredTriage(source: source);
 
+      // Claims nobody is holding any more, and one more try a day for what
+      // exhausted the revival above — both exactly as the mail sync does them
+      // (`sync_service.dart`), and both needed here too: a Teams-only session
+      // is a session where nothing else would ever look.
+      final staleBefore = _isoAgo(staleClaimAfter);
+      final reclaimedTriage = await _store.reclaimStaleTriage(
+        staleBeforeIso: staleBefore,
+        sources: const [source],
+      );
+      final reclaimedWork = await _store.reclaimStaleWork(
+        staleBeforeIso: staleBefore,
+      );
+      final terminalBefore = _isoAgo(terminalRetryAfter);
+      final revivedTerminalTriage = await _store.reviveTerminalTriage(
+        olderThanIso: terminalBefore,
+        source: source,
+      );
+      final revivedTerminalWork = await _store.reviveTerminalWork(
+        olderThanIso: terminalBefore,
+      );
+
       // Extraction, for the chat messages a person actually wrote. `OR IGNORE`
       // makes it idempotent, so it both picks up what just arrived and refills
       // a queue a crash left short.
@@ -249,6 +270,13 @@ class TeamsSync {
           'chats_fetched': chatsFetched,
           'queued_extract': queued,
           'revived_triage': revivedTriage,
+          // Only when they happened — see `sync_service.dart`.
+          if (reclaimedTriage > 0) 'reclaimed_triage': reclaimedTriage,
+          if (reclaimedWork > 0) 'reclaimed_work': reclaimedWork,
+          if (revivedTerminalTriage > 0)
+            'revived_terminal_triage': revivedTerminalTriage,
+          if (revivedTerminalWork > 0)
+            'revived_terminal_work': revivedTerminalWork,
           if (repended > 0) 'repended_triage': repended,
           if (rejudged > 0) 'rejudged_triage': rejudged,
           'backfilled_addressed_me': ?backfilled,

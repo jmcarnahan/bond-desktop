@@ -7,7 +7,11 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart'
+    show encodeEmbedding, EmbeddingsClient;
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/storyline_handler.dart';
+import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
@@ -526,6 +530,80 @@ void main() {
       expect(row.status, 'error');
       expect(row.detail['attempts'], 1);
       expect(row.detail['status_code'], 400);
+    });
+
+    /// The assignment pass files nothing most of the time, and `storyline` is
+    /// a quiet kind precisely so that those passes leave the panel alone. What
+    /// is pinned here is the line between the no-op and the two outcomes worth
+    /// a row: one string detail on the wrong side of it would put a row in the
+    /// panel for every thread whose embedding changed and matched nothing,
+    /// which is most of them.
+    Future<void> seedThread(String key, List<double> vector) async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': key,
+        'subject': 'Subject for $key',
+        'state': 'waiting',
+        'last_message_at': '2026-08-28T10:00:00Z',
+      });
+      await store.upsertConversationAi(
+        'email',
+        key,
+        embedding: encodeEmbedding(vector),
+        embeddedHash: 'h-$key',
+        embedModel: EmbeddingsClient.modelTag,
+      );
+    }
+
+    Future<void> pumpStoryline(String key, FakeLlm llm) async {
+      await store.enqueueWork('storyline', 'email', key);
+      await AiWorker(
+        store,
+        handlers: [
+          StorylineAssignHandler(
+            StorylineService(store, llm, activityLog: log),
+            activityLog: log,
+          ),
+        ],
+        activityLog: log,
+      ).pump();
+    }
+
+    test('a pass that found nothing to file writes no row at all', () async {
+      await seedThread('c1', const [1.0, 0.0]);
+
+      await pumpStoryline('c1', FakeLlm([<String, dynamic>{}]));
+
+      expect(await rows('storyline'), isEmpty);
+      expect(await store.workCounts('storyline'), {'done': 1});
+    });
+
+    test('a thread the model turned down is worth exactly one row', () async {
+      await seedThread('member', const [1.0, 0.0]);
+      await seedThread('c1', const [1.0, 0.0]);
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        summary: 'The studio is reviewing the homepage copy.',
+        charter: 'The redesign of the Northline Studio website.',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
+
+      await pumpStoryline(
+        'c1',
+        FakeLlm([
+          {'evidence': 'Different project.', 'belongs': false, 'confidence': 'high'},
+        ]),
+      );
+
+      final row = (await rows('storyline')).single;
+      // A model call happened and its answer was no. `skipped` rather than
+      // `ok`: the item is done, but nothing was filed.
+      expect(row.status, 'skipped');
+      expect(row.entityId, 'c1');
+      expect(row.detail['outcome'], 'rejected');
     });
 
     test('one row per item, not one per handler pass', () async {

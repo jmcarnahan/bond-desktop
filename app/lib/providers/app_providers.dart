@@ -305,7 +305,10 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
       // around.
-      StorylineAssignHandler(storylines),
+      StorylineAssignHandler(
+        storylines,
+        activityLog: ref.watch(activityLogProvider),
+      ),
       StorylineSweepHandler(storylines),
       // After the sweep and before drafts: a recruit is rare — it only exists
       // when a charter was just saved — and the threads it files are exactly

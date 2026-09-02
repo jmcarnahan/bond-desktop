@@ -1,3 +1,5 @@
+import 'dart:async';
+
 // `show BondDatabase`: drift generates row classes whose names collide with
 // the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
@@ -8,6 +10,7 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
+import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
 import 'package:bond_inbox/services/mcp/mcp_auth.dart';
 import 'package:bond_inbox/services/mcp/mcp_mail_backend.dart';
@@ -222,6 +225,55 @@ void main() {
     });
   });
 
+  group('switching while the model is mid-message', () {
+    /// The switch rebuilds both queues — they watch the backend preference —
+    /// and the old queue's claims are rows nothing else will ever look at
+    /// again. Before the queues released them, a switch taken while a message
+    /// was at the model left that message `processing` until the next launch.
+    test('strands no processing row', () async {
+      final llm = _HeldLlm();
+      final made = ProviderContainer(
+        overrides: [
+          dbProvider.overrideWithValue(db),
+          fastLlmClientProvider.overrideWithValue(llm),
+        ],
+      );
+      addTearDown(made.dispose);
+      await made.read(appPrefsProvider.notifier).ready;
+
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'subject': 'Launch date',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@x.com',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'Can we still ship on Thursday?',
+        'triage_status': 'pending',
+      });
+
+      final queue = made.read(triageQueueProvider);
+      final pumping = queue.pump();
+      await llm.started.future;
+      expect((await store.triageCounts())['processing'], 1);
+
+      // The switch. Everything downstream of the preference is rebuilt, which
+      // is what disposes the queue holding the claim.
+      await made.read(appPrefsProvider.notifier).setBackendMode(backendModeSdk);
+      llm.release.complete();
+      await pumping;
+      // The dispose is not awaited by `ref.onDispose`, so give the release it
+      // schedules a turn of the loop to land.
+      await Future<void>.delayed(Duration.zero);
+
+      final counts = await store.triageCounts();
+      expect(counts['processing'], isNull);
+      expect(counts.keys, isNot(contains('processing')));
+    });
+  });
+
   group('the poll timer still cannot reach Teams', () {
     /// A [TeamsSync] that counts calls instead of making them — the same
     /// stand-in `teams_refresh_test.dart` uses, for the same reason.
@@ -266,6 +318,36 @@ void main() {
       expect(ref.read(syncServiceProvider), isNot(isA<TeamsSync>()));
     });
   });
+}
+
+/// An [LlmClient] that holds its answer until the test lets go, so a backend
+/// switch can land while a message is genuinely at the model.
+class _HeldLlm extends LlmClient {
+  final Completer<void> started = Completer<void>();
+  final Completer<void> release = Completer<void>();
+
+  _HeldLlm() : super(baseUrl: 'http://127.0.0.1:1/never-dialled');
+
+  @override
+  Future<Map<String, dynamic>> completeJson({
+    required String system,
+    required String user,
+    required Map<String, dynamic> schema,
+    String schemaName = 'result',
+    int maxTokens = 512,
+    double temperature = 0.2,
+    bool think = false,
+  }) async {
+    if (!started.isCompleted) started.complete();
+    await release.future;
+    return {
+      'urgency': 'high',
+      'category': 'work',
+      'summary': 'Sarah asks about the launch date.',
+      'needs_action': true,
+      'action_items': const ['Call Sarah'],
+    };
+  }
 }
 
 class _RecordingTeams extends TeamsSync {

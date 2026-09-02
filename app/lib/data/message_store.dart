@@ -35,6 +35,64 @@ const String activityLastSyncMailKey = 'activity_last_sync_mail';
 const String activityLastSyncTeamsKey = 'activity_last_sync_teams';
 const String activityLastSweepKey = 'activity_last_sweep';
 
+/// How often a worker holding a claim says it is still alive, by bumping the
+/// row's `updated_at`.
+///
+/// One UPDATE by primary key per minute per in-flight item, against a drain
+/// that is at most a handful wide — next to a model call it costs nothing,
+/// and it is the whole reason [MessageStore.reclaimStaleTriage] can run while
+/// a drain is live. Declared here rather than beside the queues because the
+/// watchdog's window below is only correct in relation to it.
+const Duration pipelineHeartbeatInterval = Duration(seconds: 60);
+
+/// How long a claim may go unheard from before the watchdog takes it back.
+///
+/// Five heartbeats. A claim that is genuinely alive misses four of them and
+/// still keeps its work; a claim whose process is gone — a crash, a killed
+/// app, a queue torn down mid-item without a dispose — is back in the queue
+/// within five minutes instead of waiting for the next launch.
+const Duration staleClaimAfter = Duration(minutes: 5);
+
+/// How long a row that has exhausted its retries is left alone before it is
+/// given one more.
+///
+/// A day, because the failures that survive six attempts are the ones that
+/// heal on a timescale a person changes something on: a model server left
+/// off, a disk that filled, a build with a bad schema. One retry per row per
+/// day self-schedules — the failing write restamps `updated_at`, so the row
+/// falls out of reach until the next day — which is what keeps a genuinely
+/// poisoned row from costing more than one model call a day.
+const Duration terminalRetryAfter = Duration(hours: 24);
+
+/// Where a row stops being retried at all.
+///
+/// A permanent ceiling is permanent data loss, so this is the number at which
+/// a poisoned row stops COSTING anything rather than the number at which it
+/// stops mattering: twelve attempts is six days of daily revivals, by which
+/// point nothing transient is still failing.
+const int terminalMaxAttempts = 12;
+
+/// What the pipeline looks like right now: how much is queued, how much is
+/// claimed, how much failed, and how much has been given up on.
+///
+/// `dead` is the subset of `error` past [terminalMaxAttempts] — the rows
+/// nothing will retry again — which is the one number worth surfacing to a
+/// person, because it is the only one that never resolves on its own.
+typedef PipelineHealth = ({
+  int triagePending,
+  int triageProcessing,
+  int triageError,
+  int triageDead,
+  int workPending,
+  int workProcessing,
+  int workError,
+  int workDead,
+
+  /// The oldest live claim's `updated_at`, or null when nothing is claimed. A
+  /// value older than [staleClaimAfter] means the watchdog has not run.
+  String? oldestClaimIso,
+});
+
 /// Every SQL statement in the app except the schema itself lives here. Screens
 /// and providers call methods; they never build a query.
 ///
@@ -670,6 +728,87 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     );
   }
 
+  /// Says the worker holding this claim is still alive, and nothing else.
+  ///
+  /// Only `updated_at` moves, which is what makes it safe to call from a timer
+  /// while the item is mid-flight: nothing here can overwrite the result the
+  /// worker is about to write.
+  Future<void> touchTriage(String source, String sourceMessageId) async {
+    await db.customUpdate(
+      'UPDATE messages SET updated_at = ? '
+      "WHERE source = ? AND source_message_id = ? AND triage_status = 'processing'",
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+  }
+
+  /// Hands one claim back, if it is still a claim.
+  ///
+  /// Guarded on `processing` rather than written blind: a queue releasing what
+  /// it thinks it holds must never be able to reopen a message that finished
+  /// while the release was being decided — that would re-triage it, spend a
+  /// model call, and resurrect the CTA an outbound reply had cleared.
+  /// Attempts are untouched: releasing a claim is not a failed attempt.
+  Future<void> releaseTriageClaim(String source, String sourceMessageId) async {
+    await db.customUpdate(
+      "UPDATE messages SET triage_status = 'pending', updated_at = ? "
+      "WHERE source = ? AND source_message_id = ? AND triage_status = 'processing'",
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+  }
+
+  /// Takes back every claim nothing has been heard from since
+  /// [staleBeforeIso], and returns how many that was.
+  ///
+  /// Unlike [resetInterruptedTriage], this is safe to run DURING a live drain,
+  /// and the heartbeat is why: a working claim restamps `updated_at` every
+  /// [pipelineHeartbeatInterval], so a row can only fall behind a
+  /// [staleClaimAfter] window if five beats in a row went missing — which
+  /// means the worker that held it is gone. That is the difference that lets
+  /// this run on every sync where the startup reset may only run before any
+  /// worker exists.
+  ///
+  /// Attempts are untouched: nothing about the message failed.
+  Future<int> reclaimStaleTriage({
+    required String staleBeforeIso,
+    List<String> sources = const ['email'],
+  }) {
+    if (sources.isEmpty) return Future.value(0);
+    return db.customUpdate(
+      "UPDATE messages SET triage_status = 'pending', updated_at = ? "
+      "WHERE triage_status = 'processing' "
+      'AND source IN (${_placeholders(sources.length)}) '
+      'AND updated_at < ?',
+      variables: _args([_nowIso(), ...sources, staleBeforeIso]),
+    );
+  }
+
+  /// Gives rows that exhausted [reviveErroredTriage]'s ceiling one more try,
+  /// once a day, up to [maxAttempts].
+  ///
+  /// The alternative is a permanent ceiling, and a permanent ceiling is
+  /// permanent data loss: the failures that reach six attempts are mostly
+  /// local outages — a model server left off, a full disk — that heal on their
+  /// own and take the message out of the pipeline forever anyway. The
+  /// [olderThanIso] window is what bounds the cost: the failing write restamps
+  /// `updated_at`, so each revival puts the row out of reach until the next
+  /// day, and a genuinely poisoned row costs one model call a day until
+  /// [terminalMaxAttempts] stops it for good.
+  Future<int> reviveTerminalTriage({
+    required String olderThanIso,
+    int maxAttempts = terminalMaxAttempts,
+    String source = 'email',
+  }) {
+    return db.customUpdate(
+      "UPDATE messages SET triage_status = 'pending', updated_at = ? "
+      "WHERE source = ? AND triage_status = 'error' "
+      // The 6 is [reviveErroredTriage]'s ceiling: below it that method already
+      // revives the row on every sync, and the two must not both claim it.
+      'AND triage_attempts >= 6 AND triage_attempts < ? '
+      'AND updated_at < ?',
+      variables: _args([_nowIso(), source, maxAttempts, olderThanIso]),
+    );
+  }
+
   /// Puts inbound messages a retired gate reason skipped back in the queue,
   /// and returns how many that was.
   ///
@@ -1159,6 +1298,144 @@ RETURNING *
       "UPDATE messages SET triage_status = 'pending', updated_at = ? "
       "WHERE source = ? AND triage_status = 'error' AND triage_attempts < ?",
       variables: _args([_nowIso(), source, maxAttempts]),
+    );
+  }
+
+  /// [touchTriage] for the work queue, and for the same reason: only
+  /// `updated_at` moves, so a heartbeat can never overwrite the result the
+  /// worker is mid-way through producing.
+  Future<void> touchWork(String kind, String source, String entityId) async {
+    await db.customUpdate(
+      'UPDATE work_items SET updated_at = ? '
+      "WHERE task_kind = ? AND source = ? AND entity_id = ? "
+      "AND status = 'processing'",
+      variables: _args([_nowIso(), kind, source, entityId]),
+    );
+  }
+
+  /// [releaseTriageClaim] for the work queue, guarded on `processing` for the
+  /// same reason: a release must never reopen an item that finished while the
+  /// release was being decided.
+  Future<void> releaseWorkClaim(
+    String kind,
+    String source,
+    String entityId,
+  ) async {
+    await db.customUpdate(
+      "UPDATE work_items SET status = 'pending', updated_at = ? "
+      'WHERE task_kind = ? AND source = ? AND entity_id = ? '
+      "AND status = 'processing'",
+      variables: _args([_nowIso(), kind, source, entityId]),
+    );
+  }
+
+  /// [reclaimStaleTriage] for the work queue — same window, same heartbeat,
+  /// same reason it is safe to run while a drain is live, and attempts
+  /// likewise untouched.
+  ///
+  /// Every kind at once, deliberately: the claims this frees belong to a
+  /// worker that no longer exists, and which queue they were in says nothing
+  /// about that.
+  Future<int> reclaimStaleWork({required String staleBeforeIso}) {
+    return db.customUpdate(
+      "UPDATE work_items SET status = 'pending', updated_at = ? "
+      "WHERE status = 'processing' AND updated_at < ?",
+      variables: _args([_nowIso(), staleBeforeIso]),
+    );
+  }
+
+  /// [reviveTerminalTriage] for the work queue, with the same daily budget and
+  /// the same ceiling. [kind] narrows it to one queue, exactly as
+  /// [reviveErroredWork]'s does.
+  Future<int> reviveTerminalWork({
+    required String olderThanIso,
+    int maxAttempts = terminalMaxAttempts,
+    String? kind,
+  }) {
+    return db.customUpdate(
+      "UPDATE work_items SET status = 'pending', updated_at = ? "
+      "WHERE status = 'error' "
+      // The 6 is [reviveErroredWork]'s ceiling — see [reviveTerminalTriage].
+      'AND attempts >= 6 AND attempts < ? AND updated_at < ?'
+      '${kind == null ? '' : ' AND task_kind = ?'}',
+      variables: _args([_nowIso(), maxAttempts, olderThanIso, ?kind]),
+    );
+  }
+
+  /// Both queues in one read: what is waiting, what is claimed, what failed,
+  /// and what has been given up on.
+  ///
+  /// The only read in this file that spans the two tables, because the
+  /// question it answers — "is anything stuck?" — is not a question about
+  /// either one of them. `error` counts every failed row and `dead` the subset
+  /// past [terminalMaxAttempts], so `error - dead` is what a later sync will
+  /// still retry on its own.
+  Future<PipelineHealth> pipelineHealth({
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (sources.isEmpty) {
+      return (
+        triagePending: 0,
+        triageProcessing: 0,
+        triageError: 0,
+        triageDead: 0,
+        workPending: 0,
+        workProcessing: 0,
+        workError: 0,
+        workDead: 0,
+        oldestClaimIso: null,
+      );
+    }
+    final places = _placeholders(sources.length);
+
+    final triage = await db
+        .customSelect(
+          'SELECT triage_status AS status, COUNT(*) AS n, '
+          'SUM(CASE WHEN triage_attempts >= ? THEN 1 ELSE 0 END) AS dead '
+          'FROM messages WHERE source IN ($places) GROUP BY triage_status',
+          variables: _args([terminalMaxAttempts, ...sources]),
+        )
+        .get();
+    final work = await db
+        .customSelect(
+          'SELECT status, COUNT(*) AS n, '
+          'SUM(CASE WHEN attempts >= ? THEN 1 ELSE 0 END) AS dead '
+          'FROM work_items WHERE source IN ($places) GROUP BY status',
+          variables: _args([terminalMaxAttempts, ...sources]),
+        )
+        .get();
+    // One claim age for the pipeline as a whole: whichever queue holds it, an
+    // old claim means the same thing.
+    final oldest = await db
+        .customSelect(
+          'SELECT MIN(updated_at) AS oldest FROM ('
+          "SELECT updated_at FROM messages WHERE triage_status = 'processing' "
+          'AND source IN ($places) '
+          'UNION ALL '
+          "SELECT updated_at FROM work_items WHERE status = 'processing' "
+          'AND source IN ($places))',
+          variables: _args([...sources, ...sources]),
+        )
+        .get();
+
+    int countOf(List<QueryRow> rows, String status) => rows
+        .where((row) => row.data['status'] == status)
+        .fold(0, (sum, row) => sum + ((row.data['n'] as num?)?.toInt() ?? 0));
+    int deadOf(List<QueryRow> rows) => rows
+        .where((row) => row.data['status'] == 'error')
+        .fold(0, (sum, row) => sum + ((row.data['dead'] as num?)?.toInt() ?? 0));
+
+    return (
+      triagePending: countOf(triage, 'pending'),
+      triageProcessing: countOf(triage, 'processing'),
+      triageError: countOf(triage, 'error'),
+      triageDead: deadOf(triage),
+      workPending: countOf(work, 'pending'),
+      workProcessing: countOf(work, 'processing'),
+      workError: countOf(work, 'error'),
+      workDead: deadOf(work),
+      oldestClaimIso:
+          oldest.isEmpty ? null : oldest.first.data['oldest'] as String?,
     );
   }
 

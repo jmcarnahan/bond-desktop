@@ -300,12 +300,19 @@ void main() {
       expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
     });
 
-    test('a thread with no embedding returns silently', () async {
+    test('a thread with no embedding parks rather than filing it as done',
+        () async {
       await seedStoryline(store);
       await seed(store, 'c1');
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      // The park is the point. Returning quietly wrote the work row `done`,
+      // so a thread whose embedding had not landed yet — an embedding server
+      // that was down for an afternoon — was never considered again.
+      await expectLater(
+        StorylineService(store, llm).assignConversation('email', 'c1'),
+        throwsA(isA<LlmUnavailableException>()),
+      );
 
       expect(llm.schemas, isEmpty);
       expect(await store.membersOf('sl-1'), hasLength(1));
@@ -316,7 +323,12 @@ void main() {
       await seed(store, 'c1', vector: vectorAt(1), embedModel: 'some-other-model');
       final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      // Same as having none at all: a cosine across two models' spaces is a
+      // number with no meaning that still sorts.
+      await expectLater(
+        StorylineService(store, llm).assignConversation('email', 'c1'),
+        throwsA(isA<LlmUnavailableException>()),
+      );
 
       expect(llm.schemas, isEmpty);
     });
@@ -406,6 +418,87 @@ void main() {
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+  });
+
+  /// The pass files nothing most of the time, and the several reasons for that
+  /// used to be one silence. Everything downstream — the activity row, and the
+  /// question of whether the thread is worth looking at again — turns on which
+  /// of them it was.
+  group('assignConversation outcomes', () {
+    test('a filing is assigned', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.assigned,
+      );
+    });
+
+    test('a model that says no is rejected, not merely nothing', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(belongs: false)],
+      });
+
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.rejected,
+      );
+    });
+
+    test('a low-confidence yes is rejected too', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(confidence: 'low')],
+      });
+
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.rejected,
+      );
+    });
+
+    test('nothing over the gate is noCandidate — the common case', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1',
+          vector: vectorAt(0.55), participants: const ['Ann Lu']);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.noCandidate,
+      );
+    });
+
+    test('a thread the user pulled out says blocked, not noCandidate',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.95));
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'c1'),
+        AssignOutcome.blocked,
+      );
+    });
+
+    test('a conversation that no longer exists is noCandidate, not a park',
+        () async {
+      await seedStoryline(store);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      // Parking on it would hold the queue open forever for a thread no
+      // embedding is ever coming for.
+      expect(
+        await StorylineService(store, llm).assignConversation('email', 'gone'),
+        AssignOutcome.noCandidate,
+      );
     });
   });
 

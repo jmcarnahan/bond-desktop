@@ -66,6 +66,37 @@ class StorylineTuning {
   static const int recruitMaxCandidates = 8;
 }
 
+/// What one pass of [StorylineService.assignConversation] concluded.
+///
+/// The pass files nothing most of the time, and until this existed there was
+/// no way to tell the several reasons for that apart — a thread the model
+/// turned down, a thread the user had blocked, and a thread nothing came
+/// close to all looked identical from the outside, including in the activity
+/// log.
+enum AssignOutcome {
+  /// Filed into a storyline.
+  assigned,
+
+  /// Nothing cleared the cosine gate, or there was nothing to compare against.
+  /// The common case, and an unremarkable one.
+  noCandidate,
+
+  /// The model looked and said no — `belongs: false`, or a yes it was not
+  /// confident about.
+  rejected,
+
+  /// The only storylines it could have joined are ones the user took it out
+  /// of. Their "no" still holds.
+  blocked,
+
+  /// Never returned: a thread with no comparable vector is not a thread that
+  /// failed, it is a thread whose embedding has not been written yet, so the
+  /// pass throws [LlmUnavailableException] to park the queue rather than
+  /// answering. Named here because it is the fifth thing the pass can
+  /// conclude and the park is where it went.
+  noVector,
+}
+
 /// Groups conversations into storylines, and applies the user's corrections.
 ///
 /// Two entry points do the automatic work — [assignConversation] runs when one
@@ -139,15 +170,34 @@ class StorylineService {
   /// alone reaches the model, and the model's answer is the only thing that
   /// creates a membership. At most one confirmation call per thread, whatever
   /// the mailbox looks like.
-  Future<void> assignConversation(String source, String conversationKey) async {
-    final vector = await _vectorFor(source, conversationKey);
-    // No comparable vector yet. Silent rather than an error: the extraction
-    // handler re-queues this item the moment it writes an embedding, so the
-    // thread is not lost, it is simply not ready.
-    if (vector == null) return;
-
+  ///
+  /// A thread with no comparable vector PARKS the queue instead of returning:
+  /// nothing about it failed, its embedding simply has not been written yet,
+  /// and the worker's park is the only outcome that puts the row back as
+  /// `pending` with its attempt unspent. Returning quietly wrote the row
+  /// `done` and lost the thread — an embedding server that was down for an
+  /// afternoon meant a day of mail that was never considered for a storyline.
+  /// Only the `storyline` kind parks; extraction, the sweep and drafting are
+  /// on other servers and carry on.
+  Future<AssignOutcome> assignConversation(
+    String source,
+    String conversationKey,
+  ) async {
     final row = await _store.getConversationRow(source, conversationKey);
-    if (row == null) return;
+    // Read BEFORE the vector: a conversation that no longer exists has no
+    // embedding coming, so parking on it would hold the queue open forever
+    // for a thread nothing can ever file.
+    if (row == null) return AssignOutcome.noCandidate;
+
+    final vector = await _vectorFor(source, conversationKey);
+    if (vector == null) {
+      // `embed`, not `reason`: the worker's park writes its own
+      // `{'reason': 'model_unavailable'}` and its merge wins on a collision.
+      _log.note({'embed': 'missing'});
+      throw const LlmUnavailableException(
+        'No embedding for this thread yet — run: make embed',
+      );
+    }
 
     final conversation = Conversation.fromRow(row);
     final participants = _displaysOf(conversation);
@@ -161,9 +211,14 @@ class StorylineService {
 
     Storyline? best;
     var bestScore = 0.0;
+    // Only to tell the two empty-handed endings apart: a thread the user
+    // pulled OUT of the one storyline it fits is a different fact from a
+    // thread nothing came close to.
+    var blocked = false;
 
     for (final storyline in candidates) {
       if (await _store.isMemberBlocked(storyline.id, source, conversationKey)) {
+        blocked = true;
         continue;
       }
 
@@ -191,7 +246,9 @@ class StorylineService {
       }
     }
 
-    if (best == null) return;
+    if (best == null) {
+      return blocked ? AssignOutcome.blocked : AssignOutcome.noCandidate;
+    }
 
     final cardData = await _store.newestInboundCardData(source, conversationKey);
 
@@ -212,7 +269,9 @@ class StorylineService {
     // A `low` answer is a no. Nothing is blocked either way — only a person
     // removing a thread creates a block, because only a person's "no" should
     // still hold the next time the model changes its mind.
-    if (!result.belongs || result.confidence == 'low') return;
+    if (!result.belongs || result.confidence == 'low') {
+      return AssignOutcome.rejected;
+    }
 
     await _store.addStorylineMember(
       best.id,
@@ -237,6 +296,7 @@ class StorylineService {
     }
 
     await _refreshName(best.id);
+    return AssignOutcome.assigned;
   }
 
   /// Re-names a storyline when it has nothing to say for itself.

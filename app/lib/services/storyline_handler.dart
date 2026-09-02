@@ -1,3 +1,4 @@
+import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'storyline_service.dart';
 
@@ -14,19 +15,44 @@ class StorylineAssignHandler extends WorkHandler {
 
   final StorylineService _service;
 
-  StorylineAssignHandler(this._service);
+  /// Where the pass's outcome goes when it is worth saying. The service notes
+  /// what it FILED; this notes the two ways it deliberately did not.
+  final ActivityLog _log;
+
+  StorylineAssignHandler(this._service, {ActivityLog? activityLog})
+      : _log = activityLog ?? ActivityLog.disabled();
 
   @override
   String get kind => 'storyline';
 
   @override
-  Future<void> run(Map<String, Object?> item) {
+  Future<void> run(Map<String, Object?> item) async {
     final source = item['source'] as String? ?? _source;
     final key = item['entity_id'] as String? ?? '';
     // An empty key is a row nothing can be done about. Done, not failed —
     // retrying it would produce the same nothing twice.
-    if (key.isEmpty) return Future<void>.value();
-    return _service.assignConversation(source, key);
+    if (key.isEmpty) return;
+
+    final outcome = await _service.assignConversation(source, key);
+    switch (outcome) {
+      case AssignOutcome.rejected:
+      case AssignOutcome.blocked:
+        _log
+          ..noteStatus('skipped')
+          ..note({'outcome': outcome.name});
+      // `assigned` is noted by the service, with the storyline's NAME — the
+      // handler only has the conversation key, which the row already carries.
+      //
+      // `noCandidate` is noted by nobody, and that silence is load-bearing:
+      // `storyline` is a quiet kind, so a pass that did nothing writes no row
+      // at all — but only while every detail it carries is a zero. One string
+      // here would put a row in the activity panel for every thread whose
+      // embedding changed and matched nothing, which is most of them.
+      case AssignOutcome.assigned:
+      case AssignOutcome.noCandidate:
+      case AssignOutcome.noVector:
+        break;
+    }
   }
 }
 
