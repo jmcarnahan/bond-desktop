@@ -60,15 +60,15 @@ McpTeamsBackend _build(
       sameChatGap: sameChatGap ?? Duration.zero,
     );
 
-/// [mentions] is null by default, which is an older server that does not send
-/// the key at all — the case the reshape has to degrade quietly for.
+/// [mentionedUserIds] is null by default, which is an older server that does
+/// not send the key at all — the case the reshape has to degrade quietly for.
 Map<String, dynamic> _wireMessage({
   required String id,
   String lastModified = '2026-08-28T10:00:00Z',
   String? fromUserId = 'u-1',
   String? fromUserDisplay = 'Sarah Whitfield',
   String? fromApplicationId,
-  List<Object?>? mentions,
+  List<Object?>? mentionedUserIds,
 }) =>
     {
       'id': id,
@@ -80,7 +80,7 @@ Map<String, dynamic> _wireMessage({
       'body_content_type': 'text',
       'created': lastModified,
       'last_modified': lastModified,
-      'mentions': ?mentions,
+      'mentioned_user_ids': ?mentionedUserIds,
     };
 
 void main() {
@@ -456,7 +456,7 @@ void main() {
 
     test('flat mention ids become the nested shape TeamsSync parses', () async {
       final message = await only(
-        _wireMessage(id: 'm1', mentions: const ['u-7', 'u-9']),
+        _wireMessage(id: 'm1', mentionedUserIds: const ['u-7', 'u-9']),
       );
 
       expect(message['mentions'], [
@@ -478,7 +478,7 @@ void main() {
     });
 
     test('an empty mention list is a message that named nobody', () async {
-      final message = await only(_wireMessage(id: 'm1', mentions: const []));
+      final message = await only(_wireMessage(id: 'm1', mentionedUserIds: const []));
 
       expect(message['mentions'], isEmpty);
       expect(TeamsSync.mentionedUserIds(message['mentions']), isEmpty);
@@ -489,7 +489,7 @@ void main() {
       // reaching the parser would be a mention of nobody rather than no
       // mention.
       final message = await only(
-        _wireMessage(id: 'm1', mentions: const ['u-7', '', 42, null]),
+        _wireMessage(id: 'm1', mentionedUserIds: const ['u-7', '', 42, null]),
       );
 
       expect(message['mentions'], [

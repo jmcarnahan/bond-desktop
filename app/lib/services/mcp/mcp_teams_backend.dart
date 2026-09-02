@@ -281,9 +281,9 @@ class McpTeamsBackend implements TeamsBackend {
   /// bot message is gated out of extraction either way.
   ///
   /// `mentions` gets the same treatment as `from`, and it is the clearest case
-  /// for why this file exists at all: the wire carries a flat list of user ids,
-  /// because "who was named" is the only thing the desktop ever asks of a
-  /// mention, while `TeamsSync.mentionedUserIds` reads Graph's
+  /// for why this file exists at all: the wire carries `mentioned_user_ids`, a
+  /// flat list, because "who was named" is the only thing the desktop ever asks
+  /// of a mention, while `TeamsSync.mentionedUserIds` reads Graph's
   /// `[{mentioned: {user: {id}}}]`. Rebuilding the nested shape here is what
   /// keeps the two backends indistinguishable to the sync.
   ///
@@ -311,9 +311,9 @@ class McpTeamsBackend implements TeamsBackend {
             'user': {'id': userId, 'displayName': message['from_user_display']},
           },
       },
-      if (message['mentions'] case final List mentions)
+      if (message['mentioned_user_ids'] case final List mentionedUserIds)
         'mentions': [
-          for (final id in mentions)
+          for (final id in mentionedUserIds)
             if (id is String && id.isNotEmpty)
               {
                 'mentioned': {
