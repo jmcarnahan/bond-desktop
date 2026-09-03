@@ -88,8 +88,8 @@ RESET  := \033[0m
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop \
-        app-install app-run app-test app-gen app-analyze app-build bench ab \
-        ab-membership
+        app-install app-run app-test app-gen app-migrations app-analyze \
+        app-build bench ab ab-membership
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -112,6 +112,7 @@ help:
 	@printf "  make app-run      → run the $(APP_DIR)/ desktop inbox on macOS\n"
 	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
 	@printf "  make app-gen      → regenerate Drift code + migration snapshots\n"
+	@printf "  make app-migrations → record a Drift schema bump (run before app-gen)\n"
 	@printf "  make bench        → live model benchmark (needs make fast up)\n"
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
@@ -519,6 +520,21 @@ app-test:
 # loudly in review instead of silently drifting from the generated code.
 app-gen:
 	@cd $(APP_DIR) && dart run build_runner build --delete-conflicting-outputs
+
+# The schema-bump sequence, in the only order that leaves a clean tree. Run
+# this FIRST after editing schema.drift + bumping schemaVersion, then app-gen.
+#
+# make-migrations records the new version into drift_schemas/, but it also
+# rewrites every test/drift/bond/generated/schema_v*.dart snapshot WITH data
+# classes — ~30k lines that do not compile here, because the
+# `to_json AS recipientsJson` column rename does not survive into them (the
+# generated class declares `final String toJson;`, colliding with the
+# inherited `toJson()` method in every file). The second command regenerates
+# the snapshots in this repo's committed style (no data classes), restoring
+# v1..vN byte-for-byte and emitting the new version to match.
+app-migrations:
+	@cd $(APP_DIR) && dart run drift_dev make-migrations
+	@cd $(APP_DIR) && dart run drift_dev schema generate drift_schemas/bond/ test/drift/bond/generated/
 
 # Live, not a gate: replays the fixture corpus through the real task prompts
 # and prints a latency table. The test file is @Skip'd so `make app-test` never
