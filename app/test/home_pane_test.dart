@@ -4,7 +4,9 @@ import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/home_metrics.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
+import 'package:bond_inbox/widgets/stage_bar.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The home pane as a whole: the numbers over the table, the strip between
@@ -50,6 +52,11 @@ Future<void> _pump(
   VoidCallback? onToggleDropped,
   VoidCallback? onReleasePending,
   void Function(bool)? onAnchoredChanged,
+  HomeSearch? search,
+  bool searching = false,
+  String? searchNotice,
+  void Function(String)? onSearch,
+  VoidCallback? onExitSearch,
 }) async {
   await tester.binding.setSurfaceSize(const Size(1400, 900));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -75,6 +82,11 @@ Future<void> _pump(
         onToggleDropped: onToggleDropped ?? () {},
         onReleasePending: onReleasePending,
         onAnchoredChanged: onAnchoredChanged,
+        search: search,
+        searching: searching,
+        searchNotice: searchNotice,
+        onSearch: onSearch,
+        onExitSearch: onExitSearch,
       ),
     ),
   ));
@@ -363,5 +375,131 @@ void main() {
   testWidgets('the title says where you are', (tester) async {
     await _pump(tester);
     expect(find.text('Home'), findsOneWidget);
+  });
+
+  group('search', () {
+    /// The swap is an [AnimatedSwitcher], so the incoming body is not where a
+    /// finder looks for it until it has finished arriving.
+    Future<void> swap(WidgetTester tester) async {
+      await tester.pump();
+      await tester.pump(HomePane.searchSwap);
+    }
+
+    testWidgets('enter submits, and only enter', (tester) async {
+      final asked = <String>[];
+      await _pump(tester, onSearch: asked.add);
+
+      await tester.enterText(find.byType(TextField), 'invoice');
+      await tester.pump();
+      expect(asked, isEmpty, reason: 'every query is one embedding call');
+
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+      expect(asked, ['invoice']);
+    });
+
+    testWidgets('searching says so in words over a table that stays',
+        (tester) async {
+      await _pump(tester, rows: [_row(1)], searching: true);
+
+      expect(find.text('Searching…'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+      expect(find.text('Subject 1'), findsOneWidget);
+    });
+
+    testWidgets(
+        'results swap the body: counted, labeled, muted, and the pill stays '
+        'home', (tester) async {
+      await _pump(
+        tester,
+        rows: [_row(1)],
+        pendingNewCount: 3,
+        search: HomeSearch('invoice', [
+          SemanticHit(_row(7), 0.1),
+          SemanticHit(_row(8), 0.2),
+        ]),
+      );
+      await swap(tester);
+
+      expect(find.text('2 results for “invoice”'), findsOneWidget);
+      expect(find.text('Subject 7'), findsOneWidget);
+      expect(find.text('Subject 8'), findsOneWidget);
+      expect(
+        find.text('3 new'),
+        findsNothing,
+        reason: 'the pill is a promise about the live table',
+      );
+      expect(
+        tester
+            .widgetList<HomeStageBar>(find.byType(HomeStageBar))
+            .every((bar) => bar.muted),
+        isTrue,
+        reason: 'a result is context, not progress',
+      );
+    });
+
+    testWidgets('one result is singular', (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+      );
+      await swap(tester);
+
+      expect(find.text('1 result for “invoice”'), findsOneWidget);
+    });
+
+    testWidgets('nothing matching is an answer', (tester) async {
+      await _pump(tester, search: const HomeSearch('x', []));
+      await swap(tester);
+
+      expect(find.text('Nothing indexed matches that.'), findsOneWidget);
+      expect(find.text('0 results for “x”'), findsOneWidget);
+    });
+
+    testWidgets('back to live leaves', (tester) async {
+      var left = 0;
+      await _pump(
+        tester,
+        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+        onExitSearch: () => left++,
+      );
+      await swap(tester);
+
+      await tester.tap(find.text('Back to live'));
+      expect(left, 1);
+    });
+
+    testWidgets('the notice is an alert over an unswapped body',
+        (tester) async {
+      const notice =
+          'Search is unavailable — the semantic index is unavailable';
+      await _pump(tester, rows: [_row(1)], searchNotice: notice);
+
+      expect(find.text(notice), findsOneWidget);
+      expect(find.text('Subject 1'), findsOneWidget);
+    });
+
+    testWidgets('escape leaves from the box', (tester) async {
+      var left = 0;
+      await _pump(tester, onExitSearch: () => left++);
+
+      await tester.tap(find.byType(TextField));
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+
+      expect(left, 1);
+    });
+
+    testWidgets('the clear affordance leaves too', (tester) async {
+      var left = 0;
+      await _pump(
+        tester,
+        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+        onExitSearch: () => left++,
+      );
+      await swap(tester);
+
+      await tester.tap(find.byIcon(Icons.close));
+      expect(left, 1);
+    });
   });
 }

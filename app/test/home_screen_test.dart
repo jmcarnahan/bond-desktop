@@ -8,6 +8,7 @@ import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/services/message_search.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
@@ -36,6 +37,36 @@ class _FakeSync implements MailSync {
 
   @override
   Future<void> ensureMessageBody(String sourceMessageId) async {}
+}
+
+/// A search that answers with the feed itself, ranked in the order the store
+/// hands it over.
+///
+/// `implements` rather than `extends`: [MessageSearch]'s two collaborators are
+/// private, and what this screen needs pinned is the wiring — a sentence
+/// reaches the notifier, the answer reaches the pane — not the geometry, which
+/// `message_search_test.dart` owns. A real embedding server is out of reach in
+/// a widget test anyway, where the network is blocked.
+class _FakeSearch implements MessageSearch {
+  final MessageStore store;
+
+  _FakeSearch(this.store);
+
+  @override
+  Future<MessageSearchResult> search(
+    String query, {
+    int limit = 50,
+    bool includeDropped = false,
+  }) async {
+    final rows = await store.pageHomeFeed(
+      limit: limit,
+      includeDropped: includeDropped,
+    );
+    return MessageSearchHits(
+      query.trim(),
+      [for (final row in rows) SemanticHit(row, 0.1)],
+    );
+  }
 }
 
 void main() {
@@ -90,6 +121,7 @@ void main() {
       // checked for leaked timers.
       notificationCoordinatorProvider
           .overrideWithValue(NotificationCoordinator(store)),
+      messageSearchProvider.overrideWithValue(_FakeSearch(store)),
     ]);
     addTearDown(container.dispose);
 
@@ -284,6 +316,109 @@ void main() {
     await request(tester, OpenSectionIntent(RailSection.home));
 
     expect(find.byType(HomePane), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  /// The body swap, run out. Twice the duration and not once: the switcher
+  /// starts the outgoing child's fade on the frame AFTER the rebuild that
+  /// replaced it, so a single window of it lands one tick short of empty.
+  Future<void> settleSwap(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump(HomePane.searchSwap);
+    await tester.pump(HomePane.searchSwap);
+  }
+
+  /// Asks the way a person does: type, then Enter. The pumps after it are the
+  /// round trip to the index and the swap it lands in.
+  Future<void> ask(WidgetTester tester, String query) async {
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(HomePane),
+        matching: find.byType(TextField),
+      ),
+      query,
+    );
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pump();
+    await tester.pump();
+    await settleSwap(tester);
+  }
+
+  testWidgets('a searched sentence swaps the body, and back to live restores '
+      'the feed', (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await seedThread(
+      'c2',
+      'Invoice 4471',
+      receivedAt: '2026-08-28T10:00:00Z',
+    );
+
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    await ask(tester, 'invoice');
+
+    expect(find.textContaining('results for'), findsOneWidget);
+
+    await tester.tap(find.text('Back to live'));
+    await settleSwap(tester);
+
+    expect(find.textContaining('results for'), findsNothing);
+    expect(
+      find.descendant(
+        of: find.byType(HomePane),
+        matching: find.text('Homepage copy'),
+      ),
+      findsOneWidget,
+      reason: 'the table was covered, not unloaded',
+    );
+    await settleQueues(tester);
+  });
+
+  testWidgets('the walked-to place survives a search', (tester) async {
+    for (var i = 0; i < 25; i++) {
+      await seedThread(
+        'c$i',
+        'Thread $i',
+        receivedAt: '2026-08-28T09:${i.toString().padLeft(2, '0')}:00Z',
+      );
+    }
+
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    /// The live feed's viewport, which is the only one scrolled here.
+    ScrollableState liveList() => tester
+        .stateList<ScrollableState>(find.descendant(
+          of: find.byType(HomePane),
+          matching: find.byType(Scrollable),
+        ))
+        .firstWhere((state) => state.position.pixels > 0);
+
+    // Scoped to the pane: the screen has a conversation list of its own, and
+    // it is the first ListView a bare finder reaches.
+    await tester.drag(
+      find.descendant(
+        of: find.byType(HomePane),
+        matching: find.byType(ListView),
+      ),
+      const Offset(0, -400),
+    );
+    await tester.pump();
+    final walked = liveList().position.pixels;
+    expect(walked, greaterThan(0));
+
+    await ask(tester, 'thread');
+    expect(find.textContaining('results for'), findsOneWidget);
+
+    await tester.tap(find.text('Back to live'));
+    await settleSwap(tester);
+
+    expect(
+      liveList().position.pixels,
+      walked,
+      reason: "the list's PageStorageKey is what pins this",
+    );
     await settleQueues(tester);
   });
 }

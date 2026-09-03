@@ -61,8 +61,13 @@ class MessageSearch {
       // app they diverge. The difference decides whether to retry LATER, and
       // there is no later in a search: the person is waiting, and the only
       // thing they can do about either is start the server the message names.
+      //
+      // The subject is composed on rather than assumed: every
+      // [EmbeddingsClient] reason is written as a PREDICATE of the embedding
+      // server ('is not reachable — run: make embed'), so naming it here is
+      // what turns the fragment into a clause a screen can print whole.
       return MessageSearchUnavailable(
-        result.reason ?? 'the embedding server did not answer',
+        'the embedding server ${result.reason ?? 'did not answer'}',
       );
     }
 

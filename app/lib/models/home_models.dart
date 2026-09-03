@@ -147,6 +147,25 @@ class SemanticHit {
   const SemanticHit(this.row, this.distance);
 }
 
+/// The search results a reader is looking at, in place of the live feed.
+///
+/// Down here beside [SemanticHit] rather than up in the feed's notifier,
+/// because the pane renders it and the pane reads no providers: the models are
+/// the floor both the state and the widget can stand on.
+@immutable
+class HomeSearch {
+  /// The query the [hits] answer — carried with them, so a result set that
+  /// arrived after the box was typed into again is labelled by what it is
+  /// rather than by what is on screen.
+  final String query;
+
+  /// Never null: an empty list is a real answer — nothing indexed matches —
+  /// and the state where there is no answer at all is no [HomeSearch] at all.
+  final List<SemanticHit> hits;
+
+  const HomeSearch(this.query, this.hits);
+}
+
 /// The numbers over the feed, all of them over one window.
 ///
 /// One statement writes every field, which is what makes them agree with each

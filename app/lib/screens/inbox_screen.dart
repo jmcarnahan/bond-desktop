@@ -1188,6 +1188,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       entering: feed.entering,
       fading: feed.fading,
       collapsing: feed.collapsing,
+      search: feed.search,
+      searching: feed.searching,
+      searchNotice: feed.searchNotice,
       now: DateTime.now(),
       // The same door a notification's OpenThreadIntent goes through: one
       // selector resolves the row's source, marks it read and loads the
@@ -1203,6 +1206,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onToggleDropped: () => ref
           .read(homeFeedProvider.notifier)
           .setIncludeDropped(!feed.includeDropped),
+      onSearch: (query) =>
+          ref.read(homeFeedProvider.notifier).submitSearch(query),
+      onExitSearch: () => ref.read(homeFeedProvider.notifier).exitSearch(),
     );
   }
 

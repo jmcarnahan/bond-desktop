@@ -8,6 +8,7 @@ import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/activity_log_panel.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/home_metrics.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -90,6 +91,15 @@ void main() {
 
     expect(find.byType(ActivityLogPanel), findsOneWidget);
     expect(find.text('Mail sync — 3 new'), findsOneWidget);
+    // The same tile the home metrics bar renders, and not a second one that
+    // merely looks like it: this panel's stats delegate to [BondStatTile].
+    expect(
+      find.descendant(
+        of: find.byType(ActivityLogPanel),
+        matching: find.byType(BondStatTile),
+      ),
+      findsWidgets,
+    );
     // The tile reads the pref, not the row — a pane that only read rows would
     // show a dash here for the passes that record nothing.
     expect(find.text('Last sync'), findsOneWidget);

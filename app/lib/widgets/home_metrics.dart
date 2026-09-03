@@ -5,11 +5,10 @@ import '../theme/tokens.dart';
 
 /// One headline number and what it counts.
 ///
-/// The chrome is the activity log's tile, lifted rather than shared for now —
-/// `ActivityLogPanel` keeps its private copy until the phase that has this
-/// widget covered can delegate to it safely. Two tiles that look the same and
-/// are the same widget is the end state; two that look the same and are not is
-/// the price of not editing a panel this phase does not test.
+/// The one stat tile in the app: the home metrics bar below and
+/// `ActivityLogPanel`'s row of stamps and averages both render it. Two rows of
+/// numbers that read as the same thing have to BE the same widget — otherwise
+/// a change to the chrome lands on one screen and silently misses the other.
 class BondStatTile extends StatelessWidget {
   final String value;
   final String label;

@@ -74,6 +74,11 @@ class HomeFeedRowTile extends StatefulWidget {
   /// over it.
   final bool collapsing;
 
+  /// Holds the bar down whatever the row's own outcome says. What a search
+  /// result sets: its bar is context for a message somebody went looking for,
+  /// not progress anybody is watching.
+  final bool muteBar;
+
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
 
@@ -86,6 +91,7 @@ class HomeFeedRowTile extends StatefulWidget {
     this.animateIn = false,
     this.fading = false,
     this.collapsing = false,
+    this.muteBar = false,
   });
 
   @override
@@ -203,7 +209,7 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
                         child: HomeStageBar.forRow(
                           row,
                           // A finished row's bar is history, not progress.
-                          muted: row.outcome != 'pending',
+                          muted: widget.muteBar || row.outcome != 'pending',
                         ),
                       ),
                       const SizedBox(width: BondSpacing.s8),

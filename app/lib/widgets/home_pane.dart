@@ -5,6 +5,7 @@ import '../theme/tokens.dart';
 import 'chips.dart';
 import 'home_feed_row.dart';
 import 'home_metrics.dart';
+import 'home_search.dart';
 import 'hot_storylines.dart';
 import 'inline_alert.dart';
 
@@ -62,6 +63,20 @@ class HomePane extends StatefulWidget {
   /// decides whether the next arrival lands on the table or waits above it.
   final void Function(bool anchored)? onAnchoredChanged;
 
+  /// The results to show in place of the table, or null for the live one.
+  final HomeSearch? search;
+
+  /// Whether a submitted query is still out. Says so in words over a body that
+  /// does not move.
+  final bool searching;
+
+  /// Why a search could not run. An alert over whichever body is up, never a
+  /// body of its own.
+  final String? searchNotice;
+
+  final ValueChanged<String>? onSearch;
+  final VoidCallback? onExitSearch;
+
   const HomePane({
     super.key,
     required this.rows,
@@ -83,6 +98,11 @@ class HomePane extends StatefulWidget {
     this.collapsing = const {},
     this.onReleasePending,
     this.onAnchoredChanged,
+    this.search,
+    this.searching = false,
+    this.searchNotice,
+    this.onSearch,
+    this.onExitSearch,
   });
 
   /// How close to the bottom the viewport has to get before the next page is
@@ -103,12 +123,20 @@ class HomePane extends StatefulWidget {
   /// duration, because it is the same gesture: a notice arriving over a page.
   static const Duration pillEntry = Duration(milliseconds: 180);
 
+  /// The live⇄search body swap. Short enough to read as one body replacing
+  /// another rather than as a page load.
+  static const Duration searchSwap = Duration(milliseconds: 160);
+
   @override
   State<HomePane> createState() => _HomePaneState();
 }
 
 class _HomePaneState extends State<HomePane> {
   final ScrollController _scroll = ScrollController();
+
+  /// The typed query. View state in exactly the way the scroll position is:
+  /// the question belongs to the box, the answer belongs to the notifier.
+  final TextEditingController _searchText = TextEditingController();
 
   /// Mirrors what was last reported upward, so a scroll that stays at the top
   /// — or stays away from it — costs nothing.
@@ -126,7 +154,15 @@ class _HomePaneState extends State<HomePane> {
     _scroll.removeListener(_maybeLoadMore);
     _scroll.removeListener(_maybeAnchor);
     _scroll.dispose();
+    _searchText.dispose();
     super.dispose();
+  }
+
+  /// The one way out, whichever affordance asked for it: the box empties and
+  /// the live table comes back.
+  void _exitSearch() {
+    _searchText.clear();
+    widget.onExitSearch?.call();
   }
 
   /// Fires on every pixel of scroll and asks freely: the notifier's own
@@ -175,7 +211,19 @@ class _HomePaneState extends State<HomePane> {
           Row(
             children: [
               Text('Home', style: BondType.title),
-              const Spacer(),
+              const SizedBox(width: BondSpacing.s16),
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: HomeSearchField(
+                    controller: _searchText,
+                    active: widget.search != null || widget.searching,
+                    onSubmit: (query) => widget.onSearch?.call(query),
+                    onClear: _exitSearch,
+                  ),
+                ),
+              ),
+              const SizedBox(width: BondSpacing.s16),
               BondFilterPill(
                 label: 'Show dropped',
                 selected: widget.includeDropped,
@@ -199,9 +247,117 @@ class _HomePaneState extends State<HomePane> {
             ),
             const SizedBox(height: BondSpacing.s12),
           ],
-          Expanded(child: _feed()),
+          // Attention rather than error: the feed under it is working, and one
+          // feature of it is off.
+          if (widget.searchNotice != null) ...[
+            InlineAlert(
+              severity: InlineAlertSeverity.attention,
+              text: widget.searchNotice!,
+              maxLines: 2,
+            ),
+            const SizedBox(height: BondSpacing.s12),
+          ],
+          // A line, never a spinner, and never in place of the body: the table
+          // the reader was looking at stays under it until the answer lands.
+          if (widget.searching) ...[
+            Text('Searching…', style: BondType.caption),
+            const SizedBox(height: BondSpacing.s8),
+          ],
+          Expanded(
+            child: AnimatedSwitcher(
+              duration: HomePane.searchSwap,
+              child: widget.search == null
+                  ? KeyedSubtree(
+                      key: const ValueKey<String>('home-live'),
+                      child: _feed(),
+                    )
+                  : KeyedSubtree(
+                      key: const ValueKey<String>('home-search'),
+                      child: _searchBody(widget.search!),
+                    ),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  /// What a query came back with: how many, for what, and the way back.
+  ///
+  /// Its own list, with no controller and no [PageStorageKey]: a result set's
+  /// scroll position is disposable, and the live table keeps its own through
+  /// the swap precisely because that key stays on the list that owns it.
+  Widget _searchBody(HomeSearch search) {
+    final count = search.hits.length;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: BondSpacing.s4,
+            vertical: BondSpacing.s8,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '$count result${count == 1 ? '' : 's'} for “${search.query}”',
+                  style: BondType.small,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: BondSpacing.s12),
+              // The row's storyline link, not a Material button: this is a way
+              // back inside a body, and a raised control here would outrank
+              // the results it sits over.
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: _exitSearch,
+                  borderRadius: BondRadii.smAll,
+                  child: Text(
+                    'Back to live',
+                    style: BondType.small.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: BondColors.primary,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (search.hits.isEmpty)
+          Expanded(
+            child: Center(
+              child: Text(
+                'Nothing indexed matches that.',
+                style: BondType.small.copyWith(color: BondColors.inkMuted),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          )
+        else ...[
+          const HomeFeedHeaderRow(),
+          Expanded(
+            child: ListView.builder(
+              itemCount: search.hits.length,
+              itemBuilder: (context, index) {
+                final hit = search.hits[index];
+                return HomeFeedRowTile(
+                  key: ValueKey<String>('search-${hit.row.feedKey}'),
+                  row: hit.row,
+                  now: widget.now,
+                  muteBar: true,
+                  onOpenThread: widget.onOpenThread,
+                  onOpenStoryline: widget.onOpenStoryline,
+                );
+              },
+            ),
+          ),
+        ],
+      ],
     );
   }
 

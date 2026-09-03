@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
 import '../models/home_models.dart';
+import '../services/message_search.dart';
 import '../services/progress_bus.dart';
 import 'app_providers.dart';
 import 'prefs_provider.dart';
@@ -44,6 +45,17 @@ const String homeFeedStaleMessage =
 /// pane's list items are keyed by too.
 String homeRowKey(HomeFeedRow row) => row.feedKey;
 
+/// How a search is run: the notifier asks a sentence and gets the sealed
+/// answer back.
+///
+/// A callback rather than [MessageSearch] itself, for the reason the dropped
+/// filter's writer is one: this class has to be buildable in a test with no
+/// embedding server fake around it.
+typedef HomeSearchRunner = Future<MessageSearchResult> Function(
+  String query, {
+  bool includeDropped,
+});
+
 @immutable
 class HomeFeedState {
   /// Newest first, the order the store hands them over.
@@ -81,6 +93,25 @@ class HomeFeedState {
   /// does not re-run two aggregate queries per tick.
   final int metricsEpoch;
 
+  /// The results a reader is looking at instead of the table, or null for the
+  /// live body.
+  ///
+  /// Beside [rows] and never in place of them: the ticks keep landing in the
+  /// feed underneath this the whole time a search is up, which is what makes
+  /// leaving one instant — the table was never unloaded, only covered.
+  final HomeSearch? search;
+
+  /// Whether a submitted query is still out. While it is, the body does not
+  /// change at all — the answer is a line of words over whatever is already
+  /// there, because a screen that blanked itself per question would punish
+  /// asking a second one.
+  final bool searching;
+
+  /// Why a search could not run, as a sentence, shown over whichever body is
+  /// up. Not an error about the feed: the table below it is fine and one
+  /// feature is off.
+  final String? searchNotice;
+
   const HomeFeedState({
     this.rows = const [],
     this.loaded = false,
@@ -93,11 +124,15 @@ class HomeFeedState {
     this.fading = const {},
     this.collapsing = const {},
     this.metricsEpoch = 0,
+    this.search,
+    this.searching = false,
+    this.searchNotice,
   });
 
   /// [clearLoadError] rather than a nullable-means-keep [loadError]: a banner
   /// that could only be set and never cleared would outlive the failure it
-  /// described.
+  /// described. [clearSearch] and [clearSearchNotice] are there for the same
+  /// reason — results nobody can leave, and a notice nobody can answer.
   HomeFeedState copyWith({
     List<HomeFeedRow>? rows,
     bool? loaded,
@@ -111,6 +146,11 @@ class HomeFeedState {
     Set<String>? fading,
     Set<String>? collapsing,
     int? metricsEpoch,
+    HomeSearch? search,
+    bool clearSearch = false,
+    bool? searching,
+    String? searchNotice,
+    bool clearSearchNotice = false,
   }) =>
       HomeFeedState(
         rows: rows ?? this.rows,
@@ -124,6 +164,10 @@ class HomeFeedState {
         fading: fading ?? this.fading,
         collapsing: collapsing ?? this.collapsing,
         metricsEpoch: metricsEpoch ?? this.metricsEpoch,
+        search: clearSearch ? null : (search ?? this.search),
+        searching: searching ?? this.searching,
+        searchNotice:
+            clearSearchNotice ? null : (searchNotice ?? this.searchNotice),
       );
 }
 
@@ -162,6 +206,10 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// provider container around it.
   final Future<void> Function(bool value) _persistIncludeDropped;
 
+  /// How a query is answered. Null in a test that never searches, and nowhere
+  /// else — [submitSearch] without one is a no-op rather than a crash.
+  final HomeSearchRunner? _searchRunner;
+
   /// Incremented per [load]; anything that comes back stale writes nothing.
   /// [loadMore] reads it without incrementing — an older page must never win
   /// over a newer first page, and it must never invalidate one either.
@@ -171,6 +219,18 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// listener fires on every pixel, so this is load-bearing rather than
   /// defensive.
   bool _loadingMore = false;
+
+  /// [_fetchSeq] for searches, and a separate number on purpose: a reload
+  /// under a set of results must not cancel them, and a second query must not
+  /// cancel the page read the feed is in the middle of.
+  int _searchSeq = 0;
+
+  /// The query whose answer is still out, or null. What lets the dropped
+  /// toggle re-ask a question that has not even been answered yet — the state
+  /// only ever holds answered searches, and an in-flight one would otherwise
+  /// land computed against a filter the reader just left. Owned by the newest
+  /// submit: a stale completion never clears it.
+  String? _inFlightQuery;
 
   StreamSubscription<ProgressTick>? _ticks;
 
@@ -207,8 +267,10 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     this._store, {
     bool includeDropped = false,
     Future<void> Function(bool value)? persistIncludeDropped,
+    HomeSearchRunner? searchRunner,
     ProgressBus? bus,
   })  : _persistIncludeDropped = persistIncludeDropped ?? _forget,
+        _searchRunner = searchRunner,
         super(HomeFeedState(includeDropped: includeDropped)) {
     if (bus != null) _ticks = bus.ticks.listen(_onTick);
   }
@@ -311,6 +373,82 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
       debugPrint('storing the home dropped filter failed: $e');
     }
     await load();
+    // The results on screen were read against the other filter, so they are
+    // the wrong answer the moment it flips — the same fact that sends the feed
+    // back to page one. The question is re-asked rather than dropped, because
+    // the reader changed the filter, not their mind about the query. A query
+    // still in flight counts as the standing question too: its answer is
+    // about to land under a toggle it never saw.
+    final query = _inFlightQuery ?? state.search?.query;
+    if (query != null) await submitSearch(query);
+  }
+
+  /// Asks the index a sentence and shows what it comes back with.
+  ///
+  /// Submission is the whole gate: every query costs an embedding call, so
+  /// this runs on Enter and never on a keystroke, and a blank one is not a
+  /// question at all.
+  ///
+  /// The mode only ever swaps ONE way here. Hits replace whatever body is up;
+  /// an unavailable index does not, because a reader in the live feed has no
+  /// business being thrown into an empty result list by a server that is off,
+  /// and a reader holding results has no business losing them to it.
+  Future<void> submitSearch(String query) async {
+    final text = query.trim();
+    if (text.isEmpty) return;
+    final runner = _searchRunner;
+    if (runner == null) return;
+
+    final seq = ++_searchSeq;
+    _inFlightQuery = text;
+    state = state.copyWith(searching: true, clearSearchNotice: true);
+
+    final MessageSearchResult result;
+    try {
+      result = await runner(text, includeDropped: state.includeDropped);
+    } catch (e) {
+      // [MessageSearch] answers rather than throws, by contract — but the
+      // runner crosses the database on its way there, and a screen left
+      // searching forever is the one outcome this must not have.
+      if (seq != _searchSeq || !mounted) return;
+      _inFlightQuery = null;
+      debugPrint('home search failed: $e');
+      state = state.copyWith(
+        searching: false,
+        searchNotice: "Search failed — couldn't read the index.",
+      );
+      return;
+    }
+    if (seq != _searchSeq || !mounted) return;
+    _inFlightQuery = null;
+
+    switch (result) {
+      case MessageSearchHits():
+        state = state.copyWith(
+          search: HomeSearch(result.query, result.hits),
+          searching: false,
+        );
+      case MessageSearchUnavailable():
+        state = state.copyWith(
+          searching: false,
+          searchNotice: 'Search is unavailable — ${result.reason}',
+        );
+    }
+  }
+
+  /// Back to the live table.
+  ///
+  /// Instant, because the rows under the results were never unloaded — the
+  /// ticks kept landing in them the whole time. The stamp moves first: an
+  /// answer still in flight belongs to a search that no longer exists.
+  void exitSearch() {
+    _searchSeq++;
+    _inFlightQuery = null;
+    state = state.copyWith(
+      clearSearch: true,
+      searching: false,
+      clearSearchNotice: true,
+    );
   }
 
   /// Whether the viewport is at the top of the table.
@@ -652,6 +790,12 @@ final homeFeedProvider =
     includeDropped: ref.read(appPrefsProvider).homeShowDropped,
     persistIncludeDropped: (value) =>
         ref.read(appPrefsProvider.notifier).setHomeShowDropped(value),
+    // Read inside the closure, so the search stack — the embedding client and
+    // everything it holds — is built the first time somebody actually asks a
+    // question rather than every time the feed loads.
+    searchRunner: (query, {includeDropped = false}) => ref
+        .read(messageSearchProvider)
+        .search(query, includeDropped: includeDropped),
     bus: ref.watch(progressBusProvider),
   );
 });
