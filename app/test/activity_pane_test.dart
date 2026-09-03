@@ -7,6 +7,7 @@ import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/activity_log_panel.dart';
+import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -54,6 +55,9 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        // Predates Home: this file asserts on a pane the rail's old landing
+        // section opened.
+        initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
       ],

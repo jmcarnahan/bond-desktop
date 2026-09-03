@@ -10,6 +10,7 @@ import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
+import '../providers/home_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/notify_routing.dart';
@@ -24,6 +25,7 @@ import '../widgets/app_rail.dart';
 import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
+import '../widgets/home_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
 import '../widgets/notification_ribbon.dart';
@@ -81,7 +83,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The section overview showing when no thread is open. Never null in
   /// practice — the type only carries the "no explicit choice yet" case.
-  RailSection? _section = RailSection.needsYou;
+  ///
+  /// Seeded from [initialSectionProvider] in [initState] rather than here: the
+  /// pane the app lands on is a product decision, and a test that predates it
+  /// overrides that provider instead of being rewritten around a new landing.
+  RailSection? _section;
   String? _selectedId;
 
   /// Which connector [_selectedId] belongs to, set only when the caller knows
@@ -176,6 +182,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   @override
   void initState() {
     super.initState();
+    _section = ref.read(initialSectionProvider);
     // Built here, once, because nothing renders it: the OS dispatcher only
     // exists if something instantiates it, and the inbox is the screen whose
     // lifetime it should share.
@@ -189,6 +196,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // stamping it here is what stops the resume path firing again seconds
     // later when the window takes focus.
     Future.microtask(_refreshAll);
+    // The home feed reads sqlite alone, so it does not wait on the sync above
+    // it: whatever is already stored is on screen in the first frames, and the
+    // sync's arrivals land on the next read.
+    Future.microtask(() {
+      if (!mounted) return;
+      ref.read(homeFeedProvider.notifier).load();
+    });
     _poll = Timer.periodic(_pollInterval, (_) => _refresh());
   }
 
@@ -1143,7 +1157,45 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       if (storyline != null) return _storyline(storyline);
     }
 
+    // The last rung before the section overviews, so every selection above
+    // still outranks it: a thread opened from the feed shows the thread, and
+    // Home is what is left when nothing else is selected. A Later day is not a
+    // section here — it is an overview with a filter — so it is checked too.
+    if ((_section ?? RailSection.home) == RailSection.home &&
+        _selectedLaterDay == null) {
+      return _home();
+    }
+
     return _overview(conversations, loadError);
+  }
+
+  /// The pipeline, as a table. Everything it renders is a prop — see
+  /// [HomePane] — so this is the only place the home providers are read.
+  Widget _home() {
+    final feed = ref.watch(homeFeedProvider);
+    return HomePane(
+      rows: feed.rows,
+      // The previous value is carried through a re-read, so this is null only
+      // before the very first one lands.
+      metrics: ref.watch(homeMetricsProvider).valueOrNull,
+      hotStorylines: ref.watch(hotStorylinesProvider).valueOrNull ?? const [],
+      includeDropped: feed.includeDropped,
+      loaded: feed.loaded,
+      loadingMore: feed.loadingMore,
+      atEnd: feed.atEnd,
+      loadError: feed.loadError,
+      now: DateTime.now(),
+      // The same door a notification's OpenThreadIntent goes through: one
+      // selector resolves the row's source, marks it read and loads the
+      // transcript, and a second path into that would eventually disagree
+      // with this one.
+      onOpenThread: (source, key) => _select(key, source: source),
+      onOpenStoryline: _selectStoryline,
+      onLoadMore: () => ref.read(homeFeedProvider.notifier).loadMore(),
+      onToggleDropped: () => ref
+          .read(homeFeedProvider.notifier)
+          .setIncludeDropped(!feed.includeDropped),
+    );
   }
 
   /// Which thread joins [storyline].
@@ -1935,6 +1987,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ),
         ],
+      // Unreachable: [_main] routes Home to its own pane, and the two above
+      // return before this switch. The arms exist so the analyzer keeps this
+      // exhaustive when a stop is added.
+      RailSection.home ||
       RailSection.later ||
       RailSection.storylines =>
         const <(String, List<Conversation>)>[],

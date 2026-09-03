@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/token_store.dart';
+import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
@@ -202,6 +203,9 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
+        // Predates Home: this file asserts on a pane the rail's old landing
+        // section opened.
+        initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         graphAuthProvider.overrideWithValue(auth),
         syncServiceProvider.overrideWithValue(sync),

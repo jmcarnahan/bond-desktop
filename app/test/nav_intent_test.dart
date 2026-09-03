@@ -109,6 +109,9 @@ void main() {
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
+      // Predates Home: this file asserts on a pane the rail's old landing
+      // section opened.
+      initialSectionProvider.overrideWithValue(RailSection.needsYou),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
       // Unstarted, so it owns no sweep timer — this file's container is

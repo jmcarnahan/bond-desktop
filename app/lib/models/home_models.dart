@@ -108,6 +108,14 @@ class HomeFeedRow {
   /// within its connector, so neither half stands alone.
   ({String source, String id}) get key =>
       (source: source, id: sourceMessageId);
+
+  /// [key] as one string — what list items are keyed by and what the live
+  /// phase's entering/fading/collapsing sets hold. Defined once here because
+  /// the provider and the pane must agree on it byte for byte: a set keyed by
+  /// one spelling and widgets keyed by another is an animation that never
+  /// finds its row. Newline as the joint — neither connector's ids contain
+  /// one.
+  String get feedKey => '$source\n$sourceMessageId';
 }
 
 /// The numbers over the feed, all of them over one window.

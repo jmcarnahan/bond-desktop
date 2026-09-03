@@ -9,6 +9,7 @@ import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/quick_replies.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
@@ -103,6 +104,9 @@ void main() {
     final prefs = await AppPrefsNotifier.read(store);
     container = ProviderContainer(overrides: [
       dbProvider.overrideWithValue(db),
+      // Predates Home: this file asserts on a pane the rail's old landing
+      // section opened.
+      initialSectionProvider.overrideWithValue(RailSection.needsYou),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
       // Unstarted, so it owns no sweep timer. This file's container outlives

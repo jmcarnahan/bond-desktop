@@ -37,6 +37,7 @@ import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
+import '../widgets/app_rail.dart' show RailSection;
 import 'navigation_provider.dart';
 import 'notify_routing.dart';
 import 'prefs_provider.dart';
@@ -61,6 +62,24 @@ final graphAuthProvider = Provider<GraphAuth>((ref) => GraphAuth());
 /// zero churn across the existing suite rather than a hundred rows that
 /// suddenly say "thinking…".
 final sessionStartProvider = Provider<DateTime?>((ref) => null);
+
+/// The pane the app opens on.
+///
+/// Home, because the whole point of that screen is to be left up: it is what
+/// the app looks like when nobody has asked it for anything in particular.
+///
+/// A provider rather than a constant so the screen tests that predate Home —
+/// they assert on a section overview from the first frame — can override it
+/// back to the section they were written against. `home_screen_test.dart` is
+/// deliberately the one that does NOT override, which is what pins this
+/// default.
+///
+/// Importing `app_rail.dart` for [RailSection] puts a widget import in a
+/// provider file, which is the precedent `navigation_provider.dart` set: the
+/// rail's stops ARE the app's section vocabulary.
+final initialSectionProvider = Provider<RailSection>(
+  (ref) => RailSection.home,
+);
 
 /// The MCP session and the wire client under it, built together because they
 /// are circular: the client asks the session for a bearer token at every
