@@ -273,6 +273,10 @@ final llmClientProvider = Provider<LlmClient>(
 final fastLlmClientProvider = Provider<LlmClient>(
   (ref) => LlmClient(
     baseUrl: LlmClient.fastBaseUrl,
+    // Its own name as well as its own URL: a runtime that serves more than one
+    // model routes on this field, so the bulk server's client must say which
+    // of them it is asking for rather than inherit the big server's answer.
+    model: LlmClient.fastModel,
     onCall: ref.watch(activityLogProvider).noteLlmCall,
   ),
 );

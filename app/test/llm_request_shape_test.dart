@@ -120,6 +120,34 @@ void main() {
       expect(body['temperature'], 0.7);
     });
 
+    test('names the default model when nothing said otherwise', () async {
+      fake.scriptFor('probe', [
+        {'answer': 'ok'},
+      ]);
+
+      await probe();
+
+      expect(fake.requests.single['model'], LlmClient.defaultModel);
+    });
+
+    test('names the model this client was given', () async {
+      // The field llama-server ignores and an MLX-based runtime routes on: a
+      // client pointed at a multi-model server must be able to say which one.
+      final named = LlmClient(baseUrl: fake.chatUrl, model: 'x');
+      fake.scriptFor('probe', [
+        {'answer': 'ok'},
+      ]);
+
+      await named.completeJson(
+        system: 's',
+        user: 'u',
+        schema: _probeSchema,
+        schemaName: 'probe',
+      );
+
+      expect(fake.requests.single['model'], 'x');
+    });
+
     test('holds the system prompt byte-identical across two emails', () async {
       fake.scriptFor('triage', [_triageAnswer()]);
       final emails = nonGatedCorpus.take(2).toList();

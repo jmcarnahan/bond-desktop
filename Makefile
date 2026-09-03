@@ -89,7 +89,7 @@ RESET  := \033[0m
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop \
         app-install app-run app-test app-gen app-migrations app-analyze \
-        app-build bench ab ab-membership
+        app-build bench ab ab-membership drain bench-compare
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -116,7 +116,13 @@ help:
 	@printf "  make bench        → live model benchmark (needs make fast up)\n"
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
+	@printf "  make drain        → drain concurrency 1 vs 3 (needs make fast up)\n"
+	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
 	@printf "  make app-build    → release build of the macOS app\n\n"
+	@printf "Point a bench at a candidate runtime without editing anything:\n"
+	@printf "  make bench BENCH_URL=http://localhost:9000/v1/chat/completions \\\\\n"
+	@printf "             BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b\n"
+	@printf "Each run writes JSON to $(BENCH_OUT); PROSE_* points the other slot.\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
 
@@ -490,6 +496,52 @@ clean:
 -include local.mk
 MS_ENV ?= $(CURDIR)/.env
 
+# ── the bakeoff: where a bench points ──────────────────────────────────
+# Every one of these is `?=` and sits AFTER the include above, so a durable
+# override in local.mk wins and a one-off on the command line wins over that.
+# The point is that a candidate runtime can be benched with one command and no
+# code edit: `make bench BENCH_URL=http://localhost:9000/v1/chat/completions
+# BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b`.
+#
+# BENCH_* is the BULK slot — triage, extraction, membership, the work the fast
+# server does today. Defaults to exactly that, so a bench with no overrides
+# still measures what ships.
+BENCH_URL    ?= http://localhost:$(FAST_PORT)/v1/chat/completions
+# Names the run, and lands in the result filename. Name the weights as well as
+# the runtime: two quantizations of one model produce two otherwise identical
+# tables.
+BENCH_LABEL  ?= llamacpp/$(notdir $(FAST_HF))
+# llama-server ignores this; an MLX-based server routes on it.
+BENCH_MODEL  ?= qwen3.8
+# PROSE_* is the other slot — drafts and storyline names, the 27B's work, and
+# the side an A/B compares a candidate against.
+PROSE_URL    ?= http://localhost:$(MODEL_PORT)/v1/chat/completions
+PROSE_LABEL  ?= llamacpp/$(notdir $(MODEL_HF))
+PROSE_MODEL  ?= qwen3.8
+# Where a run drops its JSON result. Absolute, because `flutter test` runs with
+# $(APP_DIR) as its working directory. tmp/ is git-ignored.
+BENCH_OUT    ?= $(CURDIR)/tmp/bench
+# Discarded calls before the clock starts: llama.cpp measured 6.8 tok/s cold
+# against 130 warm here, and one cold call in the sample replaces the median
+# rather than nudging it.
+BENCH_WARMUP ?= 1
+# 1 for a candidate that always reasons (R1-Distill has no enable_thinking to
+# honour): the benches then PRINT the leak count instead of failing on it.
+BENCH_THINK  ?= 0
+
+# Single-quoted values, every one: a label carries spaces and parentheses, and
+# an unquoted --dart-define would hand the shell a second word to run.
+BENCH_DEFINES := \
+  --dart-define=BENCH_URL='$(BENCH_URL)' \
+  --dart-define=BENCH_LABEL='$(BENCH_LABEL)' \
+  --dart-define=BENCH_MODEL='$(BENCH_MODEL)' \
+  --dart-define=PROSE_URL='$(PROSE_URL)' \
+  --dart-define=PROSE_LABEL='$(PROSE_LABEL)' \
+  --dart-define=PROSE_MODEL='$(PROSE_MODEL)' \
+  --dart-define=BENCH_OUT='$(BENCH_OUT)' \
+  --dart-define=BENCH_WARMUP=$(BENCH_WARMUP) \
+  --dart-define=BENCH_THINK=$(if $(filter-out 0,$(BENCH_THINK)),true,false)
+
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then
 # refuses with a config error; a missing secret alone means public-client
@@ -505,11 +557,36 @@ $$(CID=$$(grep -m1 '^MICROSOFT_CLIENT_ID=' $(MS_ENV) 2>/dev/null | cut -d= -f2-)
    if [ -n "$$SECRET" ]; then printf -- '--dart-define=MS_CLIENT_SECRET=%s' "$$SECRET"; fi)
 endef
 
+# Points the APP itself — not a bench — at other servers or other model names,
+# so adopting a candidate that won the bakeoff is a launch flag rather than an
+# edit to llm_client.dart.
+#
+# Emitted only for the vars that are SET, which is the whole reason this is
+# nine lines instead of one: an empty define is not the same as no define.
+# `--dart-define=LLAMA_URL=` makes String.fromEnvironment read '' — the app
+# would POST to nowhere instead of falling back to its default.
+APP_LLM_DEFINES :=
+ifneq ($(strip $(LLAMA_URL)),)
+APP_LLM_DEFINES += --dart-define=LLAMA_URL='$(LLAMA_URL)'
+endif
+ifneq ($(strip $(FAST_LLAMA_URL)),)
+APP_LLM_DEFINES += --dart-define=FAST_LLAMA_URL='$(FAST_LLAMA_URL)'
+endif
+ifneq ($(strip $(EMBED_URL)),)
+APP_LLM_DEFINES += --dart-define=EMBED_URL='$(EMBED_URL)'
+endif
+ifneq ($(strip $(LLAMA_MODEL)),)
+APP_LLM_DEFINES += --dart-define=LLAMA_MODEL='$(LLAMA_MODEL)'
+endif
+ifneq ($(strip $(FAST_LLAMA_MODEL)),)
+APP_LLM_DEFINES += --dart-define=FAST_LLAMA_MODEL='$(FAST_LLAMA_MODEL)'
+endif
+
 app-install:
 	@cd $(APP_DIR) && $(FLUTTER) pub get
 
 app-run:
-	@cd $(APP_DIR) && $(FLUTTER) run -d macos $(APP_SECRET_DEFINE)
+	@cd $(APP_DIR) && $(FLUTTER) run -d macos $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 
 app-test:
 	@cd $(APP_DIR) && $(FLUTTER) test
@@ -546,7 +623,7 @@ app-migrations:
 bench:
 	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
 	   printf "$(RED)✗$(RESET) model not reachable — run: make fast\n"; exit 1; }
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_bench_live_test.dart --run-skipped
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_bench_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # Side-by-side: the same corpus through triage and extraction on BOTH servers,
 # printing where the 4B and the 27B disagree and what each cost. Live and never
@@ -556,7 +633,7 @@ ab:
 	   printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }
 	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
 	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_ab_live_test.dart --run-skipped
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_ab_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # The membership eval set through the confirm task on BOTH servers, printing
 # where each lands against the answer a person would give. Live and never a
@@ -566,7 +643,7 @@ ab-membership:
 	   printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }
 	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
 	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_membership_live_test.dart --run-skipped
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_membership_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # The drain race live: K=1 vs K=3 over the same backlog on the fast server,
 # which needs parallel slots to show anything (FAST_SLOTS=4 at `make fast`).
@@ -574,13 +651,21 @@ ab-membership:
 drain:
 	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
 	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
-	@cd $(APP_DIR) && $(FLUTTER) test test/llm_drain_live_test.dart --run-skipped
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_drain_live_test.dart --run-skipped $(BENCH_DEFINES)
+
+# Two runs, side by side. The benches above each leave a JSON file in
+# $(BENCH_OUT); this is what turns two of them into a decision.
+bench-compare:
+	@test -n "$(A)" -a -n "$(B)" || { \
+	   printf "$(RED)✗$(RESET) usage: make bench-compare A=<a.json> B=<b.json>\n"; \
+	   printf "    results land in $(BENCH_OUT)\n"; exit 1; }
+	@cd $(APP_DIR) && dart run tool/bench_compare.dart '$(A)' '$(B)'
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
 
 app-build:
-	@cd $(APP_DIR) && $(FLUTTER) build macos --release $(APP_SECRET_DEFINE)
+	@cd $(APP_DIR) && $(FLUTTER) build macos --release $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
 	@printf "  $(GREEN)✓$(RESET) $(APP_DIR)/build/macos/Build/Products/Release/bond_inbox.app\n"
 
 # This exists because a corrupt download does NOT announce itself. A

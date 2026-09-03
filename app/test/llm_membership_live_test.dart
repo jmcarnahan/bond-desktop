@@ -2,11 +2,11 @@
 library;
 
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'fixtures/bench_stats.dart';
+import 'fixtures/bench_report.dart';
+import 'fixtures/bench_target.dart';
 import 'fixtures/membership_cases.dart';
 
 /// What the charter bought, in verdicts rather than seconds.
@@ -45,25 +45,34 @@ void main() {
       // One collector per client, never one shared: the whole question here is
       // how the two servers differ, and a single bucket would average them
       // into a machine that does not exist.
-      final bigCalls = CallCollector(
-        label: '27B (default)',
-        url: LlmClient.defaultBaseUrl,
-        model: 'qwen3.8',
-      );
-      final fastCalls = CallCollector(
-        label: 'fast (default)',
-        url: LlmClient.fastBaseUrl,
-        model: 'qwen3.8',
-      );
-      final big = LlmClient(onCall: bigCalls.record);
-      final fast = LlmClient(
-        baseUrl: LlmClient.fastBaseUrl,
-        onCall: fastCalls.record,
-      );
+      final bigCalls = BenchTarget.prose.collector();
+      final fastCalls = BenchTarget.bulk.collector();
+      final big = BenchTarget.prose.client(onCall: bigCalls.record);
+      final fast = BenchTarget.bulk.client(onCall: fastCalls.record);
       // Counted per client, so a leak names the server that leaked rather than
       // leaving both under suspicion.
       big.onReasoningLeak = bigCalls.noteLeak;
       fast.onReasoningLeak = fastCalls.noteLeak;
+
+      // Thrown away, on observer-less clients, so neither table opens with a
+      // cold call. Both sides get the same treatment or the comparison is
+      // between one warm machine and one that was still loading weights.
+      final bigWarmup = BenchTarget.prose.client();
+      final fastWarmup = BenchTarget.bulk.client();
+      for (var i = 0; i < BenchTarget.warmup; i++) {
+        final first = membershipCases.first;
+        final input = ConfirmInput(
+          storyline: first.storyline,
+          storylineParticipants: first.participants,
+          candidateCard: first.candidateCard,
+        );
+        await runTask(bigWarmup, const ConfirmMembershipTask(), input,
+            temperature: 0);
+        await runTask(fastWarmup, const ConfirmMembershipTask(), input,
+            temperature: 0);
+      }
+
+      final startedAt = DateTime.now();
 
       final lines = <String>[];
       var bigAgree = 0;
@@ -157,15 +166,46 @@ void main() {
           '\n${fastCalls.banner}\n'
           '\n${fastCalls.table()}\n',
         );
+
+        // `accuracy` is empty and the counters go to `extra` because these are
+        // agreement with a human's answer per SERVER, not one corpus scored
+        // once — two columns, and the scorecard shape holds one.
+        final path = await writeBenchResult(
+          bench: 'membership',
+          collectors: [bigCalls, fastCalls],
+          accuracy: const [],
+          startedAt: startedAt,
+          extra: {
+            'agree': {
+              bigCalls.label: '$bigAgree/$judged',
+              fastCalls.label: '$fastAgree/$judged',
+            },
+            'must_pass': {
+              bigCalls.label: '$bigMustPass/$mustPassTotal',
+              fastCalls.label: '$fastMustPass/$mustPassTotal',
+            },
+          },
+        );
+        // ignore: avoid_print
+        if (path != null) print('wrote $path');
       }
 
       // Per server, and not a judgement call either way: a build that ignores
       // enable_thinking runs at half speed, and every latency above would be
-      // measuring that instead of the model.
-      expect(bigCalls.reasoningLeaks, 0,
-          reason: 'the 27B reasoned despite enable_thinking');
-      expect(fastCalls.reasoningLeaks, 0,
-          reason: 'the fast model reasoned despite enable_thinking');
+      // measuring that instead of the model. A candidate that cannot be told
+      // to stop reasoning is the one exception, and it has to say so
+      // deliberately.
+      if (BenchTarget.allowReasoning) {
+        // ignore: avoid_print
+        print('reasoning leaks: ${bigCalls.label} ${bigCalls.reasoningLeaks}, '
+            '${fastCalls.label} ${fastCalls.reasoningLeaks} '
+            '(not asserted — BENCH_THINK is set)');
+      } else {
+        expect(bigCalls.reasoningLeaks, 0,
+            reason: 'the 27B reasoned despite enable_thinking');
+        expect(fastCalls.reasoningLeaks, 0,
+            reason: 'the fast model reasoned despite enable_thinking');
+      }
     },
     timeout: const Timeout(Duration(minutes: 45)),
   );

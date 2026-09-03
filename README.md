@@ -341,9 +341,47 @@ Knobs:
 - `LLAMA_URL` — read by the Dart client, full URL of the completions endpoint.
   Defaults to `http://localhost:8080/v1/chat/completions`. Point it at another
   port or another machine.
+- `FAST_LLAMA_URL` and `EMBED_URL` — the same, for the bulk-work server
+  (`:8082`) and the embedding server (`:8081`).
+- `LLAMA_MODEL` and `FAST_LLAMA_MODEL` — the model name each request carries.
+  `llama-server` ignores it and serves whatever it loaded; an MLX-based server
+  routes on it, so a runtime holding several models needs it set.
+- All five are passed through by `make app-run` and `make app-build` only when
+  you set them: `make app-run FAST_LLAMA_URL=http://localhost:9000/v1/chat/completions`.
+  Unset means the app's own defaults, which is not the same as empty.
 - `MODEL_PORT` and `CTX_SIZE` are overridable per invocation:
   `make model CTX_SIZE=65536`, `make model MODEL_PORT=8081`.
 - `SETUP_WAIT` — how long `make setup` polls for `/health`. Default 1800s.
+
+### Benchmarks
+
+```sh
+make bench                  # the corpus through triage + extraction, timed
+make ab                     # the same corpus on both servers, compared
+make ab-membership          # the membership eval set on both servers
+make drain                  # drain concurrency 1 vs 3 (needs FAST_SLOTS=4)
+make bench-compare A=… B=…  # diff two runs
+```
+
+Each of these is live and none is a gate: they need a server up, print tables
+rather than assert on judgements, and stay out of `make app-test`.
+
+A bench points wherever you tell it, so trying a candidate runtime is one
+command and no code edit. `BENCH_*` is the bulk slot (triage, extraction,
+membership); `PROSE_*` is the drafting slot the A/B compares against:
+
+```sh
+make bench BENCH_URL=http://localhost:9000/v1/chat/completions \
+           BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b
+```
+
+Every run writes a JSON result to `BENCH_OUT` (default `tmp/bench/`), named for
+the bench, the label and the time. `make bench-compare A=<a.json> B=<b.json>`
+diffs two of them — latency, generation rate, and where accuracy moved — which
+is the only way to compare a candidate against a run from last week, since
+scrollback does not survive the meeting. `BENCH_WARMUP` (default 1) discards
+that many calls before the clock starts; `BENCH_THINK=1` prints the reasoning
+tripwire instead of failing on it, for candidates with no thinking switch.
 
 ## Performance
 

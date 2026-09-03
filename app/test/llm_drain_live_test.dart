@@ -3,10 +3,10 @@
 library;
 
 import 'package:bond_inbox/data/message_store.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/triage_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/bench_target.dart';
 import 'fixtures/test_db.dart';
 
 import 'fixtures/corpus.dart';
@@ -60,7 +60,7 @@ void main() {
 
       final queue = TriageQueue(
         store,
-        LlmClient(baseUrl: LlmClient.fastBaseUrl),
+        BenchTarget.bulk.client(),
         userAddress: userAddress,
         concurrency: concurrency,
       );

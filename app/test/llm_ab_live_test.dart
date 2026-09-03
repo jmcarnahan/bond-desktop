@@ -4,11 +4,12 @@ library;
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/bench_report.dart';
 import 'fixtures/bench_stats.dart';
+import 'fixtures/bench_target.dart';
 import 'fixtures/corpus.dart';
 
 /// What phase 3 actually cost, in labels rather than seconds.
@@ -73,21 +74,10 @@ void main() {
       // One collector per client, never one shared: the whole question here is
       // how the two servers differ, and a single bucket would average them
       // into a machine that does not exist.
-      final bigCalls = CallCollector(
-        label: '27B (default)',
-        url: LlmClient.defaultBaseUrl,
-        model: 'qwen3.8',
-      );
-      final fastCalls = CallCollector(
-        label: 'fast (default)',
-        url: LlmClient.fastBaseUrl,
-        model: 'qwen3.8',
-      );
-      final big = LlmClient(onCall: bigCalls.record);
-      final fast = LlmClient(
-        baseUrl: LlmClient.fastBaseUrl,
-        onCall: fastCalls.record,
-      );
+      final bigCalls = BenchTarget.prose.collector();
+      final fastCalls = BenchTarget.bulk.collector();
+      final big = BenchTarget.prose.client(onCall: bigCalls.record);
+      final fast = BenchTarget.bulk.client(onCall: fastCalls.record);
       // Counted per client, so a leak names the server that leaked rather than
       // leaving both under suspicion.
       big.onReasoningLeak = bigCalls.noteLeak;
@@ -95,6 +85,19 @@ void main() {
 
       final emails =
           emailCorpus.where((entry) => entry.expectedGate == null).toList();
+
+      // Thrown away, on observer-less clients, so neither table opens with a
+      // cold call. Both sides get the same treatment or the comparison is
+      // between one warm machine and one that was still loading weights.
+      final bigWarmup = BenchTarget.prose.client();
+      final fastWarmup = BenchTarget.bulk.client();
+      for (var i = 0; i < BenchTarget.warmup; i++) {
+        final input = TriageInput(emails.first.message, DateTime.now());
+        await runTask(bigWarmup, const TriageTask(), input);
+        await runTask(fastWarmup, const TriageTask(), input);
+      }
+
+      final startedAt = DateTime.now();
 
       final pairs = <_Pair>[];
       final lines = <String>[];
@@ -179,11 +182,11 @@ void main() {
           if (entry.id == 'prompt-injection') {
             injection.addAll([
               '=== PROMPT INJECTION — both servers, verbatim ===',
-              '--- 27B (:8080) ---',
+              '--- ${BenchTarget.prose.label} ---',
               'summary:      ${bigTriage.summary}',
               'action_items: ${bigTriage.actionItems}',
               'evidence:     ${bigExtract.evidence}',
-              '--- fast (:8082) ---',
+              '--- ${BenchTarget.bulk.label} ---',
               'summary:      ${fastTriage.summary}',
               'action_items: ${fastTriage.actionItems}',
               'evidence:     ${fastExtract.evidence}',
@@ -206,15 +209,26 @@ void main() {
         final importance = pairs.where((p) => withinOne(_importanceOrder,
             p.bigExtract.importance, p.fastExtract.importance));
 
+        // Computed once and both printed and written down: the table above is
+        // for whoever is watching the run, the file for whoever compares this
+        // candidate against the next one.
+        final agreement = {
+          'category_exact': pct(category.length, n),
+          'urgency_within_one': pct(urgency.length, n),
+          'needs_action_exact': pct(needsAction.length, n),
+          'intent_exact': pct(intent.length, n),
+          'importance_within_one': pct(importance.length, n),
+        };
+
         // ignore: avoid_print
         print(
           '\n| agreement | rate |\n'
           '| --- | --- |\n'
-          '| category (exact) | ${pct(category.length, n)} |\n'
-          '| urgency (within one) | ${pct(urgency.length, n)} |\n'
-          '| needs_action (exact) | ${pct(needsAction.length, n)} |\n'
-          '| intent (exact) | ${pct(intent.length, n)} |\n'
-          '| importance (within one) | ${pct(importance.length, n)} |\n'
+          '| category (exact) | ${agreement['category_exact']} |\n'
+          '| urgency (within one) | ${agreement['urgency_within_one']} |\n'
+          '| needs_action (exact) | ${agreement['needs_action_exact']} |\n'
+          '| intent (exact) | ${agreement['intent_exact']} |\n'
+          '| importance (within one) | ${agreement['importance_within_one']} |\n'
           '\n${bigCalls.banner}\n'
           '\n${bigCalls.table()}\n'
           '\n${fastCalls.banner}\n'
@@ -222,15 +236,37 @@ void main() {
           '\n${lines.join('\n')}\n'
           '\n${injection.join('\n')}\n',
         );
+
+        // `accuracy` is empty on purpose: everything above is model against
+        // model, and calling an agreement rate an accuracy would put two
+        // models' shared mistake in the column that says they were right.
+        final path = await writeBenchResult(
+          bench: 'triage-extract-ab',
+          collectors: [bigCalls, fastCalls],
+          accuracy: const [],
+          startedAt: startedAt,
+          extra: {'agreement': agreement},
+        );
+        // ignore: avoid_print
+        if (path != null) print('wrote $path');
       }
 
       // Per server, and not a judgement call either way: a build that ignores
       // enable_thinking runs at half speed, and every latency above would be
-      // measuring that instead of the model.
-      expect(bigCalls.reasoningLeaks, 0,
-          reason: 'the 27B reasoned despite enable_thinking');
-      expect(fastCalls.reasoningLeaks, 0,
-          reason: 'the fast model reasoned despite enable_thinking');
+      // measuring that instead of the model. A candidate that cannot be told
+      // to stop reasoning is the one exception, and it has to say so
+      // deliberately.
+      if (BenchTarget.allowReasoning) {
+        // ignore: avoid_print
+        print('reasoning leaks: ${bigCalls.label} ${bigCalls.reasoningLeaks}, '
+            '${fastCalls.label} ${fastCalls.reasoningLeaks} '
+            '(not asserted — BENCH_THINK is set)');
+      } else {
+        expect(bigCalls.reasoningLeaks, 0,
+            reason: 'the 27B reasoned despite enable_thinking');
+        expect(fastCalls.reasoningLeaks, 0,
+            reason: 'the fast model reasoned despite enable_thinking');
+      }
     },
     timeout: const Timeout(Duration(minutes: 45)),
   );

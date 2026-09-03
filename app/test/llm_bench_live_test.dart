@@ -4,11 +4,12 @@ library;
 
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/bench_report.dart';
 import 'fixtures/bench_stats.dart';
+import 'fixtures/bench_target.dart';
 import 'fixtures/corpus.dart';
 
 /// The number every perf phase is judged against.
@@ -19,11 +20,13 @@ import 'fixtures/corpus.dart';
 /// to answer the same seventeen emails, every time, so two phases' numbers can
 /// be put next to each other and mean something.
 ///
-/// It runs against the FAST server on :8082, not the 27B, because since phase 3
-/// that is where triage and extraction actually happen. Benching them on the
-/// server the app no longer uses for them would compare a phase's number
-/// against a path nobody takes; `make ab` is where the two servers are put
-/// side by side deliberately.
+/// It runs against [BenchTarget.bulk] — by default the FAST server on :8082,
+/// not the 27B, because since phase 3 that is where triage and extraction
+/// actually happen. Benching them on the server the app no longer uses for
+/// them would compare a phase's number against a path nobody takes; `make ab`
+/// is where two servers are put side by side deliberately. Point it elsewhere
+/// with `make bench BENCH_URL=… BENCH_LABEL=…` to bench a candidate runtime
+/// without editing anything here.
 ///
 /// It prints rather than asserts, almost entirely on purpose. A small model's
 /// category is a judgement, and a test that pinned it would fail on the next
@@ -44,21 +47,29 @@ void main() {
       // against each other; and the only clock that still means anything once
       // calls overlap, where a stopwatch around an awaited call times the
       // queue rather than the request.
-      final collector = CallCollector(
-        label: 'fast (default)',
-        url: LlmClient.fastBaseUrl,
-        model: 'qwen3.8',
-      );
-      final client = LlmClient(
-        baseUrl: LlmClient.fastBaseUrl,
-        onCall: collector.record,
-      );
+      final collector = BenchTarget.bulk.collector();
+      final client = BenchTarget.bulk.client(onCall: collector.record);
       client.onReasoningLeak = collector.noteLeak;
 
       final emails = emailCorpus
           .where((entry) => entry.expectedGate == null)
           .toList();
       final lines = <String>[];
+
+      // Thrown away, and on a client with no observer, so the first call's
+      // weight-loading cost lands nowhere near the table. Cold against warm is
+      // a 20x difference on this machine; one cold call in the sample does not
+      // move the median, it replaces it.
+      final warmupClient = BenchTarget.bulk.client();
+      for (var i = 0; i < BenchTarget.warmup; i++) {
+        await runTask(
+          warmupClient,
+          const TriageTask(),
+          TriageInput(emails.first.message, DateTime.now()),
+        );
+      }
+
+      final startedAt = DateTime.now();
 
       // Where the model disagreed with the corpus. Scored and printed, not
       // asserted: a category and a label are judgements, and pinning them
@@ -170,13 +181,28 @@ void main() {
           '\n${lines.join('\n')}\n'
           '\n${scorecardBlock([categoryCard, labelCard, needsActionCard])}\n',
         );
+        final path = await writeBenchResult(
+          bench: 'triage-extract',
+          collectors: [collector],
+          accuracy: [categoryCard, labelCard, needsActionCard],
+          startedAt: startedAt,
+        );
+        // ignore: avoid_print
+        if (path != null) print('wrote $path');
       }
 
       // Not a judgement call: a build that ignores enable_thinking runs at
       // half speed, and every number above would be measuring that instead of
-      // the change under test.
-      expect(collector.reasoningLeaks, 0,
-          reason: 'the model reasoned despite enable_thinking');
+      // the change under test. A candidate that cannot be told to stop
+      // reasoning is the one exception, and it has to say so deliberately.
+      if (BenchTarget.allowReasoning) {
+        // ignore: avoid_print
+        print('reasoning leaks: ${collector.reasoningLeaks} '
+            '(not asserted — BENCH_THINK is set)');
+      } else {
+        expect(collector.reasoningLeaks, 0,
+            reason: 'the model reasoned despite enable_thinking');
+      }
     },
     timeout: const Timeout(Duration(minutes: 30)),
   );
