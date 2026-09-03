@@ -21,6 +21,8 @@ void main() {
     VoidCallback? onSignInAgain,
     bool showActivityLog = false,
     void Function(bool)? onShowActivityLogChanged,
+    NotifyStyle notifyStyle = NotifyStyle.native,
+    void Function(NotifyStyle)? onNotifyStyleChanged,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -37,6 +39,8 @@ void main() {
                 onAboutMeChanged: onAboutMeChanged,
                 showActivityLog: showActivityLog,
                 onShowActivityLogChanged: onShowActivityLogChanged,
+                notifyStyle: notifyStyle,
+                onNotifyStyleChanged: onNotifyStyleChanged,
                 hasScope: hasScope,
                 onSignInAgain: onSignInAgain,
               ),
@@ -240,6 +244,93 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(written, [true, false]);
+    });
+  });
+
+  group('the notification style row', () {
+    testWidgets('is absent when the host wires no callback', (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+      );
+
+      expect(find.text('Notifications'), findsNothing);
+    });
+
+    testWidgets('renders on what is already stored', (tester) async {
+      // Off, which is the only one of the three that took a decision to reach:
+      // this preference defaults to native.
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        notifyStyle: NotifyStyle.off,
+        onNotifyStyleChanged: (_) {},
+      );
+
+      expect(find.text('Notifications'), findsOneWidget);
+      expect(find.text('Off'), findsOneWidget);
+      expect(find.text('In-app'), findsOneWidget);
+      expect(find.text('Native'), findsOneWidget);
+      expect(
+        tester
+            .widget<SegmentedButton<NotifyStyle>>(
+              find.byType(SegmentedButton<NotifyStyle>),
+            )
+            .selected,
+        {NotifyStyle.off},
+      );
+      // The one thing about native a user would otherwise report as a bug.
+      expect(
+        find.textContaining('falls back to the in-app ribbon'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('reports the choice immediately', (tester) async {
+      final written = <NotifyStyle>[];
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onNotifyStyleChanged: written.add,
+      );
+
+      await tester.tap(find.text('Off'));
+      await tester.pumpAndSettle();
+
+      expect(written, [NotifyStyle.off]);
+      expect(
+        tester
+            .widget<SegmentedButton<NotifyStyle>>(
+              find.byType(SegmentedButton<NotifyStyle>),
+            )
+            .selected,
+        {NotifyStyle.off},
+      );
+
+      await tester.tap(find.text('In-app'));
+      await tester.pumpAndSettle();
+
+      expect(written, [NotifyStyle.off, NotifyStyle.inApp]);
+    });
+
+    testWidgets('sits beside the activity log switch, not instead of it',
+        (tester) async {
+      await open(
+        tester,
+        onThresholdChanged: (_) {},
+        onAboutMeChanged: (_) {},
+        onShowActivityLogChanged: (_) {},
+        onNotifyStyleChanged: (_) {},
+      );
+
+      expect(find.byType(SwitchListTile), findsOneWidget);
+      expect(find.text('Show activity log'), findsOneWidget);
+      expect(find.byType(SegmentedButton<NotifyStyle>), findsOneWidget);
+      // Rows in the legacy dialog, never a dialog of their own.
+      expect(find.byType(AlertDialog), findsOneWidget);
     });
   });
 

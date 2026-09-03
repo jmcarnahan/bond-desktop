@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
+import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
@@ -14,11 +15,17 @@ class ConversationRow extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
+  /// When this session started. Null — the default — never shows the
+  /// processing hint; see [showsProcessing] for why the gate is a time and
+  /// not a flag.
+  final DateTime? processingSince;
+
   const ConversationRow({
     super.key,
     required this.conversation,
     required this.selected,
     required this.onTap,
+    this.processingSince,
   });
 
   /// Urgent needs-reply is error, needs-reply is attention, waiting is
@@ -52,6 +59,28 @@ class ConversationRow extends StatelessWidget {
     final secondary = hasCta ? cta : c.lastMessagePreview;
     final who = c.primaryParticipant?.display ?? '(no sender)';
     final time = formatTimestamp(c.lastMessageAt);
+    final processing = showsProcessing(c, since: processingSince);
+
+    // The preview is the line the model is in the middle of turning into a
+    // CTA, so it dims while that happens. A row that already HAS one is never
+    // dimmed — the ask is useful now, whatever else is still running.
+    Widget? secondaryLine;
+    if (secondary != null && secondary.isNotEmpty) {
+      secondaryLine = Text(
+        secondary,
+        style: hasCta
+            ? BondType.small.copyWith(
+                color: _ctaColor,
+                fontWeight: FontWeight.w600,
+              )
+            : BondType.small,
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      );
+      if (processing && !hasCta) {
+        secondaryLine = Opacity(opacity: 0.55, child: secondaryLine);
+      }
+    }
 
     // The 2px selection ring paints over the constant 1px border rather than
     // replacing it, so selecting a row never shifts the list's layout.
@@ -117,19 +146,9 @@ class ConversationRow extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      if (secondary != null && secondary.isNotEmpty) ...[
+                      if (secondaryLine != null) ...[
                         const SizedBox(height: BondSpacing.s4),
-                        Text(
-                          secondary,
-                          style: hasCta
-                              ? BondType.small.copyWith(
-                                  color: _ctaColor,
-                                  fontWeight: FontWeight.w600,
-                                )
-                              : BondType.small,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                        secondaryLine,
                       ],
                       const SizedBox(height: BondSpacing.s8),
                       Wrap(
@@ -137,6 +156,12 @@ class ConversationRow extends StatelessWidget {
                         runSpacing: BondSpacing.s4,
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
+                          // Words, not a spinner: something that animates for
+                          // as long as the model runs would never let a test
+                          // settle, and it would make an ordinary wait look
+                          // like a stall.
+                          if (processing)
+                            Text('thinking…', style: BondType.caption),
                           if (c.ctaUrgency == CtaUrgency.urgent)
                             const BondChip(
                                 label: 'Urgent', tone: BondTone.attention),

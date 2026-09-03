@@ -27,6 +27,19 @@ class FakeSync implements MailSync {
   Future<void> ensureMessageBody(String sourceMessageId) async {}
 }
 
+/// A store whose draft lookup is broken and whose list read is not.
+class _FailingDrafts extends MessageStore {
+  _FailingDrafts(super.db);
+
+  @override
+  Future<List<({String source, String conversationKey})>> needsDraftKeys({
+    required double threshold,
+    int limit = 7,
+    List<String> sources = const ['email', 'teams'],
+  }) async =>
+      throw StateError('the draft query fell over');
+}
+
 void main() {
   late BondDatabase db;
   late MessageStore store;
@@ -185,6 +198,20 @@ void main() {
 
     // Resetting a processing row would hand the item to a second drain.
     expect(await store.workCounts('draft'), {'processing': 1});
+  });
+
+  test('a store that cannot answer costs the load nothing', () async {
+    // The enqueue reports how many threads it queued for — the settle pass
+    // reads that to decide whether to drain again — and a failure has to
+    // report zero rather than propagate. The rows are already read by then,
+    // and losing the visible inbox over a suggestion nobody asked for yet
+    // would be the wrong trade.
+    final notifier = ConversationsNotifier(_FailingDrafts(db), sync);
+    addTearDown(notifier.dispose);
+
+    await notifier.load();
+
+    expect(notifier.state, isA<ConversationsLoaded>());
   });
 
   test('it runs after the scoring pass, on the scores that pass wrote',

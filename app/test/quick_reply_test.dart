@@ -32,6 +32,8 @@ void main() {
     VoidCallback? onDismiss,
     PendingSend? pending,
     VoidCallback? onUndo,
+    VoidCallback? onSuggest,
+    bool suggesting = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -45,6 +47,8 @@ void main() {
           onDismiss: onDismiss,
           pending: pending,
           onUndo: onUndo,
+          onSuggest: onSuggest,
+          suggesting: suggesting,
         ),
       ),
     ));
@@ -197,13 +201,94 @@ void main() {
       expect(replies, 1);
     });
 
-    testWidgets('the × closes the suggestions', (tester) async {
+    testWidgets('the × asks before it closes the suggestions', (tester) async {
       var dismissed = 0;
       await pumpBar(tester, onDismiss: () => dismissed++);
 
       await tester.tap(find.byIcon(Icons.close));
       await tester.pump();
 
+      // The first tap only asks. Suggestions are cheap to keep and gone for
+      // good once thrown away, so the × owes the user a question.
+      expect(dismissed, 0);
+      expect(find.text('Dismiss these suggestions?'), findsOneWidget);
+      // The cards the question is about stay on screen while it stands.
+      expect(find.text(_confirm.body), findsOneWidget);
+      expect(find.text(_propose.body), findsOneWidget);
+
+      await tester.tap(find.text('Dismiss'));
+      await tester.pump();
+
+      expect(dismissed, 1);
+    });
+
+    testWidgets('and Keep puts the caption back without closing anything',
+        (tester) async {
+      var dismissed = 0;
+      await pumpBar(tester, onDismiss: () => dismissed++);
+
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pump();
+      await tester.tap(find.text('Keep'));
+      await tester.pump();
+
+      expect(dismissed, 0);
+      expect(find.text('Dismiss these suggestions?'), findsNothing);
+      expect(
+        find.text('Tap a suggestion to send it — you can undo for a few '
+            'seconds.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a fresh pair is never asked about on the old one\'s behalf',
+        (tester) async {
+      var dismissed = 0;
+      await pumpBar(tester, onDismiss: () => dismissed++);
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pump();
+
+      // The model wrote two new suggestions while the question stood. They
+      // are not what the user was answering.
+      await pumpBar(
+        tester,
+        options: const [
+          DraftOption(stance: 'Ask for Wednesday', body: 'Wednesday?'),
+        ],
+        onDismiss: () => dismissed++,
+      );
+
+      expect(find.text('Dismiss these suggestions?'), findsNothing);
+      expect(dismissed, 0);
+    });
+
+    testWidgets('but the same pair in a new list is the same question',
+        (tester) async {
+      // `DraftState.options` mints a fresh list on every read, so an identity
+      // check disarmed the question on any parent rebuild — every inbox
+      // setState, every sync reload — and the × would need tapping twice for
+      // no reason the user could see.
+      var dismissed = 0;
+      await pumpBar(tester, onDismiss: () => dismissed++);
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pump();
+
+      // Fresh objects as well as a fresh list: `DraftState.options` decodes new
+      // [DraftOption]s out of JSON on every read, so neither the list nor what
+      // is in it survives a rebuild by identity.
+      DraftOption copyOf(DraftOption option) =>
+          DraftOption(stance: option.stance, body: option.body);
+
+      await pumpBar(
+        tester,
+        options: [copyOf(_confirm), copyOf(_propose)],
+        onDismiss: () => dismissed++,
+      );
+
+      expect(find.text('Dismiss these suggestions?'), findsOneWidget);
+
+      await tester.tap(find.text('Dismiss'));
+      await tester.pump();
       expect(dismissed, 1);
     });
 
@@ -212,6 +297,64 @@ void main() {
       await pumpBar(tester);
 
       expect(find.byIcon(Icons.close), findsNothing);
+    });
+  });
+
+  group('asking for a suggestion', () {
+    testWidgets('is offered when there is nothing to suggest yet',
+        (tester) async {
+      // The un-dismiss: the × takes the cards away, and this is how they come
+      // back.
+      await pumpBar(tester, options: const [], onSuggest: () {});
+
+      expect(find.text('Suggest a reply'), findsOneWidget);
+    });
+
+    testWidgets('and never beside cards that are already there',
+        (tester) async {
+      await pumpBar(tester, onSuggest: () {});
+
+      expect(find.text('Suggest a reply'), findsNothing);
+    });
+
+    testWidgets('is absent when the host cannot ask for one', (tester) async {
+      await pumpBar(tester, options: const []);
+
+      expect(find.text('Reply…'), findsOneWidget);
+      expect(find.text('Suggest a reply'), findsNothing);
+      expect(find.byIcon(Icons.auto_awesome), findsNothing);
+    });
+
+    testWidgets('says so while one is being written, and cannot be asked twice',
+        (tester) async {
+      var asked = 0;
+      await pumpBar(
+        tester,
+        options: const [],
+        onSuggest: () => asked++,
+        suggesting: true,
+      );
+
+      expect(find.text('Drafting…'), findsOneWidget);
+      expect(find.text('Suggest a reply'), findsNothing);
+      final button = tester.widget<TextButton>(
+        find.ancestor(
+          of: find.text('Drafting…'),
+          matching: find.byType(TextButton),
+        ),
+      );
+      expect(button.onPressed, isNull);
+      expect(asked, 0);
+    });
+
+    testWidgets('a tap asks once', (tester) async {
+      var asked = 0;
+      await pumpBar(tester, options: const [], onSuggest: () => asked++);
+
+      await tester.tap(find.text('Suggest a reply'));
+      await tester.pump();
+
+      expect(asked, 1);
     });
   });
 

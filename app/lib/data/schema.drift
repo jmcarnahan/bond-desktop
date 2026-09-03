@@ -148,7 +148,15 @@ CREATE TABLE storylines (
   -- this is the only position where an upgraded install and a fresh one get
   -- identical table_info — which the parity test compares in order.
   charter TEXT,
-  charter_locked INTEGER NOT NULL DEFAULT 0
+  charter_locked INTEGER NOT NULL DEFAULT 0,
+  -- The hash of the CLUSTER this storyline was proposed out of, written once
+  -- at insert and never again. `member_hash` above tracks the members as they
+  -- stand right now — every membership write overwrites it — so it cannot also
+  -- carry the identity of the group the user was originally asked about. A
+  -- dismissal is recognised on either: this column matches the cluster the
+  -- sweep rebuilds, `member_hash` matches the set as it stood when the user
+  -- said no. NULL on anything a person made — no cluster proposed it.
+  cluster_hash TEXT
 ) STRICT;
 
 CREATE INDEX ix_storylines_status ON storylines(status, last_activity_at DESC);
@@ -272,3 +280,23 @@ CREATE TABLE drafts (
   options_dismissed INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (source, conversation_key)
 ) STRICT;
+
+-- Per-message notification state: admitted 'pending', settled exactly once to
+-- 'notified' or 'suppressed'. `reason` is diagnostic only (settled|deadline|
+-- gated|read|done|not_worthy|stale). 'eligible' is deliberately NOT a stored
+-- state — worthiness is evaluated at settle time, against the freshest verdict.
+CREATE TABLE message_notify (
+  source TEXT NOT NULL,
+  source_message_id TEXT NOT NULL,
+  conversation_key TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'pending',
+  reason TEXT,
+  deadline_at TEXT NOT NULL,
+  settled_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, source_message_id)
+) STRICT;
+
+CREATE INDEX ix_message_notify_open ON message_notify(state, deadline_at);
+CREATE INDEX ix_messages_created ON messages(created_at DESC);

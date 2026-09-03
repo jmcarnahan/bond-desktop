@@ -176,10 +176,19 @@ class ExtractHandler extends WorkHandler {
   /// Re-embeds this message's thread, if what the thread says about itself
   /// actually changed.
   ///
-  /// Every way this can fail returns quietly. The extraction is already stored
-  /// by the time it runs, and an item marked failed here would be re-run —
-  /// spending a model call to redo work that succeeded — to retry an
-  /// optimisation.
+  /// Every way this can fail returns quietly, and that is a constraint rather
+  /// than a preference: the extraction is already stored by the time it runs,
+  /// and an item marked failed here would be re-run — spending a model call to
+  /// redo work that succeeded — to retry an optimisation. Nothing below may
+  /// throw.
+  ///
+  /// The storyline requeue is the part that has to survive an embedding server
+  /// being down. It used to sit behind a successful embed, which made a
+  /// missing server a silent DROP: no vector, no requeue, and the thread was
+  /// never considered for a storyline again until something else happened to
+  /// re-extract it. Now an unreachable server still queues the work and lets
+  /// the storyline pass park on it — which is the one thing that gets the
+  /// thread looked at again once `make embed` is running.
   Future<void> _refreshCard(
     String source,
     Map<String, Object?> row,
@@ -205,12 +214,24 @@ class ExtractHandler extends WorkHandler {
     final stored = await _store.getConversationAi(source, key);
     if (stored != null && stored['embedded_hash'] == hash) return;
 
-    final vector = await _embeddings.embed(card);
-    // Server down, or an answer that did not parse. Leave the old embedding
-    // and the old hash alone so the next pass tries again, and say nothing:
-    // this thread simply has no vector yet, which every reader of the column
-    // already has to handle.
-    if (vector == null) return;
+    final embedded = await _embeddings.embedResult(card);
+    final vector = embedded.vector;
+    if (vector == null) {
+      // Either way the old embedding and the old hash are left alone, so the
+      // next pass tries again. What differs is whether there is anything to
+      // try FOR: a server that is not running will have a vector for this
+      // thread later, so the storyline pass is queued now and parks until it
+      // does; a server that answered nonsense will answer the same nonsense
+      // next time, and queueing a pass that can only park is worse than
+      // nothing.
+      if (embedded.outcome == EmbedOutcome.unavailable) {
+        _log.note({'embed': 'unavailable'});
+        await _store.requeueWork('storyline', source, key);
+      } else {
+        _log.note({'embed': 'rejected'});
+      }
+      return;
+    }
 
     await _store.upsertConversationAi(
       source,

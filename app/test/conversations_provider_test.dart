@@ -263,7 +263,7 @@ void main() {
       final notifier = ConversationsNotifier(store, sync);
       await notifier.load();
 
-      await notifier.markDone('c1');
+      await notifier.markDone('email', 'c1');
 
       expect(
         (notifier.state as ConversationsLoaded).conversations.single.state,
@@ -280,7 +280,7 @@ void main() {
       final notifier = ConversationsNotifier(UnwritableStore(db), sync);
       await notifier.load();
 
-      await notifier.markDone('c1');
+      await notifier.markDone('email', 'c1');
 
       final state = notifier.state as ConversationsLoaded;
       expect(state.conversations.single.state, ConversationState.needsReply);
@@ -289,7 +289,7 @@ void main() {
 
     test('does nothing before the first load', () async {
       final notifier = ConversationsNotifier(store, sync);
-      await notifier.markDone('c1');
+      await notifier.markDone('email', 'c1');
       expect(notifier.state, isA<ConversationsInitial>());
     });
   });
@@ -297,7 +297,7 @@ void main() {
   group('thread', () {
     test('fetches bodies then reads the transcript', () async {
       await seedMessage('c1', 'm1');
-      final notifier = ThreadNotifier(store, sync, 'c1');
+      final notifier = ThreadNotifier(store, sync, 'email', 'c1');
 
       await notifier.load();
 
@@ -309,7 +309,7 @@ void main() {
 
     test('a failed body fetch still shows what is stored', () async {
       await seedMessage('c1', 'm1');
-      final notifier = ThreadNotifier(store, sync, 'c1');
+      final notifier = ThreadNotifier(store, sync, 'email', 'c1');
       sync.bodiesError = Exception('offline');
 
       await notifier.load();
@@ -321,7 +321,7 @@ void main() {
 
     test('a later failure does not blank an already-loaded thread', () async {
       await seedMessage('c1', 'm1');
-      final notifier = ThreadNotifier(store, sync, 'c1');
+      final notifier = ThreadNotifier(store, sync, 'email', 'c1');
       await notifier.load();
 
       sync.bodiesError = Exception('offline');
@@ -332,7 +332,7 @@ void main() {
 
     test('fetchBodies false skips the network', () async {
       await seedMessage('c1', 'm1');
-      final notifier = ThreadNotifier(store, sync, 'c1');
+      final notifier = ThreadNotifier(store, sync, 'email', 'c1');
 
       await notifier.load(fetchBodies: false);
 
@@ -340,9 +340,32 @@ void main() {
       expect((notifier.state as ThreadLoaded).messages, hasLength(1));
     });
 
+    test('a chat thread asks for no bodies at all', () async {
+      // [MailSync.ensureBodies] resolves what to fetch by loading the thread
+      // for source `email`. A chat body arrives whole with the message, so the
+      // call has nothing to do — and under a key shared with a mail thread it
+      // would fetch THAT thread's bodies and hand this transcript its errors.
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'received_at': '2026-08-28T10:00:00Z',
+        'body_text': 'body of m1',
+      });
+      final notifier = ThreadNotifier(store, sync, 'teams', 'c1');
+
+      await notifier.load();
+
+      expect(sync.bodiesFetched, isEmpty);
+      final state = notifier.state as ThreadLoaded;
+      expect(state.messages.single.id, 'm1');
+      expect(state.loadError, isNull);
+    });
+
     test('a stale thread load writes nothing', () async {
       await seedMessage('c1', 'm1');
-      final notifier = ThreadNotifier(store, sync, 'c1');
+      final notifier = ThreadNotifier(store, sync, 'email', 'c1');
       sync.manualBodies = true;
 
       final slow = notifier.load();
@@ -375,8 +398,9 @@ void main() {
       final state = container.read(conversationsProvider);
       expect((state as ConversationsLoaded).conversations.single.id, 'c1');
 
-      await container.read(threadProvider('c1').notifier).load();
-      expect(container.read(threadProvider('c1')), isA<ThreadLoaded>());
+      const target = (source: 'email', conversationKey: 'c1');
+      await container.read(threadProvider(target).notifier).load();
+      expect(container.read(threadProvider(target)), isA<ThreadLoaded>());
       expect(sync.bodiesFetched, ['c1']);
     });
 

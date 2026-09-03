@@ -9,6 +9,7 @@ import '../services/ai_worker.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/backend_types.dart';
+import '../services/notification_coordinator.dart';
 import '../services/read_ack_queue.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
@@ -104,7 +105,6 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   final TriageQueue? _triage;
 
   /// The AI queue, kicked after triage rather than beside it — see [load].
-  /// Nothing on screen listens to its progress yet.
   final AiWorker? _aiWorker;
 
   /// Scores and re-files the mailbox immediately before every read. Null in
@@ -118,7 +118,22 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// timer reaching those endpoints. `teams_refresh_test.dart` holds that line.
   final ReadAckQueue? _readAcks;
 
+  /// The settle machine, or null in tests that build this notifier directly.
+  ///
+  /// It OUTLIVES this notifier — it is held by a provider that a backend
+  /// switch does not rebuild — so nothing here owns it or disposes it. This
+  /// class only tells it two things: that a sync completed, and that a drain
+  /// finished writing.
+  final NotificationCoordinator? _notify;
+
   StreamSubscription<TriageProgress>? _triageProgress;
+
+  /// The AI queue's progress, on the same debounce as triage's. Some cycles
+  /// have no triage in them at all — a CTA landing from extract, a thread
+  /// joining a storyline — and before this the list only found out about them
+  /// on the next sync.
+  StreamSubscription<WorkProgress>? _aiProgress;
+
   Timer? _triageReload;
 
   /// Incremented per [load]; a load whose number is stale writes nothing.
@@ -132,13 +147,19 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     AiWorker? aiWorker,
     AttentionService? attention,
     ReadAckQueue? readAcks,
+    NotificationCoordinator? notify,
     Future<String?>? userAddress,
   })  : _teamsSync = teamsSync,
         _triage = triage,
         _aiWorker = aiWorker,
         _attention = attention,
         _readAcks = readAcks,
+        _notify = notify,
         super(const ConversationsInitial()) {
+    // Subscribed before the triage early-return below, because a notifier can
+    // be wired with an AI queue and no triage queue at all.
+    _aiProgress = aiWorker?.progress.listen((_) => _scheduleReload());
+
     final queue = triage;
     if (queue == null) return;
     if (userAddress != null) {
@@ -168,6 +189,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   void dispose() {
     _triageReload?.cancel();
     _triageProgress?.cancel();
+    _aiProgress?.cancel();
     super.dispose();
   }
 
@@ -186,6 +208,10 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     if (syncFirst) {
       try {
         await _sync.syncNow();
+        // Arms notifications at the first sync that came back, and never
+        // before: everything already stored when this fires is backlog, and
+        // the backlog must not be announced.
+        _notify?.noteSyncCompleted();
         // Started, never awaited: triage takes about seventeen seconds a
         // message, and the mail that just synced must render now. Results
         // arrive later through the progress stream.
@@ -199,7 +225,10 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         final pump = _triage?.pump();
         if (pump != null) {
           unawaited(
-            pump.then<void>((_) => _aiWorker?.pump()).catchError(
+            pump.then<void>((_) async {
+              await _aiWorker?.pump();
+              await _afterPump();
+            }).catchError(
               // Both pumps handle their own failures; anything reaching here
               // is a bug worth a trace, not worth crashing the zone over.
               (Object e) => debugPrint('queue pump chain failed: $e'),
@@ -207,7 +236,13 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
           );
         } else {
           final ai = _aiWorker?.pump();
-          if (ai != null) unawaited(ai);
+          if (ai != null) {
+            unawaited(
+              ai.then<void>((_) => _afterPump()).catchError(
+                (Object e) => debugPrint('queue pump chain failed: $e'),
+              ),
+            );
+          }
         }
       } on AuthException catch (e) {
         if (seq != _fetchSeq) return;
@@ -282,6 +317,9 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     String? error;
     try {
       await teams.syncNow();
+      // A Teams-only session arms here or not at all — its mail sync may never
+      // run, and an unarmed coordinator admits nothing.
+      _notify?.noteSyncCompleted();
       // The same chain [load] starts after a mail sync, for the same reason:
       // the chats this pull just re-pended should be triaged and drafted now,
       // not whenever the poll timer next happens to come round. Chained rather
@@ -290,13 +328,22 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       final pump = _triage?.pump();
       if (pump != null) {
         unawaited(
-          pump.then<void>((_) => _aiWorker?.pump()).catchError(
+          pump.then<void>((_) async {
+            await _aiWorker?.pump();
+            await _afterPump();
+          }).catchError(
             (Object e) => debugPrint('queue pump chain failed: $e'),
           ),
         );
       } else {
         final ai = _aiWorker?.pump();
-        if (ai != null) unawaited(ai);
+        if (ai != null) {
+          unawaited(
+            ai.then<void>((_) => _afterPump()).catchError(
+              (Object e) => debugPrint('queue pump chain failed: $e'),
+            ),
+          );
+        }
       }
     } on AuthException {
       // Deliberately the same banner as any other failure: the inbox load is
@@ -317,7 +364,41 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
   }
 
-  /// Queues a suggested reply for the threads that have earned one.
+  /// The settle pass: what the inbox does once both queues have drained.
+  ///
+  /// [load] scores and enqueues BEFORE the pumps it starts have finished,
+  /// which is right for the frame the user is looking at and wrong for the
+  /// mail the model was still reading. A thread only crosses the draft
+  /// threshold once triage has said something about it, so scoring the
+  /// mailbox a second time here is what lets that thread be drafted in the
+  /// same cycle instead of waiting for the next sync — which on a quiet
+  /// afternoon is a minute away, and on a Teams-only session never comes.
+  ///
+  /// The load-time [AttentionService.recomputeAll] STAYS. It is the pass that
+  /// makes a sender correction show up in the frame the user made it in;
+  /// this one is about what the model learned since.
+  ///
+  /// The inner pump is deliberately NOT chained back into another settle pass.
+  /// One extra drain empties the drafts this pass just queued, and a settle
+  /// that re-settled itself would be a loop with a model call in it.
+  Future<void> _afterPump() async {
+    await _attention?.recomputeAll(sources: inboxSources);
+    final queued = await _enqueueDrafts();
+    if (queued > 0) {
+      await _aiWorker?.pump();
+    }
+    // Above the `mounted` check on purpose: the drain's verdicts are written
+    // by now, and the coordinator outlives this notifier — a settle owed to
+    // the user must not be skipped because the list they were looking at went
+    // away.
+    await _notify?.noteDrainSettled();
+    if (!mounted) return;
+    await load(syncFirst: false);
+  }
+
+  /// Queues a suggested reply for the threads that have earned one. Returns
+  /// how many threads it queued one for — what the settle pass reads to decide
+  /// whether there is anything new for the AI queue to drain.
   ///
   /// Immediately after the scoring pass, because it reads the scores that pass
   /// just wrote. On EVERY load rather than only after a sync, and that is
@@ -333,16 +414,20 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// runs, and letting a failed queue write fall into the "could not read the
   /// local inbox" path would cost the user the mail they can see over a
   /// suggestion they have not asked for yet.
-  Future<void> _enqueueDrafts() async {
+  Future<int> _enqueueDrafts() async {
     try {
       final stored = await _store.getPref(attentionThresholdKey);
       final threshold = (stored == null ? null : double.tryParse(stored)) ??
           AttentionTuning.defaultThreshold;
+      var queued = 0;
       for (final row in await _store.needsDraftKeys(threshold: threshold)) {
         await _store.requeueWork('draft', row.source, row.conversationKey);
+        queued++;
       }
+      return queued;
     } catch (e) {
       debugPrint('draft enqueue failed: $e');
+      return 0;
     }
   }
 
@@ -351,22 +436,18 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// Optimistic because the write is local and effectively instantaneous —
   /// waiting on it would only add a frame of lag to a button whose whole job
   /// is to feel immediate. A failure puts the row back exactly as it was.
-  Future<void> markDone(String conversationKey) async {
+  ///
+  /// [source] is passed rather than resolved from the list, for [markRead]'s
+  /// reason and one more: a conversation key is unique only within a connector,
+  /// so scanning for it could close whichever colliding thread the scan landed
+  /// on last.
+  Future<void> markDone(String source, String conversationKey) async {
     final current = state;
     if (current is! ConversationsLoaded) return;
 
-    // The row's own source, not a literal: with a second connector in the list
-    // a hard-coded `'email'` would write the done flag against a thread that
-    // does not exist and leave the chat open behind an optimistic tick.
-    String? source;
-    for (final c in current.conversations) {
-      if (c.id == conversationKey) source = c.source;
-    }
-    if (source == null) return;
-
     state = current.withRows([
       for (final c in current.conversations)
-        if (c.id == conversationKey)
+        if (c.id == conversationKey && c.source == source)
           c.copyWith(state: ConversationState.done)
         else
           c,
@@ -594,6 +675,7 @@ final conversationsProvider =
     aiWorker: ref.watch(aiWorkerProvider),
     attention: ref.watch(attentionServiceProvider),
     readAcks: ref.watch(readAckQueueProvider),
+    notify: ref.watch(notificationCoordinatorProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
     userAddress: ref.watch(authSessionProvider).storedAccount.then(
@@ -630,14 +712,25 @@ class ThreadError extends ThreadState {
   const ThreadError(this.message);
 }
 
+/// Which thread a transcript belongs to.
+///
+/// The source rides along with the key because a conversation key is only
+/// unique WITHIN a source: the mail and chat connectors mint keys with no
+/// knowledge of each other, so a bare key can name two different threads.
+typedef ThreadTarget = ({String source, String conversationKey});
+
 class ThreadNotifier extends StateNotifier<ThreadState> {
   final MessageStore _store;
   final MailSync _sync;
   final String conversationKey;
 
+  /// The connector this thread came from — the transcript reads only its own
+  /// source's messages, so a key shared across connectors stays two threads.
+  final String source;
+
   int _fetchSeq = 0;
 
-  ThreadNotifier(this._store, this._sync, this.conversationKey)
+  ThreadNotifier(this._store, this._sync, this.source, this.conversationKey)
       : super(const ThreadInitial());
 
   /// Bodies first, then the read. [fetchBodies] false skips the network
@@ -647,12 +740,14 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
     if (state is! ThreadLoaded) state = const ThreadLoading();
 
     String? loadError;
-    if (fetchBodies) {
+    // Mail only, by source rather than by hoping the key misses: [MailSync]
+    // resolves the messages to fetch by loading the thread for source `email`,
+    // so a chat whose key is shared with a mail thread would fetch that other
+    // thread's bodies — and a failure there would stamp this transcript with a
+    // staleness it has no part in. A chat message's body arrives whole with
+    // the message, so there is nothing here to fill in either way.
+    if (fetchBodies && source == 'email') {
       try {
-        // Inert for a Teams thread rather than special-cased: [MailSync]
-        // resolves the messages to fetch by loading the thread for source
-        // `email`, and a chat id matches none of them. A chat message's body
-        // arrives whole with the message, so there is nothing to fill in.
         await _sync.ensureBodies(conversationKey);
       } catch (_) {
         if (seq != _fetchSeq) return;
@@ -667,8 +762,7 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
 
     final List<Message> messages;
     try {
-      messages =
-          await _store.loadThread(conversationKey, sources: inboxSources);
+      messages = await _store.loadThread(conversationKey, sources: [source]);
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;
@@ -686,10 +780,11 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
 /// Deliberately NOT autoDispose: clicking back to a thread should show its
 /// transcript, not a spinner over a fetch that already ran this session.
 final threadProvider =
-    StateNotifierProvider.family<ThreadNotifier, ThreadState, String>(
-  (ref, conversationKey) => ThreadNotifier(
+    StateNotifierProvider.family<ThreadNotifier, ThreadState, ThreadTarget>(
+  (ref, target) => ThreadNotifier(
     ref.watch(messageStoreProvider),
     ref.watch(syncServiceProvider),
-    conversationKey,
+    target.source,
+    target.conversationKey,
   ),
 );

@@ -57,6 +57,11 @@ dependencies:
   # minor versions. bond_mcp_client.dart is the only file allowed to import
   # it, so a bump is a one-file review.
   mcp_dart: 2.4.1
+  # Caret rather than the exact pins drift and mcp_dart carry: this package is
+  # a mature Flutter Favorite whose API has been stable across patch releases,
+  # and only local_desktop_notifier.dart is allowed to import it, so a bump is
+  # a one-file review.
+  flutter_local_notifications: ^22.3.0
 
 dev_dependencies:
   flutter_test:

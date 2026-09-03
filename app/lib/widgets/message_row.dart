@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
 import '../theme/tokens.dart';
+import 'chips.dart';
 import 'time_format.dart';
 
 /// How long a gap can be before a message stops reading as part of the same
@@ -88,10 +89,21 @@ class MessageRow extends StatefulWidget {
   /// False renders a continuation: no avatar, no name, no timestamp.
   final bool showHeader;
 
+  /// Whether this message's own ask is still unanswered. The row does not work
+  /// that out — the rule needs the whole thread, so the host passes the answer
+  /// (`models/open_asks.dart`) in.
+  final bool openAsk;
+
+  /// What tapping the ask does. Null leaves it a statement — a row whose host
+  /// has nowhere to send the tap must not look like it takes one.
+  final VoidCallback? onAskTap;
+
   const MessageRow({
     super.key,
     required this.message,
     this.showHeader = true,
+    this.openAsk = false,
+    this.onAskTap,
   });
 
   @override
@@ -230,6 +242,13 @@ class _MessageRowState extends State<MessageRow> {
                   style: BondType.caption.copyWith(color: BondColors.inkMuted),
                 ),
               ],
+              // The ask this message is still waiting on. The thread banner
+              // carries only the newest one, so an older message keeps its own
+              // here until a reply answers it.
+              if (widget.openAsk) ...[
+                const SizedBox(height: BondSpacing.s4),
+                _askLine(message),
+              ],
             ],
           ),
         ),
@@ -241,6 +260,50 @@ class _MessageRowState extends State<MessageRow> {
         top: widget.showHeader ? BondSpacing.s16 : BondSpacing.s4,
       ),
       child: Opacity(opacity: pending ? 0.6 : 1, child: row),
+    );
+  }
+
+  /// The open ask, in the same copper ink an inbox row tints its CTA with.
+  /// Triage names an action item where it can; where it only judged that a
+  /// reply is owed, the generic line still has to say so.
+  ///
+  /// A call to action the reader can act on: where the host gave it somewhere
+  /// to go, the line is the way into the reply.
+  Widget _askLine(Message message) {
+    final ask = message.actionItems.isNotEmpty
+        ? message.actionItems.first
+        : 'Reply expected';
+    final deadline = message.deadline;
+
+    final onTap = widget.onAskTap;
+    final line = Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: BondSpacing.s8,
+      runSpacing: BondSpacing.s4,
+      children: [
+        Text(
+          ask,
+          style: BondType.caption.copyWith(
+            color: BondColors.onAttentionTint,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        if (deadline != null && deadline.isNotEmpty)
+          BondChip.semantic(deadline, BondTone.attention),
+      ],
+    );
+
+    if (onTap == null) return line;
+    // Its own transparent Material: ink paints on the nearest Material
+    // ancestor, which sits behind the pane's opaque surface — the same trap
+    // `thread_detail_panel._ctaBanner` documents.
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BondRadii.smAll,
+        child: line,
+      ),
     );
   }
 

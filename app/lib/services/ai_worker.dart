@@ -134,6 +134,17 @@ class AiWorker {
   /// a kind it had already moved past would otherwise wait for the next sync.
   bool _repump = false;
 
+  /// The items this worker currently holds claims on, as `(kind, source,
+  /// entityId)` — the work table's primary key. See `TriageQueue` for why a
+  /// queue has to know what it is holding: a worker rebuilt mid-drain, which
+  /// is what a backend switch does, used to leave every claimed row
+  /// `processing` until the next launch.
+  final Set<(String, String, String)> _claimed = {};
+
+  /// The items actually at a model server, so [dispose] can wait for their
+  /// results before deciding what is still claimed.
+  final Set<Future<void>> _inFlight = {};
+
   bool _stopped = false;
 
   AiWorker(
@@ -156,9 +167,25 @@ class AiWorker {
   /// item to a second drain.
   Future<void> resetInterrupted() => _store.resetInterruptedWork();
 
-  void dispose() {
+  /// Stops the drain and gives back every claim it is still holding — the
+  /// work queue's `TriageQueue.dispose`, in the same order and for the same
+  /// reasons.
+  Future<void> dispose() async {
     _stopped = true;
     _progress.close();
+    // A LOOP, not one wait — see `TriageQueue.dispose`: a claim already at
+    // the store when [_stopped] flipped joins [_inFlight] after the first
+    // snapshot, and releasing under a still-running item would hand it to a
+    // second worker.
+    while (_inFlight.isNotEmpty) {
+      await Future.wait(_inFlight.toList()).catchError((_) => const <void>[]);
+    }
+    for (final (kind, source, id) in _claimed.toList()) {
+      // Guarded on `processing` in the statement itself, so a claim released
+      // here cannot reopen an item that finished while this was deciding.
+      await _store.releaseWorkClaim(kind, source, id);
+    }
+    _claimed.clear();
   }
 
   /// Drains every handler's queue in order until nothing is pending, the
@@ -201,11 +228,10 @@ class AiWorker {
         // suspends on the claim now — can never see the same row: whichever
         // claim lands second finds nothing pending to match and comes back
         // null.
-        final inFlight = <Future<void>>{};
         var parkedKind = false;
         var parkedDrain = false;
         while (!_stopped && !parkedKind && !parkedDrain) {
-          while (inFlight.length < handler.concurrency &&
+          while (_inFlight.length < handler.concurrency &&
               !_stopped &&
               !parkedKind &&
               !parkedDrain) {
@@ -214,6 +240,7 @@ class AiWorker {
               sources: _sources,
             );
             if (item == null) break;
+            _claimed.add(_claimKey(handler.kind, item));
             late final Future<void> future;
             // [ActivityLog.inSpan] gives this item its own tally, so
             // concurrent items' notes and model calls land on their own
@@ -221,16 +248,16 @@ class AiWorker {
             future = _log.inSpan(() => _runOne(handler, item)).then((outcome) {
               parkedKind |= outcome == _RunOutcome.parkKind;
               parkedDrain |= outcome == _RunOutcome.parkDrain;
-            }).whenComplete(() => inFlight.remove(future));
-            inFlight.add(future);
+            }).whenComplete(() => _inFlight.remove(future));
+            _inFlight.add(future);
           }
-          if (inFlight.isEmpty) break;
+          if (_inFlight.isEmpty) break;
           // Over a COPY: `whenComplete` mutates the set as each item lands.
-          await Future.any(inFlight.toList());
+          await Future.any(_inFlight.toList());
         }
         // A park stops new launches, never the work already at the server:
         // those answers are paid for and their results are kept.
-        await Future.wait(inFlight.toList());
+        await Future.wait(_inFlight.toList());
 
         // A dead session fails every kind identically, so nothing behind this
         // one is worth trying — and neither is a repump, which would park on
@@ -241,14 +268,44 @@ class AiWorker {
     } while (_repump && !_stopped);
   }
 
-  /// One item, and what its outcome means for the rest of the drain.
+  static (String, String, String) _claimKey(
+    String kind,
+    Map<String, Object?> item,
+  ) =>
+      (
+        kind,
+        item['source'] as String? ?? 'email',
+        item['entity_id'] as String? ?? '',
+      );
+
+  /// One item, with a heartbeat under it.
+  ///
+  /// The heartbeat is what makes [MessageStore.reclaimStaleWork] safe to run
+  /// on every sync — and it matters more here than in triage, because a
+  /// storyline sweep is one item that legitimately takes minutes. A claim
+  /// that is still being worked says so once a minute, so the watchdog's
+  /// five-minute window can only close on a worker that is gone.
   Future<_RunOutcome> _runOne(
     WorkHandler handler,
     Map<String, Object?> item,
-  ) async {
+  ) {
     final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
+    final beat = Timer.periodic(pipelineHeartbeatInterval, (_) {
+      // A failed touch costs nothing: the window is five beats wide.
+      _store.touchWork(handler.kind, source, id).catchError((_) {});
+    });
+    return _runClaimed(handler, item, source, id).whenComplete(beat.cancel);
+  }
 
+  /// Everything one claimed item does, and what its outcome means for the rest
+  /// of the drain.
+  Future<_RunOutcome> _runClaimed(
+    WorkHandler handler,
+    Map<String, Object?> item,
+    String source,
+    String id,
+  ) async {
     // The item arrives already claimed — the statement that picked it is the
     // statement that wrote its `processing`. A crash mid-model-call therefore
     // leaves it claimed, which is exactly what [resetInterrupted] looks for at
@@ -257,7 +314,7 @@ class AiWorker {
 
     try {
       await handler.run(item);
-      await _store.writeWork(handler.kind, source, id, status: 'done');
+      await _writeWork(handler.kind, source, id, status: 'done');
       // The work row is `done` either way; the activity row is where a
       // handler that early-returned gets to say so. [ActivityLog.note] and
       // [ActivityLog.noteStatus] are how it does that without throwing, and
@@ -315,6 +372,31 @@ class AiWorker {
     }
   }
 
+  /// Every write that ends this worker's interest in an item, and the claim
+  /// release that goes with it.
+  ///
+  /// One wrapper rather than a `_claimed.remove` beside each write site: a
+  /// path that wrote a result and forgot to release would leave [dispose]
+  /// holding a claim on an item that is already finished.
+  Future<void> _writeWork(
+    String kind,
+    String source,
+    String entityId, {
+    required String status,
+    String? error,
+    int? attempts,
+  }) async {
+    await _store.writeWork(
+      kind,
+      source,
+      entityId,
+      status: status,
+      error: error,
+      attempts: attempts,
+    );
+    _claimed.remove((kind, source, entityId));
+  }
+
   /// Back to `pending` without spending an attempt. The session ending or the
   /// server being down says nothing about this item; [outcome] says how far
   /// the park reaches and [reason] tells the activity row why.
@@ -326,7 +408,7 @@ class AiWorker {
     String reason,
     int durationMs,
   ) async {
-    await _store.writeWork(kind, source, id, status: 'pending');
+    await _writeWork(kind, source, id, status: 'pending');
     await _log.record(
       kind,
       status: 'parked',
@@ -353,7 +435,7 @@ class AiWorker {
     // the model's answer. It is identical on every retry, so retrying it
     // burns model time to reproduce a bug.
     final fatal = statusCode == 400 || attempts >= _maxAttempts;
-    await _store.writeWork(
+    await _writeWork(
       kind,
       source,
       id,

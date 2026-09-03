@@ -35,13 +35,28 @@ class ConversationListPane extends StatelessWidget {
   final InboxFilter filter;
   final List<Conversation> conversations;
   final String? selectedId;
-  final void Function(String) onSelect;
+
+  /// The open thread's connector. A conversation key is unique only within one
+  /// source, so a bare [selectedId] can match a row from the other connector
+  /// and highlight it too. Null keeps the id-only comparison, which is what a
+  /// host with a single connector wants.
+  final String? selectedSource;
+
+  /// The row's source travels with its id: the host cannot resolve one from
+  /// the other, because both connectors mint keys with no knowledge of each
+  /// other and a shared key would otherwise open whichever thread the host
+  /// happened to scan first.
+  final void Function(String source, String conversationId) onSelect;
 
   /// Sections the caller has already bucketed, rendered instead of anything
   /// this pane would compute. The rail's sections do not line up with the
   /// filter enum, and forcing them to would mean inventing filter values
   /// nothing else uses. Null leaves [filter] in charge.
   final List<(String, List<Conversation>)>? sectionsOverride;
+
+  /// When this session started, handed down to every row. Null shows no
+  /// processing hints at all.
+  final DateTime? processingSince;
 
   const ConversationListPane({
     super.key,
@@ -50,7 +65,9 @@ class ConversationListPane extends StatelessWidget {
     required this.conversations,
     required this.selectedId,
     required this.onSelect,
+    this.selectedSource,
     this.sectionsOverride,
+    this.processingSince,
   });
 
   List<Conversation> _inState(ConversationState state) => [
@@ -140,8 +157,10 @@ class ConversationListPane extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: BondSpacing.s8),
                 child: ConversationRow(
                   conversation: c,
-                  selected: c.id == selectedId,
-                  onTap: () => onSelect(c.id),
+                  selected: c.id == selectedId &&
+                      (selectedSource == null || selectedSource == c.source),
+                  onTap: () => onSelect(c.source, c.id),
+                  processingSince: processingSince,
                 ),
               ),
           ],

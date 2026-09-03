@@ -174,6 +174,51 @@ void main() {
     expect(await store.workCounts('extract'), {'pending': 1});
   });
 
+  test('the settle pass drain never overlaps the one before it', () async {
+    // The settle pass adds a second AI drain to the cycle, and the whole
+    // reason the two queues are chained rather than run together is that they
+    // share one single-threaded model server. A third drain that could start
+    // while the second was still running would throw that away.
+    await seedPendingMessage('m1');
+    await store.enqueueWork('extract', 'email', 'm1');
+    await store.upsertConversation({
+      'conversation_key': 'conv-1',
+      'subject': 'Confirm',
+      'state': 'needs_reply',
+      'last_message_at': '2026-08-28T10:00:00Z',
+    });
+    await store.writeAttentionScore('email', 'conv-1', 0.9);
+
+    final log = <String>[];
+    final triage = TriageQueue(store, LoggingLlm(log));
+    final worker = AiWorker(
+      store,
+      handlers: [
+        LoggingHandler('extract', log, 'extract'),
+        LoggingHandler('draft', log, 'draft'),
+      ],
+    );
+    addTearDown(triage.dispose);
+    addTearDown(worker.dispose);
+
+    final notifier =
+        ConversationsNotifier(store, sync, triage: triage, aiWorker: worker);
+    addTearDown(notifier.dispose);
+
+    await notifier.load();
+    await settle();
+
+    // Every start is answered by its own end before anything else begins.
+    expect(log, isNotEmpty);
+    expect(log.length.isEven, isTrue, reason: 'every start has an end');
+    for (var i = 0; i < log.length; i += 2) {
+      expect(log[i], endsWith(':start'));
+      expect(log[i + 1], log[i].replaceAll(':start', ':end'));
+    }
+    // And the draft the load queued was actually worked, in this cycle.
+    expect(log, contains('draft:start'));
+  });
+
   test('a load that skips the sync kicks neither queue', () async {
     await store.enqueueWork('extract', 'email', 'm1');
     final log = <String>[];

@@ -1,0 +1,18 @@
+// Signing defaults: ad-hoc, so a clean checkout builds with no setup.
+// To sign with a real Apple Development certificate, create
+// SigningLocal.xcconfig next to this file (gitignored) overriding these:
+//
+//   BOND_CODE_SIGN_IDENTITY = Apple Development
+//   BOND_CODE_SIGN_STYLE = Automatic
+//   BOND_DEVELOPMENT_TEAM = <your team id from `security find-identity`>
+//   BOND_ENTITLEMENTS_SUFFIX = Signed
+//
+// BOND_ENTITLEMENTS_SUFFIX slots between the entitlements basename and the
+// extension, so the empty default selects Runner/DebugProfile.entitlements
+// and "Signed" selects Runner/DebugProfileSigned.entitlements — the variant
+// carrying keychain-access-groups, which only builds under real signing.
+BOND_CODE_SIGN_IDENTITY = -
+BOND_CODE_SIGN_STYLE = Manual
+BOND_DEVELOPMENT_TEAM =
+BOND_ENTITLEMENTS_SUFFIX =
+#include? "SigningLocal.xcconfig"

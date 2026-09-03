@@ -53,10 +53,13 @@ class StorylineTuning {
   /// proposals is not a feature; it is a chore, and it gets dismissed as one.
   static const int maxPendingSuggestions = 3;
 
-  /// Below this there is not enough unassigned conversation — mail or chat —
-  /// for a cluster to mean anything, and the sweep would be proposing groups
-  /// out of noise.
-  static const int sweepMinUnassigned = 4;
+  /// All this floor asks is that there be something to pair: two unassigned
+  /// threads — mail or chat — already make a cluster, per [minClusterSize],
+  /// and below that the pass has nothing it could propose. Whether the pair
+  /// is worth proposing is decided elsewhere, by [clusterLinkThreshold], the
+  /// per-member confirm, and [maxPendingSuggestions]. Waiting for a busier
+  /// mailbox only starves a light one of its first storyline.
+  static const int sweepMinUnassigned = 2;
 
   /// How many threads one recruit pass may put in front of the model. A
   /// charter save is one user action, and eight confirmations is already the
@@ -64,6 +67,39 @@ class StorylineTuning {
   /// by cosine, a candidate was not close enough for a missed-thread hunt to
   /// be the pass that finds it.
   static const int recruitMaxCandidates = 8;
+}
+
+/// What one pass of [StorylineService.assignConversation] concluded.
+///
+/// The pass files nothing most of the time, and until this existed there was
+/// no way to tell the several reasons for that apart — a thread the model
+/// turned down, a thread the user had blocked, and a thread nothing came
+/// close to all looked identical from the outside, including in the activity
+/// log.
+enum AssignOutcome {
+  /// Filed into a storyline.
+  assigned,
+
+  /// Nothing cleared the cosine gate, or there was nothing to compare against.
+  /// The common case, and an unremarkable one.
+  noCandidate,
+
+  /// The model looked and said no — `belongs: false`, or a yes it was not
+  /// confident about.
+  rejected,
+
+  /// The only storylines it could have joined are ones the user took it out
+  /// of. Their "no" still holds.
+  blocked,
+
+  /// Never returned: a thread with no comparable vector is not a thread that
+  /// failed, it is a thread whose embedding has not been written yet. The pass
+  /// first tries to write it — the card needs no model call, only the
+  /// conversation row and the facts already extracted — and only when that
+  /// attempt finds no server does it throw [LlmUnavailableException] to park
+  /// the queue rather than answering. Named here because it is the fifth thing
+  /// the pass can conclude and the park is where it went.
+  noVector,
 }
 
 /// Groups conversations into storylines, and applies the user's corrections.
@@ -115,6 +151,11 @@ class StorylineService {
   /// the row, this only fills it in.
   final ActivityLog _log;
 
+  /// How a thread whose embedding is missing gets one. Optional: given none,
+  /// the pass parks on a missing vector exactly as it always did, which is what
+  /// every caller that never embeds — the user actions, most tests — wants.
+  final EmbeddingsClient? _embeddings;
+
   /// Cryptographic randomness for ids. Not for secrecy — for the guarantee
   /// that two ids generated in the same millisecond differ, which a
   /// time-seeded generator does not give.
@@ -125,9 +166,11 @@ class StorylineService {
     LlmClient client, {
     LlmClient? confirmClient,
     ActivityLog? activityLog,
+    EmbeddingsClient? embeddings,
   })  : _client = client,
         _confirmClient = confirmClient ?? client,
-        _log = activityLog ?? ActivityLog.disabled();
+        _log = activityLog ?? ActivityLog.disabled(),
+        _embeddings = embeddings;
 
   // ── automatic: one thread ──────────────────────────────────────────────
 
@@ -139,15 +182,32 @@ class StorylineService {
   /// alone reaches the model, and the model's answer is the only thing that
   /// creates a membership. At most one confirmation call per thread, whatever
   /// the mailbox looks like.
-  Future<void> assignConversation(String source, String conversationKey) async {
-    final vector = await _vectorFor(source, conversationKey);
-    // No comparable vector yet. Silent rather than an error: the extraction
-    // handler re-queues this item the moment it writes an embedding, so the
-    // thread is not lost, it is simply not ready.
-    if (vector == null) return;
-
+  ///
+  /// A thread with no comparable vector is embedded here and then carries on —
+  /// and PARKS the queue only when that cannot be done. Nothing about such a
+  /// thread failed, its embedding simply has not been written yet, and the
+  /// worker's park is the only outcome that puts the row back as `pending`
+  /// with its attempt unspent. Returning quietly wrote the row `done` and lost
+  /// the thread — an embedding server that was down for an afternoon meant a
+  /// day of mail that was never considered for a storyline. Only the
+  /// `storyline` kind parks; extraction, the sweep and drafting are on other
+  /// servers and carry on.
+  Future<AssignOutcome> assignConversation(
+    String source,
+    String conversationKey,
+  ) async {
     final row = await _store.getConversationRow(source, conversationKey);
-    if (row == null) return;
+    // Read BEFORE the vector: a conversation that no longer exists has no
+    // embedding coming, so parking on it would hold the queue open forever
+    // for a thread nothing can ever file.
+    if (row == null) return AssignOutcome.noCandidate;
+
+    // Written here when the store has none — see [_reembed]. Null comes back
+    // only from an embedding the server refused to give; the other two endings
+    // throw and park.
+    final vector = await _vectorFor(source, conversationKey) ??
+        await _reembed(source, conversationKey, row);
+    if (vector == null) return AssignOutcome.noCandidate;
 
     final conversation = Conversation.fromRow(row);
     final participants = _displaysOf(conversation);
@@ -161,9 +221,14 @@ class StorylineService {
 
     Storyline? best;
     var bestScore = 0.0;
+    // Only to tell the two empty-handed endings apart: a thread the user
+    // pulled OUT of the one storyline it fits is a different fact from a
+    // thread nothing came close to.
+    var blocked = false;
 
     for (final storyline in candidates) {
       if (await _store.isMemberBlocked(storyline.id, source, conversationKey)) {
+        blocked = true;
         continue;
       }
 
@@ -191,7 +256,9 @@ class StorylineService {
       }
     }
 
-    if (best == null) return;
+    if (best == null) {
+      return blocked ? AssignOutcome.blocked : AssignOutcome.noCandidate;
+    }
 
     final cardData = await _store.newestInboundCardData(source, conversationKey);
 
@@ -212,7 +279,9 @@ class StorylineService {
     // A `low` answer is a no. Nothing is blocked either way — only a person
     // removing a thread creates a block, because only a person's "no" should
     // still hold the next time the model changes its mind.
-    if (!result.belongs || result.confidence == 'low') return;
+    if (!result.belongs || result.confidence == 'low') {
+      return AssignOutcome.rejected;
+    }
 
     await _store.addStorylineMember(
       best.id,
@@ -237,6 +306,7 @@ class StorylineService {
     }
 
     await _refreshName(best.id);
+    return AssignOutcome.assigned;
   }
 
   /// Re-names a storyline when it has nothing to say for itself.
@@ -505,8 +575,8 @@ class StorylineService {
   /// cluster holding a member it links to, and otherwise opens one of its own.
   /// That makes the result a pure function of the input: same rows and same
   /// vectors in, same clusters out, which is what
-  /// [MessageStore.dismissedMemberHashExists] depends on to recognise a
-  /// suggestion the user already threw away.
+  /// [MessageStore.dismissedHashExists] depends on to recognise a suggestion
+  /// the user already threw away.
   ///
   /// Full agglomerative clustering — repeatedly merging the closest pair —
   /// would find slightly better groups and is O(n³) on a list that is
@@ -564,11 +634,10 @@ class StorylineService {
   ) async {
     const nothing = (proposed: false, confirmed: 0, rejected: 0);
 
-    final keys = [
+    final clusterHash = _hashOfKeys([
       for (final row in rows) row['conversation_key'] as String? ?? '',
-    ]..sort();
-    final memberHash = cardHash(keys.join('\n'));
-    if (await _store.dismissedMemberHashExists(memberHash)) return nothing;
+    ]);
+    if (await _store.dismissedHashExists(clusterHash)) return nothing;
 
     final cards = <String>[];
     for (final row in rows) {
@@ -655,8 +724,13 @@ class StorylineService {
       // a row carrying its hash this same group would re-spend a naming call
       // and one confirmation per member on every sync, forever, to reach the
       // same answer. Dismissed is exactly the right status for that: nothing
-      // renders it, and `dismissedMemberHashExists` above stops the rebuilt
-      // cluster before any model is dialled.
+      // renders it, and `dismissedHashExists` above stops the rebuilt cluster
+      // before any model is dialled.
+      //
+      // `member_hash` stays null on purpose: no member rows are written below
+      // this branch, so there is no stored set for it to describe. The cluster
+      // is the only identity this row has, and the only one anything can
+      // rebuild.
       await _store.insertStoryline(
         id: id,
         title: result.title,
@@ -664,7 +738,7 @@ class StorylineService {
         charter: result.charter.isEmpty ? null : result.charter,
         status: 'dismissed',
         createdBy: 'auto',
-        memberHash: memberHash,
+        clusterHash: clusterHash,
       );
       return (proposed: false, confirmed: survivors.length, rejected: rejected);
     }
@@ -676,15 +750,20 @@ class StorylineService {
       charter: result.charter.isEmpty ? null : result.charter,
       status: 'suggested',
       createdBy: 'auto',
-      // The CLUSTER's hash, not the stored members' — the two are no longer
-      // the same thing once confirmation drops a thread. It has to be the
-      // cluster's: dismissing this suggestion returns every member to the
+      // Two hashes, because they answer two different questions once
+      // confirmation drops a thread. `member_hash` describes who is stored
+      // here, and every later membership write keeps it true. `cluster_hash`
+      // names the group the sweep built and the user is being asked about; it
+      // is never written again. Dismissing this returns every member to the
       // sweep pool (`assignedOrBlockedKeys` counts only suggested and active
-      // storylines), so the identical cluster re-forms on the next sweep, and
-      // only a hash over the whole of it is recognised by the cheap check
-      // above — before a single model call is spent re-deriving an answer the
-      // user already refused.
-      memberHash: memberHash,
+      // storylines), so the identical cluster re-forms on the next sweep and
+      // the cheap check above recognises it — before a single model call is
+      // spent re-deriving an answer the user already refused.
+      memberHash: _hashOfKeys([
+        for (final survivor in survivors)
+          survivor.row['conversation_key'] as String? ?? '',
+      ]),
+      clusterHash: clusterHash,
     );
     for (final survivor in survivors) {
       await _store.addStorylineMember(
@@ -730,10 +809,10 @@ class StorylineService {
       _store.updateStoryline(id, status: 'active');
 
   /// Retires a storyline — a suggestion the user never wanted, or a kept one
-  /// they are done with. The member rows stay either way: they are what
-  /// `member_hash` was computed over, and deleting them would leave the app
-  /// unable to recognise the same cluster when the very next sweep rebuilds
-  /// it.
+  /// they are done with. Nothing else moves: the row keeps both hashes, which
+  /// is what [MessageStore.dismissedHashExists] reads when the very next sweep
+  /// rebuilds the same cluster, and the member rows stay as the record of what
+  /// the user was actually shown.
   Future<void> dismissSuggestion(String id) =>
       _store.updateStoryline(id, status: 'dismissed');
 
@@ -757,9 +836,20 @@ class StorylineService {
     await _store.requeueWork('storyline_recruit', _workSource, id);
   }
 
+  /// Files a thread into a storyline by hand. The member write clears any
+  /// block the user's own earlier removal left, which is what makes putting a
+  /// thread back work at all — see [MessageStore.addStorylineMember].
   Future<void> addThread(String id, String source, String key) async {
     await _store.addStorylineMember(id, source, key, addedBy: 'user');
-    await _store.updateStoryline(id, memberHash: await _memberHashOf(id));
+    final storyline = await _store.getStoryline(id);
+    await _store.updateStoryline(
+      id,
+      memberHash: await _memberHashOf(id),
+      // Filing a thread into a suggestion is accepting it — the same write
+      // [keepSuggestion] makes. Nothing is left to ask about a group the user
+      // is already putting threads into.
+      status: storyline?.status == 'suggested' ? 'active' : null,
+    );
     final row = await _store.getConversationRow(source, key);
     final lastMessageAt = row?['last_message_at'] as String?;
     if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
@@ -792,6 +882,71 @@ class StorylineService {
     if (blob is! Uint8List) return null;
     final vector = decodeEmbedding(blob);
     return vector.isEmpty ? null : vector;
+  }
+
+  /// Writes the embedding a thread is missing, so that a park on it can heal
+  /// itself once the server is back.
+  ///
+  /// Nothing else in the app will write it. Extraction embeds a thread once,
+  /// and by the time the storyline pass parks the extract row is already
+  /// `done` — `enqueueExtractBacklog` will not re-queue it and nothing
+  /// requeues the `extract` kind — so a park on a missing vector used to park
+  /// again on every drain, forever, for a thread whose extraction call had
+  /// already been spent. No re-extraction is needed to fix that: the card the
+  /// vector comes from is rebuilt out of the conversation row and the facts
+  /// already stored, exactly as [ExtractHandler] built it at extraction time.
+  ///
+  /// Null comes back only from a REJECTED answer — a server that answered
+  /// something that is not a vector will answer the same thing next time, so
+  /// parking on it would park forever. Unavailable throws instead: that park
+  /// is what brings this thread back the moment `make embed` is running, and
+  /// the retry it waits for is this same re-embed.
+  Future<List<double>?> _reembed(
+    String source,
+    String conversationKey,
+    Map<String, Object?> row,
+  ) async {
+    final embeddings = _embeddings;
+    if (embeddings == null) {
+      // `embed`, not `reason`: the worker's park writes its own
+      // `{'reason': 'model_unavailable'}` and its merge wins on a collision.
+      _log.note({'embed': 'missing'});
+      throw const LlmUnavailableException(
+        'No embedding for this thread yet — run: make embed',
+      );
+    }
+
+    final card = enrichedCardForConversationRow(
+      row,
+      await _store.newestInboundCardData(source, conversationKey),
+    );
+    final embedded = await embeddings.embedResult(card);
+    final vector = embedded.vector;
+    if (vector == null) {
+      if (embedded.outcome == EmbedOutcome.unavailable) {
+        _log.note({'embed': 'unavailable'});
+        throw const LlmUnavailableException(
+          'No embedding for this thread yet — run: make embed',
+        );
+      }
+      // Quiet, the same deliberate drop the extraction path makes on
+      // deterministic nonsense. The thread embeds again with its next real
+      // message.
+      _log.note({'embed': 'rejected'});
+      return null;
+    }
+
+    // The identical write [ExtractHandler._refreshCard] makes, hash included:
+    // a vector stored without one would be re-embedded by the next extraction
+    // whether or not the thread had changed.
+    await _store.upsertConversationAi(
+      source,
+      conversationKey,
+      embedding: encodeEmbedding(vector),
+      embeddedHash: cardHash(card),
+      embedModel: EmbeddingsClient.modelTag,
+    );
+    return vector;
   }
 
   /// The mean vector, or null when there is nothing to average. Not
@@ -900,12 +1055,19 @@ class StorylineService {
   /// keys, sorted, hashed. Sorted because membership is a set — the same
   /// threads arriving in a different order are the same storyline.
   Future<String> _memberHashOf(String storylineId) async {
-    final keys = [
+    return _hashOfKeys([
       for (final member in await _store.membersOf(storylineId))
         member.conversationKey,
-    ]..sort();
-    return cardHash(keys.join('\n'));
+    ]);
   }
+
+  /// The one recipe behind `cluster_hash` and `member_hash`: conversation
+  /// keys, sorted, newline-joined, hashed. Every writer goes through here —
+  /// [MessageStore.dismissedHashExists] compares the two columns against a
+  /// hash built the same way, so a second recipe drifting from this one would
+  /// silently stop dismissals from being recognised.
+  String _hashOfKeys(Iterable<String> keys) =>
+      cardHash((keys.toList()..sort()).join('\n'));
 }
 
 /// A fresh storyline id: `sl-` and sixteen hex characters.

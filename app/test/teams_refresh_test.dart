@@ -343,7 +343,7 @@ void main() {
       final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
       await notifier.load();
 
-      await notifier.markDone('chat-1');
+      await notifier.markDone('teams', 'chat-1');
 
       expect(
         (await store.getConversationRow('teams', 'chat-1'))!['state'],
@@ -352,6 +352,36 @@ void main() {
       expect(
         (notifier.state as ConversationsLoaded).conversations.single.state,
         ConversationState.done,
+      );
+    });
+
+    test('a chat and a mail thread sharing a key close separately', () async {
+      // Both connectors mint conversation keys with no knowledge of each
+      // other, so one key can name two threads. The caller says which one it
+      // closed; resolving the source by scanning for the key would close
+      // whichever of the two the scan happened to land on.
+      await seed('shared', source: 'teams');
+      await seed('shared');
+      final notifier = ConversationsNotifier(store, sync, teamsSync: teams);
+      await notifier.load();
+
+      await notifier.markDone('teams', 'shared');
+
+      expect(
+        (await store.getConversationRow('teams', 'shared'))!['state'],
+        'done',
+      );
+      expect(
+        (await store.getConversationRow('email', 'shared'))!['state'],
+        'needs_reply',
+      );
+      final rows = (notifier.state as ConversationsLoaded).conversations;
+      expect(
+        {for (final c in rows) c.source: c.state},
+        {
+          'teams': ConversationState.done,
+          'email': ConversationState.needsReply,
+        },
       );
     });
 

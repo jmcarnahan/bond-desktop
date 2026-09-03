@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
@@ -6,6 +8,7 @@ import '../data/database.dart' show BondDatabase;
 import '../data/message_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
+import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
@@ -23,12 +26,17 @@ import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
+import '../services/notification_coordinator.dart';
+import '../services/notify/desktop_notifier.dart';
+import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
+import 'navigation_provider.dart';
+import 'notify_routing.dart';
 import 'prefs_provider.dart';
 
 /// One [GraphAuth] for the whole app. Sharing the instance is what makes the
@@ -42,6 +50,15 @@ import 'prefs_provider.dart';
 /// [teamsBackendProvider], which is what makes swapping the backend a change to
 /// those three bodies and nothing else.
 final graphAuthProvider = Provider<GraphAuth>((ref) => GraphAuth());
+
+/// When this run of the app started, or null where nothing has said.
+///
+/// Overridden with `DateTime.now()` in `main()`. The null default is what the
+/// processing indicator reads as "show nothing": a widget test that has not
+/// deliberately opted in gets the quiet answer, so the indicator arrives with
+/// zero churn across the existing suite rather than a hundred rows that
+/// suddenly say "thinking…".
+final sessionStartProvider = Provider<DateTime?>((ref) => null);
 
 /// The MCP session and the wire client under it, built together because they
 /// are circular: the client asks the session for a bearer token at every
@@ -110,12 +127,50 @@ final activityLogProvider = Provider<ActivityLog>((ref) {
   return log;
 });
 
+/// The settle machine. Watches ONLY the store and the log, so a backend
+/// switch — which rebuilds the session, both backends, the sync service and
+/// the queues — leaves it standing: rebuilding it would reset the arm and
+/// re-admit the switch-sync backlog as "new mail".
+final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) {
+  final store = ref.watch(messageStoreProvider);
+  final coordinator = NotificationCoordinator(
+    store,
+    activityLog: ref.watch(activityLogProvider),
+    attentionThreshold: () async {
+      final raw = await store.getPref(attentionThresholdKey);
+      return (raw == null ? null : double.tryParse(raw)) ??
+          AttentionTuning.defaultThreshold;
+    },
+  );
+  unawaited(coordinator.start());
+  ref.onDispose(coordinator.dispose);
+  return coordinator;
+});
+
 final mailBackendProvider = Provider<MailBackend>((ref) {
   final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
   return mode == backendModeSdk
       ? GraphMail(ref.watch(graphAuthProvider))
       : McpMailBackend(ref.watch(mcpStackProvider).client);
 });
+
+/// The operating system's notification centre, as this app reaches it.
+///
+/// Always the REAL notifier, with no test-shaped default: it reports itself
+/// unsupported off macOS and Windows, and touches no method channel until
+/// something first asks it to authorize or to show — so a test that never
+/// settles anything can build this provider freely. A test that DOES settle
+/// overrides it with a fake, which is the seam doing its job.
+///
+/// The tap callback is where navigation is wired in. It lives here rather than
+/// in the notifier because `services/` never imports `providers/`: the OS side
+/// knows it has a target and nothing about where a thread lives.
+final desktopNotifierProvider = Provider<DesktopNotifier>(
+  (ref) => LocalDesktopNotifier(
+    onTap: (target) =>
+        ref.read(navIntentProvider.notifier).request(intentForTarget(target)),
+  ),
+);
 
 /// Tells the server about reads that already happened locally.
 ///
@@ -305,7 +360,10 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
       // around.
-      StorylineAssignHandler(storylines),
+      StorylineAssignHandler(
+        storylines,
+        activityLog: ref.watch(activityLogProvider),
+      ),
       StorylineSweepHandler(storylines),
       // After the sweep and before drafts: a recruit is rare — it only exists
       // when a charter was just saved — and the threads it files are exactly
@@ -338,11 +396,17 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
 ///
 /// The one place the routing split runs through a single object: membership is
 /// a label and goes to the fast server, naming is prose and stays on the 27B.
+///
+/// The same embedding client the extraction handler holds, deliberately: a
+/// thread whose embed failed there is one this service re-embeds itself when
+/// the assignment pass reaches it, and two clients would mean two dedupe sets
+/// and two rows in the activity panel for one server being down.
 final storylineServiceProvider = Provider<StorylineService>(
   (ref) => StorylineService(
     ref.watch(messageStoreProvider),
     ref.watch(llmClientProvider),
     confirmClient: ref.watch(fastLlmClientProvider),
     activityLog: ref.watch(activityLogProvider),
+    embeddings: ref.watch(embeddingsClientProvider),
   ),
 );

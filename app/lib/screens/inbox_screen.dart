@@ -10,6 +10,9 @@ import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
+import '../providers/navigation_provider.dart';
+import '../providers/notification_provider.dart';
+import '../providers/notify_routing.dart';
 import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
@@ -18,10 +21,12 @@ import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
 import '../widgets/app_rail.dart';
+import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
+import '../widgets/notification_ribbon.dart';
 import '../widgets/quick_replies.dart';
 import '../widgets/settings_dialog.dart';
 import '../widgets/source_filter.dart';
@@ -114,18 +119,31 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// window opened on one thread must not be open on the next.
   String? _replyOpenFor;
 
-  /// The thread a queued reply is going to, held until the send lands so the
+  /// The threads a queued reply is going to, held until each send lands so the
   /// result can be announced even if the user has moved on to another thread
-  /// meanwhile. Only [_pickQuickReply] sets it, which is what keeps the
+  /// meanwhile. Only [_queueQuickReply] adds to it, which is what keeps the
   /// composer's own send — which reports its outcome directly — from being
   /// announced twice.
-  DraftTarget? _announceSendFor;
+  ///
+  /// A SET, because the storyline spine renders an armed card per open episode
+  /// and two sends can be in flight at once. One slot silenced the first send's
+  /// outcome — including its failure.
+  final Set<DraftTarget> _announceSendsFor = {};
 
   /// Which member thread a storyline's composer replies to, when the user has
   /// picked one. Null means "the thread the newest message is in", which is
   /// what the dropdown shows by default — a storyline has no inbox of its own
   /// to reply to, so the composer always answers exactly one real thread.
-  String? _storylineReplyKey;
+  ///
+  /// Source and key together: a bare key names a conversation only within one
+  /// connector, and a storyline can hold members from both.
+  DraftTarget? _storylineReplyKey;
+
+  /// The storyline whose reply window is open, if any. Collapsed is the
+  /// DEFAULT here too: a storyline opens as a spine to read, and the box —
+  /// with the pills that pick which member thread it answers — appears when
+  /// the user says they are writing.
+  String? _storylineReplyOpenFor;
 
   /// Narrow layouts only: whether the rail overlay is up.
   bool _railOpen = false;
@@ -158,6 +176,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   @override
   void initState() {
     super.initState();
+    // Built here, once, because nothing renders it: the OS dispatcher only
+    // exists if something instantiates it, and the inbox is the screen whose
+    // lifetime it should share.
+    ref.read(desktopNotificationServiceProvider);
     WidgetsBinding.instance.addObserver(this);
     // A microtask, not a direct call: a provider must not be written to
     // while the first frame's widgets are still being built.
@@ -199,7 +221,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     ref.read(storylinesProvider.notifier).load();
     final selected = _selectedId;
     if (selected != null) {
-      ref.read(threadProvider(selected).notifier).load();
+      ref
+          .read(
+            threadProvider(
+              (
+                source: _selectedSource ?? 'email',
+                conversationKey: selected,
+              ),
+            ).notifier,
+          )
+          .load();
       // The sync deletes a draft whose thread just received new mail. The
       // composer must find that out NOW, not on the next AI progress event —
       // a stale suggestion left on screen gets sent as a reply to a message
@@ -247,6 +278,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   Future<void> _signOut() async {
+    // Before anything else: the ribbon holds one account's CTA text and the
+    // intent holds a thread in a database that is about to be wiped. Neither
+    // may survive into the next person's session.
+    ref.read(notificationRibbonProvider.notifier).dismiss();
+    ref.read(navIntentProvider.notifier).clear();
     await ref.read(authSessionProvider).signOut();
     // The keychain is not the only thing holding this account: the sqlite
     // file holds its mailbox, and the providers hold that in memory. A
@@ -263,9 +299,30 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   void _select(String id, {String? source}) {
+    // The row's own source, resolved from the loaded list the way [_selected]
+    // resolves it — the rail, the list pane and the digest all pass an id and
+    // nothing else, and a hard-coded `'email'` would mark a chat read against
+    // a thread that does not exist.
+    //
+    // Resolved BEFORE the selection is stored, because [_selectedSource] is
+    // what the refresh path keys the open thread's transcript and draft by.
+    // Left null it would key them `email` while the pane renders the row's
+    // real source, and a chat opened from the rail would stop refreshing.
+    final loaded = ref.read(conversationsProvider);
+    var resolvedSource = source;
+    Conversation? row;
+    if (loaded is ConversationsLoaded) {
+      for (final c in loaded.conversations) {
+        if (c.id != id) continue;
+        if (source != null && c.source != source) continue;
+        resolvedSource = c.source;
+        row = c;
+        break;
+      }
+    }
     setState(() {
       _selectedId = id;
-      _selectedSource = source;
+      _selectedSource = resolvedSource;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
@@ -278,22 +335,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // this one was worth their time. Fire-and-forget, and nothing on screen
     // reads it yet.
     ref.read(conversationsProvider.notifier).noteThreadOpened(id);
-    // Opening it IS reading it. The row's own source, resolved from the loaded
-    // list the way [_selected] resolves it — the rail passes an id and nothing
-    // else, and a hard-coded `'email'` would mark a chat read against a thread
-    // that does not exist.
-    final loaded = ref.read(conversationsProvider);
-    var resolvedSource = source;
-    if (loaded is ConversationsLoaded) {
-      for (final c in loaded.conversations) {
-        if (c.id != id) continue;
-        if (source != null && c.source != source) continue;
-        resolvedSource = c.source;
-        ref.read(conversationsProvider.notifier).markRead(c.source, id);
-        break;
-      }
+    // Opening it IS reading it.
+    if (row != null) {
+      ref.read(conversationsProvider.notifier).markRead(row.source, id);
     }
-    ref.read(threadProvider(id).notifier).load();
+    ref
+        .read(
+          threadProvider(
+            (source: resolvedSource ?? 'email', conversationKey: id),
+          ).notifier,
+        )
+        .load();
     // Reads what the queue has already written for this thread. It never asks
     // for a new one — a draft is written by the background queue or by the
     // user's own button, never by opening a thread.
@@ -320,6 +372,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The reply target belongs to the storyline that was open, not to this
       // one; the default below picks the newest thread in the new timeline.
       _storylineReplyKey = null;
+      _storylineReplyOpenFor = null;
     });
     ref.read(storylineTimelineProvider(id).notifier).load();
   }
@@ -411,12 +464,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // thread pane is what lets it be announced after the user has moved on:
     // the target outlives the selection, and the notifier behind it is not
     // autoDispose.
-    final announce = _announceSendFor;
-    if (announce != null) {
-      ref.listen<DraftState>(draftProvider(announce), (previous, next) {
+    // One listener per queued send, and each one answers for its OWN target:
+    // two episodes on a storyline can be sending at the same time, and an
+    // outcome must not clear the slot the other send was waiting in.
+    for (final target in _announceSendsFor.toList()) {
+      ref.listen<DraftState>(draftProvider(target), (previous, next) {
         if (previous == null || !mounted) return;
         if (next.sendEpoch > previous.sendEpoch) {
-          setState(() => _announceSendFor = null);
+          setState(() => _announceSendsFor.remove(target));
           _toast('Reply sent.');
           return;
         }
@@ -425,15 +480,105 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // only place left to say it.
         final error = next.error;
         if (error != null && error != previous.error && !next.sending) {
-          setState(() => _announceSendFor = null);
+          setState(() => _announceSendsFor.remove(target));
           _toast(error);
         }
       });
     }
 
+    // Where a notification's click lands. Nothing outside this State can call
+    // the three selection methods, so everything that navigates from outside
+    // the tree — the ribbon today, an OS notification next — asks here.
+    ref.listen<NavIntent?>(navIntentProvider, (_, intent) {
+      if (intent == null || !mounted) return;
+      switch (intent) {
+        case OpenThreadIntent(:final source, :final conversationKey):
+          _select(conversationKey, source: source);
+        case OpenStorylineIntent(:final storylineId):
+          _selectStoryline(storylineId);
+        case OpenSectionIntent(:final section):
+          _selectSection(section);
+      }
+      // Cleared after the frame, not inside the listener: writing to a
+      // notifier while it is notifying is a re-entrant write.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref.read(navIntentProvider.notifier).clear();
+      });
+    });
+
     final state = ref.watch(conversationsProvider);
 
-    return Scaffold(body: SafeArea(child: _body(state)));
+    return Scaffold(
+      body: SafeArea(
+        child: Stack(
+          // Expand, or the stack takes its size from the ribbon layer — which
+          // is nothing at all until something settles, and the inbox under it
+          // would lay out at zero.
+          fit: StackFit.expand,
+          children: [
+            Positioned.fill(child: _body(state)),
+            // A sibling ABOVE the body rather than something inside it: the
+            // pane swaps out from under every selection, and a ribbon mounted
+            // in there would be unmounted mid-announcement — and the narrow
+            // layout's rail overlay would cover it.
+            _ribbonLayer(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The banner that says a processed message needs the user.
+  Widget _ribbonLayer() {
+    final ribbon = ref.watch(notificationRibbonProvider);
+    final items = ribbon.items;
+    if (items.isEmpty) return const SizedBox.shrink();
+
+    // Announcing the thread the user is already reading is telling them what
+    // is on their screen. Only when it is the whole batch — a pile that
+    // happens to include it still has somewhere else to go.
+    final onScreen = items.length == 1 &&
+        items.single.conversationKey == _selectedId &&
+        (_selectedSource == null || items.single.source == _selectedSource);
+
+    final show = ribbon.visible && !onScreen;
+
+    return Positioned(
+      top: BondSpacing.s12,
+      left: 0,
+      right: 0,
+      child: Center(
+        // The child stays mounted while it animates out, so it must not be
+        // taking clicks the whole time it is invisible.
+        child: IgnorePointer(
+          ignoring: !show,
+          child: AnimatedSlide(
+            offset: show ? Offset.zero : const Offset(0, -1.4),
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOut,
+            child: AnimatedOpacity(
+              opacity: show ? 1 : 0,
+              duration: const Duration(milliseconds: 180),
+              child: NotificationRibbon(
+                severity: ribbon.anyUrgent
+                    ? InlineAlertSeverity.error
+                    : InlineAlertSeverity.attention,
+                text: ribbon.text,
+                onTap: () {
+                  ref
+                      .read(navIntentProvider.notifier)
+                      .request(intentFor(items));
+                  ref.read(notificationRibbonProvider.notifier).dismiss();
+                },
+                onDismiss: () =>
+                    ref.read(notificationRibbonProvider.notifier).dismiss(),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _body(ConversationsState state) {
@@ -603,11 +748,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       conversations: conversations,
       storylines: _storylines(),
       selectedId: _selectedId,
+      selectedSource: _selectedSource,
       selectedStorylineId: _selectedStorylineId,
       selectedLaterDay: _selectedLaterDay,
       laterCount: later.length,
       laterDays: laterDayCounts(conversations),
       attentionThreshold: ref.watch(appPrefsProvider).attentionThreshold,
+      processingSince: ref.watch(sessionStartProvider),
       // A thread, a storyline or a Later day being open means no section
       // overview is showing, so the rail must not highlight one.
       selectedSection: (_selectedId == null &&
@@ -616,7 +763,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               !_showingActivityLog)
           ? _section
           : null,
-      onSelectConversation: _select,
+      onSelectConversation: (source, id) => _select(id, source: source),
       onSelectSection: _selectSection,
       onSelectStoryline: _selectStoryline,
       onSelectLaterDay: _selectLaterDay,
@@ -772,6 +919,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         showActivityLog: prefs.showActivityLog,
         onShowActivityLogChanged: (on) =>
             unawaited(notifier.setShowActivityLog(on)),
+        notifyStyle: prefs.notifyStyle,
+        onNotifyStyleChanged: (style) =>
+            unawaited(notifier.setNotifyStyle(style)),
         // BOTH sources are wired, and deliberately not bound to the mode the
         // dialog OPENED in: the toggle now switches backends without closing
         // the dialog, so which one answers is the dialog's live choice. Each
@@ -1065,10 +1215,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// Which storyline [thread] joins, or the one it starts.
   Widget _pickStorylinePane(({String source, String id}) thread) {
-    // Suggestions are deliberately absent: filing a thread into a group the
-    // user has not accepted yet would be answering the suggestion for them. So
-    // are the storylines this thread is already in — an "Add to" that does
-    // nothing reads as a broken row.
+    // Suggestions are offered alongside the kept ones: filing a thread into a
+    // suggestion IS the user answering it, and the add promotes the group to
+    // kept. Leaving them out was how a thread removed from a suggestion could
+    // never be put back. The storylines this thread is already in stay out —
+    // an "Add to" that does nothing reads as a broken row.
     //
     // Empty until the read lands, which leaves every storyline offered for one
     // frame. Adding a thread it is already in is a no-op in the store, so the
@@ -1085,8 +1236,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       child: AddToStorylinePane(
         choices: [
           for (final storyline in _storylines())
-            if (!storyline.isSuggested && !already.contains(storyline.id))
-              storyline,
+            if (!already.contains(storyline.id)) storyline,
         ],
         onBack: () => setState(() => _pickingStorylineForThread = null),
         onPick: (id) {
@@ -1137,7 +1287,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       members:
           ref.watch(storylineMembersProvider(storyline.id)).valueOrNull ??
               const [],
-      onBack: () => setState(() => _selectedStorylineId = null),
+      onBack: () => setState(() {
+        _selectedStorylineId = null;
+        _storylineReplyOpenFor = null;
+      }),
       onRename: (title) => notifier.rename(storyline.id, title),
       onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
       onRemoveThread: (source, key) async {
@@ -1159,19 +1312,35 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         setState(() {
           _selectedStorylineId = null;
           _addingToStorylineId = null;
+          _storylineReplyOpenFor = null;
         });
         unawaited(notifier.dismiss(storyline.id));
       },
+      // The suggestions ride on the episode they answer, not under the spine:
+      // a storyline is several conversations, and a card offering to reply has
+      // to say which one it would reply to.
+      episodeFooter: (episode) => _EpisodeQuickReplies(
+        target: (
+          source: episode.source,
+          conversationKey: episode.conversationKey,
+        ),
+        onOpenReply: () => _openStorylineReply(storyline.id, episode),
+        onQueueSend: (body) => unawaited(_queueQuickReply(
+          (source: episode.source, conversationKey: episode.conversationKey),
+          body,
+        )),
+        onUndo: () => _cancelQueuedSend(
+          (source: episode.source, conversationKey: episode.conversationKey),
+        ),
+      ),
+      onAskTap: (episode) => _openStorylineReply(storyline.id, episode),
     );
 
     // A storyline replies to any of its episodes, chats included: the group is
     // the unit of work, and the answer belongs wherever the conversation
-    // actually is. The dropdown names them all.
+    // actually is. The pills name them all.
     final targets = _replyTargets(episodes);
-    final replyKey = _replyTargetFor(episodes, targets);
-    final target = replyKey == null
-        ? null
-        : (source: targets[replyKey]!.source, conversationKey: replyKey);
+    final target = _replyTargetFor(episodes, targets);
 
     // The same rung ladder the thread pane applies (see [_thread]): mail always
     // offers a box because it bottoms out at the clipboard, a chat only on the
@@ -1198,14 +1367,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Expanded(child: panel),
           if (target != null) ...[
             const SizedBox(height: BondSpacing.s12),
-            // Above the box rather than inside the `canReply` branch: when the
-            // picked episode is a chat this build cannot answer, the picker is
-            // exactly how the user reaches the thread it can.
-            _replyTargetPicker(target.conversationKey, targets),
-            const SizedBox(height: BondSpacing.s8),
-            // The target carries its own source — a picked chat is drafted and
-            // sent down the chat path, a picked thread down the mail one.
-            if (canReply) _composer(target) else _replyElsewhere(),
+            if (_storylineReplyOpenFor != storyline.id)
+              Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: () => setState(
+                      () => _storylineReplyOpenFor = storyline.id,
+                    ),
+                    icon: const Icon(Icons.reply_outlined, size: 16),
+                    label: const Text('Reply…'),
+                  ),
+                ],
+              )
+            else ...[
+              // The pills sit above the box rather than inside the `canReply`
+              // branch: when the picked episode is a chat this build cannot
+              // answer, they are exactly how the user reaches the thread it can.
+              _replyHeaderForStoryline(target, targets),
+              const SizedBox(height: BondSpacing.s8),
+              // The target carries its own source — a picked chat is drafted and
+              // sent down the chat path, a picked thread down the mail one.
+              if (canReply) _composer(target) else _replyElsewhere(),
+            ],
           ] else if (episodes.isNotEmpty) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
@@ -1215,29 +1398,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// Every member conversation a reply can go to: its source, and the subject
-  /// the dropdown names it with.
+  /// Every member conversation a reply can go to, keyed by which conversation
+  /// it is, valued by the subject the picker names it with.
   ///
-  /// Keyed on the conversation key alone, without its source, because
-  /// connector-issued keys are disjoint in practice — a Graph conversation id
-  /// and a chat id share no shape — and one flat key is what the picker's
-  /// selected value and [_storylineReplyKey] have always been.
-  Map<String, ({String source, String subject})> _replyTargets(
+  /// The key carries its source because a conversation key is only unique
+  /// within one: the mail and chat connectors mint keys with no knowledge of
+  /// each other, so the two sets are disjoint only by accident of shape. The
+  /// picker must never conflate a chat with the thread that happens to share
+  /// its key — pick one and the answer would go out on the other.
+  Map<DraftTarget, String> _replyTargets(
     List<StorylineEpisode> episodes,
   ) {
     return {
       for (final episode in episodes)
-        episode.conversationKey: (
-          source: episode.source,
-          // A chat's messages carry no subject — Graph does not give them one
-          // — so an episode built out of them has none either. Named by who is
-          // on it instead, the way a chat is named everywhere else: without
-          // this a storyline holding two chats would offer the user two
-          // identical "(no subject)" rows to choose between.
-          subject: episode.subject.isEmpty
-              ? episode.participants.join(', ')
-              : episode.subject,
-        ),
+        (source: episode.source, conversationKey: episode.conversationKey):
+            // A chat's messages carry no subject — Graph does not give them
+            // one — so an episode built out of them has none either. Named by
+            // who is on it instead, the way a chat is named everywhere else:
+            // without this a storyline holding two chats would offer the user
+            // two identical "(no subject)" rows to choose between.
+            episode.subject.isEmpty
+                ? episode.participants.join(', ')
+                : episode.subject,
     };
   }
 
@@ -1246,61 +1428,91 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The user's pick when they made one and it is still a member; otherwise the
   /// newest episode, which is nearly always the one actually waiting on an
   /// answer — the episodes arrive oldest first, so that is the last of them.
-  String? _replyTargetFor(
+  DraftTarget? _replyTargetFor(
     List<StorylineEpisode> episodes,
-    Map<String, ({String source, String subject})> targets,
+    Map<DraftTarget, String> targets,
   ) {
     final picked = _storylineReplyKey;
     if (picked != null && targets.containsKey(picked)) return picked;
     for (final episode in episodes.reversed) {
-      if (targets.containsKey(episode.conversationKey)) {
-        return episode.conversationKey;
-      }
+      final key = (
+        source: episode.source,
+        conversationKey: episode.conversationKey,
+      );
+      if (targets.containsKey(key)) return key;
     }
     // Unreachable while targets is built from these episodes; null, not a
     // fake fallback, so a future divergence surfaces as "no reply bar".
     return null;
   }
 
-  Widget _replyTargetPicker(
-    String selected,
-    Map<String, ({String source, String subject})> targets,
+  /// Opens the storyline's reply window on one episode's thread.
+  ///
+  /// Both halves, always: a box that opened on a different thread than the ask
+  /// the user tapped would send the answer to the wrong conversation.
+  void _openStorylineReply(String storylineId, StorylineEpisode episode) {
+    setState(() {
+      _storylineReplyKey = (
+        source: episode.source,
+        conversationKey: episode.conversationKey,
+      );
+      _storylineReplyOpenFor = storylineId;
+    });
+  }
+
+  /// Which member thread the open reply window is answering, and the way out
+  /// of it. The pills are the picker — every target is on screen at once, so
+  /// switching threads is one click and nothing has to open over the spine.
+  Widget _replyHeaderForStoryline(
+    DraftTarget selected,
+    Map<DraftTarget, String> targets,
   ) {
     return Row(
       children: [
         Text('Reply to', style: BondType.caption),
         const SizedBox(width: BondSpacing.s8),
-        Expanded(
-          child: DropdownButton<String>(
-            value: selected,
-            isExpanded: true,
-            underline: const SizedBox.shrink(),
-            items: [
-              for (final entry in targets.entries)
-                DropdownMenuItem<String>(
-                  value: entry.key,
-                  child: Text(
-                    entry.value.subject.isEmpty
-                        ? '(no subject)'
-                        : entry.value.subject,
-                    style: BondType.small,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-            ],
-            onChanged: (key) {
-              if (key == null) return;
-              setState(() => _storylineReplyKey = key);
-            },
-          ),
+        Expanded(child: _replyTargetPills(selected, targets)),
+        IconButton(
+          onPressed: () => setState(() => _storylineReplyOpenFor = null),
+          icon: const Icon(Icons.close),
+          iconSize: 16,
+          tooltip: 'Close',
+          padding: const EdgeInsets.all(BondSpacing.s4),
+          constraints: const BoxConstraints(),
+          visualDensity: VisualDensity.compact,
         ),
       ],
     );
   }
 
+  /// How much of a subject a pill carries. A pill's label does not ellipsize
+  /// and the row wraps, so one long subject would take a whole line to itself.
+  static const int _replyPillLabelCap = 40;
+
+  Widget _replyTargetPills(
+    DraftTarget selected,
+    Map<DraftTarget, String> targets,
+  ) {
+    return BondFilterPillRow<DraftTarget>(
+      options: targets.keys.toList(),
+      selected: selected,
+      labelOf: (key) {
+        final subject = targets[key]!;
+        final label = subject.isEmpty ? '(no subject)' : subject;
+        // By grapheme cluster, not by index: `substring` cuts UTF-16 code
+        // units and can split a surrogate pair or a ZWJ emoji, which renders
+        // as the replacement glyph on the end of the pill.
+        return label.characters.length > _replyPillLabelCap
+            ? '${label.characters.take(_replyPillLabelCap)}…'
+            : label;
+      },
+      onSelected: (key) => setState(() => _storylineReplyKey = key),
+    );
+  }
+
   Widget _thread(Conversation selected) {
-    final thread = ref.watch(threadProvider(selected.id));
+    final target = (source: selected.source, conversationKey: selected.id);
+    final thread = ref.watch(threadProvider(target));
 
     // The transcript is a sqlite read, so it is only ever genuinely absent
     // on the very first open of a thread, while its bodies are fetched.
@@ -1314,7 +1526,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _ => (const <Message>[], null),
     };
 
-    final target = (source: selected.source, conversationKey: selected.id);
     final draft = ref.watch(draftProvider(target));
     final pending = draft.pending;
 
@@ -1340,7 +1551,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               outbound: true,
               source: selected.source,
               bodyText: pending.body,
-              receivedAt: DateTime.now().toIso8601String(),
+              // UTC, like every stored timestamp: the open-ask comparison is
+              // lexicographic over these strings, and a local-time stamp sorts
+              // before the mail it answers for every zone west of UTC.
+              receivedAt: DateTime.now().toUtc().toIso8601String(),
               pendingSend: true,
             ),
           ];
@@ -1349,8 +1563,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       key: ValueKey(selected.id),
       conversation: selected,
       messages: shown,
-      onMarkDone: () =>
-          ref.read(conversationsProvider.notifier).markDone(selected.id),
+      onMarkDone: () => ref
+          .read(conversationsProvider.notifier)
+          .markDone(selected.source, selected.id),
       onBack: () => setState(() {
         _selectedId = null;
         _selectedSource = null;
@@ -1362,6 +1577,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       afterTranscript: canReply && (answersSomebody || pending != null)
           ? _quickReplies(selected, target, draft)
           : null,
+      // Every ask on the pane is a call to action, so every one of them opens
+      // the box — the banner included. Null where there is no box to open.
+      onOpenReply:
+          canReply ? () => setState(() => _replyOpenFor = selected.id) : null,
       onAddToStoryline: () => setState(() => _pickingStorylineForThread =
           (source: selected.source, id: selected.id)),
       // Sender-scoped, because the screen is the layer that knows the address
@@ -1461,6 +1680,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onDismiss: () => unawaited(notifier.dismissOptions()),
       pending: draft.pending,
       onUndo: () => _cancelQueuedSend(target),
+      // The way back from the ×, and the way in for a thread the queue never
+      // drafted: `generate` deletes the row the dismissal is recorded on and
+      // asks the queue for a fresh pair. Withheld where that row is the user's
+      // own typing or a sent reply — see [DraftState.suggestable].
+      onSuggest: draft.suggestable ? () => unawaited(notifier.generate()) : null,
+      suggesting: draft.generating,
     );
   }
 
@@ -1471,7 +1696,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _cancelQueuedSend(DraftTarget target) {
     ref.read(draftProvider(target).notifier).cancelQueuedSend();
     if (!mounted) return;
-    setState(() => _announceSendFor = null);
+    setState(() => _announceSendsFor.remove(target));
   }
 
   /// A card was tapped.
@@ -1483,14 +1708,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// anyone anyway.
   Future<void> _pickQuickReply(Conversation c, DraftOption option) async {
     final target = (source: c.source, conversationKey: c.id);
-    final notifier = ref.read(draftProvider(target).notifier);
     if (ref.read(draftProvider(target)).capability != SendCapability.send) {
       setState(() => _replyOpenFor = c.id);
-      await notifier.markEdited(option.body);
+      await ref.read(draftProvider(target).notifier).markEdited(option.body);
       return;
     }
-    setState(() => _announceSendFor = target);
-    await notifier.queueSend(option.body);
+    await _queueQuickReply(target, option.body);
+  }
+
+  /// Arms the send a tapped card asked for, wherever the card was — under the
+  /// transcript or on a storyline's episode. One helper because the two
+  /// surfaces must not drift: the announcement, the undo window and the words
+  /// on the snackbar are the same promise either way.
+  Future<void> _queueQuickReply(DraftTarget target, String body) async {
+    setState(() => _announceSendsFor.add(target));
+    await ref.read(draftProvider(target).notifier).queueSend(body);
     _toast('Reply sending.', onUndo: () => _cancelQueuedSend(target));
   }
 
@@ -1606,6 +1838,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // The previous snapshot is carried through a reload, so this is null only
     // before the very first read of the pane.
     final snapshot = ref.watch(activitySnapshotProvider).valueOrNull;
+    final health = ref.watch(pipelineHealthProvider).valueOrNull;
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
       child: Column(
@@ -1624,6 +1857,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                     lastTeamsSyncIso: snapshot.lastTeamsSyncIso,
                     lastSweepIso: snapshot.lastSweepIso,
                     entityLabel: snapshot.labelFor,
+                    deadItems:
+                        health == null ? 0 : health.triageDead + health.workDead,
                   ),
           ),
         ],
@@ -1671,7 +1906,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return LaterDigestPanel(
         conversations: conversations,
         dayFilter: _selectedLaterDay,
-        onOpen: _select,
+        onOpen: (source, id) => _select(id, source: source),
         onKeepSender: _keepSender,
         onKeepThread: _keepThread,
       );
@@ -1710,8 +1945,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       filter: InboxFilter.open,
       conversations: conversations,
       selectedId: _selectedId,
-      onSelect: _select,
+      selectedSource: _selectedSource,
+      onSelect: (source, id) => _select(id, source: source),
       sectionsOverride: sections,
+      processingSince: ref.watch(sessionStartProvider),
     );
   }
 
@@ -1799,6 +2036,100 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ),
         );
       },
+    );
+  }
+}
+
+/// One episode's suggestions, inside the card that holds the thread they
+/// answer.
+///
+/// Its own widget because the spine renders every open card at once: watching
+/// each episode's draft from the screen would rebuild the whole storyline
+/// whenever any one of them changed, and the panel itself must stay
+/// provider-free — it is handed a builder and never learns what comes back.
+///
+/// Renders NOTHING when there is nothing to offer. A card is not the place for
+/// an empty state: the pane's own `Reply…` already owns that, and a row of
+/// identical bare buttons down the spine would say nothing about any of them.
+class _EpisodeQuickReplies extends ConsumerWidget {
+  final DraftTarget target;
+
+  /// Opens the storyline's reply window on this episode's thread.
+  final VoidCallback onOpenReply;
+
+  /// Arms a send of this text, with the undo window the screen announces.
+  /// Reached only where the grant actually allows a send.
+  final void Function(String body) onQueueSend;
+
+  final VoidCallback onUndo;
+
+  const _EpisodeQuickReplies({
+    required this.target,
+    required this.onOpenReply,
+    required this.onQueueSend,
+    required this.onUndo,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final draft = ref.watch(draftProvider(target));
+    final notifier = ref.read(draftProvider(target).notifier);
+    if (draft.options.isEmpty && draft.pending == null) {
+      return _suggestAgain(draft, notifier);
+    }
+
+    return Padding(
+      // The card's own gap. The footer owns its spacing so that the empty case
+      // above can leave no trace.
+      padding: const EdgeInsets.only(top: BondSpacing.s12),
+      child: QuickReplyBar(
+        options: draft.options,
+        armed: draft.capability == SendCapability.send,
+        onPick: (option) {
+          // The same honest split the thread pane makes: without a send grant
+          // a tap opens the box with the words in it rather than appearing to
+          // send them.
+          if (draft.capability != SendCapability.send) {
+            onOpenReply();
+            unawaited(notifier.markEdited(option.body));
+            return;
+          }
+          onQueueSend(option.body);
+        },
+        onReply: onOpenReply,
+        onDismiss: () => unawaited(notifier.dismissOptions()),
+        pending: draft.pending,
+        onUndo: onUndo,
+      ),
+    );
+  }
+
+  /// The way back from a dismissal, on a card that has nothing to show.
+  ///
+  /// Offered only where the cards were closed rather than never written: a
+  /// thread the model has not drafted for yet gets nothing, because a bare
+  /// button on every card in the spine would say nothing about any of them.
+  /// [DraftState.generate] deletes the row on its way to a new draft, so the
+  /// `generating` arm is what keeps `Drafting…` on screen for the second the
+  /// row is gone.
+  Widget _suggestAgain(DraftState draft, DraftNotifier notifier) {
+    // A drafted thread whose cards were closed — the one state a fresh pair
+    // costs nothing. The `draft != null` half is what keeps a never-drafted
+    // card rendering nothing at all.
+    final hidden = draft.draft != null && draft.suggestable;
+    final suggesting = draft.generating;
+    if (!hidden && !suggesting) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: BondSpacing.s12),
+      child: Row(
+        children: [
+          TextButton.icon(
+            onPressed: suggesting ? null : () => unawaited(notifier.generate()),
+            icon: const Icon(Icons.auto_awesome, size: 16),
+            label: Text(suggesting ? 'Drafting…' : 'Suggest a reply'),
+          ),
+        ],
+      ),
     );
   }
 }

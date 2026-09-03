@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../models/open_asks.dart';
 import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
 import 'inline_alert.dart';
@@ -52,6 +53,20 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// panel is one of the things it takes away.
   final VoidCallback onDismiss;
 
+  /// Rendered at the END of an OPEN card, under that thread's messages, so it
+  /// reads as attached to the episode rather than to the spine.
+  ///
+  /// Hosts pass the reply affordance here. The panel does not know what it is
+  /// and does not ask — it renders a spine and knows nothing about drafts or
+  /// sending, which is the arrangement `ThreadDetailPanel.afterTranscript`
+  /// already lives under. The widget owns its own spacing, so a footer with
+  /// nothing to show can render nothing and leave no gap behind.
+  final Widget Function(StorylineEpisode episode)? episodeFooter;
+
+  /// A message's open ask was tapped, on the card it belongs to. Null leaves
+  /// every ask a statement.
+  final void Function(StorylineEpisode episode)? onAskTap;
+
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -66,6 +81,8 @@ class StorylineTimelinePanel extends StatefulWidget {
     required this.newestFirst,
     required this.onToggleSort,
     required this.onDismiss,
+    this.episodeFooter,
+    this.onAskTap,
   });
 
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
@@ -91,6 +108,10 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   bool _editingTitle = false;
   bool _editingCharter = false;
   bool _confirmingDismiss = false;
+
+  /// The card whose remove × has been armed, by thread key. One at a time: a
+  /// spine with three open questions on it is a spine nobody reads.
+  String? _confirmingRemoveKey;
 
   late final TextEditingController _title =
       TextEditingController(text: widget.storyline.title);
@@ -229,7 +250,10 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
-                children: _run(episode),
+                children: [
+                  ..._run(episode),
+                  ?widget.episodeFooter?.call(episode),
+                ],
               ),
             )
           else
@@ -255,6 +279,13 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     final showCta = episode.state == ConversationState.needsReply &&
         cta != null &&
         cta.isNotEmpty;
+
+    // The banner names the newest ask only. When older ones are still open,
+    // the count says so — the messages below are where they are read.
+    final openAsks = openAskCount(
+      episode.messages,
+      conversationClosed: episode.state != ConversationState.needsReply,
+    );
 
     return InkWell(
       onTap: () => setState(
@@ -299,13 +330,10 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                   // spent four lines saying it twice would crowd the spine.
                   if (showCta) ...[
                     const SizedBox(height: BondSpacing.s4),
-                    Tooltip(
-                      message: cta,
-                      child: InlineAlert(
-                        severity: InlineAlertSeverity.attention,
-                        text: cta,
-                        maxLines: 2,
-                      ),
+                    _cardCta(
+                      episode,
+                      cta,
+                      openAsks > 1 ? '$cta · $openAsks open asks' : cta,
                     ),
                   ] else if (summary.isNotEmpty) ...[
                     const SizedBox(height: 2),
@@ -319,32 +347,81 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                 ],
               ),
             ),
-            IconButton(
-              onPressed: () => widget.onOpenThread(
-                episode.source,
-                episode.conversationKey,
+            // The two-step stands where a confirm dialog would: the first tap
+            // asks, the second takes the thread out. Both icons give way to
+            // the pair, so the header reads as one question rather than a
+            // question next to an unrelated button.
+            if (_confirmingRemoveKey == episode.threadKey) ...[
+              _quietButton('Remove thread', () {
+                setState(() => _confirmingRemoveKey = null);
+                widget.onRemoveThread(
+                  episode.source,
+                  episode.conversationKey,
+                );
+              }),
+              const SizedBox(width: BondSpacing.s4),
+              _quietButton(
+                'Cancel',
+                () => setState(() => _confirmingRemoveKey = null),
               ),
-              icon: const Icon(Icons.open_in_new),
-              iconSize: 14,
-              tooltip: 'Open thread',
-              padding: const EdgeInsets.all(BondSpacing.s4),
-              constraints: const BoxConstraints(),
-              visualDensity: VisualDensity.compact,
-            ),
-            IconButton(
-              onPressed: () => widget.onRemoveThread(
-                episode.source,
-                episode.conversationKey,
+            ] else ...[
+              IconButton(
+                onPressed: () => widget.onOpenThread(
+                  episode.source,
+                  episode.conversationKey,
+                ),
+                icon: const Icon(Icons.open_in_new),
+                iconSize: 14,
+                tooltip: 'Open thread',
+                padding: const EdgeInsets.all(BondSpacing.s4),
+                constraints: const BoxConstraints(),
+                visualDensity: VisualDensity.compact,
               ),
-              icon: const Icon(Icons.close),
-              iconSize: 14,
-              tooltip: 'Remove from storyline',
-              padding: const EdgeInsets.all(BondSpacing.s4),
-              constraints: const BoxConstraints(),
-              visualDensity: VisualDensity.compact,
-            ),
+              IconButton(
+                onPressed: () => setState(
+                  () => _confirmingRemoveKey = episode.threadKey,
+                ),
+                icon: const Icon(Icons.close),
+                iconSize: 14,
+                tooltip: 'Remove from storyline',
+                padding: const EdgeInsets.all(BondSpacing.s4),
+                constraints: const BoxConstraints(),
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
           ],
         ),
+      ),
+    );
+  }
+
+  /// The ask on a card header. [tooltip] stays the bare ask: it exists to show
+  /// the full text [text] had to clamp.
+  ///
+  /// It takes its own tap where the host has a reply to open. The thread pane's
+  /// banner is the shortest way into the reply
+  /// (`thread_detail_panel._ctaBanner`), and the same copper text here must not
+  /// mean "shut the card" instead — the nested [InkWell] absorbs the tap so the
+  /// header's collapse never sees it. Its own transparent [Material] for the
+  /// usual reason: ink paints on the nearest Material ancestor, which sits
+  /// behind the card's opaque surface.
+  Widget _cardCta(StorylineEpisode episode, String tooltip, String text) {
+    final banner = Tooltip(
+      message: tooltip,
+      child: InlineAlert(
+        severity: InlineAlertSeverity.attention,
+        text: text,
+        maxLines: 2,
+      ),
+    );
+    final onAskTap = widget.onAskTap;
+    if (onAskTap == null) return banner;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: () => onAskTap(episode),
+        borderRadius: BondRadii.smAll,
+        child: banner,
       ),
     );
   }
@@ -387,6 +464,13 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     Message? previous;
     var first = true;
 
+    // One scan of the thread answers the open-ask rule for every row in it.
+    // Anything but "needs reply" closes them: without this, a send that clears
+    // the banner leaves the ask lines lit for up to a minute until the sent
+    // message syncs back.
+    final lastOut = latestOutboundAt(episode.messages);
+    final closed = episode.state != ConversationState.needsReply;
+
     for (final message in episode.messages) {
       final day = dayKeyOf(message);
       final label = formatDayLabel(message.receivedAt);
@@ -397,10 +481,20 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
       previousDay = day;
       first = false;
 
+      final open = hasOpenAsk(
+        message,
+        lastOutboundAt: lastOut,
+        conversationClosed: closed,
+      );
+      final onAskTap = widget.onAskTap;
       items.add(MessageRow(
         key: ValueKey(message.id),
         message: message,
         showHeader: previous == null || !sameRun(previous, message),
+        openAsk: open,
+        // Only a line that is actually on screen gets a tap, and it carries
+        // the episode with it: the answer goes to the thread the ask is in.
+        onAskTap: open && onAskTap != null ? () => onAskTap(episode) : null,
       ));
       previous = message;
     }

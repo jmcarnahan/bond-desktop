@@ -32,7 +32,7 @@ void main() {
     WidgetTester tester, {
     required List<Conversation> conversations,
     String? dayFilter,
-    void Function(String)? onOpen,
+    void Function(String, String)? onOpen,
     void Function(String, String)? onKeepSender,
     void Function(String, String)? onKeepThread,
   }) async {
@@ -43,7 +43,7 @@ void main() {
         body: LaterDigestPanel(
           conversations: conversations,
           dayFilter: dayFilter,
-          onOpen: onOpen ?? (_) {},
+          onOpen: onOpen ?? (_, _) {},
           onKeepSender: onKeepSender ?? (_, _) {},
           onKeepThread: onKeepThread ?? (_, _) {},
         ),
@@ -230,17 +230,19 @@ void main() {
     });
 
     testWidgets('tapping a line opens that thread', (tester) async {
-      final opened = <String>[];
+      final opened = <(String, String)>[];
       await pump(
         tester,
         conversations: [
           _conv(id: 'a', who: 'Alice', email: 'alice@x.com', subject: 'One'),
         ],
-        onOpen: opened.add,
+        onOpen: (source, id) => opened.add((source, id)),
       );
 
       await tester.tap(find.text('One'));
-      expect(opened, ['a']);
+      // With the source, for the same reason the keep-thread action carries
+      // one: the id alone does not say which connector's thread this is.
+      expect(opened, [('email', 'a')]);
     });
   });
 }

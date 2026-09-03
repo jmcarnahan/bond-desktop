@@ -4,6 +4,7 @@ import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../theme/tokens.dart';
+import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
@@ -208,6 +209,12 @@ class AppRail extends StatefulWidget {
   /// The open thread, when one is open.
   final String? selectedId;
 
+  /// The open thread's connector. A conversation key is unique only within one
+  /// source, so a bare [selectedId] can match a row from the other connector
+  /// and highlight it too. Null keeps the id-only comparison, which is what a
+  /// host with a single connector wants.
+  final String? selectedSource;
+
   /// The open storyline, when one is open. Never set at the same time as
   /// [selectedId] — the main pane shows one thing.
   final String? selectedStorylineId;
@@ -234,7 +241,16 @@ class AppRail extends StatefulWidget {
   /// wants.
   final double attentionThreshold;
 
-  final void Function(String conversationId) onSelectConversation;
+  /// When this session started. A row whose last message arrived after it and
+  /// whose thread still has work queued renders quiet — see [showsProcessing].
+  /// Null, the default, shows no processing state at all.
+  final DateTime? processingSince;
+
+  /// The row's source travels with its id: the host cannot resolve one from
+  /// the other, because both connectors mint keys with no knowledge of each
+  /// other and a shared key would otherwise open whichever thread the host
+  /// happened to scan first.
+  final void Function(String source, String conversationId) onSelectConversation;
   final void Function(RailSection section) onSelectSection;
 
   /// Opens one day's Later digest. Null leaves the day rows unclickable, which
@@ -256,6 +272,7 @@ class AppRail extends StatefulWidget {
     required this.conversations,
     required this.selectedId,
     required this.selectedSection,
+    this.selectedSource,
     required this.onSelectConversation,
     required this.onSelectSection,
     this.storylines = const [],
@@ -264,6 +281,7 @@ class AppRail extends StatefulWidget {
     this.laterCount = 0,
     this.laterDays = const [],
     this.attentionThreshold = 0,
+    this.processingSince,
     this.onSelectStoryline,
     this.onSelectLaterDay,
     this.onKeepSuggestion,
@@ -327,7 +345,13 @@ class _AppRailState extends State<AppRail> {
                     RailSection.needsYou,
                     rows: [
                       for (final c in shown)
-                        _item(c, dimmed: isWaitingRow(c), bold: true),
+                        _item(
+                          c,
+                          dimmed: isWaitingRow(c),
+                          bold: true,
+                          processing:
+                              showsProcessing(c, since: widget.processingSince),
+                        ),
                       if (overflow > 0) _more(overflow),
                     ],
                     badge: needsYou.isEmpty
@@ -344,7 +368,15 @@ class _AppRailState extends State<AppRail> {
                   ),
                   ..._section(
                     RailSection.conversations,
-                    rows: [for (final c in open) _item(c, bold: c.hasUnread)],
+                    rows: [
+                      for (final c in open)
+                        _item(
+                          c,
+                          bold: c.hasUnread,
+                          processing:
+                              showsProcessing(c, since: widget.processingSince),
+                        ),
+                    ],
                   ),
                   ..._section(
                     RailSection.later,
@@ -461,17 +493,30 @@ class _AppRailState extends State<AppRail> {
   /// One thread. [dimmed] drops it to the muted ink used for the quieter half
   /// of Needs You — a thread on the list because someone else is late, not
   /// because the user is.
-  Widget _item(Conversation c, {required bool bold, bool dimmed = false}) {
-    final selected = widget.selectedId == c.id;
+  ///
+  /// [processing] says the model has not finished with this thread yet, and it
+  /// overrides both of those: whatever the row would otherwise claim about
+  /// itself is a half-formed answer, so it reads quiet — muted ink and a
+  /// hollow dot — until the answer is whole.
+  Widget _item(
+    Conversation c, {
+    required bool bold,
+    bool dimmed = false,
+    bool processing = false,
+  }) {
+    final selected = widget.selectedId == c.id &&
+        (widget.selectedSource == null || widget.selectedSource == c.source);
 
     // Bold is the whole grammar, and it says a different thing in each section
     // because the sections ask different questions. In Needs You every row is
     // bold: you owe this. In Conversations bold means you have not read this.
     // Nothing else in the rail is bold, and the caller decides which question
     // this row is answering.
-    final color = (selected || (bold && !dimmed))
-        ? BondColors.onDarkPrimary
-        : (dimmed ? BondColors.onDarkMuted : BondColors.onDarkSecondary);
+    final color = processing
+        ? BondColors.onDarkMuted
+        : (selected || (bold && !dimmed))
+            ? BondColors.onDarkPrimary
+            : (dimmed ? BondColors.onDarkMuted : BondColors.onDarkSecondary);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
@@ -479,7 +524,7 @@ class _AppRailState extends State<AppRail> {
         color: selected ? BondColors.onDarkTint : BondColors.ink,
         borderRadius: BondRadii.smAll,
         child: InkWell(
-          onTap: () => widget.onSelectConversation(c.id),
+          onTap: () => widget.onSelectConversation(c.source, c.id),
           borderRadius: BondRadii.smAll,
           hoverColor: BondColors.onDarkFaint,
           child: SizedBox(
@@ -493,12 +538,21 @@ class _AppRailState extends State<AppRail> {
                   Container(
                     width: BondSpacing.s8,
                     height: BondSpacing.s8,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: bold
-                          ? BondColors.seaGlassOnDark
-                          : BondColors.onDarkBorder,
-                    ),
+                    // Hollow while the model works: the dot is the row's claim
+                    // about itself, and an outline is that claim not filled in
+                    // yet.
+                    decoration: processing
+                        ? BoxDecoration(
+                            shape: BoxShape.circle,
+                            border:
+                                Border.all(color: BondColors.onDarkBorder),
+                          )
+                        : BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: bold
+                                ? BondColors.seaGlassOnDark
+                                : BondColors.onDarkBorder,
+                          ),
                   ),
                   const SizedBox(width: BondSpacing.s8),
                   Expanded(

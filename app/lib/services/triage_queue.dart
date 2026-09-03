@@ -110,6 +110,19 @@ class TriageQueue {
   /// drain, which is what the tests that assert on request ORDER use.
   final int _concurrency;
 
+  /// The messages this queue currently holds claims on, as `'$source|$id'`.
+  ///
+  /// A claim is a row written `processing`, and only the worker that took it
+  /// knows it is still wanted. Tracking them is what lets [dispose] hand back
+  /// what it is holding: without it, a queue torn down mid-drain — which is
+  /// what a backend switch does — left every claimed row `processing` until
+  /// the next launch reset it.
+  final Set<String> _claimed = {};
+
+  /// The messages actually at the model server, so [dispose] can wait for
+  /// their results before deciding what is still claimed.
+  final Set<Future<void>> _inFlight = {};
+
   String? _userAddress;
   bool _running = false;
   bool _stopped = false;
@@ -147,9 +160,42 @@ class TriageQueue {
     }
   }
 
-  void dispose() {
+  /// Stops the drain and gives back every claim it is still holding.
+  ///
+  /// The order is the whole method. Stop first, so nothing new is claimed;
+  /// wait for the messages already at the server, because those answers are
+  /// paid for and their results are written by the same paths that release
+  /// their claims; then hand back whatever is left — a message that was
+  /// mid-flight when the process was told to stop.
+  ///
+  /// Writing to the store after this object is disposed is safe: the store
+  /// outlives the queue, watching only the database provider. Closing the
+  /// progress stream first is safe for the same reason [_emit] guards on
+  /// `isClosed` — an in-flight message emitting into a closed controller is
+  /// a no-op, not a crash.
+  ///
+  /// Awaited by nobody in the app (`ref.onDispose` takes a `void` callback),
+  /// which is exactly right: the release is a database write that either
+  /// lands or is picked up by [MessageStore.reclaimStaleTriage] five minutes
+  /// later. Tests await it.
+  Future<void> dispose() async {
     _stopped = true;
     _progress.close();
+    // A LOOP, not one wait: a claim that was already at the store when
+    // [_stopped] flipped lands in [_inFlight] after the first snapshot was
+    // taken. Waiting on the stale snapshot and then releasing would flip a
+    // message that is STILL RUNNING back to `pending`, where a second queue
+    // could claim it and spend a second model call on the same mail.
+    while (_inFlight.isNotEmpty) {
+      await Future.wait(_inFlight.toList()).catchError((_) => const <void>[]);
+    }
+    for (final claim in _claimed.toList()) {
+      final parts = claim.split('|');
+      // Guarded on `processing` in the statement itself, so a claim released
+      // here cannot reopen a message that finished while this was deciding.
+      await _store.releaseTriageClaim(parts.first, parts.skip(1).join('|'));
+    }
+    _claimed.clear();
   }
 
   /// Drains until nothing is pending, the queue is stopped, or the model
@@ -181,38 +227,61 @@ class TriageQueue {
   /// the same row: whichever claim lands second finds nothing pending to match
   /// and comes back null.
   Future<void> _drain() async {
-    final inFlight = <Future<void>>{};
     var parked = false;
     while (!_stopped && !parked) {
-      while (inFlight.length < _concurrency && !_stopped && !parked) {
+      while (_inFlight.length < _concurrency && !_stopped && !parked) {
         final row = await _store.claimPendingTriage(sources: sources);
         if (row == null) break;
+        _claimed.add(_claimKey(row));
         late final Future<void> future;
         // [ActivityLog.inSpan] gives this message its own tally, so three
         // concurrent messages' model calls land on three activity rows
         // instead of whichever records first.
         future = _log.inSpan(() => _triageOne(row)).then((carryOn) {
           if (!carryOn) parked = true;
-        }).whenComplete(() => inFlight.remove(future));
-        inFlight.add(future);
+        }).whenComplete(() => _inFlight.remove(future));
+        _inFlight.add(future);
       }
-      if (inFlight.isEmpty) break;
+      if (_inFlight.isEmpty) break;
       // Over a COPY: `whenComplete` mutates the set as each message lands.
-      await Future.any(inFlight.toList());
+      await Future.any(_inFlight.toList());
     }
     // A park — or a [stop] — stops new launches, never the requests already at
     // the server: those answers are paid for, and their results are kept.
-    await Future.wait(inFlight.toList());
+    await Future.wait(_inFlight.toList());
   }
 
-  /// One message. Returns false when the drain should launch nothing further
-  /// rather than move on to the next message.
-  Future<bool> _triageOne(Map<String, Object?> row) async {
+  static String _claimKey(Map<String, Object?> row) =>
+      '${row['source'] as String? ?? 'email'}|'
+      '${row['source_message_id'] as String? ?? ''}';
+
+  /// One message, with a heartbeat under it.
+  ///
+  /// The heartbeat is what makes [MessageStore.reclaimStaleTriage] safe to run
+  /// on every sync: a claim that is still being worked says so once a minute,
+  /// so the watchdog's five-minute window can only close on a worker that is
+  /// gone. Without it, the first message slower than the window would be
+  /// handed to a second drain while the first was still waiting on the model.
+  Future<bool> _triageOne(Map<String, Object?> row) {
     final id = row['source_message_id'] as String? ?? '';
+    final source = row['source'] as String? ?? 'email';
+    final beat = Timer.periodic(pipelineHeartbeatInterval, (_) {
+      // A failed touch costs nothing: the window is five beats wide.
+      _store.touchTriage(source, id).catchError((_) {});
+    });
+    return _triageClaimed(row, source, id).whenComplete(beat.cancel);
+  }
+
+  /// Everything one claimed message does. Returns false when the drain should
+  /// launch nothing further rather than move on to the next message.
+  Future<bool> _triageClaimed(
+    Map<String, Object?> row,
     // Read off the claimed row rather than held on the class: one drain takes
     // messages from every source in [sources], and every store write and
     // activity row below is keyed by `(source, id)`.
-    final source = row['source'] as String? ?? 'email';
+    String source,
+    String id,
+  ) async {
     var current = row;
     var message = Message.fromRow(current);
 
@@ -230,7 +299,7 @@ class TriageQueue {
       // means the model was consulted, and a gate is the mechanism that keeps
       // it from being — one row per newsletter would bury the work the panel
       // exists to show under the mail that never cost anything.
-      await _store.writeTriage(
+      await _writeTriage(
         source,
         id,
         status: 'skipped',
@@ -271,7 +340,7 @@ class TriageQueue {
     // the single place a gate decision is made.
     final headerGate = gateFor(message, userAddress: _userAddress);
     if (headerGate != null) {
-      await _store.writeTriage(
+      await _writeTriage(
         source,
         id,
         status: 'skipped',
@@ -304,7 +373,7 @@ class TriageQueue {
         const TriageTask(),
         TriageInput(message, DateTime.now(), thread: thread),
       );
-      await _store.writeTriage(source, id, status: 'triaged', result: result);
+      await _writeTriage(source, id, status: 'triaged', result: result);
       await _foldUp(source, current, message, result);
       // What the model decided, on the row. The `llm_*` tally the call itself
       // reported folds in from the log's pending slot.
@@ -331,7 +400,7 @@ class TriageQueue {
       // laptop where the model server is not running. Triage is one kind on
       // one server, so unlike the AI worker there is no other queue here that
       // a different server could still be answering for.
-      await _store.writeTriage(source, id, status: 'pending');
+      await _writeTriage(source, id, status: 'pending');
       await _log.record(
         'triage',
         status: 'parked',
@@ -363,13 +432,40 @@ class TriageQueue {
     }
   }
 
+  /// Every write that ends this queue's interest in a message, and the claim
+  /// release that goes with it.
+  ///
+  /// One wrapper rather than a `_claimed.remove` beside each of the six write
+  /// sites: a path that wrote a result and forgot to release would leave
+  /// [dispose] holding a claim on a message that is already finished.
+  Future<void> _writeTriage(
+    String source,
+    String id, {
+    required String status,
+    TriageResult? result,
+    String? error,
+    String? gateReason,
+    int? attempts,
+  }) async {
+    await _store.writeTriage(
+      source,
+      id,
+      status: status,
+      result: result,
+      error: error,
+      gateReason: gateReason,
+      attempts: attempts,
+    );
+    _claimed.remove('$source|$id');
+  }
+
   /// The session is over, so every message behind this one would fail its
   /// fetch identically. The row goes back to `pending` without spending an
   /// attempt — nothing is wrong with the message — and the drain parks. The
   /// sign-out routing lives in the inbox notifier; triage's whole job here is
   /// to stop burning model time on previews it cannot improve on.
   Future<bool> _parkForSession(String source, String id, int durationMs) async {
-    await _store.writeTriage(source, id, status: 'pending');
+    await _writeTriage(source, id, status: 'pending');
     await _log.record(
       'triage',
       status: 'parked',
@@ -395,7 +491,7 @@ class TriageQueue {
     // the model's answer. It is identical on every retry, so retrying it
     // burns model time to reproduce a bug.
     final fatal = statusCode == 400 || attempts >= _maxAttempts;
-    await _store.writeTriage(
+    await _writeTriage(
       source,
       id,
       status: fatal ? 'error' : 'pending',

@@ -47,6 +47,10 @@ Future<void> main() async {
       overrides: [
         dbProvider.overrideWithValue(db),
         initialAppPrefsProvider.overrideWithValue(prefs),
+        // Stamped here, once: the processing indicator only speaks for mail
+        // that arrived after the app was already open, and this is the only
+        // place that knows when that was.
+        sessionStartProvider.overrideWithValue(DateTime.now()),
       ],
       child: const BondInboxApp(),
     ),

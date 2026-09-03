@@ -92,6 +92,32 @@ class SyncService implements MailSync {
       final revivedTriage = await _store.reviveErroredTriage(source: _source);
       final revivedWork = await _store.reviveErroredWork();
 
+      // Claims nobody is holding any more — a queue rebuilt by a backend
+      // switch, a process killed mid-drain. Safe to run while a drain is live
+      // because a live claim heartbeats every minute and this window is five
+      // of them; see [MessageStore.reclaimStaleTriage]. Attempts untouched:
+      // nothing about these rows failed.
+      final staleBefore = _isoAgo(staleClaimAfter);
+      final reclaimedTriage = await _store.reclaimStaleTriage(
+        staleBeforeIso: staleBefore,
+        sources: const [_source],
+      );
+      final reclaimedWork = await _store.reclaimStaleWork(
+        staleBeforeIso: staleBefore,
+      );
+
+      // And one more try a day for what exhausted the revival above. A
+      // permanent ceiling is permanent data loss, and most of what reaches it
+      // is a local outage that has since healed.
+      final terminalBefore = _isoAgo(terminalRetryAfter);
+      final revivedTerminalTriage = await _store.reviveTerminalTriage(
+        olderThanIso: terminalBefore,
+        source: _source,
+      );
+      final revivedTerminalWork = await _store.reviveTerminalWork(
+        olderThanIso: terminalBefore,
+      );
+
       // Mail the first triage judged before it asked whether a reply is
       // expected. BEFORE the enqueue below for the same reason the teams sync
       // orders its re-pend first: a row this flips to `pending` is one the
@@ -147,6 +173,15 @@ class SyncService implements MailSync {
           'queued_extract': queued,
           'revived_triage': revivedTriage,
           'revived_work': revivedWork,
+          // Only when they happened. A zero here would read as an event where
+          // there was none — and, unlike the two counts above, these are the
+          // rare paths: a sync that reclaims nothing is every sync.
+          if (reclaimedTriage > 0) 'reclaimed_triage': reclaimedTriage,
+          if (reclaimedWork > 0) 'reclaimed_work': reclaimedWork,
+          if (revivedTerminalTriage > 0)
+            'revived_terminal_triage': revivedTerminalTriage,
+          if (revivedTerminalWork > 0)
+            'revived_terminal_work': revivedTerminalWork,
           if (rejudged > 0) 'rejudged_triage': rejudged,
           'backfilled_addressed_me': ?backfilled,
           if (inboxResync || sentResync) 'resync': true,

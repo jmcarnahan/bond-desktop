@@ -208,4 +208,100 @@ void main() {
     expect(row['reply_expected'], null);
     expect(row['deadline'], null);
   });
+
+  test('v5 to v6 adds message_notify empty and leaves the backlog alone',
+      () async {
+    final schema = await verifier.schemaAt(5);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, triage_status, created_at, updated_at)
+      VALUES ('email', 'm-1', 'c1', 'inbound', 'Closing Friday', 'triaged',
+        't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 6);
+    addTearDown(db.close);
+
+    // The step creates the table and nothing else: an upgrade must not admit
+    // the mail that was already sitting there, or the first launch after the
+    // update announces the whole backlog.
+    final pending = await db
+        .customSelect('SELECT COUNT(*) AS c FROM message_notify')
+        .getSingle();
+    expect(pending.data['c'], 0);
+
+    final subject = await db
+        .customSelect('SELECT subject FROM messages WHERE source_message_id = ?',
+            variables: [Variable('m-1')])
+        .getSingle();
+    expect(subject.data['subject'], 'Closing Friday');
+
+    final indexes = (await db
+            .customSelect("SELECT name FROM sqlite_master WHERE type = 'index'")
+            .get())
+        .map((r) => r.data['name'])
+        .toSet();
+    expect(indexes, containsAll(['ix_message_notify_open', 'ix_messages_created']));
+  });
+
+  test('v6 to v7 backfills cluster_hash on auto-created storylines only',
+      () async {
+    final schema = await verifier.schemaAt(6);
+    schema.rawDatabase.execute("""
+      INSERT INTO storylines (id, title, status, created_by, title_locked,
+        charter_locked, pinned, member_hash, created_at, updated_at)
+      VALUES
+        ('sl-auto', 'Website redesign', 'dismissed', 'auto', 0, 0, 0, 'h-auto',
+          't', 't'),
+        ('sl-user', 'Tahoe trip', 'active', 'user', 1, 0, 0, 'h-user', 't', 't'),
+        ('sl-unhashed', 'Untitled', 'active', 'auto', 0, 0, 0, NULL, 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 7);
+    addTearDown(db.close);
+
+    // Both hashes per row, so the backfill is pinned to READ member_hash and
+    // to leave it alone — copying one column must not cost the other.
+    Future<Map<String, List<Object?>>> hashesOf() async {
+      final rows = await db
+          .customSelect('SELECT id, member_hash, cluster_hash FROM storylines')
+          .get();
+      return {
+        for (final row in rows)
+          row.data['id'] as String: [
+            row.data['member_hash'],
+            row.data['cluster_hash'],
+          ],
+      };
+    }
+
+    // An auto-created row's `member_hash` started life as the cluster's hash,
+    // so copying it forward is the closest thing to the truth that exists on
+    // disk — and it is exactly the value the dismissal check used before this
+    // column. A row a person made was never proposed out of a cluster, so it
+    // gets nothing; `null` rather than `isNull`, which drift exports into this
+    // file under the same name.
+    expect(await hashesOf(), {
+      'sl-auto': ['h-auto', 'h-auto'],
+      'sl-user': ['h-user', null],
+      'sl-unhashed': [null, null],
+    });
+
+    // The dismissal check reads the backfilled value on the arm that matters.
+    final found = await db
+        .customSelect(
+            "SELECT 1 FROM storylines WHERE status = 'dismissed' "
+            'AND (cluster_hash = ? OR member_hash = ?) LIMIT 1',
+            variables: [Variable('h-auto'), Variable('h-auto')])
+        .get();
+    expect(found, hasLength(1));
+
+    // And the column takes a write, which a STRICT table would reject if the
+    // step had declared it as anything but TEXT.
+    await db.customStatement(
+        "UPDATE storylines SET cluster_hash = 'c-user' WHERE id = 'sl-user'");
+    expect((await hashesOf())['sl-user'], ['h-user', 'c-user']);
+  });
 }

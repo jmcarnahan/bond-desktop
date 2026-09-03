@@ -169,8 +169,9 @@ class _AddThreadToStorylinePaneState extends State<AddThreadToStorylinePane> {
 
 /// Which storyline this thread joins — or the one it starts.
 class AddToStorylinePane extends StatefulWidget {
-  /// The storylines that can take the thread, already stripped of suggestions
-  /// and of the ones it is in.
+  /// The storylines that can take the thread, stripped only of the ones it is
+  /// already in. Suggestions are on offer here: filing a thread into one is
+  /// accepting it.
   final List<Storyline> choices;
 
   final VoidCallback onBack;

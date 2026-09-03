@@ -2,11 +2,15 @@
 // from the tables, and this file means the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart' show TriageResult;
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:bond_inbox/widgets/chips.dart';
+import 'package:bond_inbox/widgets/quick_replies.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/storyline_pickers.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
@@ -48,10 +52,16 @@ void main() {
 
   tearDown(() => db.close());
 
+  /// One inbound message and the conversation row it folds into. [state] is
+  /// `waiting` unless the test needs an open ask on screen: the ask lines and
+  /// the CTA banner are both rendered only while the thread still wants the
+  /// user, so a `needs_reply` row is what puts them there.
   Future<void> seedThread(
     String key,
     String subject, {
     String source = 'email',
+    String receivedAt = '2026-08-28T09:00:00Z',
+    String state = 'waiting',
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -59,25 +69,34 @@ void main() {
       'conversation_key': key,
       'direction': 'inbound',
       'subject': subject,
-      'received_at': '2026-08-28T09:00:00Z',
+      'received_at': receivedAt,
       'body_text': 'body',
     });
     await store.upsertConversation({
       'source': source,
       'conversation_key': key,
       'subject': subject,
-      'state': 'waiting',
-      'last_message_at': '2026-08-28T09:00:00Z',
+      'state': state,
+      'last_message_at': receivedAt,
     });
   }
+
+  /// The reply pills by label, and which one is filled. The source filter bar
+  /// is made of the same pill, so this reads them by name rather than counting
+  /// what is on screen.
+  Map<String, bool> replyPills(WidgetTester tester) => {
+        for (final pill
+            in tester.widgetList<BondFilterPill>(find.byType(BondFilterPill)))
+          pill.label: pill.selected,
+      };
 
   /// Runs out the 400ms reload debounce the triage and AI queues arm when they
   /// report, so the test does not end with one pending.
   Future<void> settleQueues(WidgetTester tester) =>
       tester.pump(const Duration(milliseconds: 500));
 
-  /// Opens the storyline named [title] in the main pane.
-  Future<void> openStoryline(WidgetTester tester, String title) async {
+  /// The screen itself, over the seeded store, settled enough to click.
+  Future<void> pumpInbox(WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -86,6 +105,12 @@ void main() {
       dbProvider.overrideWithValue(db),
       initialAppPrefsProvider.overrideWithValue(prefs),
       syncServiceProvider.overrideWithValue(_FakeSync()),
+      // Unstarted, so it owns no sweep timer. This file's container outlives
+      // the widget tree — it is disposed in a tearDown, after flutter_test has
+      // already checked for leaked timers — and nothing here is about
+      // notifications.
+      notificationCoordinatorProvider
+          .overrideWithValue(NotificationCoordinator(store)),
     ]);
     addTearDown(container.dispose);
 
@@ -98,6 +123,11 @@ void main() {
     await tester.pump();
     await tester.pump();
     await tester.pump();
+  }
+
+  /// Opens the storyline named [title] in the main pane.
+  Future<void> openStoryline(WidgetTester tester, String title) async {
+    await pumpInbox(tester);
 
     // The rail's storylines section is expanded by default, so the row is
     // already on screen.
@@ -227,6 +257,43 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('Add to storyline offers the suggestions too', (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await seedThread('c2', 'Launch date');
+    await store.insertStoryline(
+      id: 'sl-1',
+      title: 'Website redesign',
+      status: 'suggested',
+      createdBy: 'auto',
+    );
+    await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+
+    await pumpInbox(tester);
+    await tester.tap(find.text('Homepage copy').first);
+    await tester.pump();
+    await tester.pump();
+
+    // The menu route animates; a settle would never come back over the
+    // screen's periodic timer, so the pumps are bounded.
+    await tester.tap(find.byIcon(Icons.more_horiz));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Add to storyline…'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // Filing a thread into a suggestion is the user answering it. Holding the
+    // suggestions back was how a thread removed from one could never go back.
+    expect(
+      find.descendant(
+        of: find.byType(AddToStorylinePane),
+        matching: find.text('Website redesign'),
+      ),
+      findsOneWidget,
+    );
+    await settleQueues(tester);
+  });
+
   testWidgets('Dismiss on the panel retires a kept storyline', (tester) async {
     await seedThread('c1', 'Homepage copy');
     await store.insertStoryline(
@@ -289,5 +356,293 @@ void main() {
     expect(panel.conversation.source, 'teams');
     expect(panel.conversation.subject, 'Sarah Whitfield');
     await settleQueues(tester);
+  });
+
+  group('the storyline reply window', () {
+    Future<void> seedTwoThreadStoryline() async {
+      await seedThread('c1', 'Homepage copy');
+      await seedThread('c2', 'Launch date');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+    }
+
+    testWidgets('is shut until the user says they are writing', (tester) async {
+      await seedTwoThreadStoryline();
+      await openStoryline(tester, 'Website redesign');
+
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('Reply to'), findsNothing);
+      expect(find.text('Reply…'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('opens onto the pills and the box', (tester) async {
+      await seedTwoThreadStoryline();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Reply to'), findsOneWidget);
+      expect(find.text('Write a reply…'), findsOneWidget);
+      final pills = replyPills(tester);
+      expect(pills.containsKey('Homepage copy'), isTrue);
+      expect(pills.containsKey('Launch date'), isTrue);
+      await settleQueues(tester);
+    });
+
+    testWidgets('and the close shuts it again', (tester) async {
+      await seedTwoThreadStoryline();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('Reply to'), findsNothing);
+      expect(find.text('Reply…'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a pill moves the box to that thread', (tester) async {
+      await seedTwoThreadStoryline();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
+
+      // Which member thread answers by default is the newest one's business,
+      // not this test's: whichever is not filled is the one to tap.
+      final before = replyPills(tester);
+      final wasOn =
+          before['Homepage copy'] == true ? 'Homepage copy' : 'Launch date';
+      final other =
+          wasOn == 'Homepage copy' ? 'Launch date' : 'Homepage copy';
+      expect(before[wasOn], isTrue);
+
+      // By the pill and not by its text: the list pane names the same thread.
+      await tester.tap(
+        find.byWidgetPredicate((w) => w is BondFilterPill && w.label == other),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final after = replyPills(tester);
+      expect(after[other], isTrue);
+      expect(after[wasOn], isFalse);
+      await settleQueues(tester);
+    });
+
+    testWidgets('two members sharing a key are two pills, one per connector',
+        (tester) async {
+      // The same conversation key on both sides, which is legal: keys are
+      // unique within the connector that issued them and nowhere else. Keyed
+      // on the bare key the picker held ONE of these and silently dropped the
+      // other, so replying to the chat would have answered the mail thread.
+      await seedThread('shared-1', 'Homepage copy');
+      await seedThread('shared-1', 'Sarah Whitfield',
+          source: 'teams', receivedAt: '2026-08-28T10:00:00Z');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'shared-1',
+          addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'teams', 'shared-1',
+          addedBy: 'auto');
+
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
+
+      final pills = replyPills(tester);
+      expect(pills.containsKey('Homepage copy'), isTrue);
+      expect(pills.containsKey('Sarah Whitfield'), isTrue);
+      // The chat is the newer of the two, so it is the default pick — and the
+      // pane routes it down the chat path, which this build cannot send on.
+      expect(pills['Sarah Whitfield'], isTrue);
+      expect(pills['Homepage copy'], isFalse);
+      expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
+      expect(find.text('Write a reply…'), findsNothing);
+
+      await tester.tap(
+        find.byWidgetPredicate(
+          (w) => w is BondFilterPill && w.label == 'Homepage copy',
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      // Same key, other connector: the box is the mail one now.
+      expect(replyPills(tester)['Homepage copy'], isTrue);
+      expect(find.text('Write a reply…'), findsOneWidget);
+      expect(find.text('Reply in Microsoft Teams'), findsNothing);
+      await settleQueues(tester);
+    });
+  });
+
+  group('a storyline is answerable from its episodes', () {
+    /// The same two threads, an hour apart, so which card opens on its own is
+    /// the spine's rule rather than a tie the database broke: the newest
+    /// episode is the open one, and here that is Launch date.
+    Future<void> seedTimedStoryline({String c1State = 'waiting'}) async {
+      await seedThread('c1', 'Homepage copy', state: c1State);
+      await seedThread('c2', 'Launch date', receivedAt: '2026-08-28T10:00:00Z');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+    }
+
+    /// One suggestion on [key], in the shape the draft handler writes.
+    Future<void> seedSuggestion(String key, String stance, String body) =>
+        store.upsertDraft(
+          source: 'email',
+          conversationKey: key,
+          replyToMessageId: '$key-m1',
+          body: body,
+          optionsJson: '[{"stance":"$stance","body":"$body"}]',
+        );
+
+    /// Marks [key]'s only message as still waiting on an answer.
+    Future<void> seedAsk(String key, String ask) => store.writeTriage(
+          'email',
+          '$key-m1',
+          status: 'done',
+          result: TriageResult(
+            urgency: 'normal',
+            category: 'other',
+            summary: key,
+            needsAction: true,
+            actionItems: [ask],
+            replyExpected: true,
+          ),
+        );
+
+    testWidgets('the suggestions sit on the episode they answer',
+        (tester) async {
+      await seedTimedStoryline();
+      await seedSuggestion('c2', 'Confirm Friday', 'Friday works for me.');
+
+      await openStoryline(tester, 'Website redesign');
+      // The draft is a round trip of its own, behind the timeline's.
+      await tester.pump();
+      await tester.pump();
+
+      // Inside the spine, on the open card — not parked under the pane.
+      expect(
+        find.descendant(
+          of: find.byType(StorylineTimelinePanel),
+          matching: find.byType(QuickReplyBar),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Friday works for me.'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('and a card without one shows nothing at all', (tester) async {
+      await seedTimedStoryline();
+
+      await openStoryline(tester, 'Website redesign');
+      await tester.pump();
+      await tester.pump();
+
+      // The pane's own Reply… owns the empty state; a bare button per card
+      // would say nothing about any of them.
+      expect(find.byType(QuickReplyBar), findsNothing);
+      expect(find.text('Reply…'), findsOneWidget);
+      expect(find.text('Suggest a reply'), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a card whose suggestions were closed offers them back',
+        (tester) async {
+      await seedTimedStoryline();
+      await seedSuggestion('c2', 'Confirm Friday', 'Friday works for me.');
+      // What the × writes once the user has confirmed it: the draft survives,
+      // its cards do not.
+      await store.dismissDraftOptions('email', 'c2');
+
+      await openStoryline(tester, 'Website redesign');
+      await tester.pump();
+      await tester.pump();
+
+      // The cards are gone, and the way back to them is on the card they were
+      // on — a dismissal nothing could undo is the reason this exists.
+      expect(find.byType(QuickReplyBar), findsNothing);
+      expect(find.text('Friday works for me.'), findsNothing);
+      expect(find.text('Suggest a reply'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('tapping a suggestion opens the reply on that thread',
+        (tester) async {
+      await seedTimedStoryline();
+      await seedSuggestion('c2', 'Confirm Friday', 'Friday works for me.');
+
+      await openStoryline(tester, 'Website redesign');
+      await tester.pump();
+      await tester.pump();
+
+      // Mail bottoms out at the clipboard, so a tap prefills rather than
+      // sends: what it owes the user is the box, open, on this thread.
+      await tester.tap(find.text('Friday works for me.'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Reply to'), findsOneWidget);
+      expect(replyPills(tester)['Launch date'], isTrue);
+      await settleQueues(tester);
+    });
+
+    testWidgets('an ask on an older episode opens the reply on ITS thread',
+        (tester) async {
+      // The ask line only renders while the thread still wants the user, so
+      // the older episode is seeded as one that does.
+      await seedTimedStoryline(c1State: 'needs_reply');
+      await seedAsk('c1', 'Send the deck');
+
+      await openStoryline(tester, 'Website redesign');
+      await tester.pump();
+
+      // The older card is shut by default; its header opens it.
+      await tester.tap(find.text('✉ Homepage copy'));
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.text('Send the deck'));
+      await tester.pump();
+      await tester.pump();
+
+      // Not the newest thread, which is what the box would answer if the tap
+      // had only opened it.
+      expect(find.text('Reply to'), findsOneWidget);
+      final pills = replyPills(tester);
+      expect(pills['Homepage copy'], isTrue);
+      expect(pills['Launch date'], isFalse);
+      await settleQueues(tester);
+    });
   });
 }

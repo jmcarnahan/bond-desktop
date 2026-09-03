@@ -28,7 +28,11 @@ class LaterDigestPanel extends StatelessWidget {
   /// own header.
   final String? dayFilter;
 
-  final void Function(String conversationId) onOpen;
+  /// The row's source travels with its id: the host cannot resolve one from
+  /// the other, because both connectors mint keys with no knowledge of each
+  /// other and a shared key would otherwise open whichever thread the host
+  /// happened to scan first.
+  final void Function(String source, String conversationId) onOpen;
 
   /// "This sender belongs in my inbox", by address — the standing correction.
   final void Function(String address, String source) onKeepSender;
@@ -191,7 +195,7 @@ class LaterDigestPanel extends StatelessWidget {
     return Material(
       color: BondColors.surface,
       child: InkWell(
-        onTap: () => onOpen(c.id),
+        onTap: () => onOpen(c.source, c.id),
         child: Padding(
           padding: const EdgeInsets.symmetric(
             horizontal: BondSpacing.s8,

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../models/open_asks.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'inline_alert.dart';
@@ -52,6 +53,12 @@ class ThreadDetailPanel extends StatelessWidget {
   /// or sending, which is the arrangement the composer already lives under.
   final Widget? afterTranscript;
 
+  /// Opens the reply window. Every ask on this pane — the banner and each
+  /// message's own line — is a call to action, so each one takes the reader
+  /// there. Null leaves them all as statements, for a host with no reply to
+  /// open.
+  final VoidCallback? onOpenReply;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -62,6 +69,7 @@ class ThreadDetailPanel extends StatelessWidget {
     this.onSendToLater,
     this.onKeepInInbox,
     this.afterTranscript,
+    this.onOpenReply,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -89,6 +97,13 @@ class ThreadDetailPanel extends StatelessWidget {
     Message? previous;
     var first = true;
 
+    // One scan of the thread answers the open-ask rule for every row in it.
+    // Anything but "needs reply" closes them: without this, a send that clears
+    // the banner leaves the ask lines lit for up to a minute until the sent
+    // message syncs back.
+    final lastOut = latestOutboundAt(messages);
+    final closed = conversation.state != ConversationState.needsReply;
+
     for (final message in messages) {
       final day = dayKeyOf(message);
       final label = formatDayLabel(message.receivedAt);
@@ -101,10 +116,18 @@ class ThreadDetailPanel extends StatelessWidget {
       previousDay = day;
       first = false;
 
+      final open = hasOpenAsk(
+        message,
+        lastOutboundAt: lastOut,
+        conversationClosed: closed,
+      );
       items.add(MessageRow(
         key: ValueKey(message.id),
         message: message,
         showHeader: previous == null || !sameRun(previous, message),
+        openAsk: open,
+        // Only a line that is actually on screen gets a tap.
+        onAskTap: open ? onOpenReply : null,
       ));
       previous = message;
     }
@@ -135,6 +158,14 @@ class ThreadDetailPanel extends StatelessWidget {
         cta != null &&
         cta.isNotEmpty;
 
+    // The banner names the newest ask only. When older ones are still open,
+    // the count says so — the transcript below is where they are read.
+    final openAsks = openAskCount(
+      messages,
+      conversationClosed:
+          conversation.state != ConversationState.needsReply,
+    );
+
     // A height-filling bordered surface, not a shrink-wrapping card: the
     // message ListView below needs a bounded height to scroll in.
     return Container(
@@ -160,12 +191,12 @@ class ThreadDetailPanel extends StatelessWidget {
               // Two lines, not however many the model wrote: the ask sits
               // directly above the transcript, and the tooltip keeps the full
               // text a hover away.
+              // The tooltip stays the bare ask: it exists to show the full
+              // text the banner had to clamp.
               child: Tooltip(
                 message: cta,
-                child: InlineAlert(
-                  severity: InlineAlertSeverity.attention,
-                  text: cta,
-                  maxLines: 2,
+                child: _ctaBanner(
+                  openAsks > 1 ? '$cta · $openAsks open asks' : cta,
                 ),
               ),
             ),
@@ -194,6 +225,31 @@ class ThreadDetailPanel extends StatelessWidget {
                   ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// The ask above the transcript. It is the largest statement on the pane of
+  /// what this thread wants, so it is also the shortest way to answer it: with
+  /// a reply to open, the whole banner is the click.
+  ///
+  /// Its own transparent Material, because ink paints on the nearest Material
+  /// ANCESTOR — which here is behind the pane's opaque surface, where no hover
+  /// could ever show.
+  Widget _ctaBanner(String text) {
+    final alert = InlineAlert(
+      severity: InlineAlertSeverity.attention,
+      text: text,
+      maxLines: 2,
+    );
+    final onTap = onOpenReply;
+    if (onTap == null) return alert;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BondRadii.smAll,
+        child: alert,
       ),
     );
   }

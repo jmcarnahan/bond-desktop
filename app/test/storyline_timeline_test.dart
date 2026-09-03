@@ -14,15 +14,22 @@ Message _message({
   String address = 'sarah@example.com',
   String? body,
   String source = 'email',
+  bool outbound = false,
+  bool? needsAction,
+  List<String> actionItems = const [],
+  String? deadline,
 }) =>
     Message(
       id: id,
       source: source,
-      outbound: false,
+      outbound: outbound,
       fromName: from,
       fromAddress: address,
       receivedAt: receivedAt,
       bodyText: body ?? 'body of $id',
+      needsAction: needsAction,
+      actionItems: actionItems,
+      deadline: deadline,
     );
 
 StorylineEpisode _episode({
@@ -122,6 +129,8 @@ void main() {
     bool newestFirst = false,
     VoidCallback? onToggleSort,
     VoidCallback? onDismiss,
+    Widget Function(StorylineEpisode episode)? episodeFooter,
+    void Function(StorylineEpisode episode)? onAskTap,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -140,6 +149,8 @@ void main() {
           newestFirst: newestFirst,
           onToggleSort: onToggleSort ?? () {},
           onDismiss: onDismiss ?? () {},
+          episodeFooter: episodeFooter,
+          onAskTap: onAskTap,
         ),
       ),
     ));
@@ -351,6 +362,225 @@ void main() {
       expect(find.text('The studio wants the hero paragraph cut.'),
           findsOneWidget);
     });
+
+    testWidgets('the banner counts the older asks still open', (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm attendance',
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+          _message(
+            id: 'm2',
+            receivedAt: '2026-08-01T09:30:00Z',
+            needsAction: true,
+            actionItems: ['Confirm attendance'],
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [asking]);
+
+      expect(find.text('Confirm attendance · 2 open asks'), findsOneWidget);
+    });
+
+    testWidgets('one open ask leaves the banner as the ask itself',
+        (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm attendance',
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [asking]);
+
+      expect(find.text('Confirm attendance'), findsOneWidget);
+      expect(find.textContaining('open asks'), findsNothing);
+    });
+
+    testWidgets('and the banner is the way into the reply', (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm attendance',
+        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
+      );
+      final tapped = <String>[];
+      await pumpPanel(
+        tester,
+        only: [asking],
+        onAskTap: (episode) => tapped.add(episode.conversationKey),
+      );
+
+      await tester.tap(find.text('Confirm attendance'));
+      await tester.pumpAndSettle();
+
+      expect(tapped, ['c1']);
+      // And NOT the header's collapse: the same copper text on the thread pane
+      // opens the reply, and it must not mean "shut the card" here.
+      expect(_renderedIds(tester), ['m1']);
+    });
+
+    testWidgets('and still collapses the card where there is no reply to open',
+        (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm attendance',
+        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
+      );
+      await pumpPanel(tester, only: [asking]);
+      expect(_renderedIds(tester), ['m1']);
+
+      await tester.tap(find.text('Confirm attendance'));
+      await tester.pumpAndSettle();
+
+      // Nothing absorbs the tap, so it reaches the header the banner sits in.
+      expect(_renderedIds(tester), isEmpty);
+    });
+  });
+
+  group('open asks in an episode', () {
+    testWidgets('an unanswered message carries its own ask', (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [asking]);
+
+      expect(find.text('Send the deck'), findsOneWidget);
+    });
+
+    testWidgets('a thread that is no longer waiting on the user carries none',
+        (tester) async {
+      // The reply went, the thread folded to waiting and the CTA was cleared in
+      // the same pass. The ask lines must not outlive that banner.
+      final answered = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [answered]);
+
+      expect(find.text('Send the deck'), findsNothing);
+    });
+
+    testWidgets('a later reply closes it', (tester) async {
+      final answered = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+          _message(
+            id: 'm2',
+            receivedAt: '2026-08-01T09:30:00Z',
+            outbound: true,
+            from: 'You',
+            address: 'me@example.com',
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [answered]);
+
+      expect(find.text('Send the deck'), findsNothing);
+    });
+
+    testWidgets('and a tap on one names the thread it is in', (tester) async {
+      final asking = _episode(
+        key: 'c2',
+        subject: 'Launch date',
+        state: ConversationState.needsReply,
+        messages: [
+          _message(
+            id: 'm2',
+            receivedAt: '2026-08-01T10:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+        ],
+      );
+      final tapped = <String>[];
+      await pumpPanel(
+        tester,
+        only: [homepage, asking],
+        onAskTap: (episode) => tapped.add(episode.conversationKey),
+      );
+
+      await tester.tap(find.text('Send the deck'));
+      await tester.pump();
+
+      // The answer goes to the conversation the ask is in, not to whichever
+      // one the storyline happens to end on.
+      expect(tapped, ['c2']);
+    });
+  });
+
+  group('the episode footer', () {
+    Widget footer(StorylineEpisode episode) =>
+        Text('footer for ${episode.conversationKey}');
+
+    testWidgets('rides at the end of an open card', (tester) async {
+      await pumpPanel(tester, episodeFooter: footer);
+
+      // The newest card is the one that opens on its own.
+      expect(find.text('footer for c2'), findsOneWidget);
+
+      // And it sits under the messages, where a reply to them belongs.
+      final message = tester.getBottomLeft(find.text('body of m2'));
+      expect(
+        tester.getTopLeft(find.text('footer for c2')).dy,
+        greaterThanOrEqualTo(message.dy),
+      );
+    });
+
+    testWidgets('and a shut card carries none', (tester) async {
+      await pumpPanel(tester, episodeFooter: footer);
+
+      expect(find.text('footer for c1'), findsNothing);
+    });
+
+    testWidgets('a panel given none renders none', (tester) async {
+      await pumpPanel(tester);
+
+      expect(find.textContaining('footer for'), findsNothing);
+    });
   });
 
   group('card actions', () {
@@ -382,7 +612,7 @@ void main() {
       expect(opened, ['teams/chat-1']);
     });
 
-    testWidgets('the close icon removes that thread from the storyline',
+    testWidgets('the close icon asks before it removes that thread',
         (tester) async {
       final removed = <String>[];
       await pumpPanel(
@@ -391,8 +621,56 @@ void main() {
       );
 
       await tester.tap(find.byTooltip('Remove from storyline').first);
+      await tester.pumpAndSettle();
+
+      // The first tap only arms. A × sitting next to Open thread is one slip
+      // away from taking a thread out of a group nobody meant to touch.
+      expect(removed, isEmpty);
+      expect(find.text('Remove thread'), findsOneWidget);
+      expect(find.text('Cancel'), findsOneWidget);
+
+      await tester.tap(find.text('Remove thread'));
+      await tester.pumpAndSettle();
 
       expect(removed, ['email/c1']);
+    });
+
+    testWidgets('and takes no for an answer, twice over', (tester) async {
+      final removed = <String>[];
+      await pumpPanel(
+        tester,
+        onRemoveThread: (source, key) => removed.add('$source/$key'),
+      );
+
+      await tester.tap(find.byTooltip('Remove from storyline').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(removed, isEmpty);
+      expect(find.text('Remove thread'), findsNothing);
+
+      // Disarmed, not spent: the × still asks the next time it is tapped.
+      await tester.tap(find.byTooltip('Remove from storyline').first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove thread'), findsOneWidget);
+    });
+
+    testWidgets('and only the card that was tapped asks anything',
+        (tester) async {
+      await pumpPanel(tester);
+
+      // Two cards on the spine; arming one must leave the other's icons alone,
+      // or the whole panel would look like it was about to lose everything.
+      expect(find.byTooltip('Remove from storyline'), findsNWidgets(2));
+
+      await tester.tap(find.byTooltip('Remove from storyline').first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove thread'), findsOneWidget);
+      expect(find.byTooltip('Remove from storyline'), findsOneWidget);
+      expect(find.byTooltip('Open thread'), findsOneWidget);
     });
   });
 
