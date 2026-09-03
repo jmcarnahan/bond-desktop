@@ -50,6 +50,20 @@ class FakeEmbeddings {
 
   FakeEmbeddings({this.vector = const [0.6, 0.8]});
 
+  /// One extraction now embeds TWICE, into two corpora that must never be
+  /// compared: the thread's clustering card, and the message's own search
+  /// card. Every count below is over one of them, because a bare total would
+  /// pass whichever of the two calls actually happened.
+  List<String> get clusteringInputs => [
+        for (final input in inputs)
+          if (input.startsWith(EmbeddingsClient.clusteringPrefix)) input,
+      ];
+
+  List<String> get documentInputs => [
+        for (final input in inputs)
+          if (input.startsWith(EmbeddingsClient.documentPrefix)) input,
+      ];
+
   EmbeddingsClient get client => EmbeddingsClient(
         baseUrl: 'http://localhost:8081/v1/embeddings',
         httpClient: MockClient((request) async {
@@ -252,7 +266,7 @@ void main() {
       await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
 
       expect(
-        embeddings.inputs.single,
+        embeddings.clusteringInputs.single,
         '${EmbeddingsClient.clusteringPrefix}'
         'Launch date | Sarah Chen, billing@vendor.example.com | launch date | '
         'Sarah needs the lock extended.',
@@ -282,7 +296,9 @@ void main() {
 
       // The whole reason a hash is stored: the tenth message of a thread must
       // not spend an embedding call to arrive at the same vector.
-      expect(embeddings.inputs.length, 1);
+      expect(embeddings.clusteringInputs.length, 1);
+      // The per-message card has its own hash, and the same guard.
+      expect(embeddings.documentInputs.length, 1);
     });
 
     test('a changed card is re-embedded', () async {
@@ -301,8 +317,11 @@ void main() {
       await runOne(handler);
       await runOne(handler);
 
-      expect(embeddings.inputs.length, 2);
-      expect(embeddings.inputs.last, contains('homepage copy, launch date'));
+      expect(embeddings.clusteringInputs.length, 2);
+      expect(
+        embeddings.clusteringInputs.last,
+        contains('homepage copy, launch date'),
+      );
     });
 
     test('an embedding server that is down does not cost the extraction',
@@ -329,7 +348,7 @@ void main() {
       await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
 
       expect(await store.getExtraction('email', 'm1'), isNotNull);
-      expect(embeddings.inputs, isEmpty);
+      expect(embeddings.clusteringInputs, isEmpty);
       expect(await store.getConversationAi('email', 'orphan'), isNull);
     });
 
@@ -355,6 +374,92 @@ void main() {
         (await store.getConversationAi('email', 'conv-1'))!['bucket'],
         'now',
       );
+    });
+  });
+
+  group('message vector at extraction time', () {
+    Future<Map<String, Object?>?> vectorRow(String id) async {
+      final rows = await db
+          .customSelect(
+            'SELECT * FROM message_vectors WHERE source_message_id = ?',
+            variables: [Variable<String>(id)],
+          )
+          .get();
+      return rows.isEmpty ? null : Map<String, Object?>.from(rows.first.data);
+    }
+
+    test('a successful extraction also makes the message searchable',
+        () async {
+      // The fast path: by the time a message has been extracted it is also
+      // findable, without the `embed_message` queue having had to drain.
+      await seedConversation();
+      await seedMessage(summary: 'Sarah needs the lock extended.');
+      final embeddings = FakeEmbeddings();
+
+      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+
+      final row = (await vectorRow('m1'))!;
+      expect(row['embed_model'], EmbeddingsClient.documentModelTag);
+      expect(row['received_at'], '2026-08-29T10:00:00Z');
+      expect(row['embedded_hash'], isNotNull);
+      // The message's OWN text, under the document prefix — not the thread's
+      // clustering card.
+      expect(
+        embeddings.documentInputs.single,
+        '${EmbeddingsClient.documentPrefix}'
+        'Launch date | From: Sarah <sarah@x.com> | '
+        'Sarah needs the lock extended. | Can we still ship on Thursday?',
+      );
+    });
+
+    test('an orphan thread still gets its message vector', () async {
+      // The conversation card needs a conversation row; the message card does
+      // not. A thread whose conversation never landed must still be findable.
+      await seedMessage(conversationKey: 'orphan');
+      final embeddings = FakeEmbeddings();
+
+      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+
+      expect(await vectorRow('m1'), isNotNull);
+    });
+
+    test('an embedding server that is down does not cost the extraction',
+        () async {
+      await seedConversation();
+      await seedMessage();
+      final embeddings = FakeEmbeddings(vector: null);
+
+      // Not a throw, for `_refreshCard`'s reason: the facts are already
+      // stored, and failing the item would re-run the model call that
+      // succeeded in order to retry an optimisation.
+      await runOne(ExtractHandler(store, FakeLlm([answer()]), embeddings.client));
+
+      expect(await store.getExtraction('email', 'm1'), isNotNull);
+      expect(await vectorRow('m1'), isNull);
+    });
+
+    test('and through the worker, the item is still done', () async {
+      await seedConversation();
+      await seedMessage();
+      await store.enqueueWork('extract', 'email', 'm1');
+      final worker = AiWorker(
+        store,
+        handlers: [
+          ExtractHandler(
+            store,
+            FakeLlm([answer()]),
+            FakeEmbeddings(vector: null).client,
+          )
+        ],
+      );
+
+      await worker.pump();
+
+      // `done`, and not `pending`: an unreachable EMBEDDING server must never
+      // park the extraction queue, which talks to a different server.
+      expect(await store.workCounts('extract'), {'done': 1});
+      expect(await store.getExtraction('email', 'm1'), isNotNull);
+      expect(await vectorRow('m1'), isNull);
     });
   });
 
@@ -552,7 +657,8 @@ void main() {
 
       expect(await store.workCounts('extract'), {'done': 1});
       expect(await store.getExtraction('email', 'm1'), isNotNull);
-      expect(embeddings.inputs.length, 1);
+      expect(embeddings.clusteringInputs.length, 1);
+      expect(embeddings.documentInputs.length, 1);
     });
 
     test('a model server that is down leaves the item queued', () async {

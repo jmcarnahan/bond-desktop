@@ -61,6 +61,28 @@ class EmbedResult {
 /// an [EmbedOutcome], because "the server is not running" and "the server
 /// answered nonsense" are the same null and opposite decisions — one is worth
 /// queueing a retry for and the other is not.
+///
+/// ## Two corpora, one server
+///
+/// EmbeddingGemma is prompt-conditioned, so the prefix a text is embedded
+/// under decides which space its vector lives in. This app keeps TWO, and they
+/// are never mixed:
+///
+/// - **Conversation vectors**, written under [clusteringPrefix] and tagged
+///   [modelTag]. They are compared against EACH OTHER — that is what a
+///   storyline is — so they are symmetric by construction: every side of the
+///   comparison went in under the same prefix.
+/// - **Message vectors**, written under [documentPrefix] and tagged
+///   [documentModelTag], and SEARCHED with a query embedded under
+///   [searchQueryPrefix]. That asymmetry is the model's own contract for
+///   retrieval: documents go in as documents, questions go in as questions,
+///   and the pair is trained to land near each other.
+///
+/// A distance between two vectors from different corpora is a number with no
+/// meaning — not a bad answer, a meaningless one. The tag stored beside every
+/// vector is how that is prevented rather than merely hoped for: every read
+/// filters on the tag it expects, so a vector from the other corpus, or from
+/// an older prefix, is invisible instead of silently outranking real hits.
 class EmbeddingsClient {
   /// Overridable at build time (`--dart-define=EMBED_URL=…`).
   static const String defaultBaseUrl = String.fromEnvironment(
@@ -68,17 +90,40 @@ class EmbeddingsClient {
     defaultValue: 'http://localhost:8081/v1/embeddings',
   );
 
-  /// EmbeddingGemma is prompt-conditioned: the same text embedded under
-  /// different task prefixes lands in different places. Everything this app
-  /// embeds is being embedded to be CLUSTERED against other conversations, so
-  /// the prefix is fixed here rather than passed in — a mixed corpus, half
-  /// written under one prefix and half under another, is a corpus whose
-  /// distances mean nothing.
+  /// The conversation corpus: threads embedded to be measured against other
+  /// threads.
+  ///
+  /// It is the DEFAULT of [embedResult] and [embed], and that is load-bearing
+  /// rather than tidy. Every conversation vector already in the database was
+  /// written through a call with no prefix argument, and a call that sends one
+  /// byte more or less produces a vector in a different place — which would
+  /// orphan every stored vector and quietly stop storylines from growing. The
+  /// default is what keeps those call sites byte-identical.
   static const String clusteringPrefix = 'task: clustering | query: ';
 
-  /// Stored beside every vector. Two vectors are only comparable when this
-  /// matches, so a model swap is detectable rather than silently poisonous.
+  /// Stored beside every conversation vector. Two vectors are only comparable
+  /// when this matches, so a model swap is detectable rather than silently
+  /// poisonous.
   static const String modelTag = 'embeddinggemma-300M/clustering';
+
+  /// The message corpus, written side: one message as a retrievable document.
+  ///
+  /// `title: none` because a message's subject is already inside the card
+  /// text; the model's document form wants the slot filled either way.
+  static const String documentPrefix = 'title: none | text: ';
+
+  /// The message corpus, asking side: what a person typed into the search box.
+  ///
+  /// Deliberately NOT [documentPrefix]. The model is trained so a query under
+  /// this prefix lands near the documents that answer it, and embedding the
+  /// query as though it were a document instead is the classic way to build a
+  /// search that returns plausible-looking noise.
+  static const String searchQueryPrefix = 'task: search result | query: ';
+
+  /// Stored beside every message vector, and filtered on by every search.
+  /// Distinct from [modelTag] because the two corpora share one table's worth
+  /// of habits and none of their geometry.
+  static const String documentModelTag = 'embeddinggemma-300M/document';
 
   /// A 300M model on Metal answers in well under a second. This ceiling is for
   /// a wedged server, not a slow one.
@@ -108,11 +153,18 @@ class EmbeddingsClient {
   ///
   /// The shape every caller had before outcomes existed, and still the right
   /// one for a caller that would do the same thing either way.
-  Future<List<double>?> embed(String text) async =>
-      (await embedResult(text)).vector;
+  Future<List<double>?> embed(String text, {String prefix = clusteringPrefix}) async =>
+      (await embedResult(text, prefix: prefix)).vector;
 
   /// One vector for [text], with why there isn't one when there isn't.
-  Future<EmbedResult> embedResult(String text) async {
+  ///
+  /// [prefix] chooses the corpus — see the class doc. It defaults to
+  /// [clusteringPrefix] so that every caller written before there was a second
+  /// corpus keeps sending exactly the bytes it always sent.
+  Future<EmbedResult> embedResult(
+    String text, {
+    String prefix = clusteringPrefix,
+  }) async {
     final http.Response response;
     try {
       response = await _http
@@ -120,7 +172,7 @@ class EmbeddingsClient {
             Uri.parse(baseUrl),
             headers: const {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'input': '$clusteringPrefix$text',
+              'input': '$prefix$text',
               // llama-server ignores the name — it serves what was loaded —
               // but the OpenAI request schema requires the field.
               'model': 'embed',

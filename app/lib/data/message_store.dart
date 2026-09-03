@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:drift/drift.dart';
 
@@ -7,6 +8,7 @@ import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import 'database.dart' show BondDatabase;
 import 'progress_sql.dart';
+import 'vec_index.dart';
 
 /// Which Microsoft identity the mail rows in this database belong to, stored in
 /// `app_prefs` alongside the settings but emphatically not one of them: it is
@@ -113,6 +115,17 @@ class MessageStore {
   final BondDatabase db;
 
   MessageStore(this.db);
+
+  /// The nearest-neighbour index over `message_vectors`, owned here.
+  ///
+  /// The store owns it because everything that touches it — [semanticSearch]
+  /// reading, [indexPendingVectors] filing — has to be looking at the SAME
+  /// connection the durable vectors were written down. `late final` rather
+  /// than a constructor argument because the index's lifetime is exactly this
+  /// store's, which is exactly the database's: [MessageVectorIndex.ensureReady]
+  /// memoizes its answer per connection, so one that outlived a database swap
+  /// would keep reporting on a connection nobody is using any more.
+  late final MessageVectorIndex _vecIndex = MessageVectorIndex(db);
 
   static String _nowIso() => DateTime.now().toUtc().toIso8601String();
 
@@ -1581,6 +1594,14 @@ RETURNING *
         variables: _args([dbOwnerKey, aboutMeKey]),
       );
     });
+    // The vec0 index is derived from `message_vectors`, and the DELETE above
+    // does not reach inside a virtual table: without this, the previous
+    // mailbox's floats would survive the wipe in the index's shadow tables —
+    // invisible to search (the hydrate join runs through the now-empty
+    // durable table) but present on disk, which is not what a wipe means.
+    // [MessageVectorIndex.rebuild] over an empty table is a drop and an empty
+    // refill, and it fail-softs to nothing on a build without the extension.
+    await _vecIndex.rebuild();
   }
 
   // ── per-message AI output ────────────────────────────────────────────
@@ -3089,11 +3110,18 @@ LIMIT ?
   /// Shared by the two paging reads and the live patch read on purpose: they
   /// must return the same shape, or the notifier would be replacing complete
   /// rows with rows that have holes in them.
-  static const String _homeFeedSelect = '''
-SELECT p.source, p.source_message_id, p.conversation_key, p.received_at,
+  /// The column list alone, so a read that needs the same row shape over a
+  /// DIFFERENT set of joins — [semanticSearch] comes in through
+  /// `message_vectors` — can have it without copying eighteen column names
+  /// that [HomeFeedRow.fromRow] then has to keep agreeing with.
+  static const String _homeFeedColumns = '''
+p.source, p.source_message_id, p.conversation_key, p.received_at,
   p.triage_state, p.extract_state, p.storyline_state, p.settle_state,
   p.outcome, p.dropped, p.drop_reason, p.storyline_id, p.needs_you, p.urgency,
-  m.subject, m.from_name, m.from_address, s.title AS storyline_title
+  m.subject, m.from_name, m.from_address, s.title AS storyline_title''';
+
+  static const String _homeFeedSelect = '''
+SELECT $_homeFeedColumns
 FROM message_progress p
 JOIN messages m
   ON m.source = p.source AND m.source_message_id = p.source_message_id
@@ -3426,6 +3454,226 @@ WHERE received_at >= ?
       rows.addAll([for (final row in result) HomeFeedRow.fromRow(row.data)]);
     }
     return rows;
+  }
+
+  // ── message vectors & semantic search ────────────────────────────────
+
+  /// Stores one message's embedding, replacing whatever was there.
+  ///
+  /// Both arms of the conflict clear `indexed_at`, and that is the whole point
+  /// of writing it this way: `indexed_at IS NULL` IS the vec-index backfill's
+  /// worklist, so a re-embedded message re-enters it automatically. A row that
+  /// kept its old stamp would keep its old floats in the index forever while
+  /// the durable table said otherwise, and search would answer from a vector
+  /// nothing else in the app believes in.
+  ///
+  /// [dims] is stored truthfully — `vector.length`, never the constant — so a
+  /// blob of the wrong width is a row the index can see and skip rather than a
+  /// blob it feeds to vec0 and has refused.
+  Future<int> upsertMessageVector({
+    required String source,
+    required String sourceMessageId,
+    required Uint8List embedding,
+    required int dims,
+    required String embeddedHash,
+    required String embedModel,
+    String? receivedAt,
+  }) async {
+    final rows = await db.customWriteReturning(
+      '''
+INSERT INTO message_vectors (
+  source, source_message_id, embedding, dims, embedded_hash, embed_model,
+  received_at, embedded_at, indexed_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+ON CONFLICT(source, source_message_id) DO UPDATE SET
+  embedding = excluded.embedding,
+  dims = excluded.dims,
+  embedded_hash = excluded.embedded_hash,
+  embed_model = excluded.embed_model,
+  received_at = excluded.received_at,
+  embedded_at = excluded.embedded_at,
+  indexed_at = NULL
+RETURNING id
+''',
+      variables: _args([
+        source,
+        sourceMessageId,
+        embedding,
+        dims,
+        embeddedHash,
+        embedModel,
+        receivedAt,
+        _nowIso(),
+      ]),
+    );
+    return rows.first.data['id'] as int;
+  }
+
+  /// What a message was last embedded FROM, or null if it never was.
+  ///
+  /// The hash guard's read, and it returns the model tag beside the hash on
+  /// purpose: a matching hash under an old tag is not a reason to skip the
+  /// work, it is a reason to redo it.
+  Future<Map<String, Object?>?> messageVectorMeta(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT embedded_hash, embed_model FROM message_vectors '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    if (rows.isEmpty) return null;
+    return Map<String, Object?>.from(rows.first.data);
+  }
+
+  /// Files every durable vector the nearest-neighbour index has not seen yet,
+  /// and returns how many it attempted.
+  ///
+  /// Fail-soft by construction: 0 when the native index is unavailable, and no
+  /// throw either way. The vector writers call it straight after landing a
+  /// vector, which is what keeps search warm without anything in the app
+  /// having to schedule an index pass — the index is derived, so the cheapest
+  /// correct policy is to refill it the moment its source grows.
+  Future<int> indexPendingVectors() => _vecIndex.backfill();
+
+  /// Queues per-message embedding for the newest [cap] inbound messages
+  /// received since [sinceIso], and returns how many rows that added.
+  ///
+  /// [enqueueExtractBacklog]'s twin, and idempotent for the same reason: `OR
+  /// IGNORE` against the work table's primary key means finished work stays
+  /// finished and in-flight work is not re-queued, so running it after every
+  /// sync both picks up new mail and self-heals a queue a crash left short.
+  ///
+  /// The triage filter is fixed here rather than passed in, because unlike
+  /// extraction there is no caller who wants it any other way. Gated mail is
+  /// left out on the same reasoning that keeps it out of extraction, plus one
+  /// of its own: junk is not worth a vector, and one sender's newsletters are
+  /// so alike that they would fill every search's neighbourhood with the same
+  /// twenty rows.
+  ///
+  /// Rows carry the MESSAGE's `received_at` as their `created_at`, so the
+  /// worker's `created_at DESC` drain gives newest mail its vector first.
+  Future<int> enqueueEmbedBacklog({
+    int cap = 150,
+    required String sinceIso,
+    String source = 'email',
+  }) async {
+    final now = _nowIso();
+    return db.customUpdate(
+      '''
+INSERT OR IGNORE INTO work_items (
+  task_kind, source, entity_id, status, attempts, error, payload_json,
+  created_at, updated_at
+)
+SELECT 'embed_message', source, source_message_id, 'pending', 0, NULL, NULL,
+  COALESCE(received_at, ?), ?
+FROM messages
+WHERE source = ? AND direction = 'inbound'
+  AND triage_status IN ('pending', 'processing', 'triaged')
+  AND received_at >= ?
+ORDER BY received_at DESC
+LIMIT ?
+''',
+      variables: _args([now, now, source, sinceIso, cap]),
+    );
+  }
+
+  /// The feed rows nearest [queryEmbedding], closest first.
+  ///
+  /// Returns NULL when the index is unavailable, and that is a third answer
+  /// rather than an empty list on purpose: `const []` cannot tell "nothing in
+  /// this mailbox matches" from "the native index is not loaded on this
+  /// build", and the screen says something quite different for each — one is a
+  /// result, the other is a feature being off.
+  ///
+  /// The pipeline is KNN first, filters second, because vec0 can only be asked
+  /// for neighbours and not for neighbours-matching-a-predicate. So it
+  /// over-fetches and lets the dropped, date, source and model filters run in
+  /// SQL afterwards; [limit] is honoured on what survives.
+  ///
+  /// [embedModel] is required rather than defaulted, on
+  /// [conversationsWithEmbeddings]' precedent and for its reason: two vectors
+  /// are only comparable under one tag, the caller passes
+  /// `EmbeddingsClient.documentModelTag`, and this layer imports nothing
+  /// above itself.
+  Future<List<SemanticHit>?> semanticSearch(
+    Uint8List queryEmbedding, {
+    required String embedModel,
+    int limit = 50,
+    bool includeDropped = false,
+    String? sinceIso,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (!await _vecIndex.ensureReady()) return null;
+    if (sources.isEmpty) return const [];
+
+    // Heal before asking: a durable vector whose index write never landed — a
+    // width-change rebuild emptied the index, or the extension was missing
+    // for a moment — would otherwise stay unfindable until some unrelated
+    // embed happened to run. On the ordinary search this is one indexed read
+    // of an empty worklist.
+    await _vecIndex.backfill();
+
+    // Four times the ask, capped. The slack is what stops a filter from
+    // emptying the page — a window where half the hits are dropped rows still
+    // fills a screen — and the cap is what keeps the hydration query's
+    // parameter count (400 ids plus a handful) well under the 999 an older
+    // sqlite build could be compiled with.
+    final k = math.min(limit * 4, 400);
+    final hits = await _vecIndex.knn(queryEmbedding, k: k);
+    if (hits.isEmpty) return const [];
+
+    final ids = [for (final hit in hits) hit.id];
+    final where = StringBuffer(
+      'WHERE v.id IN (${_placeholders(ids.length)}) AND v.embed_model = ?',
+    );
+    final args = <Object?>[...ids, embedModel];
+    if (!includeDropped) where.write(' AND p.dropped = 0');
+    if (sinceIso != null) {
+      where.write(' AND p.received_at >= ?');
+      args.add(sinceIso);
+    }
+    where.write(' AND p.source IN (${_placeholders(sources.length)})');
+    args.addAll(sources);
+
+    final result = await db
+        .customSelect(
+          '''
+SELECT v.id AS vector_id, $_homeFeedColumns
+FROM message_vectors v
+JOIN message_progress p
+  ON p.source = v.source AND p.source_message_id = v.source_message_id
+JOIN messages m
+  ON m.source = p.source AND m.source_message_id = p.source_message_id
+LEFT JOIN storylines s ON s.id = p.storyline_id
+$where
+''',
+          variables: _args(args),
+        )
+        .get();
+
+    // The model-tag filter above is the one that cannot be dropped for
+    // tidiness: conversation vectors and vectors from an older prefix sit in
+    // the same table, and a distance measured against one of those is not a
+    // worse answer, it is a number with no meaning — which would still sort.
+    final byVector = <int, HomeFeedRow>{
+      for (final row in result)
+        row.data['vector_id'] as int: HomeFeedRow.fromRow(row.data),
+    };
+
+    // Back into the index's order. SQL returned a set; the ranking lives in
+    // [hits] and nowhere else.
+    final ranked = <SemanticHit>[];
+    for (final hit in hits) {
+      final row = byVector[hit.id];
+      if (row == null) continue;
+      ranked.add(SemanticHit(row, hit.distance));
+      if (ranked.length == limit) break;
+    }
+    return ranked;
   }
 
   /// The storylines the window was busiest with, most messages first.

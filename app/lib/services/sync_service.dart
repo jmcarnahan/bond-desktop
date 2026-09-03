@@ -160,6 +160,15 @@ class SyncService implements MailSync {
         source: _source,
       );
 
+      // The per-message search vectors, over the same window and on the same
+      // `OR IGNORE` idempotence — new mail is queued, and a backlog that
+      // predates the search feature refills itself without anyone asking.
+      await _store.enqueueEmbedBacklog(
+        cap: firstRunTriageCap,
+        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        source: _source,
+      );
+
       // The clustering pass over everything not in a storyline yet. One row, not
       // one per thread — there is one mailbox to sweep — and a requeue rather
       // than an enqueue, so the sweep that ran after the last sync runs again

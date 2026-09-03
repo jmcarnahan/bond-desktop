@@ -131,6 +131,22 @@ class HomeFeedRow {
   String get feedKey => '$source\n$sourceMessageId';
 }
 
+/// One semantic-search result: a feed row, and how far its message sat from
+/// the query.
+///
+/// [distance] is vec0's cosine distance, not a similarity — 0 is identical, 1
+/// is orthogonal, and smaller is better. It rides along rather than being
+/// thrown away because it is the only thing that can tell a screen the
+/// difference between "the top hit answers the question" and "the top hit is
+/// merely the least bad of a bad list".
+@immutable
+class SemanticHit {
+  final HomeFeedRow row;
+  final double distance;
+
+  const SemanticHit(this.row, this.distance);
+}
+
 /// The numbers over the feed, all of them over one window.
 ///
 /// One statement writes every field, which is what makes them agree with each

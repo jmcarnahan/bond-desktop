@@ -254,6 +254,14 @@ class TeamsSync {
         source: source,
       );
 
+      // And their search vectors, over the same window and the same idempotent
+      // insert — a chat is searchable on the same terms mail is.
+      await _store.enqueueEmbedBacklog(
+        cap: _extractCap,
+        sinceIso: floor,
+        source: source,
+      );
+
       // Chat ingest freshens discovery exactly as mail ingest does: the sweep
       // reads both connectors, so a chat can now SEED a storyline and not only
       // join one. A requeue rather than an enqueue, so the sweep that ran after

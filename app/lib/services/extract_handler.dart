@@ -6,6 +6,7 @@ import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attention.dart';
 import 'conversation_state.dart';
+import 'embed_handler.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
@@ -124,6 +125,33 @@ class ExtractHandler extends WorkHandler {
 
     await _fileBucket(source, row, result);
     await _refreshCard(source, row, result);
+    await _embedMessage(source, row);
+  }
+
+  /// Gives this ONE message its search vector, while the row is already in
+  /// hand.
+  ///
+  /// The fast path for search: by the time a message has been extracted it is
+  /// also findable, with no second queue having had to drain first. It carries
+  /// [_refreshCard]'s hard constraint — the extraction is already stored, so
+  /// nothing here may throw and turn a succeeded item into a retried one — and
+  /// drops one of its habits: there is no requeue. The `embed_message` queue
+  /// enqueued at sync time IS the healing path, and it parks on the same
+  /// unreachable server until `make embed` is running, so queueing anything
+  /// from here would only be a second name for the same wait.
+  ///
+  /// The summary it embeds is TRIAGE's, not this handler's extraction output.
+  /// That is deliberate: the card has to be buildable from the message row
+  /// alone, or [EmbedHandler] could not produce the same card without
+  /// re-running an extraction to get it.
+  Future<void> _embedMessage(String source, Map<String, Object?> row) async {
+    final outcome = await embedMessageRow(_store, _embeddings, source, row);
+    if (outcome == MessageEmbedOutcome.unavailable) {
+      _log.note({'message_embed': 'unavailable'});
+    }
+    if (outcome == MessageEmbedOutcome.rejected) {
+      _log.note({'message_embed': 'rejected'});
+    }
   }
 
   /// Files this message's thread into Later, or out of it, the moment the model
@@ -307,6 +335,41 @@ String buildConversationCard({
       topics.join(', '),
       summary?.trim() ?? '',
     ].join(' | ');
+
+/// How much of a message body reaches its embedding.
+///
+/// A vector is an average, and averaging over four thousand characters of
+/// quoted thread, signature and legal footer produces a vector about email in
+/// general rather than about this message. The first 1500 characters are where
+/// a person says the thing they wrote to say; everything past that is usually
+/// what someone else already said.
+const int messageCardBodyCap = 1500;
+
+/// The text ONE MESSAGE is embedded from — the search corpus, where
+/// [buildConversationCard] builds the clustering corpus.
+///
+/// Always four segments joined by ` | `, empty ones included, for the same
+/// reason the conversation card is: a fixed shape means the same message
+/// produces the same card twice, which is what makes [cardHash] a usable "has
+/// anything changed" test. Order runs from most to least stable — subject, who
+/// sent it, what triage said it was, what it actually says — so a long body
+/// cannot drown out the two lines that identify the message.
+String buildMessageCard({
+  required String? subject,
+  required String sender,
+  required String? summary,
+  required String? body,
+}) {
+  final text = (body ?? '').trim();
+  final clipped =
+      text.length > messageCardBodyCap ? text.substring(0, messageCardBodyCap) : text;
+  return [
+    stripReFw(subject),
+    sender.trim(),
+    summary?.trim() ?? '',
+    clipped,
+  ].join(' | ');
+}
 
 /// A cheap content hash: the card's length, then FNV-1a over its UTF-8 bytes.
 ///

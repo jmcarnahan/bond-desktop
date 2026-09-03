@@ -15,6 +15,7 @@ import '../services/backend/mail_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
+import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
@@ -26,6 +27,7 @@ import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
+import '../services/message_search.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
 import '../services/pipeline_progress.dart';
@@ -382,6 +384,18 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
   ),
 );
 
+/// Semantic search over messages.
+///
+/// A plain `Provider` because it holds nothing: it is the pairing of the
+/// embedding client with the store, and the one place that knows a query and a
+/// document are embedded under different prefixes.
+final messageSearchProvider = Provider<MessageSearch>(
+  (ref) => MessageSearch(
+    ref.watch(messageStoreProvider),
+    ref.watch(embeddingsClientProvider),
+  ),
+);
+
 /// The AI work queue. One for the whole app, for the same reason there is one
 /// [triageQueueProvider]: it is one queue over shared rows.
 ///
@@ -403,6 +417,17 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
         progress: ref.watch(pipelineProgressProvider),
+      ),
+      // After extraction and before the storylines. After, because the summary
+      // it embeds is triage's and the drain order keeps the fast server's slots
+      // for extraction while there is extraction left to do. Before, because it
+      // talks to no model at all: a park here is a park on the embedding
+      // server, and it parks only its own kind, so a missing `make embed` must
+      // never be allowed to sit in front of the storyline queue.
+      EmbedHandler(
+        ref.watch(messageStoreProvider),
+        ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
       ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
