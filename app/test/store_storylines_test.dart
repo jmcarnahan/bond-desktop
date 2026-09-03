@@ -55,6 +55,7 @@ void main() {
     String status = 'suggested',
     String createdBy = 'auto',
     String? memberHash,
+    String? clusterHash,
   }) async {
     await store.insertStoryline(
       id: id,
@@ -63,6 +64,7 @@ void main() {
       status: status,
       createdBy: createdBy,
       memberHash: memberHash,
+      clusterHash: clusterHash,
     );
     return id;
   }
@@ -280,15 +282,59 @@ void main() {
     });
   });
 
-  group('dismissedMemberHashExists', () {
+  group('dismissedHashExists', () {
     test('finds a dismissed storyline by its member hash', () async {
       await seedStoryline('sl-1', status: 'dismissed', memberHash: 'h1');
       await seedStoryline('sl-2', status: 'suggested', memberHash: 'h2');
 
-      expect(await store.dismissedMemberHashExists('h1'), isTrue);
+      expect(await store.dismissedHashExists('h1'), isTrue);
       // Still on screen, so not something to skip re-proposing.
-      expect(await store.dismissedMemberHashExists('h2'), isFalse);
-      expect(await store.dismissedMemberHashExists('h3'), isFalse);
+      expect(await store.dismissedHashExists('h2'), isFalse);
+      expect(await store.dismissedHashExists('h3'), isFalse);
+    });
+
+    test('finds a dismissed storyline by its cluster hash alone', () async {
+      // The tombstone shape: a cluster that never became a suggestion has a
+      // cluster hash and no members at all.
+      await seedStoryline('sl-1', status: 'dismissed', clusterHash: 'c1');
+
+      expect(await store.dismissedHashExists('c1'), isTrue);
+      expect(await store.dismissedHashExists('h1'), isFalse);
+    });
+
+    test('finds a dismissed storyline by its member hash alone', () async {
+      // The drifted shape read the other way round: membership moved after the
+      // proposal, so the two hashes name different sets and each has to answer
+      // for itself.
+      await seedStoryline(
+        'sl-1',
+        status: 'dismissed',
+        memberHash: 'h1',
+        clusterHash: 'c1',
+      );
+
+      expect(await store.dismissedHashExists('h1'), isTrue);
+      expect(await store.dismissedHashExists('c1'), isTrue);
+    });
+
+    test('a live storyline answers for neither hash', () async {
+      await seedStoryline(
+        'sl-1',
+        status: 'suggested',
+        memberHash: 'h1',
+        clusterHash: 'c1',
+      );
+      await seedStoryline(
+        'sl-2',
+        status: 'active',
+        memberHash: 'h2',
+        clusterHash: 'c2',
+      );
+
+      for (final hash in ['h1', 'c1', 'h2', 'c2']) {
+        expect(await store.dismissedHashExists(hash), isFalse,
+            reason: '$hash belongs to a storyline still on screen');
+      }
     });
   });
 

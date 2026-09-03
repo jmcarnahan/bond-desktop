@@ -36,7 +36,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 7;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -158,6 +158,32 @@ class BondDatabase extends _$BondDatabase {
                 await customStatement(
                   'CREATE INDEX IF NOT EXISTS ix_messages_created '
                   'ON messages(created_at DESC)',
+                );
+              },
+              // v7 — a storyline remembers the cluster it came from as well as
+              // who is in it now. `member_hash` is rewritten by every
+              // membership write, so a suggestion whose membership drifted
+              // before the user dismissed it stopped matching the cluster the
+              // next sweep rebuilt — and the app asked again about a group
+              // already refused. `cluster_hash` is written once at proposal
+              // time and never touched after.
+              //
+              // The backfill reads what auto-created rows already hold: their
+              // `member_hash` was written as the cluster's hash at insert. For
+              // an undrifted row that is exactly right; for a drifted one it
+              // is the same wrong value the check uses today, so nothing is
+              // lost. User-made storylines stay NULL — no cluster proposed
+              // them, and none will ever match them.
+              from6To7: (m, schema) async {
+                if (!await _columnExists('storylines', 'cluster_hash')) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.clusterHash,
+                  );
+                }
+                await customStatement(
+                  'UPDATE storylines SET cluster_hash = member_hash '
+                  "WHERE created_by = 'auto' AND cluster_hash IS NULL",
                 );
               },
             ),

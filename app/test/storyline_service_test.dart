@@ -886,6 +886,52 @@ void main() {
       expect(await store.assignedOrBlockedKeys('email'), isNot(contains('c3')));
     });
 
+    test('a suggestion born smaller than its cluster is recognised dismissed',
+        () async {
+      // The confirm pass drops c3, so the stored members are the pair while
+      // the cluster was the trio — the two hashes must differ AT INSERT, which
+      // is what pins the survivor-set `member_hash` write. Written as the
+      // cluster's hash instead, this dismissal would go unrecognised the
+      // moment c3 left the pool.
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c3',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T02:00:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(),
+          confirmAnswer(belongs: false),
+        ],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.sweep();
+      final first = (await store.loadStorylines()).single;
+      final hashes = (await db
+              .customSelect(
+                'SELECT member_hash, cluster_hash FROM storylines WHERE id = ?',
+                variables: [Variable(first.id)],
+              )
+              .getSingle())
+          .data;
+      expect(hashes['member_hash'], isNot(hashes['cluster_hash']));
+
+      await service.dismissSuggestion(first.id);
+
+      // c3 finishes, so the next sweep clusters the pair alone — the set the
+      // user was shown and refused. Only the member arm can know that: the
+      // cluster arm still names the trio.
+      await store.setConversationState('email', 'c3', ConversationState.done);
+      await service.sweep();
+
+      expect(await store.loadStorylines(), isEmpty);
+      expect(llm.callsFor('storyline_name'), 1);
+    });
+
     test('a yes the model is not confident about is a no', () async {
       await seedMailbox(store);
       final llm = FakeLlm({
@@ -922,15 +968,19 @@ void main() {
       expect(tombstone.createdBy, 'auto');
       expect(tombstone.title, 'Website redesign');
       expect(await store.membersOf(tombstone.id), isEmpty);
-      final hash = (await db
+      final hashes = (await db
               .customSelect(
-                'SELECT member_hash FROM storylines WHERE id = ?',
+                'SELECT member_hash, cluster_hash FROM storylines WHERE id = ?',
                 variables: [Variable(tombstone.id)],
               )
               .getSingle())
-          .data['member_hash'];
-      expect(hash, isNotNull);
-      expect(await store.dismissedMemberHashExists(hash! as String), isTrue);
+          .data;
+      // The cluster is this row's only identity: no member rows were written,
+      // so there is no stored set for `member_hash` to describe.
+      expect(hashes['cluster_hash'], isNotNull);
+      expect(hashes['member_hash'], null);
+      expect(await store.dismissedHashExists(hashes['cluster_hash']! as String),
+          isTrue);
       // Nothing to answer in the rail.
       expect(await store.loadStorylines(statuses: const ['suggested']),
           isEmpty);
@@ -1007,6 +1057,79 @@ void main() {
       // Dismissing frees c1 and c2 again, so the same four threads are back on
       // the table and the clustering is deterministic — without the hash guard
       // this would re-propose the group the user just threw away.
+      await service.sweep();
+
+      expect(await store.loadStorylines(), isEmpty);
+      expect(llm.callsFor('storyline_name'), 1);
+    });
+
+    test('a dismissed cluster whose membership drifted is not proposed again',
+        () async {
+      await seedMailbox(store);
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.sweep();
+      final first = (await store.loadStorylines()).single;
+
+      // The drift: the user files a third thread into the suggestion by hand,
+      // which rewrites `member_hash` over the bigger set. `cluster_hash` is
+      // untouched — it names the pair the sweep actually built and asked
+      // about.
+      await service.addThread(first.id, 'email', 'c3');
+      final hashes = (await db
+              .customSelect(
+                'SELECT member_hash, cluster_hash FROM storylines WHERE id = ?',
+                variables: [Variable(first.id)],
+              )
+              .getSingle())
+          .data;
+      expect(hashes['member_hash'], isNot(hashes['cluster_hash']));
+
+      await service.dismissSuggestion(first.id);
+
+      // c1 and c2 are free again and still the only pair close enough to
+      // link — c3 sits at cosine 0 — so the identical cluster re-forms. Only
+      // the cluster arm can recognise it: the member hash now describes three
+      // threads, and no cluster will ever hash to that.
+      await service.sweep();
+
+      expect(await store.loadStorylines(), isEmpty);
+      expect(llm.callsFor('storyline_name'), 1);
+    });
+
+    test('a storyline the user pruned before dismissing is recognised by its '
+        'members', () async {
+      // Three threads tight enough to cluster as one.
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'c3',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T02:00:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.sweep();
+      final first = (await store.loadStorylines()).single;
+      expect((await store.membersOf(first.id)).map((m) => m.conversationKey),
+          ['c1', 'c2', 'c3']);
+
+      // The user takes one thread out and then throws the rest away. What
+      // they said no to is the PAIR, which is what `member_hash` now holds.
+      await service.removeThread(first.id, 'email', 'c3');
+      await service.dismissSuggestion(first.id);
+
+      // c3 finishes, so the next sweep's pool is the pair alone and the
+      // cluster it builds hashes to something the proposal-time
+      // `cluster_hash` — taken over all three — cannot match.
+      await store.setConversationState('email', 'c3', ConversationState.done);
       await service.sweep();
 
       expect(await store.loadStorylines(), isEmpty);
@@ -1284,10 +1407,10 @@ void main() {
       final dismissed = (await store.getStoryline('sl-1'))!;
       expect(dismissed.status, 'dismissed');
       expect(dismissed.summary, 'The studio is reviewing the homepage copy.');
-      // The member rows are the record the hash was computed over. Deleting
-      // them would leave the app unable to recognise the cluster again.
+      // The member rows are the record of what the user was shown, and the
+      // hashes on the row are what recognise the group when it re-forms.
       expect(await store.membersOf('sl-1'), hasLength(1));
-      expect(await store.dismissedMemberHashExists('h1'), isTrue);
+      expect(await store.dismissedHashExists('h1'), isTrue);
     });
 
     test('renaming locks the title', () async {

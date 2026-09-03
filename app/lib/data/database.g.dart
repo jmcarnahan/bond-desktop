@@ -4731,6 +4731,17 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
     $customConstraints: 'NOT NULL DEFAULT 0',
     defaultValue: const CustomExpression('0'),
   );
+  static const VerificationMeta _clusterHashMeta = const VerificationMeta(
+    'clusterHash',
+  );
+  late final GeneratedColumn<String> clusterHash = GeneratedColumn<String>(
+    'cluster_hash',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -4746,6 +4757,7 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
     updatedAt,
     charter,
     charterLocked,
+    clusterHash,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -4851,6 +4863,15 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
         ),
       );
     }
+    if (data.containsKey('cluster_hash')) {
+      context.handle(
+        _clusterHashMeta,
+        clusterHash.isAcceptableOrUnknown(
+          data['cluster_hash']!,
+          _clusterHashMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -4912,6 +4933,10 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
         DriftSqlType.int,
         data['${effectivePrefix}charter_locked'],
       )!,
+      clusterHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}cluster_hash'],
+      ),
     );
   }
 
@@ -4944,6 +4969,15 @@ class Storyline extends DataClass implements Insertable<Storyline> {
   /// identical table_info — which the parity test compares in order.
   final String? charter;
   final int charterLocked;
+
+  /// The hash of the CLUSTER this storyline was proposed out of, written once
+  /// at insert and never again. `member_hash` above tracks the members as they
+  /// stand right now — every membership write overwrites it — so it cannot also
+  /// carry the identity of the group the user was originally asked about. A
+  /// dismissal is recognised on either: this column matches the cluster the
+  /// sweep rebuilds, `member_hash` matches the set as it stood when the user
+  /// said no. NULL on anything a person made — no cluster proposed it.
+  final String? clusterHash;
   const Storyline({
     required this.id,
     required this.title,
@@ -4958,6 +4992,7 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     required this.updatedAt,
     this.charter,
     required this.charterLocked,
+    this.clusterHash,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -4983,6 +5018,9 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       map['charter'] = Variable<String>(charter);
     }
     map['charter_locked'] = Variable<int>(charterLocked);
+    if (!nullToAbsent || clusterHash != null) {
+      map['cluster_hash'] = Variable<String>(clusterHash);
+    }
     return map;
   }
 
@@ -5009,6 +5047,9 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           ? const Value.absent()
           : Value(charter),
       charterLocked: Value(charterLocked),
+      clusterHash: clusterHash == null && nullToAbsent
+          ? const Value.absent()
+          : Value(clusterHash),
     );
   }
 
@@ -5031,6 +5072,7 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       updatedAt: serializer.fromJson<String>(json['updated_at']),
       charter: serializer.fromJson<String?>(json['charter']),
       charterLocked: serializer.fromJson<int>(json['charter_locked']),
+      clusterHash: serializer.fromJson<String?>(json['cluster_hash']),
     );
   }
   @override
@@ -5050,6 +5092,7 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       'updated_at': serializer.toJson<String>(updatedAt),
       'charter': serializer.toJson<String?>(charter),
       'charter_locked': serializer.toJson<int>(charterLocked),
+      'cluster_hash': serializer.toJson<String?>(clusterHash),
     };
   }
 
@@ -5067,6 +5110,7 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     String? updatedAt,
     Value<String?> charter = const Value.absent(),
     int? charterLocked,
+    Value<String?> clusterHash = const Value.absent(),
   }) => Storyline(
     id: id ?? this.id,
     title: title ?? this.title,
@@ -5083,6 +5127,7 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     updatedAt: updatedAt ?? this.updatedAt,
     charter: charter.present ? charter.value : this.charter,
     charterLocked: charterLocked ?? this.charterLocked,
+    clusterHash: clusterHash.present ? clusterHash.value : this.clusterHash,
   );
   Storyline copyWithCompanion(StorylinesCompanion data) {
     return Storyline(
@@ -5107,6 +5152,9 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       charterLocked: data.charterLocked.present
           ? data.charterLocked.value
           : this.charterLocked,
+      clusterHash: data.clusterHash.present
+          ? data.clusterHash.value
+          : this.clusterHash,
     );
   }
 
@@ -5125,7 +5173,8 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('charter: $charter, ')
-          ..write('charterLocked: $charterLocked')
+          ..write('charterLocked: $charterLocked, ')
+          ..write('clusterHash: $clusterHash')
           ..write(')'))
         .toString();
   }
@@ -5145,6 +5194,7 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     updatedAt,
     charter,
     charterLocked,
+    clusterHash,
   );
   @override
   bool operator ==(Object other) =>
@@ -5162,7 +5212,8 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt &&
           other.charter == this.charter &&
-          other.charterLocked == this.charterLocked);
+          other.charterLocked == this.charterLocked &&
+          other.clusterHash == this.clusterHash);
 }
 
 class StorylinesCompanion extends UpdateCompanion<Storyline> {
@@ -5179,6 +5230,7 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
   final Value<String> updatedAt;
   final Value<String?> charter;
   final Value<int> charterLocked;
+  final Value<String?> clusterHash;
   final Value<int> rowid;
   const StorylinesCompanion({
     this.id = const Value.absent(),
@@ -5194,6 +5246,7 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     this.updatedAt = const Value.absent(),
     this.charter = const Value.absent(),
     this.charterLocked = const Value.absent(),
+    this.clusterHash = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   StorylinesCompanion.insert({
@@ -5210,6 +5263,7 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     required String updatedAt,
     this.charter = const Value.absent(),
     this.charterLocked = const Value.absent(),
+    this.clusterHash = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        title = Value(title),
@@ -5229,6 +5283,7 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     Expression<String>? updatedAt,
     Expression<String>? charter,
     Expression<int>? charterLocked,
+    Expression<String>? clusterHash,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -5245,6 +5300,7 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
       if (updatedAt != null) 'updated_at': updatedAt,
       if (charter != null) 'charter': charter,
       if (charterLocked != null) 'charter_locked': charterLocked,
+      if (clusterHash != null) 'cluster_hash': clusterHash,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -5263,6 +5319,7 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     Value<String>? updatedAt,
     Value<String?>? charter,
     Value<int>? charterLocked,
+    Value<String?>? clusterHash,
     Value<int>? rowid,
   }) {
     return StorylinesCompanion(
@@ -5279,6 +5336,7 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
       updatedAt: updatedAt ?? this.updatedAt,
       charter: charter ?? this.charter,
       charterLocked: charterLocked ?? this.charterLocked,
+      clusterHash: clusterHash ?? this.clusterHash,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -5325,6 +5383,9 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     if (charterLocked.present) {
       map['charter_locked'] = Variable<int>(charterLocked.value);
     }
+    if (clusterHash.present) {
+      map['cluster_hash'] = Variable<String>(clusterHash.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -5347,6 +5408,7 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
           ..write('updatedAt: $updatedAt, ')
           ..write('charter: $charter, ')
           ..write('charterLocked: $charterLocked, ')
+          ..write('clusterHash: $clusterHash, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -11096,6 +11158,7 @@ typedef $StorylinesCreateCompanionBuilder =
       required String updatedAt,
       Value<String?> charter,
       Value<int> charterLocked,
+      Value<String?> clusterHash,
       Value<int> rowid,
     });
 typedef $StorylinesUpdateCompanionBuilder =
@@ -11113,6 +11176,7 @@ typedef $StorylinesUpdateCompanionBuilder =
       Value<String> updatedAt,
       Value<String?> charter,
       Value<int> charterLocked,
+      Value<String?> clusterHash,
       Value<int> rowid,
     });
 
@@ -11186,6 +11250,11 @@ class $StorylinesFilterComposer extends Composer<_$BondDatabase, Storylines> {
 
   ColumnFilters<int> get charterLocked => $composableBuilder(
     column: $table.charterLocked,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get clusterHash => $composableBuilder(
+    column: $table.clusterHash,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -11262,6 +11331,11 @@ class $StorylinesOrderingComposer extends Composer<_$BondDatabase, Storylines> {
     column: $table.charterLocked,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get clusterHash => $composableBuilder(
+    column: $table.clusterHash,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $StorylinesAnnotationComposer
@@ -11319,6 +11393,11 @@ class $StorylinesAnnotationComposer
     column: $table.charterLocked,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get clusterHash => $composableBuilder(
+    column: $table.clusterHash,
+    builder: (column) => column,
+  );
 }
 
 class $StorylinesTableManager
@@ -11362,6 +11441,7 @@ class $StorylinesTableManager
                 Value<String> updatedAt = const Value.absent(),
                 Value<String?> charter = const Value.absent(),
                 Value<int> charterLocked = const Value.absent(),
+                Value<String?> clusterHash = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => StorylinesCompanion(
                 id: id,
@@ -11377,6 +11457,7 @@ class $StorylinesTableManager
                 updatedAt: updatedAt,
                 charter: charter,
                 charterLocked: charterLocked,
+                clusterHash: clusterHash,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -11394,6 +11475,7 @@ class $StorylinesTableManager
                 required String updatedAt,
                 Value<String?> charter = const Value.absent(),
                 Value<int> charterLocked = const Value.absent(),
+                Value<String?> clusterHash = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => StorylinesCompanion.insert(
                 id: id,
@@ -11409,6 +11491,7 @@ class $StorylinesTableManager
                 updatedAt: updatedAt,
                 charter: charter,
                 charterLocked: charterLocked,
+                clusterHash: clusterHash,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

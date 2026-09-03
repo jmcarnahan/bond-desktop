@@ -575,8 +575,8 @@ class StorylineService {
   /// cluster holding a member it links to, and otherwise opens one of its own.
   /// That makes the result a pure function of the input: same rows and same
   /// vectors in, same clusters out, which is what
-  /// [MessageStore.dismissedMemberHashExists] depends on to recognise a
-  /// suggestion the user already threw away.
+  /// [MessageStore.dismissedHashExists] depends on to recognise a suggestion
+  /// the user already threw away.
   ///
   /// Full agglomerative clustering — repeatedly merging the closest pair —
   /// would find slightly better groups and is O(n³) on a list that is
@@ -634,11 +634,10 @@ class StorylineService {
   ) async {
     const nothing = (proposed: false, confirmed: 0, rejected: 0);
 
-    final keys = [
+    final clusterHash = _hashOfKeys([
       for (final row in rows) row['conversation_key'] as String? ?? '',
-    ]..sort();
-    final memberHash = cardHash(keys.join('\n'));
-    if (await _store.dismissedMemberHashExists(memberHash)) return nothing;
+    ]);
+    if (await _store.dismissedHashExists(clusterHash)) return nothing;
 
     final cards = <String>[];
     for (final row in rows) {
@@ -725,8 +724,13 @@ class StorylineService {
       // a row carrying its hash this same group would re-spend a naming call
       // and one confirmation per member on every sync, forever, to reach the
       // same answer. Dismissed is exactly the right status for that: nothing
-      // renders it, and `dismissedMemberHashExists` above stops the rebuilt
-      // cluster before any model is dialled.
+      // renders it, and `dismissedHashExists` above stops the rebuilt cluster
+      // before any model is dialled.
+      //
+      // `member_hash` stays null on purpose: no member rows are written below
+      // this branch, so there is no stored set for it to describe. The cluster
+      // is the only identity this row has, and the only one anything can
+      // rebuild.
       await _store.insertStoryline(
         id: id,
         title: result.title,
@@ -734,7 +738,7 @@ class StorylineService {
         charter: result.charter.isEmpty ? null : result.charter,
         status: 'dismissed',
         createdBy: 'auto',
-        memberHash: memberHash,
+        clusterHash: clusterHash,
       );
       return (proposed: false, confirmed: survivors.length, rejected: rejected);
     }
@@ -746,15 +750,20 @@ class StorylineService {
       charter: result.charter.isEmpty ? null : result.charter,
       status: 'suggested',
       createdBy: 'auto',
-      // The CLUSTER's hash, not the stored members' — the two are no longer
-      // the same thing once confirmation drops a thread. It has to be the
-      // cluster's: dismissing this suggestion returns every member to the
+      // Two hashes, because they answer two different questions once
+      // confirmation drops a thread. `member_hash` describes who is stored
+      // here, and every later membership write keeps it true. `cluster_hash`
+      // names the group the sweep built and the user is being asked about; it
+      // is never written again. Dismissing this returns every member to the
       // sweep pool (`assignedOrBlockedKeys` counts only suggested and active
-      // storylines), so the identical cluster re-forms on the next sweep, and
-      // only a hash over the whole of it is recognised by the cheap check
-      // above — before a single model call is spent re-deriving an answer the
-      // user already refused.
-      memberHash: memberHash,
+      // storylines), so the identical cluster re-forms on the next sweep and
+      // the cheap check above recognises it — before a single model call is
+      // spent re-deriving an answer the user already refused.
+      memberHash: _hashOfKeys([
+        for (final survivor in survivors)
+          survivor.row['conversation_key'] as String? ?? '',
+      ]),
+      clusterHash: clusterHash,
     );
     for (final survivor in survivors) {
       await _store.addStorylineMember(
@@ -800,10 +809,10 @@ class StorylineService {
       _store.updateStoryline(id, status: 'active');
 
   /// Retires a storyline — a suggestion the user never wanted, or a kept one
-  /// they are done with. The member rows stay either way: they are what
-  /// `member_hash` was computed over, and deleting them would leave the app
-  /// unable to recognise the same cluster when the very next sweep rebuilds
-  /// it.
+  /// they are done with. Nothing else moves: the row keeps both hashes, which
+  /// is what [MessageStore.dismissedHashExists] reads when the very next sweep
+  /// rebuilds the same cluster, and the member rows stay as the record of what
+  /// the user was actually shown.
   Future<void> dismissSuggestion(String id) =>
       _store.updateStoryline(id, status: 'dismissed');
 
@@ -1046,12 +1055,19 @@ class StorylineService {
   /// keys, sorted, hashed. Sorted because membership is a set — the same
   /// threads arriving in a different order are the same storyline.
   Future<String> _memberHashOf(String storylineId) async {
-    final keys = [
+    return _hashOfKeys([
       for (final member in await _store.membersOf(storylineId))
         member.conversationKey,
-    ]..sort();
-    return cardHash(keys.join('\n'));
+    ]);
   }
+
+  /// The one recipe behind `cluster_hash` and `member_hash`: conversation
+  /// keys, sorted, newline-joined, hashed. Every writer goes through here —
+  /// [MessageStore.dismissedHashExists] compares the two columns against a
+  /// hash built the same way, so a second recipe drifting from this one would
+  /// silently stop dismissals from being recognised.
+  String _hashOfKeys(Iterable<String> keys) =>
+      cardHash((keys.toList()..sort()).join('\n'));
 }
 
 /// A fresh storyline id: `sl-` and sixteen hex characters.

@@ -2167,17 +2167,27 @@ FROM storylines s''';
     required String status,
     required String createdBy,
     String? memberHash,
+    String? clusterHash,
   }) async {
     final now = _nowIso();
     await db.customUpdate(
       'INSERT INTO storylines '
       '(id, title, summary, charter, status, created_by, title_locked, '
-      'charter_locked, pinned, member_hash, last_activity_at, created_at, '
-      'updated_at) '
-      'VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?, NULL, ?, ?)',
-      variables: _args(
-        [id, title, summary, charter, status, createdBy, memberHash, now, now],
-      ),
+      'charter_locked, pinned, member_hash, cluster_hash, last_activity_at, '
+      'created_at, updated_at) '
+      'VALUES (?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, NULL, ?, ?)',
+      variables: _args([
+        id,
+        title,
+        summary,
+        charter,
+        status,
+        createdBy,
+        memberHash,
+        clusterHash,
+        now,
+        now,
+      ]),
     );
   }
 
@@ -2192,6 +2202,10 @@ FROM storylines s''';
   /// [summary] and [charter] use the [_unset] sentinel because null means
   /// something: a storyline whose summary should be cleared is a different
   /// write from one whose summary is simply not this call's business.
+  ///
+  /// There is deliberately no `clusterHash` here: `cluster_hash` is written
+  /// once by [insertStoryline] and immutable after, which is the whole reason
+  /// it can still name the group the user was asked about.
   Future<void> updateStoryline(
     String id, {
     String? title,
@@ -2404,7 +2418,7 @@ FROM storylines s''';
 
   /// Which live storylines one thread belongs to. Dismissed and archived ones
   /// are excluded: their member rows survive only as the record behind
-  /// [dismissedMemberHashExists], and a thread is not "in" a suggestion the
+  /// [dismissedHashExists], and a thread is not "in" a suggestion the
   /// user threw away.
   Future<List<String>> storylineIdsFor(
     String source,
@@ -2479,12 +2493,19 @@ FROM storylines s''';
   /// Whether this exact set of threads has already been proposed and thrown
   /// away. The sweep is deterministic, so without this a dismissed suggestion
   /// would be re-proposed identically on the very next sync.
-  Future<bool> dismissedMemberHashExists(String memberHash) async {
+  ///
+  /// Both hashes answer, because a storyline can be dismissed under a set that
+  /// is not the one it was proposed as. The `cluster_hash` arm recognises the
+  /// proposal-time group — immutable, and exactly what the sweep rebuilds. The
+  /// `member_hash` arm recognises the members as they stood at dismissal,
+  /// maintained by every membership write, which is what catches a group the
+  /// user pruned before saying no.
+  Future<bool> dismissedHashExists(String hash) async {
     final result = await db
         .customSelect(
           "SELECT 1 FROM storylines WHERE status = 'dismissed' "
-          'AND member_hash = ? LIMIT 1',
-          variables: _args([memberHash]),
+          'AND (cluster_hash = ? OR member_hash = ?) LIMIT 1',
+          variables: _args([hash, hash]),
         )
         .get();
     return result.isNotEmpty;
