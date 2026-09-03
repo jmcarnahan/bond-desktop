@@ -528,4 +528,24 @@ void main() {
     expect(rows, hasLength(1));
     expect(rows.single.data['storyline_id'], 'sl-a');
   });
+
+  test('v8 migration leaves no vec tables behind', () async {
+    // The sqlite-vec index over `message_vectors` is built lazily, at first
+    // search, and never by a migration — because `migrateAndValidate` diffs
+    // the whole of `sqlite_master` against the snapshot, so a `vec0` virtual
+    // table created during a step would fail all 21 pairs in the group above
+    // rather than this one test. This is the guard that says so out loud, so a
+    // later hand moving the CREATE into a step or into `beforeOpen` gets a
+    // sentence back instead of a wall of migration failures.
+    final schema = await verifier.schemaAt(7);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 8);
+    addTearDown(db.close);
+
+    final vecTables = await db
+        .customSelect(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'vec_messages%'")
+        .get();
+    expect(vecTables, isEmpty);
+  });
 }

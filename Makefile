@@ -89,7 +89,7 @@ RESET  := \033[0m
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop \
         app-install app-run app-test app-gen app-migrations app-analyze \
-        app-build bench ab ab-membership
+        app-build vec-vendor bench ab ab-membership
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -116,7 +116,8 @@ help:
 	@printf "  make bench        → live model benchmark (needs make fast up)\n"
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
-	@printf "  make app-build    → release build of the macOS app\n\n"
+	@printf "  make app-build    → release build of the macOS app\n"
+	@printf "  make vec-vendor   → re-download the sqlite-vec C sources (SHA-pinned)\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
 
@@ -578,6 +579,76 @@ drain:
 
 app-analyze:
 	@cd $(APP_DIR) && $(FLUTTER) analyze
+
+# ── vendored sqlite-vec sources ────────────────────────────────────────
+# The four C/H files under $(VEC_SRC) are COMMITTED, not fetched at build
+# time. `flutter test` and `flutter build` compile them through the
+# sqlite_vec_ffi hook package, and a clean checkout has to build with no
+# network at all — a build hook that downloads is a build that fails on a
+# plane, in CI without egress, and the day a release asset is renamed.
+#
+# So this target exists only to (re-)vendor, and it verifies what it fetched.
+# Note WHY the pins are literals here rather than read from the release: the
+# sqlite-vec release publishes a checksums.txt that covers the prebuilt
+# loadable binaries ONLY — the amalgamation tarball is not in it. There is
+# nothing upstream to check against, so these two SHA-256 values were measured
+# by hand at vendor time and any re-vendor is checked against them. A mismatch
+# means the asset changed under the tag, which is a thing to investigate, not
+# to wave through.
+#
+# sqlite-vec.c includes <sqlite3ext.h>, which the amalgamation does NOT ship.
+# Those headers come from SQLite's own amalgamation zip, and the version must
+# TRACK the SQLite the app actually links: the sqlite3 Dart package compiles
+# its own SQLite from source in its build hook, and sqlite3 3.5.2 pulls
+# sqlite-amalgamation-3500200. Bumping the sqlite3 package means bumping
+# SQLITE_AMALGAMATION here too, or the extension is compiled against one
+# API-routines struct and loaded into another.
+VEC_VERSION     := 0.1.9
+VEC_SHA256      := 3acd67cb4aff080c7050926fd3cf8227905fe5b7ee3829d8ee5024ab1283cf61
+SQLITE_AMALGAMATION := sqlite-amalgamation-3500200
+SQLITE_SHA256   := 387991de2834b5da2894119ff4173a9ea0779ea55ebcf53d9a40b24d1dc2484e
+VEC_URL := https://github.com/asg017/sqlite-vec/releases/download/v$(VEC_VERSION)/sqlite-vec-$(VEC_VERSION)-amalgamation.tar.gz
+SQLITE_URL := https://sqlite.org/2025/$(SQLITE_AMALGAMATION).zip
+VEC_SRC := $(APP_DIR)/packages/sqlite_vec_ffi/src
+
+vec-vendor:
+	@tmp=$$(mktemp -d) || exit 1; \
+	 trap 'rm -rf "$$tmp"' EXIT; \
+	 printf "$(BLUE)==>$(RESET) [1/2] sqlite-vec $(VEC_VERSION) amalgamation\n"; \
+	 curl -sfL -o "$$tmp/vec.tar.gz" "$(VEC_URL)" || { \
+	   printf "  $(RED)✗$(RESET) download failed: $(VEC_URL)\n"; exit 1; }; \
+	 got=$$(shasum -a 256 "$$tmp/vec.tar.gz" | awk '{print $$1}'); \
+	 if [ "$$got" != "$(VEC_SHA256)" ]; then \
+	   printf "  $(RED)✗$(RESET) SHA256 mismatch for sqlite-vec-$(VEC_VERSION)-amalgamation.tar.gz\n"; \
+	   printf "        want $(VEC_SHA256)\n"; \
+	   printf "        got  %s\n" "$$got"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) %s\n" "$$got"; \
+	 printf "$(BLUE)==>$(RESET) [2/2] $(SQLITE_AMALGAMATION) headers\n"; \
+	 curl -sfL -o "$$tmp/sqlite.zip" "$(SQLITE_URL)" || { \
+	   printf "  $(RED)✗$(RESET) download failed: $(SQLITE_URL)\n"; exit 1; }; \
+	 got=$$(shasum -a 256 "$$tmp/sqlite.zip" | awk '{print $$1}'); \
+	 if [ "$$got" != "$(SQLITE_SHA256)" ]; then \
+	   printf "  $(RED)✗$(RESET) SHA256 mismatch for $(SQLITE_AMALGAMATION).zip\n"; \
+	   printf "        want $(SQLITE_SHA256)\n"; \
+	   printf "        got  %s\n" "$$got"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) %s\n" "$$got"; \
+	 mkdir -p $(VEC_SRC); \
+	 tar -xzf "$$tmp/vec.tar.gz" -C "$$tmp" sqlite-vec.c sqlite-vec.h || exit 1; \
+	 unzip -qo "$$tmp/sqlite.zip" \
+	   "$(SQLITE_AMALGAMATION)/sqlite3.h" "$(SQLITE_AMALGAMATION)/sqlite3ext.h" \
+	   -d "$$tmp" || exit 1; \
+	 cp "$$tmp/sqlite-vec.c" "$$tmp/sqlite-vec.h" $(VEC_SRC)/; \
+	 cp "$$tmp/$(SQLITE_AMALGAMATION)/sqlite3.h" \
+	    "$$tmp/$(SQLITE_AMALGAMATION)/sqlite3ext.h" $(VEC_SRC)/; \
+	 for f in sqlite-vec.c sqlite-vec.h sqlite3.h sqlite3ext.h; do \
+	   printf "  $(GREEN)✓$(RESET) %8s  $(VEC_SRC)/%s\n" \
+	     "$$(du -h $(VEC_SRC)/$$f | cut -f1)" "$$f"; \
+	 done; \
+	 printf "  $(YELLOW)!$(RESET) these are committed — include them in the diff\n"
 
 app-build:
 	@cd $(APP_DIR) && $(FLUTTER) build macos --release $(APP_SECRET_DEFINE)
