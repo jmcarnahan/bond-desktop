@@ -8,6 +8,7 @@ import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/storyline_pickers.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
@@ -296,5 +297,103 @@ void main() {
     expect(panel.conversation.source, 'teams');
     expect(panel.conversation.subject, 'Sarah Whitfield');
     await settleQueues(tester);
+  });
+
+  group('the storyline reply window', () {
+    /// The reply pills by label, and which one is filled. The source filter
+    /// bar is made of the same pill, so this reads them by name rather than
+    /// counting what is on screen.
+    Map<String, bool> replyPills(WidgetTester tester) => {
+          for (final pill
+              in tester.widgetList<BondFilterPill>(find.byType(BondFilterPill)))
+            pill.label: pill.selected,
+        };
+
+    Future<void> seedTwoThreadStoryline() async {
+      await seedThread('c1', 'Homepage copy');
+      await seedThread('c2', 'Launch date');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+    }
+
+    testWidgets('is shut until the user says they are writing', (tester) async {
+      await seedTwoThreadStoryline();
+      await openStoryline(tester, 'Website redesign');
+
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('Reply to'), findsNothing);
+      expect(find.text('Reply…'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('opens onto the pills and the box', (tester) async {
+      await seedTwoThreadStoryline();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('Reply to'), findsOneWidget);
+      expect(find.text('Write a reply…'), findsOneWidget);
+      final pills = replyPills(tester);
+      expect(pills.containsKey('Homepage copy'), isTrue);
+      expect(pills.containsKey('Launch date'), isTrue);
+      await settleQueues(tester);
+    });
+
+    testWidgets('and the close shuts it again', (tester) async {
+      await seedTwoThreadStoryline();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.byTooltip('Close'));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(TextField), findsNothing);
+      expect(find.text('Reply to'), findsNothing);
+      expect(find.text('Reply…'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a pill moves the box to that thread', (tester) async {
+      await seedTwoThreadStoryline();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
+
+      // Which member thread answers by default is the newest one's business,
+      // not this test's: whichever is not filled is the one to tap.
+      final before = replyPills(tester);
+      final wasOn =
+          before['Homepage copy'] == true ? 'Homepage copy' : 'Launch date';
+      final other =
+          wasOn == 'Homepage copy' ? 'Launch date' : 'Homepage copy';
+      expect(before[wasOn], isTrue);
+
+      // By the pill and not by its text: the list pane names the same thread.
+      await tester.tap(
+        find.byWidgetPredicate((w) => w is BondFilterPill && w.label == other),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      final after = replyPills(tester);
+      expect(after[other], isTrue);
+      expect(after[wasOn], isFalse);
+      await settleQueues(tester);
+    });
   });
 }

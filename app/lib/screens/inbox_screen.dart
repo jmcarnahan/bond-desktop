@@ -21,6 +21,7 @@ import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
 import '../widgets/app_rail.dart';
+import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/inline_alert.dart';
@@ -130,6 +131,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// what the dropdown shows by default — a storyline has no inbox of its own
   /// to reply to, so the composer always answers exactly one real thread.
   String? _storylineReplyKey;
+
+  /// The storyline whose reply window is open, if any. Collapsed is the
+  /// DEFAULT here too: a storyline opens as a spine to read, and the box —
+  /// with the pills that pick which member thread it answers — appears when
+  /// the user says they are writing.
+  String? _storylineReplyOpenFor;
 
   /// Narrow layouts only: whether the rail overlay is up.
   bool _railOpen = false;
@@ -333,6 +340,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The reply target belongs to the storyline that was open, not to this
       // one; the default below picks the newest thread in the new timeline.
       _storylineReplyKey = null;
+      _storylineReplyOpenFor = null;
     });
     ref.read(storylineTimelineProvider(id).notifier).load();
   }
@@ -1244,7 +1252,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       members:
           ref.watch(storylineMembersProvider(storyline.id)).valueOrNull ??
               const [],
-      onBack: () => setState(() => _selectedStorylineId = null),
+      onBack: () => setState(() {
+        _selectedStorylineId = null;
+        _storylineReplyOpenFor = null;
+      }),
       onRename: (title) => notifier.rename(storyline.id, title),
       onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
       onRemoveThread: (source, key) async {
@@ -1266,6 +1277,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         setState(() {
           _selectedStorylineId = null;
           _addingToStorylineId = null;
+          _storylineReplyOpenFor = null;
         });
         unawaited(notifier.dismiss(storyline.id));
       },
@@ -1273,7 +1285,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
     // A storyline replies to any of its episodes, chats included: the group is
     // the unit of work, and the answer belongs wherever the conversation
-    // actually is. The dropdown names them all.
+    // actually is. The pills name them all.
     final targets = _replyTargets(episodes);
     final replyKey = _replyTargetFor(episodes, targets);
     final target = replyKey == null
@@ -1305,14 +1317,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Expanded(child: panel),
           if (target != null) ...[
             const SizedBox(height: BondSpacing.s12),
-            // Above the box rather than inside the `canReply` branch: when the
-            // picked episode is a chat this build cannot answer, the picker is
-            // exactly how the user reaches the thread it can.
-            _replyTargetPicker(target.conversationKey, targets),
-            const SizedBox(height: BondSpacing.s8),
-            // The target carries its own source — a picked chat is drafted and
-            // sent down the chat path, a picked thread down the mail one.
-            if (canReply) _composer(target) else _replyElsewhere(),
+            if (_storylineReplyOpenFor != storyline.id)
+              Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: () => setState(
+                      () => _storylineReplyOpenFor = storyline.id,
+                    ),
+                    icon: const Icon(Icons.reply_outlined, size: 16),
+                    label: const Text('Reply…'),
+                  ),
+                ],
+              )
+            else ...[
+              // The pills sit above the box rather than inside the `canReply`
+              // branch: when the picked episode is a chat this build cannot
+              // answer, they are exactly how the user reaches the thread it can.
+              _replyHeaderForStoryline(target.conversationKey, targets),
+              const SizedBox(height: BondSpacing.s8),
+              // The target carries its own source — a picked chat is drafted and
+              // sent down the chat path, a picked thread down the mail one.
+              if (canReply) _composer(target) else _replyElsewhere(),
+            ],
           ] else if (episodes.isNotEmpty) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
@@ -1369,7 +1395,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
-  Widget _replyTargetPicker(
+  /// Which member thread the open reply window is answering, and the way out
+  /// of it. The pills are the picker — every target is on screen at once, so
+  /// switching threads is one click and nothing has to open over the spine.
+  Widget _replyHeaderForStoryline(
     String selected,
     Map<String, ({String source, String subject})> targets,
   ) {
@@ -1377,32 +1406,39 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       children: [
         Text('Reply to', style: BondType.caption),
         const SizedBox(width: BondSpacing.s8),
-        Expanded(
-          child: DropdownButton<String>(
-            value: selected,
-            isExpanded: true,
-            underline: const SizedBox.shrink(),
-            items: [
-              for (final entry in targets.entries)
-                DropdownMenuItem<String>(
-                  value: entry.key,
-                  child: Text(
-                    entry.value.subject.isEmpty
-                        ? '(no subject)'
-                        : entry.value.subject,
-                    style: BondType.small,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-            ],
-            onChanged: (key) {
-              if (key == null) return;
-              setState(() => _storylineReplyKey = key);
-            },
-          ),
+        Expanded(child: _replyTargetPills(selected, targets)),
+        IconButton(
+          onPressed: () => setState(() => _storylineReplyOpenFor = null),
+          icon: const Icon(Icons.close),
+          iconSize: 16,
+          tooltip: 'Close',
+          padding: const EdgeInsets.all(BondSpacing.s4),
+          constraints: const BoxConstraints(),
+          visualDensity: VisualDensity.compact,
         ),
       ],
+    );
+  }
+
+  /// How much of a subject a pill carries. A pill's label does not ellipsize
+  /// and the row wraps, so one long subject would take a whole line to itself.
+  static const int _replyPillLabelCap = 40;
+
+  Widget _replyTargetPills(
+    String selected,
+    Map<String, ({String source, String subject})> targets,
+  ) {
+    return BondFilterPillRow<String>(
+      options: targets.keys.toList(),
+      selected: selected,
+      labelOf: (key) {
+        final subject = targets[key]!.subject;
+        final label = subject.isEmpty ? '(no subject)' : subject;
+        return label.length > _replyPillLabelCap
+            ? '${label.substring(0, _replyPillLabelCap)}…'
+            : label;
+      },
+      onSelected: (key) => setState(() => _storylineReplyKey = key),
     );
   }
 

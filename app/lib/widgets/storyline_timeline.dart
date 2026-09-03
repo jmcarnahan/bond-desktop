@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../models/open_asks.dart';
 import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
 import 'inline_alert.dart';
@@ -256,6 +257,13 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         cta != null &&
         cta.isNotEmpty;
 
+    // The banner names the newest ask only. When older ones are still open,
+    // the count says so — the messages below are where they are read.
+    final openAsks = openAskCount(
+      episode.messages,
+      conversationDone: episode.state == ConversationState.done,
+    );
+
     return InkWell(
       onTap: () => setState(
         () => _overrides[episode.threadKey] = !expanded,
@@ -299,11 +307,13 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                   // spent four lines saying it twice would crowd the spine.
                   if (showCta) ...[
                     const SizedBox(height: BondSpacing.s4),
+                    // The tooltip stays the bare ask: it exists to show the
+                    // full text the banner had to clamp.
                     Tooltip(
                       message: cta,
                       child: InlineAlert(
                         severity: InlineAlertSeverity.attention,
-                        text: cta,
+                        text: openAsks > 1 ? '$cta · $openAsks open asks' : cta,
                         maxLines: 2,
                       ),
                     ),
@@ -387,6 +397,10 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     Message? previous;
     var first = true;
 
+    // One scan of the thread answers the open-ask rule for every row in it.
+    final lastOut = latestOutboundAt(episode.messages);
+    final done = episode.state == ConversationState.done;
+
     for (final message in episode.messages) {
       final day = dayKeyOf(message);
       final label = formatDayLabel(message.receivedAt);
@@ -401,6 +415,11 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         key: ValueKey(message.id),
         message: message,
         showHeader: previous == null || !sameRun(previous, message),
+        openAsk: hasOpenAsk(
+          message,
+          lastOutboundAt: lastOut,
+          conversationDone: done,
+        ),
       ));
       previous = message;
     }

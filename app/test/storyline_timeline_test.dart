@@ -14,15 +14,22 @@ Message _message({
   String address = 'sarah@example.com',
   String? body,
   String source = 'email',
+  bool outbound = false,
+  bool? needsAction,
+  List<String> actionItems = const [],
+  String? deadline,
 }) =>
     Message(
       id: id,
       source: source,
-      outbound: false,
+      outbound: outbound,
       fromName: from,
       fromAddress: address,
       receivedAt: receivedAt,
       bodyText: body ?? 'body of $id',
+      needsAction: needsAction,
+      actionItems: actionItems,
+      deadline: deadline,
     );
 
 StorylineEpisode _episode({
@@ -350,6 +357,99 @@ void main() {
       expect(find.byType(InlineAlert), findsNothing);
       expect(find.text('The studio wants the hero paragraph cut.'),
           findsOneWidget);
+    });
+
+    testWidgets('the banner counts the older asks still open', (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm attendance',
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+          _message(
+            id: 'm2',
+            receivedAt: '2026-08-01T09:30:00Z',
+            needsAction: true,
+            actionItems: ['Confirm attendance'],
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [asking]);
+
+      expect(find.text('Confirm attendance · 2 open asks'), findsOneWidget);
+    });
+
+    testWidgets('one open ask leaves the banner as the ask itself',
+        (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm attendance',
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [asking]);
+
+      expect(find.text('Confirm attendance'), findsOneWidget);
+      expect(find.textContaining('open asks'), findsNothing);
+    });
+  });
+
+  group('open asks in an episode', () {
+    testWidgets('an unanswered message carries its own ask', (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [asking]);
+
+      expect(find.text('Send the deck'), findsOneWidget);
+    });
+
+    testWidgets('a later reply closes it', (tester) async {
+      final answered = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+          _message(
+            id: 'm2',
+            receivedAt: '2026-08-01T09:30:00Z',
+            outbound: true,
+            from: 'You',
+            address: 'me@example.com',
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [answered]);
+
+      expect(find.text('Send the deck'), findsNothing);
     });
   });
 

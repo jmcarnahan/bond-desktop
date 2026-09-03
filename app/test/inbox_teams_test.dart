@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/token_store.dart';
+import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:flutter/material.dart';
@@ -511,7 +512,27 @@ void main() {
       await tester.pump();
       await tester.pump();
       await tester.pump();
+
+      // A storyline's reply window is collapsed by default, the way a thread's
+      // is, so every test below has to ask for it before there is a target to
+      // pick or a box to type into.
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
     }
+
+    /// The reply targets by name, and which one the box is pointed at. The
+    /// source filter bar is built from the same pill, so these are read by
+    /// label rather than counted.
+    Map<String, bool> replyPills(WidgetTester tester) => {
+          for (final pill
+              in tester.widgetList<BondFilterPill>(find.byType(BondFilterPill)))
+            pill.label: pill.selected,
+        };
+
+    /// By the pill and not by its text: the list pane names the same threads.
+    Finder pillNamed(String label) =>
+        find.byWidgetPredicate((w) => w is BondFilterPill && w.label == label);
 
     testWidgets('a chat is offered as a target and drafted down the chat path',
         (tester) async {
@@ -520,11 +541,15 @@ void main() {
       // Both episodes are on offer, which is the change: a chat used to be
       // filtered out of the list entirely. The newest is the default target,
       // and here that is the chat.
-      final picker =
-          tester.widget<DropdownButton<String>>(find.byType(DropdownButton<String>));
-      expect(picker.items!.map((item) => item.value), ['c1', 'chat-1']);
-      expect(picker.value, 'chat-1');
-      // A chat message has no subject of its own, so the row is named by who
+      final labels = tester
+          .widgetList<BondFilterPill>(find.byType(BondFilterPill))
+          .map((pill) => pill.label)
+          .where((label) =>
+              label == 'Homepage copy' || label == 'Sarah Whitfield')
+          .toList();
+      expect(labels, ['Homepage copy', 'Sarah Whitfield']);
+      expect(replyPills(tester)['Sarah Whitfield'], isTrue);
+      // A chat message has no subject of its own, so the pill is named by who
       // is on it rather than by a blank.
       expect(find.text('Sarah Whitfield'), findsWidgets);
       expect(find.text('(no subject)'), findsNothing);
@@ -539,15 +564,11 @@ void main() {
         (tester) async {
       await openMixedStoryline(tester);
 
-      await tester.tap(find.byType(DropdownButton<String>));
-      // The menu is a route with an opening animation; a bare pump lands
-      // mid-transition, with nothing hit-testable yet.
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.tap(find.text('Homepage copy').last);
+      await tester.tap(pillNamed('Homepage copy'));
       await tester.pump();
       await tester.pump();
 
+      expect(replyPills(tester)['Homepage copy'], isTrue);
       final composer = tester.widget<Composer>(find.byType(Composer));
       expect(composer.capability, SendCapability.copyOnly,
           reason: 'this grant carries no Mail.Send and no Mail.ReadWrite');
@@ -563,13 +584,10 @@ void main() {
       expect(find.byType(Composer), findsNothing);
       expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
 
-      // The picker stays put above the caption, because it is the way to the
-      // episode this build CAN answer. Hiding it with the box would strand a
+      // The pills stay put above the caption, because they are the way to the
+      // episode this build CAN answer. Hiding them with the box would strand a
       // storyline whose newest episode happens to be a chat.
-      await tester.tap(find.byType(DropdownButton<String>));
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.tap(find.text('Homepage copy').last);
+      await tester.tap(pillNamed('Homepage copy'));
       await tester.pump();
       await tester.pump();
 
