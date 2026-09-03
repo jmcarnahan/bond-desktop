@@ -94,11 +94,16 @@ class MessageRow extends StatefulWidget {
   /// (`models/open_asks.dart`) in.
   final bool openAsk;
 
+  /// What tapping the ask does. Null leaves it a statement — a row whose host
+  /// has nowhere to send the tap must not look like it takes one.
+  final VoidCallback? onAskTap;
+
   const MessageRow({
     super.key,
     required this.message,
     this.showHeader = true,
     this.openAsk = false,
+    this.onAskTap,
   });
 
   @override
@@ -261,13 +266,17 @@ class _MessageRowState extends State<MessageRow> {
   /// The open ask, in the same copper ink an inbox row tints its CTA with.
   /// Triage names an action item where it can; where it only judged that a
   /// reply is owed, the generic line still has to say so.
+  ///
+  /// A call to action the reader can act on: where the host gave it somewhere
+  /// to go, the line is the way into the reply.
   Widget _askLine(Message message) {
     final ask = message.actionItems.isNotEmpty
         ? message.actionItems.first
         : 'Reply expected';
     final deadline = message.deadline;
 
-    return Wrap(
+    final onTap = widget.onAskTap;
+    final line = Wrap(
       crossAxisAlignment: WrapCrossAlignment.center,
       spacing: BondSpacing.s8,
       runSpacing: BondSpacing.s4,
@@ -282,6 +291,13 @@ class _MessageRowState extends State<MessageRow> {
         if (deadline != null && deadline.isNotEmpty)
           BondChip.semantic(deadline, BondTone.attention),
       ],
+    );
+
+    if (onTap == null) return line;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BondRadii.smAll,
+      child: line,
     );
   }
 

@@ -44,6 +44,15 @@ class QuickReplyBar extends StatelessWidget {
 
   final VoidCallback? onUndo;
 
+  /// Asks for suggestions on a thread that has none — including one whose
+  /// cards the user closed. Offered ONLY in the zero-options state: a bar
+  /// already holding suggestions has nothing to ask for, and the composer's
+  /// Regenerate is where a different pair comes from.
+  final VoidCallback? onSuggest;
+
+  /// A suggestion is being written right now.
+  final bool suggesting;
+
   const QuickReplyBar({
     super.key,
     this.options = const [],
@@ -53,6 +62,8 @@ class QuickReplyBar extends StatelessWidget {
     this.onDismiss,
     this.pending,
     this.onUndo,
+    this.onSuggest,
+    this.suggesting = false,
   });
 
   /// Enough of the reply to recognise which one is going, and no more — the
@@ -191,7 +202,12 @@ class QuickReplyBar extends StatelessWidget {
   /// The way into the composer, plus the × when there is something to close.
   /// Quiet on purpose: writing your own reply is the normal case, and it is one
   /// click either way.
+  ///
+  /// Asking for a suggestion sits beside it, and only where there is nothing to
+  /// suggest yet — that is what makes a dismissal reversible: the × takes the
+  /// cards away, and this button is how they come back.
   Widget _replyRow() {
+    final suggest = onSuggest;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -200,6 +216,12 @@ class QuickReplyBar extends StatelessWidget {
           icon: const Icon(Icons.reply_outlined, size: 16),
           label: const Text('Reply…'),
         ),
+        if (suggest != null && options.isEmpty)
+          TextButton.icon(
+            onPressed: suggesting ? null : suggest,
+            icon: const Icon(Icons.auto_awesome, size: 16),
+            label: Text(suggesting ? 'Drafting…' : 'Suggest a reply'),
+          ),
         const Spacer(),
         if (options.isNotEmpty && onDismiss != null)
           IconButton(

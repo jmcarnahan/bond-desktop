@@ -129,6 +129,8 @@ void main() {
     bool newestFirst = false,
     VoidCallback? onToggleSort,
     VoidCallback? onDismiss,
+    Widget Function(StorylineEpisode episode)? episodeFooter,
+    void Function(StorylineEpisode episode)? onAskTap,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -147,6 +149,8 @@ void main() {
           newestFirst: newestFirst,
           onToggleSort: onToggleSort ?? () {},
           onDismiss: onDismiss ?? () {},
+          episodeFooter: episodeFooter,
+          onAskTap: onAskTap,
         ),
       ),
     ));
@@ -450,6 +454,65 @@ void main() {
       await pumpPanel(tester, only: [answered]);
 
       expect(find.text('Send the deck'), findsNothing);
+    });
+
+    testWidgets('and a tap on one names the thread it is in', (tester) async {
+      final asking = _episode(
+        key: 'c2',
+        subject: 'Launch date',
+        messages: [
+          _message(
+            id: 'm2',
+            receivedAt: '2026-08-01T10:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+        ],
+      );
+      final tapped = <String>[];
+      await pumpPanel(
+        tester,
+        only: [homepage, asking],
+        onAskTap: (episode) => tapped.add(episode.conversationKey),
+      );
+
+      await tester.tap(find.text('Send the deck'));
+      await tester.pump();
+
+      // The answer goes to the conversation the ask is in, not to whichever
+      // one the storyline happens to end on.
+      expect(tapped, ['c2']);
+    });
+  });
+
+  group('the episode footer', () {
+    Widget footer(StorylineEpisode episode) =>
+        Text('footer for ${episode.conversationKey}');
+
+    testWidgets('rides at the end of an open card', (tester) async {
+      await pumpPanel(tester, episodeFooter: footer);
+
+      // The newest card is the one that opens on its own.
+      expect(find.text('footer for c2'), findsOneWidget);
+
+      // And it sits under the messages, where a reply to them belongs.
+      final message = tester.getBottomLeft(find.text('body of m2'));
+      expect(
+        tester.getTopLeft(find.text('footer for c2')).dy,
+        greaterThanOrEqualTo(message.dy),
+      );
+    });
+
+    testWidgets('and a shut card carries none', (tester) async {
+      await pumpPanel(tester, episodeFooter: footer);
+
+      expect(find.text('footer for c1'), findsNothing);
+    });
+
+    testWidgets('a panel given none renders none', (tester) async {
+      await pumpPanel(tester);
+
+      expect(find.textContaining('footer for'), findsNothing);
     });
   });
 

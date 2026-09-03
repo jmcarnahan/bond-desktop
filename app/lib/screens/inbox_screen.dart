@@ -1281,6 +1281,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         });
         unawaited(notifier.dismiss(storyline.id));
       },
+      // The suggestions ride on the episode they answer, not under the spine:
+      // a storyline is several conversations, and a card offering to reply has
+      // to say which one it would reply to.
+      episodeFooter: (episode) => _EpisodeQuickReplies(
+        target: (
+          source: episode.source,
+          conversationKey: episode.conversationKey,
+        ),
+        onOpenReply: () => _openStorylineReply(storyline.id, episode),
+        onQueueSend: (body) => unawaited(_queueQuickReply(
+          (source: episode.source, conversationKey: episode.conversationKey),
+          body,
+        )),
+        onUndo: () => _cancelQueuedSend(
+          (source: episode.source, conversationKey: episode.conversationKey),
+        ),
+      ),
+      onAskTap: (episode) => _openStorylineReply(storyline.id, episode),
     );
 
     // A storyline replies to any of its episodes, chats included: the group is
@@ -1395,6 +1413,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
+  /// Opens the storyline's reply window on one episode's thread.
+  ///
+  /// Both halves, always: a box that opened on a different thread than the ask
+  /// the user tapped would send the answer to the wrong conversation.
+  void _openStorylineReply(String storylineId, StorylineEpisode episode) {
+    setState(() {
+      _storylineReplyKey = episode.conversationKey;
+      _storylineReplyOpenFor = storylineId;
+    });
+  }
+
   /// Which member thread the open reply window is answering, and the way out
   /// of it. The pills are the picker — every target is on screen at once, so
   /// switching threads is one click and nothing has to open over the spine.
@@ -1505,6 +1534,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       afterTranscript: canReply && (answersSomebody || pending != null)
           ? _quickReplies(selected, target, draft)
           : null,
+      // Every ask on the pane is a call to action, so every one of them opens
+      // the box — the banner included. Null where there is no box to open.
+      onOpenReply:
+          canReply ? () => setState(() => _replyOpenFor = selected.id) : null,
       onAddToStoryline: () => setState(() => _pickingStorylineForThread =
           (source: selected.source, id: selected.id)),
       // Sender-scoped, because the screen is the layer that knows the address
@@ -1604,6 +1637,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onDismiss: () => unawaited(notifier.dismissOptions()),
       pending: draft.pending,
       onUndo: () => _cancelQueuedSend(target),
+      // The way back from the ×, and the way in for a thread the queue never
+      // drafted: `generate` deletes the row the dismissal is recorded on and
+      // asks the queue for a fresh pair.
+      onSuggest: () => unawaited(notifier.generate()),
+      suggesting: draft.generating,
     );
   }
 
@@ -1626,14 +1664,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// anyone anyway.
   Future<void> _pickQuickReply(Conversation c, DraftOption option) async {
     final target = (source: c.source, conversationKey: c.id);
-    final notifier = ref.read(draftProvider(target).notifier);
     if (ref.read(draftProvider(target)).capability != SendCapability.send) {
       setState(() => _replyOpenFor = c.id);
-      await notifier.markEdited(option.body);
+      await ref.read(draftProvider(target).notifier).markEdited(option.body);
       return;
     }
+    await _queueQuickReply(target, option.body);
+  }
+
+  /// Arms the send a tapped card asked for, wherever the card was — under the
+  /// transcript or on a storyline's episode. One helper because the two
+  /// surfaces must not drift: the announcement, the undo window and the words
+  /// on the snackbar are the same promise either way.
+  Future<void> _queueQuickReply(DraftTarget target, String body) async {
     setState(() => _announceSendFor = target);
-    await notifier.queueSend(option.body);
+    await ref.read(draftProvider(target).notifier).queueSend(body);
     _toast('Reply sending.', onUndo: () => _cancelQueuedSend(target));
   }
 
@@ -1946,6 +1991,71 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ),
         );
       },
+    );
+  }
+}
+
+/// One episode's suggestions, inside the card that holds the thread they
+/// answer.
+///
+/// Its own widget because the spine renders every open card at once: watching
+/// each episode's draft from the screen would rebuild the whole storyline
+/// whenever any one of them changed, and the panel itself must stay
+/// provider-free — it is handed a builder and never learns what comes back.
+///
+/// Renders NOTHING when there is nothing to offer. A card is not the place for
+/// an empty state: the pane's own `Reply…` already owns that, and a row of
+/// identical bare buttons down the spine would say nothing about any of them.
+class _EpisodeQuickReplies extends ConsumerWidget {
+  final DraftTarget target;
+
+  /// Opens the storyline's reply window on this episode's thread.
+  final VoidCallback onOpenReply;
+
+  /// Arms a send of this text, with the undo window the screen announces.
+  /// Reached only where the grant actually allows a send.
+  final void Function(String body) onQueueSend;
+
+  final VoidCallback onUndo;
+
+  const _EpisodeQuickReplies({
+    required this.target,
+    required this.onOpenReply,
+    required this.onQueueSend,
+    required this.onUndo,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final draft = ref.watch(draftProvider(target));
+    if (draft.options.isEmpty && draft.pending == null) {
+      return const SizedBox.shrink();
+    }
+
+    final notifier = ref.read(draftProvider(target).notifier);
+    return Padding(
+      // The card's own gap. The footer owns its spacing so that the empty case
+      // above can leave no trace.
+      padding: const EdgeInsets.only(top: BondSpacing.s12),
+      child: QuickReplyBar(
+        options: draft.options,
+        armed: draft.capability == SendCapability.send,
+        onPick: (option) {
+          // The same honest split the thread pane makes: without a send grant
+          // a tap opens the box with the words in it rather than appearing to
+          // send them.
+          if (draft.capability != SendCapability.send) {
+            onOpenReply();
+            unawaited(notifier.markEdited(option.body));
+            return;
+          }
+          onQueueSend(option.body);
+        },
+        onReply: onOpenReply,
+        onDismiss: () => unawaited(notifier.dismissOptions()),
+        pending: draft.pending,
+        onUndo: onUndo,
+      ),
     );
   }
 }

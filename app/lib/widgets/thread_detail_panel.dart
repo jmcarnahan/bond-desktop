@@ -53,6 +53,12 @@ class ThreadDetailPanel extends StatelessWidget {
   /// or sending, which is the arrangement the composer already lives under.
   final Widget? afterTranscript;
 
+  /// Opens the reply window. Every ask on this pane — the banner and each
+  /// message's own line — is a call to action, so each one takes the reader
+  /// there. Null leaves them all as statements, for a host with no reply to
+  /// open.
+  final VoidCallback? onOpenReply;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -63,6 +69,7 @@ class ThreadDetailPanel extends StatelessWidget {
     this.onSendToLater,
     this.onKeepInInbox,
     this.afterTranscript,
+    this.onOpenReply,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -106,15 +113,18 @@ class ThreadDetailPanel extends StatelessWidget {
       previousDay = day;
       first = false;
 
+      final open = hasOpenAsk(
+        message,
+        lastOutboundAt: lastOut,
+        conversationDone: done,
+      );
       items.add(MessageRow(
         key: ValueKey(message.id),
         message: message,
         showHeader: previous == null || !sameRun(previous, message),
-        openAsk: hasOpenAsk(
-          message,
-          lastOutboundAt: lastOut,
-          conversationDone: done,
-        ),
+        openAsk: open,
+        // Only a line that is actually on screen gets a tap.
+        onAskTap: open ? onOpenReply : null,
       ));
       previous = message;
     }
@@ -181,10 +191,8 @@ class ThreadDetailPanel extends StatelessWidget {
               // text the banner had to clamp.
               child: Tooltip(
                 message: cta,
-                child: InlineAlert(
-                  severity: InlineAlertSeverity.attention,
-                  text: openAsks > 1 ? '$cta · $openAsks open asks' : cta,
-                  maxLines: 2,
+                child: _ctaBanner(
+                  openAsks > 1 ? '$cta · $openAsks open asks' : cta,
                 ),
               ),
             ),
@@ -213,6 +221,31 @@ class ThreadDetailPanel extends StatelessWidget {
                   ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// The ask above the transcript. It is the largest statement on the pane of
+  /// what this thread wants, so it is also the shortest way to answer it: with
+  /// a reply to open, the whole banner is the click.
+  ///
+  /// Its own transparent Material, because ink paints on the nearest Material
+  /// ANCESTOR — which here is behind the pane's opaque surface, where no hover
+  /// could ever show.
+  Widget _ctaBanner(String text) {
+    final alert = InlineAlert(
+      severity: InlineAlertSeverity.attention,
+      text: text,
+      maxLines: 2,
+    );
+    final onTap = onOpenReply;
+    if (onTap == null) return alert;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BondRadii.smAll,
+        child: alert,
       ),
     );
   }

@@ -53,6 +53,20 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// panel is one of the things it takes away.
   final VoidCallback onDismiss;
 
+  /// Rendered at the END of an OPEN card, under that thread's messages, so it
+  /// reads as attached to the episode rather than to the spine.
+  ///
+  /// Hosts pass the reply affordance here. The panel does not know what it is
+  /// and does not ask — it renders a spine and knows nothing about drafts or
+  /// sending, which is the arrangement `ThreadDetailPanel.afterTranscript`
+  /// already lives under. The widget owns its own spacing, so a footer with
+  /// nothing to show can render nothing and leave no gap behind.
+  final Widget Function(StorylineEpisode episode)? episodeFooter;
+
+  /// A message's open ask was tapped, on the card it belongs to. Null leaves
+  /// every ask a statement.
+  final void Function(StorylineEpisode episode)? onAskTap;
+
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -67,6 +81,8 @@ class StorylineTimelinePanel extends StatefulWidget {
     required this.newestFirst,
     required this.onToggleSort,
     required this.onDismiss,
+    this.episodeFooter,
+    this.onAskTap,
   });
 
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
@@ -230,7 +246,10 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
-                children: _run(episode),
+                children: [
+                  ..._run(episode),
+                  ?widget.episodeFooter?.call(episode),
+                ],
               ),
             )
           else
@@ -411,15 +430,20 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
       previousDay = day;
       first = false;
 
+      final open = hasOpenAsk(
+        message,
+        lastOutboundAt: lastOut,
+        conversationDone: done,
+      );
+      final onAskTap = widget.onAskTap;
       items.add(MessageRow(
         key: ValueKey(message.id),
         message: message,
         showHeader: previous == null || !sameRun(previous, message),
-        openAsk: hasOpenAsk(
-          message,
-          lastOutboundAt: lastOut,
-          conversationDone: done,
-        ),
+        openAsk: open,
+        // Only a line that is actually on screen gets a tap, and it carries
+        // the episode with it: the answer goes to the thread the ask is in.
+        onAskTap: open && onAskTap != null ? () => onAskTap(episode) : null,
       ));
       previous = message;
     }

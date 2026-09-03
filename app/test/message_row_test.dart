@@ -318,6 +318,42 @@ void main() {
       expect(find.byType(BondChip), findsNothing);
     });
 
+    testWidgets('an open ask is the way into the reply', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      var taps = 0;
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(needsAction: true, actionItems: const ['Send the deck']),
+        openAsk: true,
+        onAskTap: () => taps++,
+      )));
+
+      await tester.tap(find.text('Send the deck'));
+      await tester.pump();
+
+      expect(taps, 1);
+    });
+
+    testWidgets('and stays a statement where the host offers nowhere to go',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(needsAction: true, actionItems: const ['Send the deck']),
+        openAsk: true,
+      )));
+
+      expect(
+        find.ancestor(
+          of: find.text('Send the deck'),
+          matching: find.byType(InkWell),
+        ),
+        findsNothing,
+      );
+    });
+
     testWidgets('outbound stays left-aligned — no bubbles, no right column',
         (tester) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));

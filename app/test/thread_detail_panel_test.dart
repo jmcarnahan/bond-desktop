@@ -33,6 +33,7 @@ void main() {
     required List<Message> messages,
     String? ctaText = 'Reply to Dana',
     ConversationState state = ConversationState.needsReply,
+    VoidCallback? onOpenReply,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -47,6 +48,7 @@ void main() {
           ),
           messages: messages,
           onMarkDone: () {},
+          onOpenReply: onOpenReply,
         ),
       ),
     ));
@@ -107,6 +109,72 @@ void main() {
     expect(find.textContaining('open asks'), findsNothing);
     expect(find.text('Send the deck'), findsNothing);
     expect(find.text('Confirm the date'), findsNothing);
+  });
+
+  group('an ask is a call to action', () {
+    testWidgets('the banner opens the reply', (tester) async {
+      var opened = 0;
+      await pump(
+        tester,
+        onOpenReply: () => opened++,
+        messages: [
+          _msg(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            needsAction: true,
+            actionItems: const ['Send the deck'],
+          ),
+        ],
+      );
+
+      await tester.tap(find.text('Reply to Dana'));
+      await tester.pump();
+
+      expect(opened, 1);
+    });
+
+    testWidgets("and so does a message's own ask line", (tester) async {
+      var opened = 0;
+      await pump(
+        tester,
+        onOpenReply: () => opened++,
+        messages: [
+          _msg(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            needsAction: true,
+            actionItems: const ['Send the deck'],
+          ),
+        ],
+      );
+
+      await tester.tap(find.text('Send the deck'));
+      await tester.pump();
+
+      expect(opened, 1);
+    });
+
+    testWidgets('a pane with no reply to open leaves both as statements',
+        (tester) async {
+      await pump(tester, messages: [
+        _msg(
+          id: 'a',
+          receivedAt: '2026-08-25T09:00:00',
+          needsAction: true,
+          actionItems: const ['Send the deck'],
+        ),
+      ]);
+
+      // Still said, still not clickable.
+      expect(find.text('Reply to Dana'), findsOneWidget);
+      expect(find.text('Send the deck'), findsOneWidget);
+      for (final ask in ['Reply to Dana', 'Send the deck']) {
+        expect(
+          find.ancestor(of: find.text(ask), matching: find.byType(InkWell)),
+          findsNothing,
+        );
+      }
+    });
   });
 
   testWidgets('only the unanswered message carries an ask line', (tester) async {
