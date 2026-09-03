@@ -10,6 +10,7 @@ import 'llm/embeddings_client.dart';
 import 'llm/extract_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
+import 'pipeline_progress.dart';
 
 /// Extracts structured facts from one message, then refreshes its thread's
 /// embedding if the thread now reads differently.
@@ -26,12 +27,18 @@ class ExtractHandler extends WorkHandler {
   final EmbeddingsClient _embeddings;
   final ActivityLog _log;
 
+  /// Where this stage lands for the home screen. Defaulted to the disabled
+  /// recorder, so a test that builds this handler writes nothing extra.
+  final PipelineProgress _pipeline;
+
   ExtractHandler(
     this._store,
     this._client,
     this._embeddings, {
     ActivityLog? activityLog,
-  }) : _log = activityLog ?? ActivityLog.disabled();
+    PipelineProgress progress = const PipelineProgress.disabled(),
+  })  : _log = activityLog ?? ActivityLog.disabled(),
+        _pipeline = progress;
 
   @override
   String get kind => 'extract';
@@ -58,6 +65,8 @@ class ExtractHandler extends WorkHandler {
     final source = item['source'] as String? ?? _source;
     final id = item['entity_id'] as String? ?? '';
 
+    await _pipeline.noteExtract(source, id, state: 'running');
+
     final row = await _store.getMessageRow(source, id);
     // Queued, then deleted before the worker reached it. Nothing to extract
     // and nothing wrong — the item is done, not failed. The worker would
@@ -67,6 +76,7 @@ class ExtractHandler extends WorkHandler {
       _log
         ..noteStatus('skipped')
         ..note({'reason': 'deleted'});
+      await _pipeline.noteExtract(source, id, state: 'skipped');
       return;
     }
 
@@ -85,6 +95,7 @@ class ExtractHandler extends WorkHandler {
       _log
         ..noteStatus('skipped')
         ..note({'reason': 'gated'});
+      await _pipeline.noteExtract(source, id, state: 'skipped');
       return;
     }
 
@@ -98,6 +109,10 @@ class ExtractHandler extends WorkHandler {
       temperature: 0,
     );
     await _store.writeExtraction(source, id, jsonEncode(result.toJson()));
+    // After the write and before the two optional passes below: the facts are
+    // stored, so the stage is done however the bucket filing and the embedding
+    // refresh go.
+    await _pipeline.noteExtract(source, id, state: 'done');
     // Enough of the answer to make the activity row readable without opening
     // the extraction itself. Five topics, because the row is one line.
     _log.note({

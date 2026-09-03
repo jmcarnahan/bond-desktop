@@ -10,6 +10,7 @@ import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/backend_types.dart';
 import '../services/notification_coordinator.dart';
+import '../services/pipeline_progress.dart';
 import '../services/read_ack_queue.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
@@ -126,6 +127,12 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// finished writing.
   final NotificationCoordinator? _notify;
 
+  /// The home screen's recorder. This notifier owns exactly one thing about
+  /// it: the backstop sweep at the end of a pump, which is the only place in
+  /// the app that knows both that the drains have finished and what the user's
+  /// attention threshold is.
+  final PipelineProgress _pipeline;
+
   StreamSubscription<TriageProgress>? _triageProgress;
 
   /// The AI queue's progress, on the same debounce as triage's. Some cycles
@@ -148,6 +155,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     AttentionService? attention,
     ReadAckQueue? readAcks,
     NotificationCoordinator? notify,
+    PipelineProgress progress = const PipelineProgress.disabled(),
     Future<String?>? userAddress,
   })  : _teamsSync = teamsSync,
         _triage = triage,
@@ -155,6 +163,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         _attention = attention,
         _readAcks = readAcks,
         _notify = notify,
+        _pipeline = progress,
         super(const ConversationsInitial()) {
     // Subscribed before the triage early-return below, because a notifier can
     // be wired with an AI queue and no triage queue at all.
@@ -392,8 +401,30 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     // the user must not be skipped because the list they were looking at went
     // away.
     await _notify?.noteDrainSettled();
+    // After the coordinator, deliberately: it settles the messages it was
+    // given the chance to have an opinion about, and this closes out
+    // everything it was never a candidate for — outbound mail, the backlog,
+    // anything read before the pipeline caught up. Above the `mounted` check
+    // for the same reason the settle is: the rows are written by now, and a
+    // bar left saying "settling" forever is not something to skip because the
+    // list went away.
+    await _pipeline.sweepSettled(threshold: await _attentionThreshold());
     if (!mounted) return;
     await load(syncFirst: false);
+  }
+
+  /// The user's own loudness control, or the default when nothing has set it
+  /// or the read failed. One helper because the settle pass and the draft
+  /// enqueue must judge the same mailbox against the same number.
+  Future<double> _attentionThreshold() async {
+    try {
+      final stored = await _store.getPref(attentionThresholdKey);
+      return (stored == null ? null : double.tryParse(stored)) ??
+          AttentionTuning.defaultThreshold;
+    } catch (e) {
+      debugPrint('reading the attention threshold failed: $e');
+      return AttentionTuning.defaultThreshold;
+    }
   }
 
   /// Queues a suggested reply for the threads that have earned one. Returns
@@ -416,9 +447,7 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// suggestion they have not asked for yet.
   Future<int> _enqueueDrafts() async {
     try {
-      final stored = await _store.getPref(attentionThresholdKey);
-      final threshold = (stored == null ? null : double.tryParse(stored)) ??
-          AttentionTuning.defaultThreshold;
+      final threshold = await _attentionThreshold();
       var queued = 0;
       for (final row in await _store.needsDraftKeys(threshold: threshold)) {
         await _store.requeueWork('draft', row.source, row.conversationKey);
@@ -676,6 +705,7 @@ final conversationsProvider =
     attention: ref.watch(attentionServiceProvider),
     readAcks: ref.watch(readAckQueueProvider),
     notify: ref.watch(notificationCoordinatorProvider),
+    progress: ref.watch(pipelineProgressProvider),
     // A future, not a value: the account is a keychain read, and the inbox
     // must not wait on it to render. Until it resolves the self gate is off.
     userAddress: ref.watch(authSessionProvider).storedAccount.then(

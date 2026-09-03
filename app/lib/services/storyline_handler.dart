@@ -1,5 +1,6 @@
 import 'activity_log.dart';
 import 'ai_worker.dart';
+import 'pipeline_progress.dart';
 import 'storyline_service.dart';
 
 /// The two storyline queues, as work handlers.
@@ -19,8 +20,16 @@ class StorylineAssignHandler extends WorkHandler {
   /// what it FILED; this notes the two ways it deliberately did not.
   final ActivityLog _log;
 
-  StorylineAssignHandler(this._service, {ActivityLog? activityLog})
-      : _log = activityLog ?? ActivityLog.disabled();
+  /// Where this stage lands for the home screen. Defaulted to the disabled
+  /// recorder, so a test that builds this handler writes nothing extra.
+  final PipelineProgress _pipeline;
+
+  StorylineAssignHandler(
+    this._service, {
+    ActivityLog? activityLog,
+    PipelineProgress progress = const PipelineProgress.disabled(),
+  })  : _log = activityLog ?? ActivityLog.disabled(),
+        _pipeline = progress;
 
   @override
   String get kind => 'storyline';
@@ -34,22 +43,33 @@ class StorylineAssignHandler extends WorkHandler {
     if (key.isEmpty) return;
 
     final outcome = await _service.assignConversation(source, key);
+    // Four of the five outcomes end this stage: the thread was filed, or it
+    // was looked at and deliberately not filed. `noVector` is the exception —
+    // the queue parks on an embedding server that is not running, so the bar
+    // parks with it rather than claiming a verdict nobody reached.
     switch (outcome) {
-      case AssignOutcome.rejected:
-      case AssignOutcome.blocked:
-        _log
-          ..noteStatus('skipped')
-          ..note({'outcome': outcome.name});
       // `assigned` is noted by the service, with the storyline's NAME — the
       // handler only has the conversation key, which the row already carries.
-      //
+      case AssignOutcome.assigned:
+        await _pipeline.noteStoryline(
+          source,
+          key,
+          state: 'done',
+          storylineId: await _pipeline.assignedStorylineId(source, key),
+        );
       // `noCandidate` is noted by nobody, and that silence is load-bearing:
       // `storyline` is a quiet kind, so a pass that did nothing writes no row
       // at all — but only while every detail it carries is a zero. One string
       // here would put a row in the activity panel for every thread whose
       // embedding changed and matched nothing, which is most of them.
-      case AssignOutcome.assigned:
       case AssignOutcome.noCandidate:
+        await _pipeline.noteStoryline(source, key, state: 'done');
+      case AssignOutcome.rejected:
+      case AssignOutcome.blocked:
+        await _pipeline.noteStoryline(source, key, state: 'done');
+        _log
+          ..noteStatus('skipped')
+          ..note({'outcome': outcome.name});
       case AssignOutcome.noVector:
         break;
     }

@@ -5,6 +5,7 @@ import 'activity_log.dart';
 import 'drain_gate.dart';
 import 'backend/backend_types.dart';
 import 'llm/llm_client.dart';
+import 'pipeline_progress.dart';
 
 /// How much work of one kind is left, as of the last item the worker
 /// finished.
@@ -121,6 +122,12 @@ class AiWorker {
   final DrainGate _gate;
   final ActivityLog _log;
 
+  /// Only ever told about `extract`, and only about the two ways it can end
+  /// badly. Every other stage writes its own progress from inside its handler;
+  /// what a handler cannot see is the worker deciding, after it threw, whether
+  /// that was a park or a failure.
+  final PipelineProgress _pipeline;
+
   final StreamController<WorkProgress> _progress =
       StreamController<WorkProgress>.broadcast();
 
@@ -152,9 +159,11 @@ class AiWorker {
     required List<WorkHandler> handlers,
     DrainGate? gate,
     ActivityLog? activityLog,
+    PipelineProgress progress = const PipelineProgress.disabled(),
   })  : _handlers = List.unmodifiable(handlers),
         _gate = gate ?? DrainGate(),
-        _log = activityLog ?? ActivityLog.disabled();
+        _log = activityLog ?? ActivityLog.disabled(),
+        _pipeline = progress;
 
   Stream<WorkProgress> get progress => _progress.stream;
 
@@ -409,6 +418,10 @@ class AiWorker {
     int durationMs,
   ) async {
     await _writeWork(kind, source, id, status: 'pending');
+    // Back to waiting, not failed: nothing about this item went wrong.
+    if (kind == 'extract') {
+      await _pipeline.noteExtract(source, id, state: 'pending');
+    }
     await _log.record(
       kind,
       status: 'parked',
@@ -443,6 +456,23 @@ class AiWorker {
       error: '$error',
       attempts: attempts,
     );
+    // `error` only once the retries are gone: an item that will be tried again
+    // is back to waiting, and a bar that showed red in between would be
+    // reporting a state the pipeline does not consider final.
+    if (kind == 'extract') {
+      await _pipeline.noteExtract(
+        source,
+        id,
+        state: fatal ? 'error' : 'pending',
+      );
+    }
+    // The storyline handler only speaks on success — an exception never
+    // reaches its switch — so the worker has to say when the retries are
+    // gone, or the stage would sit at `pending` and the row would never
+    // settle. For this kind the entity id IS the conversation key.
+    if (kind == 'storyline' && fatal) {
+      await _pipeline.noteStoryline(source, id, state: 'error');
+    }
     // `retry` while the item still has an attempt left, `error` once it does
     // not — the work row's `pending` cannot tell those apart after the fact.
     await _log.record(

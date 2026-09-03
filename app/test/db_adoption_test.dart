@@ -307,15 +307,23 @@ void main() {
     final fresh = raw.sqlite3.open(freshPath);
     addTearDown(fresh.close);
 
+    // `vec_messages%` is sqlite-vec's virtual table and the shadow tables it
+    // brings with it. They are an INDEX over `message_vectors`, rebuildable
+    // from it without a model call, and they are created lazily at first use
+    // rather than by a migration — so whether they exist is a fact about what
+    // this process has done, not about the schema. Filtered by name here so a
+    // rebuild can never read as a parity failure; the count and the STRICT
+    // assertions below stay exactly as strict for every real table.
     List<String> tablesOf(raw.Database db) => [
           for (final r in db.select(
             "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'vec_messages%' "
+            'ORDER BY name',
           ))
             r['name'] as String,
         ];
     expect(tablesOf(fresh), tablesOf(legacy));
-    expect(tablesOf(fresh).length, 15);
+    expect(tablesOf(fresh).length, 17);
 
     for (final table in tablesOf(legacy)) {
       List<String> columnsOf(raw.Database db) => [

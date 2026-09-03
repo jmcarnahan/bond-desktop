@@ -28,6 +28,8 @@ import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
+import '../services/pipeline_progress.dart';
+import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
 import '../services/storyline_handler.dart';
@@ -127,6 +129,25 @@ final activityLogProvider = Provider<ActivityLog>((ref) {
   return log;
 });
 
+/// The pipeline's live wire. It watches NOTHING, for [activityLogProvider]'s
+/// reason turned up one notch: a backend switch rebuilds the queues that
+/// publish onto it, and a home screen open across that switch has to keep the
+/// subscription it already has or its table would freeze mid-sync.
+final progressBusProvider = Provider<ProgressBus>((ref) {
+  final bus = ProgressBus();
+  ref.onDispose(bus.dispose);
+  return bus;
+});
+
+/// The recorder every stage writes through. Watches only the store and the
+/// bus, so it outlives a backend switch along with them.
+final pipelineProgressProvider = Provider<PipelineProgress>(
+  (ref) => PipelineProgress(
+    ref.watch(messageStoreProvider),
+    bus: ref.watch(progressBusProvider),
+  ),
+);
+
 /// The settle machine. Watches ONLY the store and the log, so a backend
 /// switch — which rebuilds the session, both backends, the sync service and
 /// the queues — leaves it standing: rebuilding it would reset the arm and
@@ -136,6 +157,7 @@ final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) 
   final coordinator = NotificationCoordinator(
     store,
     activityLog: ref.watch(activityLogProvider),
+    progress: ref.watch(pipelineProgressProvider),
     attentionThreshold: () async {
       final raw = await store.getPref(attentionThresholdKey);
       return (raw == null ? null : double.tryParse(raw)) ??
@@ -304,6 +326,7 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
     gate: ref.watch(drainGateProvider),
     activityLog: ref.watch(activityLogProvider),
+    progress: ref.watch(pipelineProgressProvider),
   );
   ref.onDispose(queue.dispose);
   return queue;
@@ -356,6 +379,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(fastLlmClientProvider),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        progress: ref.watch(pipelineProgressProvider),
       ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
@@ -363,6 +387,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       StorylineAssignHandler(
         storylines,
         activityLog: ref.watch(activityLogProvider),
+        progress: ref.watch(pipelineProgressProvider),
       ),
       StorylineSweepHandler(storylines),
       // After the sweep and before drafts: a recruit is rare — it only exists
@@ -384,6 +409,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
     ],
     gate: ref.watch(drainGateProvider),
     activityLog: ref.watch(activityLogProvider),
+    progress: ref.watch(pipelineProgressProvider),
   );
   ref.onDispose(worker.dispose);
   return worker;

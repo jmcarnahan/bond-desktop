@@ -2,9 +2,11 @@ import 'dart:convert';
 
 import 'package:drift/drift.dart';
 
+import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import 'database.dart' show BondDatabase;
+import 'progress_sql.dart';
 
 /// Which Microsoft identity the mail rows in this database belong to, stored in
 /// `app_prefs` alongside the settings but emphatically not one of them: it is
@@ -147,10 +149,37 @@ class MessageStore {
   /// honestly earned its 1. The only real downgrade — an edit that removes an
   /// @mention — is rare, and keeping the flag errs toward attention, which is
   /// the direction this column exists to err in.
+  ///
+  /// Two statements now, in one transaction: every stored message also gets a
+  /// `message_progress` row, `INSERT OR IGNORE` so a delta feed replaying the
+  /// same page cannot reset a bar that has since filled in. This is the
+  /// hottest write in the app — once per row of every delta page — so the
+  /// progress row is composed here in Dart from what the caller already
+  /// passed rather than re-derived in SQL.
   Future<void> upsertMessage(Map<String, Object?> row) async {
     final now = _nowIso();
-    await db.customUpdate(
-      '''
+    final source = row['source'] ?? 'email';
+    final id = row['source_message_id'];
+    final createdAt = row['created_at'] ?? now;
+    final triageStatus = row['triage_status'] ?? 'pending';
+    final gateReason = row['gate_reason'] as String?;
+
+    // A message the gate already threw out at ingest never enters the
+    // pipeline, so its row lands finished rather than waiting on four stages
+    // nothing will ever run. Keyed on the reason and not on `skipped` alone:
+    // `skipped` with no reason is the legacy Teams tolerance, not a verdict.
+    final gated = triageStatus == 'skipped' && gateReason != null;
+    final triageState = switch (triageStatus) {
+      'triaged' => 'done',
+      'skipped' => 'skipped',
+      'error' => 'error',
+      'processing' => 'running',
+      _ => 'pending',
+    };
+
+    await db.transaction(() async {
+      await db.customUpdate(
+        '''
 INSERT INTO messages (
   source, source_message_id, internet_message_id, conversation_key, direction,
   subject, from_name, from_address, to_json, received_at, is_read,
@@ -166,29 +195,55 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
   addressed_me = MAX(messages.addressed_me, excluded.addressed_me),
   updated_at = excluded.updated_at
 ''',
-      variables: _args([
-        row['source'] ?? 'email',
-        row['source_message_id'],
-        row['internet_message_id'],
-        row['conversation_key'],
-        row['direction'],
-        row['subject'],
-        row['from_name'],
-        row['from_address'],
-        row['to_json'] ?? '[]',
-        row['received_at'],
-        row['is_read'] ?? 0,
-        row['body_preview'],
-        row['body_text'],
-        row['has_attachments'] ?? 0,
-        row['source_meta_json'],
-        row['triage_status'] ?? 'pending',
-        row['gate_reason'],
-        row['addressed_me'] ?? 0,
-        row['created_at'] ?? now,
-        row['updated_at'] ?? now,
-      ]),
-    );
+        variables: _args([
+          source,
+          id,
+          row['internet_message_id'],
+          row['conversation_key'],
+          row['direction'],
+          row['subject'],
+          row['from_name'],
+          row['from_address'],
+          row['to_json'] ?? '[]',
+          row['received_at'],
+          row['is_read'] ?? 0,
+          row['body_preview'],
+          row['body_text'],
+          row['has_attachments'] ?? 0,
+          row['source_meta_json'],
+          triageStatus,
+          gateReason,
+          row['addressed_me'] ?? 0,
+          createdAt,
+          row['updated_at'] ?? now,
+        ]),
+      );
+
+      await db.customUpdate(
+        '''
+INSERT OR IGNORE INTO message_progress (
+  source, source_message_id, conversation_key, received_at,
+  ingest_state, triage_state, extract_state, storyline_state, settle_state,
+  outcome, dropped, drop_reason, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+''',
+        variables: _args([
+          source,
+          id,
+          row['conversation_key'],
+          row['received_at'] ?? createdAt,
+          gated ? 'skipped' : triageState,
+          gated ? 'skipped' : 'pending',
+          gated ? 'skipped' : 'pending',
+          gated ? 'done' : 'pending',
+          gated ? 'dropped' : 'pending',
+          gated ? 1 : 0,
+          gated ? gateReason : null,
+          createdAt,
+          now,
+        ]),
+      );
+    });
   }
 
   /// Whether this `(source, id)` is already stored.
@@ -1501,6 +1556,8 @@ RETURNING *
       'sender_prefs',
       'drafts',
       'message_notify',
+      'message_progress',
+      'message_vectors',
     ];
     await db.transaction(() async {
       for (final table in tables) {
@@ -3005,5 +3062,388 @@ LIMIT ?
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  // ── pipeline progress ────────────────────────────────────────────────
+
+  /// The states a stage stops at. `skipped` is one of them: a message the
+  /// extractor was never going to look at has finished, and a bar that waited
+  /// for it would wait forever.
+  static const String _terminalStates = "('done', 'skipped', 'error')";
+
+  /// Everything a home-feed row needs, in one projection.
+  ///
+  /// Shared by the two paging reads and the live patch read on purpose: they
+  /// must return the same shape, or the notifier would be replacing complete
+  /// rows with rows that have holes in them.
+  static const String _homeFeedSelect = '''
+SELECT p.source, p.source_message_id, p.conversation_key, p.received_at,
+  p.triage_state, p.extract_state, p.storyline_state, p.settle_state,
+  p.outcome, p.dropped, p.drop_reason, p.storyline_id, p.needs_you, p.urgency,
+  m.subject, m.from_name, m.from_address, s.title AS storyline_title
+FROM message_progress p
+JOIN messages m
+  ON m.source = p.source AND m.source_message_id = p.source_message_id
+LEFT JOIN storylines s ON s.id = p.storyline_id''';
+
+  /// Records where triage got to, and returns the message's `received_at` so
+  /// the caller can tick a live listener without a second read. Null when
+  /// there is no progress row — a message stored before v8 that the backfill
+  /// somehow missed, which costs the tick and nothing else.
+  ///
+  /// A gate skip is the one state that finishes the WHOLE row rather than one
+  /// stage of it, and it has to be: the extract and storyline queues honour
+  /// the gate by never running, so nothing downstream is ever going to write
+  /// those columns. Only stages still `pending` are closed out, so a re-gate
+  /// after an extraction already landed does not erase what did happen.
+  Future<String?> writeTriageProgress(
+    String source,
+    String sourceMessageId, {
+    required String state,
+    String? urgency,
+    String? gateReason,
+  }) async {
+    final gated = state == 'skipped' && gateReason != null;
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET
+  triage_state = ?1,
+  triage_at = CASE WHEN ?1 IN $_terminalStates THEN ?2 ELSE triage_at END,
+  urgency = COALESCE(?3, urgency),
+  extract_state =
+    CASE WHEN ?4 = 1 AND extract_state = 'pending' THEN 'skipped'
+         ELSE extract_state END,
+  storyline_state =
+    CASE WHEN ?4 = 1 AND storyline_state = 'pending' THEN 'skipped'
+         ELSE storyline_state END,
+  settle_state = CASE WHEN ?4 = 1 THEN 'done' ELSE settle_state END,
+  settle_at = CASE WHEN ?4 = 1 THEN ?2 ELSE settle_at END,
+  outcome = CASE WHEN ?4 = 1 THEN 'dropped' ELSE outcome END,
+  dropped = CASE WHEN ?4 = 1 THEN 1 ELSE dropped END,
+  drop_reason = CASE WHEN ?4 = 1 THEN ?5 ELSE drop_reason END,
+  updated_at = ?2
+WHERE source = ?6 AND source_message_id = ?7
+RETURNING received_at
+''',
+      variables: _args([
+        state,
+        _nowIso(),
+        urgency,
+        gated ? 1 : 0,
+        gateReason,
+        source,
+        sourceMessageId,
+      ]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// Records where extraction got to. Same return contract as
+  /// [writeTriageProgress].
+  Future<String?> writeExtractProgress(
+    String source,
+    String sourceMessageId, {
+    required String state,
+  }) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET
+  extract_state = ?1,
+  extract_at = CASE WHEN ?1 IN $_terminalStates THEN ?2 ELSE extract_at END,
+  updated_at = ?2
+WHERE source = ?3 AND source_message_id = ?4
+RETURNING received_at
+''',
+      variables: _args([state, _nowIso(), source, sourceMessageId]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// Records where the storyline pass got to, for every message of one
+  /// conversation, and returns the ones it touched.
+  ///
+  /// Conversation-level because that is the grain the work is queued at: one
+  /// assignment decides for the whole thread, so writing it per message would
+  /// mean a read to find them and a statement each.
+  ///
+  /// Bounded by `settle_state <> 'done'`, which is what keeps a thread that
+  /// keeps growing from rewriting the history above it — a message the user
+  /// was told about last week must not gain a storyline column today, because
+  /// the row they are scrolling past is a record of what they were told.
+  ///
+  /// [storylineId] null leaves whatever is stored alone: `noCandidate` and
+  /// `rejected` are outcomes about this pass, not retractions of an earlier
+  /// assignment.
+  Future<List<({String sourceMessageId, String receivedAt})>>
+      writeStorylineProgress(
+    String source,
+    String conversationKey, {
+    required String state,
+    String? storylineId,
+  }) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET
+  storyline_state = ?1,
+  storyline_at =
+    CASE WHEN ?1 IN $_terminalStates THEN ?2 ELSE storyline_at END,
+  storyline_id = COALESCE(?3, storyline_id),
+  updated_at = ?2
+WHERE source = ?4 AND conversation_key = ?5 AND settle_state <> 'done'
+RETURNING source_message_id, received_at
+''',
+      variables: _args([state, _nowIso(), storylineId, source, conversationKey]),
+    );
+    return [
+      for (final row in rows)
+        (
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
+  /// Closes one message out, with the verdict the notification coordinator
+  /// reached about it.
+  ///
+  /// Deliberately unguarded on `settle_state`: the sweep below may have closed
+  /// this row as a backstop, and the coordinator's answer is the better one —
+  /// it is the same call that decided whether to interrupt the user.
+  Future<String?> writeSettledProgress(
+    String source,
+    String sourceMessageId, {
+    required bool needsYou,
+    required String reason,
+    required bool dropped,
+  }) async {
+    final now = _nowIso();
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET
+  settle_state = 'done',
+  settle_at = ?1,
+  outcome = CASE WHEN ?2 = 1 THEN 'dropped' ELSE 'done' END,
+  dropped = ?2,
+  drop_reason = CASE WHEN ?2 = 1 THEN ?3 ELSE drop_reason END,
+  needs_you = ?4,
+  updated_at = ?1
+WHERE source = ?5 AND source_message_id = ?6
+RETURNING received_at
+''',
+      variables: _args([
+        now,
+        dropped ? 1 : 0,
+        reason,
+        needsYou ? 1 : 0,
+        source,
+        sourceMessageId,
+      ]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// The backstop: closes every row whose stages have all finished and whose
+  /// thread has an attention score, and returns the ones it closed.
+  ///
+  /// Most messages never reach the notification coordinator at all — outbound
+  /// mail, anything read before the sweep, the whole backlog a first sync
+  /// writes — so without this their bars would sit at "settling" forever. The
+  /// attention score is the last thing the pipeline writes about a thread, and
+  /// waiting for it is what stops this from closing a row the coordinator was
+  /// still going to have an opinion about.
+  ///
+  /// [threshold] is the user's own attention floor, so the `needs_you` this
+  /// writes means what the tiles elsewhere mean. It is the only place a
+  /// verdict is reached in SQL rather than by `notifyWorthy` — see
+  /// [needsYouSql] for why that is, and for the one clause that differs.
+  Future<List<({String source, String sourceMessageId, String receivedAt})>>
+      sweepSettledProgress({required double threshold}) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET
+  settle_state = 'done',
+  settle_at = ?1,
+  outcome = CASE WHEN dropped = 1 THEN 'dropped' ELSE 'done' END,
+  needs_you = COALESCE((
+    SELECT ${needsYouSql(threshold: '?2')}
+      FROM messages m
+     WHERE m.source = message_progress.source
+       AND m.source_message_id = message_progress.source_message_id
+  ), 0),
+  updated_at = ?1
+WHERE settle_state <> 'done'
+  AND triage_state IN $_terminalStates
+  AND extract_state IN $_terminalStates
+  AND storyline_state IN $_terminalStates
+  AND EXISTS (
+    SELECT 1 FROM conversation_ai ai
+     WHERE ai.source = message_progress.source
+       AND ai.conversation_key = message_progress.conversation_key
+       AND ai.attention_score IS NOT NULL
+  )
+RETURNING source, source_message_id, received_at
+''',
+      variables: _args([_nowIso(), threshold]),
+    );
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? '',
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
+  /// The home screen's tiles, over everything received since [sinceIso].
+  ///
+  /// ONE statement, which is the whole point: read separately, a message
+  /// settling between two queries would land in one number and not the other,
+  /// and the tiles would disagree until something reloaded them.
+  Future<HomeMetrics> homeMetrics({required String sinceIso}) async {
+    final row = await db
+        .customSelect(
+          '''
+SELECT
+  COALESCE(SUM(CASE WHEN source = 'email' THEN 1 ELSE 0 END), 0) AS emails,
+  COALESCE(SUM(CASE WHEN source = 'teams' THEN 1 ELSE 0 END), 0) AS teams,
+  COALESCE(SUM(CASE WHEN urgency IN ('urgent', 'high') THEN 1 ELSE 0 END), 0)
+    AS urgent,
+  COALESCE(SUM(dropped), 0) AS dropped,
+  COALESCE(SUM(needs_you), 0) AS needs_you,
+  COALESCE(SUM(CASE WHEN storyline_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+    AS storylined,
+  COALESCE(SUM(CASE WHEN outcome = 'pending' THEN 1 ELSE 0 END), 0)
+    AS in_flight,
+  COALESCE(SUM(CASE WHEN triage_state = 'error' OR extract_state = 'error'
+                      OR storyline_state = 'error' THEN 1 ELSE 0 END), 0)
+    AS errored,
+  COUNT(*) AS total
+FROM message_progress
+WHERE received_at >= ?
+''',
+          variables: _args([sinceIso]),
+        )
+        .getSingle();
+    return HomeMetrics.fromRow(row.data);
+  }
+
+  /// One page of the feed, newest first.
+  ///
+  /// Keyset rather than OFFSET, and two literal statements rather than one
+  /// with a `? IS NULL OR` cursor: that form defeats the index range scan, and
+  /// on a screen someone leaves open all day the difference is the whole
+  /// table. The cursor is the previous page's last row — pass both halves or
+  /// neither.
+  ///
+  /// [includeDropped] chooses which index the read walks:
+  /// `ix_message_progress_visible` leads with `dropped`, so hiding dropped
+  /// rows is an equality seek rather than a filter over everything.
+  Future<List<HomeFeedRow>> pageHomeFeed({
+    String? beforeReceivedAt,
+    String? beforeSourceMessageId,
+    int limit = 50,
+    bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (sources.isEmpty) return const [];
+    final places = _placeholders(sources.length);
+    final visible = includeDropped ? '' : 'p.dropped = 0 AND ';
+    final first = beforeReceivedAt == null || beforeSourceMessageId == null;
+
+    final result = first
+        ? await db
+            .customSelect(
+              '$_homeFeedSelect '
+              'WHERE ${visible}p.source IN ($places) '
+              'ORDER BY p.received_at DESC, p.source_message_id DESC '
+              'LIMIT ?',
+              variables: _args([...sources, limit]),
+            )
+            .get()
+        : await db
+            .customSelect(
+              // The row-value compare is the cursor. sqlite has had it since
+              // 3.15 (this app ships its own, and `db_adoption_test` pins
+              // 3.35 for RETURNING); the portable spelling is
+              //   p.received_at < ?a
+              //   OR (p.received_at = ?a AND p.source_message_id < ?b)
+              // which sqlite would not turn into one index range scan.
+              '$_homeFeedSelect '
+              'WHERE ${visible}p.source IN ($places) '
+              'AND (p.received_at, p.source_message_id) < (?, ?) '
+              'ORDER BY p.received_at DESC, p.source_message_id DESC '
+              'LIMIT ?',
+              variables: _args([
+                ...sources,
+                beforeReceivedAt,
+                beforeSourceMessageId,
+                limit,
+              ]),
+            )
+            .get();
+    return [for (final row in result) HomeFeedRow.fromRow(row.data)];
+  }
+
+  /// The rows behind a burst of live ticks, in one read per chunk.
+  ///
+  /// The bus carries keys rather than rows, so this is what turns a debounced
+  /// burst into the patch the table applies. Chunked because a burst is
+  /// unbounded and sqlite's parameter limit is not; 200 pairs is 400
+  /// parameters, comfortably under the 999 an older build could be compiled
+  /// with.
+  Future<List<HomeFeedRow>> progressRowsFor(
+    List<({String source, String id})> keys,
+  ) async {
+    if (keys.isEmpty) return const [];
+    const chunkSize = 200;
+    final rows = <HomeFeedRow>[];
+    for (var start = 0; start < keys.length; start += chunkSize) {
+      final chunk = keys.skip(start).take(chunkSize).toList();
+      final tuples = List.filled(chunk.length, '(?, ?)').join(', ');
+      final result = await db
+          .customSelect(
+            '$_homeFeedSelect '
+            'WHERE (p.source, p.source_message_id) IN (VALUES $tuples)',
+            variables: _args([
+              for (final key in chunk) ...[key.source, key.id],
+            ]),
+          )
+          .get();
+      rows.addAll([for (final row in result) HomeFeedRow.fromRow(row.data)]);
+    }
+    return rows;
+  }
+
+  /// The storylines the window was busiest with, most messages first.
+  ///
+  /// Counts messages that landed IN THE WINDOW rather than the storylines'
+  /// lifetime sizes — "hot right now" is a statement about today, and a
+  /// storyline that has been large since March is not news.
+  ///
+  /// Dropped rows are left out: they are hidden from the feed by default, and
+  /// a strip that ranked a storyline on messages the user cannot see would
+  /// send them looking for rows that are not there.
+  Future<List<HotStoryline>> hotStorylines({
+    required String sinceIso,
+    int limit = 8,
+  }) async {
+    final result = await db
+        .customSelect(
+          '''
+SELECT p.storyline_id AS id, s.title AS title,
+  COUNT(*) AS message_count, MAX(p.received_at) AS last_at
+FROM message_progress p
+JOIN storylines s ON s.id = p.storyline_id
+WHERE p.storyline_id IS NOT NULL AND p.dropped = 0 AND p.received_at >= ?
+  AND s.status IN ('suggested', 'active')
+GROUP BY p.storyline_id, s.title
+ORDER BY message_count DESC, last_at DESC, id ASC
+LIMIT ?
+''',
+          variables: _args([sinceIso, limit]),
+        )
+        .get();
+    return [for (final row in result) HotStoryline.fromRow(row.data)];
   }
 }
