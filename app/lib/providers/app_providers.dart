@@ -243,6 +243,9 @@ final syncServiceProvider = Provider<MailSync>(
     ref.watch(mailBackendProvider),
     ref.watch(messageStoreProvider),
     activityLog: ref.watch(activityLogProvider),
+    // What tells an open home screen that a message exists at all. Every later
+    // stage announces itself from the queues; ingest happens here.
+    progress: ref.watch(pipelineProgressProvider),
     // A callback, not a value: the account is a keychain read, and this
     // provider is built by plenty that never syncs. The sync asks once, on its
     // first pass; until the answer arrives no message is marked as addressed
@@ -277,6 +280,7 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
     ref.watch(messageStoreProvider),
     canSync: () => auth.hasScope('chat.read'),
     activityLog: ref.watch(activityLogProvider),
+    progress: ref.watch(pipelineProgressProvider),
   );
 });
 

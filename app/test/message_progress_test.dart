@@ -158,6 +158,33 @@ void main() {
       expect(row['urgency'], 'high');
     });
 
+    test('the write says whether the pipeline had heard of this one', () async {
+      // What the sync services turn into an ingest tick. After the fact there
+      // is nothing in the row to tell an insert from a replay, so the write
+      // itself has to answer — and a gate-dropped message is finished by then,
+      // with no later stage left to announce it.
+      final row = {
+        'source': 'email',
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'received_at': '2026-09-01T10:00:00Z',
+      };
+
+      final first = await store.upsertMessage(row);
+      expect(
+        first,
+        (await store.pageHomeFeed()).single.receivedAt,
+        reason: 'the answer is the key the feed sorts and pages on',
+      );
+
+      expect(
+        await store.upsertMessage(row),
+        isNull,
+        reason: 'a delta page replaying itself is not an arrival',
+      );
+    });
+
     test('each connector gets its own row for a colliding id', () async {
       await ingest('m1');
       await ingest('m1', source: 'teams', conversationKey: 'chat-1');

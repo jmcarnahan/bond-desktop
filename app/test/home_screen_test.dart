@@ -2,7 +2,9 @@
 // Storyline from the tables, and this file means the app's own.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
@@ -112,10 +114,15 @@ void main() {
     await tester.pump();
   }
 
-  /// Runs out the reload debounce the triage and AI queues arm when they
-  /// report, so a test does not end with one pending.
-  Future<void> settleQueues(WidgetTester tester) =>
-      tester.pump(const Duration(milliseconds: 500));
+  /// Runs out every window the queues arm behind them, so a test does not end
+  /// with one pending: the reload debounce the triage and AI queues report on,
+  /// and — because their stage writes tick the feed — the feed's own tick
+  /// window and the metrics epoch that follows it.
+  Future<void> settleQueues(WidgetTester tester) async {
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump(HomeFeedNotifier.tickDebounce);
+    await tester.pump(HomeFeedNotifier.metricsDebounce);
+  }
 
   testWidgets('the app opens on Home, with the stop on the rail',
       (tester) async {
@@ -207,6 +214,62 @@ void main() {
 
     expect(find.byType(HomePane), findsOneWidget);
     expect(find.byType(ThreadDetailPanel), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a message the gate drops arrives, is read, and goes',
+      (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await pumpInbox(tester);
+
+    // The pair a sync makes: the store writes the row, the recorder says so.
+    // Read out of the screen's own container, because the bus the feed is
+    // listening on is the one that container built.
+    final ingested = await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'n1',
+      'conversation_key': 'c-n1',
+      'direction': 'inbound',
+      'subject': 'Weekly roundup',
+      'from_name': 'A Newsletter',
+      'received_at': '2026-09-03T09:00:00Z',
+      'triage_status': 'skipped',
+      'gate_reason': 'newsletter',
+    });
+    container.read(pipelineProgressProvider).noteIngest(
+          'email',
+          'n1',
+          receivedAt: ingested!,
+        );
+
+    await tester.pump(HomeFeedNotifier.tickDebounce);
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.descendant(
+        of: find.byType(HomePane),
+        matching: find.text('Weekly roundup'),
+      ),
+      findsOneWidget,
+      reason: 'the one glimpse a reader gets of what the gate threw out',
+    );
+    expect(find.text('Newsletter'), findsOneWidget);
+
+    await tester.pump(HomeFeedNotifier.entryClear);
+    await tester.pump(homeDropLinger);
+    await tester.pump(homeDropCollapse);
+    await tester.pump();
+
+    expect(find.text('Weekly roundup'), findsNothing);
+    expect(
+      find.descendant(
+        of: find.byType(HomePane),
+        matching: find.text('Homepage copy'),
+      ),
+      findsOneWidget,
+      reason: 'the row that left took nothing with it',
+    );
     await settleQueues(tester);
   });
 

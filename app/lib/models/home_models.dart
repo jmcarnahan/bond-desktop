@@ -7,6 +7,19 @@ import 'package:flutter/foundation.dart' show immutable;
 /// through a nullable cast with a default, so neither a half-written row nor a
 /// column an older build never wrote can throw during a render.
 
+/// How long a dropped row stays on screen, grayed, before it starts to go.
+/// The whole point of showing it at all is that the reader gets to see WHAT
+/// was dropped and why, so it has to outlast a glance.
+const Duration homeDropLinger = Duration(seconds: 3);
+
+/// The collapse that takes the grayed row off the table.
+///
+/// Here, beside the linger, because two files have to agree on it byte for
+/// byte: the row animates its height down over this, and the notifier waits
+/// exactly this long before deleting it. Deleting early leaves a jump;
+/// deleting late leaves a gap where the row already was.
+const Duration homeDropCollapse = Duration(milliseconds: 180);
+
 /// One message's trip through the pipeline, as one feed row.
 ///
 /// Every stage state is a raw string rather than an enum, for the reason a

@@ -40,10 +40,16 @@ Future<void> _pump(
   bool loadingMore = false,
   bool atEnd = false,
   String? loadError,
+  int pendingNewCount = 0,
+  Set<String> entering = const {},
+  Set<String> fading = const {},
+  Set<String> collapsing = const {},
   void Function(String, String)? onOpenThread,
   void Function(String)? onOpenStoryline,
   VoidCallback? onLoadMore,
   VoidCallback? onToggleDropped,
+  VoidCallback? onReleasePending,
+  void Function(bool)? onAnchoredChanged,
 }) async {
   await tester.binding.setSurfaceSize(const Size(1400, 900));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -58,11 +64,17 @@ Future<void> _pump(
         loadingMore: loadingMore,
         atEnd: atEnd,
         loadError: loadError,
+        pendingNewCount: pendingNewCount,
+        entering: entering,
+        fading: fading,
+        collapsing: collapsing,
         now: _now,
         onOpenThread: onOpenThread ?? (_, _) {},
         onOpenStoryline: onOpenStoryline ?? (_) {},
         onLoadMore: onLoadMore ?? () {},
         onToggleDropped: onToggleDropped ?? () {},
+        onReleasePending: onReleasePending,
+        onAnchoredChanged: onAnchoredChanged,
       ),
     ),
   ));
@@ -251,6 +263,101 @@ void main() {
           .selected,
       isTrue,
     );
+  });
+
+  group('while the reader is away from the top', () {
+    final pill = find.byKey(const ValueKey<String>('pending-pill'));
+
+    testWidgets('a count appears, and only when there is one', (tester) async {
+      await _pump(tester, rows: [_row(1)]);
+      expect(pill, findsNothing);
+
+      await _pump(tester, rows: [_row(1)], pendingNewCount: 3);
+      await tester.pump(HomePane.pillEntry);
+
+      expect(pill, findsOneWidget);
+      expect(find.text('3 new'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
+
+    testWidgets('tapping the count asks for the rows', (tester) async {
+      var released = 0;
+      await _pump(
+        tester,
+        rows: [_row(1)],
+        pendingNewCount: 2,
+        onReleasePending: () => released++,
+      );
+      // Twice: the first frame is the one that starts the slide, and the pill
+      // is not where a tap looks for it until the slide has finished.
+      await tester.pump(HomePane.pillEntry);
+      await tester.pump(HomePane.pillEntry);
+
+      await tester.tap(find.text('2 new'));
+      // The ride back to the top, run out so the test does not end mid-scroll.
+      await tester.pump(HomePane.releaseScroll);
+
+      expect(released, 1);
+    });
+
+    testWidgets('the top is reported on the way out and on the way back',
+        (tester) async {
+      final reported = <bool>[];
+      await _pump(
+        tester,
+        rows: [for (var i = 0; i < 40; i++) _row(i)],
+        onAnchoredChanged: reported.add,
+      );
+      expect(reported, isEmpty, reason: 'sitting at the top is not an event');
+
+      await tester.drag(find.byType(ListView), const Offset(0, -600));
+      await tester.pump();
+      expect(reported, [false]);
+
+      await tester.drag(find.byType(ListView), const Offset(0, 1200));
+      await tester.pump();
+      expect(reported, [false, true]);
+    });
+  });
+
+  group('a row on its way out', () {
+    testWidgets('is grayed where it stands', (tester) async {
+      final key = _row(1).feedKey;
+      await _pump(tester, rows: [_row(1)], fading: {key});
+      await tester.pump(homeDropCollapse);
+
+      final opacities = tester
+          .widgetList<AnimatedOpacity>(find.descendant(
+            of: find.byType(HomeFeedRowTile),
+            matching: find.byType(AnimatedOpacity),
+          ))
+          .map((widget) => widget.opacity);
+      expect(opacities, contains(HomeFeedRowTile.dropFadeOpacity));
+    });
+
+    testWidgets('gives up its height, and the feed closes over it',
+        (tester) async {
+      final key = _row(1).feedKey;
+      await _pump(tester, rows: [_row(1)]);
+      expect(
+        tester.getSize(find.byType(HomeFeedRowTile)).height,
+        greaterThan(0),
+      );
+
+      await _pump(tester, rows: [_row(1)], collapsing: {key});
+      expect(
+        find.byType(HomeFeedRowTile),
+        findsOneWidget,
+        reason: 'the row is still in the list while it shrinks',
+      );
+
+      await tester.pump(homeDropCollapse);
+
+      // A row of no height is a row the viewport stops laying out at all —
+      // and this is the exact duration the notifier waits before dropping it
+      // from the list, which is what keeps the two from disagreeing.
+      expect(find.byType(HomeFeedRowTile), findsNothing);
+    });
   });
 
   testWidgets('the title says where you are', (tester) async {

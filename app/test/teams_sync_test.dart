@@ -203,7 +203,7 @@ class _BreaksOn extends MessageStore {
   _BreaksOn(super.db, this.messageId);
 
   @override
-  Future<void> upsertMessage(Map<String, Object?> row) {
+  Future<String?> upsertMessage(Map<String, Object?> row) {
     if (row['source_message_id'] == messageId) {
       throw StateError('disk is full');
     }

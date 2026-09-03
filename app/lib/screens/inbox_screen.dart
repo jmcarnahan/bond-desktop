@@ -1184,6 +1184,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       loadingMore: feed.loadingMore,
       atEnd: feed.atEnd,
       loadError: feed.loadError,
+      pendingNewCount: feed.pendingNewCount,
+      entering: feed.entering,
+      fading: feed.fading,
+      collapsing: feed.collapsing,
       now: DateTime.now(),
       // The same door a notification's OpenThreadIntent goes through: one
       // selector resolves the row's source, marks it read and loads the
@@ -1192,6 +1196,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenThread: (source, key) => _select(key, source: source),
       onOpenStoryline: _selectStoryline,
       onLoadMore: () => ref.read(homeFeedProvider.notifier).loadMore(),
+      onReleasePending: () =>
+          ref.read(homeFeedProvider.notifier).releasePending(),
+      onAnchoredChanged: (anchored) =>
+          ref.read(homeFeedProvider.notifier).setAnchored(anchored),
       onToggleDropped: () => ref
           .read(homeFeedProvider.notifier)
           .setIncludeDropped(!feed.includeDropped),

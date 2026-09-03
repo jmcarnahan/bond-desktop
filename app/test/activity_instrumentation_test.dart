@@ -10,6 +10,8 @@ import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart'
     show encodeEmbedding, EmbeddingsClient;
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
+import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:bond_inbox/services/storyline_handler.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:bond_inbox/services/sync_service.dart';
@@ -296,6 +298,39 @@ void main() {
       expect([for (final row in await rows('sync_mail')) row.count], [2]);
       // It still happened, and the pref is where that is recorded.
       expect(await store.getPref(activityLastSyncMailKey), isNotNull);
+    });
+
+    test('a new message announces its arrival, and a replayed one does not',
+        () async {
+      // The home screen's other recorder, wired at the same seam and for the
+      // same reason: no stage after ingest runs for a message the gate throws
+      // out, so if the sync does not say it arrived, nothing ever will.
+      final bus = ProgressBus();
+      final ticks = <ProgressTick>[];
+      bus.ticks.listen(ticks.add);
+      addTearDown(bus.dispose);
+
+      final mail = FakeMail(messages: [graphMessage('m1')]);
+      final sync = SyncService(
+        mail,
+        store,
+        progress: PipelineProgress(store, bus: bus),
+      );
+
+      await sync.syncNow();
+      // The bus is a broadcast stream: its listeners are called a microtask
+      // after the publish.
+      await Future<void>.delayed(Duration.zero);
+      expect([for (final tick in ticks) tick.sourceMessageId], ['m1']);
+      expect(ticks.single.stage, 'ingest');
+
+      await sync.syncNow();
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        ticks,
+        hasLength(1),
+        reason: 'a delta page replaying itself is not an arrival',
+      );
     });
 
     test('a failing backend writes an error row AND still throws', () async {

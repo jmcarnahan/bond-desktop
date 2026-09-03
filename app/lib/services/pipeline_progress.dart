@@ -53,6 +53,32 @@ class PipelineProgress {
     }
   }
 
+  /// The tick that says a new message exists.
+  ///
+  /// Publish only, and the one method here that writes nothing: the ingest
+  /// stage's row is composed inside [MessageStore.upsertMessage]'s own
+  /// transaction, so by the time a caller can say the message is new the write
+  /// has already happened. [receivedAt] is that call's answer.
+  ///
+  /// Without it the screen would never see the messages it most needs to show:
+  /// a gate-dropped newsletter is finished at ingest and no later stage runs
+  /// for it, and everything else waits on triage before it says a word.
+  void noteIngest(
+    String source,
+    String sourceMessageId, {
+    required String receivedAt,
+  }) {
+    _bus.publish(
+      ProgressTick(
+        source: source,
+        sourceMessageId: sourceMessageId,
+        stage: 'ingest',
+        state: 'done',
+        receivedAt: receivedAt,
+      ),
+    );
+  }
+
   Future<void> noteTriage(
     String source,
     String sourceMessageId, {

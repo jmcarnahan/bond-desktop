@@ -30,6 +30,10 @@ class HomeFeedRowTile extends StatefulWidget {
 
   static const Duration entryDuration = Duration(milliseconds: 200);
 
+  /// How far down a row is faded while it is on its way out. Faint enough to
+  /// read as leaving, solid enough to still read.
+  static const double dropFadeOpacity = 0.35;
+
   /// The machine-readable drop reasons in the words a person would use.
   /// Anything unmapped falls back to the raw reason with its underscores
   /// opened up — a reason a newer build introduced reads awkwardly rather than
@@ -58,9 +62,17 @@ class HomeFeedRowTile extends StatefulWidget {
   final DateTime now;
 
   /// Whether this row is arriving now, rather than having been read off a
-  /// page. False renders it whole on the first frame with nothing animating —
-  /// which is every row this build ships; the live phase is what sets it.
+  /// page. False renders it whole on the first frame with nothing animating,
+  /// which is every row a page read hands over.
   final bool animateIn;
+
+  /// Whether the app has dropped this row and it is on its way off the table:
+  /// grayed where it stands, so the reader gets to see what went and why.
+  final bool fading;
+
+  /// The last beat of that: the row gives up its height and the feed closes
+  /// over it.
+  final bool collapsing;
 
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
@@ -72,6 +84,8 @@ class HomeFeedRowTile extends StatefulWidget {
     required this.onOpenThread,
     required this.onOpenStoryline,
     this.animateIn = false,
+    this.fading = false,
+    this.collapsing = false,
   });
 
   @override
@@ -96,9 +110,28 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
     });
   }
 
+  /// The collapse is the outermost thing that happens to a row, because it is
+  /// the only one that changes its size: everything inside animates within a
+  /// height this decides.
   @override
   Widget build(BuildContext context) {
-    final row = widget.row;
+    return AnimatedSize(
+      duration: homeDropCollapse,
+      curve: Curves.easeIn,
+      // From the top, so the rows below rise into the space rather than this
+      // one sinking out of its own.
+      alignment: Alignment.topCenter,
+      child: widget.collapsing
+          ? const SizedBox(width: double.infinity, height: 0)
+          : _content(widget.row),
+    );
+  }
+
+  /// The entry animations stay OUTSIDE the drop's, so the two multiply rather
+  /// than argue: a row that arrives already dropped — a newsletter the gate
+  /// threw out — slides in and grays at once, and neither animation has to
+  /// know the other exists.
+  Widget _content(HomeFeedRow row) {
     return AnimatedSlide(
       duration: HomeFeedRowTile.entryDuration,
       curve: Curves.easeOut,
@@ -107,77 +140,89 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
         duration: HomeFeedRowTile.entryDuration,
         curve: Curves.easeOut,
         opacity: _settled ? 1 : 0,
-        child: Material(
-          color: Colors.transparent,
-          child: InkWell(
-            onTap: () => widget.onOpenThread(row.source, row.conversationKey),
-            hoverColor: BondColors.faintGround,
-            child: Container(
-              padding: const EdgeInsets.symmetric(
-                horizontal: BondSpacing.s4,
-                vertical: BondSpacing.s8,
-              ),
-              decoration: const BoxDecoration(
-                border: Border(bottom: BorderSide(color: BondColors.border)),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.center,
-                children: [
-                  SizedBox(
-                    width: HomeFeedRowTile.glyphWidth,
-                    child: Text(
-                      sourceChipPrefix(row.source),
-                      style: BondType.small,
-                    ),
+        child: AnimatedOpacity(
+          duration: homeDropCollapse,
+          curve: Curves.easeOut,
+          opacity: widget.fading ? HomeFeedRowTile.dropFadeOpacity : 1,
+          child: AnimatedContainer(
+            duration: homeDropCollapse,
+            curve: Curves.easeOut,
+            color: widget.fading ? BondColors.faintGround : Colors.transparent,
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () =>
+                    widget.onOpenThread(row.source, row.conversationKey),
+                hoverColor: BondColors.faintGround,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: BondSpacing.s4,
+                    vertical: BondSpacing.s8,
                   ),
-                  const SizedBox(width: BondSpacing.s8),
-                  SizedBox(
-                    width: HomeFeedRowTile.fromWidth,
-                    child: Text(
-                      row.fromName ?? row.fromAddress ?? '(no sender)',
-                      style: BondType.body.copyWith(
-                        fontWeight: FontWeight.w600,
+                  decoration: const BoxDecoration(
+                    border:
+                        Border(bottom: BorderSide(color: BondColors.border)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      SizedBox(
+                        width: HomeFeedRowTile.glyphWidth,
+                        child: Text(
+                          sourceChipPrefix(row.source),
+                          style: BondType.small,
+                        ),
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                      const SizedBox(width: BondSpacing.s8),
+                      SizedBox(
+                        width: HomeFeedRowTile.fromWidth,
+                        child: Text(
+                          row.fromName ?? row.fromAddress ?? '(no sender)',
+                          style: BondType.body.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: BondSpacing.s8),
+                      Expanded(
+                        flex: HomeFeedRowTile.subjectFlex,
+                        child: Text(
+                          (row.subject?.isNotEmpty ?? false)
+                              ? row.subject!
+                              : '(no subject)',
+                          style: BondType.small.copyWith(color: BondColors.ink),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: BondSpacing.s8),
+                      SizedBox(
+                        width: HomeFeedRowTile.barWidth,
+                        child: HomeStageBar.forRow(
+                          row,
+                          // A finished row's bar is history, not progress.
+                          muted: row.outcome != 'pending',
+                        ),
+                      ),
+                      const SizedBox(width: BondSpacing.s8),
+                      Expanded(
+                        flex: HomeFeedRowTile.resultFlex,
+                        child: _result(row),
+                      ),
+                      const SizedBox(width: BondSpacing.s8),
+                      SizedBox(
+                        width: HomeFeedRowTile.whenWidth,
+                        child: Text(
+                          relativeTime(row.receivedAt, widget.now) ?? '',
+                          style: BondType.caption,
+                          textAlign: TextAlign.right,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: BondSpacing.s8),
-                  Expanded(
-                    flex: HomeFeedRowTile.subjectFlex,
-                    child: Text(
-                      (row.subject?.isNotEmpty ?? false)
-                          ? row.subject!
-                          : '(no subject)',
-                      style: BondType.small.copyWith(color: BondColors.ink),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const SizedBox(width: BondSpacing.s8),
-                  SizedBox(
-                    width: HomeFeedRowTile.barWidth,
-                    child: HomeStageBar.forRow(
-                      row,
-                      // A finished row's bar is history, not progress.
-                      muted: row.outcome != 'pending',
-                    ),
-                  ),
-                  const SizedBox(width: BondSpacing.s8),
-                  Expanded(
-                    flex: HomeFeedRowTile.resultFlex,
-                    child: _result(row),
-                  ),
-                  const SizedBox(width: BondSpacing.s8),
-                  SizedBox(
-                    width: HomeFeedRowTile.whenWidth,
-                    child: Text(
-                      relativeTime(row.receivedAt, widget.now) ?? '',
-                      style: BondType.caption,
-                      textAlign: TextAlign.right,
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
           ),

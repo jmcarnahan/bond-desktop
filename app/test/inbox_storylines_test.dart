@@ -4,6 +4,7 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart' show TriageResult;
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
@@ -91,10 +92,15 @@ void main() {
           pill.label: pill.selected,
       };
 
-  /// Runs out the 400ms reload debounce the triage and AI queues arm when they
-  /// report, so the test does not end with one pending.
-  Future<void> settleQueues(WidgetTester tester) =>
-      tester.pump(const Duration(milliseconds: 500));
+  /// Runs out every window the queues arm behind them, so the test does not
+  /// end with one pending: the 400ms reload debounce they report on, and —
+  /// because their stage writes tick the home feed — its tick window and the
+  /// metrics epoch that follows it.
+  Future<void> settleQueues(WidgetTester tester) async {
+    await tester.pump(const Duration(milliseconds: 500));
+    await tester.pump(HomeFeedNotifier.tickDebounce);
+    await tester.pump(HomeFeedNotifier.metricsDebounce);
+  }
 
   /// The screen itself, over the seeded store, settled enough to click.
   Future<void> pumpInbox(WidgetTester tester) async {

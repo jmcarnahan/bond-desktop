@@ -7,6 +7,7 @@ import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'graph_mail.dart';
+import 'pipeline_progress.dart';
 
 /// How far back a mailbox that has never synced reaches. Two weeks is enough
 /// context to thread the conversations that are actually live without
@@ -57,6 +58,7 @@ class SyncService implements MailSync {
   final MailBackend _mail;
   final MessageStore _store;
   final ActivityLog _log;
+  final PipelineProgress _progress;
 
   /// How to find out which mailbox this is. A callback rather than a future,
   /// so the keychain is read on the first sync rather than when this object is
@@ -73,8 +75,10 @@ class SyncService implements MailSync {
     this._mail,
     this._store, {
     ActivityLog? activityLog,
+    PipelineProgress? progress,
     Future<String?> Function()? userAddress,
   })  : _log = activityLog ?? ActivityLog.disabled(),
+        _progress = progress ?? const PipelineProgress.disabled(),
         _userAddressReader = userAddress;
 
   @override
@@ -378,7 +382,7 @@ class SyncService implements MailSync {
         // carry a newer read state.
         final firstSighting = !await _store.hasMessage(_source, id);
 
-        await _store.upsertMessage({
+        final ingested = await _store.upsertMessage({
           'source': _source,
           'source_message_id': id,
           'internet_message_id': message['internetMessageId'] as String?,
@@ -399,6 +403,13 @@ class SyncService implements MailSync {
           'gate_reason': gateReason,
           'addressed_me': direction == 'inbound' && soleRecipient ? 1 : 0,
         });
+
+        // Non-null only when the pipeline had never heard of this message, so
+        // a delta page replaying itself announces nothing. Not awaited because
+        // there is nothing to wait for: the tick is a publish onto a stream.
+        if (ingested != null) {
+          _progress.noteIngest(_source, id, receivedAt: ingested);
+        }
 
         if (!firstSighting) continue;
         newMessages++;

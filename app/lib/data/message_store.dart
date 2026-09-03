@@ -156,13 +156,23 @@ class MessageStore {
   /// hottest write in the app — once per row of every delta page — so the
   /// progress row is composed here in Dart from what the caller already
   /// passed rather than re-derived in SQL.
-  Future<void> upsertMessage(Map<String, Object?> row) async {
+  ///
+  /// Returns the row's `received_at` when this call CREATED the progress row —
+  /// the message is new to the pipeline — and null when it did not, which is
+  /// every replay a delta feed makes. Non-null is what a live screen turns
+  /// into its ingest tick: a message the gate throws out at ingest is finished
+  /// by the time this returns, and no later stage will ever announce it.
+  Future<String?> upsertMessage(Map<String, Object?> row) async {
     final now = _nowIso();
     final source = row['source'] ?? 'email';
     final id = row['source_message_id'];
     final createdAt = row['created_at'] ?? now;
     final triageStatus = row['triage_status'] ?? 'pending';
     final gateReason = row['gate_reason'] as String?;
+
+    // The progress row's sort key, read once so the value bound below and the
+    // value handed back are the same string.
+    final receivedAt = (row['received_at'] ?? createdAt).toString();
 
     // A message the gate already threw out at ingest never enters the
     // pipeline, so its row lands finished rather than waiting on four stages
@@ -177,7 +187,7 @@ class MessageStore {
       _ => 'pending',
     };
 
-    await db.transaction(() async {
+    final created = await db.transaction(() async {
       await db.customUpdate(
         '''
 INSERT INTO messages (
@@ -219,7 +229,9 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
         ]),
       );
 
-      await db.customUpdate(
+      // The affected-row count is how an insert is told from an ignore: after
+      // the fact there is nothing in the row itself that says which happened.
+      return db.customUpdate(
         '''
 INSERT OR IGNORE INTO message_progress (
   source, source_message_id, conversation_key, received_at,
@@ -231,7 +243,7 @@ INSERT OR IGNORE INTO message_progress (
           source,
           id,
           row['conversation_key'],
-          row['received_at'] ?? createdAt,
+          receivedAt,
           gated ? 'skipped' : triageState,
           gated ? 'skipped' : 'pending',
           gated ? 'skipped' : 'pending',
@@ -244,6 +256,7 @@ INSERT OR IGNORE INTO message_progress (
         ]),
       );
     });
+    return created > 0 ? receivedAt : null;
   }
 
   /// Whether this `(source, id)` is already stored.

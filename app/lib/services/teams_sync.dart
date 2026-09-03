@@ -4,6 +4,7 @@ import '../data/message_store.dart';
 import 'activity_log.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
+import 'pipeline_progress.dart';
 import 'backend/teams_backend.dart';
 
 /// LEGACY. Nothing writes this any more.
@@ -91,14 +92,17 @@ class TeamsSync {
   final Future<bool> Function() _canSync;
 
   final ActivityLog _log;
+  final PipelineProgress _progress;
 
   TeamsSync(
     this._teams,
     this._store, {
     Future<bool> Function()? canSync,
     ActivityLog? activityLog,
+    PipelineProgress? progress,
   })  : _canSync = canSync ?? _alwaysAllowed,
-        _log = activityLog ?? ActivityLog.disabled();
+        _log = activityLog ?? ActivityLog.disabled(),
+        _progress = progress ?? const PipelineProgress.disabled();
 
   static Future<bool> _alwaysAllowed() async => true;
 
@@ -380,7 +384,15 @@ class TeamsSync {
         // exactly once — see the class comment. The upsert itself still runs.
         final firstSighting = !await _store.hasMessage(source, id);
 
-        await _store.upsertMessage(row);
+        final ingested = await _store.upsertMessage(row);
+
+        // Non-null only when the pipeline had never heard of this message, so
+        // a chat read a second time announces nothing. Not awaited because
+        // there is nothing to wait for: the tick is a publish onto a stream.
+        if (ingested != null) {
+          _progress.noteIngest(source, id, receivedAt: ingested);
+        }
+
         if (!firstSighting) continue;
         newMessages++;
 
