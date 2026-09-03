@@ -18,7 +18,7 @@ import 'composer.dart' show Composer;
 /// Tapping a card SENDS only when [armed]. Without a send grant the same tap
 /// opens the reply window with the text in it, because a card that appeared to
 /// send and quietly did not would be worse than one that never offered.
-class QuickReplyBar extends StatelessWidget {
+class QuickReplyBar extends StatefulWidget {
   /// Zero, one or two. Zero renders the `Reply…` affordance alone — this bar
   /// is also how a thread with no suggestions reaches the composer.
   final List<DraftOption> options;
@@ -66,16 +66,40 @@ class QuickReplyBar extends StatelessWidget {
     this.suggesting = false,
   });
 
+  @override
+  State<QuickReplyBar> createState() => _QuickReplyBarState();
+}
+
+class _QuickReplyBarState extends State<QuickReplyBar> {
+  /// Whether the × has been armed. The cards stay up while it is: the question
+  /// is about them, and answering it should not mean remembering what they
+  /// said.
+  bool _confirmingDismiss = false;
+
   /// Enough of the reply to recognise which one is going, and no more — the
   /// undo row is a question about a decision the user just made, not a
   /// second look at the text.
   static const int _pendingPreviewCap = 80;
 
+  /// Wide enough for three lines of a short reply, narrow enough that two sit
+  /// side by side in the thread pane.
+  static const double _cardWidth = 320;
+
+  @override
+  void didUpdateWidget(covariant QuickReplyBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A fresh pair is a fresh question. Left standing, the half-answered one
+    // would sit under two suggestions nobody has been asked about yet.
+    if (!identical(oldWidget.options, widget.options)) {
+      _confirmingDismiss = false;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final queued = pending;
+    final queued = widget.pending;
     if (queued != null) return _tile(_pendingRow(queued));
-    if (options.isEmpty) return _replyRow();
+    if (widget.options.isEmpty) return _replyRow();
     return _tile(
       Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -87,26 +111,61 @@ class QuickReplyBar extends StatelessWidget {
             spacing: BondSpacing.s8,
             runSpacing: BondSpacing.s8,
             children: [
-              for (final option in options) _card(option),
+              for (final option in widget.options) _card(option),
             ],
           ),
-          // Said once, above the button, both ways: a card that sends and a
-          // card that prefills look identical, so the words are the only thing
-          // separating "one tap and this is on its way" from "one tap and you
-          // are editing it" — and guessing wrong in either direction is the
-          // dishonest version of this bar.
           const SizedBox(height: BondSpacing.s8),
-          Text(
-            armed
-                ? 'Tap a suggestion to send it — you can undo for a few '
-                    'seconds.'
-                : 'Tap a reply to open it in the composer.',
-            style: BondType.caption,
-          ),
+          // The confirm takes the caption's line rather than opening anything:
+          // the two-step stands where a confirm dialog would, and it belongs
+          // where the words it is replacing were.
+          if (_confirmingDismiss)
+            _confirmRow()
+          else
+            // Said once, above the button, both ways: a card that sends and a
+            // card that prefills look identical, so the words are the only
+            // thing separating "one tap and this is on its way" from "one tap
+            // and you are editing it" — and guessing wrong in either direction
+            // is the dishonest version of this bar.
+            Text(
+              widget.armed
+                  ? 'Tap a suggestion to send it — you can undo for a few '
+                      'seconds.'
+                  : 'Tap a reply to open it in the composer.',
+              style: BondType.caption,
+            ),
           const SizedBox(height: BondSpacing.s4),
           _replyRow(),
         ],
       ),
+    );
+  }
+
+  /// The question the × asks, and both answers. Quiet buttons: throwing away
+  /// two suggestions is a small act, and the row it sits in is a caption.
+  Widget _confirmRow() {
+    return Row(
+      children: [
+        Flexible(
+          child: Text('Dismiss these suggestions?', style: BondType.caption),
+        ),
+        _quietButton('Dismiss', () {
+          setState(() => _confirmingDismiss = false);
+          widget.onDismiss?.call();
+        }),
+        _quietButton('Keep', () => setState(() => _confirmingDismiss = false)),
+      ],
+    );
+  }
+
+  Widget _quietButton(String label, VoidCallback onPressed) {
+    return TextButton(
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+        minimumSize: const Size(0, 28),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      child: Text(label),
     );
   }
 
@@ -149,7 +208,7 @@ class QuickReplyBar extends StatelessWidget {
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(
-          onTap: () => onPick(option),
+          onTap: () => widget.onPick(option),
           borderRadius: BondRadii.smAll,
           hoverColor: BondColors.primaryTint,
           child: Container(
@@ -165,7 +224,9 @@ class QuickReplyBar extends StatelessWidget {
                 Row(
                   children: [
                     Icon(
-                      armed ? Icons.send_outlined : Icons.edit_outlined,
+                      widget.armed
+                          ? Icons.send_outlined
+                          : Icons.edit_outlined,
                       size: 14,
                       color: BondColors.primary,
                     ),
@@ -207,25 +268,27 @@ class QuickReplyBar extends StatelessWidget {
   /// suggest yet — that is what makes a dismissal reversible: the × takes the
   /// cards away, and this button is how they come back.
   Widget _replyRow() {
-    final suggest = onSuggest;
+    final suggest = widget.onSuggest;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         TextButton.icon(
-          onPressed: onReply,
+          onPressed: widget.onReply,
           icon: const Icon(Icons.reply_outlined, size: 16),
           label: const Text('Reply…'),
         ),
-        if (suggest != null && options.isEmpty)
+        if (suggest != null && widget.options.isEmpty)
           TextButton.icon(
-            onPressed: suggesting ? null : suggest,
+            onPressed: widget.suggesting ? null : suggest,
             icon: const Icon(Icons.auto_awesome, size: 16),
-            label: Text(suggesting ? 'Drafting…' : 'Suggest a reply'),
+            label: Text(widget.suggesting ? 'Drafting…' : 'Suggest a reply'),
           ),
         const Spacer(),
-        if (options.isNotEmpty && onDismiss != null)
+        if (widget.options.isNotEmpty && widget.onDismiss != null)
           IconButton(
-            onPressed: onDismiss,
+            // Arms rather than closes: what the × means has not changed, only
+            // how many taps it takes to mean it.
+            onPressed: () => setState(() => _confirmingDismiss = true),
             icon: const Icon(Icons.close),
             iconSize: 16,
             tooltip: 'Dismiss suggestions',
@@ -255,12 +318,8 @@ class QuickReplyBar extends StatelessWidget {
         const SizedBox(width: BondSpacing.s8),
         Text('Sending…', style: BondType.caption),
         const SizedBox(width: BondSpacing.s4),
-        TextButton(onPressed: onUndo, child: const Text('Undo')),
+        TextButton(onPressed: widget.onUndo, child: const Text('Undo')),
       ],
     );
   }
-
-  /// Wide enough for three lines of a short reply, narrow enough that two sit
-  /// side by side in the thread pane.
-  static const double _cardWidth = 320;
 }

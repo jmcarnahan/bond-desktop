@@ -109,6 +109,10 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   bool _editingCharter = false;
   bool _confirmingDismiss = false;
 
+  /// The card whose remove × has been armed, by thread key. One at a time: a
+  /// spine with three open questions on it is a spine nobody reads.
+  String? _confirmingRemoveKey;
+
   late final TextEditingController _title =
       TextEditingController(text: widget.storyline.title);
 
@@ -348,30 +352,48 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                 ],
               ),
             ),
-            IconButton(
-              onPressed: () => widget.onOpenThread(
-                episode.source,
-                episode.conversationKey,
+            // The two-step stands where a confirm dialog would: the first tap
+            // asks, the second takes the thread out. Both icons give way to
+            // the pair, so the header reads as one question rather than a
+            // question next to an unrelated button.
+            if (_confirmingRemoveKey == episode.threadKey) ...[
+              _quietButton('Remove thread', () {
+                setState(() => _confirmingRemoveKey = null);
+                widget.onRemoveThread(
+                  episode.source,
+                  episode.conversationKey,
+                );
+              }),
+              const SizedBox(width: BondSpacing.s4),
+              _quietButton(
+                'Cancel',
+                () => setState(() => _confirmingRemoveKey = null),
               ),
-              icon: const Icon(Icons.open_in_new),
-              iconSize: 14,
-              tooltip: 'Open thread',
-              padding: const EdgeInsets.all(BondSpacing.s4),
-              constraints: const BoxConstraints(),
-              visualDensity: VisualDensity.compact,
-            ),
-            IconButton(
-              onPressed: () => widget.onRemoveThread(
-                episode.source,
-                episode.conversationKey,
+            ] else ...[
+              IconButton(
+                onPressed: () => widget.onOpenThread(
+                  episode.source,
+                  episode.conversationKey,
+                ),
+                icon: const Icon(Icons.open_in_new),
+                iconSize: 14,
+                tooltip: 'Open thread',
+                padding: const EdgeInsets.all(BondSpacing.s4),
+                constraints: const BoxConstraints(),
+                visualDensity: VisualDensity.compact,
               ),
-              icon: const Icon(Icons.close),
-              iconSize: 14,
-              tooltip: 'Remove from storyline',
-              padding: const EdgeInsets.all(BondSpacing.s4),
-              constraints: const BoxConstraints(),
-              visualDensity: VisualDensity.compact,
-            ),
+              IconButton(
+                onPressed: () => setState(
+                  () => _confirmingRemoveKey = episode.threadKey,
+                ),
+                icon: const Icon(Icons.close),
+                iconSize: 14,
+                tooltip: 'Remove from storyline',
+                padding: const EdgeInsets.all(BondSpacing.s4),
+                constraints: const BoxConstraints(),
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
           ],
         ),
       ),

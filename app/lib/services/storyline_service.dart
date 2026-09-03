@@ -820,9 +820,20 @@ class StorylineService {
     await _store.requeueWork('storyline_recruit', _workSource, id);
   }
 
+  /// Files a thread into a storyline by hand. The member write clears any
+  /// block the user's own earlier removal left, which is what makes putting a
+  /// thread back work at all — see [MessageStore.addStorylineMember].
   Future<void> addThread(String id, String source, String key) async {
     await _store.addStorylineMember(id, source, key, addedBy: 'user');
-    await _store.updateStoryline(id, memberHash: await _memberHashOf(id));
+    final storyline = await _store.getStoryline(id);
+    await _store.updateStoryline(
+      id,
+      memberHash: await _memberHashOf(id),
+      // Filing a thread into a suggestion is accepting it — the same write
+      // [keepSuggestion] makes. Nothing is left to ask about a group the user
+      // is already putting threads into.
+      status: storyline?.status == 'suggested' ? 'active' : null,
+    );
     final row = await _store.getConversationRow(source, key);
     final lastMessageAt = row?['last_message_at'] as String?;
     if (lastMessageAt != null && lastMessageAt.isNotEmpty) {

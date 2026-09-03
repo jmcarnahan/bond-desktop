@@ -545,7 +545,7 @@ void main() {
       expect(opened, ['teams/chat-1']);
     });
 
-    testWidgets('the close icon removes that thread from the storyline',
+    testWidgets('the close icon asks before it removes that thread',
         (tester) async {
       final removed = <String>[];
       await pumpPanel(
@@ -554,8 +554,56 @@ void main() {
       );
 
       await tester.tap(find.byTooltip('Remove from storyline').first);
+      await tester.pumpAndSettle();
+
+      // The first tap only arms. A × sitting next to Open thread is one slip
+      // away from taking a thread out of a group nobody meant to touch.
+      expect(removed, isEmpty);
+      expect(find.text('Remove thread'), findsOneWidget);
+      expect(find.text('Cancel'), findsOneWidget);
+
+      await tester.tap(find.text('Remove thread'));
+      await tester.pumpAndSettle();
 
       expect(removed, ['email/c1']);
+    });
+
+    testWidgets('and takes no for an answer, twice over', (tester) async {
+      final removed = <String>[];
+      await pumpPanel(
+        tester,
+        onRemoveThread: (source, key) => removed.add('$source/$key'),
+      );
+
+      await tester.tap(find.byTooltip('Remove from storyline').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(removed, isEmpty);
+      expect(find.text('Remove thread'), findsNothing);
+
+      // Disarmed, not spent: the × still asks the next time it is tapped.
+      await tester.tap(find.byTooltip('Remove from storyline').first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove thread'), findsOneWidget);
+    });
+
+    testWidgets('and only the card that was tapped asks anything',
+        (tester) async {
+      await pumpPanel(tester);
+
+      // Two cards on the spine; arming one must leave the other's icons alone,
+      // or the whole panel would look like it was about to lose everything.
+      expect(find.byTooltip('Remove from storyline'), findsNWidgets(2));
+
+      await tester.tap(find.byTooltip('Remove from storyline').first);
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove thread'), findsOneWidget);
+      expect(find.byTooltip('Remove from storyline'), findsOneWidget);
+      expect(find.byTooltip('Open thread'), findsOneWidget);
     });
   });
 

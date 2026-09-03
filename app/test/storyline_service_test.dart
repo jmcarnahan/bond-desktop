@@ -1335,6 +1335,41 @@ void main() {
 
       expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
       expect(await store.membersOf('sl-1'), hasLength(1));
+      // The same fact the picker reads: a thread still listed here is one the
+      // Add-to pane would refuse to offer back.
+      expect(await store.blockedThreadsOf('sl-1'), isEmpty);
+    });
+
+    test('filing a thread into a suggestion accepts it', () async {
+      await seed(store, 'c1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'suggested',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.addThread('sl-1', 'email', 'c1');
+
+      // Nothing is left to ask the user about a group they are already
+      // putting threads into.
+      expect((await store.getStoryline('sl-1'))!.status, 'active');
+    });
+
+    test('and filing into a kept one leaves its status alone', () async {
+      await seed(store, 'c1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.addThread('sl-1', 'email', 'c1');
+
+      expect((await store.getStoryline('sl-1'))!.status, 'active');
     });
   });
 

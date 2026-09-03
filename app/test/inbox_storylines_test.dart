@@ -90,8 +90,8 @@ void main() {
   Future<void> settleQueues(WidgetTester tester) =>
       tester.pump(const Duration(milliseconds: 500));
 
-  /// Opens the storyline named [title] in the main pane.
-  Future<void> openStoryline(WidgetTester tester, String title) async {
+  /// The screen itself, over the seeded store, settled enough to click.
+  Future<void> pumpInbox(WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -118,6 +118,11 @@ void main() {
     await tester.pump();
     await tester.pump();
     await tester.pump();
+  }
+
+  /// Opens the storyline named [title] in the main pane.
+  Future<void> openStoryline(WidgetTester tester, String title) async {
+    await pumpInbox(tester);
 
     // The rail's storylines section is expanded by default, so the row is
     // already on screen.
@@ -244,6 +249,43 @@ void main() {
     expect(find.text('✉ Launch date'), findsNothing);
     expect(find.text('✉ Homepage copy'), findsNothing);
     expect(find.text('No threads to add.'), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('Add to storyline offers the suggestions too', (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await seedThread('c2', 'Launch date');
+    await store.insertStoryline(
+      id: 'sl-1',
+      title: 'Website redesign',
+      status: 'suggested',
+      createdBy: 'auto',
+    );
+    await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+
+    await pumpInbox(tester);
+    await tester.tap(find.text('Homepage copy').first);
+    await tester.pump();
+    await tester.pump();
+
+    // The menu route animates; a settle would never come back over the
+    // screen's periodic timer, so the pumps are bounded.
+    await tester.tap(find.byIcon(Icons.more_horiz));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Add to storyline…'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    // Filing a thread into a suggestion is the user answering it. Holding the
+    // suggestions back was how a thread removed from one could never go back.
+    expect(
+      find.descendant(
+        of: find.byType(AddToStorylinePane),
+        matching: find.text('Website redesign'),
+      ),
+      findsOneWidget,
+    );
     await settleQueues(tester);
   });
 
@@ -475,6 +517,27 @@ void main() {
       // would say nothing about any of them.
       expect(find.byType(QuickReplyBar), findsNothing);
       expect(find.text('Reply…'), findsOneWidget);
+      expect(find.text('Suggest a reply'), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a card whose suggestions were closed offers them back',
+        (tester) async {
+      await seedTimedStoryline();
+      await seedSuggestion('c2', 'Confirm Friday', 'Friday works for me.');
+      // What the × writes once the user has confirmed it: the draft survives,
+      // its cards do not.
+      await store.dismissDraftOptions('email', 'c2');
+
+      await openStoryline(tester, 'Website redesign');
+      await tester.pump();
+      await tester.pump();
+
+      // The cards are gone, and the way back to them is on the card they were
+      // on — a dismissal nothing could undo is the reason this exists.
+      expect(find.byType(QuickReplyBar), findsNothing);
+      expect(find.text('Friday works for me.'), findsNothing);
+      expect(find.text('Suggest a reply'), findsOneWidget);
       await settleQueues(tester);
     });
 

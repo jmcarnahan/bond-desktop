@@ -201,14 +201,65 @@ void main() {
       expect(replies, 1);
     });
 
-    testWidgets('the × closes the suggestions', (tester) async {
+    testWidgets('the × asks before it closes the suggestions', (tester) async {
       var dismissed = 0;
       await pumpBar(tester, onDismiss: () => dismissed++);
 
       await tester.tap(find.byIcon(Icons.close));
       await tester.pump();
 
+      // The first tap only asks. Suggestions are cheap to keep and gone for
+      // good once thrown away, so the × owes the user a question.
+      expect(dismissed, 0);
+      expect(find.text('Dismiss these suggestions?'), findsOneWidget);
+      // The cards the question is about stay on screen while it stands.
+      expect(find.text(_confirm.body), findsOneWidget);
+      expect(find.text(_propose.body), findsOneWidget);
+
+      await tester.tap(find.text('Dismiss'));
+      await tester.pump();
+
       expect(dismissed, 1);
+    });
+
+    testWidgets('and Keep puts the caption back without closing anything',
+        (tester) async {
+      var dismissed = 0;
+      await pumpBar(tester, onDismiss: () => dismissed++);
+
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pump();
+      await tester.tap(find.text('Keep'));
+      await tester.pump();
+
+      expect(dismissed, 0);
+      expect(find.text('Dismiss these suggestions?'), findsNothing);
+      expect(
+        find.text('Tap a suggestion to send it — you can undo for a few '
+            'seconds.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a fresh pair is never asked about on the old one\'s behalf',
+        (tester) async {
+      var dismissed = 0;
+      await pumpBar(tester, onDismiss: () => dismissed++);
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pump();
+
+      // The model wrote two new suggestions while the question stood. They
+      // are not what the user was answering.
+      await pumpBar(
+        tester,
+        options: const [
+          DraftOption(stance: 'Ask for Wednesday', body: 'Wednesday?'),
+        ],
+        onDismiss: () => dismissed++,
+      );
+
+      expect(find.text('Dismiss these suggestions?'), findsNothing);
+      expect(dismissed, 0);
     });
 
     testWidgets('and is absent when the host offers no way to dismiss',

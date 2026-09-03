@@ -1180,10 +1180,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// Which storyline [thread] joins, or the one it starts.
   Widget _pickStorylinePane(({String source, String id}) thread) {
-    // Suggestions are deliberately absent: filing a thread into a group the
-    // user has not accepted yet would be answering the suggestion for them. So
-    // are the storylines this thread is already in — an "Add to" that does
-    // nothing reads as a broken row.
+    // Suggestions are offered alongside the kept ones: filing a thread into a
+    // suggestion IS the user answering it, and the add promotes the group to
+    // kept. Leaving them out was how a thread removed from a suggestion could
+    // never be put back. The storylines this thread is already in stay out —
+    // an "Add to" that does nothing reads as a broken row.
     //
     // Empty until the read lands, which leaves every storyline offered for one
     // frame. Adding a thread it is already in is a no-op in the store, so the
@@ -1200,8 +1201,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       child: AddToStorylinePane(
         choices: [
           for (final storyline in _storylines())
-            if (!storyline.isSuggested && !already.contains(storyline.id))
-              storyline,
+            if (!already.contains(storyline.id)) storyline,
         ],
         onBack: () => setState(() => _pickingStorylineForThread = null),
         onPick: (id) {
@@ -2028,11 +2028,11 @@ class _EpisodeQuickReplies extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final draft = ref.watch(draftProvider(target));
+    final notifier = ref.read(draftProvider(target).notifier);
     if (draft.options.isEmpty && draft.pending == null) {
-      return const SizedBox.shrink();
+      return _suggestAgain(draft, notifier);
     }
 
-    final notifier = ref.read(draftProvider(target).notifier);
     return Padding(
       // The card's own gap. The footer owns its spacing so that the empty case
       // above can leave no trace.
@@ -2055,6 +2055,38 @@ class _EpisodeQuickReplies extends ConsumerWidget {
         onDismiss: () => unawaited(notifier.dismissOptions()),
         pending: draft.pending,
         onUndo: onUndo,
+      ),
+    );
+  }
+
+  /// The way back from a dismissal, on a card that has nothing to show.
+  ///
+  /// Offered only where the cards were closed rather than never written: a
+  /// thread the model has not drafted for yet gets nothing, because a bare
+  /// button on every card in the spine would say nothing about any of them.
+  /// [DraftState.generate] deletes the row on its way to a new draft, so the
+  /// `generating` arm is what keeps `Drafting…` on screen for the second the
+  /// row is gone.
+  Widget _suggestAgain(DraftState draft, DraftNotifier notifier) {
+    final row = draft.draft;
+    // The reads [DraftState.options] empties itself on, minus the one that is
+    // not a dismissal: a sent reply has no suggestions to bring back.
+    final hidden = row != null &&
+        row['status'] != 'sent' &&
+        (row['status'] == 'dismissed' ||
+            (row['options_dismissed'] as int? ?? 0) == 1);
+    final suggesting = draft.generating;
+    if (!hidden && !suggesting) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: BondSpacing.s12),
+      child: Row(
+        children: [
+          TextButton.icon(
+            onPressed: suggesting ? null : () => unawaited(notifier.generate()),
+            icon: const Icon(Icons.auto_awesome, size: 16),
+            label: Text(suggesting ? 'Drafting…' : 'Suggest a reply'),
+          ),
+        ],
       ),
     );
   }
