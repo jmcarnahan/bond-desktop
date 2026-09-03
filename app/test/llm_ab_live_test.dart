@@ -49,10 +49,6 @@ bool withinOne(List<String> order, String a, String b) {
   return (ia - ib).abs() <= 1;
 }
 
-String pct(int matches, int total) => total == 0
-    ? '—'
-    : '${(100 * matches / total).toStringAsFixed(0)}% ($matches/$total)';
-
 /// One corpus entry judged twice.
 class _Pair {
   final String id;
@@ -74,22 +70,32 @@ void main() {
   test(
     'the corpus through both servers, compared',
     () async {
-      final big = LlmClient();
-      final fast = LlmClient(baseUrl: LlmClient.fastBaseUrl);
-      var bigLeaks = 0;
-      var fastLeaks = 0;
+      // One collector per client, never one shared: the whole question here is
+      // how the two servers differ, and a single bucket would average them
+      // into a machine that does not exist.
+      final bigCalls = CallCollector(
+        label: '27B (default)',
+        url: LlmClient.defaultBaseUrl,
+        model: 'qwen3.8',
+      );
+      final fastCalls = CallCollector(
+        label: 'fast (default)',
+        url: LlmClient.fastBaseUrl,
+        model: 'qwen3.8',
+      );
+      final big = LlmClient(onCall: bigCalls.record);
+      final fast = LlmClient(
+        baseUrl: LlmClient.fastBaseUrl,
+        onCall: fastCalls.record,
+      );
       // Counted per client, so a leak names the server that leaked rather than
       // leaving both under suspicion.
-      big.onReasoningLeak = () => bigLeaks++;
-      fast.onReasoningLeak = () => fastLeaks++;
+      big.onReasoningLeak = bigCalls.noteLeak;
+      fast.onReasoningLeak = fastCalls.noteLeak;
 
       final emails =
           emailCorpus.where((entry) => entry.expectedGate == null).toList();
 
-      final bigTriageMs = <int>[];
-      final fastTriageMs = <int>[];
-      final bigExtractMs = <int>[];
-      final fastExtractMs = <int>[];
       final pairs = <_Pair>[];
       final lines = <String>[];
       final injection = <String>[];
@@ -106,23 +112,21 @@ void main() {
           // between the runs that has nothing to do with the models.
           final now = DateTime.now();
 
-          final bigTriageWatch = Stopwatch()..start();
+          // Latency is not timed here: each client's collector already holds
+          // the HTTP round trip for every call, measured on the same clock as
+          // the token counts it will be divided by.
           final bigTriage = await runTask(
             big,
             const TriageTask(),
             TriageInput(entry.message, now),
           );
-          bigTriageWatch.stop();
 
-          final fastTriageWatch = Stopwatch()..start();
           final fastTriage = await runTask(
             fast,
             const TriageTask(),
             TriageInput(entry.message, now),
           );
-          fastTriageWatch.stop();
 
-          final bigExtractWatch = Stopwatch()..start();
           final bigExtract = await runTask(
             big,
             const ExtractTask(),
@@ -131,21 +135,13 @@ void main() {
             // the models differing, not one of them sampling.
             temperature: 0,
           );
-          bigExtractWatch.stop();
 
-          final fastExtractWatch = Stopwatch()..start();
           final fastExtract = await runTask(
             fast,
             const ExtractTask(),
             ExtractionInput(entry.message, now),
             temperature: 0,
           );
-          fastExtractWatch.stop();
-
-          bigTriageMs.add(bigTriageWatch.elapsed.inMilliseconds);
-          fastTriageMs.add(fastTriageWatch.elapsed.inMilliseconds);
-          bigExtractMs.add(bigExtractWatch.elapsed.inMilliseconds);
-          fastExtractMs.add(fastExtractWatch.elapsed.inMilliseconds);
 
           pairs.add(_Pair(
             id: entry.id,
@@ -219,12 +215,10 @@ void main() {
           '| needs_action (exact) | ${pct(needsAction.length, n)} |\n'
           '| intent (exact) | ${pct(intent.length, n)} |\n'
           '| importance (within one) | ${pct(importance.length, n)} |\n'
-          '\n| task | n | p50 ms | p95 ms | mean ms | total s |\n'
-          '| --- | --- | --- | --- | --- | --- |\n'
-          '${row('triage 27B', bigTriageMs)}\n'
-          '${row('triage fast', fastTriageMs)}\n'
-          '${row('extract 27B', bigExtractMs)}\n'
-          '${row('extract fast', fastExtractMs)}\n'
+          '\n${bigCalls.banner}\n'
+          '\n${bigCalls.table()}\n'
+          '\n${fastCalls.banner}\n'
+          '\n${fastCalls.table()}\n'
           '\n${lines.join('\n')}\n'
           '\n${injection.join('\n')}\n',
         );
@@ -233,8 +227,9 @@ void main() {
       // Per server, and not a judgement call either way: a build that ignores
       // enable_thinking runs at half speed, and every latency above would be
       // measuring that instead of the model.
-      expect(bigLeaks, 0, reason: 'the 27B reasoned despite enable_thinking');
-      expect(fastLeaks, 0,
+      expect(bigCalls.reasoningLeaks, 0,
+          reason: 'the 27B reasoned despite enable_thinking');
+      expect(fastCalls.reasoningLeaks, 0,
           reason: 'the fast model reasoned despite enable_thinking');
     },
     timeout: const Timeout(Duration(minutes: 45)),

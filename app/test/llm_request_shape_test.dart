@@ -179,6 +179,54 @@ void main() {
       );
     });
 
+    test('usage and timings survive the wire, doubles and all', () async {
+      // Through a real socket rather than a mocked client, because the parse
+      // being checked reads a JSON number the server encodes — `3800.0` on the
+      // wire, an int in the record — and an in-process fake could hand over a
+      // Dart int the real server never sends.
+      final records = <LlmCallRecord>[];
+      final watched = LlmClient(baseUrl: fake.chatUrl, onCall: records.add);
+      fake.scriptFor('probe', [
+        ScriptedReply(
+          const {'answer': 'x'},
+          promptTokens: 812,
+          completionTokens: 47,
+          promptMs: 90,
+          predictedMs: 3800,
+        ),
+      ]);
+
+      await watched.completeJson(
+        system: 's',
+        user: 'u',
+        schema: _probeSchema,
+        schemaName: 'probe',
+      );
+
+      expect(records.single.promptTokens, 812);
+      expect(records.single.completionTokens, 47);
+      expect(records.single.serverPromptMs, 90);
+      expect(records.single.serverPredictedMs, 3800);
+    });
+
+    test('a reply that carries neither block reports neither', () async {
+      final records = <LlmCallRecord>[];
+      final watched = LlmClient(baseUrl: fake.chatUrl, onCall: records.add);
+      fake.scriptFor('probe', [
+        {'answer': 'x'},
+      ]);
+
+      await watched.completeJson(
+        system: 's',
+        user: 'u',
+        schema: _probeSchema,
+        schemaName: 'probe',
+      );
+
+      expect(records.single.promptTokens, isNull);
+      expect(records.single.serverPredictedMs, isNull);
+    });
+
     test('a hung-up socket is an outage', () async {
       fake.scriptFor('probe', [FakeLlamaServer.drop]);
 

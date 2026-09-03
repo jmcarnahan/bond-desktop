@@ -68,6 +68,20 @@ class LlmCallRecord {
   final int? promptTokens;
   final int? completionTokens;
 
+  /// llama-server's own `timings` — how long IT spent on the prompt and on
+  /// generation. Null when the runtime sends no such block; an MLX-based
+  /// server does not.
+  ///
+  /// Kept BESIDE [durationMs] rather than replacing it because the difference
+  /// between the two is the answer to a question neither number can settle
+  /// alone: wall duration minus server predicted time is the HTTP and
+  /// queue-wait overhead, which is exactly the number that moves when a server
+  /// batches concurrent requests. A runtime that generates at the same rate
+  /// but queues four callers behind each other looks identical on server time
+  /// and twice as slow on the wall.
+  final int? serverPromptMs;
+  final int? serverPredictedMs;
+
   /// `ok`, `unavailable`, `error`, or `format`.
   final String outcome;
 
@@ -80,6 +94,8 @@ class LlmCallRecord {
     required this.outcome,
     this.promptTokens,
     this.completionTokens,
+    this.serverPromptMs,
+    this.serverPredictedMs,
     this.statusCode,
     this.error,
   });
@@ -246,6 +262,8 @@ class LlmClient {
         outcome: 'ok',
         promptTokens: result.promptTokens,
         completionTokens: result.completionTokens,
+        serverPromptMs: result.serverPromptMs,
+        serverPredictedMs: result.serverPredictedMs,
       ));
       return result.message;
     } on LlmUnavailableException catch (e) {
@@ -276,8 +294,14 @@ class LlmClient {
     }
   }
 
-  Future<({Map<String, dynamic> message, int? promptTokens, int? completionTokens})>
-      _postInner(
+  Future<
+      ({
+        Map<String, dynamic> message,
+        int? promptTokens,
+        int? completionTokens,
+        int? serverPromptMs,
+        int? serverPredictedMs,
+      })> _postInner(
     Map<String, dynamic> body, {
     required bool think,
   }) async {
@@ -361,12 +385,22 @@ class LlmClient {
     }
 
     final usage = decoded['usage'];
+    // `timings` is llama-server's, not OpenAI's, and its milliseconds arrive
+    // as doubles — hence `as num?` before `.toInt()`, the same defensiveness
+    // the token counts get. A runtime that sends no such block reads as null
+    // rather than zero, because "did not say" and "took no time" have to stay
+    // distinguishable to anything averaging these.
+    final timings = decoded['timings'];
     return (
       message: Map<String, dynamic>.from(message),
       promptTokens:
           usage is Map ? (usage['prompt_tokens'] as num?)?.toInt() : null,
       completionTokens:
           usage is Map ? (usage['completion_tokens'] as num?)?.toInt() : null,
+      serverPromptMs:
+          timings is Map ? (timings['prompt_ms'] as num?)?.toInt() : null,
+      serverPredictedMs:
+          timings is Map ? (timings['predicted_ms'] as num?)?.toInt() : null,
     );
   }
 

@@ -42,17 +42,29 @@ void main() {
   test(
     'the membership eval set through both servers, compared',
     () async {
-      final big = LlmClient();
-      final fast = LlmClient(baseUrl: LlmClient.fastBaseUrl);
-      var bigLeaks = 0;
-      var fastLeaks = 0;
+      // One collector per client, never one shared: the whole question here is
+      // how the two servers differ, and a single bucket would average them
+      // into a machine that does not exist.
+      final bigCalls = CallCollector(
+        label: '27B (default)',
+        url: LlmClient.defaultBaseUrl,
+        model: 'qwen3.8',
+      );
+      final fastCalls = CallCollector(
+        label: 'fast (default)',
+        url: LlmClient.fastBaseUrl,
+        model: 'qwen3.8',
+      );
+      final big = LlmClient(onCall: bigCalls.record);
+      final fast = LlmClient(
+        baseUrl: LlmClient.fastBaseUrl,
+        onCall: fastCalls.record,
+      );
       // Counted per client, so a leak names the server that leaked rather than
       // leaving both under suspicion.
-      big.onReasoningLeak = () => bigLeaks++;
-      fast.onReasoningLeak = () => fastLeaks++;
+      big.onReasoningLeak = bigCalls.noteLeak;
+      fast.onReasoningLeak = fastCalls.noteLeak;
 
-      final bigMs = <int>[];
-      final fastMs = <int>[];
       final lines = <String>[];
       var bigAgree = 0;
       var fastAgree = 0;
@@ -74,7 +86,9 @@ void main() {
             candidateCard: entry.candidateCard,
           );
 
-          final bigWatch = Stopwatch()..start();
+          // Latency is not timed here: each client's collector already holds
+          // the HTTP round trip for every call, measured on the same clock as
+          // the token counts it will be divided by.
           final bigResult = await runTask(
             big,
             const ConfirmMembershipTask(),
@@ -83,19 +97,16 @@ void main() {
             // the models differing, not one of them sampling.
             temperature: 0,
           );
-          bigWatch.stop();
 
-          final fastWatch = Stopwatch()..start();
           final fastResult = await runTask(
             fast,
             const ConfirmMembershipTask(),
             input,
             temperature: 0,
           );
-          fastWatch.stop();
 
-          bigMs.add(bigWatch.elapsed.inMilliseconds);
-          fastMs.add(fastWatch.elapsed.inMilliseconds);
+          final bigMs = bigCalls.lastFor('storyline_membership')!.durationMs;
+          final fastMs = fastCalls.lastFor('storyline_membership')!.durationMs;
 
           final bigOk = _verdict(bigResult) == entry.expectBelongs;
           final fastOk = _verdict(fastResult) == entry.expectBelongs;
@@ -116,8 +127,8 @@ void main() {
             '${bigOk ? ' ' : '!'} '
             '4B ${_cell(fastResult).padRight(11)}'
             '${fastOk ? ' ' : '!'} '
-            '${bigWatch.elapsed.inMilliseconds.toString().padLeft(6)}ms '
-            '${fastWatch.elapsed.inMilliseconds.toString().padLeft(6)}ms',
+            '${bigMs.toString().padLeft(6)}ms '
+            '${fastMs.toString().padLeft(6)}ms',
           );
 
           // Shape, not quality: an answer with no evidence sentence is a call
@@ -129,30 +140,31 @@ void main() {
         lines.add('FAILED on $current: $error');
         rethrow;
       } finally {
-        final bigSorted = [...bigMs]..sort();
-        final fastSorted = [...fastMs]..sort();
+        final bigConfirm = bigCalls.metricsFor('storyline_membership');
+        final fastConfirm = fastCalls.metricsFor('storyline_membership');
         // ignore: avoid_print
         print(
           '\n=== membership eval — * must-pass, ! disagrees with expected ===\n'
           '${lines.join('\n')}\n'
           '\n27B: $bigAgree/$judged agree, '
           'must-pass $bigMustPass/$mustPassTotal, '
-          'p50 ${percentile(bigSorted, 0.5)}ms\n'
+          'p50 ${bigConfirm.p50Ms}ms\n'
           '4B:  $fastAgree/$judged agree, '
           'must-pass $fastMustPass/$mustPassTotal, '
-          'p50 ${percentile(fastSorted, 0.5)}ms\n'
-          '\n| task | n | p50 ms | p95 ms | mean ms | total s |\n'
-          '| --- | --- | --- | --- | --- | --- |\n'
-          '${row('confirm 27B', bigMs)}\n'
-          '${row('confirm fast', fastMs)}\n',
+          'p50 ${fastConfirm.p50Ms}ms\n'
+          '\n${bigCalls.banner}\n'
+          '\n${bigCalls.table()}\n'
+          '\n${fastCalls.banner}\n'
+          '\n${fastCalls.table()}\n',
         );
       }
 
       // Per server, and not a judgement call either way: a build that ignores
       // enable_thinking runs at half speed, and every latency above would be
       // measuring that instead of the model.
-      expect(bigLeaks, 0, reason: 'the 27B reasoned despite enable_thinking');
-      expect(fastLeaks, 0,
+      expect(bigCalls.reasoningLeaks, 0,
+          reason: 'the 27B reasoned despite enable_thinking');
+      expect(fastCalls.reasoningLeaks, 0,
           reason: 'the fast model reasoned despite enable_thinking');
     },
     timeout: const Timeout(Duration(minutes: 45)),

@@ -56,7 +56,11 @@ void main() {
           onCall: seen.add,
         );
 
-    http.Response completion({Map<String, Object?>? usage}) => http.Response(
+    http.Response completion({
+      Map<String, Object?>? usage,
+      Map<String, Object?>? timings,
+    }) =>
+        http.Response(
           jsonEncode({
             'choices': [
               {
@@ -64,6 +68,7 @@ void main() {
               }
             ],
             'usage': ?usage,
+            'timings': ?timings,
           }),
           200,
           headers: const {'content-type': 'application/json'},
@@ -100,6 +105,38 @@ void main() {
       expect(seen.single.label, 'result');
       expect(seen.single.promptTokens, isNull);
       expect(seen.single.completionTokens, isNull);
+    });
+
+    test('llama-server\'s own timings arrive as doubles and survive it',
+        () async {
+      // The real server sends these as doubles, not ints. A parse that read
+      // them with `as int?` would return null against every live server while
+      // passing any fixture that sent whole numbers — so the fixture sends
+      // what the server sends.
+      final client = watching(() async => completion(
+            usage: const {'prompt_tokens': 812, 'completion_tokens': 47},
+            timings: const {'prompt_ms': 90.5, 'predicted_ms': 3800.0},
+          ));
+
+      await client.complete(system: 's', user: 'u');
+
+      expect(seen.single.serverPromptMs, 90);
+      expect(seen.single.serverPredictedMs, 3800);
+    });
+
+    test('a runtime that sends no timings still reports its tokens', () async {
+      // An MLX-based server answers with usage and no timings at all. The
+      // bench falls back to wall-clock speed for it, which only works if the
+      // absence reads as null rather than as zero milliseconds.
+      final client = watching(() async => completion(
+            usage: const {'prompt_tokens': 812, 'completion_tokens': 47},
+          ));
+
+      await client.complete(system: 's', user: 'u');
+
+      expect(seen.single.promptTokens, 812);
+      expect(seen.single.serverPromptMs, isNull);
+      expect(seen.single.serverPredictedMs, isNull);
     });
 
     test('free text is labelled by the call, not by a schema', () async {

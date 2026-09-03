@@ -35,21 +35,39 @@ void main() {
   test(
     'the corpus through triage and extraction, timed',
     () async {
-      final client = LlmClient(baseUrl: LlmClient.fastBaseUrl);
-      var leaks = 0;
-      client.onReasoningLeak = () => leaks++;
+      // Every number in the table below comes from the client's own call
+      // records rather than from a stopwatch wrapped around the call site.
+      // `durationMs` is the HTTP round trip as the client measured it — the
+      // same clock the token counts come from, so tokens per second is a rate
+      // and not two unrelated measurements divided; the same number the
+      // ActivityLog shows a user, so the bench and the app are quotable
+      // against each other; and the only clock that still means anything once
+      // calls overlap, where a stopwatch around an awaited call times the
+      // queue rather than the request.
+      final collector = CallCollector(
+        label: 'fast (default)',
+        url: LlmClient.fastBaseUrl,
+        model: 'qwen3.8',
+      );
+      final client = LlmClient(
+        baseUrl: LlmClient.fastBaseUrl,
+        onCall: collector.record,
+      );
+      client.onReasoningLeak = collector.noteLeak;
 
       final emails = emailCorpus
           .where((entry) => entry.expectedGate == null)
           .toList();
-      final triageMs = <int>[];
-      final extractMs = <int>[];
       final lines = <String>[];
 
-      // Where the model disagreed with the corpus. Collected and printed, not
+      // Where the model disagreed with the corpus. Scored and printed, not
       // asserted: a category and a label are judgements, and pinning them
-      // would fail the bench on the next model swap for no defect.
-      final misses = <String>[];
+      // would fail the bench on the next model swap for no defect. An entry
+      // the corpus has no opinion about is never judged at all, so a rate is
+      // over what was asked rather than over the corpus's annotation coverage.
+      final categoryCard = Scorecard('category (exact)');
+      final labelCard = Scorecard('label (contains)');
+      final needsActionCard = Scorecard('needs_action (exact)');
 
       // The table prints even when a call fails mid-run. A later phase points
       // this bench at an experimental server config, and a failure on the
@@ -61,15 +79,12 @@ void main() {
           current = entry.id;
           final now = DateTime.now();
 
-          final triageWatch = Stopwatch()..start();
           final triage = await runTask(
             client,
             const TriageTask(),
             TriageInput(entry.message, now),
           );
-          triageWatch.stop();
 
-          final extractWatch = Stopwatch()..start();
           final extraction = await runTask(
             client,
             const ExtractTask(),
@@ -78,10 +93,9 @@ void main() {
             // facts, or a phase's "improvement" is just sampling noise.
             temperature: 0,
           );
-          extractWatch.stop();
 
-          triageMs.add(triageWatch.elapsed.inMilliseconds);
-          extractMs.add(extractWatch.elapsed.inMilliseconds);
+          final triageMs = collector.lastFor('triage')!.durationMs;
+          final extractMs = collector.lastFor('extraction')!.durationMs;
 
           // What the corpus says this message is, next to what the model said
           // it is. `expectedLabel` is a loose fragment on purpose — "dinner
@@ -91,19 +105,35 @@ void main() {
               entry.expectedCategory != triage.category;
           final labelMiss = entry.expectedLabel != null &&
               !triage.label.toLowerCase().contains(entry.expectedLabel!);
-          if (categoryMiss) {
-            misses.add('$current: category '
-                '${entry.expectedCategory} != ${triage.category}');
+          if (entry.expectedCategory != null) {
+            categoryCard.judge(
+              current,
+              matched: entry.expectedCategory == triage.category,
+              detail: 'category '
+                  '${entry.expectedCategory} != ${triage.category}',
+            );
           }
-          if (labelMiss) {
-            misses.add('$current: label '
-                '"${entry.expectedLabel}" not in "${triage.label}"');
+          if (entry.expectedLabel != null) {
+            labelCard.judge(
+              current,
+              matched: triage.label.toLowerCase().contains(entry.expectedLabel!),
+              detail: 'label '
+                  '"${entry.expectedLabel}" not in "${triage.label}"',
+            );
+          }
+          if (entry.expectsNeedsAction != null) {
+            needsActionCard.judge(
+              current,
+              matched: entry.expectsNeedsAction == triage.needsAction,
+              detail: 'needs_action '
+                  '${entry.expectsNeedsAction} != ${triage.needsAction}',
+            );
           }
 
           lines.add(
             '${entry.id.padRight(26)} '
-            'triage ${triageWatch.elapsed.inMilliseconds.toString().padLeft(6)}ms  '
-            'extract ${extractWatch.elapsed.inMilliseconds.toString().padLeft(6)}ms  '
+            'triage ${triageMs.toString().padLeft(6)}ms  '
+            'extract ${extractMs.toString().padLeft(6)}ms  '
             '${triage.category}${categoryMiss ? '!' : ''}/${triage.urgency}/'
             'needs_action=${triage.needsAction}  '
             'label="${triage.label}"${labelMiss ? '!' : ''}  '
@@ -135,19 +165,18 @@ void main() {
       } finally {
         // ignore: avoid_print
         print(
-          '\n| task | n | p50 ms | p95 ms | mean ms | total s |\n'
-          '| --- | --- | --- | --- | --- | --- |\n'
-          '${row('triage', triageMs)}\n'
-          '${row('extract', extractMs)}\n'
+          '\n${collector.banner}\n'
+          '\n${collector.table()}\n'
           '\n${lines.join('\n')}\n'
-          '\n${misses.isEmpty ? 'no disagreements with the corpus' : 'disagreed with the corpus:\n${misses.join('\n')}'}\n',
+          '\n${scorecardBlock([categoryCard, labelCard, needsActionCard])}\n',
         );
       }
 
       // Not a judgement call: a build that ignores enable_thinking runs at
       // half speed, and every number above would be measuring that instead of
       // the change under test.
-      expect(leaks, 0, reason: 'the model reasoned despite enable_thinking');
+      expect(collector.reasoningLeaks, 0,
+          reason: 'the model reasoned despite enable_thinking');
     },
     timeout: const Timeout(Duration(minutes: 30)),
   );
