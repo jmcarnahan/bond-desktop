@@ -290,13 +290,22 @@ class NotificationCoordinator {
   /// `== 1` comparisons only, never truthiness: `reply_expected` NULL means
   /// "no v2 pass has judged this", which is not a "no". Reading NULL as 0
   /// would turn every un-judged message into a decided negative.
+  ///
+  /// Every ask below is the message's own except `cta_text`, which lives on the
+  /// CONVERSATION and belongs to whichever message was triaged into it last.
+  /// The thread's CTA therefore testifies for this message only when this
+  /// message's own triage wrote it: `triaged` is the one status whose pass
+  /// rewrote the conversation's CTA fields. Counted for a candidate still
+  /// `pending` at its deadline, or one whose triage ended in `error`, it is
+  /// another message's ask — and the toast that followed named THIS message
+  /// while quoting THAT one.
   bool _worthy(Map<String, Object?> row, {required double threshold}) {
     final ask = _int(row['reply_expected']) == 1 ||
         _int(row['needs_action']) == 1 ||
         row['urgency'] == 'urgent' ||
         row['urgency'] == 'high' ||
         (row['deadline'] as String? ?? '').isNotEmpty ||
-        (row['cta_text'] as String? ?? '').isNotEmpty;
+        (_ownsCta(row) && (row['cta_text'] as String? ?? '').isNotEmpty);
     // Unread is already guaranteed — a read message never reaches here.
     final score = (row['attention_score'] as num?)?.toDouble() ?? 0;
     return ask &&
@@ -304,6 +313,13 @@ class NotificationCoordinator {
         row['bucket'] != 'later' &&
         score >= threshold;
   }
+
+  /// Whether the conversation's CTA fields are this message's own words.
+  ///
+  /// They describe the newest TRIAGED message of the thread, so only a
+  /// candidate whose own triage finished may be judged — or quoted — by them.
+  static bool _ownsCta(Map<String, Object?> row) =>
+      row['triage_status'] == 'triaged';
 
   Future<void> _emit(Map<String, Object?> row, _Decision decision) async {
     if (_controller.isClosed) return;
@@ -327,6 +343,13 @@ class NotificationCoordinator {
       }
     }
 
+    // The same staleness treatment the deadline settle gives the storyline
+    // above, for the same reason: the conversation's CTA belongs to the newest
+    // triaged message, so on a candidate whose own triage never finished it is
+    // somebody else's ask and this toast must not quote it. The urgency goes
+    // with it — it only colours the CTA's severity, and a colour kept from a
+    // sentence that is no longer shown is a severity about nothing.
+    final ownsCta = _ownsCta(row);
     if (_controller.isClosed) return;
     _controller.add(
       MessageSettled(
@@ -335,8 +358,9 @@ class NotificationCoordinator {
         conversationKey: conversationKey,
         title: row['subject'] as String? ?? row['from_name'] as String?,
         summary: row['summary'] as String?,
-        ctaText: row['cta_text'] as String?,
-        ctaUrgency: CtaUrgency.fromWire(row['cta_urgency'] as String?),
+        ctaText: ownsCta ? row['cta_text'] as String? : null,
+        ctaUrgency:
+            CtaUrgency.fromWire(ownsCta ? row['cta_urgency'] as String? : null),
         urgency: row['urgency'] as String?,
         deadline: row['deadline'] as String?,
         replyExpected: _int(row['reply_expected']) == 1,

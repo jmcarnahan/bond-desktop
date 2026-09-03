@@ -52,11 +52,16 @@ void main() {
 
   tearDown(() => db.close());
 
+  /// One inbound message and the conversation row it folds into. [state] is
+  /// `waiting` unless the test needs an open ask on screen: the ask lines and
+  /// the CTA banner are both rendered only while the thread still wants the
+  /// user, so a `needs_reply` row is what puts them there.
   Future<void> seedThread(
     String key,
     String subject, {
     String source = 'email',
     String receivedAt = '2026-08-28T09:00:00Z',
+    String state = 'waiting',
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -71,7 +76,7 @@ void main() {
       'source': source,
       'conversation_key': key,
       'subject': subject,
-      'state': 'waiting',
+      'state': state,
       'last_message_at': receivedAt,
     });
   }
@@ -446,8 +451,8 @@ void main() {
     /// The same two threads, an hour apart, so which card opens on its own is
     /// the spine's rule rather than a tie the database broke: the newest
     /// episode is the open one, and here that is Launch date.
-    Future<void> seedTimedStoryline() async {
-      await seedThread('c1', 'Homepage copy');
+    Future<void> seedTimedStoryline({String c1State = 'waiting'}) async {
+      await seedThread('c1', 'Homepage copy', state: c1State);
       await seedThread('c2', 'Launch date', receivedAt: '2026-08-28T10:00:00Z');
       await store.insertStoryline(
         id: 'sl-1',
@@ -563,7 +568,9 @@ void main() {
 
     testWidgets('an ask on an older episode opens the reply on ITS thread',
         (tester) async {
-      await seedTimedStoryline();
+      // The ask line only renders while the thread still wants the user, so
+      // the older episode is seeded as one that does.
+      await seedTimedStoryline(c1State: 'needs_reply');
       await seedAsk('c1', 'Send the deck');
 
       await openStoryline(tester, 'Website redesign');

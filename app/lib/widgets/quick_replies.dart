@@ -88,11 +88,25 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
   @override
   void didUpdateWidget(covariant QuickReplyBar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // A fresh pair is a fresh question. Left standing, the half-answered one
-    // would sit under two suggestions nobody has been asked about yet.
-    if (!identical(oldWidget.options, widget.options)) {
+    // A fresh PAIR is a fresh question — left standing, the half-answered one
+    // would sit under two suggestions nobody has been asked about yet. A fresh
+    // LIST OBJECT holding the same words is the same question, mid-answer:
+    // `DraftState.options` mints a new list on every read, so an identity check
+    // here would disarm the ×'s question on any parent rebuild — every inbox
+    // setState, every sync reload.
+    if (!_sameOptions(oldWidget.options, widget.options)) {
       _confirmingDismiss = false;
     }
+  }
+
+  /// Whether two option lists say the same thing. By value, because
+  /// [DraftOption] has no `==`.
+  bool _sameOptions(List<DraftOption> a, List<DraftOption> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i].stance != b[i].stance || a[i].body != b[i].body) return false;
+    }
+    return true;
   }
 
   @override

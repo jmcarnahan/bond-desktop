@@ -396,11 +396,17 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
 ///
 /// The one place the routing split runs through a single object: membership is
 /// a label and goes to the fast server, naming is prose and stays on the 27B.
+///
+/// The same embedding client the extraction handler holds, deliberately: a
+/// thread whose embed failed there is one this service re-embeds itself when
+/// the assignment pass reaches it, and two clients would mean two dedupe sets
+/// and two rows in the activity panel for one server being down.
 final storylineServiceProvider = Provider<StorylineService>(
   (ref) => StorylineService(
     ref.watch(messageStoreProvider),
     ref.watch(llmClientProvider),
     confirmClient: ref.watch(fastLlmClientProvider),
     activityLog: ref.watch(activityLogProvider),
+    embeddings: ref.watch(embeddingsClientProvider),
   ),
 );

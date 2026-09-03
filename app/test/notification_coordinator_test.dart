@@ -311,6 +311,25 @@ void main() {
       expect(emitted.single.ctaText, 'Send the appraisal');
     });
 
+    test("a thread's CTA is not this message's ask when its own triage failed",
+        () async {
+      // The CTA on a conversation belongs to its newest TRIAGED message. This
+      // one's triage spent its attempts and ended in `error`, so the ask
+      // sitting on the thread is somebody else's — and counting it would
+      // announce THIS message while quoting THAT one.
+      await seedCandidate(
+        triageStatus: 'error',
+        triageVerdict: false,
+        ctaText: 'Send the appraisal',
+      );
+      await sweep();
+
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'suppressed');
+      expect(row['reason'], 'not_worthy');
+      expect(emitted, isEmpty);
+    });
+
     test('an unjudged reply_expected is not an ask', () async {
       // NULL means no v2 pass has judged this message, which is NOT a decided
       // "no reply expected" — but it is not a "yes" either. The score is well
@@ -374,6 +393,48 @@ void main() {
       // thread of work.
       expect(event.storylineId, isNull);
       expect(event.storylineTitle, isNull);
+    });
+
+    test("a CTA this message's own triage wrote is still an ask at the deadline",
+        () async {
+      // Triaged, so the thread's CTA is this message's own words. What holds
+      // it open is the storyline pass, and the deadline settle quotes the ask
+      // it earned.
+      await seedCandidate(replyExpected: false, ctaText: 'Send the appraisal');
+      await store.enqueueWork('storyline', 'email', 'conv-1');
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
+
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'notified');
+      expect(row['reason'], 'deadline');
+      expect(emitted.single.ctaText, 'Send the appraisal');
+    });
+
+    test("a CTA no triage of this message's wrote is not an ask at the deadline",
+        () async {
+      // The deadline forces a verdict on a message whose own triage never
+      // finished, so the CTA on its thread was written by a different message
+      // — and the score alone is not an ask. Before this it was: the toast
+      // named this message and quoted the other one's request.
+      await seedCandidate(
+        triageStatus: 'pending',
+        replyExpected: false,
+        ctaText: 'Send the appraisal',
+      );
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
+
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'suppressed');
+      expect(row['reason'], 'deadline');
+      expect(emitted, isEmpty);
     });
 
     test('an unfinished, unremarkable message is dropped when time runs out',

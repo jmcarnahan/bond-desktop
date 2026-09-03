@@ -25,12 +25,12 @@ Message _msg({
 bool _open(
   Message m, {
   String? lastOutboundAt,
-  bool conversationDone = false,
+  bool conversationClosed = false,
 }) =>
     hasOpenAsk(
       m,
       lastOutboundAt: lastOutboundAt,
-      conversationDone: conversationDone,
+      conversationClosed: conversationClosed,
     );
 
 void main() {
@@ -48,7 +48,7 @@ void main() {
       expect(
         openAskCount(
           [_msg(needsAction: true, replyExpected: true)],
-          conversationDone: false,
+          conversationClosed: false,
         ),
         1,
       );
@@ -95,9 +95,12 @@ void main() {
       );
     });
 
-    test('a done conversation closes everything', () {
+    test('a conversation that is not waiting on the user closes everything',
+        () {
+      // Done, or waiting because a reply already went — the hosts fold both
+      // into one flag, and neither leaves an ask lit.
       expect(
-        _open(_msg(needsAction: true), conversationDone: true),
+        _open(_msg(needsAction: true), conversationClosed: true),
         isFalse,
       );
     });
@@ -162,7 +165,7 @@ void main() {
         _msg(id: 'c', needsAction: true, receivedAt: '2026-08-25T10:00:00'),
         _msg(id: 'd', replyExpected: true, receivedAt: '2026-08-25T11:00:00'),
       ];
-      expect(openAskCount(thread, conversationDone: false), 2);
+      expect(openAskCount(thread, conversationClosed: false), 2);
     });
   });
 }

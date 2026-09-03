@@ -410,6 +410,49 @@ void main() {
       expect(find.text('Confirm attendance'), findsOneWidget);
       expect(find.textContaining('open asks'), findsNothing);
     });
+
+    testWidgets('and the banner is the way into the reply', (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm attendance',
+        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
+      );
+      final tapped = <String>[];
+      await pumpPanel(
+        tester,
+        only: [asking],
+        onAskTap: (episode) => tapped.add(episode.conversationKey),
+      );
+
+      await tester.tap(find.text('Confirm attendance'));
+      await tester.pumpAndSettle();
+
+      expect(tapped, ['c1']);
+      // And NOT the header's collapse: the same copper text on the thread pane
+      // opens the reply, and it must not mean "shut the card" here.
+      expect(_renderedIds(tester), ['m1']);
+    });
+
+    testWidgets('and still collapses the card where there is no reply to open',
+        (tester) async {
+      final asking = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        state: ConversationState.needsReply,
+        ctaText: 'Confirm attendance',
+        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
+      );
+      await pumpPanel(tester, only: [asking]);
+      expect(_renderedIds(tester), ['m1']);
+
+      await tester.tap(find.text('Confirm attendance'));
+      await tester.pumpAndSettle();
+
+      // Nothing absorbs the tap, so it reaches the header the banner sits in.
+      expect(_renderedIds(tester), isEmpty);
+    });
   });
 
   group('open asks in an episode', () {
@@ -417,6 +460,7 @@ void main() {
       final asking = _episode(
         key: 'c1',
         subject: 'Homepage copy',
+        state: ConversationState.needsReply,
         messages: [
           _message(
             id: 'm1',
@@ -431,10 +475,32 @@ void main() {
       expect(find.text('Send the deck'), findsOneWidget);
     });
 
+    testWidgets('a thread that is no longer waiting on the user carries none',
+        (tester) async {
+      // The reply went, the thread folded to waiting and the CTA was cleared in
+      // the same pass. The ask lines must not outlive that banner.
+      final answered = _episode(
+        key: 'c1',
+        subject: 'Homepage copy',
+        messages: [
+          _message(
+            id: 'm1',
+            receivedAt: '2026-08-01T09:00:00Z',
+            needsAction: true,
+            actionItems: ['Send the deck'],
+          ),
+        ],
+      );
+      await pumpPanel(tester, only: [answered]);
+
+      expect(find.text('Send the deck'), findsNothing);
+    });
+
     testWidgets('a later reply closes it', (tester) async {
       final answered = _episode(
         key: 'c1',
         subject: 'Homepage copy',
+        state: ConversationState.needsReply,
         messages: [
           _message(
             id: 'm1',
@@ -460,6 +526,7 @@ void main() {
       final asking = _episode(
         key: 'c2',
         subject: 'Launch date',
+        state: ConversationState.needsReply,
         messages: [
           _message(
             id: 'm2',

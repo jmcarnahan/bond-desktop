@@ -570,6 +570,55 @@ void main() {
     });
   });
 
+  group('what may be re-suggested', () {
+    // Pure state — no store, no notifier. `generate()` DELETES the row on its
+    // way to a fresh pair, so this getter is the whole guard between "Suggest a
+    // reply" and throwing away words the user typed or already sent.
+    DraftState withRow({required String status, int optionsDismissed = 0}) =>
+        DraftState(draft: {
+          'status': status,
+          'body': 'Friday works.',
+          'options_dismissed': optionsDismissed,
+        });
+
+    test('a thread never drafted for has nothing to lose', () {
+      expect(const DraftState().suggestable, isTrue);
+    });
+
+    test('a dismissed draft is the way back from the ×', () {
+      expect(withRow(status: 'dismissed').suggestable, isTrue);
+    });
+
+    test('and so is a suggestion whose cards were waved off', () {
+      expect(
+        withRow(status: 'suggested', optionsDismissed: 1).suggestable,
+        isTrue,
+      );
+    });
+
+    test('a live suggestion has nothing to ask for', () {
+      // The composer's Regenerate is where a different pair comes from.
+      expect(withRow(status: 'suggested').suggestable, isFalse);
+    });
+
+    test('the user\'s own typing is never offered up for deletion', () {
+      expect(withRow(status: 'edited').suggestable, isFalse);
+      // Closing the cards does not turn an edited draft back into the model's.
+      expect(
+        withRow(status: 'edited', optionsDismissed: 1).suggestable,
+        isFalse,
+      );
+    });
+
+    test('and neither is a reply that has already gone', () {
+      expect(withRow(status: 'sent').suggestable, isFalse);
+      expect(
+        withRow(status: 'sent', optionsDismissed: 1).suggestable,
+        isFalse,
+      );
+    });
+  });
+
   group('nothing sends on its own', () {
     test('constructing, loading, generating, editing and dismissing reach '
         'Graph never', () async {

@@ -119,12 +119,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// window opened on one thread must not be open on the next.
   String? _replyOpenFor;
 
-  /// The thread a queued reply is going to, held until the send lands so the
+  /// The threads a queued reply is going to, held until each send lands so the
   /// result can be announced even if the user has moved on to another thread
-  /// meanwhile. Only [_pickQuickReply] sets it, which is what keeps the
+  /// meanwhile. Only [_queueQuickReply] adds to it, which is what keeps the
   /// composer's own send — which reports its outcome directly — from being
   /// announced twice.
-  DraftTarget? _announceSendFor;
+  ///
+  /// A SET, because the storyline spine renders an armed card per open episode
+  /// and two sends can be in flight at once. One slot silenced the first send's
+  /// outcome — including its failure.
+  final Set<DraftTarget> _announceSendsFor = {};
 
   /// Which member thread a storyline's composer replies to, when the user has
   /// picked one. Null means "the thread the newest message is in", which is
@@ -432,12 +436,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // thread pane is what lets it be announced after the user has moved on:
     // the target outlives the selection, and the notifier behind it is not
     // autoDispose.
-    final announce = _announceSendFor;
-    if (announce != null) {
-      ref.listen<DraftState>(draftProvider(announce), (previous, next) {
+    // One listener per queued send, and each one answers for its OWN target:
+    // two episodes on a storyline can be sending at the same time, and an
+    // outcome must not clear the slot the other send was waiting in.
+    for (final target in _announceSendsFor.toList()) {
+      ref.listen<DraftState>(draftProvider(target), (previous, next) {
         if (previous == null || !mounted) return;
         if (next.sendEpoch > previous.sendEpoch) {
-          setState(() => _announceSendFor = null);
+          setState(() => _announceSendsFor.remove(target));
           _toast('Reply sent.');
           return;
         }
@@ -446,7 +452,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // only place left to say it.
         final error = next.error;
         if (error != null && error != previous.error && !next.sending) {
-          setState(() => _announceSendFor = null);
+          setState(() => _announceSendsFor.remove(target));
           _toast(error);
         }
       });
@@ -1463,8 +1469,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       labelOf: (key) {
         final subject = targets[key]!.subject;
         final label = subject.isEmpty ? '(no subject)' : subject;
-        return label.length > _replyPillLabelCap
-            ? '${label.substring(0, _replyPillLabelCap)}…'
+        // By grapheme cluster, not by index: `substring` cuts UTF-16 code
+        // units and can split a surrogate pair or a ZWJ emoji, which renders
+        // as the replacement glyph on the end of the pill.
+        return label.characters.length > _replyPillLabelCap
+            ? '${label.characters.take(_replyPillLabelCap)}…'
             : label;
       },
       onSelected: (key) => setState(() => _storylineReplyKey = key),
@@ -1512,7 +1521,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               outbound: true,
               source: selected.source,
               bodyText: pending.body,
-              receivedAt: DateTime.now().toIso8601String(),
+              // UTC, like every stored timestamp: the open-ask comparison is
+              // lexicographic over these strings, and a local-time stamp sorts
+              // before the mail it answers for every zone west of UTC.
+              receivedAt: DateTime.now().toUtc().toIso8601String(),
               pendingSend: true,
             ),
           ];
@@ -1639,8 +1651,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onUndo: () => _cancelQueuedSend(target),
       // The way back from the ×, and the way in for a thread the queue never
       // drafted: `generate` deletes the row the dismissal is recorded on and
-      // asks the queue for a fresh pair.
-      onSuggest: () => unawaited(notifier.generate()),
+      // asks the queue for a fresh pair. Withheld where that row is the user's
+      // own typing or a sent reply — see [DraftState.suggestable].
+      onSuggest: draft.suggestable ? () => unawaited(notifier.generate()) : null,
       suggesting: draft.generating,
     );
   }
@@ -1652,7 +1665,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _cancelQueuedSend(DraftTarget target) {
     ref.read(draftProvider(target).notifier).cancelQueuedSend();
     if (!mounted) return;
-    setState(() => _announceSendFor = null);
+    setState(() => _announceSendsFor.remove(target));
   }
 
   /// A card was tapped.
@@ -1677,7 +1690,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// surfaces must not drift: the announcement, the undo window and the words
   /// on the snackbar are the same promise either way.
   Future<void> _queueQuickReply(DraftTarget target, String body) async {
-    setState(() => _announceSendFor = target);
+    setState(() => _announceSendsFor.add(target));
     await ref.read(draftProvider(target).notifier).queueSend(body);
     _toast('Reply sending.', onUndo: () => _cancelQueuedSend(target));
   }
@@ -2068,13 +2081,10 @@ class _EpisodeQuickReplies extends ConsumerWidget {
   /// `generating` arm is what keeps `Drafting…` on screen for the second the
   /// row is gone.
   Widget _suggestAgain(DraftState draft, DraftNotifier notifier) {
-    final row = draft.draft;
-    // The reads [DraftState.options] empties itself on, minus the one that is
-    // not a dismissal: a sent reply has no suggestions to bring back.
-    final hidden = row != null &&
-        row['status'] != 'sent' &&
-        (row['status'] == 'dismissed' ||
-            (row['options_dismissed'] as int? ?? 0) == 1);
+    // A drafted thread whose cards were closed — the one state a fresh pair
+    // costs nothing. The `draft != null` half is what keeps a never-drafted
+    // card rendering nothing at all.
+    final hidden = draft.draft != null && draft.suggestable;
     final suggesting = draft.generating;
     if (!hidden && !suggesting) return const SizedBox.shrink();
     return Padding(

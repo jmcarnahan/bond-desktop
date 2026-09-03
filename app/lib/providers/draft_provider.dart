@@ -155,6 +155,20 @@ class DraftState {
     ];
   }
 
+  /// Whether "Suggest a reply" may run [DraftNotifier.generate] here: only a
+  /// thread whose suggestions were closed — status 'dismissed', or a
+  /// 'suggested' row whose cards were waved off — or one never drafted at all.
+  /// An 'edited' row is the user's own words and a 'sent' one is history;
+  /// generate() deletes the row, so offering it beside either would offer to
+  /// destroy it.
+  bool get suggestable {
+    final row = draft;
+    if (row == null) return true;
+    final status = row['status'] as String?;
+    return status == 'dismissed' ||
+        (status == 'suggested' && (row['options_dismissed'] as int? ?? 0) == 1);
+  }
+
   String? get graphDraftId => draft?['graph_draft_id'] as String?;
 
   String? get replyToMessageId => draft?['reply_to_message_id'] as String?;

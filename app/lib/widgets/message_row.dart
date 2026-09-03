@@ -294,10 +294,16 @@ class _MessageRowState extends State<MessageRow> {
     );
 
     if (onTap == null) return line;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BondRadii.smAll,
-      child: line,
+    // Its own transparent Material: ink paints on the nearest Material
+    // ancestor, which sits behind the pane's opaque surface — the same trap
+    // `thread_detail_panel._ctaBanner` documents.
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BondRadii.smAll,
+        child: line,
+      ),
     );
   }
 

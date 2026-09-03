@@ -177,6 +177,28 @@ void main() {
     });
   });
 
+  testWidgets('a waiting thread carries no banner and no ask line',
+      (tester) async {
+    // The send that flips the thread to waiting clears the CTA in the same
+    // fold. The ask lines have to go with it, or they sit lit under a banner
+    // that is already gone until the sent message syncs back.
+    await pump(
+      tester,
+      state: ConversationState.waiting,
+      messages: [
+        _msg(
+          id: 'a',
+          receivedAt: '2026-08-25T09:00:00',
+          needsAction: true,
+          actionItems: const ['Send the deck'],
+        ),
+      ],
+    );
+
+    expect(find.text('Reply to Dana'), findsNothing);
+    expect(find.text('Send the deck'), findsNothing);
+  });
+
   testWidgets('only the unanswered message carries an ask line', (tester) async {
     await pump(tester, messages: [
       _msg(

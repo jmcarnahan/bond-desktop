@@ -25,6 +25,12 @@ import 'fixtures/test_db.dart';
 /// vector, no requeue, and a thread that had already spent its extraction call
 /// silently left the clustering pipeline. Nothing failed, nothing retried,
 /// nothing said so.
+///
+/// The requeue alone only got the thread back into the QUEUE. Nothing wrote
+/// the vector it was missing — the extraction that would have is `done` and
+/// never runs again — so the pass parked on the same absent embedding every
+/// drain, forever. The assignment pass now embeds the thread itself, which is
+/// what turns that park into a retry.
 
 /// An [LlmClient] that answers from a per-schema script, so an extraction and
 /// a membership confirmation can be scripted independently of the order the
@@ -178,7 +184,16 @@ void main() {
         store,
         handlers: [
           ExtractHandler(store, llm, embeddings(state, vector: vector)),
-          StorylineAssignHandler(StorylineService(store, llm)),
+          // The same server the extraction embeds against, as in the app: a
+          // thread whose embed failed there is one the assignment pass embeds
+          // itself when it gets to it.
+          StorylineAssignHandler(
+            StorylineService(
+              store,
+              llm,
+              embeddings: embeddings(state, vector: vector),
+            ),
+          ),
           ?draft,
         ],
       );
@@ -232,8 +247,9 @@ void main() {
       });
       await workerWith(EmbedServer.down, llm).pump();
 
-      // A storyline for it to join, and the vector the extraction pass writes
-      // the moment `make embed` is running again.
+      // A storyline for it to join. Nothing writes conv-1's own vector: the
+      // extraction that would have is already `done` and never runs again, so
+      // the pass has to embed the thread itself or park forever.
       await store.insertStoryline(
         id: 'sl-1',
         title: 'Website redesign',
@@ -257,13 +273,6 @@ void main() {
         embedModel: EmbeddingsClient.modelTag,
       );
       await store.addStorylineMember('sl-1', 'email', 'member', addedBy: 'auto');
-      await store.upsertConversationAi(
-        'email',
-        'conv-1',
-        embedding: encodeEmbedding(const [1.0, 0.0]),
-        embeddedHash: 'h-conv-1',
-        embedModel: EmbeddingsClient.modelTag,
-      );
 
       await workerWith(EmbedServer.up, llm).pump();
 
@@ -274,7 +283,42 @@ void main() {
         (await store.membersOf('sl-1')).map((m) => m.conversationKey),
         containsAll(['member', 'conv-1']),
       );
+
+      // And the vector it filed on is stored, hashed over the same enriched
+      // card the extraction would have embedded — so the next extraction of
+      // this thread sees its own answer rather than embedding it again.
+      final card = enrichedCardForConversationRow(
+        (await store.getConversationRow('email', 'conv-1'))!,
+        await store.newestInboundCardData('email', 'conv-1'),
+      );
+      final ai = (await store.getConversationAi('email', 'conv-1'))!;
+      expect(ai['embedding'], isNotNull);
+      expect(ai['embedded_hash'], cardHash(card));
+      expect(ai['embed_model'], EmbeddingsClient.modelTag);
     });
+
+    test('a pass that still cannot reach the server parks and writes nothing',
+        () async {
+      await seedThread();
+      final service = StorylineService(
+        store,
+        FakeLlm({}),
+        embeddings: embeddings(EmbedServer.down),
+      );
+
+      // The re-embed is the retry the park waits for, so a failed one has to
+      // park again rather than answer — and it must leave the column empty,
+      // because a half-written vector is one nothing would ever correct.
+      await expectLater(
+        service.assignConversation('email', 'conv-1'),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+      expect(
+        (await store.getConversationAi('email', 'conv-1'))?['embedding'],
+        isNull,
+      );
+    });
+
   });
 
   group('an embedding server that answered nonsense', () {
@@ -289,6 +333,49 @@ void main() {
       // A server that answers nonsense answers the same nonsense next time,
       // so a queued pass could only park forever.
       expect(await workRow('storyline', 'conv-1'), isNull);
+    });
+
+    test('ends an assignment pass quietly rather than parking it', () async {
+      await seedThread();
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(
+        store,
+        FakeLlm({}),
+        embeddings: embeddings(EmbedServer.nonsense),
+      );
+
+      // The re-embed gets the same answer next time, so parking on it would
+      // park forever. The thread embeds again with its next real message.
+      expect(
+        await service.assignConversation('email', 'conv-1'),
+        AssignOutcome.noCandidate,
+      );
+      expect(
+        (await store.getConversationAi('email', 'conv-1'))?['embedding'],
+        isNull,
+      );
+      expect(await store.membersOf('sl-1'), isEmpty);
+    });
+  });
+
+  group('a service with no embedding client', () {
+    test('parks on a missing vector exactly as it always did', () async {
+      await seedThread();
+
+      // The default, and what every caller that cannot embed — the user
+      // actions, most tests — still gets.
+      await expectLater(
+        StorylineService(store, FakeLlm({})).assignConversation(
+          'email',
+          'conv-1',
+        ),
+        throwsA(isA<LlmUnavailableException>()),
+      );
     });
   });
 }

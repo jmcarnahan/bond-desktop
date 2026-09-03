@@ -31,12 +31,17 @@ String? latestOutboundAt(List<Message> thread) {
 /// [Message.needsAction] and [Message.replyExpected] are tristate — NULL means
 /// no pass has judged the message, which is not an ask. Hence `== true` and
 /// never `!= false`.
+///
+/// [conversationClosed] means the conversation is not waiting on the user —
+/// done, or waiting because a reply already went. The same fold that clears the
+/// CTA on send has declared everything before that reply answered, and the asks
+/// must not outlive the banner.
 bool hasOpenAsk(
   Message m, {
   required String? lastOutboundAt,
-  required bool conversationDone,
+  required bool conversationClosed,
 }) {
-  if (conversationDone) return false;
+  if (conversationClosed) return false;
   if (!m.inbound) return false;
   if (m.needsAction != true && m.replyExpected != true) return false;
   if (lastOutboundAt == null) return true;
@@ -45,13 +50,14 @@ bool hasOpenAsk(
   return lastOutboundAt.compareTo(m.receivedAt ?? '') <= 0;
 }
 
-/// How many of [thread]'s asks are still open.
-int openAskCount(List<Message> thread, {required bool conversationDone}) {
+/// How many of [thread]'s asks are still open. [conversationClosed] carries the
+/// same meaning it does on [hasOpenAsk].
+int openAskCount(List<Message> thread, {required bool conversationClosed}) {
   final lastOut = latestOutboundAt(thread);
   var count = 0;
   for (final m in thread) {
     if (hasOpenAsk(m,
-        lastOutboundAt: lastOut, conversationDone: conversationDone)) {
+        lastOutboundAt: lastOut, conversationClosed: conversationClosed)) {
       count++;
     }
   }

@@ -98,8 +98,11 @@ class ThreadDetailPanel extends StatelessWidget {
     var first = true;
 
     // One scan of the thread answers the open-ask rule for every row in it.
+    // Anything but "needs reply" closes them: without this, a send that clears
+    // the banner leaves the ask lines lit for up to a minute until the sent
+    // message syncs back.
     final lastOut = latestOutboundAt(messages);
-    final done = conversation.state == ConversationState.done;
+    final closed = conversation.state != ConversationState.needsReply;
 
     for (final message in messages) {
       final day = dayKeyOf(message);
@@ -116,7 +119,7 @@ class ThreadDetailPanel extends StatelessWidget {
       final open = hasOpenAsk(
         message,
         lastOutboundAt: lastOut,
-        conversationDone: done,
+        conversationClosed: closed,
       );
       items.add(MessageRow(
         key: ValueKey(message.id),
@@ -159,7 +162,8 @@ class ThreadDetailPanel extends StatelessWidget {
     // the count says so — the transcript below is where they are read.
     final openAsks = openAskCount(
       messages,
-      conversationDone: conversation.state == ConversationState.done,
+      conversationClosed:
+          conversation.state != ConversationState.needsReply,
     );
 
     // A height-filling bordered surface, not a shrink-wrapping card: the

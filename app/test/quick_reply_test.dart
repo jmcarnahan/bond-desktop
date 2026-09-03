@@ -262,6 +262,36 @@ void main() {
       expect(dismissed, 0);
     });
 
+    testWidgets('but the same pair in a new list is the same question',
+        (tester) async {
+      // `DraftState.options` mints a fresh list on every read, so an identity
+      // check disarmed the question on any parent rebuild — every inbox
+      // setState, every sync reload — and the × would need tapping twice for
+      // no reason the user could see.
+      var dismissed = 0;
+      await pumpBar(tester, onDismiss: () => dismissed++);
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pump();
+
+      // Fresh objects as well as a fresh list: `DraftState.options` decodes new
+      // [DraftOption]s out of JSON on every read, so neither the list nor what
+      // is in it survives a rebuild by identity.
+      DraftOption copyOf(DraftOption option) =>
+          DraftOption(stance: option.stance, body: option.body);
+
+      await pumpBar(
+        tester,
+        options: [copyOf(_confirm), copyOf(_propose)],
+        onDismiss: () => dismissed++,
+      );
+
+      expect(find.text('Dismiss these suggestions?'), findsOneWidget);
+
+      await tester.tap(find.text('Dismiss'));
+      await tester.pump();
+      expect(dismissed, 1);
+    });
+
     testWidgets('and is absent when the host offers no way to dismiss',
         (tester) async {
       await pumpBar(tester);

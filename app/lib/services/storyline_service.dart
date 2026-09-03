@@ -93,10 +93,12 @@ enum AssignOutcome {
   blocked,
 
   /// Never returned: a thread with no comparable vector is not a thread that
-  /// failed, it is a thread whose embedding has not been written yet, so the
-  /// pass throws [LlmUnavailableException] to park the queue rather than
-  /// answering. Named here because it is the fifth thing the pass can
-  /// conclude and the park is where it went.
+  /// failed, it is a thread whose embedding has not been written yet. The pass
+  /// first tries to write it — the card needs no model call, only the
+  /// conversation row and the facts already extracted — and only when that
+  /// attempt finds no server does it throw [LlmUnavailableException] to park
+  /// the queue rather than answering. Named here because it is the fifth thing
+  /// the pass can conclude and the park is where it went.
   noVector,
 }
 
@@ -149,6 +151,11 @@ class StorylineService {
   /// the row, this only fills it in.
   final ActivityLog _log;
 
+  /// How a thread whose embedding is missing gets one. Optional: given none,
+  /// the pass parks on a missing vector exactly as it always did, which is what
+  /// every caller that never embeds — the user actions, most tests — wants.
+  final EmbeddingsClient? _embeddings;
+
   /// Cryptographic randomness for ids. Not for secrecy — for the guarantee
   /// that two ids generated in the same millisecond differ, which a
   /// time-seeded generator does not give.
@@ -159,9 +166,11 @@ class StorylineService {
     LlmClient client, {
     LlmClient? confirmClient,
     ActivityLog? activityLog,
+    EmbeddingsClient? embeddings,
   })  : _client = client,
         _confirmClient = confirmClient ?? client,
-        _log = activityLog ?? ActivityLog.disabled();
+        _log = activityLog ?? ActivityLog.disabled(),
+        _embeddings = embeddings;
 
   // ── automatic: one thread ──────────────────────────────────────────────
 
@@ -174,14 +183,15 @@ class StorylineService {
   /// creates a membership. At most one confirmation call per thread, whatever
   /// the mailbox looks like.
   ///
-  /// A thread with no comparable vector PARKS the queue instead of returning:
-  /// nothing about it failed, its embedding simply has not been written yet,
-  /// and the worker's park is the only outcome that puts the row back as
-  /// `pending` with its attempt unspent. Returning quietly wrote the row
-  /// `done` and lost the thread — an embedding server that was down for an
-  /// afternoon meant a day of mail that was never considered for a storyline.
-  /// Only the `storyline` kind parks; extraction, the sweep and drafting are
-  /// on other servers and carry on.
+  /// A thread with no comparable vector is embedded here and then carries on —
+  /// and PARKS the queue only when that cannot be done. Nothing about such a
+  /// thread failed, its embedding simply has not been written yet, and the
+  /// worker's park is the only outcome that puts the row back as `pending`
+  /// with its attempt unspent. Returning quietly wrote the row `done` and lost
+  /// the thread — an embedding server that was down for an afternoon meant a
+  /// day of mail that was never considered for a storyline. Only the
+  /// `storyline` kind parks; extraction, the sweep and drafting are on other
+  /// servers and carry on.
   Future<AssignOutcome> assignConversation(
     String source,
     String conversationKey,
@@ -192,15 +202,12 @@ class StorylineService {
     // for a thread nothing can ever file.
     if (row == null) return AssignOutcome.noCandidate;
 
-    final vector = await _vectorFor(source, conversationKey);
-    if (vector == null) {
-      // `embed`, not `reason`: the worker's park writes its own
-      // `{'reason': 'model_unavailable'}` and its merge wins on a collision.
-      _log.note({'embed': 'missing'});
-      throw const LlmUnavailableException(
-        'No embedding for this thread yet — run: make embed',
-      );
-    }
+    // Written here when the store has none — see [_reembed]. Null comes back
+    // only from an embedding the server refused to give; the other two endings
+    // throw and park.
+    final vector = await _vectorFor(source, conversationKey) ??
+        await _reembed(source, conversationKey, row);
+    if (vector == null) return AssignOutcome.noCandidate;
 
     final conversation = Conversation.fromRow(row);
     final participants = _displaysOf(conversation);
@@ -866,6 +873,71 @@ class StorylineService {
     if (blob is! Uint8List) return null;
     final vector = decodeEmbedding(blob);
     return vector.isEmpty ? null : vector;
+  }
+
+  /// Writes the embedding a thread is missing, so that a park on it can heal
+  /// itself once the server is back.
+  ///
+  /// Nothing else in the app will write it. Extraction embeds a thread once,
+  /// and by the time the storyline pass parks the extract row is already
+  /// `done` — `enqueueExtractBacklog` will not re-queue it and nothing
+  /// requeues the `extract` kind — so a park on a missing vector used to park
+  /// again on every drain, forever, for a thread whose extraction call had
+  /// already been spent. No re-extraction is needed to fix that: the card the
+  /// vector comes from is rebuilt out of the conversation row and the facts
+  /// already stored, exactly as [ExtractHandler] built it at extraction time.
+  ///
+  /// Null comes back only from a REJECTED answer — a server that answered
+  /// something that is not a vector will answer the same thing next time, so
+  /// parking on it would park forever. Unavailable throws instead: that park
+  /// is what brings this thread back the moment `make embed` is running, and
+  /// the retry it waits for is this same re-embed.
+  Future<List<double>?> _reembed(
+    String source,
+    String conversationKey,
+    Map<String, Object?> row,
+  ) async {
+    final embeddings = _embeddings;
+    if (embeddings == null) {
+      // `embed`, not `reason`: the worker's park writes its own
+      // `{'reason': 'model_unavailable'}` and its merge wins on a collision.
+      _log.note({'embed': 'missing'});
+      throw const LlmUnavailableException(
+        'No embedding for this thread yet — run: make embed',
+      );
+    }
+
+    final card = enrichedCardForConversationRow(
+      row,
+      await _store.newestInboundCardData(source, conversationKey),
+    );
+    final embedded = await embeddings.embedResult(card);
+    final vector = embedded.vector;
+    if (vector == null) {
+      if (embedded.outcome == EmbedOutcome.unavailable) {
+        _log.note({'embed': 'unavailable'});
+        throw const LlmUnavailableException(
+          'No embedding for this thread yet — run: make embed',
+        );
+      }
+      // Quiet, the same deliberate drop the extraction path makes on
+      // deterministic nonsense. The thread embeds again with its next real
+      // message.
+      _log.note({'embed': 'rejected'});
+      return null;
+    }
+
+    // The identical write [ExtractHandler._refreshCard] makes, hash included:
+    // a vector stored without one would be re-embedded by the next extraction
+    // whether or not the thread had changed.
+    await _store.upsertConversationAi(
+      source,
+      conversationKey,
+      embedding: encodeEmbedding(vector),
+      embeddedHash: cardHash(card),
+      embedModel: EmbeddingsClient.modelTag,
+    );
+    return vector;
   }
 
   /// The mean vector, or null when there is nothing to average. Not

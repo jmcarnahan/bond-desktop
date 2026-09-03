@@ -953,8 +953,9 @@ void main() {
 
       await StorylineService(store, llm).sweep();
 
-      // c1's only partner is finished, so nothing clusters — and with c2 gone
-      // there are only three threads left to look at anyway.
+      // c1's only partner is finished. The three threads left are well over
+      // the sweep's floor, so the pass runs — and c1, c3 and c4 sit too far
+      // apart to link, so no cluster forms and no model is dialled.
       expect(llm.schemas, isEmpty);
       expect(await store.loadStorylines(), isEmpty);
     });
@@ -975,8 +976,10 @@ void main() {
 
       await StorylineService(store, llm).sweep();
 
-      // c1 is spoken for, which leaves three unassigned threads — under the
-      // floor, so the sweep does not run.
+      // c1 is spoken for, which leaves three unassigned threads — over the
+      // sweep's floor, so the pass runs. What keeps it silent is that c1 was
+      // c2's only partner: c2, c3 and c4 link to nothing at
+      // `clusterLinkThreshold`, so no cluster forms and no model is dialled.
       expect(llm.schemas, isEmpty);
       expect(await store.loadStorylines(), hasLength(1));
     });

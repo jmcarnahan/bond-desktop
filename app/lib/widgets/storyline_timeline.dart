@@ -284,7 +284,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     // the count says so — the messages below are where they are read.
     final openAsks = openAskCount(
       episode.messages,
-      conversationDone: episode.state == ConversationState.done,
+      conversationClosed: episode.state != ConversationState.needsReply,
     );
 
     return InkWell(
@@ -330,15 +330,10 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                   // spent four lines saying it twice would crowd the spine.
                   if (showCta) ...[
                     const SizedBox(height: BondSpacing.s4),
-                    // The tooltip stays the bare ask: it exists to show the
-                    // full text the banner had to clamp.
-                    Tooltip(
-                      message: cta,
-                      child: InlineAlert(
-                        severity: InlineAlertSeverity.attention,
-                        text: openAsks > 1 ? '$cta · $openAsks open asks' : cta,
-                        maxLines: 2,
-                      ),
+                    _cardCta(
+                      episode,
+                      cta,
+                      openAsks > 1 ? '$cta · $openAsks open asks' : cta,
                     ),
                   ] else if (summary.isNotEmpty) ...[
                     const SizedBox(height: 2),
@@ -400,6 +395,37 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
+  /// The ask on a card header. [tooltip] stays the bare ask: it exists to show
+  /// the full text [text] had to clamp.
+  ///
+  /// It takes its own tap where the host has a reply to open. The thread pane's
+  /// banner is the shortest way into the reply
+  /// (`thread_detail_panel._ctaBanner`), and the same copper text here must not
+  /// mean "shut the card" instead — the nested [InkWell] absorbs the tap so the
+  /// header's collapse never sees it. Its own transparent [Material] for the
+  /// usual reason: ink paints on the nearest Material ancestor, which sits
+  /// behind the card's opaque surface.
+  Widget _cardCta(StorylineEpisode episode, String tooltip, String text) {
+    final banner = Tooltip(
+      message: tooltip,
+      child: InlineAlert(
+        severity: InlineAlertSeverity.attention,
+        text: text,
+        maxLines: 2,
+      ),
+    );
+    final onAskTap = widget.onAskTap;
+    if (onAskTap == null) return banner;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: () => onAskTap(episode),
+        borderRadius: BondRadii.smAll,
+        child: banner,
+      ),
+    );
+  }
+
   /// What a shut card shows of the thread: the newest message, and nothing at
   /// all when that message has no text to show yet.
   List<Widget> _preview(StorylineEpisode episode) {
@@ -439,8 +465,11 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     var first = true;
 
     // One scan of the thread answers the open-ask rule for every row in it.
+    // Anything but "needs reply" closes them: without this, a send that clears
+    // the banner leaves the ask lines lit for up to a minute until the sent
+    // message syncs back.
     final lastOut = latestOutboundAt(episode.messages);
-    final done = episode.state == ConversationState.done;
+    final closed = episode.state != ConversationState.needsReply;
 
     for (final message in episode.messages) {
       final day = dayKeyOf(message);
@@ -455,7 +484,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
       final open = hasOpenAsk(
         message,
         lastOutboundAt: lastOut,
-        conversationDone: done,
+        conversationClosed: closed,
       );
       final onAskTap = widget.onAskTap;
       items.add(MessageRow(
