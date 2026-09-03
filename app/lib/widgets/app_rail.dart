@@ -209,6 +209,12 @@ class AppRail extends StatefulWidget {
   /// The open thread, when one is open.
   final String? selectedId;
 
+  /// The open thread's connector. A conversation key is unique only within one
+  /// source, so a bare [selectedId] can match a row from the other connector
+  /// and highlight it too. Null keeps the id-only comparison, which is what a
+  /// host with a single connector wants.
+  final String? selectedSource;
+
   /// The open storyline, when one is open. Never set at the same time as
   /// [selectedId] — the main pane shows one thing.
   final String? selectedStorylineId;
@@ -240,7 +246,11 @@ class AppRail extends StatefulWidget {
   /// Null, the default, shows no processing state at all.
   final DateTime? processingSince;
 
-  final void Function(String conversationId) onSelectConversation;
+  /// The row's source travels with its id: the host cannot resolve one from
+  /// the other, because both connectors mint keys with no knowledge of each
+  /// other and a shared key would otherwise open whichever thread the host
+  /// happened to scan first.
+  final void Function(String source, String conversationId) onSelectConversation;
   final void Function(RailSection section) onSelectSection;
 
   /// Opens one day's Later digest. Null leaves the day rows unclickable, which
@@ -262,6 +272,7 @@ class AppRail extends StatefulWidget {
     required this.conversations,
     required this.selectedId,
     required this.selectedSection,
+    this.selectedSource,
     required this.onSelectConversation,
     required this.onSelectSection,
     this.storylines = const [],
@@ -493,7 +504,8 @@ class _AppRailState extends State<AppRail> {
     bool dimmed = false,
     bool processing = false,
   }) {
-    final selected = widget.selectedId == c.id;
+    final selected = widget.selectedId == c.id &&
+        (widget.selectedSource == null || widget.selectedSource == c.source);
 
     // Bold is the whole grammar, and it says a different thing in each section
     // because the sections ask different questions. In Needs You every row is
@@ -512,7 +524,7 @@ class _AppRailState extends State<AppRail> {
         color: selected ? BondColors.onDarkTint : BondColors.ink,
         borderRadius: BondRadii.smAll,
         child: InkWell(
-          onTap: () => widget.onSelectConversation(c.id),
+          onTap: () => widget.onSelectConversation(c.source, c.id),
           borderRadius: BondRadii.smAll,
           hoverColor: BondColors.onDarkFaint,
           child: SizedBox(

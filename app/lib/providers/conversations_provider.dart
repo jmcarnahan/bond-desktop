@@ -436,22 +436,18 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   /// Optimistic because the write is local and effectively instantaneous —
   /// waiting on it would only add a frame of lag to a button whose whole job
   /// is to feel immediate. A failure puts the row back exactly as it was.
-  Future<void> markDone(String conversationKey) async {
+  ///
+  /// [source] is passed rather than resolved from the list, for [markRead]'s
+  /// reason and one more: a conversation key is unique only within a connector,
+  /// so scanning for it could close whichever colliding thread the scan landed
+  /// on last.
+  Future<void> markDone(String source, String conversationKey) async {
     final current = state;
     if (current is! ConversationsLoaded) return;
 
-    // The row's own source, not a literal: with a second connector in the list
-    // a hard-coded `'email'` would write the done flag against a thread that
-    // does not exist and leave the chat open behind an optimistic tick.
-    String? source;
-    for (final c in current.conversations) {
-      if (c.id == conversationKey) source = c.source;
-    }
-    if (source == null) return;
-
     state = current.withRows([
       for (final c in current.conversations)
-        if (c.id == conversationKey)
+        if (c.id == conversationKey && c.source == source)
           c.copyWith(state: ConversationState.done)
         else
           c,
@@ -716,14 +712,25 @@ class ThreadError extends ThreadState {
   const ThreadError(this.message);
 }
 
+/// Which thread a transcript belongs to.
+///
+/// The source rides along with the key because a conversation key is only
+/// unique WITHIN a source: the mail and chat connectors mint keys with no
+/// knowledge of each other, so a bare key can name two different threads.
+typedef ThreadTarget = ({String source, String conversationKey});
+
 class ThreadNotifier extends StateNotifier<ThreadState> {
   final MessageStore _store;
   final MailSync _sync;
   final String conversationKey;
 
+  /// The connector this thread came from — the transcript reads only its own
+  /// source's messages, so a key shared across connectors stays two threads.
+  final String source;
+
   int _fetchSeq = 0;
 
-  ThreadNotifier(this._store, this._sync, this.conversationKey)
+  ThreadNotifier(this._store, this._sync, this.source, this.conversationKey)
       : super(const ThreadInitial());
 
   /// Bodies first, then the read. [fetchBodies] false skips the network
@@ -733,12 +740,14 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
     if (state is! ThreadLoaded) state = const ThreadLoading();
 
     String? loadError;
-    if (fetchBodies) {
+    // Mail only, by source rather than by hoping the key misses: [MailSync]
+    // resolves the messages to fetch by loading the thread for source `email`,
+    // so a chat whose key is shared with a mail thread would fetch that other
+    // thread's bodies — and a failure there would stamp this transcript with a
+    // staleness it has no part in. A chat message's body arrives whole with
+    // the message, so there is nothing here to fill in either way.
+    if (fetchBodies && source == 'email') {
       try {
-        // Inert for a Teams thread rather than special-cased: [MailSync]
-        // resolves the messages to fetch by loading the thread for source
-        // `email`, and a chat id matches none of them. A chat message's body
-        // arrives whole with the message, so there is nothing to fill in.
         await _sync.ensureBodies(conversationKey);
       } catch (_) {
         if (seq != _fetchSeq) return;
@@ -753,8 +762,7 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
 
     final List<Message> messages;
     try {
-      messages =
-          await _store.loadThread(conversationKey, sources: inboxSources);
+      messages = await _store.loadThread(conversationKey, sources: [source]);
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;
@@ -772,10 +780,11 @@ class ThreadNotifier extends StateNotifier<ThreadState> {
 /// Deliberately NOT autoDispose: clicking back to a thread should show its
 /// transcript, not a spinner over a fetch that already ran this session.
 final threadProvider =
-    StateNotifierProvider.family<ThreadNotifier, ThreadState, String>(
-  (ref, conversationKey) => ThreadNotifier(
+    StateNotifierProvider.family<ThreadNotifier, ThreadState, ThreadTarget>(
+  (ref, target) => ThreadNotifier(
     ref.watch(messageStoreProvider),
     ref.watch(syncServiceProvider),
-    conversationKey,
+    target.source,
+    target.conversationKey,
   ),
 );

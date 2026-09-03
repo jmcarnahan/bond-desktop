@@ -348,7 +348,7 @@ void main() {
       final n = notifier();
       await n.load();
 
-      await n.markDone('c1');
+      await n.markDone('email', 'c1');
 
       final event = (await events()).single;
       expect(event['direction'], 'down');
@@ -360,7 +360,7 @@ void main() {
       final n = ConversationsNotifier(_UnwritableStore(db), sync);
       await n.load();
 
-      await n.markDone('c1');
+      await n.markDone('email', 'c1');
 
       expect(await events(), isEmpty,
           reason: 'the app must not learn from something that did not happen');

@@ -12,6 +12,7 @@ import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/composer.dart';
+import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -108,7 +109,11 @@ void main() {
 
   tearDown(() => db.close());
 
-  Future<void> seedChat(String key, {String subject = 'Sarah Whitfield'}) async {
+  Future<void> seedChat(
+    String key, {
+    String subject = 'Sarah Whitfield',
+    String body = 'Any word on the CD?',
+  }) async {
     await store.upsertMessage({
       'source': 'teams',
       'source_message_id': '$key-m1',
@@ -117,7 +122,7 @@ void main() {
       'from_name': 'Sarah Whitfield',
       'from_address': 'teams:u1',
       'received_at': '2026-08-28T11:00:00Z',
-      'body_text': 'Any word on the CD?',
+      'body_text': body,
       'body_preview': 'Any word on the CD?',
       'triage_status': 'skipped',
       'gate_reason': teamsSourceGate,
@@ -135,7 +140,12 @@ void main() {
     await store.recomputeConversationCounts('teams', key);
   }
 
-  Future<void> seedMail(String key, {String subject = 'Homepage copy'}) async {
+  Future<void> seedMail(
+    String key, {
+    String subject = 'Homepage copy',
+    String body = 'The homepage copy is in.',
+    String at = '2026-08-28T09:00:00Z',
+  }) async {
     await store.upsertMessage({
       'source_message_id': '$key-m1',
       'conversation_key': key,
@@ -143,16 +153,16 @@ void main() {
       'subject': subject,
       'from_name': 'Eric Vance',
       'from_address': 'eric@example.com',
-      'received_at': '2026-08-28T09:00:00Z',
-      'body_text': 'The homepage copy is in.',
+      'received_at': at,
+      'body_text': body,
     });
     await store.upsertConversation({
       'conversation_key': key,
       'subject': subject,
       'participants_json': '[{"name":"Eric Vance","email":"eric@example.com"}]',
       'state': 'needs_reply',
-      'last_message_at': '2026-08-28T09:00:00Z',
-      'last_inbound_at': '2026-08-28T09:00:00Z',
+      'last_message_at': at,
+      'last_inbound_at': at,
     });
     await store.recomputeConversationCounts('email', key);
   }
@@ -242,6 +252,33 @@ void main() {
 
       expect(teams.calls, before + 1);
     });
+  });
+
+  testWidgets('a chat row opens the chat, even when mail shares its key',
+      (tester) async {
+    // Both connectors mint conversation keys with no knowledge of each other,
+    // so one key can name two threads. The row hands its source to the
+    // selection along with the id — without it the screen scans the loaded
+    // list for the key alone and opens whichever thread it reaches first,
+    // which here is the mail one, because it sorts newest.
+    await seedChat('shared', body: 'the chat transcript');
+    await seedMail(
+      'shared',
+      body: 'the mail transcript',
+      at: '2026-08-28T13:00:00Z',
+    );
+    await pumpScreen(tester);
+
+    await tester.tap(find.descendant(
+      of: find.byType(ConversationListPane),
+      matching: find.text('💬 Sarah Whitfield'),
+    ));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('the chat transcript'), findsOneWidget);
+    expect(find.text('the mail transcript'), findsNothing);
   });
 
   group('a chat thread', () {

@@ -445,6 +445,57 @@ void main() {
       expect(after[wasOn], isFalse);
       await settleQueues(tester);
     });
+
+    testWidgets('two members sharing a key are two pills, one per connector',
+        (tester) async {
+      // The same conversation key on both sides, which is legal: keys are
+      // unique within the connector that issued them and nowhere else. Keyed
+      // on the bare key the picker held ONE of these and silently dropped the
+      // other, so replying to the chat would have answered the mail thread.
+      await seedThread('shared-1', 'Homepage copy');
+      await seedThread('shared-1', 'Sarah Whitfield',
+          source: 'teams', receivedAt: '2026-08-28T10:00:00Z');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'shared-1',
+          addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'teams', 'shared-1',
+          addedBy: 'auto');
+
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('Reply…'));
+      await tester.pump();
+      await tester.pump();
+
+      final pills = replyPills(tester);
+      expect(pills.containsKey('Homepage copy'), isTrue);
+      expect(pills.containsKey('Sarah Whitfield'), isTrue);
+      // The chat is the newer of the two, so it is the default pick — and the
+      // pane routes it down the chat path, which this build cannot send on.
+      expect(pills['Sarah Whitfield'], isTrue);
+      expect(pills['Homepage copy'], isFalse);
+      expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
+      expect(find.text('Write a reply…'), findsNothing);
+
+      await tester.tap(
+        find.byWidgetPredicate(
+          (w) => w is BondFilterPill && w.label == 'Homepage copy',
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      // Same key, other connector: the box is the mail one now.
+      expect(replyPills(tester)['Homepage copy'], isTrue);
+      expect(find.text('Write a reply…'), findsOneWidget);
+      expect(find.text('Reply in Microsoft Teams'), findsNothing);
+      await settleQueues(tester);
+    });
   });
 
   group('a storyline is answerable from its episodes', () {

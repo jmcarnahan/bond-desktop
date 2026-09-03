@@ -173,6 +173,24 @@ void main() {
       ),
       findsNothing,
     );
+    // And the transcript under that title is the chat's alone. The pane used
+    // to read both connectors' messages for the key and interleave them; the
+    // thread is keyed by (source, key) now, and these two lines are what pins
+    // it — a regression would put the mail body under the chat's heading.
+    expect(
+      find.descendant(
+        of: find.byType(ThreadDetailPanel),
+        matching: find.textContaining('body of Sarah Whitfield'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(ThreadDetailPanel),
+        matching: find.textContaining('body of Homepage copy'),
+      ),
+      findsNothing,
+    );
 
     await settleQueues(tester);
   });

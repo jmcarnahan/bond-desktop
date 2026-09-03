@@ -334,7 +334,7 @@ void main() {
       WidgetTester tester, {
       String? selectedId,
       RailSection? selectedSection = RailSection.needsYou,
-      void Function(String)? onSelectConversation,
+      void Function(String, String)? onSelectConversation,
       void Function(RailSection)? onSelectSection,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
@@ -343,7 +343,7 @@ void main() {
         conversations: conversations,
         selectedId: selectedId,
         selectedSection: selectedSection,
-        onSelectConversation: onSelectConversation ?? (_) {},
+        onSelectConversation: onSelectConversation ?? (_, _) {},
         onSelectSection: onSelectSection ?? (_) {},
       )));
     }
@@ -380,12 +380,17 @@ void main() {
     });
 
     testWidgets('tapping a row selects that conversation', (tester) async {
-      final selected = <String>[];
-      await pumpRail(tester, onSelectConversation: selected.add);
+      final selected = <(String, String)>[];
+      await pumpRail(
+        tester,
+        onSelectConversation: (source, id) => selected.add((source, id)),
+      );
 
       // Cleo has an ask on her, so Needs You is the one section she is in.
       await tester.tap(find.text('Cleo'));
-      expect(selected, ['c']);
+      // The source rides along: the host cannot resolve it from the id, and a
+      // key shared with the other connector would open the wrong thread.
+      expect(selected, [('email', 'c')]);
     });
 
     testWidgets('tapping a section label opens its overview', (tester) async {
@@ -431,7 +436,7 @@ void main() {
         selectedLaterDay: selectedLaterDay,
         laterCount: laterRows(conversations).length,
         laterDays: laterDayCounts(conversations),
-        onSelectConversation: (_) {},
+        onSelectConversation: (_, _) {},
         onSelectSection: (_) {},
         onSelectLaterDay: onSelectLaterDay,
       )));
@@ -520,7 +525,7 @@ void main() {
         selectedId: null,
         selectedSection: RailSection.needsYou,
         attentionThreshold: threshold,
-        onSelectConversation: (_) {},
+        onSelectConversation: (_, _) {},
         onSelectSection: onSelectSection ?? (_) {},
       )));
     }
@@ -635,7 +640,7 @@ void main() {
         conversations: conversations,
         selectedId: null,
         selectedSection: null,
-        onSelectConversation: (_) {},
+        onSelectConversation: (_, _) {},
         onSelectSection: (_) {},
       )));
     }
@@ -688,7 +693,7 @@ void main() {
         selectedId: null,
         selectedSection: null,
         processingSince: processingSince,
-        onSelectConversation: (_) {},
+        onSelectConversation: (_, _) {},
         onSelectSection: (_) {},
       )));
     }
@@ -838,7 +843,7 @@ void main() {
         selectedId: null,
         selectedStorylineId: selectedStorylineId,
         selectedSection: RailSection.storylines,
-        onSelectConversation: (_) {},
+        onSelectConversation: (_, _) {},
         onSelectSection: (_) {},
         onSelectStoryline: onSelectStoryline ?? (_) {},
         onKeepSuggestion: onKeepSuggestion ?? (_) {},
