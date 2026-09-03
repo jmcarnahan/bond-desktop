@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
+import '../models/open_asks.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'inline_alert.dart';
@@ -89,6 +90,10 @@ class ThreadDetailPanel extends StatelessWidget {
     Message? previous;
     var first = true;
 
+    // One scan of the thread answers the open-ask rule for every row in it.
+    final lastOut = latestOutboundAt(messages);
+    final done = conversation.state == ConversationState.done;
+
     for (final message in messages) {
       final day = dayKeyOf(message);
       final label = formatDayLabel(message.receivedAt);
@@ -105,6 +110,11 @@ class ThreadDetailPanel extends StatelessWidget {
         key: ValueKey(message.id),
         message: message,
         showHeader: previous == null || !sameRun(previous, message),
+        openAsk: hasOpenAsk(
+          message,
+          lastOutboundAt: lastOut,
+          conversationDone: done,
+        ),
       ));
       previous = message;
     }
@@ -135,6 +145,13 @@ class ThreadDetailPanel extends StatelessWidget {
         cta != null &&
         cta.isNotEmpty;
 
+    // The banner names the newest ask only. When older ones are still open,
+    // the count says so — the transcript below is where they are read.
+    final openAsks = openAskCount(
+      messages,
+      conversationDone: conversation.state == ConversationState.done,
+    );
+
     // A height-filling bordered surface, not a shrink-wrapping card: the
     // message ListView below needs a bounded height to scroll in.
     return Container(
@@ -160,11 +177,13 @@ class ThreadDetailPanel extends StatelessWidget {
               // Two lines, not however many the model wrote: the ask sits
               // directly above the transcript, and the tooltip keeps the full
               // text a hover away.
+              // The tooltip stays the bare ask: it exists to show the full
+              // text the banner had to clamp.
               child: Tooltip(
                 message: cta,
                 child: InlineAlert(
                   severity: InlineAlertSeverity.attention,
-                  text: cta,
+                  text: openAsks > 1 ? '$cta · $openAsks open asks' : cta,
                   maxLines: 2,
                 ),
               ),

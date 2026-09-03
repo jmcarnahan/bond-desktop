@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/time_format.dart';
 import 'package:flutter/material.dart';
@@ -24,6 +25,9 @@ Message _msg({
   String? summary,
   String triageStatus = 'done',
   bool pendingSend = false,
+  bool? needsAction,
+  List<String> actionItems = const [],
+  String? deadline,
 }) {
   return Message(
     id: id,
@@ -36,6 +40,9 @@ Message _msg({
     summary: summary,
     triageStatus: triageStatus,
     pendingSend: pendingSend,
+    needsAction: needsAction,
+    actionItems: actionItems,
+    deadline: deadline,
   );
 }
 
@@ -239,6 +246,76 @@ void main() {
       );
 
       expect(find.text('AI: Wants the rate sheet.'), findsOneWidget);
+    });
+
+    testWidgets('an open ask renders its action item and deadline',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          needsAction: true,
+          actionItems: const ['Send the deck'],
+          deadline: 'Friday',
+        ),
+        openAsk: true,
+      )));
+
+      expect(find.text('Send the deck'), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(BondChip),
+          matching: find.text('Friday'),
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an open ask with no action item still says one is owed',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(needsAction: true),
+        openAsk: true,
+      )));
+
+      expect(find.text('Reply expected'), findsOneWidget);
+    });
+
+    testWidgets('the row does not work the rule out for itself', (tester) async {
+      // needsAction on the message is not enough — only the host, which can
+      // see the whole thread, knows whether a reply already answered it.
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          needsAction: true,
+          actionItems: const ['Send the deck'],
+          deadline: 'Friday',
+        ),
+      )));
+
+      expect(find.text('Send the deck'), findsNothing);
+      expect(find.text('Reply expected'), findsNothing);
+      expect(find.text('Friday'), findsNothing);
+    });
+
+    testWidgets('an open ask without a deadline renders no chip',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(needsAction: true, actionItems: const ['Send the deck']),
+        openAsk: true,
+      )));
+
+      expect(find.text('Send the deck'), findsOneWidget);
+      expect(find.byType(BondChip), findsNothing);
     });
 
     testWidgets('outbound stays left-aligned — no bubbles, no right column',

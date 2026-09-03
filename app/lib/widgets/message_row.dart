@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
 import '../theme/tokens.dart';
+import 'chips.dart';
 import 'time_format.dart';
 
 /// How long a gap can be before a message stops reading as part of the same
@@ -88,10 +89,16 @@ class MessageRow extends StatefulWidget {
   /// False renders a continuation: no avatar, no name, no timestamp.
   final bool showHeader;
 
+  /// Whether this message's own ask is still unanswered. The row does not work
+  /// that out — the rule needs the whole thread, so the host passes the answer
+  /// (`models/open_asks.dart`) in.
+  final bool openAsk;
+
   const MessageRow({
     super.key,
     required this.message,
     this.showHeader = true,
+    this.openAsk = false,
   });
 
   @override
@@ -230,6 +237,13 @@ class _MessageRowState extends State<MessageRow> {
                   style: BondType.caption.copyWith(color: BondColors.inkMuted),
                 ),
               ],
+              // The ask this message is still waiting on. The thread banner
+              // carries only the newest one, so an older message keeps its own
+              // here until a reply answers it.
+              if (widget.openAsk) ...[
+                const SizedBox(height: BondSpacing.s4),
+                _askLine(message),
+              ],
             ],
           ),
         ),
@@ -241,6 +255,33 @@ class _MessageRowState extends State<MessageRow> {
         top: widget.showHeader ? BondSpacing.s16 : BondSpacing.s4,
       ),
       child: Opacity(opacity: pending ? 0.6 : 1, child: row),
+    );
+  }
+
+  /// The open ask, in the same copper ink an inbox row tints its CTA with.
+  /// Triage names an action item where it can; where it only judged that a
+  /// reply is owed, the generic line still has to say so.
+  Widget _askLine(Message message) {
+    final ask = message.actionItems.isNotEmpty
+        ? message.actionItems.first
+        : 'Reply expected';
+    final deadline = message.deadline;
+
+    return Wrap(
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: BondSpacing.s8,
+      runSpacing: BondSpacing.s4,
+      children: [
+        Text(
+          ask,
+          style: BondType.caption.copyWith(
+            color: BondColors.onAttentionTint,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        if (deadline != null && deadline.isNotEmpty)
+          BondChip.semantic(deadline, BondTone.attention),
+      ],
     );
   }
 
