@@ -766,9 +766,10 @@ void main() {
           vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
     }
 
-    test('too little unassigned mail is a no-op', () async {
+    test('a lone unassigned thread is below the gate', () async {
+      // One thread is nothing to pair, and a storyline of one is just a
+      // thread — the sweep does not reach the model at all.
       await seed(store, 'c1', vector: vectorAt(1));
-      await seed(store, 'c2', vector: vectorAt(0.95));
       final llm = FakeLlm({
         'storyline_name': [nameAnswer()],
         'storyline_membership': [confirmAnswer()],
@@ -778,6 +779,30 @@ void main() {
 
       expect(llm.schemas, isEmpty);
       expect(await store.loadStorylines(), isEmpty);
+    });
+
+    test('two similar threads are enough for the sweep to propose', () async {
+      // Pins the gate at two: a light mailbox has to be able to form its
+      // first storyline, not wait until it is busy enough.
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer(), confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      expect(storyline.status, 'suggested');
+      expect(storyline.createdBy, 'auto');
+
+      final members = await store.membersOf(storyline.id);
+      expect(members.map((m) => m.conversationKey).toSet(), {'c1', 'c2'});
+      expect(llm.callsFor('storyline_name'), 1);
+      expect(llm.callsFor('storyline_membership'), 2);
     });
 
     test('a cluster becomes one suggestion with its confirmed members',
@@ -1432,7 +1457,6 @@ void main() {
       // Under the unassigned floor, so no cluster ever reaches the model and
       // there is not even a tally to be zero about.
       await seed(store, 'c1', vector: vectorAt(1));
-      await seed(store, 'c2', vector: vectorAt(0.9));
 
       final detail = await sweepAndRecord(FakeLlm({
         'storyline_name': [nameAnswer()],

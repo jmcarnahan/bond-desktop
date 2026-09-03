@@ -53,10 +53,13 @@ class StorylineTuning {
   /// proposals is not a feature; it is a chore, and it gets dismissed as one.
   static const int maxPendingSuggestions = 3;
 
-  /// Below this there is not enough unassigned conversation — mail or chat —
-  /// for a cluster to mean anything, and the sweep would be proposing groups
-  /// out of noise.
-  static const int sweepMinUnassigned = 4;
+  /// All this floor asks is that there be something to pair: two unassigned
+  /// threads — mail or chat — already make a cluster, per [minClusterSize],
+  /// and below that the pass has nothing it could propose. Whether the pair
+  /// is worth proposing is decided elsewhere, by [clusterLinkThreshold], the
+  /// per-member confirm, and [maxPendingSuggestions]. Waiting for a busier
+  /// mailbox only starves a light one of its first storyline.
+  static const int sweepMinUnassigned = 2;
 
   /// How many threads one recruit pass may put in front of the model. A
   /// charter save is one user action, and eight confirmations is already the
