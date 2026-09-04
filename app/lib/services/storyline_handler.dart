@@ -128,6 +128,36 @@ class StorylineRefreshHandler extends WorkHandler {
   }
 }
 
+/// Re-writes one storyline's running state of play — where it stands, what is
+/// still open, what has been decided — from the newest messages across its
+/// member threads. Queued by every path that changes what has been SAID in a
+/// storyline: a message's facts landing in a member thread, a thread filed by
+/// hand, and the refresh pass, whose membership change is a change to the
+/// story.
+///
+/// Registered AFTER the recruit, and the position is behaviour for the same
+/// reason the refresh's is. `AiWorker._drainAll` walks handlers in list order
+/// once per pass, so the threads a recruit just filed are in the recap written
+/// in that same drain rather than a pump later. It stays ahead of the draft
+/// handler, which is last for its own reasons.
+class StorylineRecapHandler extends WorkHandler {
+  final StorylineService _service;
+
+  StorylineRecapHandler(this._service);
+
+  @override
+  String get kind => 'storyline_recap';
+
+  @override
+  Future<void> run(Map<String, Object?> item) {
+    final id = item['entity_id'] as String? ?? '';
+    // An empty id is a row nothing can be done about. Done, not failed —
+    // retrying it would produce the same nothing twice.
+    if (id.isEmpty) return Future<void>.value();
+    return _service.recap(id);
+  }
+}
+
 /// Looks for new groups across everything not in a storyline yet. Queued once
 /// per sync against the single entity id `sweep` — there is one mailbox, so
 /// there is one sweep, and the work table's primary key is what keeps a

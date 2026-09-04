@@ -453,6 +453,13 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // when a charter was just saved, or a refresh moved one — and the
       // threads it files are exactly what the draft below should know about.
       StorylineRecruitHandler(storylines),
+      // After the recruit, so a thread the recruit just filed is in the recap
+      // written on this same drain rather than a pump later — the recap is the
+      // storyline screen's centrepiece, and a member the user can see in the
+      // timeline while the recap still talks about the group without it is the
+      // one inconsistency they would notice. Still ahead of the draft, which
+      // is last on its own terms.
+      StorylineRecapHandler(storylines),
       // Last, and after both storyline passes: a draft reads the storyline
       // summary as background, so drafting before the sweep has run would
       // write this message's reply without it. Last also means the work

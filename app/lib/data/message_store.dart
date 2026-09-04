@@ -3096,6 +3096,61 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
     return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
+  /// The newest [limit] messages across every thread in [storylineId], newest
+  /// first — the window the recap pass reads.
+  ///
+  /// Newest FIRST, where [storylineTimeline] is oldest first, because the two
+  /// have opposite problems. The timeline renders everything and scrolls; this
+  /// takes a fixed-size tail off an unbounded history, and `ORDER BY … DESC
+  /// LIMIT ?` is the only way to ask for the last twelve without reading the
+  /// first thousand. The caller reverses what it gets — "where does this stand
+  /// now" is a question about the END of a sequence, so the model reads them
+  /// chronologically.
+  ///
+  /// The subject falls back to the CONVERSATION's, and that is not cosmetic: a
+  /// chat message carries no subject at all (`TeamsSync.messageRow` stores
+  /// null rather than inventing one), so without the fallback every line of a
+  /// chat member thread would arrive with no thread name and the model could
+  /// not tell one thread's messages from another's. The join is LEFT so a
+  /// message that outran its own conversation row still comes back.
+  ///
+  /// Gated messages are excluded on exactly [EmbedHandler]'s rule: triage
+  /// flipped them to `skipped` because they are newsletters, no-reply senders
+  /// or auto-generated mail, and a recap that narrated the vendor's marketing
+  /// mail would be describing the wrong storyline. The `teams_source`
+  /// exception is the same legacy tolerance — a chat row stored before chats
+  /// were triaged is `skipped` for no judgement anyone made, and dropping it
+  /// would silently empty the recap of a chat-only storyline.
+  Future<List<Map<String, Object?>>> recentStorylineMessages(
+    String storylineId, {
+    int limit = 12,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.source AS source, '
+          'm.source_message_id AS source_message_id, '
+          'm.conversation_key AS conversation_key, '
+          'COALESCE(m.subject, c.subject) AS subject, '
+          'm.direction AS direction, m.from_name AS from_name, '
+          'm.body_preview AS body_preview, m.body_text AS body_text, '
+          'm.received_at AS received_at '
+          'FROM messages m '
+          'JOIN storyline_members sm '
+          '  ON sm.source = m.source '
+          '  AND sm.conversation_key = m.conversation_key '
+          'LEFT JOIN conversations c '
+          '  ON c.source = m.source AND c.conversation_key = m.conversation_key '
+          'WHERE sm.storyline_id = ? '
+          "AND (m.triage_status <> 'skipped' "
+          "     OR m.gate_reason = 'teams_source') "
+          'ORDER BY m.received_at DESC, m.source_message_id DESC '
+          'LIMIT ?',
+          variables: _args([storylineId, limit]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
   // ── notifications ────────────────────────────────────────────────────
 
   /// Opens a notification row for every inbound message that could still earn

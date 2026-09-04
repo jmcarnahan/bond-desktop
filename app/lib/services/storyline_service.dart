@@ -477,7 +477,144 @@ class StorylineService {
         _normalized(wroteCharter) != _normalized(preCharter ?? '')) {
       await _store.requeueWork('storyline_recruit', _workSource, storylineId);
     }
+
+    // Unconditional, and only on the passes that got this far: reaching here
+    // means the member set moved, and a storyline that gained or lost a thread
+    // is a storyline whose state of play changed — the recap was written
+    // against messages that are no longer the whole story. The two early
+    // returns above skip this deliberately; a refresh that found nothing
+    // changed changed nothing for the recap either.
+    await _store.requeueWork('storyline_recap', _workSource, storylineId);
   }
+
+  // ── automatic: one storyline, on what was said in it ───────────────────
+
+  /// Writes where a storyline stands right now, for a reader who has been
+  /// away.
+  ///
+  /// The one pass that runs on MESSAGES rather than on membership. The other
+  /// three describe a storyline so the app can act on it — a title for a row,
+  /// a charter to judge threads against — and all of them go quiet the moment
+  /// the member set settles. This one keeps moving as long as people are
+  /// talking, because that is what the user asked for: something to check in
+  /// on periodically instead of re-reading the last few days of a thread.
+  ///
+  /// It must be useful when there is nothing to do. An inbox that only speaks
+  /// up about work owed is silent about the storylines that are going well,
+  /// and "going well" is exactly what someone coming back from a week away
+  /// wants to be told.
+  ///
+  /// The window is the newest [MessageStore.recentStorylineMessages] across
+  /// every member thread, merged into one chronology. Not per thread: a
+  /// storyline is one story told in several places, and a per-thread recap
+  /// would be the thing the reader is already doing by hand.
+  Future<void> recap(String storylineId) async {
+    final storyline = await _store.getStoryline(storylineId);
+    // Dismissed between the enqueue and the drain. Recapping it would spend a
+    // call describing a group nothing renders.
+    if (storyline == null ||
+        (storyline.status != 'active' && storyline.status != 'suggested')) {
+      return;
+    }
+
+    // Newest first, as the store hands them over. Empty means a storyline
+    // whose threads hold nothing the recap may read — every member emptied,
+    // or every message gated — and there is nothing to say about it. Quiet,
+    // like the recruit's own empty ending.
+    final rows = await _store.recentStorylineMessages(storylineId);
+    if (rows.isEmpty) return;
+
+    // The watermark, taken BEFORE the model is dialled and before the list is
+    // reversed. The store orders `received_at DESC`, and SQLite sorts NULLs
+    // last under DESC, so the first row carries the newest timestamp there is.
+    final newestSeen = rows.first['received_at'] as String?;
+    // Every message in the window arrived without a timestamp — nothing here
+    // can move a watermark, and a recap that cannot stamp one would re-run on
+    // every trigger for the rest of the database's life.
+    if (newestSeen == null || newestSeen.isEmpty) return;
+
+    // The staleness gate, before the call rather than after it. ISO-8601 with
+    // a fixed offset compares correctly as a string — that is the format's
+    // whole point, and every timestamp this app stores is written that way —
+    // so no parsing is needed to ask "has the recap already read this?"
+    final through = storyline.recapThrough;
+    if (through != null && through.compareTo(newestSeen) >= 0) return;
+
+    final result = await runTask(
+      _client,
+      const StorylineRecapTask(),
+      RecapInput(
+        title: storyline.title,
+        charter: storyline.charter ?? '',
+        previousRecap: storyline.recapText ?? '',
+        // Reversed into chronological order: the model is being asked where
+        // things stand at the END of the sequence, and a sequence read
+        // backwards ends at the oldest message.
+        messageLines: [for (final row in rows.reversed) _recapLine(row)],
+      ),
+      // Zero, like every other storyline call: the same window recapped twice
+      // must read the same, or a re-run after a park would rewrite the block
+      // a user is looking at for no reason they could see.
+      temperature: 0,
+    );
+
+    // A model with nothing to say must not blank a good recap. The stored
+    // text stands and the watermark stays behind it, so the next message to
+    // land asks again — which is a far better failure than a storyline screen
+    // that went empty because one call came back thin.
+    if (result.recap.isEmpty) return;
+
+    await _store.updateStoryline(
+      storylineId,
+      recapText: result.recap,
+      recapOpenJson: jsonEncode(result.openItems),
+      recapDecisionsJson: jsonEncode(result.decisions),
+      // The PRE-call watermark, for the reason the refresh stamps its pre-call
+      // hash: a message that landed while the model was thinking is a message
+      // this recap never read, and stamping what is true NOW would claim
+      // otherwise — the gate above would then read as fresh and that message
+      // would never be recapped. Stamping the older value leaves the pass
+      // stale, which re-fires it.
+      recapThrough: newestSeen,
+    );
+  }
+
+  /// One stored message as the recap prompt reads it: which thread it is on,
+  /// who said it, and what they said.
+  ///
+  /// `[subject] sender: text`, and no timestamp — the window is already in
+  /// order, and a date in every line is a date the model can misattribute in a
+  /// prompt whose strictest rule is to invent none.
+  ///
+  /// The subject bracket is dropped entirely when there is none, rather than
+  /// rendered empty. A chat has no subject and its conversation may have no
+  /// topic either; `[]` would tell the model a thread name was missing rather
+  /// than that this one has none — the same distinction `buildMessageBlock`
+  /// draws by omitting the `Subject:` line for chats.
+  ///
+  /// The owner's own messages are `You`, exactly as the triage prompt's thread
+  /// tail renders them. It is the cheapest way to answer the question the
+  /// recap most has to get right: a thread whose last word is the reader's is
+  /// a thread nobody is waiting on them for.
+  static String _recapLine(Map<String, Object?> row) {
+    final subject = stripReFw(row['subject'] as String?);
+    final sender = row['direction'] == 'outbound'
+        ? 'You'
+        : (row['from_name'] as String? ?? '');
+    final preview = row['body_preview'] as String?;
+    final body = (preview != null && preview.isNotEmpty)
+        ? preview
+        : (row['body_text'] as String? ?? '');
+    final text = body.trim();
+    return '${subject.isEmpty ? '' : '[$subject] '}$sender: '
+        '${text.length > _recapLineCap ? text.substring(0, _recapLineCap) : text}';
+  }
+
+  /// How much of one message reaches the recap. A dozen of these has to fit
+  /// under [StorylineRecapTask]'s window cap with the thread names and the
+  /// senders, and a preview is what a person skimming their inbox sees — past
+  /// that it is quoted thread and signature.
+  static const int _recapLineCap = 400;
 
   /// The first description: the same naming call a fresh cluster gets.
   ///
@@ -1172,6 +1309,13 @@ class StorylineService {
   /// which is gated. A person filing a thread by hand is saying this group is
   /// about that too, and they are looking at the description while they say
   /// it.
+  ///
+  /// It queues a [recap] for the same reason, and the two are separate
+  /// requeues rather than one: the thread that just arrived brings its own
+  /// messages, so where this storyline STANDS changed the moment it was filed,
+  /// not only what the storyline is about. The refresh queues one of these
+  /// too, but only when it gets past its own gate — and a hand-filed thread is
+  /// the case where the user is watching.
   Future<void> addThread(String id, String source, String key) async {
     await _store.addStorylineMember(id, source, key, addedBy: 'user');
     final storyline = await _store.getStoryline(id);
@@ -1190,6 +1334,7 @@ class StorylineService {
       await _store.touchStorylineActivity(id, lastMessageAt);
     }
     await _store.requeueWork('storyline_refresh', _workSource, id);
+    await _store.requeueWork('storyline_recap', _workSource, id);
   }
 
   /// Takes a thread out, and blocks it from coming back. Always blocking:

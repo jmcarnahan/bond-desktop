@@ -1,13 +1,13 @@
 # 6 · Storylines
 
 Storylines are groups of threads about the same thing, proposed by the model
-and kept or dismissed by the user. Four passes share the machinery, all in
+and kept or dismissed by the user. Five passes share the machinery, all in
 `app/lib/services/storyline_service.dart` behind the handlers in
 `app/lib/services/storyline_handler.dart`. **Their relative order is the
 handler registration order in `app_providers.dart`** — that list's comments
 are the authority on sequencing.
 
-## The four passes, in drain order
+## The five passes, in drain order
 
 1. **Assign** (`StorylineAssignHandler` → `assignConversation`) — when a
    conversation's card changes, cosine-shortlist it against live storyline
@@ -27,8 +27,14 @@ are the authority on sequencing.
 4. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
    charter, or after a refresh widened one, judges up to 8 candidate threads
    against it.
+5. **Recap** (`StorylineRecapHandler` → `recap`) — re-writes the storyline's
+   running state of play from the newest messages across its member threads.
+   Its own section below.
 
 A thread the user removes by hand is blocked — the model cannot put it back.
+
+The first four run on MEMBERSHIP and go quiet once the member set settles. The
+recap runs on what was SAID and keeps moving as long as people are talking.
 
 ## The refresh pass
 
@@ -106,6 +112,65 @@ user accepts it. That, plus handler ordering (refresh is registered *before*
 recruit, so a recruit's refresh waits a pump while a user edit refreshes and
 recruits in one drain) and monotone membership, is what bounds the one cycle
 these two passes could form.
+
+## The recap pass
+
+The storyline screen's centrepiece, and the only pass written for the reader
+rather than for the app. It answers "I have been away — where does this stand?"
+without them re-reading the last few days of every thread: two to four
+present-tense sentences of state, a list of what is still open (who owes whom
+what), and a list of what has recently been decided. The one-line `summary`
+stays for the compact surfaces (rail, cards); the recap is what the storyline
+screen leads with.
+
+It must be useful when there is **nothing to do**. An inbox that only speaks up
+about work owed is silent about the storylines that are going well, and "going
+well" is what someone coming back from a week away most wants to be told —
+which is why an empty `open_items` list is stated in the prompt as an honest
+answer rather than a failure to find something.
+
+**The window** is `MessageStore.recentStorylineMessages(id, limit: 12)`: the
+newest messages across *every* member thread, merged into one chronology by
+`received_at DESC LIMIT ?` and reversed by the service so the model reads them
+oldest-first. Not per thread — a storyline is one story told in several places,
+and a per-thread recap is the thing the reader is already doing by hand. Each
+line is `[subject] sender: preview`, with the owner's own messages rendered as
+`You` (the triage prompt's idiom) and no timestamp — the sequence is already in
+order, and a date per line is a date the model can misattribute in a prompt
+whose strictest rule is to invent none. The subject falls back to the
+*conversation's* (`COALESCE`), because a chat message carries no subject at all
+and every line of a chat thread would otherwise arrive unnamed. Gated messages
+are excluded on exactly `EmbedHandler`'s rule — `triage_status = 'skipped'`
+unless `gate_reason = 'teams_source'` — so a recap never narrates the vendor's
+newsletters, and a chat row `skipped` only for being a chat still counts.
+
+**The gate** is the `recap_through` watermark (schema v10): the pass returns
+before any model call when `recap_through >= ` the newest `received_at` in the
+window. ISO-8601 with a fixed offset compares correctly as a string, so no
+parsing is involved. The stamp is the **pre-call** watermark, for the reason
+the refresh stamps its pre-call hash: a message that landed while the model was
+thinking is a message this recap never read, and stamping what is true *now*
+would leave the gate reading fresh and that message would never be recapped.
+
+**Triggers** — every path that changes what has been *said*, all via
+`requeueWork`:
+
+| Trigger | When |
+|---|---|
+| `ExtractHandler` tail | a message's facts land in a thread that is already in ≥1 storyline (`storylineIdsFor`), one requeue per storyline. Deliberately outside `_refreshCard` and not behind a successful embed — the recap has nothing to do with the vector, and a down embedding server must not cost it a message |
+| `addThread` | always — a hand-filed thread brings its own messages, and the user is looking |
+| `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story |
+
+Bursts coalesce for free: `requeueWork` is keyed on
+`(kind, source, entity_id)`, so ten messages landing in one drain leave one
+row, and the one pass that runs reads the whole burst because it reads current
+state at run time rather than a payload. Nothing carries provenance through the
+queue.
+
+**Empty answers keep the previous recap standing.** A model that comes back
+with no recap text writes *nothing at all* — not the text, not the lists, not
+the watermark. A thin answer must never cost the user the catch-up they had,
+and leaving the watermark behind means the next message to land asks again.
 
 ## Filing a thread by hand
 
@@ -191,3 +256,15 @@ threads — because every word it moves is a word that moved under a person who
 had already read it. Its validator is separate from naming's for one reason:
 an empty title here keeps the stored one, where naming substitutes
 `Untitled storyline`.
+
+**StorylineRecapTask** — same file, schema `storyline_recap`, **prose / 27B
+slot**, **temperature 0**. Two fences (`storyline` with the title, charter and
+previous recap; `messages` with the window). Four fields: `evidence`, then a
+2–4 sentence present-tense `recap`, then `open_items` and `decisions` as plain
+string arrays — the shape `triage_task.dart` proves this server's grammar
+converter handles, no `$defs`. The previous recap rides *inside* the fence
+even though this app stored it: a model wrote it out of other people's mail,
+and text laundered through one of our own columns is still theirs. Its
+validator drops non-string list entries rather than stringifying them (the
+other five items are still good items) and caps each list at 6 — a reader with
+twelve open questions has a backlog, not a recap.

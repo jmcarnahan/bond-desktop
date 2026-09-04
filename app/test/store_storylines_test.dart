@@ -735,6 +735,103 @@ void main() {
     });
   });
 
+  group('recentStorylineMessages', () {
+    test('takes the newest few across every member thread, newest first',
+        () async {
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedMessage('c2', 'm2', receivedAt: '2026-08-01T10:00:00Z');
+      await seedMessage('c1', 'm3', receivedAt: '2026-08-01T11:00:00Z');
+      // Not a member — a recap must not read it.
+      await seedConversation('c9');
+      await seedMessage('c9', 'm9', receivedAt: '2026-08-01T12:00:00Z');
+
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1');
+      // Newest first, and the two threads interleaved rather than one after
+      // the other: a storyline is one story told in several places.
+      expect(rows.map((r) => r['source_message_id']), ['m3', 'm2', 'm1']);
+      expect(rows.map((r) => r['received_at']), [
+        '2026-08-01T11:00:00Z',
+        '2026-08-01T10:00:00Z',
+        '2026-08-01T09:00:00Z',
+      ]);
+      expect(rows.map((r) => r['conversation_key']), ['c1', 'c2', 'c1']);
+    });
+
+    test('the limit takes the newest, not the first found', () async {
+      await seedConversation('c1');
+      for (var i = 0; i < 5; i++) {
+        await seedMessage('c1', 'm$i', receivedAt: '2026-08-0${i + 1}T09:00:00Z');
+      }
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1', limit: 2);
+
+      expect(rows.map((r) => r['received_at']),
+          ['2026-08-05T09:00:00Z', '2026-08-04T09:00:00Z']);
+    });
+
+    test('a gated message is left out of the window', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedMessage('c1', 'm2', receivedAt: '2026-08-01T10:00:00Z');
+      await store.writeTriage('email', 'm2',
+          status: 'skipped', gateReason: 'newsletter');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1');
+
+      // Triage threw it out as a newsletter, and a recap narrating the
+      // vendor's marketing mail would be describing the wrong storyline.
+      expect(rows.map((r) => r['source_message_id']), ['m1']);
+    });
+
+    test('a chat skipped only for being a chat still counts', () async {
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 't1',
+        'conversation_key': 'chat-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'received_at': '2026-08-01T09:00:00Z',
+        'body_text': 'legal wants a look',
+        'triage_status': 'skipped',
+        'gate_reason': 'teams_source',
+      });
+      await store.upsertConversation({
+        'source': 'teams',
+        'conversation_key': 'chat-1',
+        'subject': 'Acme renewal',
+        'state': 'waiting',
+      });
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'teams', 'chat-1', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1');
+
+      // Legacy tolerance, exactly as the embed queue applies it: a chat row
+      // stored before chats were triaged is `skipped` for no judgement anyone
+      // made, and dropping it would empty a chat-only storyline's recap.
+      expect(rows, hasLength(1));
+      // A chat message carries no subject of its own — the conversation's
+      // topic is what names the thread.
+      expect(rows.single['subject'], 'Acme renewal');
+      expect(rows.single['from_name'], 'Dana');
+    });
+
+    test('a storyline with nothing in it has an empty window', () async {
+      await seedStoryline('sl-1', status: 'active');
+      expect(await store.recentStorylineMessages('sl-1'), isEmpty);
+    });
+  });
+
   group('conversationsWithEmbeddings', () {
     test('returns only rows with a vector from the model asked for', () async {
       await seedConversation('c1', lastMessageAt: '2026-08-03T00:00:00Z');

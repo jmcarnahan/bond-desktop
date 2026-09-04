@@ -23,6 +23,15 @@ import 'pipeline_progress.dart';
 class ExtractHandler extends WorkHandler {
   static const String _source = 'email';
 
+  /// What a storyline work row is LABELLED with, which is a different thing
+  /// from [_source]. The `source` column on those rows is a label and not a
+  /// scope — their entity ids are storyline ids, and a storyline spans both
+  /// connectors — so a chat message queues its storyline's recap under the
+  /// same label a mail message does. See `StorylineService._workSource`, which
+  /// is the authority; changing one without the other would strand the rows
+  /// the other writes.
+  static const String _storylineWorkSource = 'email';
+
   final MessageStore _store;
   final LlmClient _client;
   final EmbeddingsClient _embeddings;
@@ -131,8 +140,41 @@ class ExtractHandler extends WorkHandler {
 
     await _fileBucket(source, row, result);
     await _refreshCard(source, row, result);
+    await _queueRecap(source, row);
     await _embedMessage(source, row);
     await _queueDraft(source, id, row);
+  }
+
+  /// Wakes the running recap of every storyline this message's thread is
+  /// filed in.
+  ///
+  /// The one storyline trigger that has nothing to do with membership. The
+  /// assignment queue next door asks "does this thread belong somewhere?" and
+  /// runs off the thread's embedding; this asks nothing — a message landing in
+  /// a thread that is ALREADY in a storyline changes where that storyline
+  /// stands, whether or not its vector moved, and the recap is what a user
+  /// opens the storyline to read.
+  ///
+  /// Deliberately outside [_refreshCard], and not behind a successful embed:
+  /// an embedding server that is down must not cost the recap a message. The
+  /// requeue is idempotent by construction — `requeueWork` is keyed on
+  /// `(kind, source, entity_id)` — so a storyline whose threads take ten
+  /// messages in one drain gets one recap, which is also the pass reading the
+  /// whole burst at once instead of ten times.
+  ///
+  /// Nothing here may throw: the extraction is already stored by the time it
+  /// runs, and a failure would re-run the model call that succeeded.
+  Future<void> _queueRecap(String source, Map<String, Object?> row) async {
+    final key = row['conversation_key'] as String?;
+    if (key == null || key.isEmpty) return;
+    for (final storylineId in await _store.storylineIdsFor(source, key)) {
+      if (storylineId.isEmpty) continue;
+      await _store.requeueWork(
+        'storyline_recap',
+        _storylineWorkSource,
+        storylineId,
+      );
+    }
   }
 
   /// Puts this message in front of the drafting model, or closes its draft
