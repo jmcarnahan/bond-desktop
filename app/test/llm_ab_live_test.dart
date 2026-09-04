@@ -93,8 +93,13 @@ void main() {
       final fastWarmup = BenchTarget.bulk.client();
       for (var i = 0; i < BenchTarget.warmup; i++) {
         final input = TriageInput(emails.first.message, DateTime.now());
-        await runTask(bigWarmup, const TriageTask(), input);
-        await runTask(fastWarmup, const TriageTask(), input);
+        // Warmed the way the run itself will be measured: a candidate that
+        // needs BENCH_THINK would 400 here otherwise, and a warmup that failed
+        // would leave the first timed call cold.
+        await runTask(bigWarmup, const TriageTask(), input,
+            think: BenchTarget.allowReasoning);
+        await runTask(fastWarmup, const TriageTask(), input,
+            think: BenchTarget.allowReasoning);
       }
 
       final startedAt = DateTime.now();
@@ -122,12 +127,17 @@ void main() {
             big,
             const TriageTask(),
             TriageInput(entry.message, now),
+            // One switch for both servers: an A/B where only one side was
+            // asked to stop reasoning would compare a model against itself
+            // thinking.
+            think: BenchTarget.allowReasoning,
           );
 
           final fastTriage = await runTask(
             fast,
             const TriageTask(),
             TriageInput(entry.message, now),
+            think: BenchTarget.allowReasoning,
           );
 
           final bigExtract = await runTask(
@@ -137,6 +147,7 @@ void main() {
             // As the handler runs it, on both sides: a disagreement has to be
             // the models differing, not one of them sampling.
             temperature: 0,
+            think: BenchTarget.allowReasoning,
           );
 
           final fastExtract = await runTask(
@@ -144,6 +155,7 @@ void main() {
             const ExtractTask(),
             ExtractionInput(entry.message, now),
             temperature: 0,
+            think: BenchTarget.allowReasoning,
           );
 
           pairs.add(_Pair(

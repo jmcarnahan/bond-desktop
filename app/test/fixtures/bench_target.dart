@@ -69,9 +69,46 @@ class BenchTarget {
   /// it just stops being a gate.
   static const bool allowReasoning = bool.fromEnvironment('BENCH_THINK');
 
+  /// Which concurrencies the drain races, comma-separated and in the order it
+  /// races them — `1,3` by default, the shipping pair.
+  ///
+  /// The server has to be started with AT LEAST max(K) slots
+  /// (`make fast FAST_SLOTS=…`) or the high rounds measure the wrong thing
+  /// entirely: requests past the slot count queue on the server rather than
+  /// batch, so K=6 against a 4-slot server reports queue-wait dressed up as
+  /// throughput and the speedup flattens for a reason that has nothing to do
+  /// with the runtime under test.
+  static const String drainK =
+      String.fromEnvironment('BENCH_K', defaultValue: '1,3');
+
   LlmClient client({LlmCallObserver? onCall}) =>
       LlmClient(baseUrl: url, model: model, onCall: onCall);
 
   CallCollector collector() =>
       CallCollector(label: label, url: url, model: model);
+}
+
+/// [BenchTarget.drainK] as the numbers it names, in the order it names them.
+///
+/// Loud rather than lenient: a define is typed by hand on a command line, and
+/// a `BENCH_K=1,3,` that silently became `[1, 3]` — or a `BENCH_K=1;3` that
+/// became `[1]` — would produce a table with a round missing and nothing
+/// anywhere saying so.
+List<int> parseDrainK([String raw = BenchTarget.drainK]) {
+  final rounds = <int>[];
+  for (final part in raw.split(',')) {
+    final value = int.tryParse(part.trim());
+    if (value == null || value < 1) {
+      throw ArgumentError.value(
+        raw,
+        'BENCH_K',
+        'expected comma-separated positive integers (e.g. 1,3,6)',
+      );
+    }
+    rounds.add(value);
+  }
+  if (rounds.isEmpty) {
+    throw ArgumentError.value(raw, 'BENCH_K', 'names no concurrency to run');
+  }
+  return rounds;
 }

@@ -66,10 +66,13 @@ void main() {
           storylineParticipants: first.participants,
           candidateCard: first.candidateCard,
         );
+        // Warmed the way the run itself will be measured: a candidate that
+        // needs BENCH_THINK would 400 here otherwise, and a warmup that failed
+        // would leave the first timed call cold.
         await runTask(bigWarmup, const ConfirmMembershipTask(), input,
-            temperature: 0);
+            temperature: 0, think: BenchTarget.allowReasoning);
         await runTask(fastWarmup, const ConfirmMembershipTask(), input,
-            temperature: 0);
+            temperature: 0, think: BenchTarget.allowReasoning);
       }
 
       final startedAt = DateTime.now();
@@ -105,6 +108,10 @@ void main() {
             // As the service runs it, on both sides: a disagreement has to be
             // the models differing, not one of them sampling.
             temperature: 0,
+            // One switch for both servers: a comparison where only one side
+            // was asked to stop reasoning compares a model against itself
+            // thinking.
+            think: BenchTarget.allowReasoning,
           );
 
           final fastResult = await runTask(
@@ -112,6 +119,7 @@ void main() {
             const ConfirmMembershipTask(),
             input,
             temperature: 0,
+            think: BenchTarget.allowReasoning,
           );
 
           final bigMs = bigCalls.lastFor('storyline_membership')!.durationMs;

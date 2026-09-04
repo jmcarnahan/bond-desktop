@@ -36,12 +36,22 @@ abstract class JsonTask<T> {
 /// [maxTokens] is per call for a blunter reason: a label fits in a fraction of
 /// the default and a drafted reply does not, and a budget that runs out mid-
 /// string comes back as a grammar-valid answer that was simply cut off.
+///
+/// [think] exists for the bakeoff and defaults to the app's own answer: off.
+/// Every caller in `lib/` leaves it alone, so nothing about the shipping path
+/// changes. A benched CANDIDATE can need it — an always-reasoning model like
+/// R1-Distill has no `enable_thinking` toggle to honour, so sending the kwarg
+/// asks for something the runtime cannot give and the tripwire then counts a
+/// fact about the model as a defect. Under `BENCH_THINK` the benches pass true,
+/// which drops `chat_template_kwargs` from the body entirely: the request stops
+/// claiming otherwise, and the leak count stops being a gate.
 Future<T> runTask<T>(
   LlmClient client,
   JsonTask<T> task,
   Object input, {
   double temperature = 0.2,
   int maxTokens = 512,
+  bool think = false,
 }) async {
   final json = await client.completeJson(
     system: task.systemPrompt,
@@ -50,6 +60,7 @@ Future<T> runTask<T>(
     schemaName: task.schemaName,
     temperature: temperature,
     maxTokens: maxTokens,
+    think: think,
   );
   return task.validate(json);
 }

@@ -356,19 +356,31 @@ Knobs:
 ### Benchmarks
 
 ```sh
+make bench-verify           # does a target uphold the contract? (bulk slot)
+make bench-verify-prose     # the same, for the prose slot
 make bench                  # the corpus through triage + extraction, timed
+make bench-prose            # storyline names + drafted replies, verbatim
 make ab                     # the same corpus on both servers, compared
 make ab-membership          # the membership eval set on both servers
-make drain                  # drain concurrency 1 vs 3 (needs FAST_SLOTS=4)
+make drain                  # the drain concurrency race (needs FAST_SLOTS=4)
 make bench-compare A=… B=…  # diff two runs
 ```
 
 Each of these is live and none is a gate: they need a server up, print tables
 rather than assert on judgements, and stay out of `make app-test`.
 
+`bench-verify` is the exception, and it runs first from every target above.
+It asks the questions `curl /health` cannot: does this server accept the
+request body the app sends, does it honour a JSON schema, is decoding actually
+constrained, does it report the token counts a throughput number is divided by?
+None of those is a judgement — they are facts about how a server was
+configured, and getting one wrong is an adoption disqualifier rather than a
+nuance, because the queues treat an HTTP 400 as fatal and drop the message.
+`BENCH_VERIFY=0` skips it.
+
 A bench points wherever you tell it, so trying a candidate runtime is one
 command and no code edit. `BENCH_*` is the bulk slot (triage, extraction,
-membership); `PROSE_*` is the drafting slot the A/B compares against:
+membership); `PROSE_*` is the drafting slot `make bench-prose` and the A/B use:
 
 ```sh
 make bench BENCH_URL=http://localhost:9000/v1/chat/completions \
@@ -382,6 +394,17 @@ is the only way to compare a candidate against a run from last week, since
 scrollback does not survive the meeting. `BENCH_WARMUP` (default 1) discards
 that many calls before the clock starts; `BENCH_THINK=1` prints the reasoning
 tripwire instead of failing on it, for candidates with no thinking switch.
+
+Two more knobs:
+
+- `BENCH_VERIFY` (default 1) — run the contract check before the bench. Set to
+  0 for a server already verified this session, or to watch a failing candidate
+  behave rather than be stopped at the door.
+- `BENCH_K` (default `1,3`) — which concurrencies `make drain` races, in order.
+  `make drain BENCH_K=1,3,6` needs the server started with at least six slots
+  (`make fast FAST_SLOTS=6`); past the slot count the extra requests queue on
+  the server rather than batch, and the round measures queue-wait dressed up as
+  throughput.
 
 ## Performance
 

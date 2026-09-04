@@ -87,6 +87,41 @@ void main() {
       // Absent, not `true`: the template branches on the key existing.
       expect(fake.requests.single.containsKey('chat_template_kwargs'), isFalse);
     });
+
+    test('runTask keeps it off for every task the app runs', () async {
+      fake.scriptFor('triage', [_triageAnswer()]);
+
+      await runTask(
+        client,
+        const TriageTask(),
+        TriageInput(corpus.first.message, DateTime(2026, 8, 31)),
+      );
+
+      // Asserted at the runTask seam and not only at completeJson's, because
+      // that is the seam every caller in `lib/` actually uses: a `think`
+      // parameter that stopped being passed through would leave the whole app
+      // reasoning while the client's own test stayed green.
+      expect(
+        fake.requests.single['chat_template_kwargs'],
+        {'enable_thinking': false},
+      );
+    });
+
+    test('runTask drops it entirely when a bench asks for thinking', () async {
+      fake.scriptFor('triage', [_triageAnswer()]);
+
+      // What BENCH_THINK buys: an always-reasoning candidate has no
+      // `enable_thinking` to honour, so the request stops asking for one
+      // rather than asking and being ignored.
+      await runTask(
+        client,
+        const TriageTask(),
+        TriageInput(corpus.first.message, DateTime(2026, 8, 31)),
+        think: true,
+      );
+
+      expect(fake.requests.single.containsKey('chat_template_kwargs'), isFalse);
+    });
   });
 
   group('the request body', () {

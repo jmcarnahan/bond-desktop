@@ -89,7 +89,8 @@ RESET  := \033[0m
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop \
         app-install app-run app-test app-gen app-migrations app-analyze \
-        app-build bench ab ab-membership drain bench-compare
+        app-build bench bench-verify bench-verify-prose bench-prose \
+        ab ab-membership drain bench-compare
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -113,16 +114,20 @@ help:
 	@printf "  make app-test     → flutter test in $(APP_DIR)/\n"
 	@printf "  make app-gen      → regenerate Drift code + migration snapshots\n"
 	@printf "  make app-migrations → record a Drift schema bump (run before app-gen)\n"
+	@printf "  make bench-verify → does a target uphold the contract? (runs before every bench)\n"
 	@printf "  make bench        → live model benchmark (needs make fast up)\n"
+	@printf "  make bench-prose  → storyline names + drafted replies, verbatim (needs make model up)\n"
 	@printf "  make ab           → 27B vs fast model, side by side (needs both up)\n"
 	@printf "  make ab-membership → membership eval, 27B vs fast model (needs both up)\n"
-	@printf "  make drain        → drain concurrency 1 vs 3 (needs make fast up)\n"
+	@printf "  make drain        → drain concurrency race, BENCH_K rounds (needs make fast up)\n"
 	@printf "  make bench-compare A=<a.json> B=<b.json> → diff two bench results\n"
 	@printf "  make app-build    → release build of the macOS app\n\n"
 	@printf "Point a bench at a candidate runtime without editing anything:\n"
 	@printf "  make bench BENCH_URL=http://localhost:9000/v1/chat/completions \\\\\n"
 	@printf "             BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b\n"
-	@printf "Each run writes JSON to $(BENCH_OUT); PROSE_* points the other slot.\n\n"
+	@printf "Each run writes JSON to $(BENCH_OUT); PROSE_* points the other slot.\n"
+	@printf "BENCH_VERIFY=0 skips the contract check; BENCH_K=1,3,6 picks the drain\n"
+	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
 	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
 
@@ -528,6 +533,15 @@ BENCH_WARMUP ?= 1
 # 1 for a candidate that always reasons (R1-Distill has no enable_thinking to
 # honour): the benches then PRINT the leak count instead of failing on it.
 BENCH_THINK  ?= 0
+# The contract check that runs before every bench below. 0 skips it — for a
+# server already verified this session, or to see how a failing candidate
+# actually behaves rather than being stopped at the door.
+BENCH_VERIFY ?= 1
+# Which concurrencies `make drain` races, in order. The fast server must be
+# started with AT LEAST max(K) slots (`make fast FAST_SLOTS=4`) or the high
+# rounds measure queue-wait rather than batching, which is the opposite of the
+# thing being measured.
+BENCH_K      ?= 1,3
 
 # Single-quoted values, every one: a label carries spaces and parentheses, and
 # an unquoted --dart-define would hand the shell a second word to run.
@@ -540,7 +554,8 @@ BENCH_DEFINES := \
   --dart-define=PROSE_MODEL='$(PROSE_MODEL)' \
   --dart-define=BENCH_OUT='$(BENCH_OUT)' \
   --dart-define=BENCH_WARMUP=$(BENCH_WARMUP) \
-  --dart-define=BENCH_THINK=$(if $(filter-out 0,$(BENCH_THINK)),true,false)
+  --dart-define=BENCH_THINK=$(if $(filter-out 0,$(BENCH_THINK)),true,false) \
+  --dart-define=BENCH_K='$(BENCH_K)'
 
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then
@@ -613,44 +628,72 @@ app-migrations:
 	@cd $(APP_DIR) && dart run drift_dev make-migrations
 	@cd $(APP_DIR) && dart run drift_dev schema generate drift_schemas/bond/ test/drift/bond/generated/
 
+# Does the target server uphold the contract every bench below assumes?
+#
+# This replaced the `curl /health` guards the benches used to open with, which
+# answered a question nobody was asking: /health said a PROCESS was listening
+# and nothing about whether it accepts this app's request body, honours a JSON
+# schema, constrains decoding, or reports the tokens a throughput number is
+# divided by. A candidate runtime may not even serve /health. This runs the
+# real prompts and the real schemas and fails with the actionable sentence.
+#
+# It is also the one live test that asserts — see the file's own header for why
+# a contract is not a judgement.
+bench-verify:
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_target_verify_test.dart --run-skipped --plain-name 'bulk slot' $(BENCH_DEFINES)
+
+# The same, for the prose slot: naming and drafting, and `draft_reply`'s nested
+# options array, which is the schema a partial grammar implementation chokes on.
+bench-verify-prose:
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_target_verify_test.dart --run-skipped --plain-name 'prose slot' $(BENCH_DEFINES)
+
 # Live, not a gate: replays the fixture corpus through the real task prompts
 # and prints a latency table. The test file is @Skip'd so `make app-test` never
 # depends on a server being up; --run-skipped is what actually runs it here.
 #
-# Guards :$(FAST_PORT), not :$(MODEL_PORT): after phase 3 triage and extraction
-# are the fast server's work, so benching them anywhere else would be measuring
-# a path the app no longer takes.
+# Runs against the BULK slot, not :$(MODEL_PORT): after phase 3 triage and
+# extraction are the fast server's work, so benching them anywhere else would
+# be measuring a path the app no longer takes.
+#
+# The `:` arm of every $(if) below is load-bearing — an empty command after an
+# @ is a make error, so BENCH_VERIFY=0 needs a no-op to expand to.
 bench:
-	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
-	   printf "$(RED)✗$(RESET) model not reachable — run: make fast\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_bench_live_test.dart --run-skipped $(BENCH_DEFINES)
+
+# The prose slot's own bench: five storylines named and five replies drafted,
+# every answer printed verbatim. No scorecard — a title and a draft are judged
+# by reading them, which is why this one prints more than it measures.
+bench-prose:
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
+	@cd $(APP_DIR) && $(FLUTTER) test test/llm_prose_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # Side-by-side: the same corpus through triage and extraction on BOTH servers,
 # printing where the 4B and the 27B disagree and what each cost. Live and never
 # a gate — agreement is a judgement about labels, not a defect to fail on.
+#
+# Both slots are verified, because both are measured: a comparison against an
+# unverified server is a comparison against a number, not a runtime.
 ab:
-	@curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health || { \
-	   printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }
-	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
-	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_ab_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # The membership eval set through the confirm task on BOTH servers, printing
 # where each lands against the answer a person would give. Live and never a
 # gate, for `ab`'s reason: a verdict is a judgement, not a defect to fail on.
 ab-membership:
-	@curl -sf -o /dev/null http://localhost:$(MODEL_PORT)/health || { \
-	   printf "$(RED)✗$(RESET) model not reachable — run: make model\n"; exit 1; }
-	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
-	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify-prose,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_membership_live_test.dart --run-skipped $(BENCH_DEFINES)
 
-# The drain race live: K=1 vs K=3 over the same backlog on the fast server,
-# which needs parallel slots to show anything (FAST_SLOTS=4 at `make fast`).
-# The check that re-verified the atomic-claim redesign against real inference.
+# The drain race live: one round per concurrency in BENCH_K (default 1,3) over
+# the same backlog on the bulk server, which needs parallel slots to show
+# anything — start it with FAST_SLOTS >= max(K) or the high rounds measure
+# queue-wait instead. The check that re-verified the atomic-claim redesign
+# against real inference, and the only bench that can see batching at all.
 drain:
-	@curl -sf -o /dev/null http://localhost:$(FAST_PORT)/health || { \
-	   printf "$(RED)✗$(RESET) fast model not reachable — run: make fast\n"; exit 1; }
+	@$(if $(filter-out 0,$(BENCH_VERIFY)),$(MAKE) --no-print-directory bench-verify,:)
 	@cd $(APP_DIR) && $(FLUTTER) test test/llm_drain_live_test.dart --run-skipped $(BENCH_DEFINES)
 
 # Two runs, side by side. The benches above each leave a JSON file in

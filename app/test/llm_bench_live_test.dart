@@ -66,6 +66,10 @@ void main() {
           warmupClient,
           const TriageTask(),
           TriageInput(emails.first.message, DateTime.now()),
+          // Warmed the way the run itself will be measured: a candidate that
+          // needs BENCH_THINK would 400 here otherwise, and a warmup that
+          // failed would leave the first timed call cold.
+          think: BenchTarget.allowReasoning,
         );
       }
 
@@ -94,6 +98,9 @@ void main() {
             client,
             const TriageTask(),
             TriageInput(entry.message, now),
+            // Off unless BENCH_THINK says this candidate cannot be told to
+            // stop reasoning, in which case the body stops asking it to.
+            think: BenchTarget.allowReasoning,
           );
 
           final extraction = await runTask(
@@ -103,6 +110,7 @@ void main() {
             // As the handler runs it: the same email twice must be the same
             // facts, or a phase's "improvement" is just sampling noise.
             temperature: 0,
+            think: BenchTarget.allowReasoning,
           );
 
           final triageMs = collector.lastFor('triage')!.durationMs;
