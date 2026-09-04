@@ -3396,6 +3396,67 @@ RETURNING source_message_id, received_at
     ];
   }
 
+  /// Points one conversation's messages at a storyline, or stops pointing them
+  /// at one — and touches nothing else.
+  ///
+  /// The narrow twin of [writeStorylineProgress], for the membership a PERSON
+  /// decided. It exists separately because the two writes answer different
+  /// questions: that one records how far the assignment pass got, and the
+  /// stages it writes are what the settle machine and the draft close-out
+  /// read. Filing a thread by hand moved no stage — it moved a pointer — and
+  /// borrowing the pass's write to do it would restart a settled row's
+  /// pipeline for a decision that was never the pipeline's.
+  ///
+  /// Unguarded on `settle_state`, which is the other half of the split. The
+  /// pass is bounded by it so a thread that keeps growing cannot rewrite the
+  /// history above it; a hand-filed thread must do exactly that, because the
+  /// user is telling the app what the old messages were always about.
+  ///
+  /// Exactly one of [storylineId] and [clearingStorylineId] per call. Clearing
+  /// names the storyline it is clearing rather than blanking the column: a
+  /// thread can sit in two storylines, and taking it out of one must leave the
+  /// other's stamp where it is.
+  ///
+  /// Returns the rows it touched, so [PipelineProgress.noteStorylineLink] can
+  /// tick a live screen without a second read.
+  Future<List<({String sourceMessageId, String receivedAt})>> stampStorylineId(
+    String source,
+    String conversationKey, {
+    String? storylineId,
+    String? clearingStorylineId,
+  }) async {
+    // Thrown, not asserted: with both null the stamp arm below would blanket-
+    // null every row of the conversation — the exact write the clearing
+    // predicate exists to forbid — and a release build strips asserts.
+    if ((storylineId == null) == (clearingStorylineId == null)) {
+      throw ArgumentError(
+        'stampStorylineId writes a stamp or clears one, never both or neither',
+      );
+    }
+    final clearing = clearingStorylineId;
+    final rows = clearing != null
+        ? await db.customWriteReturning(
+            'UPDATE message_progress SET storyline_id = NULL, updated_at = ? '
+            'WHERE source = ? AND conversation_key = ? AND storyline_id = ? '
+            'RETURNING source_message_id, received_at',
+            variables: _args([_nowIso(), source, conversationKey, clearing]),
+          )
+        : await db.customWriteReturning(
+            'UPDATE message_progress SET storyline_id = ?, updated_at = ? '
+            'WHERE source = ? AND conversation_key = ? '
+            'RETURNING source_message_id, received_at',
+            variables:
+                _args([storylineId, _nowIso(), source, conversationKey]),
+          );
+    return [
+      for (final row in rows)
+        (
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// Closes one message out, with the verdict the notification coordinator
   /// reached about it.
   ///

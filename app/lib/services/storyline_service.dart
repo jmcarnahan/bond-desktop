@@ -12,6 +12,7 @@ import 'llm/embeddings_client.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/storyline_tasks.dart';
+import 'pipeline_progress.dart';
 
 /// Every number the storyline logic turns on, in one place.
 ///
@@ -170,16 +171,26 @@ class StorylineService {
   /// time-seeded generator does not give.
   static final math.Random _random = math.Random.secure();
 
+  /// Announces a hand-filed membership to an open home screen. It carries the
+  /// tick and NOT the write — the stamp happens either way, see
+  /// [PipelineProgress.noteStorylineLink]. Only the user actions use it; the
+  /// automatic passes are recorded by the handlers, which hold their own
+  /// recorder. Defaulted to the disabled one, so the several hundred tests
+  /// that build this service without a home screen in sight cost nothing.
+  final PipelineProgress _progress;
+
   StorylineService(
     this._store,
     LlmClient client, {
     LlmClient? confirmClient,
     ActivityLog? activityLog,
     EmbeddingsClient? embeddings,
+    PipelineProgress progress = const PipelineProgress.disabled(),
   })  : _client = client,
         _confirmClient = confirmClient ?? client,
         _log = activityLog ?? ActivityLog.disabled(),
-        _embeddings = embeddings;
+        _embeddings = embeddings,
+        _progress = progress;
 
   // ── automatic: one thread ──────────────────────────────────────────────
 
@@ -887,6 +898,12 @@ class StorylineService {
   /// Files a thread into a storyline by hand. The member write clears any
   /// block the user's own earlier removal left, which is what makes putting a
   /// thread back work at all — see [MessageStore.addStorylineMember].
+  ///
+  /// It also stamps the thread's messages, which is what makes the filing
+  /// VISIBLE. The home feed and the hot-storylines strip both read
+  /// `message_progress.storyline_id` and know nothing about member rows, so a
+  /// thread added by hand used to appear on the timeline and the rail and
+  /// nowhere else.
   Future<void> addThread(String id, String source, String key) async {
     await _store.addStorylineMember(id, source, key, addedBy: 'user');
     final storyline = await _store.getStoryline(id);
@@ -898,6 +915,7 @@ class StorylineService {
       // is already putting threads into.
       status: storyline?.status == 'suggested' ? 'active' : null,
     );
+    await _stampPointer(source, key);
     final row = await _store.getConversationRow(source, key);
     final lastMessageAt = row?['last_message_at'] as String?;
     if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
@@ -908,9 +926,37 @@ class StorylineService {
   /// Takes a thread out, and blocks it from coming back. Always blocking:
   /// there is no other way for a user to reach this, and an unblocked removal
   /// would be undone by the next assignment pass.
+  ///
+  /// The clear names [id] rather than blanking the column, and then whatever
+  /// membership is LEFT takes the pointer over: a thread in two storylines
+  /// pulled out of one still belongs to the other, and a feed row that went
+  /// blank would be telling the user it belongs to nothing.
   Future<void> removeThread(String id, String source, String key) async {
     await _store.removeStorylineMember(id, source, key, block: true);
     await _store.updateStoryline(id, memberHash: await _memberHashOf(id));
+    _progress.noteStorylineLink(
+      source,
+      await _store.stampStorylineId(source, key, clearingStorylineId: id),
+    );
+    await _stampPointer(source, key);
+  }
+
+  /// Points a thread's messages at the storyline the rest of the app would
+  /// say it is in, or leaves them alone when it is in none.
+  ///
+  /// The id is `storylineIdsFor(...).first` — deliberately the same pick
+  /// [PipelineProgress.assignedStorylineId] makes, which is oldest membership
+  /// first. So filing a thread into a SECOND storyline stamps the first one it
+  /// joined, not the one just chosen: the two answers must agree, or the feed
+  /// row and the automatic pass would fight over the column every time the
+  /// thread was touched.
+  Future<void> _stampPointer(String source, String key) async {
+    final ids = await _store.storylineIdsFor(source, key);
+    if (ids.isEmpty) return;
+    _progress.noteStorylineLink(
+      source,
+      await _store.stampStorylineId(source, key, storylineId: ids.first),
+    );
   }
 
   // ── helpers ────────────────────────────────────────────────────────────

@@ -28,6 +28,39 @@ are the authority on sequencing.
 
 A thread the user removes by hand is blocked — the model cannot put it back.
 
+## Filing a thread by hand
+
+`StorylineService.addThread` / `removeThread` are the user's own passes, and
+they write the same per-message pointer the automatic ones do —
+`message_progress.storyline_id`, through the narrow
+`MessageStore.stampStorylineId`. This is what makes a hand-filed thread
+visible: the home feed's storyline link and the hot-storylines strip both join
+on that column and know nothing about `storyline_members`, so before this the
+timeline and the rail showed the filing and the feed did not.
+
+The write is deliberately NOT `writeStorylineProgress`. That one records how
+far the assignment pass got — `storyline_state`, `storyline_at` — and those
+stages are what the settle machine and the draft close-out read; a hand filing
+moved a pointer, not a stage. It is also unguarded on `settle_state`, unlike
+the pass, which is bounded by it so a growing thread cannot rewrite the
+history above it. A person filing a thread means exactly that rewrite: they
+are saying what the old messages were always about.
+
+Which id gets stamped is `storylineIdsFor(source, key).first` — oldest
+membership first, the identical pick `PipelineProgress.assignedStorylineId`
+makes for the automatic path. So adding a thread to a *second* storyline
+leaves the pointer on the first one it joined; the two answers have to agree
+or they would fight over the column. Removal clears by name
+(`… AND storyline_id = ?`), so a thread in two storylines keeps the other's
+stamp, and then re-stamps from whatever membership is left.
+
+Both surfaces that read the column are windowed by `received_at`, so stamping
+history moves their numbers: `homeMetrics.storylined` counts progress rows in
+the window with a non-null `storyline_id`, and `hotStorylines` groups by it —
+filing one long thread by hand can add many messages to both at once. That is
+the intended reading (the messages really are in that storyline), not a
+double-count.
+
 ## Cross-source identity
 
 A thread is `(source, conversation_key)`, never the key on its own. Mail and

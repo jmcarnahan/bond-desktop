@@ -167,6 +167,39 @@ class PipelineProgress {
     }
   }
 
+  /// The same thread-wide tick, for the membership a person decided.
+  ///
+  /// Publish only, and the second method here that writes nothing — for
+  /// [noteIngest]'s reason turned around. Filing a thread by hand moves the
+  /// storyline POINTER and no stage, so the write is
+  /// [MessageStore.stampStorylineId] and it belongs to the user action, not to
+  /// the recorder: a stamp that only happened when somebody was watching would
+  /// be an observer breaking the thing it observes, and every test and every
+  /// caller holding the disabled recorder would file threads that never
+  /// reached the home feed. [StorylineService] does the write and hands over
+  /// the rows it touched.
+  ///
+  /// The ticks go out under `storyline`/`done`, which is honest — the column
+  /// the listeners re-read behind a tick is the one that changed — and it
+  /// means the feed patches a hand-filed thread's rows the moment the user
+  /// files it, rather than whenever the next pass happens to touch them.
+  void noteStorylineLink(
+    String source,
+    List<({String sourceMessageId, String receivedAt})> touched,
+  ) {
+    for (final row in touched) {
+      _bus.publish(
+        ProgressTick(
+          source: source,
+          sourceMessageId: row.sourceMessageId,
+          stage: 'storyline',
+          state: 'done',
+          receivedAt: row.receivedAt,
+        ),
+      );
+    }
+  }
+
   Future<void> noteSettled(
     String source,
     String sourceMessageId, {

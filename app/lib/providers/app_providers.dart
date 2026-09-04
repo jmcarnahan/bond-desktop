@@ -489,5 +489,10 @@ final storylineServiceProvider = Provider<StorylineService>(
     confirmClient: ref.watch(fastLlmClientProvider),
     activityLog: ref.watch(activityLogProvider),
     embeddings: ref.watch(embeddingsClientProvider),
+    // Only the user actions write through it — see [StorylineService]. The
+    // recorder watches the store and the bus, both of which outlive a backend
+    // switch, so taking it here costs this provider nothing it did not
+    // already depend on.
+    progress: ref.watch(pipelineProgressProvider),
   ),
 );

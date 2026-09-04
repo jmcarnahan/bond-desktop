@@ -267,6 +267,99 @@ void main() {
     });
   });
 
+  /// The pointer a hand-filed thread leaves on every one of its messages. The
+  /// column the home feed and the hot strip join on — and the reason this
+  /// write exists at all is that it must move it without touching anything the
+  /// settle machine reads.
+  group('stampStorylineId', () {
+    /// One message, its `message_progress` row finished the way the pipeline
+    /// leaves a settled one: every stage terminal, a verdict, a chip.
+    Future<void> seedSettled(
+      String key,
+      String id, {
+      String receivedAt = '2026-08-28T10:00:00Z',
+      String? storylineId,
+    }) async {
+      await seedConversation(key);
+      await seedMessage(key, id, receivedAt: receivedAt);
+      await db.customUpdate(
+        "UPDATE message_progress SET triage_state = 'done', "
+        "extract_state = 'done', storyline_state = 'done', "
+        "draft_state = 'done', settle_state = 'done', outcome = 'done', "
+        "needs_you = 1, urgency = 'high', storyline_id = ? "
+        'WHERE source = ? AND source_message_id = ?',
+        variables: [
+          Variable(storylineId),
+          const Variable('email'),
+          Variable(id),
+        ],
+      );
+    }
+
+    Future<Map<String, Object?>> progressOf(String id) async => (await db
+            .customSelect(
+              'SELECT * FROM message_progress '
+              'WHERE source = ? AND source_message_id = ?',
+              variables: [const Variable('email'), Variable(id)],
+            )
+            .getSingle())
+        .data;
+
+    test('stamping a link touches a settled row, and only the id column',
+        () async {
+      await seedSettled('c1', 'm1');
+      final before = await progressOf('m1');
+
+      final touched =
+          await store.stampStorylineId('email', 'c1', storylineId: 'sl-1');
+
+      final after = await progressOf('m1');
+      expect(after['storyline_id'], 'sl-1');
+      // The whole point of the narrow write: a row the coordinator already
+      // closed keeps every verdict it reached.
+      expect(after['settle_state'], before['settle_state']);
+      expect(after['storyline_state'], before['storyline_state']);
+      expect(after['storyline_at'], before['storyline_at']);
+      expect(after['outcome'], before['outcome']);
+      expect(after['needs_you'], before['needs_you']);
+      expect(after['draft_state'], before['draft_state']);
+      // And the caller gets what it needs to tick a live screen.
+      expect(touched.single.sourceMessageId, 'm1');
+      expect(touched.single.receivedAt, '2026-08-28T10:00:00Z');
+    });
+
+    test('stamping reaches every message of the thread and no other', () async {
+      await seedSettled('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await seedSettled('c1', 'm2', receivedAt: '2026-08-29T10:00:00Z');
+      await seedSettled('c2', 'm9');
+
+      final touched =
+          await store.stampStorylineId('email', 'c1', storylineId: 'sl-1');
+
+      expect(
+        touched.map((r) => r.sourceMessageId).toSet(),
+        {'m1', 'm2'},
+      );
+      expect((await progressOf('m9'))['storyline_id'], isNull);
+    });
+
+    test("clearing a link leaves another storyline's stamp alone", () async {
+      await seedSettled('c1', 'm1', storylineId: 'sl-2');
+
+      // The thread sits in sl-2; a removal from sl-1 is about a membership
+      // this row was never pointing at.
+      final missed = await store
+          .stampStorylineId('email', 'c1', clearingStorylineId: 'sl-1');
+      expect(missed, isEmpty);
+      expect((await progressOf('m1'))['storyline_id'], 'sl-2');
+
+      final hit = await store
+          .stampStorylineId('email', 'c1', clearingStorylineId: 'sl-2');
+      expect(hit.single.sourceMessageId, 'm1');
+      expect((await progressOf('m1'))['storyline_id'], isNull);
+    });
+  });
+
   group('assignedOrBlockedKeys', () {
     test('unions members and blocks of live storylines only', () async {
       await seedStoryline('sl-live', status: 'active');

@@ -11,6 +11,8 @@ import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
+import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
@@ -187,6 +189,51 @@ void main() {
       embedModel: embedModel,
     );
   }
+
+  /// One message on a thread, and with it the `message_progress` row
+  /// `upsertMessage` writes — the row the storyline pointer lands on.
+  Future<void> seedMessage(
+    MessageStore into,
+    String key,
+    String id, {
+    String receivedAt = '2026-08-28T10:00:00Z',
+    String source = 'email',
+  }) =>
+      into.upsertMessage({
+        'source': source,
+        'source_message_id': id,
+        'conversation_key': key,
+        'direction': 'inbound',
+        'subject': 'Subject for $key',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@example.com',
+        'received_at': receivedAt,
+        'body_text': 'body of $id',
+      });
+
+  /// The storyline pointer one message carries, straight from the column the
+  /// home feed joins on.
+  Future<String?> pointerOf(String id, {String source = 'email'}) async =>
+      (await db
+              .customSelect(
+                'SELECT storyline_id FROM message_progress '
+                'WHERE source = ? AND source_message_id = ?',
+                variables: [Variable(source), Variable(id)],
+              )
+              .getSingle())
+          .data['storyline_id'] as String?;
+
+  /// Pins when a membership was made. `added_at` is written at millisecond
+  /// resolution, and every test below that turns on WHICH membership is oldest
+  /// says so here rather than trusting two writes to land in different
+  /// milliseconds.
+  Future<void> memberAddedAt(String id, String key, String iso) =>
+      db.customUpdate(
+        'UPDATE storyline_members SET added_at = ? '
+        'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+        variables: [Variable(iso), Variable(id), const Variable('email'),
+            Variable(key)],
+      );
 
   /// A storyline with one member, both already embedded.
   Future<void> seedStoryline(
@@ -1665,6 +1712,134 @@ void main() {
       await service.addThread('sl-1', 'email', 'c1');
 
       expect((await store.getStoryline('sl-1'))!.status, 'active');
+    });
+  });
+
+  /// Where a hand-filed thread SHOWS UP. The timeline and the rail read
+  /// member rows; the home feed and the hot strip read
+  /// `message_progress.storyline_id`, and until the user actions stamped it a
+  /// thread the user filed appeared on half the app.
+  group('the pointer a user action leaves', () {
+    test('a hand-added thread is visible where the pipeline stamped rows',
+        () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1', receivedAt: '2026-08-27T09:00:00Z');
+      await seedMessage(store, 'c1', 'm2', receivedAt: '2026-08-28T09:00:00Z');
+      // Another thread entirely — the stamp is per conversation.
+      await seed(store, 'c2');
+      await seedMessage(store, 'c2', 'm9');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.addThread('sl-1', 'email', 'c1');
+
+      expect(await pointerOf('m1'), 'sl-1');
+      expect(await pointerOf('m2'), 'sl-1');
+      expect(await pointerOf('m9'), isNull);
+    });
+
+    test('adding to a second storyline does not steal the pointer', () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1');
+      for (final id in ['sl-1', 'sl-2']) {
+        await store.insertStoryline(
+          id: id,
+          title: 'Website redesign',
+          status: 'active',
+          createdBy: 'auto',
+        );
+      }
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await memberAddedAt('sl-1', 'c1', '2026-08-01T00:00:00Z');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.addThread('sl-2', 'email', 'c1');
+
+      // Oldest membership wins, because that is the id
+      // `PipelineProgress.assignedStorylineId` would pick — the two answers
+      // have to agree or they fight over the column.
+      expect(await pointerOf('m1'), 'sl-1');
+      expect(await store.storylineIdsFor('email', 'c1'), ['sl-1', 'sl-2']);
+    });
+
+    test('a clear hands the pointer to the remaining membership', () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1');
+      for (final id in ['sl-1', 'sl-2']) {
+        await store.insertStoryline(
+          id: id,
+          title: 'Website redesign',
+          status: 'active',
+          createdBy: 'auto',
+        );
+        await store.addStorylineMember(id, 'email', 'c1', addedBy: 'auto');
+      }
+      await memberAddedAt('sl-1', 'c1', '2026-08-01T00:00:00Z');
+      await memberAddedAt('sl-2', 'c1', '2026-08-02T00:00:00Z');
+      await store.stampStorylineId('email', 'c1', storylineId: 'sl-1');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.removeThread('sl-1', 'email', 'c1');
+
+      // Not blank: the thread still belongs to sl-2, and a feed row that went
+      // empty would be saying it belongs to nothing.
+      expect(await pointerOf('m1'), 'sl-2');
+    });
+
+    test('removing the last membership leaves the rows pointing at nothing',
+        () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(store, FakeLlm(const {}));
+      await service.addThread('sl-1', 'email', 'c1');
+
+      await service.removeThread('sl-1', 'email', 'c1');
+
+      expect(await pointerOf('m1'), isNull);
+    });
+
+    test('a hand-filed thread ticks the screen once per message it moved',
+        () async {
+      final bus = ProgressBus();
+      addTearDown(bus.dispose);
+      final ticks = <ProgressTick>[];
+      bus.ticks.listen(ticks.add);
+
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1', receivedAt: '2026-08-27T09:00:00Z');
+      await seedMessage(store, 'c1', 'm2', receivedAt: '2026-08-28T09:00:00Z');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(
+        store,
+        FakeLlm(const {}),
+        progress: PipelineProgress(store, bus: bus),
+      );
+
+      await service.addThread('sl-1', 'email', 'c1');
+      await pumpEventQueue();
+
+      expect(ticks.map((t) => t.sourceMessageId), ['m1', 'm2']);
+      expect(ticks.map((t) => t.stage).toSet(), {'storyline'});
+      expect(ticks.map((t) => t.state).toSet(), {'done'});
+      // The feed's sort key rides along, so a listener can tell a patch from a
+      // prepend without re-reading.
+      expect(ticks.first.receivedAt, '2026-08-27T09:00:00Z');
     });
   });
 
