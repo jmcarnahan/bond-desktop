@@ -87,7 +87,7 @@ RESET  := \033[0m
 .NOTPARALLEL:
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
-        embed embed-stop fast fast-stop \
+        embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build bench bench-verify bench-verify-prose bench-prose \
         ab ab-membership drain bench-compare
@@ -102,6 +102,8 @@ help:
 	@printf "  make embed-stop   → stop the embedding server on :$(EMBED_PORT)\n"
 	@printf "  make fast         → start the bulk-work server :$(FAST_PORT) ($(FAST_HF))\n"
 	@printf "  make fast-stop    → stop the bulk-work server on :$(FAST_PORT)\n"
+	@printf "  make omlx         → start the oMLX bakeoff server :$(OMLX_PORT) (all cached models)\n"
+	@printf "  make omlx-stop    → stop the oMLX server on :$(OMLX_PORT)\n"
 	@printf "  make status       → are the servers up? [up]/[down] + pid\n"
 	@printf "  make logs         → tail $(LOG_DIR)/model-$(MODEL_PORT).log\n"
 	@printf "  make smoke        → one chat completion against :$(MODEL_PORT)\n"
@@ -413,12 +415,15 @@ fast-stop:
 #
 # The loading hint is reported only when NO port is bound. With three servers
 # a live llama-server is no longer evidence that something is still loading —
-# it is usually just one of the others.
+# it is usually just one of the others. :$(OMLX_PORT) is deliberately left out
+# of that condition: it is a different runtime entirely, so a live oMLX says
+# nothing about whether a llama-server is mid-download.
 status:
 	@printf "$(BLUE)=== bond-desktop ===$(RESET)\n"
 	@mpid=$$(lsof -nP -iTCP:$(MODEL_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 epid=$$(lsof -nP -iTCP:$(EMBED_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 fpid=$$(lsof -nP -iTCP:$(FAST_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 opid=$$(lsof -nP -iTCP:$(OMLX_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
 	 if [ -n "$$mpid" ]; then \
 	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "model" "$(MODEL_PORT)" "$$mpid"; \
 	 else \
@@ -433,6 +438,11 @@ status:
 	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "fast" "$(FAST_PORT)" "$$fpid"; \
 	 else \
 	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "fast" "$(FAST_PORT)"; \
+	 fi; \
+	 if [ -n "$$opid" ]; then \
+	   printf "  $(GREEN)[up]$(RESET)   %-12s :%s  (pid %s)\n" "omlx" "$(OMLX_PORT)" "$$opid"; \
+	 else \
+	   printf "  $(RED)[down]$(RESET) %-12s :%s\n" "omlx" "$(OMLX_PORT)"; \
 	 fi; \
 	 if [ -z "$$mpid" ] && [ -z "$$epid" ] && [ -z "$$fpid" ]; then \
 	   lpid=$$(pgrep -x llama-server 2>/dev/null | head -1); \
@@ -556,6 +566,101 @@ BENCH_DEFINES := \
   --dart-define=BENCH_WARMUP=$(BENCH_WARMUP) \
   --dart-define=BENCH_THINK=$(if $(filter-out 0,$(BENCH_THINK)),true,false) \
   --dart-define=BENCH_K='$(BENCH_K)'
+
+# ── the bakeoff: oMLX, the candidate runtime ───────────────────────────
+# oMLX is an MLX-based OpenAI-compatible server, and unlike llama-server it is
+# MULTI-MODEL: one process discovers every model in ~/.omlx/models and in the
+# HuggingFace cache, and the request body's `model` field picks between them.
+# So there is one server here, not one per slot — BENCH_MODEL/PROSE_MODEL are
+# what route a bench at the bulk or the prose weights.
+#
+# Deliberately outside the 8080-8083 range the llama.cpp servers use, so a
+# bakeoff can hold both runtimes up at once and compare them without a restart
+# between rows.
+OMLX_PORT      ?= 8090
+# oMLX's `balanced` memory guard picked a 14.0GB ceiling on this 64GB M1 Max,
+# which refuses the ~15GB 27B-4bit outright. An explicit ceiling replaces the
+# tier: 24GB leaves the 4B and the 27B resident together and still sits well
+# under the ~52GB Metal budget, so the multi-model LRU never has to evict one
+# to answer for the other.
+OMLX_GUARD_GB  ?= 24
+# --max-concurrent-requests, and it carries FAST_SLOTS' warning: `make drain`
+# races BENCH_K concurrencies at once, so anything below max(BENCH_K) turns the
+# high rounds into a measurement of queue-wait rather than of batching.
+OMLX_SLOTS     ?= 8
+# The dylib search path xgrammar needs to actually load. Homebrew's
+# `--with-grammar` install pairs xgrammar 0.2.3 with a tvm_ffi whose loader
+# looks only in tvm_ffi's own directories plus DYLD_LIBRARY_PATH/PATH — never
+# in the xgrammar package directory where libxgrammar_bindings.dylib lives, and
+# that dylib in turn needs libtvm_ffi.dylib from tvm_ffi/lib. Both directories,
+# in that order, are what make the import succeed. The symptom when it is
+# missing is not a crash: oMLX falls back to asking for the schema in the
+# prompt, structured output stops being constrained, and `make bench-verify`
+# fails its enum probe. python3.11 is pinned by the formula's own venv.
+OMLX_XG_LIBS   := /opt/homebrew/opt/omlx/libexec/lib/python3.11/site-packages/xgrammar:/opt/homebrew/opt/omlx/libexec/lib/python3.11/site-packages/tvm_ffi/lib
+# The whole launch command in one overridable variable: when oMLX's CLI moves,
+# this is the single seam to fix, and a one-off experiment can replace it
+# wholesale on the command line.
+#
+# `env` rather than a plain assignment, for two independent reasons: `nohup
+# VAR=x cmd` treats the assignment itself as the command name, and SIP strips
+# exported DYLD_* variables when make execs /bin/sh. Handing the assignment to
+# `env` as an argv word, which then execs the (unprotected) Homebrew python,
+# survives both.
+OMLX_SERVE     ?= env DYLD_LIBRARY_PATH=$(OMLX_XG_LIBS) omlx serve --port $(OMLX_PORT) --memory-guard-gb $(OMLX_GUARD_GB) --max-concurrent-requests $(OMLX_SLOTS)
+
+# Same port guard as `fast:`, matching on *omlx* rather than *llama-server*:
+# the process shows up as the formula's python running /opt/homebrew/bin/omlx,
+# so the pattern catches both halves of that command line.
+#
+# Same split between the launch line and the wait line, and for the same
+# reason: make runs any line containing $(MAKE) even under `make -n`, so
+# folding them together would make a dry run start a real server.
+omlx:
+	@pid=$$(lsof -nP -iTCP:$(OMLX_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -n "$$pid" ]; then \
+	   cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	   case "$$cmd" in \
+	     *omlx*) exit 0 ;; \
+	     *) printf "  $(YELLOW)!$(RESET) :$(OMLX_PORT) is held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd"; \
+	        printf "    not ours to reuse — free it, or: make omlx OMLX_PORT=<other>\n"; \
+	        exit 1 ;; \
+	   esac; \
+	 fi; \
+	 mkdir -p $(LOG_DIR); \
+	 printf "→ omlx serve on :$(OMLX_PORT)  (all cached models, guard $(OMLX_GUARD_GB)GB, $(OMLX_SLOTS) slots)\n"; \
+	 nohup $(OMLX_SERVE) \
+	   > $(LOG_DIR)/omlx-$(OMLX_PORT).log 2>&1 &
+	@$(MAKE) --no-print-directory _wait-omlx
+
+# Port-based only, for the reason `stop:` is — except the name that would be
+# caught by a fallback here is a Homebrew python, which is very much not ours
+# to kill by name.
+omlx-stop:
+	@pid=$$(lsof -nP -iTCP:$(OMLX_PORT) -sTCP:LISTEN -t 2>/dev/null | head -1); \
+	 if [ -z "$$pid" ]; then \
+	   printf "  $(RED)[down]$(RESET) nothing holds :$(OMLX_PORT)\n"; \
+	   exit 0; \
+	 fi; \
+	 cmd=$$(ps -p $$pid -o command= 2>/dev/null); \
+	 case "$$cmd" in \
+	   *omlx*) ;; \
+	   *) printf "  $(YELLOW)[skip]$(RESET) :$(OMLX_PORT) held by a foreign process (pid %s): %s\n" "$$pid" "$$cmd" >&2; \
+	      exit 0 ;; \
+	 esac; \
+	 printf "  stopping omlx serve :$(OMLX_PORT) (pid %s)\n" "$$pid"; \
+	 kill -TERM $$pid 2>/dev/null || true; \
+	 for i in 1 2 3 4 5 6 7 8 9 10; do \
+	   rem=$$(lsof -nP -iTCP:$(OMLX_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	   [ -z "$$rem" ] && break; \
+	   sleep 1; \
+	 done; \
+	 rem=$$(lsof -nP -iTCP:$(OMLX_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	 if [ -n "$$rem" ]; then \
+	   printf "  $(RED)✗$(RESET) :$(OMLX_PORT) still held after 10s (pid %s)\n" "$$rem"; \
+	   exit 1; \
+	 fi; \
+	 printf "  $(GREEN)✓$(RESET) :$(OMLX_PORT) free\n"
 
 # Emits --dart-define=MS_CLIENT_ID/MS_TENANT_ID/MS_CLIENT_SECRET=... for each
 # value that can be read; emits nothing for any that cannot (sign-in then
@@ -825,4 +930,28 @@ _wait-fast:
 	 printf "    (~4.3GB) — give it a few minutes and re-run. Otherwise the\n"; \
 	 printf "    log has the reason:\n"; \
 	 printf "    tail -f $(LOG_DIR)/model-$(FAST_PORT).log\n"; \
+	 exit 1
+
+# The one wait loop that asks the APP rather than the kernel. oMLX's uvicorn
+# binds the port immediately and then spends ~70s on startup before
+# /v1/chat/completions answers, so the lsof probe the three loops above use
+# would report "up" a minute early — and a bench launched against a bound but
+# unready server collects connection-level 503s and calls them the candidate's
+# numbers. A 200 from /v1/models is the earliest honest signal.
+_wait-omlx:
+	@for i in $$(seq 1 $(WAIT_TIMEOUT)); do \
+	   code=$$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$(OMLX_PORT)/v1/models 2>/dev/null); \
+	   if [ "$$code" = "200" ]; then \
+	     printf "  $(GREEN)✓$(RESET) omlx answering :$(OMLX_PORT) (after %ss)\n" "$$i"; \
+	     exit 0; \
+	   fi; \
+	   sleep 1; \
+	 done; \
+	 printf "  $(YELLOW)!$(RESET) omlx has not answered :$(OMLX_PORT) after $(WAIT_TIMEOUT)s\n"; \
+	 printf "    Nothing is downloading here — oMLX serves models that are\n"; \
+	 printf "    ALREADY in the HuggingFace cache, so a missing model is a\n"; \
+	 printf "    silent absence rather than a wait. Pull one first and see\n"; \
+	 printf "    docs/model-bakeoff.md for the hf command and the serving ids.\n"; \
+	 printf "    The log has the reason:\n"; \
+	 printf "    tail -f $(LOG_DIR)/omlx-$(OMLX_PORT).log\n"; \
 	 exit 1
