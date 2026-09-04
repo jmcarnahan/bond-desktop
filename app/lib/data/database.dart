@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 9;
+  int get schemaVersion => 10;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -339,6 +339,94 @@ UPDATE message_progress SET draft_state = CASE
      WHERE d.source = message_progress.source
        AND d.reply_to_message_id = message_progress.source_message_id
   ) THEN 'done' ELSE 'skipped' END''');
+              },
+              // v10 — a storyline keeps growing after it is named. The refresh
+              // pass re-describes one whose membership moved
+              // (`refreshed_member_hash` / `_count`, and `charter_suggestion`
+              // when the charter is the user's and must not be overwritten),
+              // and the recap pass says where things stand across its threads.
+              // Nothing reads these columns yet; they land a version early so
+              // the passes that fill them are code alone.
+              //
+              // One guard per column, the v3–v5 discipline: a quit between the
+              // ALTERs must not leave a replay that skips the rest because the
+              // first already exists.
+              from9To10: (m, schema) async {
+                if (!await _columnExists(
+                  'storylines',
+                  'refreshed_member_hash',
+                )) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.refreshedMemberHash,
+                  );
+                }
+                if (!await _columnExists(
+                  'storylines',
+                  'refreshed_member_count',
+                )) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.refreshedMemberCount,
+                  );
+                }
+                if (!await _columnExists('storylines', 'charter_suggestion')) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.charterSuggestion,
+                  );
+                }
+                if (!await _columnExists('storylines', 'recap_text')) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.recapText,
+                  );
+                }
+                if (!await _columnExists('storylines', 'recap_open_json')) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.recapOpenJson,
+                  );
+                }
+                if (!await _columnExists(
+                  'storylines',
+                  'recap_decisions_json',
+                )) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.recapDecisionsJson,
+                  );
+                }
+                if (!await _columnExists('storylines', 'recap_through')) {
+                  await m.addColumn(
+                    schema.storylines,
+                    schema.storylines.recapThrough,
+                  );
+                }
+                // A storyline that already reads well is marked "described as
+                // it stands", so the upgrade itself asks the model nothing: the
+                // refresh gate is `refreshed_member_hash == member_hash`, and
+                // stamping it here makes every settled storyline skip its first
+                // pass. A row missing a summary or a charter is left NULL so it
+                // still gets its one first draft — the convergence contract the
+                // naming pass already keeps.
+                //
+                // Copying `member_hash` verbatim is right even though the hash
+                // recipe changed this round: the gate is an equality test
+                // against whatever that column holds now, not a claim about how
+                // it was computed. `IS NULL` makes the statement idempotent, so
+                // a replay over a torn state re-stamps nothing.
+                await customStatement('''
+UPDATE storylines
+   SET refreshed_member_hash = member_hash,
+       refreshed_member_count = (
+         SELECT COUNT(*) FROM storyline_members m
+          WHERE m.storyline_id = storylines.id
+       )
+ WHERE refreshed_member_hash IS NULL
+   AND summary IS NOT NULL AND TRIM(summary) != ''
+   AND charter IS NOT NULL AND TRIM(charter) != ''
+''');
               },
             ),
           ),

@@ -4742,6 +4742,83 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
     requiredDuringInsert: false,
     $customConstraints: '',
   );
+  static const VerificationMeta _refreshedMemberHashMeta =
+      const VerificationMeta('refreshedMemberHash');
+  late final GeneratedColumn<String> refreshedMemberHash =
+      GeneratedColumn<String>(
+        'refreshed_member_hash',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+        $customConstraints: '',
+      );
+  static const VerificationMeta _refreshedMemberCountMeta =
+      const VerificationMeta('refreshedMemberCount');
+  late final GeneratedColumn<int> refreshedMemberCount = GeneratedColumn<int>(
+    'refreshed_member_count',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _charterSuggestionMeta = const VerificationMeta(
+    'charterSuggestion',
+  );
+  late final GeneratedColumn<String> charterSuggestion =
+      GeneratedColumn<String>(
+        'charter_suggestion',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+        $customConstraints: '',
+      );
+  static const VerificationMeta _recapTextMeta = const VerificationMeta(
+    'recapText',
+  );
+  late final GeneratedColumn<String> recapText = GeneratedColumn<String>(
+    'recap_text',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _recapOpenJsonMeta = const VerificationMeta(
+    'recapOpenJson',
+  );
+  late final GeneratedColumn<String> recapOpenJson = GeneratedColumn<String>(
+    'recap_open_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _recapDecisionsJsonMeta =
+      const VerificationMeta('recapDecisionsJson');
+  late final GeneratedColumn<String> recapDecisionsJson =
+      GeneratedColumn<String>(
+        'recap_decisions_json',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+        $customConstraints: '',
+      );
+  static const VerificationMeta _recapThroughMeta = const VerificationMeta(
+    'recapThrough',
+  );
+  late final GeneratedColumn<String> recapThrough = GeneratedColumn<String>(
+    'recap_through',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -4758,6 +4835,13 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
     charter,
     charterLocked,
     clusterHash,
+    refreshedMemberHash,
+    refreshedMemberCount,
+    charterSuggestion,
+    recapText,
+    recapOpenJson,
+    recapDecisionsJson,
+    recapThrough,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -4872,6 +4956,66 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
         ),
       );
     }
+    if (data.containsKey('refreshed_member_hash')) {
+      context.handle(
+        _refreshedMemberHashMeta,
+        refreshedMemberHash.isAcceptableOrUnknown(
+          data['refreshed_member_hash']!,
+          _refreshedMemberHashMeta,
+        ),
+      );
+    }
+    if (data.containsKey('refreshed_member_count')) {
+      context.handle(
+        _refreshedMemberCountMeta,
+        refreshedMemberCount.isAcceptableOrUnknown(
+          data['refreshed_member_count']!,
+          _refreshedMemberCountMeta,
+        ),
+      );
+    }
+    if (data.containsKey('charter_suggestion')) {
+      context.handle(
+        _charterSuggestionMeta,
+        charterSuggestion.isAcceptableOrUnknown(
+          data['charter_suggestion']!,
+          _charterSuggestionMeta,
+        ),
+      );
+    }
+    if (data.containsKey('recap_text')) {
+      context.handle(
+        _recapTextMeta,
+        recapText.isAcceptableOrUnknown(data['recap_text']!, _recapTextMeta),
+      );
+    }
+    if (data.containsKey('recap_open_json')) {
+      context.handle(
+        _recapOpenJsonMeta,
+        recapOpenJson.isAcceptableOrUnknown(
+          data['recap_open_json']!,
+          _recapOpenJsonMeta,
+        ),
+      );
+    }
+    if (data.containsKey('recap_decisions_json')) {
+      context.handle(
+        _recapDecisionsJsonMeta,
+        recapDecisionsJson.isAcceptableOrUnknown(
+          data['recap_decisions_json']!,
+          _recapDecisionsJsonMeta,
+        ),
+      );
+    }
+    if (data.containsKey('recap_through')) {
+      context.handle(
+        _recapThroughMeta,
+        recapThrough.isAcceptableOrUnknown(
+          data['recap_through']!,
+          _recapThroughMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -4937,6 +5081,34 @@ class Storylines extends Table with TableInfo<Storylines, Storyline> {
         DriftSqlType.string,
         data['${effectivePrefix}cluster_hash'],
       ),
+      refreshedMemberHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}refreshed_member_hash'],
+      ),
+      refreshedMemberCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}refreshed_member_count'],
+      ),
+      charterSuggestion: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}charter_suggestion'],
+      ),
+      recapText: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}recap_text'],
+      ),
+      recapOpenJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}recap_open_json'],
+      ),
+      recapDecisionsJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}recap_decisions_json'],
+      ),
+      recapThrough: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}recap_through'],
+      ),
     );
   }
 
@@ -4978,6 +5150,29 @@ class Storyline extends DataClass implements Insertable<Storyline> {
   /// sweep rebuilds, `member_hash` matches the set as it stood when the user
   /// said no. NULL on anything a person made — no cluster proposed it.
   final String? clusterHash;
+
+  /// v10 — a storyline evolves after it is named. The membership as it stood
+  /// the last time the refresh pass described this storyline: the gate is an
+  /// equality test against `member_hash`, so a thread added since leaves these
+  /// stale and re-fires the pass. NULL means never described.
+  final String? refreshedMemberHash;
+  final int? refreshedMemberCount;
+
+  /// v10 — what the refresh pass would write to `charter` if the charter were
+  /// not the user's. A locked charter is never overwritten; the model's version
+  /// is parked here for the user to accept or dismiss. NULL when there is
+  /// nothing on offer.
+  final String? charterSuggestion;
+
+  /// v10 — the recap: where things stand across every member thread, so the
+  /// reader need not re-read them. `recap_open_json` and `recap_decisions_json`
+  /// are JSON arrays of short strings; `recap_through` is the `received_at` of
+  /// the newest message the recap has seen, which is what makes the pass skip
+  /// a storyline nothing has happened in.
+  final String? recapText;
+  final String? recapOpenJson;
+  final String? recapDecisionsJson;
+  final String? recapThrough;
   const Storyline({
     required this.id,
     required this.title,
@@ -4993,6 +5188,13 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     this.charter,
     required this.charterLocked,
     this.clusterHash,
+    this.refreshedMemberHash,
+    this.refreshedMemberCount,
+    this.charterSuggestion,
+    this.recapText,
+    this.recapOpenJson,
+    this.recapDecisionsJson,
+    this.recapThrough,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -5020,6 +5222,27 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     map['charter_locked'] = Variable<int>(charterLocked);
     if (!nullToAbsent || clusterHash != null) {
       map['cluster_hash'] = Variable<String>(clusterHash);
+    }
+    if (!nullToAbsent || refreshedMemberHash != null) {
+      map['refreshed_member_hash'] = Variable<String>(refreshedMemberHash);
+    }
+    if (!nullToAbsent || refreshedMemberCount != null) {
+      map['refreshed_member_count'] = Variable<int>(refreshedMemberCount);
+    }
+    if (!nullToAbsent || charterSuggestion != null) {
+      map['charter_suggestion'] = Variable<String>(charterSuggestion);
+    }
+    if (!nullToAbsent || recapText != null) {
+      map['recap_text'] = Variable<String>(recapText);
+    }
+    if (!nullToAbsent || recapOpenJson != null) {
+      map['recap_open_json'] = Variable<String>(recapOpenJson);
+    }
+    if (!nullToAbsent || recapDecisionsJson != null) {
+      map['recap_decisions_json'] = Variable<String>(recapDecisionsJson);
+    }
+    if (!nullToAbsent || recapThrough != null) {
+      map['recap_through'] = Variable<String>(recapThrough);
     }
     return map;
   }
@@ -5050,6 +5273,27 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       clusterHash: clusterHash == null && nullToAbsent
           ? const Value.absent()
           : Value(clusterHash),
+      refreshedMemberHash: refreshedMemberHash == null && nullToAbsent
+          ? const Value.absent()
+          : Value(refreshedMemberHash),
+      refreshedMemberCount: refreshedMemberCount == null && nullToAbsent
+          ? const Value.absent()
+          : Value(refreshedMemberCount),
+      charterSuggestion: charterSuggestion == null && nullToAbsent
+          ? const Value.absent()
+          : Value(charterSuggestion),
+      recapText: recapText == null && nullToAbsent
+          ? const Value.absent()
+          : Value(recapText),
+      recapOpenJson: recapOpenJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(recapOpenJson),
+      recapDecisionsJson: recapDecisionsJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(recapDecisionsJson),
+      recapThrough: recapThrough == null && nullToAbsent
+          ? const Value.absent()
+          : Value(recapThrough),
     );
   }
 
@@ -5073,6 +5317,21 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       charter: serializer.fromJson<String?>(json['charter']),
       charterLocked: serializer.fromJson<int>(json['charter_locked']),
       clusterHash: serializer.fromJson<String?>(json['cluster_hash']),
+      refreshedMemberHash: serializer.fromJson<String?>(
+        json['refreshed_member_hash'],
+      ),
+      refreshedMemberCount: serializer.fromJson<int?>(
+        json['refreshed_member_count'],
+      ),
+      charterSuggestion: serializer.fromJson<String?>(
+        json['charter_suggestion'],
+      ),
+      recapText: serializer.fromJson<String?>(json['recap_text']),
+      recapOpenJson: serializer.fromJson<String?>(json['recap_open_json']),
+      recapDecisionsJson: serializer.fromJson<String?>(
+        json['recap_decisions_json'],
+      ),
+      recapThrough: serializer.fromJson<String?>(json['recap_through']),
     );
   }
   @override
@@ -5093,6 +5352,13 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       'charter': serializer.toJson<String?>(charter),
       'charter_locked': serializer.toJson<int>(charterLocked),
       'cluster_hash': serializer.toJson<String?>(clusterHash),
+      'refreshed_member_hash': serializer.toJson<String?>(refreshedMemberHash),
+      'refreshed_member_count': serializer.toJson<int?>(refreshedMemberCount),
+      'charter_suggestion': serializer.toJson<String?>(charterSuggestion),
+      'recap_text': serializer.toJson<String?>(recapText),
+      'recap_open_json': serializer.toJson<String?>(recapOpenJson),
+      'recap_decisions_json': serializer.toJson<String?>(recapDecisionsJson),
+      'recap_through': serializer.toJson<String?>(recapThrough),
     };
   }
 
@@ -5111,6 +5377,13 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     Value<String?> charter = const Value.absent(),
     int? charterLocked,
     Value<String?> clusterHash = const Value.absent(),
+    Value<String?> refreshedMemberHash = const Value.absent(),
+    Value<int?> refreshedMemberCount = const Value.absent(),
+    Value<String?> charterSuggestion = const Value.absent(),
+    Value<String?> recapText = const Value.absent(),
+    Value<String?> recapOpenJson = const Value.absent(),
+    Value<String?> recapDecisionsJson = const Value.absent(),
+    Value<String?> recapThrough = const Value.absent(),
   }) => Storyline(
     id: id ?? this.id,
     title: title ?? this.title,
@@ -5128,6 +5401,23 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     charter: charter.present ? charter.value : this.charter,
     charterLocked: charterLocked ?? this.charterLocked,
     clusterHash: clusterHash.present ? clusterHash.value : this.clusterHash,
+    refreshedMemberHash: refreshedMemberHash.present
+        ? refreshedMemberHash.value
+        : this.refreshedMemberHash,
+    refreshedMemberCount: refreshedMemberCount.present
+        ? refreshedMemberCount.value
+        : this.refreshedMemberCount,
+    charterSuggestion: charterSuggestion.present
+        ? charterSuggestion.value
+        : this.charterSuggestion,
+    recapText: recapText.present ? recapText.value : this.recapText,
+    recapOpenJson: recapOpenJson.present
+        ? recapOpenJson.value
+        : this.recapOpenJson,
+    recapDecisionsJson: recapDecisionsJson.present
+        ? recapDecisionsJson.value
+        : this.recapDecisionsJson,
+    recapThrough: recapThrough.present ? recapThrough.value : this.recapThrough,
   );
   Storyline copyWithCompanion(StorylinesCompanion data) {
     return Storyline(
@@ -5155,6 +5445,25 @@ class Storyline extends DataClass implements Insertable<Storyline> {
       clusterHash: data.clusterHash.present
           ? data.clusterHash.value
           : this.clusterHash,
+      refreshedMemberHash: data.refreshedMemberHash.present
+          ? data.refreshedMemberHash.value
+          : this.refreshedMemberHash,
+      refreshedMemberCount: data.refreshedMemberCount.present
+          ? data.refreshedMemberCount.value
+          : this.refreshedMemberCount,
+      charterSuggestion: data.charterSuggestion.present
+          ? data.charterSuggestion.value
+          : this.charterSuggestion,
+      recapText: data.recapText.present ? data.recapText.value : this.recapText,
+      recapOpenJson: data.recapOpenJson.present
+          ? data.recapOpenJson.value
+          : this.recapOpenJson,
+      recapDecisionsJson: data.recapDecisionsJson.present
+          ? data.recapDecisionsJson.value
+          : this.recapDecisionsJson,
+      recapThrough: data.recapThrough.present
+          ? data.recapThrough.value
+          : this.recapThrough,
     );
   }
 
@@ -5174,13 +5483,20 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           ..write('updatedAt: $updatedAt, ')
           ..write('charter: $charter, ')
           ..write('charterLocked: $charterLocked, ')
-          ..write('clusterHash: $clusterHash')
+          ..write('clusterHash: $clusterHash, ')
+          ..write('refreshedMemberHash: $refreshedMemberHash, ')
+          ..write('refreshedMemberCount: $refreshedMemberCount, ')
+          ..write('charterSuggestion: $charterSuggestion, ')
+          ..write('recapText: $recapText, ')
+          ..write('recapOpenJson: $recapOpenJson, ')
+          ..write('recapDecisionsJson: $recapDecisionsJson, ')
+          ..write('recapThrough: $recapThrough')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(
+  int get hashCode => Object.hashAll([
     id,
     title,
     summary,
@@ -5195,7 +5511,14 @@ class Storyline extends DataClass implements Insertable<Storyline> {
     charter,
     charterLocked,
     clusterHash,
-  );
+    refreshedMemberHash,
+    refreshedMemberCount,
+    charterSuggestion,
+    recapText,
+    recapOpenJson,
+    recapDecisionsJson,
+    recapThrough,
+  ]);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -5213,7 +5536,14 @@ class Storyline extends DataClass implements Insertable<Storyline> {
           other.updatedAt == this.updatedAt &&
           other.charter == this.charter &&
           other.charterLocked == this.charterLocked &&
-          other.clusterHash == this.clusterHash);
+          other.clusterHash == this.clusterHash &&
+          other.refreshedMemberHash == this.refreshedMemberHash &&
+          other.refreshedMemberCount == this.refreshedMemberCount &&
+          other.charterSuggestion == this.charterSuggestion &&
+          other.recapText == this.recapText &&
+          other.recapOpenJson == this.recapOpenJson &&
+          other.recapDecisionsJson == this.recapDecisionsJson &&
+          other.recapThrough == this.recapThrough);
 }
 
 class StorylinesCompanion extends UpdateCompanion<Storyline> {
@@ -5231,6 +5561,13 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
   final Value<String?> charter;
   final Value<int> charterLocked;
   final Value<String?> clusterHash;
+  final Value<String?> refreshedMemberHash;
+  final Value<int?> refreshedMemberCount;
+  final Value<String?> charterSuggestion;
+  final Value<String?> recapText;
+  final Value<String?> recapOpenJson;
+  final Value<String?> recapDecisionsJson;
+  final Value<String?> recapThrough;
   final Value<int> rowid;
   const StorylinesCompanion({
     this.id = const Value.absent(),
@@ -5247,6 +5584,13 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     this.charter = const Value.absent(),
     this.charterLocked = const Value.absent(),
     this.clusterHash = const Value.absent(),
+    this.refreshedMemberHash = const Value.absent(),
+    this.refreshedMemberCount = const Value.absent(),
+    this.charterSuggestion = const Value.absent(),
+    this.recapText = const Value.absent(),
+    this.recapOpenJson = const Value.absent(),
+    this.recapDecisionsJson = const Value.absent(),
+    this.recapThrough = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   StorylinesCompanion.insert({
@@ -5264,6 +5608,13 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     this.charter = const Value.absent(),
     this.charterLocked = const Value.absent(),
     this.clusterHash = const Value.absent(),
+    this.refreshedMemberHash = const Value.absent(),
+    this.refreshedMemberCount = const Value.absent(),
+    this.charterSuggestion = const Value.absent(),
+    this.recapText = const Value.absent(),
+    this.recapOpenJson = const Value.absent(),
+    this.recapDecisionsJson = const Value.absent(),
+    this.recapThrough = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : id = Value(id),
        title = Value(title),
@@ -5284,6 +5635,13 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     Expression<String>? charter,
     Expression<int>? charterLocked,
     Expression<String>? clusterHash,
+    Expression<String>? refreshedMemberHash,
+    Expression<int>? refreshedMemberCount,
+    Expression<String>? charterSuggestion,
+    Expression<String>? recapText,
+    Expression<String>? recapOpenJson,
+    Expression<String>? recapDecisionsJson,
+    Expression<String>? recapThrough,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -5301,6 +5659,16 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
       if (charter != null) 'charter': charter,
       if (charterLocked != null) 'charter_locked': charterLocked,
       if (clusterHash != null) 'cluster_hash': clusterHash,
+      if (refreshedMemberHash != null)
+        'refreshed_member_hash': refreshedMemberHash,
+      if (refreshedMemberCount != null)
+        'refreshed_member_count': refreshedMemberCount,
+      if (charterSuggestion != null) 'charter_suggestion': charterSuggestion,
+      if (recapText != null) 'recap_text': recapText,
+      if (recapOpenJson != null) 'recap_open_json': recapOpenJson,
+      if (recapDecisionsJson != null)
+        'recap_decisions_json': recapDecisionsJson,
+      if (recapThrough != null) 'recap_through': recapThrough,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -5320,6 +5688,13 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     Value<String?>? charter,
     Value<int>? charterLocked,
     Value<String?>? clusterHash,
+    Value<String?>? refreshedMemberHash,
+    Value<int?>? refreshedMemberCount,
+    Value<String?>? charterSuggestion,
+    Value<String?>? recapText,
+    Value<String?>? recapOpenJson,
+    Value<String?>? recapDecisionsJson,
+    Value<String?>? recapThrough,
     Value<int>? rowid,
   }) {
     return StorylinesCompanion(
@@ -5337,6 +5712,13 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
       charter: charter ?? this.charter,
       charterLocked: charterLocked ?? this.charterLocked,
       clusterHash: clusterHash ?? this.clusterHash,
+      refreshedMemberHash: refreshedMemberHash ?? this.refreshedMemberHash,
+      refreshedMemberCount: refreshedMemberCount ?? this.refreshedMemberCount,
+      charterSuggestion: charterSuggestion ?? this.charterSuggestion,
+      recapText: recapText ?? this.recapText,
+      recapOpenJson: recapOpenJson ?? this.recapOpenJson,
+      recapDecisionsJson: recapDecisionsJson ?? this.recapDecisionsJson,
+      recapThrough: recapThrough ?? this.recapThrough,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -5386,6 +5768,29 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
     if (clusterHash.present) {
       map['cluster_hash'] = Variable<String>(clusterHash.value);
     }
+    if (refreshedMemberHash.present) {
+      map['refreshed_member_hash'] = Variable<String>(
+        refreshedMemberHash.value,
+      );
+    }
+    if (refreshedMemberCount.present) {
+      map['refreshed_member_count'] = Variable<int>(refreshedMemberCount.value);
+    }
+    if (charterSuggestion.present) {
+      map['charter_suggestion'] = Variable<String>(charterSuggestion.value);
+    }
+    if (recapText.present) {
+      map['recap_text'] = Variable<String>(recapText.value);
+    }
+    if (recapOpenJson.present) {
+      map['recap_open_json'] = Variable<String>(recapOpenJson.value);
+    }
+    if (recapDecisionsJson.present) {
+      map['recap_decisions_json'] = Variable<String>(recapDecisionsJson.value);
+    }
+    if (recapThrough.present) {
+      map['recap_through'] = Variable<String>(recapThrough.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -5409,6 +5814,13 @@ class StorylinesCompanion extends UpdateCompanion<Storyline> {
           ..write('charter: $charter, ')
           ..write('charterLocked: $charterLocked, ')
           ..write('clusterHash: $clusterHash, ')
+          ..write('refreshedMemberHash: $refreshedMemberHash, ')
+          ..write('refreshedMemberCount: $refreshedMemberCount, ')
+          ..write('charterSuggestion: $charterSuggestion, ')
+          ..write('recapText: $recapText, ')
+          ..write('recapOpenJson: $recapOpenJson, ')
+          ..write('recapDecisionsJson: $recapDecisionsJson, ')
+          ..write('recapThrough: $recapThrough, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -13100,6 +13512,13 @@ typedef $StorylinesCreateCompanionBuilder =
       Value<String?> charter,
       Value<int> charterLocked,
       Value<String?> clusterHash,
+      Value<String?> refreshedMemberHash,
+      Value<int?> refreshedMemberCount,
+      Value<String?> charterSuggestion,
+      Value<String?> recapText,
+      Value<String?> recapOpenJson,
+      Value<String?> recapDecisionsJson,
+      Value<String?> recapThrough,
       Value<int> rowid,
     });
 typedef $StorylinesUpdateCompanionBuilder =
@@ -13118,6 +13537,13 @@ typedef $StorylinesUpdateCompanionBuilder =
       Value<String?> charter,
       Value<int> charterLocked,
       Value<String?> clusterHash,
+      Value<String?> refreshedMemberHash,
+      Value<int?> refreshedMemberCount,
+      Value<String?> charterSuggestion,
+      Value<String?> recapText,
+      Value<String?> recapOpenJson,
+      Value<String?> recapDecisionsJson,
+      Value<String?> recapThrough,
       Value<int> rowid,
     });
 
@@ -13196,6 +13622,41 @@ class $StorylinesFilterComposer extends Composer<_$BondDatabase, Storylines> {
 
   ColumnFilters<String> get clusterHash => $composableBuilder(
     column: $table.clusterHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get refreshedMemberHash => $composableBuilder(
+    column: $table.refreshedMemberHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get refreshedMemberCount => $composableBuilder(
+    column: $table.refreshedMemberCount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get charterSuggestion => $composableBuilder(
+    column: $table.charterSuggestion,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get recapText => $composableBuilder(
+    column: $table.recapText,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get recapOpenJson => $composableBuilder(
+    column: $table.recapOpenJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get recapDecisionsJson => $composableBuilder(
+    column: $table.recapDecisionsJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get recapThrough => $composableBuilder(
+    column: $table.recapThrough,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -13277,6 +13738,41 @@ class $StorylinesOrderingComposer extends Composer<_$BondDatabase, Storylines> {
     column: $table.clusterHash,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get refreshedMemberHash => $composableBuilder(
+    column: $table.refreshedMemberHash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get refreshedMemberCount => $composableBuilder(
+    column: $table.refreshedMemberCount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get charterSuggestion => $composableBuilder(
+    column: $table.charterSuggestion,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get recapText => $composableBuilder(
+    column: $table.recapText,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get recapOpenJson => $composableBuilder(
+    column: $table.recapOpenJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get recapDecisionsJson => $composableBuilder(
+    column: $table.recapDecisionsJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get recapThrough => $composableBuilder(
+    column: $table.recapThrough,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $StorylinesAnnotationComposer
@@ -13339,6 +13835,39 @@ class $StorylinesAnnotationComposer
     column: $table.clusterHash,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get refreshedMemberHash => $composableBuilder(
+    column: $table.refreshedMemberHash,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get refreshedMemberCount => $composableBuilder(
+    column: $table.refreshedMemberCount,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get charterSuggestion => $composableBuilder(
+    column: $table.charterSuggestion,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get recapText =>
+      $composableBuilder(column: $table.recapText, builder: (column) => column);
+
+  GeneratedColumn<String> get recapOpenJson => $composableBuilder(
+    column: $table.recapOpenJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get recapDecisionsJson => $composableBuilder(
+    column: $table.recapDecisionsJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get recapThrough => $composableBuilder(
+    column: $table.recapThrough,
+    builder: (column) => column,
+  );
 }
 
 class $StorylinesTableManager
@@ -13383,6 +13912,13 @@ class $StorylinesTableManager
                 Value<String?> charter = const Value.absent(),
                 Value<int> charterLocked = const Value.absent(),
                 Value<String?> clusterHash = const Value.absent(),
+                Value<String?> refreshedMemberHash = const Value.absent(),
+                Value<int?> refreshedMemberCount = const Value.absent(),
+                Value<String?> charterSuggestion = const Value.absent(),
+                Value<String?> recapText = const Value.absent(),
+                Value<String?> recapOpenJson = const Value.absent(),
+                Value<String?> recapDecisionsJson = const Value.absent(),
+                Value<String?> recapThrough = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => StorylinesCompanion(
                 id: id,
@@ -13399,6 +13935,13 @@ class $StorylinesTableManager
                 charter: charter,
                 charterLocked: charterLocked,
                 clusterHash: clusterHash,
+                refreshedMemberHash: refreshedMemberHash,
+                refreshedMemberCount: refreshedMemberCount,
+                charterSuggestion: charterSuggestion,
+                recapText: recapText,
+                recapOpenJson: recapOpenJson,
+                recapDecisionsJson: recapDecisionsJson,
+                recapThrough: recapThrough,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -13417,6 +13960,13 @@ class $StorylinesTableManager
                 Value<String?> charter = const Value.absent(),
                 Value<int> charterLocked = const Value.absent(),
                 Value<String?> clusterHash = const Value.absent(),
+                Value<String?> refreshedMemberHash = const Value.absent(),
+                Value<int?> refreshedMemberCount = const Value.absent(),
+                Value<String?> charterSuggestion = const Value.absent(),
+                Value<String?> recapText = const Value.absent(),
+                Value<String?> recapOpenJson = const Value.absent(),
+                Value<String?> recapDecisionsJson = const Value.absent(),
+                Value<String?> recapThrough = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => StorylinesCompanion.insert(
                 id: id,
@@ -13433,6 +13983,13 @@ class $StorylinesTableManager
                 charter: charter,
                 charterLocked: charterLocked,
                 clusterHash: clusterHash,
+                refreshedMemberHash: refreshedMemberHash,
+                refreshedMemberCount: refreshedMemberCount,
+                charterSuggestion: charterSuggestion,
+                recapText: recapText,
+                recapOpenJson: recapOpenJson,
+                recapDecisionsJson: recapDecisionsJson,
+                recapThrough: recapThrough,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

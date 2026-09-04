@@ -2323,6 +2323,13 @@ FROM storylines s''';
     bool? pinned,
     String? lastActivityAt,
     String? memberHash,
+    Object? refreshedMemberHash = _unset,
+    Object? refreshedMemberCount = _unset,
+    Object? charterSuggestion = _unset,
+    Object? recapText = _unset,
+    Object? recapOpenJson = _unset,
+    Object? recapDecisionsJson = _unset,
+    Object? recapThrough = _unset,
   }) async {
     final sets = <String>['updated_at = ?'];
     final args = <Object?>[_nowIso()];
@@ -2362,6 +2369,37 @@ FROM storylines s''';
     if (memberHash != null) {
       sets.add('member_hash = ?');
       args.add(memberHash);
+    }
+    // The v10 columns all take the sentinel rather than a plain nullable: a
+    // refresh clearing a charter suggestion and a caller not touching it are
+    // different writes, and every one of these is cleared by somebody.
+    if (!identical(refreshedMemberHash, _unset)) {
+      sets.add('refreshed_member_hash = ?');
+      args.add(refreshedMemberHash as String?);
+    }
+    if (!identical(refreshedMemberCount, _unset)) {
+      sets.add('refreshed_member_count = ?');
+      args.add(refreshedMemberCount as int?);
+    }
+    if (!identical(charterSuggestion, _unset)) {
+      sets.add('charter_suggestion = ?');
+      args.add(charterSuggestion as String?);
+    }
+    if (!identical(recapText, _unset)) {
+      sets.add('recap_text = ?');
+      args.add(recapText as String?);
+    }
+    if (!identical(recapOpenJson, _unset)) {
+      sets.add('recap_open_json = ?');
+      args.add(recapOpenJson as String?);
+    }
+    if (!identical(recapDecisionsJson, _unset)) {
+      sets.add('recap_decisions_json = ?');
+      args.add(recapDecisionsJson as String?);
+    }
+    if (!identical(recapThrough, _unset)) {
+      sets.add('recap_through = ?');
+      args.add(recapThrough as String?);
     }
 
     args.add(id);

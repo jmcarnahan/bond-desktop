@@ -47,6 +47,28 @@ class Storyline {
   /// forward — see `MessageStore.touchStorylineActivity`.
   final String? lastActivityAt;
 
+  /// The membership as it stood the last time the refresh pass described this
+  /// storyline. The gate is an equality test against the current member hash,
+  /// so a thread added since leaves these stale and the pass runs again. Null
+  /// on a storyline nobody has described yet.
+  final String? refreshedMemberHash;
+  final int? refreshedMemberCount;
+
+  /// What the refresh pass would have written to [charter] if the charter were
+  /// not the user's. A locked charter is never overwritten — the model's
+  /// version waits here for the user to accept or dismiss it.
+  final String? charterSuggestion;
+
+  /// The recap: where things stand across every member thread, so the reader
+  /// need not re-read them. [recapOpenJson] and [recapDecisionsJson] are JSON
+  /// arrays of short strings, kept as text because nothing but the recap pane
+  /// reads them. [recapThrough] is the `received_at` of the newest message the
+  /// recap has seen — what makes the pass skip a storyline nothing happened in.
+  final String? recapText;
+  final String? recapOpenJson;
+  final String? recapDecisionsJson;
+  final String? recapThrough;
+
   /// Derived by the list query, not stored: how many threads belong to this
   /// storyline, and how many of those are awaiting a reply.
   final int memberCount;
@@ -63,6 +85,13 @@ class Storyline {
     this.charterLocked = false,
     this.pinned = false,
     this.lastActivityAt,
+    this.refreshedMemberHash,
+    this.refreshedMemberCount,
+    this.charterSuggestion,
+    this.recapText,
+    this.recapOpenJson,
+    this.recapDecisionsJson,
+    this.recapThrough,
     this.memberCount = 0,
     this.openCount = 0,
   });
@@ -85,6 +114,13 @@ class Storyline {
       charterLocked: (row['charter_locked'] as num?)?.toInt() == 1,
       pinned: (row['pinned'] as num?)?.toInt() == 1,
       lastActivityAt: row['last_activity_at'] as String?,
+      refreshedMemberHash: row['refreshed_member_hash'] as String?,
+      refreshedMemberCount: (row['refreshed_member_count'] as num?)?.toInt(),
+      charterSuggestion: row['charter_suggestion'] as String?,
+      recapText: row['recap_text'] as String?,
+      recapOpenJson: row['recap_open_json'] as String?,
+      recapDecisionsJson: row['recap_decisions_json'] as String?,
+      recapThrough: row['recap_through'] as String?,
       memberCount: (row['member_count'] as num?)?.toInt() ?? 0,
       openCount: (row['open_count'] as num?)?.toInt() ?? 0,
     );

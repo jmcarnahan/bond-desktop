@@ -178,6 +178,43 @@ void main() {
       expect((await store.getStoryline('sl-1'))!.titleLocked, isFalse);
       expect((await store.getStoryline('sl-1'))!.pinned, isTrue);
     });
+
+    test('the refresh and recap columns round-trip through the row', () async {
+      await seedStoryline('sl-1');
+
+      await store.updateStoryline(
+        'sl-1',
+        refreshedMemberHash: 'h-1',
+        refreshedMemberCount: 2,
+        charterSuggestion: 'Also the pricing page.',
+        recapText: 'The copy is signed off; the build is waiting on art.',
+        recapOpenJson: '["Who owns the hero image?"]',
+        recapDecisionsJson: '["Ship without the video."]',
+        recapThrough: '2026-09-01T10:00:00Z',
+      );
+
+      final written = (await store.getStoryline('sl-1'))!;
+      expect(written.refreshedMemberHash, 'h-1');
+      expect(written.refreshedMemberCount, 2);
+      expect(written.charterSuggestion, 'Also the pricing page.');
+      expect(
+        written.recapText,
+        'The copy is signed off; the build is waiting on art.',
+      );
+      expect(written.recapOpenJson, '["Who owns the hero image?"]');
+      expect(written.recapDecisionsJson, '["Ship without the video."]');
+      expect(written.recapThrough, '2026-09-01T10:00:00Z');
+
+      // Dismissing a suggestion is an explicit null; everything else was
+      // omitted, and the sentinel is what keeps the recap from going with it.
+      await store.updateStoryline('sl-1', charterSuggestion: null);
+
+      final cleared = (await store.getStoryline('sl-1'))!;
+      expect(cleared.charterSuggestion, isNull);
+      expect(cleared.refreshedMemberHash, 'h-1');
+      expect(cleared.refreshedMemberCount, 2);
+      expect(cleared.recapThrough, '2026-09-01T10:00:00Z');
+    });
   });
 
   group('members', () {
