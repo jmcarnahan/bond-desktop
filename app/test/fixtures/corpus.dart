@@ -846,6 +846,14 @@ Nina
   ),
 ];
 
+/// The corpus by id, so a fixture can name the mail it wants instead of
+/// copying the body — `prose_cases.dart` builds its draft threads this way, and
+/// a duplicated message would drift from this one the first time either is
+/// edited.
+final Map<String, CorpusEmail> corpusById = {
+  for (final entry in corpus) entry.id: entry,
+};
+
 /// The entries a gate catches before the model ever runs.
 Iterable<CorpusEmail> get gatedCorpus =>
     corpus.where((entry) => entry.expectedGate != null);

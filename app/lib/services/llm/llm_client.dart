@@ -68,6 +68,20 @@ class LlmCallRecord {
   final int? promptTokens;
   final int? completionTokens;
 
+  /// llama-server's own `timings` — how long IT spent on the prompt and on
+  /// generation. Null when the runtime sends no such block; an MLX-based
+  /// server does not.
+  ///
+  /// Kept BESIDE [durationMs] rather than replacing it because the difference
+  /// between the two is the answer to a question neither number can settle
+  /// alone: wall duration minus server predicted time is the HTTP and
+  /// queue-wait overhead, which is exactly the number that moves when a server
+  /// batches concurrent requests. A runtime that generates at the same rate
+  /// but queues four callers behind each other looks identical on server time
+  /// and twice as slow on the wall.
+  final int? serverPromptMs;
+  final int? serverPredictedMs;
+
   /// `ok`, `unavailable`, `error`, or `format`.
   final String outcome;
 
@@ -80,6 +94,8 @@ class LlmCallRecord {
     required this.outcome,
     this.promptTokens,
     this.completionTokens,
+    this.serverPromptMs,
+    this.serverPredictedMs,
     this.statusCode,
     this.error,
   });
@@ -104,27 +120,59 @@ class LlmClient {
     defaultValue: 'http://localhost:8082/v1/chat/completions',
   );
 
-  /// llama-server ignores the model name — it serves whatever was loaded at
-  /// launch — but the OpenAI request schema requires the field.
-  static const String _model = 'qwen3.8';
+  /// The model name every request carries, and the reason it is a field on the
+  /// instance rather than the one constant it used to be.
+  ///
+  /// llama-server ignores it — it serves whatever was loaded at launch — but
+  /// the OpenAI request schema requires the field, and an MLX-based server
+  /// HONOURS it: one runtime can hold several models and picks by this name.
+  /// A single constant would make the app unable to say which of them it meant.
+  static const String defaultModel = String.fromEnvironment(
+    'LLAMA_MODEL',
+    defaultValue: 'qwen3.8',
+  );
+
+  /// The same, for the bulk-work server — the two may be different models on
+  /// different runtimes, so they get separate defines.
+  static const String fastModel = String.fromEnvironment(
+    'FAST_LLAMA_MODEL',
+    defaultValue: 'qwen3.8',
+  );
 
   /// The model generates at roughly 12 tokens a second, so a full 512-token
   /// answer can legitimately take most of a minute. This ceiling is here to
   /// catch a wedged server, not a slow one.
-  static const Duration _timeout = Duration(seconds: 120);
+  static const Duration _defaultTimeout = Duration(seconds: 120);
 
   static const String _unreachable =
       'The local model server is not reachable — run: make model';
 
   final String baseUrl;
+
+  /// What this client calls the model it is talking to. Per instance, because
+  /// the two servers may be two different models — see [defaultModel].
+  final String model;
+
+  /// Per instance for a plainer reason than [model]: a candidate runtime being
+  /// benched may be slower than the ceiling that suits the shipping one, and a
+  /// bench that timed out at 120s would report an outage instead of a speed.
+  final Duration timeout;
+
   final http.Client _http;
   final LlmCallObserver? _onCall;
 
   /// Fires with the tripwire below, so a test can catch a thinking regression.
   void Function()? onReasoningLeak;
 
-  LlmClient({String? baseUrl, http.Client? httpClient, LlmCallObserver? onCall})
-      : baseUrl = baseUrl ?? defaultBaseUrl,
+  LlmClient({
+    String? baseUrl,
+    String? model,
+    Duration? timeout,
+    http.Client? httpClient,
+    LlmCallObserver? onCall,
+  })  : baseUrl = baseUrl ?? defaultBaseUrl,
+        model = model ?? defaultModel,
+        timeout = timeout ?? _defaultTimeout,
         _http = httpClient ?? http.Client(),
         _onCall = onCall;
 
@@ -214,7 +262,7 @@ class LlmClient {
     required bool think,
   }) =>
       {
-        'model': _model,
+        'model': model,
         'messages': [
           {'role': 'system', 'content': system},
           {'role': 'user', 'content': user},
@@ -246,6 +294,8 @@ class LlmClient {
         outcome: 'ok',
         promptTokens: result.promptTokens,
         completionTokens: result.completionTokens,
+        serverPromptMs: result.serverPromptMs,
+        serverPredictedMs: result.serverPredictedMs,
       ));
       return result.message;
     } on LlmUnavailableException catch (e) {
@@ -276,8 +326,14 @@ class LlmClient {
     }
   }
 
-  Future<({Map<String, dynamic> message, int? promptTokens, int? completionTokens})>
-      _postInner(
+  Future<
+      ({
+        Map<String, dynamic> message,
+        int? promptTokens,
+        int? completionTokens,
+        int? serverPromptMs,
+        int? serverPredictedMs,
+      })> _postInner(
     Map<String, dynamic> body, {
     required bool think,
   }) async {
@@ -289,7 +345,7 @@ class LlmClient {
             headers: const {'Content-Type': 'application/json'},
             body: jsonEncode(body),
           )
-          .timeout(_timeout);
+          .timeout(timeout);
     } on SocketException {
       throw const LlmUnavailableException(_unreachable);
     } on http.ClientException {
@@ -300,7 +356,7 @@ class LlmClient {
       // Counting it against the message is what stops a single pathological
       // email from blocking the queue behind it forever.
       throw LlmException(
-        'The local model did not answer within ${_timeout.inSeconds} seconds.',
+        'The local model did not answer within ${timeout.inSeconds} seconds.',
       );
     }
 
@@ -361,12 +417,22 @@ class LlmClient {
     }
 
     final usage = decoded['usage'];
+    // `timings` is llama-server's, not OpenAI's, and its milliseconds arrive
+    // as doubles — hence `as num?` before `.toInt()`, the same defensiveness
+    // the token counts get. A runtime that sends no such block reads as null
+    // rather than zero, because "did not say" and "took no time" have to stay
+    // distinguishable to anything averaging these.
+    final timings = decoded['timings'];
     return (
       message: Map<String, dynamic>.from(message),
       promptTokens:
           usage is Map ? (usage['prompt_tokens'] as num?)?.toInt() : null,
       completionTokens:
           usage is Map ? (usage['completion_tokens'] as num?)?.toInt() : null,
+      serverPromptMs:
+          timings is Map ? (timings['prompt_ms'] as num?)?.toInt() : null,
+      serverPredictedMs:
+          timings is Map ? (timings['predicted_ms'] as num?)?.toInt() : null,
     );
   }
 

@@ -87,6 +87,41 @@ void main() {
       // Absent, not `true`: the template branches on the key existing.
       expect(fake.requests.single.containsKey('chat_template_kwargs'), isFalse);
     });
+
+    test('runTask keeps it off for every task the app runs', () async {
+      fake.scriptFor('triage', [_triageAnswer()]);
+
+      await runTask(
+        client,
+        const TriageTask(),
+        TriageInput(corpus.first.message, DateTime(2026, 8, 31)),
+      );
+
+      // Asserted at the runTask seam and not only at completeJson's, because
+      // that is the seam every caller in `lib/` actually uses: a `think`
+      // parameter that stopped being passed through would leave the whole app
+      // reasoning while the client's own test stayed green.
+      expect(
+        fake.requests.single['chat_template_kwargs'],
+        {'enable_thinking': false},
+      );
+    });
+
+    test('runTask drops it entirely when a bench asks for thinking', () async {
+      fake.scriptFor('triage', [_triageAnswer()]);
+
+      // What BENCH_THINK buys: an always-reasoning candidate has no
+      // `enable_thinking` to honour, so the request stops asking for one
+      // rather than asking and being ignored.
+      await runTask(
+        client,
+        const TriageTask(),
+        TriageInput(corpus.first.message, DateTime(2026, 8, 31)),
+        think: true,
+      );
+
+      expect(fake.requests.single.containsKey('chat_template_kwargs'), isFalse);
+    });
   });
 
   group('the request body', () {
@@ -118,6 +153,34 @@ void main() {
       final body = fake.requests.single;
       expect(body['max_tokens'], 96);
       expect(body['temperature'], 0.7);
+    });
+
+    test('names the default model when nothing said otherwise', () async {
+      fake.scriptFor('probe', [
+        {'answer': 'ok'},
+      ]);
+
+      await probe();
+
+      expect(fake.requests.single['model'], LlmClient.defaultModel);
+    });
+
+    test('names the model this client was given', () async {
+      // The field llama-server ignores and an MLX-based runtime routes on: a
+      // client pointed at a multi-model server must be able to say which one.
+      final named = LlmClient(baseUrl: fake.chatUrl, model: 'x');
+      fake.scriptFor('probe', [
+        {'answer': 'ok'},
+      ]);
+
+      await named.completeJson(
+        system: 's',
+        user: 'u',
+        schema: _probeSchema,
+        schemaName: 'probe',
+      );
+
+      expect(fake.requests.single['model'], 'x');
     });
 
     test('holds the system prompt byte-identical across two emails', () async {
@@ -177,6 +240,54 @@ void main() {
                   isFalse),
         ),
       );
+    });
+
+    test('usage and timings survive the wire, doubles and all', () async {
+      // Through a real socket rather than a mocked client, because the parse
+      // being checked reads a JSON number the server encodes — `3800.0` on the
+      // wire, an int in the record — and an in-process fake could hand over a
+      // Dart int the real server never sends.
+      final records = <LlmCallRecord>[];
+      final watched = LlmClient(baseUrl: fake.chatUrl, onCall: records.add);
+      fake.scriptFor('probe', [
+        ScriptedReply(
+          const {'answer': 'x'},
+          promptTokens: 812,
+          completionTokens: 47,
+          promptMs: 90,
+          predictedMs: 3800,
+        ),
+      ]);
+
+      await watched.completeJson(
+        system: 's',
+        user: 'u',
+        schema: _probeSchema,
+        schemaName: 'probe',
+      );
+
+      expect(records.single.promptTokens, 812);
+      expect(records.single.completionTokens, 47);
+      expect(records.single.serverPromptMs, 90);
+      expect(records.single.serverPredictedMs, 3800);
+    });
+
+    test('a reply that carries neither block reports neither', () async {
+      final records = <LlmCallRecord>[];
+      final watched = LlmClient(baseUrl: fake.chatUrl, onCall: records.add);
+      fake.scriptFor('probe', [
+        {'answer': 'x'},
+      ]);
+
+      await watched.completeJson(
+        system: 's',
+        user: 'u',
+        schema: _probeSchema,
+        schemaName: 'probe',
+      );
+
+      expect(records.single.promptTokens, isNull);
+      expect(records.single.serverPredictedMs, isNull);
     });
 
     test('a hung-up socket is an outage', () async {

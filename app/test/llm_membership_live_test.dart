@@ -2,11 +2,11 @@
 library;
 
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/storyline_tasks.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'fixtures/bench_stats.dart';
+import 'fixtures/bench_report.dart';
+import 'fixtures/bench_target.dart';
 import 'fixtures/membership_cases.dart';
 
 /// What the charter bought, in verdicts rather than seconds.
@@ -42,17 +42,41 @@ void main() {
   test(
     'the membership eval set through both servers, compared',
     () async {
-      final big = LlmClient();
-      final fast = LlmClient(baseUrl: LlmClient.fastBaseUrl);
-      var bigLeaks = 0;
-      var fastLeaks = 0;
+      // One collector per client, never one shared: the whole question here is
+      // how the two servers differ, and a single bucket would average them
+      // into a machine that does not exist.
+      final bigCalls = BenchTarget.prose.collector();
+      final fastCalls = BenchTarget.bulk.collector();
+      final big = BenchTarget.prose.client(onCall: bigCalls.record);
+      final fast = BenchTarget.bulk.client(onCall: fastCalls.record);
       // Counted per client, so a leak names the server that leaked rather than
       // leaving both under suspicion.
-      big.onReasoningLeak = () => bigLeaks++;
-      fast.onReasoningLeak = () => fastLeaks++;
+      big.onReasoningLeak = bigCalls.noteLeak;
+      fast.onReasoningLeak = fastCalls.noteLeak;
 
-      final bigMs = <int>[];
-      final fastMs = <int>[];
+      // Thrown away, on observer-less clients, so neither table opens with a
+      // cold call. Both sides get the same treatment or the comparison is
+      // between one warm machine and one that was still loading weights.
+      final bigWarmup = BenchTarget.prose.client();
+      final fastWarmup = BenchTarget.bulk.client();
+      for (var i = 0; i < BenchTarget.warmup; i++) {
+        final first = membershipCases.first;
+        final input = ConfirmInput(
+          storyline: first.storyline,
+          storylineParticipants: first.participants,
+          candidateCard: first.candidateCard,
+        );
+        // Warmed the way the run itself will be measured: a candidate that
+        // needs BENCH_THINK would 400 here otherwise, and a warmup that failed
+        // would leave the first timed call cold.
+        await runTask(bigWarmup, const ConfirmMembershipTask(), input,
+            temperature: 0, think: BenchTarget.allowReasoning);
+        await runTask(fastWarmup, const ConfirmMembershipTask(), input,
+            temperature: 0, think: BenchTarget.allowReasoning);
+      }
+
+      final startedAt = DateTime.now();
+
       final lines = <String>[];
       var bigAgree = 0;
       var fastAgree = 0;
@@ -74,7 +98,9 @@ void main() {
             candidateCard: entry.candidateCard,
           );
 
-          final bigWatch = Stopwatch()..start();
+          // Latency is not timed here: each client's collector already holds
+          // the HTTP round trip for every call, measured on the same clock as
+          // the token counts it will be divided by.
           final bigResult = await runTask(
             big,
             const ConfirmMembershipTask(),
@@ -82,20 +108,22 @@ void main() {
             // As the service runs it, on both sides: a disagreement has to be
             // the models differing, not one of them sampling.
             temperature: 0,
+            // One switch for both servers: a comparison where only one side
+            // was asked to stop reasoning compares a model against itself
+            // thinking.
+            think: BenchTarget.allowReasoning,
           );
-          bigWatch.stop();
 
-          final fastWatch = Stopwatch()..start();
           final fastResult = await runTask(
             fast,
             const ConfirmMembershipTask(),
             input,
             temperature: 0,
+            think: BenchTarget.allowReasoning,
           );
-          fastWatch.stop();
 
-          bigMs.add(bigWatch.elapsed.inMilliseconds);
-          fastMs.add(fastWatch.elapsed.inMilliseconds);
+          final bigMs = bigCalls.lastFor('storyline_membership')!.durationMs;
+          final fastMs = fastCalls.lastFor('storyline_membership')!.durationMs;
 
           final bigOk = _verdict(bigResult) == entry.expectBelongs;
           final fastOk = _verdict(fastResult) == entry.expectBelongs;
@@ -116,8 +144,8 @@ void main() {
             '${bigOk ? ' ' : '!'} '
             '4B ${_cell(fastResult).padRight(11)}'
             '${fastOk ? ' ' : '!'} '
-            '${bigWatch.elapsed.inMilliseconds.toString().padLeft(6)}ms '
-            '${fastWatch.elapsed.inMilliseconds.toString().padLeft(6)}ms',
+            '${bigMs.toString().padLeft(6)}ms '
+            '${fastMs.toString().padLeft(6)}ms',
           );
 
           // Shape, not quality: an answer with no evidence sentence is a call
@@ -129,31 +157,63 @@ void main() {
         lines.add('FAILED on $current: $error');
         rethrow;
       } finally {
-        final bigSorted = [...bigMs]..sort();
-        final fastSorted = [...fastMs]..sort();
+        final bigConfirm = bigCalls.metricsFor('storyline_membership');
+        final fastConfirm = fastCalls.metricsFor('storyline_membership');
         // ignore: avoid_print
         print(
           '\n=== membership eval — * must-pass, ! disagrees with expected ===\n'
           '${lines.join('\n')}\n'
           '\n27B: $bigAgree/$judged agree, '
           'must-pass $bigMustPass/$mustPassTotal, '
-          'p50 ${percentile(bigSorted, 0.5)}ms\n'
+          'p50 ${bigConfirm.p50Ms}ms\n'
           '4B:  $fastAgree/$judged agree, '
           'must-pass $fastMustPass/$mustPassTotal, '
-          'p50 ${percentile(fastSorted, 0.5)}ms\n'
-          '\n| task | n | p50 ms | p95 ms | mean ms | total s |\n'
-          '| --- | --- | --- | --- | --- | --- |\n'
-          '${row('confirm 27B', bigMs)}\n'
-          '${row('confirm fast', fastMs)}\n',
+          'p50 ${fastConfirm.p50Ms}ms\n'
+          '\n${bigCalls.banner}\n'
+          '\n${bigCalls.table()}\n'
+          '\n${fastCalls.banner}\n'
+          '\n${fastCalls.table()}\n',
         );
+
+        // `accuracy` is empty and the counters go to `extra` because these are
+        // agreement with a human's answer per SERVER, not one corpus scored
+        // once — two columns, and the scorecard shape holds one.
+        final path = await writeBenchResult(
+          bench: 'membership',
+          collectors: [bigCalls, fastCalls],
+          accuracy: const [],
+          startedAt: startedAt,
+          extra: {
+            'agree': {
+              bigCalls.label: '$bigAgree/$judged',
+              fastCalls.label: '$fastAgree/$judged',
+            },
+            'must_pass': {
+              bigCalls.label: '$bigMustPass/$mustPassTotal',
+              fastCalls.label: '$fastMustPass/$mustPassTotal',
+            },
+          },
+        );
+        // ignore: avoid_print
+        if (path != null) print('wrote $path');
       }
 
       // Per server, and not a judgement call either way: a build that ignores
       // enable_thinking runs at half speed, and every latency above would be
-      // measuring that instead of the model.
-      expect(bigLeaks, 0, reason: 'the 27B reasoned despite enable_thinking');
-      expect(fastLeaks, 0,
-          reason: 'the fast model reasoned despite enable_thinking');
+      // measuring that instead of the model. A candidate that cannot be told
+      // to stop reasoning is the one exception, and it has to say so
+      // deliberately.
+      if (BenchTarget.allowReasoning) {
+        // ignore: avoid_print
+        print('reasoning leaks: ${bigCalls.label} ${bigCalls.reasoningLeaks}, '
+            '${fastCalls.label} ${fastCalls.reasoningLeaks} '
+            '(not asserted — BENCH_THINK is set)');
+      } else {
+        expect(bigCalls.reasoningLeaks, 0,
+            reason: 'the 27B reasoned despite enable_thinking');
+        expect(fastCalls.reasoningLeaks, 0,
+            reason: 'the fast model reasoned despite enable_thinking');
+      }
     },
     timeout: const Timeout(Duration(minutes: 45)),
   );

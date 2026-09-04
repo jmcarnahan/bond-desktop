@@ -134,11 +134,29 @@ class FakeLlamaServer {
       if (reply.reasoningContent != null)
         'reasoning_content': reply.reasoningContent,
     };
-    final bytes = utf8.encode(jsonEncode({
+    final envelope = <String, dynamic>{
       'choices': [
         {'index': 0, 'message': message, 'finish_reason': 'stop'},
       ],
-    }));
+    };
+    if (reply.promptTokens != null || reply.completionTokens != null) {
+      envelope['usage'] = <String, dynamic>{
+        if (reply.promptTokens != null) 'prompt_tokens': reply.promptTokens,
+        if (reply.completionTokens != null)
+          'completion_tokens': reply.completionTokens,
+      };
+    }
+    if (reply.promptMs != null || reply.predictedMs != null) {
+      // Doubles, because that is what llama-server sends — an `int` here would
+      // let a client that parsed with `as int?` pass a test it fails against
+      // the real server.
+      envelope['timings'] = <String, dynamic>{
+        if (reply.promptMs != null) 'prompt_ms': reply.promptMs!.toDouble(),
+        if (reply.predictedMs != null)
+          'predicted_ms': reply.predictedMs!.toDouble(),
+      };
+    }
+    final bytes = utf8.encode(jsonEncode(envelope));
 
     response.statusCode = HttpStatus.ok;
     // Set as a raw string, not a `ContentType` with a charset: the real
@@ -156,5 +174,23 @@ class ScriptedReply {
   final Map<String, dynamic> content;
   final String? reasoningContent;
 
-  const ScriptedReply(this.content, {this.reasoningContent});
+  /// The `usage` counts and the `timings` milliseconds to answer with.
+  ///
+  /// Null omits the block entirely rather than sending zeros — which is what
+  /// an MLX-shaped runtime does, and what the bench's fallback path has to
+  /// survive. A fixture that always sent timings would let a division by a
+  /// missing number ship.
+  final int? promptTokens;
+  final int? completionTokens;
+  final int? promptMs;
+  final int? predictedMs;
+
+  const ScriptedReply(
+    this.content, {
+    this.reasoningContent,
+    this.promptTokens,
+    this.completionTokens,
+    this.promptMs,
+    this.predictedMs,
+  });
 }

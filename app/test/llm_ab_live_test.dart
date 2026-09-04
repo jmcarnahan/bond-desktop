@@ -4,11 +4,12 @@ library;
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/json_task.dart';
-import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'fixtures/bench_report.dart';
 import 'fixtures/bench_stats.dart';
+import 'fixtures/bench_target.dart';
 import 'fixtures/corpus.dart';
 
 /// What phase 3 actually cost, in labels rather than seconds.
@@ -49,10 +50,6 @@ bool withinOne(List<String> order, String a, String b) {
   return (ia - ib).abs() <= 1;
 }
 
-String pct(int matches, int total) => total == 0
-    ? '—'
-    : '${(100 * matches / total).toStringAsFixed(0)}% ($matches/$total)';
-
 /// One corpus entry judged twice.
 class _Pair {
   final String id;
@@ -74,22 +71,39 @@ void main() {
   test(
     'the corpus through both servers, compared',
     () async {
-      final big = LlmClient();
-      final fast = LlmClient(baseUrl: LlmClient.fastBaseUrl);
-      var bigLeaks = 0;
-      var fastLeaks = 0;
+      // One collector per client, never one shared: the whole question here is
+      // how the two servers differ, and a single bucket would average them
+      // into a machine that does not exist.
+      final bigCalls = BenchTarget.prose.collector();
+      final fastCalls = BenchTarget.bulk.collector();
+      final big = BenchTarget.prose.client(onCall: bigCalls.record);
+      final fast = BenchTarget.bulk.client(onCall: fastCalls.record);
       // Counted per client, so a leak names the server that leaked rather than
       // leaving both under suspicion.
-      big.onReasoningLeak = () => bigLeaks++;
-      fast.onReasoningLeak = () => fastLeaks++;
+      big.onReasoningLeak = bigCalls.noteLeak;
+      fast.onReasoningLeak = fastCalls.noteLeak;
 
       final emails =
           emailCorpus.where((entry) => entry.expectedGate == null).toList();
 
-      final bigTriageMs = <int>[];
-      final fastTriageMs = <int>[];
-      final bigExtractMs = <int>[];
-      final fastExtractMs = <int>[];
+      // Thrown away, on observer-less clients, so neither table opens with a
+      // cold call. Both sides get the same treatment or the comparison is
+      // between one warm machine and one that was still loading weights.
+      final bigWarmup = BenchTarget.prose.client();
+      final fastWarmup = BenchTarget.bulk.client();
+      for (var i = 0; i < BenchTarget.warmup; i++) {
+        final input = TriageInput(emails.first.message, DateTime.now());
+        // Warmed the way the run itself will be measured: a candidate that
+        // needs BENCH_THINK would 400 here otherwise, and a warmup that failed
+        // would leave the first timed call cold.
+        await runTask(bigWarmup, const TriageTask(), input,
+            think: BenchTarget.allowReasoning);
+        await runTask(fastWarmup, const TriageTask(), input,
+            think: BenchTarget.allowReasoning);
+      }
+
+      final startedAt = DateTime.now();
+
       final pairs = <_Pair>[];
       final lines = <String>[];
       final injection = <String>[];
@@ -106,23 +120,26 @@ void main() {
           // between the runs that has nothing to do with the models.
           final now = DateTime.now();
 
-          final bigTriageWatch = Stopwatch()..start();
+          // Latency is not timed here: each client's collector already holds
+          // the HTTP round trip for every call, measured on the same clock as
+          // the token counts it will be divided by.
           final bigTriage = await runTask(
             big,
             const TriageTask(),
             TriageInput(entry.message, now),
+            // One switch for both servers: an A/B where only one side was
+            // asked to stop reasoning would compare a model against itself
+            // thinking.
+            think: BenchTarget.allowReasoning,
           );
-          bigTriageWatch.stop();
 
-          final fastTriageWatch = Stopwatch()..start();
           final fastTriage = await runTask(
             fast,
             const TriageTask(),
             TriageInput(entry.message, now),
+            think: BenchTarget.allowReasoning,
           );
-          fastTriageWatch.stop();
 
-          final bigExtractWatch = Stopwatch()..start();
           final bigExtract = await runTask(
             big,
             const ExtractTask(),
@@ -130,22 +147,16 @@ void main() {
             // As the handler runs it, on both sides: a disagreement has to be
             // the models differing, not one of them sampling.
             temperature: 0,
+            think: BenchTarget.allowReasoning,
           );
-          bigExtractWatch.stop();
 
-          final fastExtractWatch = Stopwatch()..start();
           final fastExtract = await runTask(
             fast,
             const ExtractTask(),
             ExtractionInput(entry.message, now),
             temperature: 0,
+            think: BenchTarget.allowReasoning,
           );
-          fastExtractWatch.stop();
-
-          bigTriageMs.add(bigTriageWatch.elapsed.inMilliseconds);
-          fastTriageMs.add(fastTriageWatch.elapsed.inMilliseconds);
-          bigExtractMs.add(bigExtractWatch.elapsed.inMilliseconds);
-          fastExtractMs.add(fastExtractWatch.elapsed.inMilliseconds);
 
           pairs.add(_Pair(
             id: entry.id,
@@ -183,11 +194,11 @@ void main() {
           if (entry.id == 'prompt-injection') {
             injection.addAll([
               '=== PROMPT INJECTION — both servers, verbatim ===',
-              '--- 27B (:8080) ---',
+              '--- ${BenchTarget.prose.label} ---',
               'summary:      ${bigTriage.summary}',
               'action_items: ${bigTriage.actionItems}',
               'evidence:     ${bigExtract.evidence}',
-              '--- fast (:8082) ---',
+              '--- ${BenchTarget.bulk.label} ---',
               'summary:      ${fastTriage.summary}',
               'action_items: ${fastTriage.actionItems}',
               'evidence:     ${fastExtract.evidence}',
@@ -210,32 +221,64 @@ void main() {
         final importance = pairs.where((p) => withinOne(_importanceOrder,
             p.bigExtract.importance, p.fastExtract.importance));
 
+        // Computed once and both printed and written down: the table above is
+        // for whoever is watching the run, the file for whoever compares this
+        // candidate against the next one.
+        final agreement = {
+          'category_exact': pct(category.length, n),
+          'urgency_within_one': pct(urgency.length, n),
+          'needs_action_exact': pct(needsAction.length, n),
+          'intent_exact': pct(intent.length, n),
+          'importance_within_one': pct(importance.length, n),
+        };
+
         // ignore: avoid_print
         print(
           '\n| agreement | rate |\n'
           '| --- | --- |\n'
-          '| category (exact) | ${pct(category.length, n)} |\n'
-          '| urgency (within one) | ${pct(urgency.length, n)} |\n'
-          '| needs_action (exact) | ${pct(needsAction.length, n)} |\n'
-          '| intent (exact) | ${pct(intent.length, n)} |\n'
-          '| importance (within one) | ${pct(importance.length, n)} |\n'
-          '\n| task | n | p50 ms | p95 ms | mean ms | total s |\n'
-          '| --- | --- | --- | --- | --- | --- |\n'
-          '${row('triage 27B', bigTriageMs)}\n'
-          '${row('triage fast', fastTriageMs)}\n'
-          '${row('extract 27B', bigExtractMs)}\n'
-          '${row('extract fast', fastExtractMs)}\n'
+          '| category (exact) | ${agreement['category_exact']} |\n'
+          '| urgency (within one) | ${agreement['urgency_within_one']} |\n'
+          '| needs_action (exact) | ${agreement['needs_action_exact']} |\n'
+          '| intent (exact) | ${agreement['intent_exact']} |\n'
+          '| importance (within one) | ${agreement['importance_within_one']} |\n'
+          '\n${bigCalls.banner}\n'
+          '\n${bigCalls.table()}\n'
+          '\n${fastCalls.banner}\n'
+          '\n${fastCalls.table()}\n'
           '\n${lines.join('\n')}\n'
           '\n${injection.join('\n')}\n',
         );
+
+        // `accuracy` is empty on purpose: everything above is model against
+        // model, and calling an agreement rate an accuracy would put two
+        // models' shared mistake in the column that says they were right.
+        final path = await writeBenchResult(
+          bench: 'triage-extract-ab',
+          collectors: [bigCalls, fastCalls],
+          accuracy: const [],
+          startedAt: startedAt,
+          extra: {'agreement': agreement},
+        );
+        // ignore: avoid_print
+        if (path != null) print('wrote $path');
       }
 
       // Per server, and not a judgement call either way: a build that ignores
       // enable_thinking runs at half speed, and every latency above would be
-      // measuring that instead of the model.
-      expect(bigLeaks, 0, reason: 'the 27B reasoned despite enable_thinking');
-      expect(fastLeaks, 0,
-          reason: 'the fast model reasoned despite enable_thinking');
+      // measuring that instead of the model. A candidate that cannot be told
+      // to stop reasoning is the one exception, and it has to say so
+      // deliberately.
+      if (BenchTarget.allowReasoning) {
+        // ignore: avoid_print
+        print('reasoning leaks: ${bigCalls.label} ${bigCalls.reasoningLeaks}, '
+            '${fastCalls.label} ${fastCalls.reasoningLeaks} '
+            '(not asserted — BENCH_THINK is set)');
+      } else {
+        expect(bigCalls.reasoningLeaks, 0,
+            reason: 'the 27B reasoned despite enable_thinking');
+        expect(fastCalls.reasoningLeaks, 0,
+            reason: 'the fast model reasoned despite enable_thinking');
+      }
     },
     timeout: const Timeout(Duration(minutes: 45)),
   );
