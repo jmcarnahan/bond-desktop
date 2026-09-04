@@ -619,6 +619,87 @@ void main() {
       expect(row.data['category'], 'other');
     });
 
+    test('writeNeedsYouVerdict round-trips all three states and the reason',
+        () async {
+      await store.upsertMessage(messageRow(id: 'm1'));
+
+      // Never judged is the state the row arrives in, and it is a real answer
+      // rather than a missing one: the unjudged rows are the worklist.
+      final fresh = (await store.getMessageRow('email', 'm1'))!;
+      expect(fresh['needs_you_verdict'], isNull);
+      expect(fresh['needs_you_reason'], isNull);
+
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'teams_direct');
+      final yes = (await store.getMessageRow('email', 'm1'))!;
+      expect(yes['needs_you_verdict'], 1);
+      expect(yes['needs_you_reason'], 'teams_direct');
+
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: false, reason: 'Nobody is waiting on an answer.');
+      final no = (await store.getMessageRow('email', 'm1'))!;
+      expect(no['needs_you_verdict'], 0);
+      expect(no['needs_you_reason'], 'Nobody is waiting on an answer.');
+
+      // And back to unjudged, which is what puts a row a later pass has to
+      // reconsider back on the worklist.
+      await store.writeNeedsYouVerdict('email', 'm1', verdict: null);
+      final cleared = (await store.getMessageRow('email', 'm1'))!;
+      expect(cleared['needs_you_verdict'], isNull);
+      // The same rule `label` and `deadline` take: a blank reason and a reason
+      // nobody wrote must read alike.
+      expect(cleared['needs_you_reason'], isNull);
+    });
+
+    test('a re-sync of the same message does not clobber the verdict',
+        () async {
+      // The conflict branch of `upsertMessage` names its columns, and these
+      // two are not among them — which is what keeps a delta pull that
+      // re-offers a chat from erasing a judgement the pass already made.
+      await store.upsertMessage(messageRow(id: 'm1', source: 'teams'));
+      await store.writeNeedsYouVerdict('teams', 'm1',
+          verdict: true, reason: 'teams_direct');
+
+      await store.upsertMessage(
+          messageRow(id: 'm1', source: 'teams', bodyText: 'Edited body'));
+
+      final row = (await store.getMessageRow('teams', 'm1'))!;
+      expect(row['body_text'], 'Edited body');
+      expect(row['needs_you_verdict'], 1);
+      expect(row['needs_you_reason'], 'teams_direct');
+    });
+
+    test('writeNeedsYouVerdict only touches the addressed (source, id) pair',
+        () async {
+      await store.upsertMessage(messageRow(id: 'shared', source: 'email'));
+      await store.upsertMessage(messageRow(id: 'shared', source: 'teams'));
+
+      await store.writeNeedsYouVerdict('teams', 'shared',
+          verdict: true, reason: 'teams_direct');
+
+      final rows = await db
+          .customSelect('SELECT source, needs_you_verdict FROM messages '
+              'ORDER BY source')
+          .get();
+      expect(rows[0].data['needs_you_verdict'], isNull);
+      expect(rows[1].data['needs_you_verdict'], 1);
+    });
+
+    test('writeTriage leaves the needs-you verdict alone', () async {
+      // Two stages, two sets of columns. A triage that ran after the pass must
+      // not undo it, and neither may the pass undo a triage.
+      await store.upsertMessage(messageRow(id: 'm1'));
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'teams_direct');
+
+      await store.writeTriage('email', 'm1',
+          status: 'triaged', result: TriageResult.fallback());
+
+      final row = (await store.getMessageRow('email', 'm1'))!;
+      expect(row['needs_you_verdict'], 1);
+      expect(row['triage_status'], 'triaged');
+    });
+
     test('writeTriage only touches the addressed (source, id) pair', () async {
       await store.upsertMessage(messageRow(id: 'shared', source: 'email'));
       await store.upsertMessage(messageRow(id: 'shared', source: 'teams'));

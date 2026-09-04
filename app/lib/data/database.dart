@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 9;
+  int get schemaVersion => 10;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -339,6 +339,33 @@ UPDATE message_progress SET draft_state = CASE
      WHERE d.source = message_progress.source
        AND d.reply_to_message_id = message_progress.source_message_id
   ) THEN 'done' ELSE 'skipped' END''');
+              },
+              // v10 — the needs-you pass gets a place to put its answer.
+              // `needs_you_verdict` is tri-state and `needs_you_reason` says
+              // what stands behind it.
+              //
+              // No backfill, and that is the design rather than an omission:
+              // NULL means nobody has judged this row, so every migrated
+              // message is exactly what the pass is looking for. Writing a 0
+              // here would claim a verdict this app never reached, and take
+              // the whole stored mailbox out of the worklist on the way.
+              //
+              // One guard per column, the v3–v5 discipline: a quit between
+              // the two ALTERs must not leave a replay that skips the second
+              // because the first already exists.
+              from9To10: (m, schema) async {
+                if (!await _columnExists('messages', 'needs_you_verdict')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.needsYouVerdict,
+                  );
+                }
+                if (!await _columnExists('messages', 'needs_you_reason')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.needsYouReason,
+                  );
+                }
               },
             ),
           ),

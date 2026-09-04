@@ -1179,6 +1179,37 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     );
   }
 
+  /// Records what the needs-you pass decided about one message.
+  ///
+  /// Targeted like [writeTriage], and for the same reason: this stage owns
+  /// exactly two columns, and a write that carried the rest of the row would
+  /// be free to undo a triage that finished while the pass was thinking.
+  ///
+  /// [verdict] is tri-state, and the null arm is a real answer rather than a
+  /// missing argument: it puts the row back on the worklist. `false` is a
+  /// judgement that the message does not need the owner, which is a different
+  /// fact from never having been judged, and nothing may read the two as one.
+  Future<void> writeNeedsYouVerdict(
+    String source,
+    String sourceMessageId, {
+    required bool? verdict,
+    String? reason,
+  }) async {
+    await db.customUpdate(
+      'UPDATE messages SET needs_you_verdict = ?, needs_you_reason = ?, '
+      'updated_at = ? WHERE source = ? AND source_message_id = ?',
+      variables: _args([
+        verdict == null ? null : (verdict ? 1 : 0),
+        // NULL, not '': the same rule `label` takes in [writeTriage] — an
+        // empty reason is no reason, and it should read like one.
+        (reason == null || reason.isEmpty) ? null : reason,
+        _nowIso(),
+        source,
+        sourceMessageId,
+      ]),
+    );
+  }
+
   // ── work queue ───────────────────────────────────────────────────────
 
   /// Distinguishes "this argument was not passed" from "this argument was
@@ -1236,6 +1267,51 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     String source = 'email',
     List<String> triageStatuses = const ['pending', 'processing', 'triaged'],
     List<String>? gateReasons,
+  }) =>
+      _enqueueMessageBacklog(
+        kind: 'extract',
+        cap: cap,
+        sinceIso: sinceIso,
+        source: source,
+        triageStatuses: triageStatuses,
+        gateReasons: gateReasons,
+      );
+
+  /// Queues the needs-you judgement for the same messages extraction gets, and
+  /// returns how many rows that added.
+  ///
+  /// [enqueueExtractBacklog]'s twin, argument for argument, and the symmetry is
+  /// load-bearing rather than convenient: the same filter and the same caps are
+  /// what guarantee that every row extraction will read has been through this
+  /// pass first. Two different windows here would leave extraction reading a
+  /// verdict for some messages and NULL — "never judged" — for others, with
+  /// nothing on the row to say which kind of NULL it was looking at.
+  Future<int> enqueueNeedsYouBacklog({
+    int cap = 150,
+    required String sinceIso,
+    String source = 'email',
+    List<String> triageStatuses = const ['pending', 'processing', 'triaged'],
+    List<String>? gateReasons,
+  }) =>
+      _enqueueMessageBacklog(
+        kind: 'needs_you',
+        cap: cap,
+        sinceIso: sinceIso,
+        source: source,
+        triageStatuses: triageStatuses,
+        gateReasons: gateReasons,
+      );
+
+  /// The backlog enqueue both per-message kinds run, with [kind] the only
+  /// thing that differs — one statement, so the two queues cannot drift apart
+  /// into covering different sets of messages.
+  Future<int> _enqueueMessageBacklog({
+    required String kind,
+    required int cap,
+    required String sinceIso,
+    required String source,
+    required List<String> triageStatuses,
+    required List<String>? gateReasons,
   }) async {
     // An empty list would render as `IN ()`, which sqlite rejects. Nothing is
     // queued because nothing was asked for.
@@ -1249,7 +1325,7 @@ INSERT OR IGNORE INTO work_items (
   task_kind, source, entity_id, status, attempts, error, payload_json,
   created_at, updated_at
 )
-SELECT 'extract', source, source_message_id, 'pending', 0, NULL, NULL,
+SELECT ?, source, source_message_id, 'pending', 0, NULL, NULL,
   COALESCE(received_at, ?), ?
 FROM messages
 WHERE source = ? AND direction = 'inbound'
@@ -1260,6 +1336,7 @@ ORDER BY received_at DESC
 LIMIT ?
 ''',
       variables: _args([
+        kind,
         now,
         now,
         source,

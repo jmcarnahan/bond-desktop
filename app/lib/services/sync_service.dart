@@ -160,6 +160,16 @@ class SyncService implements MailSync {
         source: _source,
       );
 
+      // The needs-you verdict, over exactly the rows above. Same cap and same
+      // window on purpose — see [MessageStore.enqueueNeedsYouBacklog]: the two
+      // queues covering one set of messages is what lets a reader tell "judged
+      // no" from "never judged" without a second column to say which.
+      final queuedNeedsYou = await _store.enqueueNeedsYouBacklog(
+        cap: firstRunTriageCap,
+        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        source: _source,
+      );
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -184,6 +194,7 @@ class SyncService implements MailSync {
           'inbox': inbox,
           'sent': sent,
           'queued_extract': queued,
+          'queued_needs_you': queuedNeedsYou,
           'revived_triage': revivedTriage,
           'revived_work': revivedWork,
           // Only when they happened. A zero here would read as an event where

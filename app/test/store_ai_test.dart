@@ -375,6 +375,79 @@ void main() {
     });
   });
 
+  group('enqueueNeedsYouBacklog', () {
+    const since = '2026-08-25T00:00:00Z';
+
+    /// Every entity id queued under one kind, in a stable order.
+    Future<List<Object?>> queued(String kind) async => (await db
+            .customSelect(
+              'SELECT entity_id FROM work_items WHERE task_kind = ? '
+              'ORDER BY entity_id',
+              variables: [Variable(kind)],
+            )
+            .get())
+        .map((r) => r.data['entity_id'])
+        .toList();
+
+    test('queues exactly the rows extraction gets, given the same arguments',
+        () async {
+      // The symmetry is the guarantee: every message extraction will read has
+      // been through the needs-you pass, so a NULL verdict downstream can only
+      // mean "judged nothing", never "never offered".
+      await store.upsertMessage(messageRow(id: 'keep'));
+      await store.upsertMessage(messageRow(id: 'sent', direction: 'outbound'));
+      await store.upsertMessage(messageRow(id: 'gated', triageStatus: 'skipped'));
+      await store.upsertMessage(
+          messageRow(id: 'stale', receivedAt: '2026-08-01T10:00:00Z'));
+      await store.upsertMessage(
+          messageRow(id: 'newer', receivedAt: '2026-08-29T10:00:00Z'));
+
+      expect(await store.enqueueExtractBacklog(sinceIso: since), 2);
+      expect(await store.enqueueNeedsYouBacklog(sinceIso: since), 2);
+
+      expect(await queued('needs_you'), await queued('extract'));
+      expect(await queued('needs_you'), ['keep', 'newer']);
+    });
+
+    test('the cap bites the same way on both queues', () async {
+      await store
+          .upsertMessage(messageRow(id: 'new', receivedAt: '2026-08-28T10:00:00Z'));
+      await store
+          .upsertMessage(messageRow(id: 'mid', receivedAt: '2026-08-27T10:00:00Z'));
+      await store
+          .upsertMessage(messageRow(id: 'old', receivedAt: '2026-08-26T10:00:00Z'));
+
+      await store.enqueueExtractBacklog(cap: 2, sinceIso: since);
+      expect(await store.enqueueNeedsYouBacklog(cap: 2, sinceIso: since), 2);
+
+      expect(await queued('needs_you'), await queued('extract'));
+    });
+
+    test('a second run adds nothing and resurrects nothing', () async {
+      await store.upsertMessage(messageRow(id: 'm1'));
+      await store.upsertMessage(messageRow(id: 'm2'));
+      expect(await store.enqueueNeedsYouBacklog(sinceIso: since), 2);
+      await store.writeWork('needs_you', 'email', 'm1', status: 'done');
+
+      expect(await store.enqueueNeedsYouBacklog(sinceIso: since), 0);
+
+      expect((await workRow('needs_you', 'm1'))['status'], 'done');
+      expect((await workRow('needs_you', 'm2'))['status'], 'pending');
+    });
+
+    test('the two kinds are separate rows on one message', () async {
+      // Same primary key but for `task_kind`, so neither enqueue can consume
+      // the other's row — the queues share a table, not a claim.
+      await store.upsertMessage(messageRow(id: 'm1'));
+
+      expect(await store.enqueueExtractBacklog(sinceIso: since), 1);
+      expect(await store.enqueueNeedsYouBacklog(sinceIso: since), 1);
+
+      expect((await workRow('extract', 'm1'))['status'], 'pending');
+      expect((await workRow('needs_you', 'm1'))['status'], 'pending');
+    });
+  });
+
   group('message_ai', () {
     test('writes, reads back, and overwrites in place', () async {
       expect(await store.getExtraction('email', 'm1'), isNull);

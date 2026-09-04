@@ -340,6 +340,28 @@ class Messages extends Table with TableInfo<Messages, Message> {
     requiredDuringInsert: false,
     $customConstraints: '',
   );
+  static const VerificationMeta _needsYouVerdictMeta = const VerificationMeta(
+    'needsYouVerdict',
+  );
+  late final GeneratedColumn<int> needsYouVerdict = GeneratedColumn<int>(
+    'needs_you_verdict',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _needsYouReasonMeta = const VerificationMeta(
+    'needsYouReason',
+  );
+  late final GeneratedColumn<String> needsYouReason = GeneratedColumn<String>(
+    'needs_you_reason',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -372,6 +394,8 @@ class Messages extends Table with TableInfo<Messages, Message> {
     addressedMe,
     replyExpected,
     deadline,
+    needsYouVerdict,
+    needsYouReason,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -620,6 +644,24 @@ class Messages extends Table with TableInfo<Messages, Message> {
         deadline.isAcceptableOrUnknown(data['deadline']!, _deadlineMeta),
       );
     }
+    if (data.containsKey('needs_you_verdict')) {
+      context.handle(
+        _needsYouVerdictMeta,
+        needsYouVerdict.isAcceptableOrUnknown(
+          data['needs_you_verdict']!,
+          _needsYouVerdictMeta,
+        ),
+      );
+    }
+    if (data.containsKey('needs_you_reason')) {
+      context.handle(
+        _needsYouReasonMeta,
+        needsYouReason.isAcceptableOrUnknown(
+          data['needs_you_reason']!,
+          _needsYouReasonMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -749,6 +791,14 @@ class Messages extends Table with TableInfo<Messages, Message> {
         DriftSqlType.string,
         data['${effectivePrefix}deadline'],
       ),
+      needsYouVerdict: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}needs_you_verdict'],
+      ),
+      needsYouReason: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}needs_you_reason'],
+      ),
     );
   }
 
@@ -821,6 +871,22 @@ class Message extends DataClass implements Insertable<Message> {
   final int addressedMe;
   final int? replyExpected;
   final String? deadline;
+
+  /// `needs_you_verdict` is the needs-you pass's answer to the only question
+  /// the rail exists to ask: does this one want the owner? NULL means the pass
+  /// has never judged this row, which is NOT the same as "no" — the unjudged
+  /// rows ARE the worklist, so nothing may read NULL as 0. 0 is a judgement
+  /// that the message does not need the owner; 1 is a judgement that it does.
+  ///
+  /// Written by the `needs_you` work handler and by nobody else — the
+  /// deterministic floor or, later, the model. Ingest never touches it: what a
+  /// connector knows lands in `addressed_me`, which is a fact about the
+  /// message, while this is a verdict about it.
+  ///
+  /// `needs_you_reason` says why: 'teams_direct' from the floor, or the
+  /// model's own evidence sentence.
+  final int? needsYouVerdict;
+  final String? needsYouReason;
   const Message({
     required this.source,
     required this.sourceMessageId,
@@ -852,6 +918,8 @@ class Message extends DataClass implements Insertable<Message> {
     required this.addressedMe,
     this.replyExpected,
     this.deadline,
+    this.needsYouVerdict,
+    this.needsYouReason,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -921,6 +989,12 @@ class Message extends DataClass implements Insertable<Message> {
     }
     if (!nullToAbsent || deadline != null) {
       map['deadline'] = Variable<String>(deadline);
+    }
+    if (!nullToAbsent || needsYouVerdict != null) {
+      map['needs_you_verdict'] = Variable<int>(needsYouVerdict);
+    }
+    if (!nullToAbsent || needsYouReason != null) {
+      map['needs_you_reason'] = Variable<String>(needsYouReason);
     }
     return map;
   }
@@ -993,6 +1067,12 @@ class Message extends DataClass implements Insertable<Message> {
       deadline: deadline == null && nullToAbsent
           ? const Value.absent()
           : Value(deadline),
+      needsYouVerdict: needsYouVerdict == null && nullToAbsent
+          ? const Value.absent()
+          : Value(needsYouVerdict),
+      needsYouReason: needsYouReason == null && nullToAbsent
+          ? const Value.absent()
+          : Value(needsYouReason),
     );
   }
 
@@ -1034,6 +1114,8 @@ class Message extends DataClass implements Insertable<Message> {
       addressedMe: serializer.fromJson<int>(json['addressed_me']),
       replyExpected: serializer.fromJson<int?>(json['reply_expected']),
       deadline: serializer.fromJson<String?>(json['deadline']),
+      needsYouVerdict: serializer.fromJson<int?>(json['needs_you_verdict']),
+      needsYouReason: serializer.fromJson<String?>(json['needs_you_reason']),
     );
   }
   @override
@@ -1070,6 +1152,8 @@ class Message extends DataClass implements Insertable<Message> {
       'addressed_me': serializer.toJson<int>(addressedMe),
       'reply_expected': serializer.toJson<int?>(replyExpected),
       'deadline': serializer.toJson<String?>(deadline),
+      'needs_you_verdict': serializer.toJson<int?>(needsYouVerdict),
+      'needs_you_reason': serializer.toJson<String?>(needsYouReason),
     };
   }
 
@@ -1104,6 +1188,8 @@ class Message extends DataClass implements Insertable<Message> {
     int? addressedMe,
     Value<int?> replyExpected = const Value.absent(),
     Value<String?> deadline = const Value.absent(),
+    Value<int?> needsYouVerdict = const Value.absent(),
+    Value<String?> needsYouReason = const Value.absent(),
   }) => Message(
     source: source ?? this.source,
     sourceMessageId: sourceMessageId ?? this.sourceMessageId,
@@ -1143,6 +1229,12 @@ class Message extends DataClass implements Insertable<Message> {
         ? replyExpected.value
         : this.replyExpected,
     deadline: deadline.present ? deadline.value : this.deadline,
+    needsYouVerdict: needsYouVerdict.present
+        ? needsYouVerdict.value
+        : this.needsYouVerdict,
+    needsYouReason: needsYouReason.present
+        ? needsYouReason.value
+        : this.needsYouReason,
   );
   Message copyWithCompanion(MessagesCompanion data) {
     return Message(
@@ -1210,6 +1302,12 @@ class Message extends DataClass implements Insertable<Message> {
           ? data.replyExpected.value
           : this.replyExpected,
       deadline: data.deadline.present ? data.deadline.value : this.deadline,
+      needsYouVerdict: data.needsYouVerdict.present
+          ? data.needsYouVerdict.value
+          : this.needsYouVerdict,
+      needsYouReason: data.needsYouReason.present
+          ? data.needsYouReason.value
+          : this.needsYouReason,
     );
   }
 
@@ -1245,7 +1343,9 @@ class Message extends DataClass implements Insertable<Message> {
           ..write('label: $label, ')
           ..write('addressedMe: $addressedMe, ')
           ..write('replyExpected: $replyExpected, ')
-          ..write('deadline: $deadline')
+          ..write('deadline: $deadline, ')
+          ..write('needsYouVerdict: $needsYouVerdict, ')
+          ..write('needsYouReason: $needsYouReason')
           ..write(')'))
         .toString();
   }
@@ -1282,6 +1382,8 @@ class Message extends DataClass implements Insertable<Message> {
     addressedMe,
     replyExpected,
     deadline,
+    needsYouVerdict,
+    needsYouReason,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -1316,7 +1418,9 @@ class Message extends DataClass implements Insertable<Message> {
           other.label == this.label &&
           other.addressedMe == this.addressedMe &&
           other.replyExpected == this.replyExpected &&
-          other.deadline == this.deadline);
+          other.deadline == this.deadline &&
+          other.needsYouVerdict == this.needsYouVerdict &&
+          other.needsYouReason == this.needsYouReason);
 }
 
 class MessagesCompanion extends UpdateCompanion<Message> {
@@ -1350,6 +1454,8 @@ class MessagesCompanion extends UpdateCompanion<Message> {
   final Value<int> addressedMe;
   final Value<int?> replyExpected;
   final Value<String?> deadline;
+  final Value<int?> needsYouVerdict;
+  final Value<String?> needsYouReason;
   final Value<int> rowid;
   const MessagesCompanion({
     this.source = const Value.absent(),
@@ -1382,6 +1488,8 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.addressedMe = const Value.absent(),
     this.replyExpected = const Value.absent(),
     this.deadline = const Value.absent(),
+    this.needsYouVerdict = const Value.absent(),
+    this.needsYouReason = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessagesCompanion.insert({
@@ -1415,6 +1523,8 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     this.addressedMe = const Value.absent(),
     this.replyExpected = const Value.absent(),
     this.deadline = const Value.absent(),
+    this.needsYouVerdict = const Value.absent(),
+    this.needsYouReason = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : sourceMessageId = Value(sourceMessageId),
        conversationKey = Value(conversationKey),
@@ -1452,6 +1562,8 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Expression<int>? addressedMe,
     Expression<int>? replyExpected,
     Expression<String>? deadline,
+    Expression<int>? needsYouVerdict,
+    Expression<String>? needsYouReason,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1485,6 +1597,8 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       if (addressedMe != null) 'addressed_me': addressedMe,
       if (replyExpected != null) 'reply_expected': replyExpected,
       if (deadline != null) 'deadline': deadline,
+      if (needsYouVerdict != null) 'needs_you_verdict': needsYouVerdict,
+      if (needsYouReason != null) 'needs_you_reason': needsYouReason,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1520,6 +1634,8 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     Value<int>? addressedMe,
     Value<int?>? replyExpected,
     Value<String?>? deadline,
+    Value<int?>? needsYouVerdict,
+    Value<String?>? needsYouReason,
     Value<int>? rowid,
   }) {
     return MessagesCompanion(
@@ -1553,6 +1669,8 @@ class MessagesCompanion extends UpdateCompanion<Message> {
       addressedMe: addressedMe ?? this.addressedMe,
       replyExpected: replyExpected ?? this.replyExpected,
       deadline: deadline ?? this.deadline,
+      needsYouVerdict: needsYouVerdict ?? this.needsYouVerdict,
+      needsYouReason: needsYouReason ?? this.needsYouReason,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1650,6 +1768,12 @@ class MessagesCompanion extends UpdateCompanion<Message> {
     if (deadline.present) {
       map['deadline'] = Variable<String>(deadline.value);
     }
+    if (needsYouVerdict.present) {
+      map['needs_you_verdict'] = Variable<int>(needsYouVerdict.value);
+    }
+    if (needsYouReason.present) {
+      map['needs_you_reason'] = Variable<String>(needsYouReason.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1689,6 +1813,8 @@ class MessagesCompanion extends UpdateCompanion<Message> {
           ..write('addressedMe: $addressedMe, ')
           ..write('replyExpected: $replyExpected, ')
           ..write('deadline: $deadline, ')
+          ..write('needsYouVerdict: $needsYouVerdict, ')
+          ..write('needsYouReason: $needsYouReason, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -11036,6 +11162,8 @@ typedef $MessagesCreateCompanionBuilder =
       Value<int> addressedMe,
       Value<int?> replyExpected,
       Value<String?> deadline,
+      Value<int?> needsYouVerdict,
+      Value<String?> needsYouReason,
       Value<int> rowid,
     });
 typedef $MessagesUpdateCompanionBuilder =
@@ -11070,6 +11198,8 @@ typedef $MessagesUpdateCompanionBuilder =
       Value<int> addressedMe,
       Value<int?> replyExpected,
       Value<String?> deadline,
+      Value<int?> needsYouVerdict,
+      Value<String?> needsYouReason,
       Value<int> rowid,
     });
 
@@ -11228,6 +11358,16 @@ class $MessagesFilterComposer extends Composer<_$BondDatabase, Messages> {
 
   ColumnFilters<String> get deadline => $composableBuilder(
     column: $table.deadline,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get needsYouVerdict => $composableBuilder(
+    column: $table.needsYouVerdict,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get needsYouReason => $composableBuilder(
+    column: $table.needsYouReason,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -11389,6 +11529,16 @@ class $MessagesOrderingComposer extends Composer<_$BondDatabase, Messages> {
     column: $table.deadline,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<int> get needsYouVerdict => $composableBuilder(
+    column: $table.needsYouVerdict,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get needsYouReason => $composableBuilder(
+    column: $table.needsYouReason,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $MessagesAnnotationComposer extends Composer<_$BondDatabase, Messages> {
@@ -11522,6 +11672,16 @@ class $MessagesAnnotationComposer extends Composer<_$BondDatabase, Messages> {
 
   GeneratedColumn<String> get deadline =>
       $composableBuilder(column: $table.deadline, builder: (column) => column);
+
+  GeneratedColumn<int> get needsYouVerdict => $composableBuilder(
+    column: $table.needsYouVerdict,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get needsYouReason => $composableBuilder(
+    column: $table.needsYouReason,
+    builder: (column) => column,
+  );
 }
 
 class $MessagesTableManager
@@ -11582,6 +11742,8 @@ class $MessagesTableManager
                 Value<int> addressedMe = const Value.absent(),
                 Value<int?> replyExpected = const Value.absent(),
                 Value<String?> deadline = const Value.absent(),
+                Value<int?> needsYouVerdict = const Value.absent(),
+                Value<String?> needsYouReason = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion(
                 source: source,
@@ -11614,6 +11776,8 @@ class $MessagesTableManager
                 addressedMe: addressedMe,
                 replyExpected: replyExpected,
                 deadline: deadline,
+                needsYouVerdict: needsYouVerdict,
+                needsYouReason: needsYouReason,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -11648,6 +11812,8 @@ class $MessagesTableManager
                 Value<int> addressedMe = const Value.absent(),
                 Value<int?> replyExpected = const Value.absent(),
                 Value<String?> deadline = const Value.absent(),
+                Value<int?> needsYouVerdict = const Value.absent(),
+                Value<String?> needsYouReason = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessagesCompanion.insert(
                 source: source,
@@ -11680,6 +11846,8 @@ class $MessagesTableManager
                 addressedMe: addressedMe,
                 replyExpected: replyExpected,
                 deadline: deadline,
+                needsYouVerdict: needsYouVerdict,
+                needsYouReason: needsYouReason,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

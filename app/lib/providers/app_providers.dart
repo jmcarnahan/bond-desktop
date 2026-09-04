@@ -28,6 +28,7 @@ import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
+import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
 import '../services/pipeline_progress.dart';
@@ -410,7 +411,17 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
   final worker = AiWorker(
     ref.watch(messageStoreProvider),
     handlers: [
-      // Extraction first, and it drains completely before either storyline
+      // First, and it drains completely before extraction starts. The verdict
+      // has to be ON the row before anything asks about it: extraction's draft
+      // pre-gate reads the message as it stands, and the settle pass asks the
+      // same row later in the drain. Running the two alongside each other would
+      // have half the mailbox pre-gated against a verdict that had not been
+      // written yet.
+      NeedsYouHandler(
+        ref.watch(messageStoreProvider),
+        activityLog: ref.watch(activityLogProvider),
+      ),
+      // Extraction next, and it drains completely before either storyline
       // handler starts. That order is the point: extraction is what writes the
       // embeddings both storyline passes compare, so running them alongside it
       // would have them clustering a mailbox half of which has no vector yet.
