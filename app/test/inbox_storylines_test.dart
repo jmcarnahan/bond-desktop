@@ -593,7 +593,7 @@ void main() {
       await seedSuggestion('c2', 'Confirm Friday', 'Friday works for me.');
       // What the × writes once the user has confirmed it: the draft survives,
       // its cards do not.
-      await store.dismissDraftOptions('email', 'c2');
+      await store.dismissDraftOptions('email', 'c2-m1');
 
       await openStoryline(tester, 'Website redesign');
       await tester.pump();

@@ -278,7 +278,6 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       // either is "could not read the local inbox".
       await _attention?.recomputeAll(sources: inboxSources);
       rows = await _store.loadConversations(sources: inboxSources);
-      await _enqueueDrafts();
     } catch (e) {
       // The database itself failed. There is no stale-but-valid answer to
       // fall back to beyond whatever is already on screen.
@@ -375,27 +374,18 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
   /// The settle pass: what the inbox does once both queues have drained.
   ///
-  /// [load] scores and enqueues BEFORE the pumps it starts have finished,
-  /// which is right for the frame the user is looking at and wrong for the
-  /// mail the model was still reading. A thread only crosses the draft
-  /// threshold once triage has said something about it, so scoring the
-  /// mailbox a second time here is what lets that thread be drafted in the
-  /// same cycle instead of waiting for the next sync — which on a quiet
-  /// afternoon is a minute away, and on a Teams-only session never comes.
+  /// [load] scores BEFORE the pumps it starts have finished, which is right
+  /// for the frame the user is looking at and wrong for the mail the model was
+  /// still reading — so the mailbox is scored a second time here, against what
+  /// the drain has since learned. The load-time
+  /// [AttentionService.recomputeAll] STAYS: it is the pass that makes a sender
+  /// correction show up in the frame the user made it in.
   ///
-  /// The load-time [AttentionService.recomputeAll] STAYS. It is the pass that
-  /// makes a sender correction show up in the frame the user made it in;
-  /// this one is about what the model learned since.
-  ///
-  /// The inner pump is deliberately NOT chained back into another settle pass.
-  /// One extra drain empties the drafts this pass just queued, and a settle
-  /// that re-settled itself would be a loop with a model call in it.
+  /// Nothing is enqueued here any more. Drafting is queued from the end of
+  /// extraction, per message, so the work lands mid-drain and the drafting
+  /// handler — last in the worker's order — picks it up on the same pass.
   Future<void> _afterPump() async {
     await _attention?.recomputeAll(sources: inboxSources);
-    final queued = await _enqueueDrafts();
-    if (queued > 0) {
-      await _aiWorker?.pump();
-    }
     // Above the `mounted` check on purpose: the drain's verdicts are written
     // by now, and the coordinator outlives this notifier — a settle owed to
     // the user must not be skipped because the list they were looking at went
@@ -414,8 +404,8 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   }
 
   /// The user's own loudness control, or the default when nothing has set it
-  /// or the read failed. One helper because the settle pass and the draft
-  /// enqueue must judge the same mailbox against the same number.
+  /// or the read failed. Read here rather than at the sweep so the settle pass
+  /// judges the mailbox against the same number the tiles do.
   Future<double> _attentionThreshold() async {
     try {
       final stored = await _store.getPref(attentionThresholdKey);
@@ -424,39 +414,6 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     } catch (e) {
       debugPrint('reading the attention threshold failed: $e');
       return AttentionTuning.defaultThreshold;
-    }
-  }
-
-  /// Queues a suggested reply for the threads that have earned one. Returns
-  /// how many threads it queued one for — what the settle pass reads to decide
-  /// whether there is anything new for the AI queue to drain.
-  ///
-  /// Immediately after the scoring pass, because it reads the scores that pass
-  /// just wrote. On EVERY load rather than only after a sync, and that is
-  /// cheap: [MessageStore.needsDraftKeys] excludes any thread that already has
-  /// a draft, so a thread appears here exactly once, and `requeueWork` only
-  /// revives rows that are already `done` or `error`. The queue itself does not
-  /// drain until something pumps it, which is the sync path.
-  ///
-  /// Nothing here sends anything. It writes work rows; the handler behind them
-  /// writes text into sqlite.
-  ///
-  /// It swallows its own failures. The rows are already read by the time this
-  /// runs, and letting a failed queue write fall into the "could not read the
-  /// local inbox" path would cost the user the mail they can see over a
-  /// suggestion they have not asked for yet.
-  Future<int> _enqueueDrafts() async {
-    try {
-      final threshold = await _attentionThreshold();
-      var queued = 0;
-      for (final row in await _store.needsDraftKeys(threshold: threshold)) {
-        await _store.requeueWork('draft', row.source, row.conversationKey);
-        queued++;
-      }
-      return queued;
-    } catch (e) {
-      debugPrint('draft enqueue failed: $e');
-      return 0;
     }
   }
 
@@ -488,6 +445,11 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
         conversationKey,
         ConversationState.done,
       );
+      // The other half of the needs-you exit, beside a synced reply: finishing
+      // a thread is the user saying the ask is answered, and the chip goes
+      // with it. After the state write, so a failed write leaves the row
+      // exactly as it was — chip included.
+      await _pipeline.clearNeedsYou(source, conversationKey);
       // On the success path only. Closing a thread is the quietest "I am done
       // with this" the user ever gives, and it is worth recording — but recording
       // one for a write that failed would teach the app from something that

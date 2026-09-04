@@ -248,9 +248,9 @@ ON CONFLICT(source, source_message_id) DO UPDATE SET
         '''
 INSERT OR IGNORE INTO message_progress (
   source, source_message_id, conversation_key, received_at,
-  ingest_state, triage_state, extract_state, storyline_state, settle_state,
-  outcome, dropped, drop_reason, created_at, updated_at
-) VALUES (?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ingest_state, triage_state, extract_state, storyline_state, draft_state,
+  settle_state, outcome, dropped, drop_reason, created_at, updated_at
+) VALUES (?, ?, ?, ?, 'done', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ''',
         variables: _args([
           source,
@@ -259,6 +259,11 @@ INSERT OR IGNORE INTO message_progress (
           receivedAt,
           gated ? 'skipped' : triageState,
           gated ? 'skipped' : 'pending',
+          gated ? 'skipped' : 'pending',
+          // Every stage the gate closes, drafting included: nothing will ever
+          // queue a reply for mail the gate threw out, and a stage left
+          // `pending` on a row that is already finished is a bar that never
+          // fills.
           gated ? 'skipped' : 'pending',
           gated ? 'done' : 'pending',
           gated ? 'dropped' : 'pending',
@@ -336,20 +341,30 @@ INSERT OR IGNORE INTO message_progress (
   }
 
   /// One thread, oldest first — the order the chat transcript renders in.
+  ///
+  /// [untilIso] cuts the thread off at a moment, inclusive of it. That is what
+  /// makes a per-message model call deterministic: the answer written for a
+  /// message must be written from the thread AS IT WAS when that message
+  /// landed, or the same message would be answered differently depending on
+  /// how far behind the queue happened to be. `COALESCE(received_at,
+  /// created_at)` because a message with no timestamp of its own is ordered by
+  /// when it was stored everywhere else too.
   Future<List<Message>> loadThread(
     String conversationKey, {
     List<String> sources = const ['email'],
+    String? untilIso,
   }) async {
     if (sources.isEmpty) return const [];
     final result = await db
         .customSelect(
           'SELECT * FROM messages '
           'WHERE conversation_key = ? AND source IN (${_placeholders(sources.length)}) '
+          '${untilIso == null ? '' : 'AND COALESCE(received_at, created_at) <= ? '}'
           // The tie-break matters now that one thread can hold two sources: two
           // messages sharing a second must render in ONE order, not whichever the
           // query plan felt like — same rule as storylineTimeline.
           'ORDER BY received_at ASC, source_message_id ASC',
-          variables: _args([conversationKey, ...sources]),
+          variables: _args([conversationKey, ...sources, ?untilIso]),
         )
         .get();
     return [for (final row in result) Message.fromRow(row.data)];
@@ -2641,15 +2656,14 @@ FROM storylines s''';
 
   // ── drafts ───────────────────────────────────────────────────────────
 
-  /// Writes the one draft a conversation is allowed, replacing whatever was
-  /// there.
+  /// Writes the one draft a MESSAGE is allowed, replacing whatever was there.
   ///
   /// A full replace rather than a merge because that is what regenerating
-  /// means: the new draft answers a possibly different message, and keeping
+  /// means: the second answer to a message supersedes the first, and keeping
   /// the old `graph_draft_id` would leave the Send button pointing at an
   /// Outlook draft holding text nobody can see any more. `created_at` survives
-  /// — it says when this conversation first got a suggestion, which is the one
-  /// fact a regenerate does not change.
+  /// — it says when this message first got a suggestion, which is the one fact
+  /// a regenerate does not change.
   ///
   /// `options_dismissed` goes back to 0 for the same reason `graph_draft_id`
   /// is nulled: a regenerate is a FRESH suggestion, and the user closing the
@@ -2671,8 +2685,8 @@ INSERT INTO drafts (
   graph_draft_id, web_link, created_at, updated_at, options_json,
   options_dismissed
 ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)
-ON CONFLICT(source, conversation_key) DO UPDATE SET
-  reply_to_message_id = excluded.reply_to_message_id,
+ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
+  conversation_key = excluded.conversation_key,
   body = excluded.body,
   evidence = excluded.evidence,
   status = excluded.status,
@@ -2697,27 +2711,68 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   }
 
   /// Closes the short replies without closing the draft. The row stays — the
-  /// same reason `status = 'dismissed'` keeps it — so the auto-enqueue does not
-  /// immediately write the identical options back.
+  /// same reason `status = 'dismissed'` keeps it — so nothing writes the
+  /// identical options straight back.
   Future<void> dismissDraftOptions(
     String source,
-    String conversationKey,
+    String replyToMessageId,
   ) async {
     await db.customUpdate(
       'UPDATE drafts SET options_dismissed = 1, updated_at = ? '
-      'WHERE source = ? AND conversation_key = ?',
-      variables: _args([_nowIso(), source, conversationKey]),
+      'WHERE source = ? AND reply_to_message_id = ?',
+      variables: _args([_nowIso(), source, replyToMessageId]),
     );
   }
 
+  /// The suggestion written against one message, or null.
+  Future<Map<String, Object?>?> getDraftForMessage(
+    String source,
+    String messageId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM drafts WHERE source = ? AND reply_to_message_id = ?',
+          variables: _args([source, messageId]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// The suggestion a THREAD would show: the one answering its newest inbound
+  /// message, and only that one.
+  ///
+  /// The subselect is what replaced the sync's delete-on-new-inbound. A draft
+  /// written against an older message is still stored — it answers what was
+  /// said then, and the history reads better with it — but it is not what this
+  /// returns, so a thread whose newest message has not been drafted yet reads
+  /// as having no suggestion rather than offering an answer to the
+  /// second-to-last thing that was said. Nothing has to be deleted for that to
+  /// be true.
+  ///
+  /// The subselect breaks ties on `source_message_id DESC`, the same way
+  /// [newestInboundMessage] breaks them, so both agree on which message the
+  /// thread is waiting on.
   Future<Map<String, Object?>?> getDraft(
     String source,
     String conversationKey,
   ) async {
     final result = await db
         .customSelect(
-          'SELECT * FROM drafts WHERE source = ? AND conversation_key = ?',
-          variables: _args([source, conversationKey]),
+          'SELECT d.* FROM drafts d '
+          'WHERE d.source = ? AND d.conversation_key = ? '
+          'AND d.reply_to_message_id = ('
+          '  SELECT m.source_message_id FROM messages m '
+          '   WHERE m.source = ? AND m.conversation_key = ? '
+          "     AND m.direction = 'inbound' "
+          '   ORDER BY m.received_at DESC, m.source_message_id DESC LIMIT 1'
+          ')',
+          variables: _args([
+            source,
+            conversationKey,
+            source,
+            conversationKey,
+          ]),
         )
         .get();
     if (result.isEmpty) return null;
@@ -2730,9 +2785,13 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
   /// Targeted like [writeTriage]: the edit that marks a draft touched must not
   /// blank the Outlook ids a save-to-drafts wrote, and a send must not rewrite
   /// the body the user is looking at.
+  ///
+  /// Keyed on the message, like every other write here. A thread-scoped UPDATE
+  /// would mark every suggestion the thread ever collected as sent, including
+  /// the answers to messages nobody sent anything about.
   Future<void> updateDraftStatus(
     String source,
-    String conversationKey, {
+    String replyToMessageId, {
     required String status,
     String? body,
     String? graphDraftId,
@@ -2754,18 +2813,21 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
       args.add(webLink);
     }
 
-    args.addAll([source, conversationKey]);
+    args.addAll([source, replyToMessageId]);
     await db.customUpdate(
       'UPDATE drafts SET ${sets.join(', ')} '
-      'WHERE source = ? AND conversation_key = ?',
+      'WHERE source = ? AND reply_to_message_id = ?',
       variables: _args(args),
     );
   }
 
-  Future<void> deleteDraft(String source, String conversationKey) async {
+  /// Throws away the suggestion written against one message — what a
+  /// regenerate does before it asks for another, since the handler returns
+  /// early when this message already has one.
+  Future<void> deleteDraftForMessage(String source, String messageId) async {
     await db.customUpdate(
-      'DELETE FROM drafts WHERE source = ? AND conversation_key = ?',
-      variables: _args([source, conversationKey]),
+      'DELETE FROM drafts WHERE source = ? AND reply_to_message_id = ?',
+      variables: _args([source, messageId]),
     );
   }
 
@@ -2843,59 +2905,6 @@ ON CONFLICT(source, conversation_key) DO UPDATE SET
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
-  }
-
-  /// The threads worth spending a model call drafting a reply for.
-  ///
-  /// Four filters, and each one is there to stop a specific waste: the thread
-  /// must actually be waiting on the user, it must not be filed away in Later, it
-  /// must have scored high enough to be worth answering, and it must not have a
-  /// draft already. That last one is what makes this safe to call on every list
-  /// load — a thread drops out of the list the moment it has a suggestion, so
-  /// the queue fills once rather than on every pass.
-  ///
-  /// A thread with no attention score at all is excluded: `NULL >= ?` is NULL,
-  /// which is not true. That is the wanted behaviour — a thread the scorer has
-  /// never reached has not earned a model call yet.
-  ///
-  /// ONE list across every source, ranked purely by score. A chat and a mail
-  /// compete for the same seven slots on equal terms — there is no per-source
-  /// quota, because "which thread most deserves a suggestion" is a question
-  /// about the thread, not about the connector it arrived through. Each row
-  /// carries its own source, since that is what the work item is written
-  /// against.
-  Future<List<({String source, String conversationKey})>> needsDraftKeys({
-    required double threshold,
-    int limit = 7,
-    List<String> sources = const ['email', 'teams'],
-  }) async {
-    if (sources.isEmpty) return const [];
-    final result = await db
-        .customSelect(
-          'SELECT c.source AS source, '
-          'c.conversation_key AS conversation_key FROM conversations c '
-          'LEFT JOIN conversation_ai ai '
-          '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
-          'LEFT JOIN drafts d '
-          '  ON d.source = c.source AND d.conversation_key = c.conversation_key '
-          "WHERE c.state = 'needs_reply' "
-          'AND c.source IN (${_placeholders(sources.length)}) '
-          // `IS NOT`, not `<>`: a thread with no bucket at all belongs here, and
-          // `NULL <> 'later'` would drop every one of them.
-          "AND ai.bucket IS NOT 'later' "
-          'AND ai.attention_score >= ? '
-          'AND d.conversation_key IS NULL '
-          'ORDER BY ai.attention_score DESC, c.conversation_key ASC LIMIT ?',
-          variables: _args([...sources, threshold, limit]),
-        )
-        .get();
-    return [
-      for (final row in result)
-        (
-          source: row.data['source'] as String? ?? '',
-          conversationKey: row.data['conversation_key'] as String? ?? '',
-        ),
-    ];
   }
 
   /// Every message of every member thread, merged into one chronology.
@@ -3133,10 +3142,11 @@ LEFT JOIN storylines s ON s.id = p.storyline_id''';
   /// somehow missed, which costs the tick and nothing else.
   ///
   /// A gate skip is the one state that finishes the WHOLE row rather than one
-  /// stage of it, and it has to be: the extract and storyline queues honour
-  /// the gate by never running, so nothing downstream is ever going to write
-  /// those columns. Only stages still `pending` are closed out, so a re-gate
-  /// after an extraction already landed does not erase what did happen.
+  /// stage of it, and it has to be: the extract, storyline and draft queues
+  /// honour the gate by never running, so nothing downstream is ever going to
+  /// write those columns. Only stages still `pending` are closed out, so a
+  /// re-gate after an extraction already landed does not erase what did
+  /// happen.
   Future<String?> writeTriageProgress(
     String source,
     String sourceMessageId, {
@@ -3157,6 +3167,9 @@ UPDATE message_progress SET
   storyline_state =
     CASE WHEN ?4 = 1 AND storyline_state = 'pending' THEN 'skipped'
          ELSE storyline_state END,
+  draft_state =
+    CASE WHEN ?4 = 1 AND draft_state = 'pending' THEN 'skipped'
+         ELSE draft_state END,
   settle_state = CASE WHEN ?4 = 1 THEN 'done' ELSE settle_state END,
   settle_at = CASE WHEN ?4 = 1 THEN ?2 ELSE settle_at END,
   outcome = CASE WHEN ?4 = 1 THEN 'dropped' ELSE outcome END,
@@ -3191,6 +3204,46 @@ RETURNING received_at
 UPDATE message_progress SET
   extract_state = ?1,
   extract_at = CASE WHEN ?1 IN $_terminalStates THEN ?2 ELSE extract_at END,
+  updated_at = ?2
+WHERE source = ?3 AND source_message_id = ?4
+RETURNING received_at
+''',
+      variables: _args([state, _nowIso(), source, sourceMessageId]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// Records where the reply suggestion got to, and closes the row when this
+  /// was the last thing it was waiting on. Same return contract as
+  /// [writeTriageProgress].
+  ///
+  /// The second half is why this is not just [writeExtractProgress] with
+  /// another column name. Drafting is the last stage of the five, so on nearly
+  /// every message this write is the one that finishes the pipeline — and
+  /// closing the outcome here means the bar completes the moment the
+  /// suggestion is in sqlite, rather than whenever the next settle sweep
+  /// happens to run. Guarded on `outcome = 'pending'` so a row the coordinator
+  /// already dropped keeps its verdict, and on every other stage being
+  /// terminal so an out-of-order draft cannot close a row still being worked.
+  Future<String?> writeDraftProgress(
+    String source,
+    String sourceMessageId, {
+    required String state,
+  }) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET
+  draft_state = ?1,
+  draft_at = CASE WHEN ?1 IN $_terminalStates THEN ?2 ELSE draft_at END,
+  outcome =
+    CASE WHEN outcome = 'pending'
+          AND ?1 IN $_terminalStates
+          AND settle_state = 'done'
+          AND triage_state IN $_terminalStates
+          AND extract_state IN $_terminalStates
+          AND storyline_state IN $_terminalStates
+         THEN (CASE WHEN dropped = 1 THEN 'dropped' ELSE 'done' END)
+         ELSE outcome END,
   updated_at = ?2
 WHERE source = ?3 AND source_message_id = ?4
 RETURNING received_at
@@ -3250,6 +3303,12 @@ RETURNING source_message_id, received_at
   /// Deliberately unguarded on `settle_state`: the sweep below may have closed
   /// this row as a backstop, and the coordinator's answer is the better one —
   /// it is the same call that decided whether to interrupt the user.
+  ///
+  /// `settle_state` and `needs_you` are written immediately and `outcome` is
+  /// not, and that split is the whole point: a toast must never wait on a
+  /// draft — the user is being told about mail, not about a suggestion — while
+  /// the row is not FINISHED until the suggestion (or the decision that none
+  /// is needed) is stored. [writeDraftProgress] closes it a moment later.
   Future<String?> writeSettledProgress(
     String source,
     String sourceMessageId, {
@@ -3263,7 +3322,10 @@ RETURNING source_message_id, received_at
 UPDATE message_progress SET
   settle_state = 'done',
   settle_at = ?1,
-  outcome = CASE WHEN ?2 = 1 THEN 'dropped' ELSE 'done' END,
+  outcome =
+    CASE WHEN draft_state IN $_terminalStates
+         THEN (CASE WHEN ?2 = 1 THEN 'dropped' ELSE 'done' END)
+         ELSE 'pending' END,
   dropped = ?2,
   drop_reason = CASE WHEN ?2 = 1 THEN ?3 ELSE drop_reason END,
   needs_you = ?4,
@@ -3297,25 +3359,44 @@ RETURNING received_at
   /// writes means what the tiles elsewhere mean. It is the only place a
   /// verdict is reached in SQL rather than by `notifyWorthy` — see
   /// [needsYouSql] for why that is, and for the one clause that differs.
+  ///
+  /// It closes two shapes of row, which is what the WHERE says: one nothing
+  /// ever settled, and one the coordinator settled while the draft was still
+  /// being written — that second one has `settle_state = 'done'` and an
+  /// `outcome` still `pending`, and without this it would never finish if the
+  /// drafting queue never got back to it.
+  ///
+  /// A row the coordinator already settled keeps the `needs_you` it settled
+  /// with. Recomputing it here would erase a Needs You the moment the user
+  /// READ the message, and the decision is that a chip once earned survives
+  /// reading — it clears when the user replies or marks the thread done, not
+  /// when their eyes pass over it.
   Future<List<({String source, String sourceMessageId, String receivedAt})>>
       sweepSettledProgress({required double threshold}) async {
     final rows = await db.customWriteReturning(
       '''
 UPDATE message_progress SET
-  settle_state = 'done',
-  settle_at = ?1,
+  settle_at = CASE WHEN settle_state = 'done' THEN settle_at ELSE ?1 END,
   outcome = CASE WHEN dropped = 1 THEN 'dropped' ELSE 'done' END,
-  needs_you = COALESCE((
-    SELECT ${needsYouSql(threshold: '?2')}
-      FROM messages m
-     WHERE m.source = message_progress.source
-       AND m.source_message_id = message_progress.source_message_id
-  ), 0),
-  updated_at = ?1
-WHERE settle_state <> 'done'
+  needs_you =
+    CASE WHEN settle_state = 'done' THEN needs_you
+         ELSE COALESCE((
+           SELECT ${needsYouSql(threshold: '?2')}
+             FROM messages m
+            WHERE m.source = message_progress.source
+              AND m.source_message_id = message_progress.source_message_id
+         ), 0) END,
+  updated_at = ?1,
+  -- Position is cosmetic: sqlite evaluates EVERY SET expression against the
+  -- row as it was before the update, so the clauses above that ask whether
+  -- the coordinator got here first read the old settle_state wherever this
+  -- line sits. Stated so nobody reorders defensively.
+  settle_state = 'done'
+WHERE (settle_state <> 'done' OR outcome = 'pending')
   AND triage_state IN $_terminalStates
   AND extract_state IN $_terminalStates
   AND storyline_state IN $_terminalStates
+  AND draft_state IN $_terminalStates
   AND EXISTS (
     SELECT 1 FROM conversation_ai ai
      WHERE ai.source = message_progress.source
@@ -3330,6 +3411,33 @@ RETURNING source, source_message_id, received_at
       for (final row in rows)
         (
           source: row.data['source'] as String? ?? '',
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
+  /// Takes the Needs You chip off every message of one thread, and returns the
+  /// ones it took it off.
+  ///
+  /// Thread-scoped because the exits are: a reply answers the whole
+  /// conversation, and so does marking it done. Guarded on `needs_you = 1` so
+  /// the RETURNING carries only rows that actually changed — the caller ticks
+  /// the bus per row, and a thread of forty read messages must not produce
+  /// forty ticks saying nothing happened.
+  Future<List<({String sourceMessageId, String receivedAt})>> clearNeedsYou(
+    String source,
+    String conversationKey,
+  ) async {
+    final rows = await db.customWriteReturning(
+      'UPDATE message_progress SET needs_you = 0, updated_at = ? '
+      'WHERE source = ? AND conversation_key = ? AND needs_you = 1 '
+      'RETURNING source_message_id, received_at',
+      variables: _args([_nowIso(), source, conversationKey]),
+    );
+    return [
+      for (final row in rows)
+        (
           sourceMessageId: row.data['source_message_id'] as String? ?? '',
           receivedAt: row.data['received_at'] as String? ?? '',
         ),

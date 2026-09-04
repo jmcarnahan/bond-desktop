@@ -6,7 +6,9 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -291,6 +293,62 @@ void main() {
       final notifier = ConversationsNotifier(store, sync);
       await notifier.markDone('email', 'c1');
       expect(notifier.state, isA<ConversationsInitial>());
+    });
+
+    test('and it takes the Needs You chip off the thread', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1');
+      await db.customUpdate(
+        'UPDATE message_progress SET needs_you = 1 '
+        'WHERE source_message_id = ?',
+        variables: [Variable('m1')],
+      );
+      final notifier = ConversationsNotifier(
+        store,
+        sync,
+        progress: PipelineProgress(store),
+      );
+      await notifier.load();
+
+      await notifier.markDone('email', 'c1');
+
+      // Finishing a thread is the user saying the ask is answered — the other
+      // half of the exit a synced reply takes.
+      final row = await db
+          .customSelect(
+            'SELECT needs_you FROM message_progress '
+            'WHERE source_message_id = ?',
+            variables: [Variable('m1')],
+          )
+          .getSingle();
+      expect(row.data['needs_you'], 0);
+    });
+
+    test('a failed write leaves the chip exactly where it was', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1');
+      await db.customUpdate(
+        'UPDATE message_progress SET needs_you = 1 '
+        'WHERE source_message_id = ?',
+        variables: [Variable('m1')],
+      );
+      final notifier = ConversationsNotifier(
+        UnwritableStore(db),
+        sync,
+        progress: PipelineProgress(store),
+      );
+      await notifier.load();
+
+      await notifier.markDone('email', 'c1');
+
+      final row = await db
+          .customSelect(
+            'SELECT needs_you FROM message_progress '
+            'WHERE source_message_id = ?',
+            variables: [Variable('m1')],
+          )
+          .getSingle();
+      expect(row.data['needs_you'], 1);
     });
   });
 

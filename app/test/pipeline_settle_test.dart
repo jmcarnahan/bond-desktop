@@ -16,11 +16,15 @@ import 'fixtures/test_db.dart';
 
 /// The settle pass — what the inbox does once its two queues have drained.
 ///
-/// The bug it closes: a thread only becomes worth drafting once triage has
-/// said something about it, and [ConversationsNotifier.load] scores and
-/// enqueues before the pumps it starts have finished. Without a second pass
-/// the draft waits for the next sync, which on a Teams-only session never
-/// arrives.
+/// What it is for: [ConversationsNotifier.load] scores the mailbox before the
+/// pumps it starts have finished, so the frame on screen is right and what the
+/// model learned a second later is not. The settle pass scores it again,
+/// closes out the rows the notification coordinator was never going to reach,
+/// and puts the result on screen.
+///
+/// It queues nothing. Drafting work is written from the end of extraction, per
+/// message, so it lands mid-drain and the drafting handler — last in the
+/// worker's order — takes it on the same pass.
 
 /// A [MailSync] that never touches a socket.
 class FakeSync implements MailSync {
@@ -240,45 +244,11 @@ void main() {
     expect(log.where((e) => e == 'read'), hasLength(2));
   });
 
-  test('a thread that crosses the threshold during triage drafts in the same '
-      'cycle', () async {
-    await seedThread();
-    // What triage does to a thread it decides is asking for an answer. Before
-    // this the thread is not draft-worthy at all: the load-time enqueue sees
-    // a waiting thread with no score.
-    final triage = FakeTriage(
-      store,
-      log,
-      onPumped: () async {
-        await store.setConversationState(
-          'email',
-          'conv-1',
-          ConversationState.needsReply,
-        );
-        await store.writeAttentionScore('email', 'conv-1', 0.9);
-      },
-    );
-    final worker = FakeWorker(store, log);
-    addTearDown(triage.dispose);
-    addTearDown(worker.dispose);
-
-    await notifierFor(
-      triage: triage,
-      aiWorker: worker,
-      attention: FakeAttention(store, log),
-    ).load();
-    await settle();
-
-    expect(await queuedDrafts(), ['conv-1']);
-    // And the queue is pumped a second time, so the draft this pass queued is
-    // written in this cycle rather than at the next sync.
-    expect(log.where((e) => e == 'ai'), hasLength(2));
-  });
-
-  test('with nothing to draft the queue is not pumped again', () async {
-    // A thread nothing is waiting on: no reply owed, no score. The settle
-    // pass rescores, finds nobody worth drafting for, and leaves the queue
-    // alone rather than paying a drain to discover the same thing.
+  test('the queue is pumped once — drafting rides the same drain', () async {
+    // Nothing here enqueues a draft, and the settle pass does not pump again
+    // to look for one: a settle that re-drained would be a loop with a model
+    // call in it, and the work drafting needs is written mid-drain by
+    // extraction anyway.
     await seedThread();
     final triage = FakeTriage(store, log);
     final worker = FakeWorker(store, log);
@@ -327,8 +297,10 @@ void main() {
     await notifier.refreshTeams();
     await settle();
 
-    expect(await queuedDrafts(), ['conv-1']);
-    expect(log.where((e) => e == 'ai'), hasLength(2));
+    // A Teams-only session never runs a mail sync, so this path is the only
+    // one that would ever score what the queues just learned.
+    expect(log.where((e) => e == 'recompute'), hasLength(3));
+    expect(log.where((e) => e == 'ai'), hasLength(1));
   });
 
   test('with no triage queue wired the AI queue still settles', () async {

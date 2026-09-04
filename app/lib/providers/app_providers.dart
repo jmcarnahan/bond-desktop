@@ -444,7 +444,9 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       StorylineRecruitHandler(storylines),
       // Last, and after both storyline passes: a draft reads the storyline
       // summary as background, so drafting before the sweep has run would
-      // write the one reply for this thread without it.
+      // write this message's reply without it. Last also means the work
+      // extraction queued at the top of this drain is picked up on the same
+      // pass rather than waiting for the next sync.
       //
       // The only handler still on the 27B. A draft is prose the user sends
       // under their own name — the one place the bigger model earns its
@@ -453,6 +455,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        progress: ref.watch(pipelineProgressProvider),
       ),
     ],
     gate: ref.watch(drainGateProvider),

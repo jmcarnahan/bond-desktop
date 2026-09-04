@@ -92,6 +92,7 @@ void main() {
       expect(row['triage_state'], 'pending');
       expect(row['extract_state'], 'pending');
       expect(row['storyline_state'], 'pending');
+      expect(row['draft_state'], 'pending');
       expect(row['settle_state'], 'pending');
       expect(row['outcome'], 'pending');
       expect(row['dropped'], 0);
@@ -126,6 +127,9 @@ void main() {
       expect(row['triage_state'], 'skipped');
       expect(row['extract_state'], 'skipped');
       expect(row['storyline_state'], 'skipped');
+      // Drafting with the rest: nothing will ever queue a reply for mail the
+      // gate threw out, so the bar stops here rather than waiting on it.
+      expect(row['draft_state'], 'skipped');
       expect(row['settle_state'], 'done');
       expect(row['outcome'], 'dropped');
       expect(row['dropped'], 1);
@@ -244,6 +248,9 @@ void main() {
       expect(row['triage_state'], 'skipped');
       expect(row['extract_state'], 'skipped');
       expect(row['storyline_state'], 'skipped');
+      // Drafting with the rest: nothing will ever queue a reply for mail the
+      // gate threw out, so the bar stops here rather than waiting on it.
+      expect(row['draft_state'], 'skipped');
       expect(row['settle_state'], 'done');
       expect(row['outcome'], 'dropped');
       expect(row['dropped'], 1);
@@ -350,9 +357,15 @@ void main() {
   });
 
   group('settling', () {
+    /// Everything but the drafting stage, which the tests below say their own
+    /// thing about: a settle only closes the row when the suggestion is in.
+    Future<void> finishDraft(String id) =>
+        progress.noteDraft('email', id, state: 'skipped');
+
     test('a message the user was told about is done and not dropped',
         () async {
       await ingest('m1');
+      await finishDraft('m1');
 
       await progress.noteSettled(
         'email',
@@ -372,6 +385,7 @@ void main() {
 
     test('one the user got to first is done, not dropped', () async {
       await ingest('m1');
+      await finishDraft('m1');
 
       await progress.noteSettled(
         'email',
@@ -391,6 +405,7 @@ void main() {
 
     test('one the app judged unworthy is dropped, with the reason', () async {
       await ingest('m1');
+      await finishDraft('m1');
 
       await progress.noteSettled(
         'email',
@@ -405,6 +420,66 @@ void main() {
       expect(row['dropped'], 1);
       expect(row['drop_reason'], 'not_worthy');
     });
+
+    test('the toast does not wait for the reply suggestion, the outcome does',
+        () async {
+      await ingest('m1');
+
+      await progress.noteSettled(
+        'email',
+        'm1',
+        needsYou: true,
+        reason: 'settled',
+        dropped: false,
+      );
+
+      // Everything the user is told about is written; the row is simply not
+      // finished, because the suggestion is not in sqlite yet.
+      final row = await progressOf('m1');
+      expect(row['settle_state'], 'done');
+      expect(row['needs_you'], 1);
+      expect(row['outcome'], 'pending');
+    });
+
+    test('and the draft write is what closes it, without a sweep', () async {
+      await ingest('m1');
+      await progress.noteTriage('email', 'm1', state: 'done');
+      await progress.noteExtract('email', 'm1', state: 'done');
+      await progress.noteStoryline('email', 'c1', state: 'done');
+      await progress.noteSettled(
+        'email',
+        'm1',
+        needsYou: false,
+        reason: 'read',
+        dropped: false,
+      );
+
+      await progress.noteDraft('email', 'm1', state: 'done');
+
+      // The bar completes the moment the suggestion lands, rather than at
+      // whatever distance the next settle sweep happens to be.
+      expect((await progressOf('m1'))['outcome'], 'done');
+    });
+
+    test('a draft landing early cannot close a row still being worked',
+        () async {
+      await ingest('m1');
+
+      await progress.noteDraft('email', 'm1', state: 'done');
+
+      final row = await progressOf('m1');
+      expect(row['draft_state'], 'done');
+      expect(row['outcome'], 'pending');
+    });
+
+    test('and one landing on a dropped row leaves the verdict alone',
+        () async {
+      await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
+
+      await progress.noteDraft('email', 'm1', state: 'skipped');
+
+      expect((await progressOf('m1'))['outcome'], 'dropped');
+    });
   });
 
   group('the settle sweep', () {
@@ -414,6 +489,7 @@ void main() {
       await progress.noteTriage('email', id, state: 'done');
       await progress.noteExtract('email', id, state: 'done');
       await progress.noteStoryline('email', 'c1', state: 'done');
+      await progress.noteDraft('email', id, state: 'skipped');
     }
 
     test('it closes a row whose stages are all finished', () async {
@@ -545,6 +621,131 @@ void main() {
       await progress.sweepSettled(threshold: 0.5);
 
       expect((await progressOf('m1'))['needs_you'], 0);
+    });
+    test('it waits for the reply suggestion too', () async {
+      await ingest('m1');
+      await progress.noteTriage('email', 'm1', state: 'done');
+      await progress.noteExtract('email', 'm1', state: 'done');
+      await progress.noteStoryline('email', 'c1', state: 'done');
+      await store.writeAttentionScore('email', 'c1', 0.9);
+
+      expect(await progress.sweepSettled(threshold: 0.5), 0);
+      expect((await progressOf('m1'))['settle_state'], 'pending');
+    });
+
+    test('it finishes a row that was settled and then left open', () async {
+      await ingest('m1');
+      await progress.noteTriage('email', 'm1', state: 'done');
+      await progress.noteExtract('email', 'm1', state: 'done');
+      await progress.noteStoryline('email', 'c1', state: 'done');
+      await store.writeAttentionScore('email', 'c1', 0.9);
+      await progress.noteSettled(
+        'email',
+        'm1',
+        needsYou: true,
+        reason: 'settled',
+        dropped: false,
+      );
+      // A quit between the draft stage landing and the outcome being closed —
+      // the one gap the draft write cannot close for itself. Written by hand
+      // because going through the recorder would close the row on the way.
+      await db.customUpdate(
+        "UPDATE message_progress SET draft_state = 'done' "
+        "WHERE source_message_id = 'm1'",
+      );
+
+      expect((await progressOf('m1'))['outcome'], 'pending');
+      expect(await progress.sweepSettled(threshold: 0.5), 1);
+      expect((await progressOf('m1'))['outcome'], 'done');
+    });
+
+    test('and leaves that row\'s verdict about the user exactly as it was',
+        () async {
+      await ingest('m1', urgency: 'high');
+      await finishStages('m1');
+      await store.writeAttentionScore('email', 'c1', 0.9);
+      await progress.noteSettled(
+        'email',
+        'm1',
+        needsYou: true,
+        reason: 'settled',
+        dropped: false,
+      );
+      // The user has since READ the message, which is what would make the
+      // SQL twin answer 0.
+      await db.customUpdate(
+        "UPDATE messages SET is_read = 1 WHERE source_message_id = 'm1'",
+      );
+
+      await progress.sweepSettled(threshold: 0.5);
+
+      // A chip once earned survives being read. It clears when the user
+      // replies or marks the thread done — never because their eyes passed
+      // over it.
+      expect((await progressOf('m1'))['needs_you'], 1);
+      expect((await progressOf('m1'))['settle_at'], isNotNull);
+    });
+  });
+
+  group('the needs-you exit', () {
+    test('it flips the whole thread and says which rows it flipped', () async {
+      await ingest('m1');
+      await ingest('m2', receivedAt: '2026-09-01T11:00:00Z');
+      await ingest('other', conversationKey: 'c2');
+      for (final id in ['m1', 'm2', 'other']) {
+        await db.customUpdate(
+          'UPDATE message_progress SET needs_you = 1 '
+          'WHERE source_message_id = ?',
+          variables: [Variable(id)],
+        );
+      }
+
+      final cleared = await store.clearNeedsYou('email', 'c1');
+
+      expect(
+        cleared.map((r) => r.sourceMessageId),
+        unorderedEquals(['m1', 'm2']),
+      );
+      expect(cleared.first.receivedAt, isNotEmpty);
+      expect((await progressOf('m1'))['needs_you'], 0);
+      expect((await progressOf('other'))['needs_you'], 1);
+    });
+
+    test('a row that was never asking is not reported as having changed',
+        () async {
+      await ingest('m1');
+
+      // Guarded on `needs_you = 1`, so a thread of forty read messages does
+      // not produce forty ticks saying nothing happened.
+      expect(await store.clearNeedsYou('email', 'c1'), isEmpty);
+    });
+
+    test('the recorder ticks once per row it actually cleared', () async {
+      await ingest('m1');
+      await db.customUpdate(
+        "UPDATE message_progress SET needs_you = 1 "
+        "WHERE source_message_id = 'm1'",
+      );
+
+      await progress.clearNeedsYou('email', 'c1');
+      await pumpEventQueue();
+
+      expect(ticks, hasLength(1));
+      expect(ticks.single.sourceMessageId, 'm1');
+      expect(ticks.single.receivedAt, '2026-09-01T10:00:00Z');
+      expect((await progressOf('m1'))['needs_you'], 0);
+    });
+
+    test('and the disabled recorder clears nothing', () async {
+      await ingest('m1');
+      await db.customUpdate(
+        "UPDATE message_progress SET needs_you = 1 "
+        "WHERE source_message_id = 'm1'",
+      );
+
+      await const PipelineProgress.disabled().clearNeedsYou('email', 'c1');
+
+      expect((await progressOf('m1'))['needs_you'], 1);
     });
   });
 

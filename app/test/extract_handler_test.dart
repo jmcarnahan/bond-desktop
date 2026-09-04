@@ -9,6 +9,7 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -639,6 +640,168 @@ void main() {
 
     test('handles text outside ASCII', () {
       expect(cardHash('café — naïve'), isNot(cardHash('cafe - naive')));
+    });
+  });
+
+  /// Extraction is what decides whether a message reaches the drafting model
+  /// at all, and it decides on the fast triage's own verdict — the row it
+  /// already has in hand. That gate is COARSE on purpose: the 27B behind the
+  /// queue makes the real call, and this only stops a backlog of newsletters
+  /// from buying hours of its time.
+  group('the drafting pre-gate', () {
+    /// The stage as `message_progress` holds it — the bar's fifth segment.
+    Future<String?> draftStateOf(String id, {String source = 'email'}) async =>
+        (await db
+                .customSelect(
+                  'SELECT draft_state FROM message_progress '
+                  'WHERE source = ? AND source_message_id = ?',
+                  variables: [Variable(source), Variable(id)],
+                )
+                .getSingle())
+            .data['draft_state'] as String?;
+
+    Future<List<String>> queuedDrafts() async => [
+          for (final row in await db
+              .customSelect(
+                "SELECT entity_id FROM work_items WHERE task_kind = 'draft' "
+                'ORDER BY entity_id',
+              )
+              .get())
+            row.data['entity_id'] as String,
+        ];
+
+    Future<void> triageSaid({
+      String id = 'm1',
+      bool replyExpected = false,
+      bool needsAction = false,
+      String urgency = 'normal',
+      String deadline = '',
+    }) =>
+        store.writeTriage(
+          'email',
+          id,
+          status: 'triaged',
+          result: TriageResult(
+            urgency: urgency,
+            category: 'work',
+            summary: 'what it says',
+            needsAction: needsAction,
+            actionItems: const [],
+            replyExpected: replyExpected,
+            deadline: deadline,
+          ),
+        );
+
+    Future<void> extract({String id = 'm1'}) => runOne(
+          ExtractHandler(
+            store,
+            FakeLlm([answer()]),
+            FakeEmbeddings().client,
+            progress: PipelineProgress(store),
+          ),
+          id: id,
+        );
+
+    test('a message somebody is waiting on is queued, by its own id',
+        () async {
+      await seedMessage();
+      await seedConversation();
+      await triageSaid(replyExpected: true);
+
+      await extract();
+
+      // The work is keyed on the MESSAGE — a suggestion answers one thing
+      // somebody said, not a thread.
+      expect(await queuedDrafts(), ['m1']);
+      expect(await draftStateOf('m1'), 'pending');
+    });
+
+    test('and so is one that asks the reader to do something', () async {
+      await seedMessage();
+      await triageSaid(needsAction: true);
+
+      await extract();
+
+      expect(await queuedDrafts(), ['m1']);
+    });
+
+    test('a loud message is queued on the noise alone', () async {
+      await seedMessage();
+      await triageSaid(urgency: 'urgent');
+
+      await extract();
+
+      expect(await queuedDrafts(), ['m1']);
+    });
+
+    test('and so is one that names a date', () async {
+      await seedMessage();
+      await triageSaid(deadline: 'Friday');
+
+      await extract();
+
+      expect(await queuedDrafts(), ['m1']);
+    });
+
+    test('a message nobody is waiting on gets no work row and no wait',
+        () async {
+      await seedMessage();
+      await seedConversation();
+      await triageSaid();
+
+      await extract();
+
+      // Skipped rather than pending: no work row will ever be written for it,
+      // and a bar that waited would wait forever.
+      expect(await queuedDrafts(), isEmpty);
+      expect(await draftStateOf('m1'), 'skipped');
+    });
+
+    test('a message that vanished is skipped, not left waiting', () async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm1',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+      await db.customUpdate(
+        "DELETE FROM messages WHERE source_message_id = 'm1'",
+      );
+
+      await extract();
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(await draftStateOf('m1'), 'skipped');
+    });
+
+    test('and a gated one is skipped at the same point extraction is',
+        () async {
+      await seedMessage();
+      await store.writeTriage('email', 'm1',
+          status: 'skipped', gateReason: 'newsletter');
+
+      await extract();
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(await draftStateOf('m1'), 'skipped');
+    });
+
+    test('the user\'s own mail is never queued to be answered', () async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'o1',
+        'conversation_key': 'conv-1',
+        'direction': 'outbound',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'Sent it over. — Jo',
+      });
+      await triageSaid(id: 'o1', replyExpected: true);
+
+      await extract(id: 'o1');
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(await draftStateOf('o1'), 'skipped');
     });
   });
 

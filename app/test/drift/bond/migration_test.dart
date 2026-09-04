@@ -529,6 +529,113 @@ void main() {
     expect(rows.single.data['storyline_id'], 'sl-a');
   });
 
+  test('v8 to v9 re-keys the drafts on the message each one answers',
+      () async {
+    final schema = await verifier.schemaAt(8);
+    // Two threads, one draft each — the most a v8 mailbox could hold, since
+    // the old key was the thread.
+    schema.rawDatabase.execute("""
+      INSERT INTO drafts (source, conversation_key, reply_to_message_id, body,
+        evidence, status, graph_draft_id, web_link, created_at, updated_at,
+        options_json, options_dismissed)
+      VALUES
+        ('email', 'c-answered', 'm-answered', 'Friday works.', 'She asked.',
+          'suggested', 'g-1', 'https://outlook/g-1', 't1', 't2',
+          '[{"stance":"Confirm Friday","body":"Friday works."}]', 1),
+        ('teams', 'chat-1', 'chat-1-m1', 'Sending it now.', NULL, 'dismissed',
+          NULL, NULL, 't1', 't2', NULL, 0);
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 9);
+    addTearDown(db.close);
+
+    final rows = await db
+        .customSelect('SELECT * FROM drafts ORDER BY reply_to_message_id')
+        .get();
+    expect(rows, hasLength(2));
+    // Every column survives the recreate, the Outlook ids and the options
+    // included — a draft the user had saved to Outlook must still point at it.
+    final mail = rows.last.data;
+    expect(mail['conversation_key'], 'c-answered');
+    expect(mail['reply_to_message_id'], 'm-answered');
+    expect(mail['body'], 'Friday works.');
+    expect(mail['evidence'], 'She asked.');
+    expect(mail['status'], 'suggested');
+    expect(mail['graph_draft_id'], 'g-1');
+    expect(mail['web_link'], 'https://outlook/g-1');
+    expect(mail['created_at'], 't1');
+    expect(mail['updated_at'], 't2');
+    expect(
+      mail['options_json'],
+      '[{"stance":"Confirm Friday","body":"Friday works."}]',
+    );
+    expect(mail['options_dismissed'], 1);
+    expect(rows.first.data['conversation_key'], 'chat-1');
+
+    // The key really moved: two answers on one thread is now a legal pair of
+    // rows, and it would have collided under the old primary key.
+    await db.customStatement(
+      "INSERT INTO drafts (source, conversation_key, reply_to_message_id, "
+      "body, status, created_at, updated_at, options_dismissed) "
+      "VALUES ('email', 'c-answered', 'm-later', 'And Monday too.', "
+      "'suggested', 't3', 't3', 0)",
+    );
+    final onThread = await db
+        .customSelect(
+          "SELECT COUNT(*) AS c FROM drafts WHERE conversation_key = 'c-answered'",
+        )
+        .getSingle();
+    expect(onThread.data['c'], 2);
+  });
+
+  test('v8 to v9 reads the drafting stage off the drafts that exist',
+      () async {
+    final schema = await verifier.schemaAt(8);
+    schema.rawDatabase.execute("""
+      INSERT INTO drafts (source, conversation_key, reply_to_message_id, body,
+        status, created_at, updated_at, options_dismissed)
+      VALUES ('email', 'c-answered', 'm-answered', 'Friday works.',
+        'suggested', 't', 't', 0);
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO message_progress (source, source_message_id,
+        conversation_key, received_at, ingest_state, triage_state,
+        extract_state, storyline_state, settle_state, outcome, dropped,
+        needs_you, created_at, updated_at)
+      VALUES
+        ('email', 'm-answered', 'c-answered', '2026-09-01T10:00:00Z', 'done',
+          'done', 'done', 'done', 'done', 'done', 0, 1, 't', 't'),
+        ('email', 'm-quiet', 'c-quiet', '2026-09-01T09:00:00Z', 'done',
+          'done', 'done', 'done', 'done', 'done', 0, 0, 't', 't'),
+        ('email', 'm-open', 'c-open', '2026-09-01T08:00:00Z', 'done',
+          'done', 'pending', 'pending', 'pending', 'pending', 0, 0, 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 9);
+    addTearDown(db.close);
+
+    Future<Map<String, Object?>> progressOf(String id) async => (await db
+            .customSelect(
+                'SELECT * FROM message_progress WHERE source_message_id = ?',
+                variables: [Variable(id)])
+            .getSingle())
+        .data;
+
+    expect((await progressOf('m-answered'))['draft_state'], 'done');
+    expect((await progressOf('m-quiet'))['draft_state'], 'skipped');
+    // The open row is terminal too, and deliberately: nothing will ever queue
+    // draft work for a message stored before this version, and 'pending' would
+    // park its bar forever.
+    expect((await progressOf('m-open'))['draft_state'], 'skipped');
+    // Nothing is stamped — this app did not watch the history it is
+    // describing.
+    for (final id in ['m-answered', 'm-quiet', 'm-open']) {
+      expect((await progressOf(id))['draft_at'], null);
+    }
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

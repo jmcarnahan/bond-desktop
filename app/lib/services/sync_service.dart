@@ -423,12 +423,6 @@ class SyncService implements MailSync {
         if (!firstSighting) continue;
         newMessages++;
 
-        // A draft answers the message that was newest when the model wrote it.
-        // The moment a newer inbound message lands, that draft is a reply to
-        // the wrong thing — so it goes, and the enqueue on the next list load
-        // writes a fresh one against what the sender actually just said.
-        if (!outbound) await _store.deleteDraft(_source, key);
-
         // Spelled out rather than `putIfAbsent`, which takes a synchronous
         // factory and the seed read is a query now.
         var entry = work[key];
@@ -452,7 +446,13 @@ class SyncService implements MailSync {
           subject: subject,
           preview: preview,
         );
-        if (resolvesAsk) entry.clearCta();
+        if (resolvesAsk) {
+          entry.clearCta();
+          // And the chip goes with the CTA. A reply the user sent — from here,
+          // from Outlook, from a phone — is what takes a thread off the Needs
+          // You list; reading it never was.
+          await _progress.clearNeedsYou(_source, key);
+        }
         // Whoever is on the other end: the sender of mail that came in, the
         // recipients of mail that went out. Never the user.
         if (outbound) {

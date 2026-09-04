@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 8;
+  int get schemaVersion => 9;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -241,6 +241,104 @@ class BondDatabase extends _$BondDatabase {
                   'ON message_vectors(indexed_at)',
                 );
                 await customStatement(_backfillProgress);
+              },
+              // v9 — a suggested reply belongs to the message it answers.
+              // `drafts` is re-keyed from the thread to the message, and
+              // `message_progress` grows the stage that says where that reply
+              // got to.
+              //
+              // The re-key is a table recreate because sqlite cannot alter a
+              // primary key, and it is guarded on the key itself rather than
+              // on a column: every column here already exists, so the only
+              // thing that tells a first run from a replay over a torn state
+              // is which columns the table's pk is made of.
+              //
+              // `INSERT OR IGNORE` is the other half of that guard. Message
+              // ids are unique within a source, so a mailbox holding one draft
+              // per thread cannot collide on the new key — but a replay that
+              // half-ran must not fail on rows it already copied.
+              //
+              // The backfill writes a terminal state for EVERY row, open ones
+              // included. Nothing will ever queue draft work for a message
+              // stored before this version, so 'pending' would park those bars
+              // forever; 'done' where a draft answers the message and
+              // 'skipped' where none does is what the rows themselves say.
+              // `draft_at` stays NULL for the v8 reason: this app did not
+              // watch the history it is describing.
+              from8To9: (m, schema) async {
+                final pk = await customSelect(
+                  "SELECT name FROM pragma_table_info('drafts') WHERE pk > 0",
+                ).get();
+                final keyedByMessage = pk.any(
+                  (row) => row.data['name'] == 'reply_to_message_id',
+                );
+                if (!keyedByMessage) {
+                  await customStatement('''
+CREATE TABLE drafts_new (
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  reply_to_message_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  evidence TEXT,
+  status TEXT NOT NULL DEFAULT 'suggested',
+  graph_draft_id TEXT,
+  web_link TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  options_json TEXT,
+  options_dismissed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source, reply_to_message_id)
+) STRICT''');
+                  await customStatement('''
+INSERT OR IGNORE INTO drafts_new (
+  source, conversation_key, reply_to_message_id, body, evidence, status,
+  graph_draft_id, web_link, created_at, updated_at, options_json,
+  options_dismissed
+)
+SELECT
+  source, conversation_key, reply_to_message_id, body, evidence, status,
+  graph_draft_id, web_link, created_at, updated_at, options_json,
+  options_dismissed
+FROM drafts''');
+                  await customStatement('DROP TABLE drafts');
+                  await customStatement(
+                    'ALTER TABLE drafts_new RENAME TO drafts',
+                  );
+                }
+                // Hand-written with IF NOT EXISTS for the v6 reason: the
+                // generated `Index` entities carry bare `CREATE INDEX`, which
+                // throws on a replay over a torn state.
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_drafts_conv '
+                  'ON drafts(source, conversation_key)',
+                );
+                // One guard per column, the v3–v5 discipline: a quit between
+                // the two ALTERs must not leave a replay that skips the
+                // second because the first already exists.
+                if (!await _columnExists('message_progress', 'draft_state')) {
+                  await m.addColumn(
+                    schema.messageProgress,
+                    schema.messageProgress.draftState,
+                  );
+                }
+                if (!await _columnExists('message_progress', 'draft_at')) {
+                  await m.addColumn(
+                    schema.messageProgress,
+                    schema.messageProgress.draftAt,
+                  );
+                }
+                // Unguarded, because it is idempotent and a guard would be a
+                // hole: between a torn run and its replay the app never
+                // opened, so re-deriving every row's answer changes nothing —
+                // while skipping it on a replay that got the columns in would
+                // leave the default 'pending' parked forever.
+                await customStatement('''
+UPDATE message_progress SET draft_state = CASE
+  WHEN EXISTS (
+    SELECT 1 FROM drafts d
+     WHERE d.source = message_progress.source
+       AND d.reply_to_message_id = message_progress.source_message_id
+  ) THEN 'done' ELSE 'skipped' END''');
               },
             ),
           ),

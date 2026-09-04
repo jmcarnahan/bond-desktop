@@ -78,6 +78,11 @@ class ExtractHandler extends WorkHandler {
         ..noteStatus('skipped')
         ..note({'reason': 'deleted'});
       await _pipeline.noteExtract(source, id, state: 'skipped');
+      // Drafting is enqueued from the end of this method, so an early return
+      // is also the last word on whether a reply will ever be suggested. The
+      // stage is closed here rather than left `pending`, or the bar would wait
+      // forever on work nothing is going to queue.
+      await _pipeline.noteDraft(source, id, state: 'skipped');
       return;
     }
 
@@ -97,6 +102,7 @@ class ExtractHandler extends WorkHandler {
         ..noteStatus('skipped')
         ..note({'reason': 'gated'});
       await _pipeline.noteExtract(source, id, state: 'skipped');
+      await _pipeline.noteDraft(source, id, state: 'skipped');
       return;
     }
 
@@ -126,6 +132,32 @@ class ExtractHandler extends WorkHandler {
     await _fileBucket(source, row, result);
     await _refreshCard(source, row, result);
     await _embedMessage(source, row);
+    await _queueDraft(source, id, row);
+  }
+
+  /// Puts this message in front of the drafting model, or closes its draft
+  /// stage without one.
+  ///
+  /// [asksForAReply] is a PRE-GATE and nothing more. The verdict that decides
+  /// whether a suggestion is written comes from the 27B behind this queue,
+  /// which reads the whole conversation; this only decides which messages are
+  /// worth asking about — cost control, so a two-hundred-message backlog does
+  /// not spend hours of the big model's time on newsletters. If it proves too
+  /// tight, this is the line to widen: the false negatives are silent, and a
+  /// message it drops here is never drafted for at all.
+  ///
+  /// A message it drops is `skipped`, not left waiting: no work row will ever
+  /// be written for it, and a bar that waited would wait forever.
+  Future<void> _queueDraft(
+    String source,
+    String id,
+    Map<String, Object?> row,
+  ) async {
+    if (asksForAReply(row)) {
+      await _store.enqueueWork('draft', source, id);
+      return;
+    }
+    await _pipeline.noteDraft(source, id, state: 'skipped');
   }
 
   /// Gives this ONE message its search vector, while the row is already in
@@ -314,6 +346,31 @@ class ExtractHandler extends WorkHandler {
     }
     return names;
   }
+}
+
+/// Whether a stored message looks, on its own row, like something the user
+/// might have to answer.
+///
+/// Four signals, all written by the fast triage, and any one of them is
+/// enough: the sender is waiting, the reader has to do something, the message
+/// is loud, or it names a date. Read off the row rather than re-judged,
+/// because the point is to be cheap — the expensive judgement is the model
+/// call this gate decides whether to spend.
+///
+/// Outbound mail answers false. The user's own message needs no reply from
+/// them, and extraction only ever sees inbound rows anyway, so this is a guard
+/// rather than a case.
+///
+/// The two flags come back as INTEGERs — sqlite has no bool, and a STRICT
+/// column holds 0 or 1 — so both are compared against 1 rather than trusted to
+/// be truthy.
+bool asksForAReply(Map<String, Object?> row) {
+  if (row['direction'] != 'inbound') return false;
+  return row['reply_expected'] == 1 ||
+      row['needs_action'] == 1 ||
+      row['urgency'] == 'urgent' ||
+      row['urgency'] == 'high' ||
+      (row['deadline'] as String?)?.isNotEmpty == true;
 }
 
 /// The text a conversation is embedded from.

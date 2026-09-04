@@ -813,10 +813,14 @@ void main() {
     // chat now drafts through the same queue, so a suggestion left standing
     // over a newer message would be a reply to the wrong thing in either inbox.
 
-    Future<void> seedDraft({String key = 'chat-1'}) => store.upsertDraft(
+    Future<void> seedDraft({
+      String key = 'chat-1',
+      String messageId = 'm1',
+    }) =>
+        store.upsertDraft(
           source: 'teams',
           conversationKey: key,
-          replyToMessageId: 'm1',
+          replyToMessageId: messageId,
           body: 'Sending it over this afternoon.',
           optionsJson: '[{"stance":"Confirm","body":"On its way."}]',
         );
@@ -838,14 +842,16 @@ void main() {
       await build().syncNow();
     });
 
-    test('a NEW inbound chat message deletes that chat\'s draft', () async {
+    test('a NEW inbound chat message takes the old suggestion out of reach',
+        () async {
       await seedDraft();
 
       await syncAgain([_message(id: 'm2', at: _iso(const Duration(hours: 1)))]);
 
-      // The whole row goes, so the short replies go with it — they answered
-      // the message that is no longer the newest one.
+      // The chat is waiting on m2, which has no answer yet — so it offers
+      // none, short replies included. The answer to m1 is untouched on disk.
       expect(await store.getDraft('teams', 'chat-1'), isNull);
+      expect(await store.getDraftForMessage('teams', 'm1'), isNotNull);
     });
 
     test('the user\'s own message does not', () async {
@@ -876,7 +882,14 @@ void main() {
     });
 
     test('and it leaves another chat\'s draft alone', () async {
-      await seedDraft(key: 'chat-2');
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'chat-2-m1',
+        'conversation_key': 'chat-2',
+        'direction': 'inbound',
+        'received_at': _iso(const Duration(hours: 3)),
+      });
+      await seedDraft(key: 'chat-2', messageId: 'chat-2-m1');
 
       await syncAgain([_message(id: 'm2', at: _iso(const Duration(hours: 1)))]);
 

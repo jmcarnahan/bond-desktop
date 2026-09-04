@@ -465,6 +465,11 @@ void main() {
             : null,
       );
       await store.writeAttentionScore('email', 'c1', attentionScore);
+      // The pipeline has finished with it, drafting included — a settle
+      // writes the verdict either way, but the row is only CLOSED once the
+      // reply suggestion (or the decision that none is needed) is stored, and
+      // these tests are about the verdict.
+      await progress.noteDraft('email', 'm1', state: 'skipped');
     }
 
     NotificationCoordinator coordinatorAt(DateTime now) {

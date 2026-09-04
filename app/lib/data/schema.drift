@@ -241,12 +241,22 @@ CREATE TABLE app_prefs (
   value TEXT NOT NULL
 ) STRICT;
 
--- One draft per conversation, and the message it answers.
+-- One suggested reply, and the MESSAGE it answers.
 --
--- `reply_to_message_id` is what makes a draft falsifiable: a reply written
--- against a message that is no longer the newest inbound one is stale, and the
--- sync deletes it rather than letting the user send an answer to the
--- second-to-last thing that was said.
+-- The key is the message rather than the thread, because that is what a
+-- suggestion actually is: an answer to one thing somebody said. A thread that
+-- gets a second question earns a second suggestion instead of having the
+-- first overwritten, and the answer to a message stays readable beside the
+-- message it belongs to however long the thread runs on.
+--
+-- `conversation_key` rides along as a column so a thread can find its newest
+-- suggestion in one indexed read — `ix_drafts_conv` below — without walking
+-- the messages table to learn which thread each draft came from.
+--
+-- Staleness needs no sweep under this key. A reply written against the
+-- second-to-last thing that was said is simply not the row the thread's
+-- newest inbound message points at, so the read scopes itself and no sync
+-- has to delete anything to keep a wrong answer off the screen.
 --
 -- `graph_draft_id` / `web_link` are null until the draft has been pushed to
 -- Outlook, which only happens on the user's own click.
@@ -268,18 +278,18 @@ CREATE TABLE drafts (
   -- `options_json` is a JSON array of at most two ready-to-send short replies,
   -- `[{"stance": "…", "body": "…"}]`, written by the same model call that
   -- writes `body` — the long form. A column rather than a table because
-  -- nothing ever queries INTO the options, and a second table would have to be
-  -- keyed by something other than (source, conversation_key), breaking the
-  -- one-draft-per-conversation primary key that `needsDraftKeys` and the
-  -- sync's draft invalidation both rely on.
+  -- nothing ever queries INTO the options, and a second table keyed by the
+  -- same message would be a second row saying what this one already says.
   --
   -- `options_dismissed` keeps the row when the user closes the suggestions,
   -- the same trick `status = 'dismissed'` plays for the long form: deleting it
   -- would let the auto-enqueue write the identical options straight back.
   options_json TEXT,
   options_dismissed INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (source, conversation_key)
+  PRIMARY KEY (source, reply_to_message_id)
 ) STRICT;
+
+CREATE INDEX ix_drafts_conv ON drafts(source, conversation_key);
 
 -- Per-message notification state: admitted 'pending', settled exactly once to
 -- 'notified' or 'suppressed'. `reason` is diagnostic only (settled|deadline|
@@ -345,6 +355,17 @@ CREATE TABLE message_progress (
   urgency TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  -- Migration-added columns sit AFTER the originals, for the reason the
+  -- drafts table states: ALTER TABLE appends, so this is the only position
+  -- where an upgraded install and a fresh one get identical table_info.
+  --
+  -- Drafting is a stage like any other and reads in the same vocabulary —
+  -- pending|running|done|skipped|error. `skipped` covers both messages
+  -- nothing will ever draft for and the ones the model read and decided need
+  -- no answer: either way the stage has finished, and a bar that waited for a
+  -- reply nobody is going to write would wait forever.
+  draft_state TEXT NOT NULL DEFAULT 'pending',
+  draft_at TEXT,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
 

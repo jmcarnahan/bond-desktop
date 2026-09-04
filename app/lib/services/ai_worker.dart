@@ -122,10 +122,10 @@ class AiWorker {
   final DrainGate _gate;
   final ActivityLog _log;
 
-  /// Only ever told about `extract`, and only about the two ways it can end
-  /// badly. Every other stage writes its own progress from inside its handler;
-  /// what a handler cannot see is the worker deciding, after it threw, whether
-  /// that was a park or a failure.
+  /// Only ever told about the two ways an item can end BADLY. Every stage
+  /// writes its own progress from inside its handler; what a handler cannot
+  /// see is the worker deciding, after it threw, whether that was a park or a
+  /// failure.
   final PipelineProgress _pipeline;
 
   final StreamController<WorkProgress> _progress =
@@ -422,6 +422,9 @@ class AiWorker {
     if (kind == 'extract') {
       await _pipeline.noteExtract(source, id, state: 'pending');
     }
+    if (kind == 'draft') {
+      await _pipeline.noteDraft(source, id, state: 'pending');
+    }
     await _log.record(
       kind,
       status: 'parked',
@@ -465,6 +468,12 @@ class AiWorker {
         id,
         state: fatal ? 'error' : 'pending',
       );
+    }
+    // The drafting handler writes `running` at entry and never gets to speak
+    // again once it throws, so the same two states have to come from here —
+    // and for this kind, too, the entity id IS the message id.
+    if (kind == 'draft') {
+      await _pipeline.noteDraft(source, id, state: fatal ? 'error' : 'pending');
     }
     // The storyline handler only speaks on success — an exception never
     // reaches its switch — so the worker has to say when the retries are

@@ -117,6 +117,23 @@ class PipelineProgress {
         ),
       );
 
+  Future<void> noteDraft(
+    String source,
+    String sourceMessageId, {
+    required String state,
+  }) =>
+      _one(
+        source,
+        sourceMessageId,
+        'draft',
+        state,
+        (store) => store.writeDraftProgress(
+          source,
+          sourceMessageId,
+          state: state,
+        ),
+      );
+
   /// One outcome for a whole thread — the grain the storyline queue works at.
   /// Ticks once per message it actually moved.
   Future<void> noteStoryline(
@@ -170,6 +187,39 @@ class PipelineProgress {
           dropped: dropped,
         ),
       );
+
+  /// Takes the Needs You chip off a thread the user has answered or finished,
+  /// and says so per message.
+  ///
+  /// The chip is earned at settle time and survives being read; what clears it
+  /// is the user actually doing something about the thread — a reply synced
+  /// back from anywhere, or a thread marked done.
+  ///
+  /// The ticks go out under `settle`, which is nominal: the stage did not move
+  /// and there is no stage for "the user answered". The live screen re-reads
+  /// the whole row behind any tick, so the label only has to be one the
+  /// listeners already know.
+  Future<void> clearNeedsYou(String source, String conversationKey) async {
+    final store = _store;
+    if (store == null) return;
+    try {
+      final cleared = await store.clearNeedsYou(source, conversationKey);
+      for (final row in cleared) {
+        _bus.publish(
+          ProgressTick(
+            source: source,
+            sourceMessageId: row.sourceMessageId,
+            stage: 'settle',
+            state: 'done',
+            receivedAt: row.receivedAt,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('progress: needs-you clear $source/$conversationKey '
+          'failed: $e');
+    }
+  }
 
   /// Closes out every row the coordinator was never going to settle. Returns
   /// how many that was — nothing reads it in the app, and the tests do.

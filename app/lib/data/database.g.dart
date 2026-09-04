@@ -7895,7 +7895,7 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
   }
 
   @override
-  Set<GeneratedColumn> get $primaryKey => {source, conversationKey};
+  Set<GeneratedColumn> get $primaryKey => {source, replyToMessageId};
   @override
   Draft map(Map<String, dynamic> data, {String? tablePrefix}) {
     final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
@@ -7960,7 +7960,7 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
   bool get isStrict => true;
   @override
   List<String> get customConstraints => const [
-    'PRIMARY KEY(source, conversation_key)',
+    'PRIMARY KEY(source, reply_to_message_id)',
   ];
   @override
   bool get dontWriteConstraints => true;
@@ -7985,10 +7985,8 @@ class Draft extends DataClass implements Insertable<Draft> {
   /// `options_json` is a JSON array of at most two ready-to-send short replies,
   /// `[{"stance": "…", "body": "…"}]`, written by the same model call that
   /// writes `body` — the long form. A column rather than a table because
-  /// nothing ever queries INTO the options, and a second table would have to be
-  /// keyed by something other than (source, conversation_key), breaking the
-  /// one-draft-per-conversation primary key that `needsDraftKeys` and the
-  /// sync's draft invalidation both rely on.
+  /// nothing ever queries INTO the options, and a second table keyed by the
+  /// same message would be a second row saying what this one already says.
   ///
   /// `options_dismissed` keeps the row when the user closes the suggestions,
   /// the same trick `status = 'dismissed'` plays for the long form: deleting it
@@ -9209,6 +9207,29 @@ class MessageProgress extends Table
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _draftStateMeta = const VerificationMeta(
+    'draftState',
+  );
+  late final GeneratedColumn<String> draftState = GeneratedColumn<String>(
+    'draft_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _draftAtMeta = const VerificationMeta(
+    'draftAt',
+  );
+  late final GeneratedColumn<String> draftAt = GeneratedColumn<String>(
+    'draft_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -9232,6 +9253,8 @@ class MessageProgress extends Table
     urgency,
     createdAt,
     updatedAt,
+    draftState,
+    draftAt,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -9410,6 +9433,18 @@ class MessageProgress extends Table
     } else if (isInserting) {
       context.missing(_updatedAtMeta);
     }
+    if (data.containsKey('draft_state')) {
+      context.handle(
+        _draftStateMeta,
+        draftState.isAcceptableOrUnknown(data['draft_state']!, _draftStateMeta),
+      );
+    }
+    if (data.containsKey('draft_at')) {
+      context.handle(
+        _draftAtMeta,
+        draftAt.isAcceptableOrUnknown(data['draft_at']!, _draftAtMeta),
+      );
+    }
     return context;
   }
 
@@ -9503,6 +9538,14 @@ class MessageProgress extends Table
         DriftSqlType.string,
         data['${effectivePrefix}updated_at'],
       )!,
+      draftState: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}draft_state'],
+      )!,
+      draftAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}draft_at'],
+      ),
     );
   }
 
@@ -9544,6 +9587,18 @@ class MessageProgressData extends DataClass
   final String? urgency;
   final String createdAt;
   final String updatedAt;
+
+  /// Migration-added columns sit AFTER the originals, for the reason the
+  /// drafts table states: ALTER TABLE appends, so this is the only position
+  /// where an upgraded install and a fresh one get identical table_info.
+  ///
+  /// Drafting is a stage like any other and reads in the same vocabulary —
+  /// pending|running|done|skipped|error. `skipped` covers both messages
+  /// nothing will ever draft for and the ones the model read and decided need
+  /// no answer: either way the stage has finished, and a bar that waited for a
+  /// reply nobody is going to write would wait forever.
+  final String draftState;
+  final String? draftAt;
   const MessageProgressData({
     required this.source,
     required this.sourceMessageId,
@@ -9566,6 +9621,8 @@ class MessageProgressData extends DataClass
     this.urgency,
     required this.createdAt,
     required this.updatedAt,
+    required this.draftState,
+    this.draftAt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -9605,6 +9662,10 @@ class MessageProgressData extends DataClass
     }
     map['created_at'] = Variable<String>(createdAt);
     map['updated_at'] = Variable<String>(updatedAt);
+    map['draft_state'] = Variable<String>(draftState);
+    if (!nullToAbsent || draftAt != null) {
+      map['draft_at'] = Variable<String>(draftAt);
+    }
     return map;
   }
 
@@ -9645,6 +9706,10 @@ class MessageProgressData extends DataClass
           : Value(urgency),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
+      draftState: Value(draftState),
+      draftAt: draftAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(draftAt),
     );
   }
 
@@ -9675,6 +9740,8 @@ class MessageProgressData extends DataClass
       urgency: serializer.fromJson<String?>(json['urgency']),
       createdAt: serializer.fromJson<String>(json['created_at']),
       updatedAt: serializer.fromJson<String>(json['updated_at']),
+      draftState: serializer.fromJson<String>(json['draft_state']),
+      draftAt: serializer.fromJson<String?>(json['draft_at']),
     );
   }
   @override
@@ -9702,6 +9769,8 @@ class MessageProgressData extends DataClass
       'urgency': serializer.toJson<String?>(urgency),
       'created_at': serializer.toJson<String>(createdAt),
       'updated_at': serializer.toJson<String>(updatedAt),
+      'draft_state': serializer.toJson<String>(draftState),
+      'draft_at': serializer.toJson<String?>(draftAt),
     };
   }
 
@@ -9727,6 +9796,8 @@ class MessageProgressData extends DataClass
     Value<String?> urgency = const Value.absent(),
     String? createdAt,
     String? updatedAt,
+    String? draftState,
+    Value<String?> draftAt = const Value.absent(),
   }) => MessageProgressData(
     source: source ?? this.source,
     sourceMessageId: sourceMessageId ?? this.sourceMessageId,
@@ -9749,6 +9820,8 @@ class MessageProgressData extends DataClass
     urgency: urgency.present ? urgency.value : this.urgency,
     createdAt: createdAt ?? this.createdAt,
     updatedAt: updatedAt ?? this.updatedAt,
+    draftState: draftState ?? this.draftState,
+    draftAt: draftAt.present ? draftAt.value : this.draftAt,
   );
   MessageProgressData copyWithCompanion(MessageProgressCompanion data) {
     return MessageProgressData(
@@ -9795,6 +9868,10 @@ class MessageProgressData extends DataClass
       urgency: data.urgency.present ? data.urgency.value : this.urgency,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      draftState: data.draftState.present
+          ? data.draftState.value
+          : this.draftState,
+      draftAt: data.draftAt.present ? data.draftAt.value : this.draftAt,
     );
   }
 
@@ -9821,7 +9898,9 @@ class MessageProgressData extends DataClass
           ..write('needsYou: $needsYou, ')
           ..write('urgency: $urgency, ')
           ..write('createdAt: $createdAt, ')
-          ..write('updatedAt: $updatedAt')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('draftState: $draftState, ')
+          ..write('draftAt: $draftAt')
           ..write(')'))
         .toString();
   }
@@ -9849,6 +9928,8 @@ class MessageProgressData extends DataClass
     urgency,
     createdAt,
     updatedAt,
+    draftState,
+    draftAt,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -9874,7 +9955,9 @@ class MessageProgressData extends DataClass
           other.needsYou == this.needsYou &&
           other.urgency == this.urgency &&
           other.createdAt == this.createdAt &&
-          other.updatedAt == this.updatedAt);
+          other.updatedAt == this.updatedAt &&
+          other.draftState == this.draftState &&
+          other.draftAt == this.draftAt);
 }
 
 class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
@@ -9899,6 +9982,8 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
   final Value<String?> urgency;
   final Value<String> createdAt;
   final Value<String> updatedAt;
+  final Value<String> draftState;
+  final Value<String?> draftAt;
   final Value<int> rowid;
   const MessageProgressCompanion({
     this.source = const Value.absent(),
@@ -9922,6 +10007,8 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
     this.urgency = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
+    this.draftState = const Value.absent(),
+    this.draftAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   MessageProgressCompanion.insert({
@@ -9946,6 +10033,8 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
     this.urgency = const Value.absent(),
     required String createdAt,
     required String updatedAt,
+    this.draftState = const Value.absent(),
+    this.draftAt = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : source = Value(source),
        sourceMessageId = Value(sourceMessageId),
@@ -9975,6 +10064,8 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
     Expression<String>? urgency,
     Expression<String>? createdAt,
     Expression<String>? updatedAt,
+    Expression<String>? draftState,
+    Expression<String>? draftAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -9999,6 +10090,8 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
       if (urgency != null) 'urgency': urgency,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
+      if (draftState != null) 'draft_state': draftState,
+      if (draftAt != null) 'draft_at': draftAt,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -10025,6 +10118,8 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
     Value<String?>? urgency,
     Value<String>? createdAt,
     Value<String>? updatedAt,
+    Value<String>? draftState,
+    Value<String?>? draftAt,
     Value<int>? rowid,
   }) {
     return MessageProgressCompanion(
@@ -10049,6 +10144,8 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
       urgency: urgency ?? this.urgency,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      draftState: draftState ?? this.draftState,
+      draftAt: draftAt ?? this.draftAt,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -10119,6 +10216,12 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
     if (updatedAt.present) {
       map['updated_at'] = Variable<String>(updatedAt.value);
     }
+    if (draftState.present) {
+      map['draft_state'] = Variable<String>(draftState.value);
+    }
+    if (draftAt.present) {
+      map['draft_at'] = Variable<String>(draftAt.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -10149,6 +10252,8 @@ class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
           ..write('urgency: $urgency, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
+          ..write('draftState: $draftState, ')
+          ..write('draftAt: $draftAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -10822,6 +10927,10 @@ abstract class _$BondDatabase extends GeneratedDatabase {
   late final SenderPrefs senderPrefs = SenderPrefs(this);
   late final AppPrefs appPrefs = AppPrefs(this);
   late final Drafts drafts = Drafts(this);
+  late final Index ixDraftsConv = Index(
+    'ix_drafts_conv',
+    'CREATE INDEX ix_drafts_conv ON drafts (source, conversation_key)',
+  );
   late final MessageNotify messageNotify = MessageNotify(this);
   late final Index ixMessageNotifyOpen = Index(
     'ix_message_notify_open',
@@ -10881,6 +10990,7 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     senderPrefs,
     appPrefs,
     drafts,
+    ixDraftsConv,
     messageNotify,
     ixMessageNotifyOpen,
     ixMessagesCreated,
@@ -15178,6 +15288,8 @@ typedef $MessageProgressCreateCompanionBuilder =
       Value<String?> urgency,
       required String createdAt,
       required String updatedAt,
+      Value<String> draftState,
+      Value<String?> draftAt,
       Value<int> rowid,
     });
 typedef $MessageProgressUpdateCompanionBuilder =
@@ -15203,6 +15315,8 @@ typedef $MessageProgressUpdateCompanionBuilder =
       Value<String?> urgency,
       Value<String> createdAt,
       Value<String> updatedAt,
+      Value<String> draftState,
+      Value<String?> draftAt,
       Value<int> rowid,
     });
 
@@ -15317,6 +15431,16 @@ class $MessageProgressFilterComposer
 
   ColumnFilters<String> get updatedAt => $composableBuilder(
     column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get draftState => $composableBuilder(
+    column: $table.draftState,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get draftAt => $composableBuilder(
+    column: $table.draftAt,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -15434,6 +15558,16 @@ class $MessageProgressOrderingComposer
     column: $table.updatedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get draftState => $composableBuilder(
+    column: $table.draftState,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get draftAt => $composableBuilder(
+    column: $table.draftAt,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $MessageProgressAnnotationComposer
@@ -15529,6 +15663,14 @@ class $MessageProgressAnnotationComposer
 
   GeneratedColumn<String> get updatedAt =>
       $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get draftState => $composableBuilder(
+    column: $table.draftState,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get draftAt =>
+      $composableBuilder(column: $table.draftAt, builder: (column) => column);
 }
 
 class $MessageProgressTableManager
@@ -15587,6 +15729,8 @@ class $MessageProgressTableManager
                 Value<String?> urgency = const Value.absent(),
                 Value<String> createdAt = const Value.absent(),
                 Value<String> updatedAt = const Value.absent(),
+                Value<String> draftState = const Value.absent(),
+                Value<String?> draftAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessageProgressCompanion(
                 source: source,
@@ -15610,6 +15754,8 @@ class $MessageProgressTableManager
                 urgency: urgency,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
+                draftState: draftState,
+                draftAt: draftAt,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -15635,6 +15781,8 @@ class $MessageProgressTableManager
                 Value<String?> urgency = const Value.absent(),
                 required String createdAt,
                 required String updatedAt,
+                Value<String> draftState = const Value.absent(),
+                Value<String?> draftAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => MessageProgressCompanion.insert(
                 source: source,
@@ -15658,6 +15806,8 @@ class $MessageProgressTableManager
                 urgency: urgency,
                 createdAt: createdAt,
                 updatedAt: updatedAt,
+                draftState: draftState,
+                draftAt: draftAt,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

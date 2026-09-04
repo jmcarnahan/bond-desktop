@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/composer.dart' show SendCapability;
 import 'package:flutter_test/flutter_test.dart';
@@ -214,6 +215,41 @@ void main() {
       (await store.getConversationRow('teams', 'chat-1'))!;
 
   group('the send', () {
+    test(
+        'a chat send takes the Needs You chip off — the one path the sync '
+        'can never clear', () async {
+      await seedChat();
+      await store.writeSettledProgress(
+        'teams',
+        'm1',
+        needsYou: true,
+        reason: 'settled',
+        dropped: false,
+      );
+      // The pipeline is passed explicitly here and nowhere else in this file:
+      // the outbound row the chat send writes is one the next pull skips as
+      // already-seen, so the sync's `resolvesAsk` arm never runs for it and
+      // THIS is the only place the chip can come off.
+      final notifier = DraftNotifier(
+        store,
+        _FakeAuth(),
+        _UnreachableMail(),
+        (source: 'teams', conversationKey: 'chat-1'),
+        teams: teams,
+        pipeline: PipelineProgress(store),
+        onSent: () async => syncsAfterSend++,
+      );
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      await notifier.send('Sending it over now.');
+
+      final row = (await store
+              .progressRowsFor([(source: 'teams', id: 'm1')]))
+          .single;
+      expect(row.needsYou, isFalse);
+    });
+
     test('goes to the chat, not through anything mail owns', () async {
       await seedChat();
       final notifier = await loaded();

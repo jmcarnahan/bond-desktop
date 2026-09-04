@@ -406,12 +406,6 @@ class TeamsSync {
 
         final outbound = row['direction'] == 'outbound';
 
-        // A draft answers the message that was newest when the model wrote it.
-        // The moment a newer inbound message lands, that draft is a reply to
-        // the wrong thing — so it goes, and the enqueue on the next list load
-        // writes a fresh one against what the sender actually just said.
-        if (!outbound) await _store.deleteDraft(source, key);
-
         // Asked BEFORE the fold advances the inbound watermark — a reply the
         // user sent from any Teams client resolves the standing ask, exactly
         // as the composer's send path does for a reply sent from here.
@@ -423,7 +417,13 @@ class TeamsSync {
           receivedAt: row['received_at'] as String?,
           preview: row['body_preview'] as String?,
         );
-        if (resolvesAsk) work.clearCta();
+        if (resolvesAsk) {
+          work.clearCta();
+          // And the chip goes with the CTA. A reply the user sent from any
+          // Teams client is what takes the thread off the Needs You list;
+          // reading it never was.
+          await _progress.clearNeedsYou(source, key);
+        }
       }
 
       await _writeConversation(key, work, chat, firstSight: firstSight);
