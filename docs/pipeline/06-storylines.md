@@ -172,6 +172,36 @@ with no recap text writes *nothing at all* — not the text, not the lists, not
 the watermark. A thin answer must never cost the user the catch-up they had,
 and leaving the watermark behind means the next message to land asks again.
 
+## What the user sees
+
+The storyline screen (`StorylineTimelinePanel`) leads with the recap: the
+paragraph in body type directly under the title, then a compact **OPEN** list
+and a **DECIDED** list — each rendered only when the pass found something for
+it — and a quiet "as of *n*h ago" read off `recap_through`, which dates the
+paragraph by the newest message it has *read* rather than by when it ran. The
+recap **replaces** the one-line `summary` in that header; the summary is still
+what the rail and the overview cards show, and it is the header's text until
+the recap pass has written one. `recapOpenItems` / `recapDecisions` on
+`Storyline` are the only decoders of the two JSON columns, and they are
+tolerant in the same way the message models are: a half-written column costs
+the lists, never the render.
+
+The parked charter surfaces in the About block, under the charter itself, as
+**SUGGESTED UPDATE** with **Use this** and **Discard** (not "Dismiss" — that
+word already retires the whole storyline in the header above). *Use this* is a
+two-step, as removing a thread is, because it overwrites a sentence the user
+wrote: the second tap reads *Replace the charter*. Accepting routes through
+`setCharter`, so it does everything a hand-typed save does — trims, locks,
+clears the suggestion, and queues the recruit that hunts for threads matching
+the new criteria. *Discard* is one tap and clears the column alone. Neither
+offer appears while the charter field is open: the field is where the user
+would be answering the suggestion anyway.
+
+Refresh and recap both report progress under their own kinds, and
+`StorylinesNotifier` listens for both, so a pass that rewrites a title or a
+recap lands on the rail and the open storyline within the list's 400 ms
+debounce rather than at the next poll.
+
 ## Filing a thread by hand
 
 `StorylineService.addThread` / `removeThread` are the user's own passes, and

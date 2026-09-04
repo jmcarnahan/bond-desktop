@@ -36,6 +36,16 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// the service decides what an empty charter means.
   final void Function(String charter) onSetCharter;
 
+  /// Takes the charter the refresh pass parked as the storyline's own. Hosts
+  /// route it through the same save [onSetCharter] uses: accepting the model's
+  /// sentence is the user saying this is what the storyline is about, which
+  /// locks the charter and sends the model hunting for threads that match.
+  final void Function(String charter) onAcceptSuggestion;
+
+  /// Throws the parked charter away. The user's own charter and its lock are
+  /// untouched.
+  final VoidCallback onDismissSuggestion;
+
   final void Function(String source, String conversationKey) onRemoveThread;
   final void Function(String source, String conversationKey) onOpenThread;
 
@@ -75,6 +85,8 @@ class StorylineTimelinePanel extends StatefulWidget {
     required this.onBack,
     required this.onRename,
     required this.onSetCharter,
+    required this.onAcceptSuggestion,
+    required this.onDismissSuggestion,
     required this.onRemoveThread,
     required this.onOpenThread,
     required this.onAddThread,
@@ -109,6 +121,12 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   bool _editingCharter = false;
   bool _confirmingDismiss = false;
 
+  /// The parked charter's **Use this** has been armed. Its own flag rather
+  /// than the dismiss one: accepting a suggestion and retiring the storyline
+  /// are different questions, and arming one must not look like arming the
+  /// other.
+  bool _confirmingSuggestion = false;
+
   /// The card whose remove × has been armed, by thread key. One at a time: a
   /// spine with three open questions on it is a spine nobody reads.
   String? _confirmingRemoveKey;
@@ -124,6 +142,18 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     _title.dispose();
     _charter.dispose();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(StorylineTimelinePanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // A refresh that parks a different sentence while the confirm is armed
+    // makes the arm stale: what the user was about to accept is not what the
+    // second tap would now write.
+    if (oldWidget.storyline.charterSuggestion !=
+        widget.storyline.charterSuggestion) {
+      _confirmingSuggestion = false;
+    }
   }
 
   void _startEditing() {
@@ -504,6 +534,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   Widget _header() {
     final storyline = widget.storyline;
     final summary = storyline.summary ?? '';
+    final recap = storyline.recapText ?? '';
 
     return Padding(
       padding: const EdgeInsets.symmetric(
@@ -528,7 +559,15 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 _titleField(storyline),
-                if (summary.isNotEmpty) ...[
+                // The recap REPLACES the one-line summary here rather than
+                // stacking over it: they answer the same question at
+                // different lengths, and the long answer is what this screen
+                // is for. The summary is still what the rail and the overview
+                // cards show, and it is the header's text until the recap
+                // pass has written one.
+                if (recap.isNotEmpty)
+                  _recapBlock(storyline, recap)
+                else if (summary.isNotEmpty) ...[
                   const SizedBox(height: 2),
                   Text(
                     summary,
@@ -584,6 +623,72 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
+  /// Where the storyline stands, in the recap pass's words — the catch-up a
+  /// colleague would give, so the reader need not open every card below it.
+  /// It is the centrepiece of this screen, which is why it takes body type
+  /// where the summary took caption.
+  ///
+  /// The two lists under it stay quiet and compact: they are what is still
+  /// open and what has been settled, and a paragraph that has to compete with
+  /// them for the eye is a paragraph nobody reads. Either can be empty — a
+  /// storyline with nothing outstanding shows no OPEN heading at all.
+  Widget _recapBlock(Storyline storyline, String recap) {
+    final open = storyline.recapOpenItems;
+    final decided = storyline.recapDecisions;
+    final asOf = relativeTime(storyline.recapThrough, DateTime.now());
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(
+        maxWidth: StorylineTimelinePanel._maxContentWidth,
+      ),
+      child: Padding(
+        padding: const EdgeInsets.only(
+          top: BondSpacing.s4,
+          bottom: BondSpacing.s4,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(recap, style: BondType.body),
+            ..._recapList('OPEN', open),
+            ..._recapList('DECIDED', decided),
+            if (asOf != null) ...[
+              const SizedBox(height: BondSpacing.s4),
+              // What the recap has read up to, not when it ran: a pass that
+              // found nothing new leaves the watermark where it was, and the
+              // honest thing to date the paragraph by is the newest message
+              // it has seen.
+              Text('as of $asOf', style: BondType.caption),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// One heading and its lines, or nothing at all when there is nothing to
+  /// head.
+  List<Widget> _recapList(String heading, List<String> items) {
+    if (items.isEmpty) return const [];
+    return [
+      const SizedBox(height: BondSpacing.s8),
+      Text(heading, style: BondType.label),
+      for (final item in items)
+        Padding(
+          padding: const EdgeInsets.only(top: 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('·', style: BondType.caption),
+              const SizedBox(width: BondSpacing.s4),
+              Expanded(child: Text(item, style: BondType.caption)),
+            ],
+          ),
+        ),
+    ];
+  }
+
   /// The title, editable in place. Tap to edit, enter to commit, focus loss to
   /// abandon — a rename is a small enough act that a dialog for it would be
   /// heavier than the thing being renamed.
@@ -627,6 +732,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   /// ones that match.
   Widget _aboutBlock() {
     final charter = widget.storyline.charter ?? '';
+    final suggestion = widget.storyline.charterSuggestion ?? '';
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -635,7 +741,67 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         BondSpacing.s16,
         BondSpacing.s12,
       ),
-      child: _editingCharter ? _charterField() : _charterText(charter),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _editingCharter ? _charterField() : _charterText(charter),
+          // Not while the field is open: offering to replace a sentence the
+          // user is in the middle of writing is offering to throw their work
+          // away, and the field is where they would be typing the answer to
+          // this suggestion anyway.
+          if (!_editingCharter && suggestion.isNotEmpty)
+            _suggestionBlock(suggestion),
+        ],
+      ),
+    );
+  }
+
+  /// What the refresh pass would have written to the charter, parked because
+  /// the charter is the user's own and a locked one is never auto-amended.
+  ///
+  /// Accepting it is a two-step for the same reason removing a thread is: it
+  /// overwrites a sentence a person wrote, and it sends the model hunting for
+  /// threads that match the new one.
+  Widget _suggestionBlock(String suggestion) {
+    return Padding(
+      padding: const EdgeInsets.only(top: BondSpacing.s8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('SUGGESTED UPDATE', style: BondType.label),
+          const SizedBox(height: 2),
+          Text(
+            suggestion,
+            style: BondType.caption.copyWith(fontStyle: FontStyle.italic),
+          ),
+          Row(
+            children: [
+              if (!_confirmingSuggestion) ...[
+                _quietButton(
+                  'Use this',
+                  () => setState(() => _confirmingSuggestion = true),
+                ),
+                const SizedBox(width: BondSpacing.s4),
+                // One tap: dismissing throws away the model's text, not the
+                // user's, and the next refresh may park another.
+                _quietButton('Discard', widget.onDismissSuggestion),
+              ] else ...[
+                _quietButton('Replace the charter', () {
+                  setState(() => _confirmingSuggestion = false);
+                  widget.onAcceptSuggestion(suggestion);
+                }),
+                const SizedBox(width: BondSpacing.s4),
+                _quietButton(
+                  'Cancel',
+                  () => setState(() => _confirmingSuggestion = false),
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
     );
   }
 

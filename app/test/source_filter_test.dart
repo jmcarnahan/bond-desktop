@@ -236,6 +236,8 @@ void main() {
         onBack: null,
         onRename: (_) {},
         onSetCharter: (_) {},
+        onAcceptSuggestion: (_) {},
+        onDismissSuggestion: () {},
         onRemoveThread: (_, _) {},
         onOpenThread: (_, _) {},
         onAddThread: () {},

@@ -81,6 +81,34 @@ const _chartered = Storyline(
   memberCount: 2,
 );
 
+/// The same storyline once the recap pass has caught the reader up.
+///
+/// The watermark is relative to now rather than a calendar date: the header
+/// dates the paragraph with `relativeTime`, and a pinned date would answer
+/// differently every day the suite runs.
+Storyline _recapped({
+  String recapText =
+      'The studio cut the hero paragraph and the launch slipped a week.',
+  String? openJson = '["Who signs off the new hero copy?"]',
+  String? decidedJson = '["Launch moved to the 14th."]',
+  String? charterSuggestion,
+}) =>
+    Storyline(
+      id: 'sl-1',
+      title: 'Website redesign',
+      summary: 'The studio is reviewing the homepage copy.',
+      status: 'active',
+      charter: 'Threads about the new homepage and its launch.',
+      charterLocked: true,
+      charterSuggestion: charterSuggestion,
+      recapText: recapText,
+      recapOpenJson: openJson,
+      recapDecisionsJson: decidedJson,
+      recapThrough:
+          DateTime.now().subtract(const Duration(hours: 3)).toIso8601String(),
+      memberCount: 2,
+    );
+
 void main() {
   // Two member threads, oldest activity first: the homepage thread ran in the
   // morning, the launch thread answered later. Newest last is what the panel is
@@ -122,6 +150,8 @@ void main() {
     List<StorylineMember>? withMembers,
     void Function(String title)? onRename,
     void Function(String charter)? onSetCharter,
+    void Function(String charter)? onAcceptSuggestion,
+    VoidCallback? onDismissSuggestion,
     void Function(String source, String key)? onRemoveThread,
     void Function(String source, String key)? onOpenThread,
     VoidCallback? onBack,
@@ -143,6 +173,8 @@ void main() {
           onBack: onBack,
           onRename: onRename ?? (_) {},
           onSetCharter: onSetCharter ?? (_) {},
+          onAcceptSuggestion: onAcceptSuggestion ?? (_) {},
+          onDismissSuggestion: onDismissSuggestion ?? () {},
           onRemoveThread: onRemoveThread ?? (_, _) {},
           onOpenThread: onOpenThread ?? (_, _) {},
           onAddThread: onAddThread ?? () {},
@@ -916,6 +948,177 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(asked, 1);
+    });
+  });
+
+  group('the recap', () {
+    const paragraph =
+        'The studio cut the hero paragraph and the launch slipped a week.';
+    const summary = 'The studio is reviewing the homepage copy.';
+
+    testWidgets('is the header when there is one', (tester) async {
+      await pumpPanel(tester, storyline: _recapped());
+
+      expect(find.text(paragraph), findsOneWidget);
+      expect(find.text('OPEN'), findsOneWidget);
+      expect(find.text('Who signs off the new hero copy?'), findsOneWidget);
+      expect(find.text('DECIDED'), findsOneWidget);
+      expect(find.text('Launch moved to the 14th.'), findsOneWidget);
+      expect(find.text('as of 3h ago'), findsOneWidget);
+
+      // The one-liner is the rail's text, not this screen's: showing both
+      // would be the same answer twice at two lengths.
+      expect(find.text(summary), findsNothing);
+    });
+
+    testWidgets('no recap falls back to the summary', (tester) async {
+      await pumpPanel(tester);
+
+      expect(find.text(summary), findsOneWidget);
+      expect(find.text('OPEN'), findsNothing);
+      expect(find.text('DECIDED'), findsNothing);
+    });
+
+    testWidgets('empty lists render no Open or Decided headings',
+        (tester) async {
+      await pumpPanel(
+        tester,
+        storyline: _recapped(openJson: '[]', decidedJson: '[]'),
+      );
+
+      expect(find.text(paragraph), findsOneWidget);
+      expect(find.text('OPEN'), findsNothing);
+      expect(find.text('DECIDED'), findsNothing);
+    });
+
+    testWidgets('a column that is not a list of strings shows nothing',
+        (tester) async {
+      await pumpPanel(
+        tester,
+        storyline: _recapped(openJson: 'not json at all', decidedJson: '{}'),
+      );
+
+      // The paragraph is still the header: a half-written column costs the
+      // lists, not the recap.
+      expect(find.text(paragraph), findsOneWidget);
+      expect(find.text('OPEN'), findsNothing);
+      expect(find.text('DECIDED'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+  });
+
+  group('the charter suggestion', () {
+    const suggestion =
+        'Threads about the homepage, its launch, and the press briefing.';
+    const charter = 'Threads about the new homepage and its launch.';
+
+    testWidgets('offers Use this and Discard under the charter',
+        (tester) async {
+      await pumpPanel(
+        tester,
+        storyline: _recapped(charterSuggestion: suggestion),
+      );
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('SUGGESTED UPDATE'), findsOneWidget);
+      expect(find.text(suggestion), findsOneWidget);
+      expect(find.text('Use this'), findsOneWidget);
+      // Not "Dismiss": that word is already spoken for by the header, where
+      // it retires the whole storyline.
+      expect(find.text('Discard'), findsOneWidget);
+    });
+
+    testWidgets('Use this arms first and fires on the second tap',
+        (tester) async {
+      final accepted = <String>[];
+      await pumpPanel(
+        tester,
+        storyline: _recapped(charterSuggestion: suggestion),
+        onAcceptSuggestion: accepted.add,
+      );
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use this'));
+      await tester.pumpAndSettle();
+
+      // The first tap only asks: it overwrites a sentence the user wrote.
+      expect(accepted, isEmpty);
+      expect(find.text('Replace the charter'), findsOneWidget);
+
+      await tester.tap(find.text('Replace the charter'));
+      await tester.pumpAndSettle();
+
+      expect(accepted, [suggestion]);
+      // Disarmed on the way out, so the row is back to its two offers.
+      expect(find.text('Use this'), findsOneWidget);
+    });
+
+    testWidgets('Cancel disarms and writes nothing', (tester) async {
+      final accepted = <String>[];
+      await pumpPanel(
+        tester,
+        storyline: _recapped(charterSuggestion: suggestion),
+        onAcceptSuggestion: accepted.add,
+      );
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Use this'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(accepted, isEmpty);
+      expect(find.text('Use this'), findsOneWidget);
+    });
+
+    testWidgets('Discard fires at once', (tester) async {
+      var dismissed = 0;
+      await pumpPanel(
+        tester,
+        storyline: _recapped(charterSuggestion: suggestion),
+        onDismissSuggestion: () => dismissed++,
+      );
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Discard'));
+      await tester.pumpAndSettle();
+
+      // Throwing away the model's text costs the user nothing of their own,
+      // so it does not ask twice.
+      expect(dismissed, 1);
+    });
+
+    testWidgets('no suggestion, no block', (tester) async {
+      await pumpPanel(tester, storyline: _chartered);
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('SUGGESTED UPDATE'), findsNothing);
+      expect(find.text('Use this'), findsNothing);
+    });
+
+    testWidgets('hides while the charter is being edited', (tester) async {
+      await pumpPanel(
+        tester,
+        storyline: _recapped(charterSuggestion: suggestion),
+      );
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(charter));
+      await tester.pumpAndSettle();
+
+      // The field is where the user answers this suggestion, and offering to
+      // overwrite what they are typing is offering to throw it away.
+      expect(find.byType(TextField), findsOneWidget);
+      expect(find.text('SUGGESTED UPDATE'), findsNothing);
+      expect(find.text('Use this'), findsNothing);
     });
   });
 }

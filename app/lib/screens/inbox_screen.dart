@@ -1306,19 +1306,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             if (!already.contains(storyline.id)) storyline,
         ],
         onBack: () => setState(() => _pickingStorylineForThread = null),
-        onPick: (id) {
-          ref
+        // Both awaited, and both reload the storyline they filed into — the
+        // same ending `_addThreadPane.onPick` has. Fired and forgotten, the
+        // pane closed over a write that had not landed, and the storyline's
+        // spine showed the thread only when the next debounce happened to
+        // come round.
+        onPick: (id) async {
+          await ref
               .read(storylinesProvider.notifier)
               .addThread(id, thread.source, thread.id);
+          if (!mounted) return;
           setState(() => _pickingStorylineForThread = null);
+          ref.read(storylineTimelineProvider(id).notifier).load();
         },
-        onCreate: (title) {
-          ref.read(storylinesProvider.notifier).create(
+        onCreate: (title) async {
+          final id = await ref.read(storylinesProvider.notifier).create(
                 title,
                 conversationKey: thread.id,
                 source: thread.source,
               );
+          if (!mounted) return;
           setState(() => _pickingStorylineForThread = null);
+          ref.read(storylineTimelineProvider(id).notifier).load();
         },
       ),
     );
@@ -1360,6 +1369,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }),
       onRename: (title) => notifier.rename(storyline.id, title),
       onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
+      onAcceptSuggestion: (charter) =>
+          notifier.acceptCharterSuggestion(storyline.id, charter),
+      onDismissSuggestion: () =>
+          notifier.dismissCharterSuggestion(storyline.id),
       onRemoveThread: (source, key) async {
         await notifier.removeThread(storyline.id, source, key);
         if (!mounted) return;

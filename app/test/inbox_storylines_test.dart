@@ -195,6 +195,65 @@ void main() {
     await settleQueues(tester);
   });
 
+  group('the parked charter', () {
+    /// A storyline whose charter is the user's, with the sentence the refresh
+    /// pass would have written waiting under it.
+    Future<void> seedSuggestion() async {
+      await seedThread('c1', 'Homepage copy');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.updateStoryline(
+        'sl-1',
+        charter: 'Threads about the new homepage.',
+        charterLocked: true,
+        charterSuggestion: 'Threads about the homepage and the press briefing.',
+      );
+    }
+
+    testWidgets('accepting it from the screen writes the charter through',
+        (tester) async {
+      await seedSuggestion();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('About'));
+      await tester.pump();
+      await tester.tap(find.text('Use this'));
+      await tester.pump();
+      await tester.tap(find.text('Replace the charter'));
+      await tester.pump();
+      await tester.pump();
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(
+        storyline.charter,
+        'Threads about the homepage and the press briefing.',
+      );
+      expect(storyline.charterSuggestion, isNull);
+      await settleQueues(tester);
+    });
+
+    testWidgets('discarding it leaves the charter alone', (tester) async {
+      await seedSuggestion();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('About'));
+      await tester.pump();
+      await tester.tap(find.text('Discard'));
+      await tester.pump();
+      await tester.pump();
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charterSuggestion, isNull);
+      expect(storyline.charter, 'Threads about the new homepage.');
+      await settleQueues(tester);
+    });
+  });
+
   testWidgets('Add thread opens a pane over the storyline, and back returns',
       (tester) async {
     await seedThread('c1', 'Homepage copy');
