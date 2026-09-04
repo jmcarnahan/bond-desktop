@@ -44,6 +44,11 @@ dependencies:
   # to read `user_version` off a pre-drift file before drift is allowed to
   # open it and decide the schema is missing.
   sqlite3: ^3.5.2
+  # In-tree, because it is a build hook as much as a library: it compiles the
+  # committed sqlite-vec C sources into a bundled dylib and registers them as
+  # a SQLite auto-extension. See packages/sqlite_vec_ffi/ and `make vec-vendor`.
+  sqlite_vec_ffi:
+    path: packages/sqlite_vec_ffi
   path_provider: ^2.1.4
   path: ^1.9.0
   intl: ^0.19.0

@@ -14,9 +14,12 @@ import 'fixtures/test_db.dart';
 
 /// What a newly arrived message does to a draft written before it.
 ///
-/// A reply answers the message that was newest when the model wrote it. The
-/// moment a newer inbound message lands, that draft answers the wrong thing —
-/// and the LO is one click from sending it.
+/// A reply answers ONE message. The moment a newer inbound message lands, the
+/// thread is waiting on something that has no answer yet — so the thread reads
+/// as having no suggestion, and the stale one stays on disk against the
+/// message it did answer. Nothing is deleted: the read scopes itself, which is
+/// the only way a sync can be wrong about staleness without costing the user a
+/// current suggestion.
 ///
 /// The Graph stub is deliberately duplicated from sync_extract_test rather than
 /// shared, so neither file can break the other by editing it.
@@ -135,11 +138,27 @@ void main() {
 
   tearDown(() async => db.close());
 
-  Future<void> seedDraft({String key = 'conv-1'}) async {
+  Future<void> seedMessage(
+    String id, {
+    String key = 'conv-1',
+    required String receivedAt,
+  }) =>
+      store.upsertMessage({
+        'source': 'email',
+        'source_message_id': id,
+        'conversation_key': key,
+        'direction': 'inbound',
+        'received_at': receivedAt,
+      });
+
+  Future<void> seedDraft({
+    String key = 'conv-1',
+    String messageId = 'old-message',
+  }) async {
     await store.upsertDraft(
       source: 'email',
       conversationKey: key,
-      replyToMessageId: 'old-message',
+      replyToMessageId: messageId,
       body: 'A reply to what was said before.',
       optionsJson: '[{"stance":"Confirm Friday","body":"Friday works."}]',
     );
@@ -154,7 +173,9 @@ void main() {
     ]);
   }
 
-  test('a new inbound message deletes that conversation\'s draft', () async {
+  test('a newer inbound message takes the old suggestion out of reach',
+      () async {
+    await seedMessage('old-message', receivedAt: fresh(const Duration(hours: 3)));
     await seedDraft();
     queueInbound([
       graphMessage(id: 'new-1', receivedDateTime: fresh(const Duration(hours: 1))),
@@ -162,14 +183,23 @@ void main() {
 
     await sync.syncNow();
 
-    // The whole row goes, so the short replies go with it — they answered the
-    // message that is no longer the newest one, exactly as the long form did.
+    // The thread is waiting on new-1, which has no answer yet — so it offers
+    // none, short replies included.
     expect(await store.getDraft('email', 'conv-1'), isNull);
+    // And nothing was deleted. The old answer is still filed against the
+    // message it answered, which is where it belongs.
+    expect(await store.getDraftForMessage('email', 'old-message'), isNotNull);
   });
 
   test('and leaves every other conversation\'s draft alone', () async {
+    await seedMessage('old-message', receivedAt: fresh(const Duration(hours: 3)));
+    await seedMessage(
+      'other-message',
+      key: 'conv-2',
+      receivedAt: fresh(const Duration(hours: 3)),
+    );
     await seedDraft(key: 'conv-1');
-    await seedDraft(key: 'conv-2');
+    await seedDraft(key: 'conv-2', messageId: 'other-message');
     queueInbound([
       graphMessage(id: 'new-1', receivedDateTime: fresh(const Duration(hours: 1))),
     ]);
@@ -182,14 +212,13 @@ void main() {
 
   test('a REPLAYED message leaves the draft standing', () async {
     // Delta feeds legitimately replay messages — across pages, and wholesale
-    // during the 24-hour re-drain a 410 forces. Deleting on a replay would
-    // throw away a perfectly current draft, and the LO would watch their
-    // suggestion vanish on a routine refresh.
+    // during the 24-hour re-drain a 410 forces. A replay must not cost the LO
+    // a perfectly current suggestion.
     queueInbound([
       graphMessage(id: 'm1', receivedDateTime: fresh(const Duration(hours: 2))),
     ]);
     await sync.syncNow();
-    await seedDraft();
+    await seedDraft(messageId: 'm1');
 
     graph.queue('inbox', [
       () => jsonOk({
@@ -209,7 +238,9 @@ void main() {
 
   test('the LO\'s own sent mail does not invalidate the draft', () async {
     // A sent message means the thread moved on, but it does not make a draft
-    // answer the wrong message — and the send path writes the status itself.
+    // answer the wrong message — the thread is still waiting on the same
+    // inbound one.
+    await seedMessage('old-message', receivedAt: fresh(const Duration(hours: 3)));
     await seedDraft();
     graph.queue('sentitems', [
       () => jsonOk({
@@ -230,6 +261,7 @@ void main() {
   });
 
   test('a sync that brings nothing new keeps the draft', () async {
+    await seedMessage('old-message', receivedAt: fresh(const Duration(hours: 3)));
     await seedDraft();
 
     await sync.syncNow();

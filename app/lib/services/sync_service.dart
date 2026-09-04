@@ -7,6 +7,7 @@ import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'graph_mail.dart';
+import 'pipeline_progress.dart';
 
 /// How far back a mailbox that has never synced reaches. Two weeks is enough
 /// context to thread the conversations that are actually live without
@@ -57,6 +58,7 @@ class SyncService implements MailSync {
   final MailBackend _mail;
   final MessageStore _store;
   final ActivityLog _log;
+  final PipelineProgress _progress;
 
   /// How to find out which mailbox this is. A callback rather than a future,
   /// so the keychain is read on the first sync rather than when this object is
@@ -73,8 +75,10 @@ class SyncService implements MailSync {
     this._mail,
     this._store, {
     ActivityLog? activityLog,
+    PipelineProgress? progress,
     Future<String?> Function()? userAddress,
   })  : _log = activityLog ?? ActivityLog.disabled(),
+        _progress = progress ?? const PipelineProgress.disabled(),
         _userAddressReader = userAddress;
 
   @override
@@ -151,6 +155,15 @@ class SyncService implements MailSync {
       // is queued, finished work stays finished, and a queue that a crash left
       // short refills itself without anyone tracking that it did.
       final queued = await _store.enqueueExtractBacklog(
+        cap: firstRunTriageCap,
+        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        source: _source,
+      );
+
+      // The per-message search vectors, over the same window and on the same
+      // `OR IGNORE` idempotence — new mail is queued, and a backlog that
+      // predates the search feature refills itself without anyone asking.
+      await _store.enqueueEmbedBacklog(
         cap: firstRunTriageCap,
         sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
         source: _source,
@@ -378,7 +391,7 @@ class SyncService implements MailSync {
         // carry a newer read state.
         final firstSighting = !await _store.hasMessage(_source, id);
 
-        await _store.upsertMessage({
+        final ingested = await _store.upsertMessage({
           'source': _source,
           'source_message_id': id,
           'internet_message_id': message['internetMessageId'] as String?,
@@ -400,14 +413,15 @@ class SyncService implements MailSync {
           'addressed_me': direction == 'inbound' && soleRecipient ? 1 : 0,
         });
 
+        // Non-null only when the pipeline had never heard of this message, so
+        // a delta page replaying itself announces nothing. Not awaited because
+        // there is nothing to wait for: the tick is a publish onto a stream.
+        if (ingested != null) {
+          _progress.noteIngest(_source, id, receivedAt: ingested);
+        }
+
         if (!firstSighting) continue;
         newMessages++;
-
-        // A draft answers the message that was newest when the model wrote it.
-        // The moment a newer inbound message lands, that draft is a reply to
-        // the wrong thing — so it goes, and the enqueue on the next list load
-        // writes a fresh one against what the sender actually just said.
-        if (!outbound) await _store.deleteDraft(_source, key);
 
         // Spelled out rather than `putIfAbsent`, which takes a synchronous
         // factory and the seed read is a query now.
@@ -432,7 +446,13 @@ class SyncService implements MailSync {
           subject: subject,
           preview: preview,
         );
-        if (resolvesAsk) entry.clearCta();
+        if (resolvesAsk) {
+          entry.clearCta();
+          // And the chip goes with the CTA. A reply the user sent — from here,
+          // from Outlook, from a phone — is what takes a thread off the Needs
+          // You list; reading it never was.
+          await _progress.clearNeedsYou(_source, key);
+        }
         // Whoever is on the other end: the sender of mail that came in, the
         // recipients of mail that went out. Never the user.
         if (outbound) {

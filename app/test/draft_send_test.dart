@@ -4,6 +4,8 @@ import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
+import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/composer.dart' show SendCapability;
 import 'package:drift/drift.dart' show Variable;
@@ -117,7 +119,7 @@ void main() {
 
   tearDown(() => db.close());
 
-  DraftNotifier notifierFor({String key = 'conv-1'}) {
+  DraftNotifier notifierFor({String key = 'conv-1', Duration? undoWindow}) {
     final notifier = DraftNotifier(
       store,
       GraphAuth(httpClient: never, store: tokens),
@@ -128,15 +130,27 @@ void main() {
         launched.add(url);
         return true;
       },
+      undoWindow: undoWindow,
     );
     addTearDown(notifier.dispose);
     return notifier;
   }
 
+  /// The message and the suggestion written against it. Both, because a draft
+  /// is keyed on the message it answers and a thread reads back the one
+  /// answering the message it is waiting on — a suggestion with no message
+  /// under it is a row nothing would ever show.
   Future<void> seedDraft({
     String key = 'conv-1',
     String body = 'Friday works.',
   }) async {
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'inbound-1',
+      'conversation_key': key,
+      'direction': 'inbound',
+      'received_at': '2026-08-29T10:00:00Z',
+    });
     await store.upsertDraft(
       source: 'email',
       conversationKey: key,
@@ -257,6 +271,43 @@ void main() {
       ).get();
       expect(feedback.single.data['origin'], 'implicit');
       expect(feedback.single.data['direction'], 'up');
+    });
+
+    test('a send takes the Needs You chip off, and says so on the bus',
+        () async {
+      await seedDraft();
+      await store.writeSettledProgress(
+        'email',
+        'inbound-1',
+        needsYou: true,
+        reason: 'settled',
+        dropped: false,
+      );
+      final bus = ProgressBus();
+      addTearDown(bus.dispose);
+      final ticks = <ProgressTick>[];
+      bus.ticks.listen(ticks.add);
+      final notifier = DraftNotifier(
+        store,
+        GraphAuth(httpClient: never, store: tokens),
+        mail,
+        (source: 'email', conversationKey: 'conv-1'),
+        pipeline: PipelineProgress(store, bus: bus),
+        onSent: () async => syncsAfterSend++,
+      );
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      await notifier.send('Friday works.');
+      await pumpEventQueue();
+
+      // From here, not a sync later: the reply leaving is the needs-you exit,
+      // and the chip in the home feed comes off the moment it leaves.
+      final row = (await store
+              .progressRowsFor([(source: 'email', id: 'inbound-1')]))
+          .single;
+      expect(row.needsYou, isFalse);
+      expect(ticks.map((tick) => tick.sourceMessageId), contains('inbound-1'));
     });
 
     test('refreshes the inbox afterwards rather than faking a row', () async {
@@ -382,6 +433,143 @@ void main() {
     });
   });
 
+  /// A thread whose transcript holds more than one answerable message. The
+  /// suggestions are drawn under the messages they answer, so a tap on an older
+  /// card has to reply to THAT message — not to whatever the thread's newest
+  /// one happens to be.
+  group('replying to a message other than the newest', () {
+    /// Two inbound messages, each with its own suggestion.
+    Future<void> seedTwo() async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'older-inbound',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'newest-inbound',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-30T10:00:00Z',
+      });
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'older-inbound',
+        body: 'answering the older one',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'newest-inbound',
+        body: 'answering the newest one',
+      );
+    }
+
+    test('the reply goes to the message the card belongs to', () async {
+      await seedTwo();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      final outcome =
+          await notifier.send('About that older one.', replyTo: 'older-inbound');
+
+      expect(outcome, SendOutcome.sent);
+      expect(mail.calls.first, 'createReply:older-inbound');
+    });
+
+    test('and only that message\'s suggestion is marked sent', () async {
+      await seedTwo();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('About that older one.', replyTo: 'older-inbound');
+
+      expect(
+        (await store.getDraftForMessage('email', 'older-inbound'))!['status'],
+        'sent',
+      );
+      // The newest message has not been answered, and its suggestion must
+      // still be on offer.
+      expect(
+        (await store.getDraftForMessage('email', 'newest-inbound'))!['status'],
+        'suggested',
+      );
+    });
+
+    test('without one, the send still targets the thread\'s stored draft',
+        () async {
+      await seedTwo();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('Whatever this thread is waiting on.');
+
+      expect(mail.calls.first, 'createReply:newest-inbound');
+    });
+
+    test('the target survives the undo window', () async {
+      // The queued send fires from a timer, long after the tap: the message it
+      // answers rides in the closure, because [PendingSend] carries only what
+      // the undo row draws.
+      await seedTwo();
+      const window = Duration(milliseconds: 50);
+      final notifier = notifierFor(undoWindow: window);
+      await notifier.load();
+
+      await notifier.queueSend('About that older one.',
+          replyTo: 'older-inbound');
+      expect(mail.calls, isEmpty, reason: 'nothing goes while it is open');
+      await Future<void>.delayed(window * 4);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(mail.calls.first, 'createReply:older-inbound');
+      expect(
+        (await store.getDraftForMessage('email', 'older-inbound'))!['status'],
+        'sent',
+      );
+    });
+
+    test('every stored suggestion loads, keyed by the message it answers',
+        () async {
+      await seedTwo();
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(
+        notifier.state.threadDrafts.keys.toSet(),
+        {'older-inbound', 'newest-inbound'},
+      );
+      expect(
+        notifier.state.threadDrafts['older-inbound']!['body'],
+        'answering the older one',
+      );
+      // And the composer's own row is still the newest message's alone.
+      expect(notifier.state.body, 'answering the newest one');
+    });
+
+    test('a dismissal closes one message\'s cards and leaves the rest',
+        () async {
+      await seedTwo();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.dismissOptionsFor('older-inbound');
+
+      expect(
+        notifier.state.threadDrafts['older-inbound']!['options_dismissed'],
+        1,
+      );
+      expect(
+        notifier.state.threadDrafts['newest-inbound']!['options_dismissed'],
+        0,
+      );
+    });
+  });
+
   group('the lesser rungs', () {
     test('Mail.ReadWrite saves to Outlook and opens it, without sending',
         () async {
@@ -470,7 +658,8 @@ void main() {
       expect((await store.getDraft('email', 'conv-1'))!['status'], 'dismissed');
     });
 
-    test('generate clears the old draft and queues a fresh one', () async {
+    test('generate clears the old draft and queues the message again',
+        () async {
       await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
@@ -478,17 +667,33 @@ void main() {
       await notifier.generate();
 
       expect(await store.getDraft('email', 'conv-1'), isNull);
-      expect(
-        (await db
-                .customSelect(
-                  "SELECT status FROM work_items WHERE task_kind = 'draft'",
-                )
-                .get())
-            .single
-            .data['status'],
-        'pending',
-      );
+      final work = (await db
+              .customSelect(
+                "SELECT entity_id, status FROM work_items "
+                "WHERE task_kind = 'draft'",
+              )
+              .get())
+          .single
+          .data;
+      expect(work['status'], 'pending');
+      // Keyed on the newest inbound MESSAGE, which is what the handler
+      // answers — a conversation key would send it looking for a message that
+      // does not exist.
+      expect(work['entity_id'], 'inbound-1');
       expect(notifier.state.body, isNull);
+    });
+
+    test('generate on a thread with nothing to answer says so', () async {
+      // No inbound message at all: there is nothing to reply to, which is a
+      // sentence rather than a spinner that never stops.
+      final notifier = notifierFor(key: 'empty');
+      await notifier.load();
+
+      await notifier.generate();
+
+      expect(notifier.state.generating, isFalse);
+      expect(notifier.state.error, contains('nothing to reply to'));
+      expect(await store.workCounts('draft'), isEmpty);
     });
   });
 
@@ -498,6 +703,13 @@ void main() {
         '{"stance":"Propose Tuesday","body":"Could we say Tuesday?"}]';
 
     Future<void> seedWithOptions({String? json = options}) async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'inbound-1',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
       await store.upsertDraft(
         source: 'email',
         conversationKey: 'conv-1',
@@ -551,7 +763,11 @@ void main() {
       expect(notifier.state.options, isEmpty);
       expect(notifier.state.body, 'Friday works.',
           reason: 'closing the cards is not closing the draft');
-      expect((await store.getDraft('email', 'conv-1'))!['options_dismissed'], 1);
+      expect(
+        (await store.getDraftForMessage('email', 'inbound-1'))![
+            'options_dismissed'],
+        1,
+      );
     });
 
     test('a dismissed or sent draft offers none either', () async {
@@ -564,7 +780,7 @@ void main() {
       await notifier.dismiss();
       expect(notifier.state.options, isEmpty);
 
-      await store.updateDraftStatus('email', 'conv-1', status: 'sent');
+      await store.updateDraftStatus('email', 'inbound-1', status: 'sent');
       await notifier.load();
       expect(notifier.state.options, isEmpty);
     });

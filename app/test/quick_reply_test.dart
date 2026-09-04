@@ -34,6 +34,7 @@ void main() {
     VoidCallback? onUndo,
     VoidCallback? onSuggest,
     bool suggesting = false,
+    bool showReplyRow = true,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -49,6 +50,7 @@ void main() {
           onUndo: onUndo,
           onSuggest: onSuggest,
           suggesting: suggesting,
+          showReplyRow: showReplyRow,
         ),
       ),
     ));
@@ -297,6 +299,60 @@ void main() {
       await pumpBar(tester);
 
       expect(find.byIcon(Icons.close), findsNothing);
+    });
+  });
+
+  /// The same bar drawn under one MESSAGE rather than under the transcript.
+  /// The way into the composer belongs to the thread and sits once, at the
+  /// bottom; an inline card carries the cards and the × that closes them.
+  group('an inline card', () {
+    testWidgets('carries no Reply… beside the cards', (tester) async {
+      await pumpBar(tester, showReplyRow: false, onSuggest: () {});
+
+      expect(find.text('Confirm Friday'), findsOneWidget);
+      expect(find.text('Reply…'), findsNothing);
+      expect(find.text('Suggest a reply'), findsNothing);
+    });
+
+    testWidgets('and the bar under the transcript still does', (tester) async {
+      await pumpBar(tester);
+
+      expect(find.text('Reply…'), findsOneWidget);
+    });
+
+    testWidgets('keeps the × — it closes THESE cards', (tester) async {
+      var dismissed = 0;
+      await pumpBar(
+        tester,
+        showReplyRow: false,
+        onDismiss: () => dismissed++,
+      );
+
+      await tester.tap(find.byIcon(Icons.close));
+      await tester.pump();
+      expect(find.text('Dismiss these suggestions?'), findsOneWidget);
+
+      await tester.tap(find.text('Dismiss'));
+      await tester.pump();
+
+      expect(dismissed, 1);
+    });
+
+    testWidgets('with nothing to offer it draws nothing at all',
+        (tester) async {
+      // Not an empty state: a card with no options is a card that should not
+      // be on screen, and the bottom of the transcript owns the empty case.
+      await pumpBar(
+        tester,
+        options: const [],
+        showReplyRow: false,
+        onDismiss: () {},
+        onSuggest: () {},
+      );
+
+      expect(find.byType(TextButton), findsNothing);
+      expect(find.byIcon(Icons.close), findsNothing);
+      expect(find.byType(SizedBox), findsWidgets);
     });
   });
 

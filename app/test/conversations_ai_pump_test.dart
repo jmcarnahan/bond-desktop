@@ -40,12 +40,17 @@ class LoggingHandler extends WorkHandler {
   final List<String> log;
   final String label;
 
-  LoggingHandler(this.kind, this.log, this.label);
+  /// Run inside the item, before it finishes — how a handler that queues work
+  /// for a LATER handler is stood in for. Extraction does exactly this.
+  final Future<void> Function()? onRun;
+
+  LoggingHandler(this.kind, this.log, this.label, {this.onRun});
 
   @override
   Future<void> run(Map<String, Object?> item) async {
     log.add('$label:start');
     await Future<void>.delayed(const Duration(milliseconds: 5));
+    await onRun?.call();
     log.add('$label:end');
   }
 }
@@ -174,11 +179,12 @@ void main() {
     expect(await store.workCounts('extract'), {'pending': 1});
   });
 
-  test('the settle pass drain never overlaps the one before it', () async {
-    // The settle pass adds a second AI drain to the cycle, and the whole
-    // reason the two queues are chained rather than run together is that they
-    // share one single-threaded model server. A third drain that could start
-    // while the second was still running would throw that away.
+  test('the drains never overlap each other', () async {
+    // The whole reason the two queues are chained rather than run together is
+    // that they share one single-threaded model server. A drain that could
+    // start while another was still running would throw that away — and the
+    // drafting work extraction queues mid-drain must be worked by the drain
+    // already in flight, not by a second one racing it.
     await seedPendingMessage('m1');
     await store.enqueueWork('extract', 'email', 'm1');
     await store.upsertConversation({
@@ -194,7 +200,14 @@ void main() {
     final worker = AiWorker(
       store,
       handlers: [
-        LoggingHandler('extract', log, 'extract'),
+        // What the real extraction handler does at the end of an item: the
+        // message asks for an answer, so drafting is queued for it.
+        LoggingHandler(
+          'extract',
+          log,
+          'extract',
+          onRun: () => store.enqueueWork('draft', 'email', 'm1'),
+        ),
         LoggingHandler('draft', log, 'draft'),
       ],
     );
@@ -215,8 +228,10 @@ void main() {
       expect(log[i], endsWith(':start'));
       expect(log[i + 1], log[i].replaceAll(':start', ':end'));
     }
-    // And the draft the load queued was actually worked, in this cycle.
-    expect(log, contains('draft:start'));
+    // Extraction queues the drafting, and drafting is the handler behind it in
+    // the same pass — so the reply for a message this cycle extracted is
+    // written in this cycle rather than at the next sync.
+    expect(log, containsAllInOrder(['extract:end', 'draft:start']));
   });
 
   test('a load that skips the sync kicks neither queue', () async {

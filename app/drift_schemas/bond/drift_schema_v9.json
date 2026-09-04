@@ -1,0 +1,2613 @@
+{
+  "_meta": {
+    "description": "This file contains a serialized version of schema entities for drift.",
+    "version": "1.3.0"
+  },
+  "options": {
+    "store_date_time_values_as_text": false
+  },
+  "entities": [
+    {
+      "id": 0,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "messages",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source_message_id",
+            "getter_name": "sourceMessageId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "internet_message_id",
+            "getter_name": "internetMessageId",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "conversation_key",
+            "getter_name": "conversationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "direction",
+            "getter_name": "direction",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "subject",
+            "getter_name": "subject",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "from_name",
+            "getter_name": "fromName",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "from_address",
+            "getter_name": "fromAddress",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "to_json",
+            "getter_name": "recipientsJson",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT '[]'",
+            "default_dart": "const CustomExpression('\\'[]\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "received_at",
+            "getter_name": "receivedAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "is_read",
+            "getter_name": "isRead",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "body_preview",
+            "getter_name": "bodyPreview",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "body_text",
+            "getter_name": "bodyText",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "has_attachments",
+            "getter_name": "hasAttachments",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source_meta_json",
+            "getter_name": "sourceMetaJson",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "triage_status",
+            "getter_name": "triageStatus",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "triage_attempts",
+            "getter_name": "triageAttempts",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "triage_error",
+            "getter_name": "triageError",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "gate_reason",
+            "getter_name": "gateReason",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "urgency",
+            "getter_name": "urgency",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "category",
+            "getter_name": "category",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "summary",
+            "getter_name": "summary",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "needs_action",
+            "getter_name": "needsAction",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "action_items_json",
+            "getter_name": "actionItemsJson",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "label",
+            "getter_name": "label",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "addressed_me",
+            "getter_name": "addressedMe",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "reply_expected",
+            "getter_name": "replyExpected",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "deadline",
+            "getter_name": "deadline",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(source, source_message_id)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "source",
+          "source_message_id"
+        ]
+      }
+    },
+    {
+      "id": 1,
+      "references": [
+        0
+      ],
+      "type": "index",
+      "data": {
+        "on": 0,
+        "name": "ix_messages_conv",
+        "sql": "CREATE INDEX ix_messages_conv ON messages(source, conversation_key, received_at);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 2,
+      "references": [
+        0
+      ],
+      "type": "index",
+      "data": {
+        "on": 0,
+        "name": "ix_messages_triage",
+        "sql": "CREATE INDEX ix_messages_triage ON messages(triage_status, received_at DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 3,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "conversations",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "conversation_key",
+            "getter_name": "conversationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "subject",
+            "getter_name": "subject",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "participants_json",
+            "getter_name": "participantsJson",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT '[]'",
+            "default_dart": "const CustomExpression('\\'[]\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "state",
+            "getter_name": "state",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'done'",
+            "default_dart": "const CustomExpression('\\'done\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "category",
+            "getter_name": "category",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "cta_text",
+            "getter_name": "ctaText",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "cta_urgency",
+            "getter_name": "ctaUrgency",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'normal'",
+            "default_dart": "const CustomExpression('\\'normal\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "message_count",
+            "getter_name": "messageCount",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "inbound_count",
+            "getter_name": "inboundCount",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "last_inbound_at",
+            "getter_name": "lastInboundAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "last_outbound_at",
+            "getter_name": "lastOutboundAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "last_message_at",
+            "getter_name": "lastMessageAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "last_message_preview",
+            "getter_name": "lastMessagePreview",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "state_changed_at",
+            "getter_name": "stateChangedAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(source, conversation_key)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "source",
+          "conversation_key"
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "references": [
+        3
+      ],
+      "type": "index",
+      "data": {
+        "on": 3,
+        "name": "ix_conv_last",
+        "sql": "CREATE INDEX ix_conv_last ON conversations(last_message_at DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 5,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "sync_state",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "folder",
+            "getter_name": "folder",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "delta_link",
+            "getter_name": "deltaLink",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "synced_at",
+            "getter_name": "syncedAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(source, folder)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "source",
+          "folder"
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "work_items",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "task_kind",
+            "getter_name": "taskKind",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "entity_id",
+            "getter_name": "entityId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "status",
+            "getter_name": "status",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "attempts",
+            "getter_name": "attempts",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "error",
+            "getter_name": "error",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "payload_json",
+            "getter_name": "payloadJson",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(task_kind, source, entity_id)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "task_kind",
+          "source",
+          "entity_id"
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "references": [
+        6
+      ],
+      "type": "index",
+      "data": {
+        "on": 6,
+        "name": "ix_work_pending",
+        "sql": "CREATE INDEX ix_work_pending ON work_items(task_kind, status, created_at DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 8,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "message_ai",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source_message_id",
+            "getter_name": "sourceMessageId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "extraction_json",
+            "getter_name": "extractionJson",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "extracted_at",
+            "getter_name": "extractedAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(source, source_message_id)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "source",
+          "source_message_id"
+        ]
+      }
+    },
+    {
+      "id": 9,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "conversation_ai",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "conversation_key",
+            "getter_name": "conversationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "embedding",
+            "getter_name": "embedding",
+            "moor_type": "blob",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "embedded_hash",
+            "getter_name": "embeddedHash",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "embed_model",
+            "getter_name": "embedModel",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "bucket",
+            "getter_name": "bucket",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "bucket_reason",
+            "getter_name": "bucketReason",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "attention_score",
+            "getter_name": "attentionScore",
+            "moor_type": "double",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "snoozed_until",
+            "getter_name": "snoozedUntil",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(source, conversation_key)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "source",
+          "conversation_key"
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "storylines",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "id",
+            "getter_name": "id",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "PRIMARY KEY",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "primary-key"
+            ]
+          },
+          {
+            "name": "title",
+            "getter_name": "title",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "summary",
+            "getter_name": "summary",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "status",
+            "getter_name": "status",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'suggested'",
+            "default_dart": "const CustomExpression('\\'suggested\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_by",
+            "getter_name": "createdBy",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'auto'",
+            "default_dart": "const CustomExpression('\\'auto\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "title_locked",
+            "getter_name": "titleLocked",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "pinned",
+            "getter_name": "pinned",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "member_hash",
+            "getter_name": "memberHash",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "last_activity_at",
+            "getter_name": "lastActivityAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "charter",
+            "getter_name": "charter",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "charter_locked",
+            "getter_name": "charterLocked",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "cluster_hash",
+            "getter_name": "clusterHash",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [],
+        "strict": true
+      }
+    },
+    {
+      "id": 11,
+      "references": [
+        10
+      ],
+      "type": "index",
+      "data": {
+        "on": 10,
+        "name": "ix_storylines_status",
+        "sql": "CREATE INDEX ix_storylines_status ON storylines(status, last_activity_at DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 12,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "storyline_members",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "storyline_id",
+            "getter_name": "storylineId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "conversation_key",
+            "getter_name": "conversationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "added_by",
+            "getter_name": "addedBy",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'auto'",
+            "default_dart": "const CustomExpression('\\'auto\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "evidence",
+            "getter_name": "evidence",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "added_at",
+            "getter_name": "addedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(storyline_id, source, conversation_key)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "storyline_id",
+          "source",
+          "conversation_key"
+        ]
+      }
+    },
+    {
+      "id": 13,
+      "references": [
+        12
+      ],
+      "type": "index",
+      "data": {
+        "on": 12,
+        "name": "ix_storyline_members_conv",
+        "sql": "CREATE INDEX ix_storyline_members_conv\n  ON storyline_members(source, conversation_key);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 14,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "storyline_member_blocks",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "storyline_id",
+            "getter_name": "storylineId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "conversation_key",
+            "getter_name": "conversationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "blocked_at",
+            "getter_name": "blockedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(storyline_id, source, conversation_key)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "storyline_id",
+          "source",
+          "conversation_key"
+        ]
+      }
+    },
+    {
+      "id": 15,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "feedback_events",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "id",
+            "getter_name": "id",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "PRIMARY KEY",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "primary-key"
+            ]
+          },
+          {
+            "name": "scope",
+            "getter_name": "scope",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "scope_key",
+            "getter_name": "scopeKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "direction",
+            "getter_name": "direction",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "origin",
+            "getter_name": "origin",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [],
+        "strict": true
+      }
+    },
+    {
+      "id": 16,
+      "references": [
+        15
+      ],
+      "type": "index",
+      "data": {
+        "on": 15,
+        "name": "ix_feedback_scope",
+        "sql": "CREATE INDEX ix_feedback_scope\n  ON feedback_events(scope, scope_key, created_at DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 17,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "activity_events",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "id",
+            "getter_name": "id",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "PRIMARY KEY",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "primary-key"
+            ]
+          },
+          {
+            "name": "kind",
+            "getter_name": "kind",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "status",
+            "getter_name": "status",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "entity_id",
+            "getter_name": "entityId",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "count",
+            "getter_name": "count",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "duration_ms",
+            "getter_name": "durationMs",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "detail_json",
+            "getter_name": "detailJson",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [],
+        "strict": true
+      }
+    },
+    {
+      "id": 18,
+      "references": [
+        17
+      ],
+      "type": "index",
+      "data": {
+        "on": 17,
+        "name": "ix_activity_created",
+        "sql": "CREATE INDEX ix_activity_created\n  ON activity_events(created_at DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 19,
+      "references": [
+        17
+      ],
+      "type": "index",
+      "data": {
+        "on": 17,
+        "name": "ix_activity_kind",
+        "sql": "CREATE INDEX ix_activity_kind\n  ON activity_events(kind, created_at DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 20,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "sender_prefs",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "address",
+            "getter_name": "address",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "PRIMARY KEY",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "primary-key"
+            ]
+          },
+          {
+            "name": "disposition",
+            "getter_name": "disposition",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [],
+        "strict": true
+      }
+    },
+    {
+      "id": 21,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "app_prefs",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "key",
+            "getter_name": "key",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "PRIMARY KEY",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "primary-key"
+            ]
+          },
+          {
+            "name": "value",
+            "getter_name": "value",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [],
+        "strict": true
+      }
+    },
+    {
+      "id": 22,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "drafts",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'email'",
+            "default_dart": "const CustomExpression('\\'email\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "conversation_key",
+            "getter_name": "conversationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "reply_to_message_id",
+            "getter_name": "replyToMessageId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "body",
+            "getter_name": "body",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "evidence",
+            "getter_name": "evidence",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "status",
+            "getter_name": "status",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'suggested'",
+            "default_dart": "const CustomExpression('\\'suggested\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "graph_draft_id",
+            "getter_name": "graphDraftId",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "web_link",
+            "getter_name": "webLink",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "options_json",
+            "getter_name": "optionsJson",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "options_dismissed",
+            "getter_name": "optionsDismissed",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(source, reply_to_message_id)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "source",
+          "reply_to_message_id"
+        ]
+      }
+    },
+    {
+      "id": 23,
+      "references": [
+        22
+      ],
+      "type": "index",
+      "data": {
+        "on": 22,
+        "name": "ix_drafts_conv",
+        "sql": "CREATE INDEX ix_drafts_conv ON drafts(source, conversation_key);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 24,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "message_notify",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source_message_id",
+            "getter_name": "sourceMessageId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "conversation_key",
+            "getter_name": "conversationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "state",
+            "getter_name": "state",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "reason",
+            "getter_name": "reason",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "deadline_at",
+            "getter_name": "deadlineAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "settled_at",
+            "getter_name": "settledAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(source, source_message_id)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "source",
+          "source_message_id"
+        ]
+      }
+    },
+    {
+      "id": 25,
+      "references": [
+        24
+      ],
+      "type": "index",
+      "data": {
+        "on": 24,
+        "name": "ix_message_notify_open",
+        "sql": "CREATE INDEX ix_message_notify_open ON message_notify(state, deadline_at);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 26,
+      "references": [
+        0
+      ],
+      "type": "index",
+      "data": {
+        "on": 0,
+        "name": "ix_messages_created",
+        "sql": "CREATE INDEX ix_messages_created ON messages(created_at DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 27,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "message_progress",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source_message_id",
+            "getter_name": "sourceMessageId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "conversation_key",
+            "getter_name": "conversationKey",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "received_at",
+            "getter_name": "receivedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "ingest_state",
+            "getter_name": "ingestState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'done'",
+            "default_dart": "const CustomExpression('\\'done\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "triage_state",
+            "getter_name": "triageState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "extract_state",
+            "getter_name": "extractState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "storyline_state",
+            "getter_name": "storylineState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "settle_state",
+            "getter_name": "settleState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "triage_at",
+            "getter_name": "triageAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "extract_at",
+            "getter_name": "extractAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "storyline_at",
+            "getter_name": "storylineAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "settle_at",
+            "getter_name": "settleAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "outcome",
+            "getter_name": "outcome",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "dropped",
+            "getter_name": "dropped",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "drop_reason",
+            "getter_name": "dropReason",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "storyline_id",
+            "getter_name": "storylineId",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "needs_you",
+            "getter_name": "needsYou",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 0",
+            "default_dart": "const CustomExpression('0')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "urgency",
+            "getter_name": "urgency",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "created_at",
+            "getter_name": "createdAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "updated_at",
+            "getter_name": "updatedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "draft_state",
+            "getter_name": "draftState",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL DEFAULT 'pending'",
+            "default_dart": "const CustomExpression('\\'pending\\'')",
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "draft_at",
+            "getter_name": "draftAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [
+          "PRIMARY KEY(source, source_message_id)"
+        ],
+        "strict": true,
+        "explicit_pk": [
+          "source",
+          "source_message_id"
+        ]
+      }
+    },
+    {
+      "id": 28,
+      "references": [
+        27
+      ],
+      "type": "index",
+      "data": {
+        "on": 27,
+        "name": "ix_message_progress_feed",
+        "sql": "CREATE INDEX ix_message_progress_feed\n  ON message_progress(received_at DESC, source_message_id DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 29,
+      "references": [
+        27
+      ],
+      "type": "index",
+      "data": {
+        "on": 27,
+        "name": "ix_message_progress_visible",
+        "sql": "CREATE INDEX ix_message_progress_visible\n  ON message_progress(dropped, received_at DESC, source_message_id DESC);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 30,
+      "references": [
+        27
+      ],
+      "type": "index",
+      "data": {
+        "on": 27,
+        "name": "ix_message_progress_conv",
+        "sql": "CREATE INDEX ix_message_progress_conv\n  ON message_progress(source, conversation_key);",
+        "unique": false,
+        "columns": []
+      }
+    },
+    {
+      "id": 31,
+      "references": [],
+      "type": "table",
+      "data": {
+        "name": "message_vectors",
+        "was_declared_in_moor": true,
+        "columns": [
+          {
+            "name": "id",
+            "getter_name": "id",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "PRIMARY KEY",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": [
+              "primary-key"
+            ]
+          },
+          {
+            "name": "source",
+            "getter_name": "source",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "source_message_id",
+            "getter_name": "sourceMessageId",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "embedding",
+            "getter_name": "embedding",
+            "moor_type": "blob",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "dims",
+            "getter_name": "dims",
+            "moor_type": "int",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "embedded_hash",
+            "getter_name": "embeddedHash",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "embed_model",
+            "getter_name": "embedModel",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "received_at",
+            "getter_name": "receivedAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "embedded_at",
+            "getter_name": "embeddedAt",
+            "moor_type": "string",
+            "nullable": false,
+            "customConstraints": "NOT NULL",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "indexed_at",
+            "getter_name": "indexedAt",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          }
+        ],
+        "is_virtual": false,
+        "without_rowid": false,
+        "constraints": [],
+        "strict": true
+      }
+    },
+    {
+      "id": 32,
+      "references": [
+        31
+      ],
+      "type": "index",
+      "data": {
+        "on": 31,
+        "name": "ix_message_vectors_message",
+        "sql": "CREATE UNIQUE INDEX ix_message_vectors_message\n  ON message_vectors(source, source_message_id);",
+        "unique": true,
+        "columns": []
+      }
+    },
+    {
+      "id": 33,
+      "references": [
+        31
+      ],
+      "type": "index",
+      "data": {
+        "on": 31,
+        "name": "ix_message_vectors_unindexed",
+        "sql": "CREATE INDEX ix_message_vectors_unindexed ON message_vectors(indexed_at);",
+        "unique": false,
+        "columns": []
+      }
+    }
+  ],
+  "fixed_sql": [
+    {
+      "name": "messages",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"messages\" (\"source\" TEXT NOT NULL DEFAULT 'email', \"source_message_id\" TEXT NOT NULL, \"internet_message_id\" TEXT, \"conversation_key\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"subject\" TEXT, \"from_name\" TEXT, \"from_address\" TEXT, \"to_json\" TEXT NOT NULL DEFAULT '[]', \"received_at\" TEXT, \"is_read\" INTEGER NOT NULL DEFAULT 0, \"body_preview\" TEXT, \"body_text\" TEXT, \"has_attachments\" INTEGER NOT NULL DEFAULT 0, \"source_meta_json\" TEXT, \"triage_status\" TEXT NOT NULL DEFAULT 'pending', \"triage_attempts\" INTEGER NOT NULL DEFAULT 0, \"triage_error\" TEXT, \"gate_reason\" TEXT, \"urgency\" TEXT, \"category\" TEXT, \"summary\" TEXT, \"needs_action\" INTEGER, \"action_items_json\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"label\" TEXT, \"addressed_me\" INTEGER NOT NULL DEFAULT 0, \"reply_expected\" INTEGER, \"deadline\" TEXT, PRIMARY KEY(source, source_message_id)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_messages_conv",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_messages_conv ON messages (source, conversation_key, received_at)"
+        }
+      ]
+    },
+    {
+      "name": "ix_messages_triage",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_messages_triage ON messages (triage_status, received_at DESC)"
+        }
+      ]
+    },
+    {
+      "name": "conversations",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"conversations\" (\"source\" TEXT NOT NULL DEFAULT 'email', \"conversation_key\" TEXT NOT NULL, \"subject\" TEXT, \"participants_json\" TEXT NOT NULL DEFAULT '[]', \"state\" TEXT NOT NULL DEFAULT 'done', \"category\" TEXT, \"cta_text\" TEXT, \"cta_urgency\" TEXT NOT NULL DEFAULT 'normal', \"message_count\" INTEGER NOT NULL DEFAULT 0, \"inbound_count\" INTEGER NOT NULL DEFAULT 0, \"last_inbound_at\" TEXT, \"last_outbound_at\" TEXT, \"last_message_at\" TEXT, \"last_message_preview\" TEXT, \"state_changed_at\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, PRIMARY KEY(source, conversation_key)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_conv_last",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_conv_last ON conversations (last_message_at DESC)"
+        }
+      ]
+    },
+    {
+      "name": "sync_state",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"sync_state\" (\"source\" TEXT NOT NULL DEFAULT 'email', \"folder\" TEXT NOT NULL, \"delta_link\" TEXT, \"synced_at\" TEXT, PRIMARY KEY(source, folder)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "work_items",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"work_items\" (\"task_kind\" TEXT NOT NULL, \"source\" TEXT NOT NULL DEFAULT 'email', \"entity_id\" TEXT NOT NULL, \"status\" TEXT NOT NULL DEFAULT 'pending', \"attempts\" INTEGER NOT NULL DEFAULT 0, \"error\" TEXT, \"payload_json\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, PRIMARY KEY(task_kind, source, entity_id)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_work_pending",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_work_pending ON work_items (task_kind, status, created_at DESC)"
+        }
+      ]
+    },
+    {
+      "name": "message_ai",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"message_ai\" (\"source\" TEXT NOT NULL DEFAULT 'email', \"source_message_id\" TEXT NOT NULL, \"extraction_json\" TEXT, \"extracted_at\" TEXT, PRIMARY KEY(source, source_message_id)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "conversation_ai",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"conversation_ai\" (\"source\" TEXT NOT NULL DEFAULT 'email', \"conversation_key\" TEXT NOT NULL, \"embedding\" BLOB, \"embedded_hash\" TEXT, \"embed_model\" TEXT, \"bucket\" TEXT, \"bucket_reason\" TEXT, \"attention_score\" REAL, \"snoozed_until\" TEXT, \"updated_at\" TEXT NOT NULL, PRIMARY KEY(source, conversation_key)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "storylines",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"storylines\" (\"id\" TEXT PRIMARY KEY, \"title\" TEXT NOT NULL, \"summary\" TEXT, \"status\" TEXT NOT NULL DEFAULT 'suggested', \"created_by\" TEXT NOT NULL DEFAULT 'auto', \"title_locked\" INTEGER NOT NULL DEFAULT 0, \"pinned\" INTEGER NOT NULL DEFAULT 0, \"member_hash\" TEXT, \"last_activity_at\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"charter\" TEXT, \"charter_locked\" INTEGER NOT NULL DEFAULT 0, \"cluster_hash\" TEXT) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_storylines_status",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_storylines_status ON storylines (status, last_activity_at DESC)"
+        }
+      ]
+    },
+    {
+      "name": "storyline_members",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"storyline_members\" (\"storyline_id\" TEXT NOT NULL, \"source\" TEXT NOT NULL DEFAULT 'email', \"conversation_key\" TEXT NOT NULL, \"added_by\" TEXT NOT NULL DEFAULT 'auto', \"evidence\" TEXT, \"added_at\" TEXT NOT NULL, PRIMARY KEY(storyline_id, source, conversation_key)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_storyline_members_conv",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_storyline_members_conv ON storyline_members (source, conversation_key)"
+        }
+      ]
+    },
+    {
+      "name": "storyline_member_blocks",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"storyline_member_blocks\" (\"storyline_id\" TEXT NOT NULL, \"source\" TEXT NOT NULL DEFAULT 'email', \"conversation_key\" TEXT NOT NULL, \"blocked_at\" TEXT NOT NULL, PRIMARY KEY(storyline_id, source, conversation_key)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "feedback_events",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"feedback_events\" (\"id\" INTEGER PRIMARY KEY, \"scope\" TEXT NOT NULL, \"scope_key\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"origin\" TEXT NOT NULL, \"created_at\" TEXT NOT NULL) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_feedback_scope",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_feedback_scope ON feedback_events (scope, scope_key, created_at DESC)"
+        }
+      ]
+    },
+    {
+      "name": "activity_events",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"activity_events\" (\"id\" INTEGER PRIMARY KEY, \"kind\" TEXT NOT NULL, \"source\" TEXT, \"status\" TEXT NOT NULL, \"entity_id\" TEXT, \"count\" INTEGER, \"duration_ms\" INTEGER, \"detail_json\" TEXT, \"created_at\" TEXT NOT NULL) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_activity_created",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_activity_created ON activity_events (created_at DESC)"
+        }
+      ]
+    },
+    {
+      "name": "ix_activity_kind",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_activity_kind ON activity_events (kind, created_at DESC)"
+        }
+      ]
+    },
+    {
+      "name": "sender_prefs",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"sender_prefs\" (\"address\" TEXT PRIMARY KEY, \"disposition\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "app_prefs",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"app_prefs\" (\"key\" TEXT PRIMARY KEY, \"value\" TEXT NOT NULL) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "drafts",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"drafts\" (\"source\" TEXT NOT NULL DEFAULT 'email', \"conversation_key\" TEXT NOT NULL, \"reply_to_message_id\" TEXT NOT NULL, \"body\" TEXT NOT NULL, \"evidence\" TEXT, \"status\" TEXT NOT NULL DEFAULT 'suggested', \"graph_draft_id\" TEXT, \"web_link\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"options_json\" TEXT, \"options_dismissed\" INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(source, reply_to_message_id)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_drafts_conv",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_drafts_conv ON drafts (source, conversation_key)"
+        }
+      ]
+    },
+    {
+      "name": "message_notify",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"message_notify\" (\"source\" TEXT NOT NULL, \"source_message_id\" TEXT NOT NULL, \"conversation_key\" TEXT NOT NULL, \"state\" TEXT NOT NULL DEFAULT 'pending', \"reason\" TEXT, \"deadline_at\" TEXT NOT NULL, \"settled_at\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, PRIMARY KEY(source, source_message_id)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_message_notify_open",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_message_notify_open ON message_notify (state, deadline_at)"
+        }
+      ]
+    },
+    {
+      "name": "ix_messages_created",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_messages_created ON messages (created_at DESC)"
+        }
+      ]
+    },
+    {
+      "name": "message_progress",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"message_progress\" (\"source\" TEXT NOT NULL, \"source_message_id\" TEXT NOT NULL, \"conversation_key\" TEXT NOT NULL, \"received_at\" TEXT NOT NULL, \"ingest_state\" TEXT NOT NULL DEFAULT 'done', \"triage_state\" TEXT NOT NULL DEFAULT 'pending', \"extract_state\" TEXT NOT NULL DEFAULT 'pending', \"storyline_state\" TEXT NOT NULL DEFAULT 'pending', \"settle_state\" TEXT NOT NULL DEFAULT 'pending', \"triage_at\" TEXT, \"extract_at\" TEXT, \"storyline_at\" TEXT, \"settle_at\" TEXT, \"outcome\" TEXT NOT NULL DEFAULT 'pending', \"dropped\" INTEGER NOT NULL DEFAULT 0, \"drop_reason\" TEXT, \"storyline_id\" TEXT, \"needs_you\" INTEGER NOT NULL DEFAULT 0, \"urgency\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"draft_state\" TEXT NOT NULL DEFAULT 'pending', \"draft_at\" TEXT, PRIMARY KEY(source, source_message_id)) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_message_progress_feed",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_message_progress_feed ON message_progress (received_at DESC, source_message_id DESC)"
+        }
+      ]
+    },
+    {
+      "name": "ix_message_progress_visible",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_message_progress_visible ON message_progress (dropped, received_at DESC, source_message_id DESC)"
+        }
+      ]
+    },
+    {
+      "name": "ix_message_progress_conv",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_message_progress_conv ON message_progress (source, conversation_key)"
+        }
+      ]
+    },
+    {
+      "name": "message_vectors",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE TABLE IF NOT EXISTS \"message_vectors\" (\"id\" INTEGER PRIMARY KEY, \"source\" TEXT NOT NULL, \"source_message_id\" TEXT NOT NULL, \"embedding\" BLOB NOT NULL, \"dims\" INTEGER NOT NULL, \"embedded_hash\" TEXT NOT NULL, \"embed_model\" TEXT NOT NULL, \"received_at\" TEXT, \"embedded_at\" TEXT NOT NULL, \"indexed_at\" TEXT) STRICT;"
+        }
+      ]
+    },
+    {
+      "name": "ix_message_vectors_message",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE UNIQUE INDEX ix_message_vectors_message ON message_vectors (source, source_message_id)"
+        }
+      ]
+    },
+    {
+      "name": "ix_message_vectors_unindexed",
+      "sql": [
+        {
+          "dialect": "sqlite",
+          "sql": "CREATE INDEX ix_message_vectors_unindexed ON message_vectors (indexed_at)"
+        }
+      ]
+    }
+  ]
+}

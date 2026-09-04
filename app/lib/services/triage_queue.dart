@@ -9,6 +9,7 @@ import 'backend/backend_types.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/triage_task.dart';
+import 'pipeline_progress.dart';
 
 /// How much triage is left, as of the last message the worker finished.
 ///
@@ -102,6 +103,10 @@ class TriageQueue {
 
   final ActivityLog _log;
 
+  /// Where each message's stage lands for the home screen. Defaulted to the
+  /// disabled recorder, so a test that builds this queue writes nothing extra.
+  final PipelineProgress _pipeline;
+
   final StreamController<TriageProgress> _progress =
       StreamController<TriageProgress>.broadcast();
 
@@ -135,11 +140,13 @@ class TriageQueue {
     DrainGate? gate,
     int concurrency = 3,
     ActivityLog? activityLog,
+    PipelineProgress progress = const PipelineProgress.disabled(),
   })  : _userAddress = userAddress,
         _ensureBody = ensureBody,
         _gate = gate ?? DrainGate(),
         _concurrency = concurrency,
-        _log = activityLog ?? ActivityLog.disabled();
+        _log = activityLog ?? ActivityLog.disabled(),
+        _pipeline = progress;
 
   /// The signed-in mailbox, for the gate that skips the user's own mail. Set
   /// after sign-in resolves; until then that one gate is simply off.
@@ -284,6 +291,10 @@ class TriageQueue {
   ) async {
     var current = row;
     var message = Message.fromRow(current);
+
+    // The claim is what the bar means by `running`: the row is off the pending
+    // list and this worker owns it.
+    await _pipeline.noteTriage(source, id, state: 'running');
 
     // The row arrives already claimed — the statement that picked it is the
     // statement that wrote its `processing`. A crash mid-model-call therefore
@@ -455,6 +466,21 @@ class TriageQueue {
       error: error,
       gateReason: gateReason,
       attempts: attempts,
+    );
+    // Mapped here rather than at the six call sites, and `pending` is a real
+    // answer among them: a park is the bar going back to waiting, not a stage
+    // that finished.
+    await _pipeline.noteTriage(
+      source,
+      id,
+      state: switch (status) {
+        'triaged' => 'done',
+        'skipped' => 'skipped',
+        'error' => 'error',
+        _ => 'pending',
+      },
+      urgency: result?.urgency,
+      gateReason: gateReason,
     );
     _claimed.remove('$source|$id');
   }

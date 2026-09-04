@@ -8,6 +8,7 @@ import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/composer.dart' show SendCapability;
 import 'package:flutter_test/flutter_test.dart';
@@ -214,6 +215,41 @@ void main() {
       (await store.getConversationRow('teams', 'chat-1'))!;
 
   group('the send', () {
+    test(
+        'a chat send takes the Needs You chip off — the one path the sync '
+        'can never clear', () async {
+      await seedChat();
+      await store.writeSettledProgress(
+        'teams',
+        'm1',
+        needsYou: true,
+        reason: 'settled',
+        dropped: false,
+      );
+      // The pipeline is passed explicitly here and nowhere else in this file:
+      // the outbound row the chat send writes is one the next pull skips as
+      // already-seen, so the sync's `resolvesAsk` arm never runs for it and
+      // THIS is the only place the chip can come off.
+      final notifier = DraftNotifier(
+        store,
+        _FakeAuth(),
+        _UnreachableMail(),
+        (source: 'teams', conversationKey: 'chat-1'),
+        teams: teams,
+        pipeline: PipelineProgress(store),
+        onSent: () async => syncsAfterSend++,
+      );
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      await notifier.send('Sending it over now.');
+
+      final row = (await store
+              .progressRowsFor([(source: 'teams', id: 'm1')]))
+          .single;
+      expect(row.needsYou, isFalse);
+    });
+
     test('goes to the chat, not through anything mail owns', () async {
       await seedChat();
       final notifier = await loaded();
@@ -298,6 +334,44 @@ void main() {
       expect(await teamsMessages(), hasLength(1));
       expect((await conversation())['state'], 'needs_reply');
       expect((await conversation())['cta_text'], isNotNull);
+    });
+
+    test('a card\'s send marks that message\'s suggestion sent', () async {
+      // A chat send marked no draft row at all until the cards moved under the
+      // messages they answer. It was harmless while only the newest suggestion
+      // was tappable; now an older card can send, and a row left 'suggested'
+      // would offer the reply again straight after it went.
+      await seedChat();
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'chat-1',
+        replyToMessageId: 'm1',
+        body: 'Sending it over now.',
+      );
+
+      await (await loaded()).send('Sending it over now.', replyTo: 'm1');
+
+      final draft = (await store.getDraftForMessage('teams', 'm1'))!;
+      expect(draft['status'], 'sent');
+      expect(draft['body'], 'Sending it over now.');
+    });
+
+    test('and a send that names no message changes no suggestion', () async {
+      // The composer's own send, which resolves its target elsewhere. Pinned
+      // because it is existing behaviour and not an oversight.
+      await seedChat();
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'chat-1',
+        replyToMessageId: 'm1',
+        body: 'Sending it over now.',
+      );
+
+      await (await loaded()).send('Typed from scratch.');
+
+      final draft = (await store.getDraftForMessage('teams', 'm1'))!;
+      expect(draft['status'], 'suggested');
+      expect(draft['body'], 'Sending it over now.');
     });
 
     test('without the grant the reply only reaches the clipboard', () async {

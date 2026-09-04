@@ -1735,6 +1735,26 @@ void main() {
       expect(await store.membersOf('sl-1'), hasLength(1));
     });
 
+    test('a block is about one connector, not one key', () async {
+      await seedStoryline(store);
+      // Two threads under one key, one per connector — which is normal: the
+      // mail and chat connectors mint keys with no knowledge of each other.
+      // The user's "no" was about the chat.
+      await seed(store, 'shared', vector: vectorAt(0.95));
+      await seed(store, 'shared', source: 'teams', vector: vectorAt(0.95));
+      await store.removeStorylineMember('sl-1', 'teams', 'shared',
+          block: true);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final detail = await recruitAndRecord(llm);
+
+      expect(llm.callsFor('storyline_membership'), 1);
+      expect(detail['considered'], 1);
+      final joined = (await store.membersOf('sl-1')).last;
+      expect(joined.conversationKey, 'shared');
+      expect(joined.source, 'email');
+    });
+
     test('the pass is capped at the top eight by cosine', () async {
       await seedStoryline(store);
       // Ten over the gate, at distinct cosines. The two weakest must never

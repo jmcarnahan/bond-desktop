@@ -241,12 +241,22 @@ CREATE TABLE app_prefs (
   value TEXT NOT NULL
 ) STRICT;
 
--- One draft per conversation, and the message it answers.
+-- One suggested reply, and the MESSAGE it answers.
 --
--- `reply_to_message_id` is what makes a draft falsifiable: a reply written
--- against a message that is no longer the newest inbound one is stale, and the
--- sync deletes it rather than letting the user send an answer to the
--- second-to-last thing that was said.
+-- The key is the message rather than the thread, because that is what a
+-- suggestion actually is: an answer to one thing somebody said. A thread that
+-- gets a second question earns a second suggestion instead of having the
+-- first overwritten, and the answer to a message stays readable beside the
+-- message it belongs to however long the thread runs on.
+--
+-- `conversation_key` rides along as a column so a thread can find its newest
+-- suggestion in one indexed read — `ix_drafts_conv` below — without walking
+-- the messages table to learn which thread each draft came from.
+--
+-- Staleness needs no sweep under this key. A reply written against the
+-- second-to-last thing that was said is simply not the row the thread's
+-- newest inbound message points at, so the read scopes itself and no sync
+-- has to delete anything to keep a wrong answer off the screen.
 --
 -- `graph_draft_id` / `web_link` are null until the draft has been pushed to
 -- Outlook, which only happens on the user's own click.
@@ -268,18 +278,18 @@ CREATE TABLE drafts (
   -- `options_json` is a JSON array of at most two ready-to-send short replies,
   -- `[{"stance": "…", "body": "…"}]`, written by the same model call that
   -- writes `body` — the long form. A column rather than a table because
-  -- nothing ever queries INTO the options, and a second table would have to be
-  -- keyed by something other than (source, conversation_key), breaking the
-  -- one-draft-per-conversation primary key that `needsDraftKeys` and the
-  -- sync's draft invalidation both rely on.
+  -- nothing ever queries INTO the options, and a second table keyed by the
+  -- same message would be a second row saying what this one already says.
   --
   -- `options_dismissed` keeps the row when the user closes the suggestions,
   -- the same trick `status = 'dismissed'` plays for the long form: deleting it
   -- would let the auto-enqueue write the identical options straight back.
   options_json TEXT,
   options_dismissed INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (source, conversation_key)
+  PRIMARY KEY (source, reply_to_message_id)
 ) STRICT;
+
+CREATE INDEX ix_drafts_conv ON drafts(source, conversation_key);
 
 -- Per-message notification state: admitted 'pending', settled exactly once to
 -- 'notified' or 'suppressed'. `reason` is diagnostic only (settled|deadline|
@@ -300,3 +310,96 @@ CREATE TABLE message_notify (
 
 CREATE INDEX ix_message_notify_open ON message_notify(state, deadline_at);
 CREATE INDEX ix_messages_created ON messages(created_at DESC);
+
+-- One row per message, tracking it through the pipeline: which stage it is
+-- at, what the app decided, and whether the user needed to know.
+--
+-- Everything the home feed shows is here, denormalized on purpose. The screen
+-- is left open all day over a growing mailbox, so a page has to be one indexed
+-- scan rather than a five-table join re-evaluated per row — and the snapshot
+-- columns (`needs_you`, `urgency`, `storyline_id`) are frozen at the moment
+-- the app decided, so history reads next week the way it read the day it
+-- happened.
+--
+-- `received_at` is NOT NULL and stored as COALESCE(received_at, created_at):
+-- it is half the paging cursor, and a NULL in a row-value comparison is
+-- neither less nor greater than anything.
+--
+-- Stage vocabulary is pending|running|done|skipped|error, and `skipped` is a
+-- real END state rather than a missing one — a gated message's bar must stop,
+-- not wait forever for an extraction nothing will ever queue.
+--
+-- `dropped` duplicates what `outcome` already says, deliberately. The default
+-- feed hides dropped rows and sqlite cannot range-scan `outcome <> 'dropped'`,
+-- so the discriminator leads the visible index and turns the common read into
+-- an equality seek.
+CREATE TABLE message_progress (
+  source TEXT NOT NULL,
+  source_message_id TEXT NOT NULL,
+  conversation_key TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  ingest_state TEXT NOT NULL DEFAULT 'done',
+  triage_state TEXT NOT NULL DEFAULT 'pending',
+  extract_state TEXT NOT NULL DEFAULT 'pending',
+  storyline_state TEXT NOT NULL DEFAULT 'pending',
+  settle_state TEXT NOT NULL DEFAULT 'pending',
+  triage_at TEXT,
+  extract_at TEXT,
+  storyline_at TEXT,
+  settle_at TEXT,
+  outcome TEXT NOT NULL DEFAULT 'pending',
+  dropped INTEGER NOT NULL DEFAULT 0,
+  drop_reason TEXT,
+  storyline_id TEXT,
+  needs_you INTEGER NOT NULL DEFAULT 0,
+  urgency TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  -- Migration-added columns sit AFTER the originals, for the reason the
+  -- drafts table states: ALTER TABLE appends, so this is the only position
+  -- where an upgraded install and a fresh one get identical table_info.
+  --
+  -- Drafting is a stage like any other and reads in the same vocabulary —
+  -- pending|running|done|skipped|error. `skipped` covers both messages
+  -- nothing will ever draft for and the ones the model read and decided need
+  -- no answer: either way the stage has finished, and a bar that waited for a
+  -- reply nobody is going to write would wait forever.
+  draft_state TEXT NOT NULL DEFAULT 'pending',
+  draft_at TEXT,
+  PRIMARY KEY (source, source_message_id)
+) STRICT;
+
+CREATE INDEX ix_message_progress_feed
+  ON message_progress(received_at DESC, source_message_id DESC);
+CREATE INDEX ix_message_progress_visible
+  ON message_progress(dropped, received_at DESC, source_message_id DESC);
+CREATE INDEX ix_message_progress_conv
+  ON message_progress(source, conversation_key);
+
+-- One vector per message, and the SOURCE OF TRUTH for it: the sqlite-vec
+-- index built over these rows is derived, disposable, and rebuildable from
+-- this table without a single model call.
+--
+-- `id` is a surrogate because it is also the vec0 index's rowid, and a
+-- message's own rowid is not stable across a VACUUM. Bare `INTEGER PRIMARY
+-- KEY` and not AUTOINCREMENT, for the reason `feedback_events` gives.
+--
+-- `indexed_at` NULL is the backfill worklist: a row whose vector exists but
+-- has not reached the index yet, which is the normal state after a rebuild or
+-- after the extension turned out to be unavailable at write time.
+CREATE TABLE message_vectors (
+  id INTEGER PRIMARY KEY,
+  source TEXT NOT NULL,
+  source_message_id TEXT NOT NULL,
+  embedding BLOB NOT NULL,
+  dims INTEGER NOT NULL,
+  embedded_hash TEXT NOT NULL,
+  embed_model TEXT NOT NULL,
+  received_at TEXT,
+  embedded_at TEXT NOT NULL,
+  indexed_at TEXT
+) STRICT;
+
+CREATE UNIQUE INDEX ix_message_vectors_message
+  ON message_vectors(source, source_message_id);
+CREATE INDEX ix_message_vectors_unindexed ON message_vectors(indexed_at);

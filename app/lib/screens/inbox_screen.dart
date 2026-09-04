@@ -5,11 +5,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/message_models.dart';
+import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
+import '../providers/home_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/notify_routing.dart';
@@ -24,6 +26,7 @@ import '../widgets/app_rail.dart';
 import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
+import '../widgets/home_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
 import '../widgets/notification_ribbon.dart';
@@ -81,7 +84,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The section overview showing when no thread is open. Never null in
   /// practice — the type only carries the "no explicit choice yet" case.
-  RailSection? _section = RailSection.needsYou;
+  ///
+  /// Seeded from [initialSectionProvider] in [initState] rather than here: the
+  /// pane the app lands on is a product decision, and a test that predates it
+  /// overrides that provider instead of being rewritten around a new landing.
+  RailSection? _section;
   String? _selectedId;
 
   /// Which connector [_selectedId] belongs to, set only when the caller knows
@@ -176,6 +183,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   @override
   void initState() {
     super.initState();
+    _section = ref.read(initialSectionProvider);
     // Built here, once, because nothing renders it: the OS dispatcher only
     // exists if something instantiates it, and the inbox is the screen whose
     // lifetime it should share.
@@ -189,6 +197,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // stamping it here is what stops the resume path firing again seconds
     // later when the window takes focus.
     Future.microtask(_refreshAll);
+    // The home feed reads sqlite alone, so it does not wait on the sync above
+    // it: whatever is already stored is on screen in the first frames, and the
+    // sync's arrivals land on the next read.
+    Future.microtask(() {
+      if (!mounted) return;
+      ref.read(homeFeedProvider.notifier).load();
+    });
     _poll = Timer.periodic(_pollInterval, (_) => _refresh());
   }
 
@@ -1143,7 +1158,59 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       if (storyline != null) return _storyline(storyline);
     }
 
+    // The last rung before the section overviews, so every selection above
+    // still outranks it: a thread opened from the feed shows the thread, and
+    // Home is what is left when nothing else is selected. A Later day is not a
+    // section here — it is an overview with a filter — so it is checked too.
+    if ((_section ?? RailSection.home) == RailSection.home &&
+        _selectedLaterDay == null) {
+      return _home();
+    }
+
     return _overview(conversations, loadError);
+  }
+
+  /// The pipeline, as a table. Everything it renders is a prop — see
+  /// [HomePane] — so this is the only place the home providers are read.
+  Widget _home() {
+    final feed = ref.watch(homeFeedProvider);
+    return HomePane(
+      rows: feed.rows,
+      // The previous value is carried through a re-read, so this is null only
+      // before the very first one lands.
+      metrics: ref.watch(homeMetricsProvider).valueOrNull,
+      hotStorylines: ref.watch(hotStorylinesProvider).valueOrNull ?? const [],
+      includeDropped: feed.includeDropped,
+      loaded: feed.loaded,
+      loadingMore: feed.loadingMore,
+      atEnd: feed.atEnd,
+      loadError: feed.loadError,
+      pendingNewCount: feed.pendingNewCount,
+      entering: feed.entering,
+      fading: feed.fading,
+      collapsing: feed.collapsing,
+      search: feed.search,
+      searching: feed.searching,
+      searchNotice: feed.searchNotice,
+      now: DateTime.now(),
+      // The same door a notification's OpenThreadIntent goes through: one
+      // selector resolves the row's source, marks it read and loads the
+      // transcript, and a second path into that would eventually disagree
+      // with this one.
+      onOpenThread: (source, key) => _select(key, source: source),
+      onOpenStoryline: _selectStoryline,
+      onLoadMore: () => ref.read(homeFeedProvider.notifier).loadMore(),
+      onReleasePending: () =>
+          ref.read(homeFeedProvider.notifier).releasePending(),
+      onAnchoredChanged: (anchored) =>
+          ref.read(homeFeedProvider.notifier).setAnchored(anchored),
+      onToggleDropped: () => ref
+          .read(homeFeedProvider.notifier)
+          .setIncludeDropped(!feed.includeDropped),
+      onSearch: (query) =>
+          ref.read(homeFeedProvider.notifier).submitSearch(query),
+      onExitSearch: () => ref.read(homeFeedProvider.notifier).exitSearch(),
+    );
   }
 
   /// Which thread joins [storyline].
@@ -1559,10 +1626,63 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ];
 
+    // Over the SHOWN transcript, optimistic bubble included: an outbound after
+    // a message answered it, and the reply the user just queued counts. That is
+    // what makes every card in the thread close at once the moment a send is
+    // armed, rather than leaving older ones tappable behind a reply already on
+    // its way.
+    final lastOut = latestOutboundAt(shown);
+    final notifier = ref.read(draftProvider(target).notifier);
+
+    /// The suggestion offered under one message, or null where there is none
+    /// left to offer.
+    ///
+    /// Every guard here is about honesty rather than tidiness: a card that can
+    /// still be tapped is a card that can still send, so it goes the moment its
+    /// message has been answered — by a synced reply or by a queued one.
+    Widget? cardFor(Message m) {
+      if (!m.inbound) return null;
+      final row = draft.threadDrafts[m.id];
+      if (row == null) return null;
+      // 'edited' is the user's own words and belongs in the composer; 'sent'
+      // and 'dismissed' are over.
+      if ((row['status'] as String?) != 'suggested') return null;
+      final options = draftOptionsOf(row);
+      // Covers the closed-cards case too: `options_dismissed` reads as none.
+      if (options.isEmpty) return null;
+      // Strict, mirroring `hasOpenAsk`: an outbound at the same instant did not
+      // answer this one.
+      if (lastOut != null && lastOut.compareTo(m.receivedAt ?? '') > 0) {
+        return null;
+      }
+      final armed = draft.capability == SendCapability.send;
+      return QuickReplyBar(
+        showReplyRow: false,
+        options: options,
+        armed: armed,
+        onPick: (option) {
+          // The same honest split `_pickQuickReply` makes: without a send grant
+          // a tap opens the box with the words in it rather than appearing to
+          // send them.
+          if (!armed) {
+            setState(() => _replyOpenFor = selected.id);
+            unawaited(notifier.markEdited(option.body));
+            return;
+          }
+          unawaited(_queueQuickReply(target, option.body, replyTo: m.id));
+        },
+        onReply: () => setState(() => _replyOpenFor = selected.id),
+        onDismiss: () => unawaited(notifier.dismissOptionsFor(m.id)),
+      );
+    }
+
     final panel = ThreadDetailPanel(
       key: ValueKey(selected.id),
       conversation: selected,
       messages: shown,
+      // The suggestions sit with the messages they answer. The panel places
+      // them and never learns what they are.
+      suggestionFor: cardFor,
       onMarkDone: () => ref
           .read(conversationsProvider.notifier)
           .markDone(selected.source, selected.id),
@@ -1665,7 +1785,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// The suggestions under the transcript, and everything a tap on one can do.
+  /// The bar under the transcript: the composer's doorway, the way to ask for a
+  /// suggestion, and the undo row while a send is queued.
+  ///
+  /// It carries no cards any more — a suggestion answers one message, and it is
+  /// drawn under that message. What is left here is what belongs to the THREAD
+  /// rather than to any message in it.
   Widget _quickReplies(
     Conversation selected,
     DraftTarget target,
@@ -1673,11 +1798,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ) {
     final notifier = ref.read(draftProvider(target).notifier);
     return QuickReplyBar(
-      options: draft.options,
+      options: const [],
       armed: draft.capability == SendCapability.send,
       onPick: (option) => unawaited(_pickQuickReply(selected, option)),
       onReply: () => setState(() => _replyOpenFor = selected.id),
-      onDismiss: () => unawaited(notifier.dismissOptions()),
       pending: draft.pending,
       onUndo: () => _cancelQueuedSend(target),
       // The way back from the ×, and the way in for a thread the queue never
@@ -1716,13 +1840,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     await _queueQuickReply(target, option.body);
   }
 
-  /// Arms the send a tapped card asked for, wherever the card was — under the
-  /// transcript or on a storyline's episode. One helper because the two
+  /// Arms the send a tapped card asked for, wherever the card was — inline
+  /// under a message, or on a storyline's episode. One helper because the two
   /// surfaces must not drift: the announcement, the undo window and the words
   /// on the snackbar are the same promise either way.
-  Future<void> _queueQuickReply(DraftTarget target, String body) async {
+  ///
+  /// [replyTo] is the message an inline card belongs to. Omitted, the send
+  /// resolves its own target the way it always did — the thread's stored draft,
+  /// then its newest inbound message.
+  Future<void> _queueQuickReply(
+    DraftTarget target,
+    String body, {
+    String? replyTo,
+  }) async {
     setState(() => _announceSendsFor.add(target));
-    await ref.read(draftProvider(target).notifier).queueSend(body);
+    await ref
+        .read(draftProvider(target).notifier)
+        .queueSend(body, replyTo: replyTo);
     _toast('Reply sending.', onUndo: () => _cancelQueuedSend(target));
   }
 
@@ -1935,6 +2069,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ),
         ],
+      // Unreachable: [_main] routes Home to its own pane, and the two above
+      // return before this switch. The arms exist so the analyzer keeps this
+      // exhaustive when a stop is added.
+      RailSection.home ||
       RailSection.later ||
       RailSection.storylines =>
         const <(String, List<Conversation>)>[],

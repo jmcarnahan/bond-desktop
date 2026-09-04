@@ -8,11 +8,14 @@ import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
-/// The rail's four stops.
-enum RailSection { needsYou, storylines, conversations, later }
+/// The rail's stops. [RailSection.home] leads because it is where the app
+/// lands, and because it is the only one that is about the pipeline rather
+/// than about a pile of mail.
+enum RailSection { home, needsYou, storylines, conversations, later }
 
 extension RailSectionLabel on RailSection {
   String get label => switch (this) {
+        RailSection.home => 'Home',
         RailSection.needsYou => 'Needs You',
         RailSection.storylines => 'Storylines',
         RailSection.conversations => 'Conversations',
@@ -341,6 +344,8 @@ class _AppRailState extends State<AppRail> {
                   vertical: BondSpacing.s12,
                 ),
                 children: [
+                  _stop(RailSection.home, Icons.bolt),
+                  const SizedBox(height: BondSpacing.s12),
                   ..._section(
                     RailSection.needsYou,
                     rows: [
@@ -401,6 +406,52 @@ class _AppRailState extends State<AppRail> {
               widget.footer!,
             ],
           ],
+        ),
+      ),
+    );
+  }
+
+  /// A stop with nothing under it: one row, selectable, no chevron.
+  ///
+  /// [_header]'s chrome minus the collapse affordance, deliberately — Home has
+  /// no children to hide, and a chevron that did nothing would be an
+  /// affordance that lied. The icon is what tells the eye it is a destination
+  /// rather than the heading of a list.
+  Widget _stop(RailSection section, IconData icon) {
+    final selected = widget.selectedSection == section;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
+      child: Material(
+        color: selected ? BondColors.onDarkTint : BondColors.ink,
+        borderRadius: BondRadii.smAll,
+        child: InkWell(
+          onTap: () => widget.onSelectSection(section),
+          borderRadius: BondRadii.smAll,
+          hoverColor: BondColors.onDarkFaint,
+          child: SizedBox(
+            height: _rowHeight,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+              child: Row(
+                children: [
+                  Icon(icon, size: 16, color: BondColors.onDarkMuted),
+                  const SizedBox(width: BondSpacing.s8),
+                  Expanded(
+                    child: Text(
+                      section.label.toUpperCase(),
+                      style: BondType.caption.copyWith(
+                        color: BondColors.onDarkMuted,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.96,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );

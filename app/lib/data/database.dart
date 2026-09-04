@@ -6,6 +6,7 @@ import 'package:drift/native.dart';
 import 'package:sqlite3/sqlite3.dart' as raw;
 
 import 'database.steps.dart';
+import 'progress_sql.dart';
 
 part 'database.g.dart';
 
@@ -36,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 7;
+  int get schemaVersion => 9;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -186,6 +187,159 @@ class BondDatabase extends _$BondDatabase {
                   "WHERE created_by = 'auto' AND cluster_hash IS NULL",
                 );
               },
+              // v8 — the pipeline becomes something a person can watch.
+              // `message_progress` carries one row per message: which stage it
+              // reached, what the app decided, and whether the user needed to
+              // know. `message_vectors` ships in the same step although
+              // nothing writes it yet — one migration over a large mailbox is
+              // cheaper than two, and the table is inert until then.
+              //
+              // The backfill is what makes the first launch after this update
+              // show a mailbox rather than an empty screen, and it is the
+              // longest statement this app has ever migrated with. Its shape
+              // is dictated by one constraint: SCALAR SUBQUERIES throughout,
+              // never a join. `storyline_members` holds a row per
+              // (storyline, thread), so joining it would offer a
+              // multi-storyline thread's messages twice and the INSERT would
+              // trip its own primary key.
+              //
+              // Stage timestamps stay NULL on purpose. This app did not watch
+              // the history it is describing, and a stamped time would be a
+              // claim about when something happened that nobody observed.
+              from7To8: (m, schema) async {
+                if (!await _tableExists('message_progress')) {
+                  await m.createTable(schema.messageProgress);
+                }
+                if (!await _tableExists('message_vectors')) {
+                  await m.createTable(schema.messageVectors);
+                }
+                // Hand-written with IF NOT EXISTS for the v6 reason: the
+                // generated `Index` entities carry bare `CREATE INDEX`, which
+                // throws on a replay over a torn state. Names and columns match
+                // the generated entities exactly, which is what the
+                // fresh-vs-migrated parity test compares.
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_message_progress_feed '
+                  'ON message_progress(received_at DESC, '
+                  'source_message_id DESC)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_message_progress_visible '
+                  'ON message_progress(dropped, received_at DESC, '
+                  'source_message_id DESC)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_message_progress_conv '
+                  'ON message_progress(source, conversation_key)',
+                );
+                await customStatement(
+                  'CREATE UNIQUE INDEX IF NOT EXISTS ix_message_vectors_message '
+                  'ON message_vectors(source, source_message_id)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_message_vectors_unindexed '
+                  'ON message_vectors(indexed_at)',
+                );
+                await customStatement(_backfillProgress);
+              },
+              // v9 — a suggested reply belongs to the message it answers.
+              // `drafts` is re-keyed from the thread to the message, and
+              // `message_progress` grows the stage that says where that reply
+              // got to.
+              //
+              // The re-key is a table recreate because sqlite cannot alter a
+              // primary key, and it is guarded on the key itself rather than
+              // on a column: every column here already exists, so the only
+              // thing that tells a first run from a replay over a torn state
+              // is which columns the table's pk is made of.
+              //
+              // `INSERT OR IGNORE` is the other half of that guard. Message
+              // ids are unique within a source, so a mailbox holding one draft
+              // per thread cannot collide on the new key — but a replay that
+              // half-ran must not fail on rows it already copied.
+              //
+              // The backfill writes a terminal state for EVERY row, open ones
+              // included. Nothing will ever queue draft work for a message
+              // stored before this version, so 'pending' would park those bars
+              // forever; 'done' where a draft answers the message and
+              // 'skipped' where none does is what the rows themselves say.
+              // `draft_at` stays NULL for the v8 reason: this app did not
+              // watch the history it is describing.
+              from8To9: (m, schema) async {
+                final pk = await customSelect(
+                  "SELECT name FROM pragma_table_info('drafts') WHERE pk > 0",
+                ).get();
+                final keyedByMessage = pk.any(
+                  (row) => row.data['name'] == 'reply_to_message_id',
+                );
+                if (!keyedByMessage) {
+                  await customStatement('''
+CREATE TABLE drafts_new (
+  source TEXT NOT NULL DEFAULT 'email',
+  conversation_key TEXT NOT NULL,
+  reply_to_message_id TEXT NOT NULL,
+  body TEXT NOT NULL,
+  evidence TEXT,
+  status TEXT NOT NULL DEFAULT 'suggested',
+  graph_draft_id TEXT,
+  web_link TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  options_json TEXT,
+  options_dismissed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source, reply_to_message_id)
+) STRICT''');
+                  await customStatement('''
+INSERT OR IGNORE INTO drafts_new (
+  source, conversation_key, reply_to_message_id, body, evidence, status,
+  graph_draft_id, web_link, created_at, updated_at, options_json,
+  options_dismissed
+)
+SELECT
+  source, conversation_key, reply_to_message_id, body, evidence, status,
+  graph_draft_id, web_link, created_at, updated_at, options_json,
+  options_dismissed
+FROM drafts''');
+                  await customStatement('DROP TABLE drafts');
+                  await customStatement(
+                    'ALTER TABLE drafts_new RENAME TO drafts',
+                  );
+                }
+                // Hand-written with IF NOT EXISTS for the v6 reason: the
+                // generated `Index` entities carry bare `CREATE INDEX`, which
+                // throws on a replay over a torn state.
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_drafts_conv '
+                  'ON drafts(source, conversation_key)',
+                );
+                // One guard per column, the v3–v5 discipline: a quit between
+                // the two ALTERs must not leave a replay that skips the
+                // second because the first already exists.
+                if (!await _columnExists('message_progress', 'draft_state')) {
+                  await m.addColumn(
+                    schema.messageProgress,
+                    schema.messageProgress.draftState,
+                  );
+                }
+                if (!await _columnExists('message_progress', 'draft_at')) {
+                  await m.addColumn(
+                    schema.messageProgress,
+                    schema.messageProgress.draftAt,
+                  );
+                }
+                // Unguarded, because it is idempotent and a guard would be a
+                // hole: between a torn run and its replay the app never
+                // opened, so re-deriving every row's answer changes nothing —
+                // while skipping it on a replay that got the columns in would
+                // leave the default 'pending' parked forever.
+                await customStatement('''
+UPDATE message_progress SET draft_state = CASE
+  WHEN EXISTS (
+    SELECT 1 FROM drafts d
+     WHERE d.source = message_progress.source
+       AND d.reply_to_message_id = message_progress.source_message_id
+  ) THEN 'done' ELSE 'skipped' END''');
+              },
             ),
           ),
         ),
@@ -218,6 +372,140 @@ class BondDatabase extends _$BondDatabase {
     return rows.isNotEmpty;
   }
 }
+
+/// The v8 backfill: one row of `message_progress` per stored message, with
+/// every stage read back out of what the pipeline already wrote.
+///
+/// Three nested SELECTs rather than one, because sqlite cannot refer to an
+/// output alias from the same SELECT list and the alternative is the same
+/// dozen-line CASE spelled out four times. The innermost derives the per-stage
+/// states from the tables that hold them, the middle turns those into the
+/// settle verdict and the drop flags, and the outer composes the outcome.
+///
+/// The derivations worth stating:
+/// - An ABSENT work row is a terminal state, not a missing one. A message the
+///   extractor was never queued for is `skipped`, so its bar stops instead of
+///   waiting forever on work nothing will ever enqueue.
+/// - A gated message lands fully resolved and dropped, keyed on `gate_reason`
+///   rather than on `triage_status` alone: `skipped` with no reason is the
+///   legacy Teams tolerance, not a verdict about the message.
+/// - `needs_you` is judged against a literal threshold ([needsYouSql]) because
+///   a migration must not read preferences; rows still open when the app
+///   launches are restated by the first settle sweep.
+final String _backfillProgress = '''
+INSERT OR IGNORE INTO message_progress (
+  source, source_message_id, conversation_key, received_at,
+  ingest_state, triage_state, extract_state, storyline_state, settle_state,
+  triage_at, extract_at, storyline_at, settle_at,
+  outcome, dropped, drop_reason, storyline_id, needs_you, urgency,
+  created_at, updated_at
+)
+SELECT
+  e.source, e.source_message_id, e.conversation_key, e.received_at,
+  'done', e.triage_state, e.extract_state, e.storyline_state, e.settle_state,
+  NULL, NULL, NULL, NULL,
+  CASE
+    WHEN e.dropped = 1 THEN 'dropped'
+    WHEN e.triage_state IN ('done', 'skipped', 'error')
+     AND e.extract_state IN ('done', 'skipped', 'error')
+     AND e.storyline_state IN ('done', 'skipped', 'error')
+     AND e.settle_state IN ('done', 'skipped', 'error') THEN 'done'
+    ELSE 'pending'
+  END,
+  e.dropped, e.drop_reason, e.storyline_id, e.needs_you, e.urgency,
+  e.created_at, e.updated_at
+FROM (
+  SELECT d.*,
+    CASE
+      WHEN d.gated = 1 THEN 'done'
+      WHEN d.notify_state IN ('notified', 'suppressed') THEN 'done'
+      WHEN d.notify_state = 'pending' THEN 'pending'
+      ELSE 'skipped'
+    END AS settle_state,
+    CASE
+      WHEN d.gated = 1 THEN 1
+      WHEN d.notify_state = 'suppressed'
+       AND d.notify_reason IN ('gated', 'not_worthy') THEN 1
+      ELSE 0
+    END AS dropped,
+    CASE
+      WHEN d.gated = 1 THEN d.gate_reason
+      WHEN d.notify_state = 'suppressed'
+       AND d.notify_reason IN ('gated', 'not_worthy')
+        THEN d.notify_reason
+      ELSE NULL
+    END AS drop_reason
+  FROM (
+    SELECT
+      m.source AS source,
+      m.source_message_id AS source_message_id,
+      m.conversation_key AS conversation_key,
+      COALESCE(m.received_at, m.created_at) AS received_at,
+      m.urgency AS urgency,
+      m.gate_reason AS gate_reason,
+      m.created_at AS created_at,
+      m.updated_at AS updated_at,
+      CASE
+        WHEN m.triage_status = 'skipped' AND m.gate_reason IS NOT NULL THEN 1
+        ELSE 0
+      END AS gated,
+      CASE m.triage_status
+        WHEN 'triaged' THEN 'done'
+        WHEN 'skipped' THEN 'skipped'
+        WHEN 'error' THEN 'error'
+        WHEN 'processing' THEN 'running'
+        ELSE 'pending'
+      END AS triage_state,
+      CASE
+        WHEN EXISTS (SELECT 1 FROM message_ai a
+                      WHERE a.source = m.source
+                        AND a.source_message_id = m.source_message_id
+                        AND a.extraction_json IS NOT NULL) THEN 'done'
+        WHEN m.triage_status = 'skipped' THEN 'skipped'
+        ELSE COALESCE((
+          SELECT CASE w.status
+                   WHEN 'done' THEN 'done'
+                   WHEN 'error' THEN 'error'
+                   WHEN 'processing' THEN 'running'
+                   ELSE 'pending'
+                 END
+            FROM work_items w
+           WHERE w.task_kind = 'extract' AND w.source = m.source
+             AND w.entity_id = m.source_message_id), 'skipped')
+      END AS extract_state,
+      CASE
+        WHEN EXISTS (SELECT 1 FROM storyline_members sm
+                      WHERE sm.source = m.source
+                        AND sm.conversation_key = m.conversation_key) THEN 'done'
+        WHEN m.triage_status = 'skipped' THEN 'skipped'
+        ELSE COALESCE((
+          SELECT CASE w.status
+                   WHEN 'done' THEN 'done'
+                   WHEN 'error' THEN 'error'
+                   WHEN 'processing' THEN 'running'
+                   ELSE 'pending'
+                 END
+            FROM work_items w
+           WHERE w.task_kind = 'storyline' AND w.source = m.source
+             AND w.entity_id = m.conversation_key), 'skipped')
+      END AS storyline_state,
+      (SELECT sm.storyline_id
+         FROM storyline_members sm
+         JOIN storylines s ON s.id = sm.storyline_id
+        WHERE sm.source = m.source AND sm.conversation_key = m.conversation_key
+          AND s.status IN ('suggested', 'active')
+        ORDER BY sm.added_at ASC LIMIT 1) AS storyline_id,
+      (SELECT n.state FROM message_notify n
+        WHERE n.source = m.source
+          AND n.source_message_id = m.source_message_id) AS notify_state,
+      (SELECT n.reason FROM message_notify n
+        WHERE n.source = m.source
+          AND n.source_message_id = m.source_message_id) AS notify_reason,
+      ${needsYouSql(threshold: backfillNeedsYouThreshold)} AS needs_you
+    FROM messages m
+  ) d
+) e
+''';
 
 /// Claims a pre-drift database as schema version 1.
 ///
