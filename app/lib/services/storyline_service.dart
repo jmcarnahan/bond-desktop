@@ -396,6 +396,13 @@ class StorylineService {
       return;
     }
 
+    // One read of the blocks, not one per candidate. The loop below walks
+    // every embedded thread in the mailbox, and the user is sitting in front
+    // of the charter they just saved waiting for this pass — a query per
+    // thread turned that wait into a function of mailbox size. Same set, same
+    // gate, same order.
+    final blocked = await _store.blockedThreadsOf(storylineId);
+
     // Scored, then top-N. Ties break on the store's own order (newest first,
     // key ascending), and the sort is made deterministic by index because
     // List.sort makes no stability promise of its own.
@@ -410,7 +417,7 @@ class StorylineService {
       if (key.isEmpty) continue;
       final rowSource = row['source'] as String? ?? _workSource;
       if (context.memberThreads.contains(_threadKey(rowSource, key))) continue;
-      if (await _store.isMemberBlocked(storylineId, rowSource, key)) continue;
+      if (blocked.contains(_threadKey(rowSource, key))) continue;
       final blob = row['embedding'];
       if (blob is! Uint8List) continue;
       final vector = decodeEmbedding(blob);

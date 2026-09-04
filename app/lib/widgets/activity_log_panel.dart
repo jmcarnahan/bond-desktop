@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../services/activity_log.dart';
 import '../theme/tokens.dart';
+import 'home_metrics.dart';
 import 'time_format.dart';
 
 /// What the app has been doing while nobody was watching it.
@@ -376,30 +377,12 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
     return ActivityLogPanel.formatSpeed(tokens * 1000 / ms);
   }
 
-  // Sized so the full set — through the two wall-clock stamps, the widest
-  // values — stays one row on a laptop pane; a wrapped tile row buries the
-  // table it sits above.
+  // The home metrics bar's tile, which is the same tile: two rows of numbers
+  // that look alike ARE one widget, so a change to the chrome cannot land on
+  // one screen and miss the other. The method stays as the local name every
+  // call site above already uses.
   Widget _tile(String value, String label, {Color? valueColor}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: BondSpacing.s12,
-        vertical: BondSpacing.s8,
-      ),
-      decoration: BoxDecoration(
-        color: BondColors.faintGround,
-        borderRadius: BondRadii.mdAll,
-        border: Border.all(color: BondColors.border),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(value, style: BondType.mono.copyWith(color: valueColor)),
-          const SizedBox(height: 2),
-          Text(label, style: BondType.caption),
-        ],
-      ),
-    );
+    return BondStatTile(value: value, label: label, valueColor: valueColor);
   }
 
   /// The events by local calendar day, newest day first, each day's rows in

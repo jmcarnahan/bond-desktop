@@ -5,8 +5,10 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/conversation_state.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -132,7 +134,13 @@ void main() {
     tokens.values['granted_scopes'] = _grantedScopes;
 
     final auth = GraphAuth(httpClient: graph.client, store: tokens);
-    sync = SyncService(GraphMail(auth, httpClient: graph.client), store);
+    sync = SyncService(
+      GraphMail(auth, httpClient: graph.client),
+      store,
+      // The recorder the sync writes progress through — the same one that
+      // takes the Needs You chip off a thread the user has answered.
+      progress: PipelineProgress(store),
+    );
   });
 
   tearDown(() async => db.close());
@@ -274,4 +282,74 @@ void main() {
     expect(r?['state'], stateWaiting);
     expect(r?['cta_text'], isNull);
   });
+  /// The chip is earned at settle time and survives being read. A reply the
+  /// user sent — from here, from Outlook, from a phone — is what takes it off.
+  group('the Needs You chip', () {
+    /// The chip on the messages that were asking — the user's own mail is not
+    /// one of them, and lands with the column at 0 whatever happens here.
+    Future<List<Object?>> needsYouOn(String key) async => [
+          for (final row in await db
+              .customSelect(
+                'SELECT p.needs_you FROM message_progress p '
+                'JOIN messages m ON m.source = p.source '
+                '  AND m.source_message_id = p.source_message_id '
+                "WHERE p.conversation_key = ? AND m.direction = 'inbound' "
+                'ORDER BY p.source_message_id',
+                variables: [Variable(key)],
+              )
+              .get())
+            row.data['needs_you'],
+        ];
+
+    Future<void> markAsking() => db.customUpdate(
+          'UPDATE message_progress SET needs_you = 1',
+        );
+
+    test('a synced reply takes it off every message of the thread', () async {
+      queueInbound([
+        graphMessage(
+            id: 'in-1', receivedDateTime: fresh(const Duration(hours: 2))),
+      ]);
+      await sync.syncNow();
+      await store.updateConversationTriage(
+        'email',
+        'conv-1',
+        ctaText: 'Review the contract sent earlier',
+        ctaUrgency: 'high',
+      );
+      await markAsking();
+
+      queueSent([
+        graphMessage(
+          id: 'sent-1',
+          fromAddress: 'lo@bond.com',
+          receivedDateTime: fresh(const Duration(hours: 1)),
+        ),
+      ]);
+      await sync.syncNow();
+
+      expect(await needsYouOn('conv-1'), [0]);
+    });
+
+    test('and an outbound that answers nothing leaves it standing', () async {
+      queueInbound([
+        graphMessage(
+            id: 'in-1', receivedDateTime: fresh(const Duration(hours: 1))),
+      ]);
+      await sync.syncNow();
+      await markAsking();
+
+      queueSent([
+        graphMessage(
+          id: 'sent-old',
+          fromAddress: 'lo@bond.com',
+          receivedDateTime: fresh(const Duration(hours: 3)),
+        ),
+      ]);
+      await sync.syncNow();
+
+      expect(await needsYouOn('conv-1'), [1]);
+    });
+  });
+
 }

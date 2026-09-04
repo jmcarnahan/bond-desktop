@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/sync_service.dart';
@@ -143,11 +144,12 @@ void main() {
 
   tearDown(() async => db.close());
 
-  Future<List<String>> queuedIds() async => [
+  Future<List<String>> queuedIds({String kind = 'extract'}) async => [
         for (final row in await db
             .customSelect(
-              "SELECT entity_id FROM work_items WHERE task_kind = 'extract' "
+              'SELECT entity_id FROM work_items WHERE task_kind = ? '
               'ORDER BY entity_id',
+              variables: [Variable<String>(kind)],
             )
             .get())
           row.data['entity_id'] as String,
@@ -194,6 +196,11 @@ void main() {
     // backlog cost model time and answer nothing.
     expect(await queuedIds(), ['fresh-1', 'fresh-2']);
     expect(await store.workCounts('extract'), {'pending': 2});
+
+    // The search vectors ride the same window and the same idempotent insert:
+    // whatever is worth extracting is worth being able to find.
+    expect(await queuedIds(kind: 'embed_message'), ['fresh-1', 'fresh-2']);
+    expect(await store.workCounts('embed_message'), {'pending': 2});
   });
 
   test('a second sync neither duplicates nor resurrects', () async {

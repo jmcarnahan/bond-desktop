@@ -91,6 +91,11 @@ class AppPrefs {
   /// for a setting would waste the whole point of it.
   final NotifyStyle notifyStyle;
 
+  /// Whether the home feed lists the messages the app decided the user does
+  /// not need. Off by default — that decision is the product — and the toggle
+  /// is what makes it auditable rather than hidden.
+  final bool homeShowDropped;
+
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
@@ -99,6 +104,7 @@ class AppPrefs {
     this.showActivityLog = false,
     this.storylineNewestFirst = false,
     this.notifyStyle = NotifyStyle.native,
+    this.homeShowDropped = false,
   });
 
   /// Whether the in-app ribbon runs. It does in BOTH remaining modes — it is
@@ -115,6 +121,7 @@ class AppPrefs {
     bool? showActivityLog,
     bool? storylineNewestFirst,
     NotifyStyle? notifyStyle,
+    bool? homeShowDropped,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -125,6 +132,7 @@ class AppPrefs {
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
         notifyStyle: notifyStyle ?? this.notifyStyle,
+        homeShowDropped: homeShowDropped ?? this.homeShowDropped,
       );
 }
 
@@ -139,6 +147,7 @@ const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
 const String storylineNewestFirstKey = 'storyline_newest_first';
 const String notifyStyleKey = 'notify_style';
+const String homeShowDroppedKey = 'home_show_dropped';
 
 /// The switch [notifyStyleKey] replaced. Still read — and only read — so an
 /// install that had turned the ribbon off stays quiet across the upgrade
@@ -193,6 +202,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         await store.getPref(notifyStyleKey),
         await store.getPref(notifyRibbonKey),
       ),
+      homeShowDropped: await store.getPref(homeShowDroppedKey) == 'true',
     );
   }
 
@@ -282,6 +292,11 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setNotifyStyle(NotifyStyle value) async {
     state = state.copyWith(notifyStyle: value);
     await _store.setPref(notifyStyleKey, _styleName(value));
+  }
+
+  Future<void> setHomeShowDropped(bool value) async {
+    state = state.copyWith(homeShowDropped: value);
+    await _store.setPref(homeShowDroppedKey, value.toString());
   }
 }
 

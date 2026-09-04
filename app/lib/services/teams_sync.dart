@@ -4,6 +4,7 @@ import '../data/message_store.dart';
 import 'activity_log.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
+import 'pipeline_progress.dart';
 import 'backend/teams_backend.dart';
 
 /// LEGACY. Nothing writes this any more.
@@ -91,14 +92,17 @@ class TeamsSync {
   final Future<bool> Function() _canSync;
 
   final ActivityLog _log;
+  final PipelineProgress _progress;
 
   TeamsSync(
     this._teams,
     this._store, {
     Future<bool> Function()? canSync,
     ActivityLog? activityLog,
+    PipelineProgress? progress,
   })  : _canSync = canSync ?? _alwaysAllowed,
-        _log = activityLog ?? ActivityLog.disabled();
+        _log = activityLog ?? ActivityLog.disabled(),
+        _progress = progress ?? const PipelineProgress.disabled();
 
   static Future<bool> _alwaysAllowed() async => true;
 
@@ -250,6 +254,14 @@ class TeamsSync {
         source: source,
       );
 
+      // And their search vectors, over the same window and the same idempotent
+      // insert — a chat is searchable on the same terms mail is.
+      await _store.enqueueEmbedBacklog(
+        cap: _extractCap,
+        sinceIso: floor,
+        source: source,
+      );
+
       // Chat ingest freshens discovery exactly as mail ingest does: the sweep
       // reads both connectors, so a chat can now SEED a storyline and not only
       // join one. A requeue rather than an enqueue, so the sweep that ran after
@@ -380,17 +392,19 @@ class TeamsSync {
         // exactly once — see the class comment. The upsert itself still runs.
         final firstSighting = !await _store.hasMessage(source, id);
 
-        await _store.upsertMessage(row);
+        final ingested = await _store.upsertMessage(row);
+
+        // Non-null only when the pipeline had never heard of this message, so
+        // a chat read a second time announces nothing. Not awaited because
+        // there is nothing to wait for: the tick is a publish onto a stream.
+        if (ingested != null) {
+          _progress.noteIngest(source, id, receivedAt: ingested);
+        }
+
         if (!firstSighting) continue;
         newMessages++;
 
         final outbound = row['direction'] == 'outbound';
-
-        // A draft answers the message that was newest when the model wrote it.
-        // The moment a newer inbound message lands, that draft is a reply to
-        // the wrong thing — so it goes, and the enqueue on the next list load
-        // writes a fresh one against what the sender actually just said.
-        if (!outbound) await _store.deleteDraft(source, key);
 
         // Asked BEFORE the fold advances the inbound watermark — a reply the
         // user sent from any Teams client resolves the standing ask, exactly
@@ -403,7 +417,13 @@ class TeamsSync {
           receivedAt: row['received_at'] as String?,
           preview: row['body_preview'] as String?,
         );
-        if (resolvesAsk) work.clearCta();
+        if (resolvesAsk) {
+          work.clearCta();
+          // And the chip goes with the CTA. A reply the user sent from any
+          // Teams client is what takes the thread off the Needs You list;
+          // reading it never was.
+          await _progress.clearNeedsYou(source, key);
+        }
       }
 
       await _writeConversation(key, work, chat, firstSight: firstSight);

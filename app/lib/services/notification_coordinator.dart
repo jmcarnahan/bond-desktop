@@ -7,6 +7,65 @@ import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'attention.dart';
 import 'notify/settled_event.dart';
+import 'pipeline_progress.dart';
+
+/// Whether this message is worth interrupting for: a message-level ask AND a
+/// thread-level volume, never one of the two.
+///
+/// Top-level and public because it is asked twice about one message and the
+/// two answers have to be the same answer. The sweep asks it to decide whether
+/// to notify; the settle then asks it for the `needs_you` snapshot the home
+/// screen shows. Two copies would drift, and the symptom is the tile
+/// disagreeing with the toast it came from.
+///
+/// BOTH halves are required, and they answer different questions. The ask
+/// says the message wants something from the reader. The volume says the
+/// user wants to hear about this thread at all — the attention threshold and
+/// the `later` bucket are their ONE loudness control, and an ask that
+/// bypassed them would take the control away exactly when it matters.
+/// Volume alone is worse still: a high score is a ranking, not a request, so
+/// firing on it would announce every unread message of every decent thread
+/// and invert the app into the notification stream it exists to replace.
+/// Either half alone is a notification the user did not sign up for.
+///
+/// `== 1` comparisons only, never truthiness: `reply_expected` NULL means
+/// "no v2 pass has judged this", which is not a "no". Reading NULL as 0
+/// would turn every un-judged message into a decided negative.
+///
+/// Every ask below is the message's own except `cta_text`, which lives on the
+/// CONVERSATION and belongs to whichever message was triaged into it last.
+/// The thread's CTA therefore testifies for this message only when this
+/// message's own triage wrote it: `triaged` is the one status whose pass
+/// rewrote the conversation's CTA fields. Counted for a candidate still
+/// `pending` at its deadline, or one whose triage ended in `error`, it is
+/// another message's ask — and the toast that followed named THIS message
+/// while quoting THAT one.
+///
+/// Read state is not asked about here, because a read message never reaches
+/// this: [NotificationCoordinator]'s decision table suppresses it first.
+/// `needsYouSql`, which judges the rows this never sees, has to carry that
+/// guard itself.
+bool notifyWorthy(Map<String, Object?> row, {required double threshold}) {
+  final ask = _int(row['reply_expected']) == 1 ||
+      _int(row['needs_action']) == 1 ||
+      row['urgency'] == 'urgent' ||
+      row['urgency'] == 'high' ||
+      (row['deadline'] as String? ?? '').isNotEmpty ||
+      (_ownsCta(row) && (row['cta_text'] as String? ?? '').isNotEmpty);
+  final score = (row['attention_score'] as num?)?.toDouble() ?? 0;
+  return ask &&
+      row['conversation_state'] != 'done' &&
+      row['bucket'] != 'later' &&
+      score >= threshold;
+}
+
+/// Whether the conversation's CTA fields are this message's own words.
+///
+/// They describe the newest TRIAGED message of the thread, so only a
+/// candidate whose own triage finished may be judged — or quoted — by them.
+bool _ownsCta(Map<String, Object?> row) => row['triage_status'] == 'triaged';
+
+int? _int(Object? value) => (value as num?)?.toInt();
 
 /// Decides, once per message, whether the user hears about it.
 ///
@@ -47,8 +106,23 @@ class NotificationCoordinator {
   /// moves nothing this reads, so it does not wake the sweep.
   static const Set<String> _pipelineKinds = {'triage', 'extract', 'storyline'};
 
+  /// The reasons that mean **the app decided the user does not need this**,
+  /// which is exactly what `dropped` records. `read`, `done` and `stale` are
+  /// not among them and must not be: a message the user got to before the
+  /// pipeline settled is finished, not discarded, and hiding it under the
+  /// "show dropped" toggle would be the app taking credit for a decision the
+  /// person made. Neither is `deadline`: a deadline suppression is a verdict
+  /// rendered on an INCOMPLETE pipeline — for a message whose triage never
+  /// ran (a model server down, a backlog) it is a timeout, not a judgment,
+  /// and hiding it would bury exactly the messages the pipeline failed on.
+  static const Set<String> _dropReasons = {'gated', 'not_worthy'};
+
   final MessageStore _store;
   final ActivityLog _log;
+
+  /// Where each settle lands for the home screen.
+  final PipelineProgress _pipeline;
+
   final Future<double> Function()? _threshold;
   final DateTime Function() _clock;
 
@@ -70,7 +144,9 @@ class NotificationCoordinator {
     ActivityLog? activityLog,
     Future<double> Function()? attentionThreshold,
     DateTime Function()? clock,
+    PipelineProgress progress = const PipelineProgress.disabled(),
   })  : _log = activityLog ?? ActivityLog.disabled(),
+        _pipeline = progress,
         _threshold = attentionThreshold,
         _clock = clock ?? (() => DateTime.now().toUtc());
 
@@ -203,6 +279,18 @@ class NotificationCoordinator {
           reason: decision.reason,
         );
         if (!settled) continue;
+        // The SAME verdict the decision was made on, not a second opinion:
+        // `needs_you` is what the home screen's tile reads and the toast is
+        // what the user saw, and two evaluations of one predicate would
+        // eventually disagree about one message.
+        await _pipeline.noteSettled(
+          source,
+          id,
+          needsYou: notifyWorthy(row, threshold: threshold),
+          reason: decision.reason,
+          dropped: decision.state == 'suppressed' &&
+              _dropReasons.contains(decision.reason),
+        );
         if (decision.state != 'notified') continue;
         await _emit(row, decision);
       } catch (e) {
@@ -242,13 +330,13 @@ class NotificationCoordinator {
       return const _Decision('suppressed', 'done');
     }
     if (_isComplete(row)) {
-      return _worthy(row, threshold: threshold)
+      return notifyWorthy(row, threshold: threshold)
           ? const _Decision('notified', 'settled')
           : const _Decision('suppressed', 'not_worthy');
     }
     final deadline = row['deadline_at'] as String? ?? '';
     if (deadline.compareTo(nowIso) <= 0) {
-      return _worthy(row, threshold: threshold)
+      return notifyWorthy(row, threshold: threshold)
           ? const _Decision('notified', 'deadline', onDeadline: true)
           : const _Decision('suppressed', 'deadline', onDeadline: true);
     }
@@ -273,53 +361,6 @@ class NotificationCoordinator {
     if (aiAt == null || aiAt.compareTo(msgAt) < 0) return false;
     return true;
   }
-
-  /// Whether this is worth interrupting for: a message-level ask AND a
-  /// thread-level volume, never one of the two.
-  ///
-  /// BOTH halves are required, and they answer different questions. The ask
-  /// says the message wants something from the reader. The volume says the
-  /// user wants to hear about this thread at all — the attention threshold and
-  /// the `later` bucket are their ONE loudness control, and an ask that
-  /// bypassed them would take the control away exactly when it matters.
-  /// Volume alone is worse still: a high score is a ranking, not a request, so
-  /// firing on it would announce every unread message of every decent thread
-  /// and invert the app into the notification stream it exists to replace.
-  /// Either half alone is a notification the user did not sign up for.
-  ///
-  /// `== 1` comparisons only, never truthiness: `reply_expected` NULL means
-  /// "no v2 pass has judged this", which is not a "no". Reading NULL as 0
-  /// would turn every un-judged message into a decided negative.
-  ///
-  /// Every ask below is the message's own except `cta_text`, which lives on the
-  /// CONVERSATION and belongs to whichever message was triaged into it last.
-  /// The thread's CTA therefore testifies for this message only when this
-  /// message's own triage wrote it: `triaged` is the one status whose pass
-  /// rewrote the conversation's CTA fields. Counted for a candidate still
-  /// `pending` at its deadline, or one whose triage ended in `error`, it is
-  /// another message's ask — and the toast that followed named THIS message
-  /// while quoting THAT one.
-  bool _worthy(Map<String, Object?> row, {required double threshold}) {
-    final ask = _int(row['reply_expected']) == 1 ||
-        _int(row['needs_action']) == 1 ||
-        row['urgency'] == 'urgent' ||
-        row['urgency'] == 'high' ||
-        (row['deadline'] as String? ?? '').isNotEmpty ||
-        (_ownsCta(row) && (row['cta_text'] as String? ?? '').isNotEmpty);
-    // Unread is already guaranteed — a read message never reaches here.
-    final score = (row['attention_score'] as num?)?.toDouble() ?? 0;
-    return ask &&
-        row['conversation_state'] != 'done' &&
-        row['bucket'] != 'later' &&
-        score >= threshold;
-  }
-
-  /// Whether the conversation's CTA fields are this message's own words.
-  ///
-  /// They describe the newest TRIAGED message of the thread, so only a
-  /// candidate whose own triage finished may be judged — or quoted — by them.
-  static bool _ownsCta(Map<String, Object?> row) =>
-      row['triage_status'] == 'triaged';
 
   Future<void> _emit(Map<String, Object?> row, _Decision decision) async {
     if (_controller.isClosed) return;
@@ -389,8 +430,6 @@ class NotificationCoordinator {
     await events?.cancel();
     await _controller.close();
   }
-
-  static int? _int(Object? value) => (value as num?)?.toInt();
 
   /// The clock already yields UTC, so this is the store's timestamp format.
   static String _iso(DateTime t) => t.toIso8601String();

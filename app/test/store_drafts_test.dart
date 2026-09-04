@@ -4,7 +4,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
 
-/// The `drafts` table and the two reads that feed drafting.
+/// The `drafts` table — keyed on the message a suggestion answers — and the
+/// reads that feed drafting.
 
 void main() {
   late BondDatabase db;
@@ -38,37 +39,6 @@ void main() {
     });
   }
 
-  Future<void> seedConversation({
-    required String key,
-    String source = 'email',
-    String state = 'needs_reply',
-    double? score = 0.9,
-    String? bucket,
-  }) async {
-    await store.upsertConversation({
-      'source': source,
-      'conversation_key': key,
-      'subject': key,
-      'state': state,
-      'last_message_at': '2026-08-29T10:00:00Z',
-    });
-    if (score != null) await store.writeAttentionScore(source, key, score);
-    if (bucket != null) {
-      await store.setConversationBucket(source, key, bucket: bucket);
-    }
-  }
-
-  /// The records, as `source/key` strings — short enough to read in an
-  /// expectation, and it pins both halves of every row.
-  Future<List<String>> draftQueue({
-    double threshold = 0.5,
-    int limit = 7,
-  }) async => [
-        for (final row
-            in await store.needsDraftKeys(threshold: threshold, limit: limit))
-          '${row.source}/${row.conversationKey}',
-      ];
-
   group('the schema', () {
     test('drafts is STRICT, like every other table', () async {
       final sql = (await db
@@ -84,7 +54,8 @@ void main() {
   });
 
   group('CRUD', () {
-    test('writes a draft and reads it back', () async {
+    test('writes a draft and reads it back by the message it answers',
+        () async {
       await store.upsertDraft(
         source: 'email',
         conversationKey: 'conv-1',
@@ -93,16 +64,39 @@ void main() {
         evidence: 'Sarah wants the lock extended.',
       );
 
-      final draft = (await store.getDraft('email', 'conv-1'))!;
+      final draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(draft['body'], 'Friday works.');
       expect(draft['evidence'], 'Sarah wants the lock extended.');
       expect(draft['status'], 'suggested');
-      expect(draft['reply_to_message_id'], 'm1');
+      expect(draft['conversation_key'], 'conv-1');
       expect(draft['created_at'], isNotNull);
     });
 
-    test('getDraft is null for a conversation with none', () async {
-      expect(await store.getDraft('email', 'nothing'), isNull);
+    test('getDraftForMessage is null for a message with none', () async {
+      expect(await store.getDraftForMessage('email', 'nothing'), isNull);
+    });
+
+    test('a second question gets its own answer, not the first one rewritten',
+        () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'answering the first',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm2',
+        body: 'answering the second',
+      );
+
+      // The key is the message, so the thread now holds two suggestions and
+      // each still says what it answered.
+      expect((await store.getDraftForMessage('email', 'm1'))!['body'],
+          'answering the first');
+      expect((await store.getDraftForMessage('email', 'm2'))!['body'],
+          'answering the second');
     });
 
     test('a regenerate replaces the whole draft, Outlook ids included',
@@ -116,30 +110,30 @@ void main() {
       );
       await store.updateDraftStatus(
         'email',
-        'conv-1',
+        'm1',
         status: 'suggested',
         graphDraftId: 'g1',
         webLink: 'https://outlook/g1',
       );
-      final createdAt = (await store.getDraft('email', 'conv-1'))!['created_at'];
+      final createdAt =
+          (await store.getDraftForMessage('email', 'm1'))!['created_at'];
 
       await store.upsertDraft(
         source: 'email',
         conversationKey: 'conv-1',
-        replyToMessageId: 'm2',
+        replyToMessageId: 'm1',
         body: 'second',
       );
 
-      final draft = (await store.getDraft('email', 'conv-1'))!;
+      final draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(draft['body'], 'second');
-      expect(draft['reply_to_message_id'], 'm2');
       expect(draft['evidence'], isNull);
       // The stale Outlook draft holds text nobody can see any more; a Send
       // pointing at it would send the version that was replaced.
       expect(draft['graph_draft_id'], isNull);
       expect(draft['web_link'], isNull);
       expect(draft['created_at'], createdAt,
-          reason: 'when this thread first got a suggestion does not change');
+          reason: 'when this message first got a suggestion does not change');
     });
 
     test('updateDraftStatus writes only the fields it carries', () async {
@@ -151,27 +145,52 @@ void main() {
         evidence: 'why',
       );
 
-      await store.updateDraftStatus('email', 'conv-1', status: 'edited');
-      var draft = (await store.getDraft('email', 'conv-1'))!;
+      await store.updateDraftStatus('email', 'm1', status: 'edited');
+      var draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(draft['status'], 'edited');
       expect(draft['body'], 'original');
       expect(draft['evidence'], 'why');
 
       await store.updateDraftStatus(
         'email',
-        'conv-1',
+        'm1',
         status: 'sent',
         body: 'what was actually sent',
         graphDraftId: 'g9',
       );
-      draft = (await store.getDraft('email', 'conv-1'))!;
+      draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(draft['status'], 'sent');
       expect(draft['body'], 'what was actually sent');
       expect(draft['graph_draft_id'], 'g9');
       expect(draft['web_link'], isNull);
     });
 
-    test('deleteDraft removes it', () async {
+    test('and it leaves the answers to the rest of the thread alone',
+        () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'answering the first',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm2',
+        body: 'answering the second',
+      );
+
+      await store.updateDraftStatus('email', 'm2', status: 'sent');
+
+      // A thread-scoped UPDATE would mark the answer to a message nobody
+      // replied to as sent.
+      expect((await store.getDraftForMessage('email', 'm1'))!['status'],
+          'suggested');
+      expect(
+          (await store.getDraftForMessage('email', 'm2'))!['status'], 'sent');
+    });
+
+    test('deleteDraftForMessage removes it', () async {
       await store.upsertDraft(
         source: 'email',
         conversationKey: 'conv-1',
@@ -179,12 +198,12 @@ void main() {
         body: 'gone soon',
       );
 
-      await store.deleteDraft('email', 'conv-1');
+      await store.deleteDraftForMessage('email', 'm1');
 
-      expect(await store.getDraft('email', 'conv-1'), isNull);
+      expect(await store.getDraftForMessage('email', 'm1'), isNull);
     });
 
-    test('drafts are per source as well as per conversation', () async {
+    test('drafts are per source as well as per message', () async {
       await store.upsertDraft(
         source: 'email',
         conversationKey: 'conv-1',
@@ -198,8 +217,190 @@ void main() {
         body: 'teams draft',
       );
 
-      expect((await store.getDraft('email', 'conv-1'))!['body'], 'email draft');
-      expect((await store.getDraft('teams', 'conv-1'))!['body'], 'teams draft');
+      expect((await store.getDraftForMessage('email', 'm1'))!['body'],
+          'email draft');
+      expect((await store.getDraftForMessage('teams', 'm1'))!['body'],
+          'teams draft');
+    });
+  });
+
+  /// What a THREAD shows: the answer to the message it is waiting on, and
+  /// nothing else. This is what replaced the sync deleting drafts — an answer
+  /// to an older message is still stored, and simply is not what this returns.
+  group('the thread read', () {
+    test('is the suggestion written for the newest inbound message', () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm2',
+        body: 'answering the newest',
+      );
+
+      expect((await store.getDraft('email', 'conv-1'))!['body'],
+          'answering the newest');
+    });
+
+    test('and a newer message that has none reads as no suggestion at all',
+        () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'answering what was said before',
+      );
+      await seedMessage(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
+
+      // The stale answer is still on disk against m1; nothing had to delete it
+      // for the thread to stop offering it.
+      expect(await store.getDraft('email', 'conv-1'), isNull);
+      expect(await store.getDraftForMessage('email', 'm1'), isNotNull);
+    });
+
+    test('the user\'s own mail never becomes the message a thread waits on',
+        () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
+      await seedMessage(
+        id: 'o1',
+        direction: 'outbound',
+        receivedAt: '2026-08-30T10:00:00Z',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'still the answer',
+      );
+
+      expect((await store.getDraft('email', 'conv-1'))!['body'],
+          'still the answer');
+    });
+
+    test('ties break on source_message_id DESC, like newestInboundMessage',
+        () async {
+      await seedMessage(id: 'm1', receivedAt: '2026-08-29T10:00:00Z');
+      await seedMessage(id: 'm9', receivedAt: '2026-08-29T10:00:00Z');
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm9',
+        body: 'answering m9',
+      );
+
+      // Both reads have to agree on which message the thread is waiting on, or
+      // the draft would be written against one and read against the other.
+      expect(
+          (await store.getDraft('email', 'conv-1'))!['body'], 'answering m9');
+    });
+
+    test('a thread with nothing inbound has nothing to show', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'answering a message nobody stored',
+      );
+
+      expect(await store.getDraft('email', 'conv-1'), isNull);
+    });
+
+    test('it is keyed by connector as well as by thread', () async {
+      await seedMessage(id: 'm1');
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 'm1',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'the chat answer',
+      );
+
+      expect(await store.getDraft('email', 'conv-1'), isNull);
+      expect(
+          (await store.getDraft('teams', 'conv-1'))!['body'], 'the chat answer');
+    });
+  });
+
+  /// What the TRANSCRIPT reads: every answer the thread has collected, so each
+  /// one can be drawn under the message it answers.
+  group('the whole thread\'s drafts', () {
+    test('come back for the conversation asked for, and no other', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'answering the first',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm2',
+        body: 'answering the second',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-2',
+        replyToMessageId: 'other-m1',
+        body: 'a different thread entirely',
+      );
+
+      final rows = await store.draftsForConversation('email', 'conv-1');
+
+      expect(rows, hasLength(2));
+      // The message each one answers is what tells them apart — it is the key
+      // the transcript looks them up by.
+      expect(
+        {for (final row in rows) row['reply_to_message_id']: row['body']},
+        {'m1': 'answering the first', 'm2': 'answering the second'},
+      );
+    });
+
+    test('a status the thread will not draw is still returned', () async {
+      // The read is unfiltered on purpose: which of these are still showable is
+      // the thread view's question, and it needs the sent one to know a reply
+      // already went.
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'already gone',
+      );
+      await store.updateDraftStatus('email', 'm1', status: 'sent');
+
+      final rows = await store.draftsForConversation('email', 'conv-1');
+
+      expect(rows.single['status'], 'sent');
+    });
+
+    test('and it is keyed by connector as well as by thread', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'the mail answer',
+      );
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'the chat answer',
+      );
+
+      expect(
+        (await store.draftsForConversation('teams', 'conv-1')).single['body'],
+        'the chat answer',
+      );
+    });
+
+    test('a thread nobody drafted for reads as none', () async {
+      expect(await store.draftsForConversation('email', 'conv-1'), isEmpty);
     });
   });
 
@@ -217,7 +418,7 @@ void main() {
         optionsJson: options,
       );
 
-      final draft = (await store.getDraft('email', 'conv-1'))!;
+      final draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(draft['options_json'], options);
       expect(draft['options_dismissed'], 0);
     });
@@ -230,7 +431,7 @@ void main() {
         body: 'the long one',
       );
 
-      final draft = (await store.getDraft('email', 'conv-1'))!;
+      final draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(draft['options_json'], isNull);
       expect(draft['options_dismissed'], 0);
     });
@@ -244,12 +445,12 @@ void main() {
         optionsJson: options,
       );
 
-      await store.dismissDraftOptions('email', 'conv-1');
+      await store.dismissDraftOptions('email', 'm1');
 
-      final draft = (await store.getDraft('email', 'conv-1'))!;
+      final draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(draft['options_dismissed'], 1);
       // The row survives, the same way a dismissed draft does — deleting it
-      // would let the auto-enqueue write the identical options straight back.
+      // would let the next pass write the identical options straight back.
       expect(draft['options_json'], options);
       expect(draft['body'], 'the long one');
     });
@@ -263,17 +464,17 @@ void main() {
         body: 'first',
         optionsJson: options,
       );
-      await store.dismissDraftOptions('email', 'conv-1');
+      await store.dismissDraftOptions('email', 'm1');
 
       await store.upsertDraft(
         source: 'email',
         conversationKey: 'conv-1',
-        replyToMessageId: 'm2',
+        replyToMessageId: 'm1',
         body: 'second',
         optionsJson: '[{"stance":"Decline politely","body":"Not this week."}]',
       );
 
-      final draft = (await store.getDraft('email', 'conv-1'))!;
+      final draft = (await store.getDraftForMessage('email', 'm1'))!;
       expect(
         draft['options_json'],
         '[{"stance":"Decline politely","body":"Not this week."}]',
@@ -295,11 +496,12 @@ void main() {
       await store.upsertDraft(
         source: 'email',
         conversationKey: 'conv-1',
-        replyToMessageId: 'm2',
+        replyToMessageId: 'm1',
         body: 'second',
       );
 
-      expect((await store.getDraft('email', 'conv-1'))!['options_json'], isNull);
+      expect((await store.getDraftForMessage('email', 'm1'))!['options_json'],
+          isNull);
     });
   });
 
@@ -435,137 +637,4 @@ void main() {
     });
   });
 
-  group('needsDraftKeys', () {
-    test('picks threads waiting on the user that score high enough', () async {
-      await seedConversation(key: 'hot', score: 0.9);
-      await seedConversation(key: 'cold', score: 0.2);
-      await seedConversation(key: 'answered', state: 'done', score: 0.9);
-
-      expect(await draftQueue(), ['email/hot']);
-    });
-
-    test('excludes anything filed into Later, and keeps un-bucketed threads',
-        () async {
-      await seedConversation(key: 'inbox', score: 0.9);
-      await seedConversation(key: 'deferred', score: 0.95, bucket: 'later');
-      await seedConversation(key: 'other-bucket', score: 0.99, bucket: 'now');
-
-      // `IS NOT 'later'` rather than `<> 'later'`: NULL <> 'later' is NULL,
-      // which would drop every un-bucketed thread.
-      expect(await draftQueue(), ['email/other-bucket', 'email/inbox']);
-    });
-
-    test('excludes a thread that already has a draft', () async {
-      await seedConversation(key: 'drafted', score: 0.9);
-      await seedConversation(key: 'undrafted', score: 0.8);
-      await store.upsertDraft(
-        source: 'email',
-        conversationKey: 'drafted',
-        replyToMessageId: 'm1',
-        body: 'already written',
-      );
-
-      // This is what makes the enqueue safe to run on every list load.
-      expect(await draftQueue(), ['email/undrafted']);
-    });
-
-    test('a dismissed draft still counts as a draft', () async {
-      await seedConversation(key: 'dismissed', score: 0.9);
-      await store.upsertDraft(
-        source: 'email',
-        conversationKey: 'dismissed',
-        replyToMessageId: 'm1',
-        body: 'thrown away',
-      );
-      await store.updateDraftStatus('email', 'dismissed', status: 'dismissed');
-
-      // Otherwise every list load would write back the suggestion the user
-      // just closed.
-      expect(await draftQueue(), isEmpty);
-    });
-
-    test('an unscored thread is excluded', () async {
-      await seedConversation(key: 'unscored', score: null);
-
-      // NULL >= threshold is NULL, not true — and a thread the scorer has never
-      // reached has not earned a model call.
-      expect(await draftQueue(threshold: 0.0), isEmpty);
-    });
-
-    test('orders by score and caps at the limit', () async {
-      await seedConversation(key: 'a', score: 0.6);
-      await seedConversation(key: 'b', score: 0.9);
-      await seedConversation(key: 'c', score: 0.7);
-
-      expect(await draftQueue(), ['email/b', 'email/c', 'email/a']);
-      expect(await draftQueue(limit: 2), ['email/b', 'email/c']);
-    });
-
-    test('no sources means no keys', () async {
-      await seedConversation(key: 'hot', score: 0.9);
-
-      expect(
-          await store.needsDraftKeys(threshold: 0.5, sources: const []), isEmpty);
-    });
-  });
-
-  group('needsDraftKeys — chats queue on the same terms', () {
-    test('a chat waiting on the user comes back carrying its own source',
-        () async {
-      await seedConversation(key: 'chat-1', source: 'teams', score: 0.9);
-
-      // The source is what the work row is written against, so a bare key
-      // would send the handler looking for mail that is not there.
-      expect(await draftQueue(), ['teams/chat-1']);
-    });
-
-    test('a chat and a mail compete in ONE list, ranked purely by score',
-        () async {
-      await seedConversation(key: 'mail-low', score: 0.6);
-      await seedConversation(key: 'chat-high', source: 'teams', score: 0.95);
-      await seedConversation(key: 'mail-high', score: 0.8);
-      await seedConversation(key: 'chat-low', source: 'teams', score: 0.7);
-
-      // No per-source quota and no interleave: the seven slots go to the seven
-      // threads that most deserve an answer, whichever connector they arrived
-      // through.
-      expect(await draftQueue(), [
-        'teams/chat-high',
-        'email/mail-high',
-        'teams/chat-low',
-        'email/mail-low',
-      ]);
-    });
-
-    test('and the mail filters apply to a chat unchanged', () async {
-      await seedConversation(key: 'cold', source: 'teams', score: 0.2);
-      await seedConversation(
-          key: 'deferred', source: 'teams', score: 0.95, bucket: 'later');
-      await seedConversation(key: 'drafted', source: 'teams', score: 0.9);
-      await store.upsertDraft(
-        source: 'teams',
-        conversationKey: 'drafted',
-        replyToMessageId: 'chat-1-m1',
-        body: 'already written',
-      );
-
-      expect(await draftQueue(), isEmpty);
-    });
-
-    test('asking for mail alone still leaves the chats out', () async {
-      await seedConversation(key: 'hot', score: 0.9);
-      await seedConversation(key: 'chat-1', source: 'teams', score: 0.95);
-
-      expect(
-        [
-          for (final row in await store.needsDraftKeys(
-            threshold: 0.5,
-            sources: const ['email'],
-          ))
-            '${row.source}/${row.conversationKey}',
-        ],
-        ['email/hot'],
-      );
-    });
-  });
 }

@@ -7895,7 +7895,7 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
   }
 
   @override
-  Set<GeneratedColumn> get $primaryKey => {source, conversationKey};
+  Set<GeneratedColumn> get $primaryKey => {source, replyToMessageId};
   @override
   Draft map(Map<String, dynamic> data, {String? tablePrefix}) {
     final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
@@ -7960,7 +7960,7 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
   bool get isStrict => true;
   @override
   List<String> get customConstraints => const [
-    'PRIMARY KEY(source, conversation_key)',
+    'PRIMARY KEY(source, reply_to_message_id)',
   ];
   @override
   bool get dontWriteConstraints => true;
@@ -7985,10 +7985,8 @@ class Draft extends DataClass implements Insertable<Draft> {
   /// `options_json` is a JSON array of at most two ready-to-send short replies,
   /// `[{"stance": "…", "body": "…"}]`, written by the same model call that
   /// writes `body` — the long form. A column rather than a table because
-  /// nothing ever queries INTO the options, and a second table would have to be
-  /// keyed by something other than (source, conversation_key), breaking the
-  /// one-draft-per-conversation primary key that `needsDraftKeys` and the
-  /// sync's draft invalidation both rely on.
+  /// nothing ever queries INTO the options, and a second table keyed by the
+  /// same message would be a second row saying what this one already says.
   ///
   /// `options_dismissed` keeps the row when the user closes the suggestions,
   /// the same trick `status = 'dismissed'` plays for the long form: deleting it
@@ -8966,6 +8964,1915 @@ class MessageNotifyCompanion extends UpdateCompanion<MessageNotifyData> {
   }
 }
 
+class MessageProgress extends Table
+    with TableInfo<MessageProgress, MessageProgressData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  MessageProgress(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _conversationKeyMeta = const VerificationMeta(
+    'conversationKey',
+  );
+  late final GeneratedColumn<String> conversationKey = GeneratedColumn<String>(
+    'conversation_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _receivedAtMeta = const VerificationMeta(
+    'receivedAt',
+  );
+  late final GeneratedColumn<String> receivedAt = GeneratedColumn<String>(
+    'received_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _ingestStateMeta = const VerificationMeta(
+    'ingestState',
+  );
+  late final GeneratedColumn<String> ingestState = GeneratedColumn<String>(
+    'ingest_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'done\'',
+    defaultValue: const CustomExpression('\'done\''),
+  );
+  static const VerificationMeta _triageStateMeta = const VerificationMeta(
+    'triageState',
+  );
+  late final GeneratedColumn<String> triageState = GeneratedColumn<String>(
+    'triage_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _extractStateMeta = const VerificationMeta(
+    'extractState',
+  );
+  late final GeneratedColumn<String> extractState = GeneratedColumn<String>(
+    'extract_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _storylineStateMeta = const VerificationMeta(
+    'storylineState',
+  );
+  late final GeneratedColumn<String> storylineState = GeneratedColumn<String>(
+    'storyline_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _settleStateMeta = const VerificationMeta(
+    'settleState',
+  );
+  late final GeneratedColumn<String> settleState = GeneratedColumn<String>(
+    'settle_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _triageAtMeta = const VerificationMeta(
+    'triageAt',
+  );
+  late final GeneratedColumn<String> triageAt = GeneratedColumn<String>(
+    'triage_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _extractAtMeta = const VerificationMeta(
+    'extractAt',
+  );
+  late final GeneratedColumn<String> extractAt = GeneratedColumn<String>(
+    'extract_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _storylineAtMeta = const VerificationMeta(
+    'storylineAt',
+  );
+  late final GeneratedColumn<String> storylineAt = GeneratedColumn<String>(
+    'storyline_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _settleAtMeta = const VerificationMeta(
+    'settleAt',
+  );
+  late final GeneratedColumn<String> settleAt = GeneratedColumn<String>(
+    'settle_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _outcomeMeta = const VerificationMeta(
+    'outcome',
+  );
+  late final GeneratedColumn<String> outcome = GeneratedColumn<String>(
+    'outcome',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _droppedMeta = const VerificationMeta(
+    'dropped',
+  );
+  late final GeneratedColumn<int> dropped = GeneratedColumn<int>(
+    'dropped',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _dropReasonMeta = const VerificationMeta(
+    'dropReason',
+  );
+  late final GeneratedColumn<String> dropReason = GeneratedColumn<String>(
+    'drop_reason',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _storylineIdMeta = const VerificationMeta(
+    'storylineId',
+  );
+  late final GeneratedColumn<String> storylineId = GeneratedColumn<String>(
+    'storyline_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _needsYouMeta = const VerificationMeta(
+    'needsYou',
+  );
+  late final GeneratedColumn<int> needsYou = GeneratedColumn<int>(
+    'needs_you',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _urgencyMeta = const VerificationMeta(
+    'urgency',
+  );
+  late final GeneratedColumn<String> urgency = GeneratedColumn<String>(
+    'urgency',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _draftStateMeta = const VerificationMeta(
+    'draftState',
+  );
+  late final GeneratedColumn<String> draftState = GeneratedColumn<String>(
+    'draft_state',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _draftAtMeta = const VerificationMeta(
+    'draftAt',
+  );
+  late final GeneratedColumn<String> draftAt = GeneratedColumn<String>(
+    'draft_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    source,
+    sourceMessageId,
+    conversationKey,
+    receivedAt,
+    ingestState,
+    triageState,
+    extractState,
+    storylineState,
+    settleState,
+    triageAt,
+    extractAt,
+    storylineAt,
+    settleAt,
+    outcome,
+    dropped,
+    dropReason,
+    storylineId,
+    needsYou,
+    urgency,
+    createdAt,
+    updatedAt,
+    draftState,
+    draftAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'message_progress';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MessageProgressData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('conversation_key')) {
+      context.handle(
+        _conversationKeyMeta,
+        conversationKey.isAcceptableOrUnknown(
+          data['conversation_key']!,
+          _conversationKeyMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_conversationKeyMeta);
+    }
+    if (data.containsKey('received_at')) {
+      context.handle(
+        _receivedAtMeta,
+        receivedAt.isAcceptableOrUnknown(data['received_at']!, _receivedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_receivedAtMeta);
+    }
+    if (data.containsKey('ingest_state')) {
+      context.handle(
+        _ingestStateMeta,
+        ingestState.isAcceptableOrUnknown(
+          data['ingest_state']!,
+          _ingestStateMeta,
+        ),
+      );
+    }
+    if (data.containsKey('triage_state')) {
+      context.handle(
+        _triageStateMeta,
+        triageState.isAcceptableOrUnknown(
+          data['triage_state']!,
+          _triageStateMeta,
+        ),
+      );
+    }
+    if (data.containsKey('extract_state')) {
+      context.handle(
+        _extractStateMeta,
+        extractState.isAcceptableOrUnknown(
+          data['extract_state']!,
+          _extractStateMeta,
+        ),
+      );
+    }
+    if (data.containsKey('storyline_state')) {
+      context.handle(
+        _storylineStateMeta,
+        storylineState.isAcceptableOrUnknown(
+          data['storyline_state']!,
+          _storylineStateMeta,
+        ),
+      );
+    }
+    if (data.containsKey('settle_state')) {
+      context.handle(
+        _settleStateMeta,
+        settleState.isAcceptableOrUnknown(
+          data['settle_state']!,
+          _settleStateMeta,
+        ),
+      );
+    }
+    if (data.containsKey('triage_at')) {
+      context.handle(
+        _triageAtMeta,
+        triageAt.isAcceptableOrUnknown(data['triage_at']!, _triageAtMeta),
+      );
+    }
+    if (data.containsKey('extract_at')) {
+      context.handle(
+        _extractAtMeta,
+        extractAt.isAcceptableOrUnknown(data['extract_at']!, _extractAtMeta),
+      );
+    }
+    if (data.containsKey('storyline_at')) {
+      context.handle(
+        _storylineAtMeta,
+        storylineAt.isAcceptableOrUnknown(
+          data['storyline_at']!,
+          _storylineAtMeta,
+        ),
+      );
+    }
+    if (data.containsKey('settle_at')) {
+      context.handle(
+        _settleAtMeta,
+        settleAt.isAcceptableOrUnknown(data['settle_at']!, _settleAtMeta),
+      );
+    }
+    if (data.containsKey('outcome')) {
+      context.handle(
+        _outcomeMeta,
+        outcome.isAcceptableOrUnknown(data['outcome']!, _outcomeMeta),
+      );
+    }
+    if (data.containsKey('dropped')) {
+      context.handle(
+        _droppedMeta,
+        dropped.isAcceptableOrUnknown(data['dropped']!, _droppedMeta),
+      );
+    }
+    if (data.containsKey('drop_reason')) {
+      context.handle(
+        _dropReasonMeta,
+        dropReason.isAcceptableOrUnknown(data['drop_reason']!, _dropReasonMeta),
+      );
+    }
+    if (data.containsKey('storyline_id')) {
+      context.handle(
+        _storylineIdMeta,
+        storylineId.isAcceptableOrUnknown(
+          data['storyline_id']!,
+          _storylineIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('needs_you')) {
+      context.handle(
+        _needsYouMeta,
+        needsYou.isAcceptableOrUnknown(data['needs_you']!, _needsYouMeta),
+      );
+    }
+    if (data.containsKey('urgency')) {
+      context.handle(
+        _urgencyMeta,
+        urgency.isAcceptableOrUnknown(data['urgency']!, _urgencyMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('draft_state')) {
+      context.handle(
+        _draftStateMeta,
+        draftState.isAcceptableOrUnknown(data['draft_state']!, _draftStateMeta),
+      );
+    }
+    if (data.containsKey('draft_at')) {
+      context.handle(
+        _draftAtMeta,
+        draftAt.isAcceptableOrUnknown(data['draft_at']!, _draftAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {source, sourceMessageId};
+  @override
+  MessageProgressData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MessageProgressData(
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      conversationKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}conversation_key'],
+      )!,
+      receivedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}received_at'],
+      )!,
+      ingestState: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}ingest_state'],
+      )!,
+      triageState: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}triage_state'],
+      )!,
+      extractState: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}extract_state'],
+      )!,
+      storylineState: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}storyline_state'],
+      )!,
+      settleState: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}settle_state'],
+      )!,
+      triageAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}triage_at'],
+      ),
+      extractAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}extract_at'],
+      ),
+      storylineAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}storyline_at'],
+      ),
+      settleAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}settle_at'],
+      ),
+      outcome: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}outcome'],
+      )!,
+      dropped: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}dropped'],
+      )!,
+      dropReason: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}drop_reason'],
+      ),
+      storylineId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}storyline_id'],
+      ),
+      needsYou: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}needs_you'],
+      )!,
+      urgency: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}urgency'],
+      ),
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      draftState: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}draft_state'],
+      )!,
+      draftAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}draft_at'],
+      ),
+    );
+  }
+
+  @override
+  MessageProgress createAlias(String alias) {
+    return MessageProgress(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(source, source_message_id)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class MessageProgressData extends DataClass
+    implements Insertable<MessageProgressData> {
+  final String source;
+  final String sourceMessageId;
+  final String conversationKey;
+  final String receivedAt;
+  final String ingestState;
+  final String triageState;
+  final String extractState;
+  final String storylineState;
+  final String settleState;
+  final String? triageAt;
+  final String? extractAt;
+  final String? storylineAt;
+  final String? settleAt;
+  final String outcome;
+  final int dropped;
+  final String? dropReason;
+  final String? storylineId;
+  final int needsYou;
+  final String? urgency;
+  final String createdAt;
+  final String updatedAt;
+
+  /// Migration-added columns sit AFTER the originals, for the reason the
+  /// drafts table states: ALTER TABLE appends, so this is the only position
+  /// where an upgraded install and a fresh one get identical table_info.
+  ///
+  /// Drafting is a stage like any other and reads in the same vocabulary —
+  /// pending|running|done|skipped|error. `skipped` covers both messages
+  /// nothing will ever draft for and the ones the model read and decided need
+  /// no answer: either way the stage has finished, and a bar that waited for a
+  /// reply nobody is going to write would wait forever.
+  final String draftState;
+  final String? draftAt;
+  const MessageProgressData({
+    required this.source,
+    required this.sourceMessageId,
+    required this.conversationKey,
+    required this.receivedAt,
+    required this.ingestState,
+    required this.triageState,
+    required this.extractState,
+    required this.storylineState,
+    required this.settleState,
+    this.triageAt,
+    this.extractAt,
+    this.storylineAt,
+    this.settleAt,
+    required this.outcome,
+    required this.dropped,
+    this.dropReason,
+    this.storylineId,
+    required this.needsYou,
+    this.urgency,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.draftState,
+    this.draftAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['conversation_key'] = Variable<String>(conversationKey);
+    map['received_at'] = Variable<String>(receivedAt);
+    map['ingest_state'] = Variable<String>(ingestState);
+    map['triage_state'] = Variable<String>(triageState);
+    map['extract_state'] = Variable<String>(extractState);
+    map['storyline_state'] = Variable<String>(storylineState);
+    map['settle_state'] = Variable<String>(settleState);
+    if (!nullToAbsent || triageAt != null) {
+      map['triage_at'] = Variable<String>(triageAt);
+    }
+    if (!nullToAbsent || extractAt != null) {
+      map['extract_at'] = Variable<String>(extractAt);
+    }
+    if (!nullToAbsent || storylineAt != null) {
+      map['storyline_at'] = Variable<String>(storylineAt);
+    }
+    if (!nullToAbsent || settleAt != null) {
+      map['settle_at'] = Variable<String>(settleAt);
+    }
+    map['outcome'] = Variable<String>(outcome);
+    map['dropped'] = Variable<int>(dropped);
+    if (!nullToAbsent || dropReason != null) {
+      map['drop_reason'] = Variable<String>(dropReason);
+    }
+    if (!nullToAbsent || storylineId != null) {
+      map['storyline_id'] = Variable<String>(storylineId);
+    }
+    map['needs_you'] = Variable<int>(needsYou);
+    if (!nullToAbsent || urgency != null) {
+      map['urgency'] = Variable<String>(urgency);
+    }
+    map['created_at'] = Variable<String>(createdAt);
+    map['updated_at'] = Variable<String>(updatedAt);
+    map['draft_state'] = Variable<String>(draftState);
+    if (!nullToAbsent || draftAt != null) {
+      map['draft_at'] = Variable<String>(draftAt);
+    }
+    return map;
+  }
+
+  MessageProgressCompanion toCompanion(bool nullToAbsent) {
+    return MessageProgressCompanion(
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      conversationKey: Value(conversationKey),
+      receivedAt: Value(receivedAt),
+      ingestState: Value(ingestState),
+      triageState: Value(triageState),
+      extractState: Value(extractState),
+      storylineState: Value(storylineState),
+      settleState: Value(settleState),
+      triageAt: triageAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(triageAt),
+      extractAt: extractAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(extractAt),
+      storylineAt: storylineAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(storylineAt),
+      settleAt: settleAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(settleAt),
+      outcome: Value(outcome),
+      dropped: Value(dropped),
+      dropReason: dropReason == null && nullToAbsent
+          ? const Value.absent()
+          : Value(dropReason),
+      storylineId: storylineId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(storylineId),
+      needsYou: Value(needsYou),
+      urgency: urgency == null && nullToAbsent
+          ? const Value.absent()
+          : Value(urgency),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+      draftState: Value(draftState),
+      draftAt: draftAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(draftAt),
+    );
+  }
+
+  factory MessageProgressData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MessageProgressData(
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      conversationKey: serializer.fromJson<String>(json['conversation_key']),
+      receivedAt: serializer.fromJson<String>(json['received_at']),
+      ingestState: serializer.fromJson<String>(json['ingest_state']),
+      triageState: serializer.fromJson<String>(json['triage_state']),
+      extractState: serializer.fromJson<String>(json['extract_state']),
+      storylineState: serializer.fromJson<String>(json['storyline_state']),
+      settleState: serializer.fromJson<String>(json['settle_state']),
+      triageAt: serializer.fromJson<String?>(json['triage_at']),
+      extractAt: serializer.fromJson<String?>(json['extract_at']),
+      storylineAt: serializer.fromJson<String?>(json['storyline_at']),
+      settleAt: serializer.fromJson<String?>(json['settle_at']),
+      outcome: serializer.fromJson<String>(json['outcome']),
+      dropped: serializer.fromJson<int>(json['dropped']),
+      dropReason: serializer.fromJson<String?>(json['drop_reason']),
+      storylineId: serializer.fromJson<String?>(json['storyline_id']),
+      needsYou: serializer.fromJson<int>(json['needs_you']),
+      urgency: serializer.fromJson<String?>(json['urgency']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+      draftState: serializer.fromJson<String>(json['draft_state']),
+      draftAt: serializer.fromJson<String?>(json['draft_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'conversation_key': serializer.toJson<String>(conversationKey),
+      'received_at': serializer.toJson<String>(receivedAt),
+      'ingest_state': serializer.toJson<String>(ingestState),
+      'triage_state': serializer.toJson<String>(triageState),
+      'extract_state': serializer.toJson<String>(extractState),
+      'storyline_state': serializer.toJson<String>(storylineState),
+      'settle_state': serializer.toJson<String>(settleState),
+      'triage_at': serializer.toJson<String?>(triageAt),
+      'extract_at': serializer.toJson<String?>(extractAt),
+      'storyline_at': serializer.toJson<String?>(storylineAt),
+      'settle_at': serializer.toJson<String?>(settleAt),
+      'outcome': serializer.toJson<String>(outcome),
+      'dropped': serializer.toJson<int>(dropped),
+      'drop_reason': serializer.toJson<String?>(dropReason),
+      'storyline_id': serializer.toJson<String?>(storylineId),
+      'needs_you': serializer.toJson<int>(needsYou),
+      'urgency': serializer.toJson<String?>(urgency),
+      'created_at': serializer.toJson<String>(createdAt),
+      'updated_at': serializer.toJson<String>(updatedAt),
+      'draft_state': serializer.toJson<String>(draftState),
+      'draft_at': serializer.toJson<String?>(draftAt),
+    };
+  }
+
+  MessageProgressData copyWith({
+    String? source,
+    String? sourceMessageId,
+    String? conversationKey,
+    String? receivedAt,
+    String? ingestState,
+    String? triageState,
+    String? extractState,
+    String? storylineState,
+    String? settleState,
+    Value<String?> triageAt = const Value.absent(),
+    Value<String?> extractAt = const Value.absent(),
+    Value<String?> storylineAt = const Value.absent(),
+    Value<String?> settleAt = const Value.absent(),
+    String? outcome,
+    int? dropped,
+    Value<String?> dropReason = const Value.absent(),
+    Value<String?> storylineId = const Value.absent(),
+    int? needsYou,
+    Value<String?> urgency = const Value.absent(),
+    String? createdAt,
+    String? updatedAt,
+    String? draftState,
+    Value<String?> draftAt = const Value.absent(),
+  }) => MessageProgressData(
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    conversationKey: conversationKey ?? this.conversationKey,
+    receivedAt: receivedAt ?? this.receivedAt,
+    ingestState: ingestState ?? this.ingestState,
+    triageState: triageState ?? this.triageState,
+    extractState: extractState ?? this.extractState,
+    storylineState: storylineState ?? this.storylineState,
+    settleState: settleState ?? this.settleState,
+    triageAt: triageAt.present ? triageAt.value : this.triageAt,
+    extractAt: extractAt.present ? extractAt.value : this.extractAt,
+    storylineAt: storylineAt.present ? storylineAt.value : this.storylineAt,
+    settleAt: settleAt.present ? settleAt.value : this.settleAt,
+    outcome: outcome ?? this.outcome,
+    dropped: dropped ?? this.dropped,
+    dropReason: dropReason.present ? dropReason.value : this.dropReason,
+    storylineId: storylineId.present ? storylineId.value : this.storylineId,
+    needsYou: needsYou ?? this.needsYou,
+    urgency: urgency.present ? urgency.value : this.urgency,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+    draftState: draftState ?? this.draftState,
+    draftAt: draftAt.present ? draftAt.value : this.draftAt,
+  );
+  MessageProgressData copyWithCompanion(MessageProgressCompanion data) {
+    return MessageProgressData(
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      conversationKey: data.conversationKey.present
+          ? data.conversationKey.value
+          : this.conversationKey,
+      receivedAt: data.receivedAt.present
+          ? data.receivedAt.value
+          : this.receivedAt,
+      ingestState: data.ingestState.present
+          ? data.ingestState.value
+          : this.ingestState,
+      triageState: data.triageState.present
+          ? data.triageState.value
+          : this.triageState,
+      extractState: data.extractState.present
+          ? data.extractState.value
+          : this.extractState,
+      storylineState: data.storylineState.present
+          ? data.storylineState.value
+          : this.storylineState,
+      settleState: data.settleState.present
+          ? data.settleState.value
+          : this.settleState,
+      triageAt: data.triageAt.present ? data.triageAt.value : this.triageAt,
+      extractAt: data.extractAt.present ? data.extractAt.value : this.extractAt,
+      storylineAt: data.storylineAt.present
+          ? data.storylineAt.value
+          : this.storylineAt,
+      settleAt: data.settleAt.present ? data.settleAt.value : this.settleAt,
+      outcome: data.outcome.present ? data.outcome.value : this.outcome,
+      dropped: data.dropped.present ? data.dropped.value : this.dropped,
+      dropReason: data.dropReason.present
+          ? data.dropReason.value
+          : this.dropReason,
+      storylineId: data.storylineId.present
+          ? data.storylineId.value
+          : this.storylineId,
+      needsYou: data.needsYou.present ? data.needsYou.value : this.needsYou,
+      urgency: data.urgency.present ? data.urgency.value : this.urgency,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      draftState: data.draftState.present
+          ? data.draftState.value
+          : this.draftState,
+      draftAt: data.draftAt.present ? data.draftAt.value : this.draftAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageProgressData(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('receivedAt: $receivedAt, ')
+          ..write('ingestState: $ingestState, ')
+          ..write('triageState: $triageState, ')
+          ..write('extractState: $extractState, ')
+          ..write('storylineState: $storylineState, ')
+          ..write('settleState: $settleState, ')
+          ..write('triageAt: $triageAt, ')
+          ..write('extractAt: $extractAt, ')
+          ..write('storylineAt: $storylineAt, ')
+          ..write('settleAt: $settleAt, ')
+          ..write('outcome: $outcome, ')
+          ..write('dropped: $dropped, ')
+          ..write('dropReason: $dropReason, ')
+          ..write('storylineId: $storylineId, ')
+          ..write('needsYou: $needsYou, ')
+          ..write('urgency: $urgency, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('draftState: $draftState, ')
+          ..write('draftAt: $draftAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hashAll([
+    source,
+    sourceMessageId,
+    conversationKey,
+    receivedAt,
+    ingestState,
+    triageState,
+    extractState,
+    storylineState,
+    settleState,
+    triageAt,
+    extractAt,
+    storylineAt,
+    settleAt,
+    outcome,
+    dropped,
+    dropReason,
+    storylineId,
+    needsYou,
+    urgency,
+    createdAt,
+    updatedAt,
+    draftState,
+    draftAt,
+  ]);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MessageProgressData &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          other.conversationKey == this.conversationKey &&
+          other.receivedAt == this.receivedAt &&
+          other.ingestState == this.ingestState &&
+          other.triageState == this.triageState &&
+          other.extractState == this.extractState &&
+          other.storylineState == this.storylineState &&
+          other.settleState == this.settleState &&
+          other.triageAt == this.triageAt &&
+          other.extractAt == this.extractAt &&
+          other.storylineAt == this.storylineAt &&
+          other.settleAt == this.settleAt &&
+          other.outcome == this.outcome &&
+          other.dropped == this.dropped &&
+          other.dropReason == this.dropReason &&
+          other.storylineId == this.storylineId &&
+          other.needsYou == this.needsYou &&
+          other.urgency == this.urgency &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt &&
+          other.draftState == this.draftState &&
+          other.draftAt == this.draftAt);
+}
+
+class MessageProgressCompanion extends UpdateCompanion<MessageProgressData> {
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<String> conversationKey;
+  final Value<String> receivedAt;
+  final Value<String> ingestState;
+  final Value<String> triageState;
+  final Value<String> extractState;
+  final Value<String> storylineState;
+  final Value<String> settleState;
+  final Value<String?> triageAt;
+  final Value<String?> extractAt;
+  final Value<String?> storylineAt;
+  final Value<String?> settleAt;
+  final Value<String> outcome;
+  final Value<int> dropped;
+  final Value<String?> dropReason;
+  final Value<String?> storylineId;
+  final Value<int> needsYou;
+  final Value<String?> urgency;
+  final Value<String> createdAt;
+  final Value<String> updatedAt;
+  final Value<String> draftState;
+  final Value<String?> draftAt;
+  final Value<int> rowid;
+  const MessageProgressCompanion({
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.conversationKey = const Value.absent(),
+    this.receivedAt = const Value.absent(),
+    this.ingestState = const Value.absent(),
+    this.triageState = const Value.absent(),
+    this.extractState = const Value.absent(),
+    this.storylineState = const Value.absent(),
+    this.settleState = const Value.absent(),
+    this.triageAt = const Value.absent(),
+    this.extractAt = const Value.absent(),
+    this.storylineAt = const Value.absent(),
+    this.settleAt = const Value.absent(),
+    this.outcome = const Value.absent(),
+    this.dropped = const Value.absent(),
+    this.dropReason = const Value.absent(),
+    this.storylineId = const Value.absent(),
+    this.needsYou = const Value.absent(),
+    this.urgency = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.draftState = const Value.absent(),
+    this.draftAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  MessageProgressCompanion.insert({
+    required String source,
+    required String sourceMessageId,
+    required String conversationKey,
+    required String receivedAt,
+    this.ingestState = const Value.absent(),
+    this.triageState = const Value.absent(),
+    this.extractState = const Value.absent(),
+    this.storylineState = const Value.absent(),
+    this.settleState = const Value.absent(),
+    this.triageAt = const Value.absent(),
+    this.extractAt = const Value.absent(),
+    this.storylineAt = const Value.absent(),
+    this.settleAt = const Value.absent(),
+    this.outcome = const Value.absent(),
+    this.dropped = const Value.absent(),
+    this.dropReason = const Value.absent(),
+    this.storylineId = const Value.absent(),
+    this.needsYou = const Value.absent(),
+    this.urgency = const Value.absent(),
+    required String createdAt,
+    required String updatedAt,
+    this.draftState = const Value.absent(),
+    this.draftAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : source = Value(source),
+       sourceMessageId = Value(sourceMessageId),
+       conversationKey = Value(conversationKey),
+       receivedAt = Value(receivedAt),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<MessageProgressData> custom({
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<String>? conversationKey,
+    Expression<String>? receivedAt,
+    Expression<String>? ingestState,
+    Expression<String>? triageState,
+    Expression<String>? extractState,
+    Expression<String>? storylineState,
+    Expression<String>? settleState,
+    Expression<String>? triageAt,
+    Expression<String>? extractAt,
+    Expression<String>? storylineAt,
+    Expression<String>? settleAt,
+    Expression<String>? outcome,
+    Expression<int>? dropped,
+    Expression<String>? dropReason,
+    Expression<String>? storylineId,
+    Expression<int>? needsYou,
+    Expression<String>? urgency,
+    Expression<String>? createdAt,
+    Expression<String>? updatedAt,
+    Expression<String>? draftState,
+    Expression<String>? draftAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (conversationKey != null) 'conversation_key': conversationKey,
+      if (receivedAt != null) 'received_at': receivedAt,
+      if (ingestState != null) 'ingest_state': ingestState,
+      if (triageState != null) 'triage_state': triageState,
+      if (extractState != null) 'extract_state': extractState,
+      if (storylineState != null) 'storyline_state': storylineState,
+      if (settleState != null) 'settle_state': settleState,
+      if (triageAt != null) 'triage_at': triageAt,
+      if (extractAt != null) 'extract_at': extractAt,
+      if (storylineAt != null) 'storyline_at': storylineAt,
+      if (settleAt != null) 'settle_at': settleAt,
+      if (outcome != null) 'outcome': outcome,
+      if (dropped != null) 'dropped': dropped,
+      if (dropReason != null) 'drop_reason': dropReason,
+      if (storylineId != null) 'storyline_id': storylineId,
+      if (needsYou != null) 'needs_you': needsYou,
+      if (urgency != null) 'urgency': urgency,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (draftState != null) 'draft_state': draftState,
+      if (draftAt != null) 'draft_at': draftAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  MessageProgressCompanion copyWith({
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<String>? conversationKey,
+    Value<String>? receivedAt,
+    Value<String>? ingestState,
+    Value<String>? triageState,
+    Value<String>? extractState,
+    Value<String>? storylineState,
+    Value<String>? settleState,
+    Value<String?>? triageAt,
+    Value<String?>? extractAt,
+    Value<String?>? storylineAt,
+    Value<String?>? settleAt,
+    Value<String>? outcome,
+    Value<int>? dropped,
+    Value<String?>? dropReason,
+    Value<String?>? storylineId,
+    Value<int>? needsYou,
+    Value<String?>? urgency,
+    Value<String>? createdAt,
+    Value<String>? updatedAt,
+    Value<String>? draftState,
+    Value<String?>? draftAt,
+    Value<int>? rowid,
+  }) {
+    return MessageProgressCompanion(
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      conversationKey: conversationKey ?? this.conversationKey,
+      receivedAt: receivedAt ?? this.receivedAt,
+      ingestState: ingestState ?? this.ingestState,
+      triageState: triageState ?? this.triageState,
+      extractState: extractState ?? this.extractState,
+      storylineState: storylineState ?? this.storylineState,
+      settleState: settleState ?? this.settleState,
+      triageAt: triageAt ?? this.triageAt,
+      extractAt: extractAt ?? this.extractAt,
+      storylineAt: storylineAt ?? this.storylineAt,
+      settleAt: settleAt ?? this.settleAt,
+      outcome: outcome ?? this.outcome,
+      dropped: dropped ?? this.dropped,
+      dropReason: dropReason ?? this.dropReason,
+      storylineId: storylineId ?? this.storylineId,
+      needsYou: needsYou ?? this.needsYou,
+      urgency: urgency ?? this.urgency,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      draftState: draftState ?? this.draftState,
+      draftAt: draftAt ?? this.draftAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (conversationKey.present) {
+      map['conversation_key'] = Variable<String>(conversationKey.value);
+    }
+    if (receivedAt.present) {
+      map['received_at'] = Variable<String>(receivedAt.value);
+    }
+    if (ingestState.present) {
+      map['ingest_state'] = Variable<String>(ingestState.value);
+    }
+    if (triageState.present) {
+      map['triage_state'] = Variable<String>(triageState.value);
+    }
+    if (extractState.present) {
+      map['extract_state'] = Variable<String>(extractState.value);
+    }
+    if (storylineState.present) {
+      map['storyline_state'] = Variable<String>(storylineState.value);
+    }
+    if (settleState.present) {
+      map['settle_state'] = Variable<String>(settleState.value);
+    }
+    if (triageAt.present) {
+      map['triage_at'] = Variable<String>(triageAt.value);
+    }
+    if (extractAt.present) {
+      map['extract_at'] = Variable<String>(extractAt.value);
+    }
+    if (storylineAt.present) {
+      map['storyline_at'] = Variable<String>(storylineAt.value);
+    }
+    if (settleAt.present) {
+      map['settle_at'] = Variable<String>(settleAt.value);
+    }
+    if (outcome.present) {
+      map['outcome'] = Variable<String>(outcome.value);
+    }
+    if (dropped.present) {
+      map['dropped'] = Variable<int>(dropped.value);
+    }
+    if (dropReason.present) {
+      map['drop_reason'] = Variable<String>(dropReason.value);
+    }
+    if (storylineId.present) {
+      map['storyline_id'] = Variable<String>(storylineId.value);
+    }
+    if (needsYou.present) {
+      map['needs_you'] = Variable<int>(needsYou.value);
+    }
+    if (urgency.present) {
+      map['urgency'] = Variable<String>(urgency.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (draftState.present) {
+      map['draft_state'] = Variable<String>(draftState.value);
+    }
+    if (draftAt.present) {
+      map['draft_at'] = Variable<String>(draftAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageProgressCompanion(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('conversationKey: $conversationKey, ')
+          ..write('receivedAt: $receivedAt, ')
+          ..write('ingestState: $ingestState, ')
+          ..write('triageState: $triageState, ')
+          ..write('extractState: $extractState, ')
+          ..write('storylineState: $storylineState, ')
+          ..write('settleState: $settleState, ')
+          ..write('triageAt: $triageAt, ')
+          ..write('extractAt: $extractAt, ')
+          ..write('storylineAt: $storylineAt, ')
+          ..write('settleAt: $settleAt, ')
+          ..write('outcome: $outcome, ')
+          ..write('dropped: $dropped, ')
+          ..write('dropReason: $dropReason, ')
+          ..write('storylineId: $storylineId, ')
+          ..write('needsYou: $needsYou, ')
+          ..write('urgency: $urgency, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('draftState: $draftState, ')
+          ..write('draftAt: $draftAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class MessageVectors extends Table
+    with TableInfo<MessageVectors, MessageVector> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  MessageVectors(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'PRIMARY KEY',
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _embeddingMeta = const VerificationMeta(
+    'embedding',
+  );
+  late final GeneratedColumn<Uint8List> embedding = GeneratedColumn<Uint8List>(
+    'embedding',
+    aliasedName,
+    false,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _dimsMeta = const VerificationMeta('dims');
+  late final GeneratedColumn<int> dims = GeneratedColumn<int>(
+    'dims',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _embeddedHashMeta = const VerificationMeta(
+    'embeddedHash',
+  );
+  late final GeneratedColumn<String> embeddedHash = GeneratedColumn<String>(
+    'embedded_hash',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _embedModelMeta = const VerificationMeta(
+    'embedModel',
+  );
+  late final GeneratedColumn<String> embedModel = GeneratedColumn<String>(
+    'embed_model',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _receivedAtMeta = const VerificationMeta(
+    'receivedAt',
+  );
+  late final GeneratedColumn<String> receivedAt = GeneratedColumn<String>(
+    'received_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _embeddedAtMeta = const VerificationMeta(
+    'embeddedAt',
+  );
+  late final GeneratedColumn<String> embeddedAt = GeneratedColumn<String>(
+    'embedded_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _indexedAtMeta = const VerificationMeta(
+    'indexedAt',
+  );
+  late final GeneratedColumn<String> indexedAt = GeneratedColumn<String>(
+    'indexed_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    source,
+    sourceMessageId,
+    embedding,
+    dims,
+    embeddedHash,
+    embedModel,
+    receivedAt,
+    embeddedAt,
+    indexedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'message_vectors';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MessageVector> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('embedding')) {
+      context.handle(
+        _embeddingMeta,
+        embedding.isAcceptableOrUnknown(data['embedding']!, _embeddingMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_embeddingMeta);
+    }
+    if (data.containsKey('dims')) {
+      context.handle(
+        _dimsMeta,
+        dims.isAcceptableOrUnknown(data['dims']!, _dimsMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dimsMeta);
+    }
+    if (data.containsKey('embedded_hash')) {
+      context.handle(
+        _embeddedHashMeta,
+        embeddedHash.isAcceptableOrUnknown(
+          data['embedded_hash']!,
+          _embeddedHashMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_embeddedHashMeta);
+    }
+    if (data.containsKey('embed_model')) {
+      context.handle(
+        _embedModelMeta,
+        embedModel.isAcceptableOrUnknown(data['embed_model']!, _embedModelMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_embedModelMeta);
+    }
+    if (data.containsKey('received_at')) {
+      context.handle(
+        _receivedAtMeta,
+        receivedAt.isAcceptableOrUnknown(data['received_at']!, _receivedAtMeta),
+      );
+    }
+    if (data.containsKey('embedded_at')) {
+      context.handle(
+        _embeddedAtMeta,
+        embeddedAt.isAcceptableOrUnknown(data['embedded_at']!, _embeddedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_embeddedAtMeta);
+    }
+    if (data.containsKey('indexed_at')) {
+      context.handle(
+        _indexedAtMeta,
+        indexedAt.isAcceptableOrUnknown(data['indexed_at']!, _indexedAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  MessageVector map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MessageVector(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      embedding: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}embedding'],
+      )!,
+      dims: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}dims'],
+      )!,
+      embeddedHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}embedded_hash'],
+      )!,
+      embedModel: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}embed_model'],
+      )!,
+      receivedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}received_at'],
+      ),
+      embeddedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}embedded_at'],
+      )!,
+      indexedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}indexed_at'],
+      ),
+    );
+  }
+
+  @override
+  MessageVectors createAlias(String alias) {
+    return MessageVectors(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class MessageVector extends DataClass implements Insertable<MessageVector> {
+  final int id;
+  final String source;
+  final String sourceMessageId;
+  final Uint8List embedding;
+  final int dims;
+  final String embeddedHash;
+  final String embedModel;
+  final String? receivedAt;
+  final String embeddedAt;
+  final String? indexedAt;
+  const MessageVector({
+    required this.id,
+    required this.source,
+    required this.sourceMessageId,
+    required this.embedding,
+    required this.dims,
+    required this.embeddedHash,
+    required this.embedModel,
+    this.receivedAt,
+    required this.embeddedAt,
+    this.indexedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['embedding'] = Variable<Uint8List>(embedding);
+    map['dims'] = Variable<int>(dims);
+    map['embedded_hash'] = Variable<String>(embeddedHash);
+    map['embed_model'] = Variable<String>(embedModel);
+    if (!nullToAbsent || receivedAt != null) {
+      map['received_at'] = Variable<String>(receivedAt);
+    }
+    map['embedded_at'] = Variable<String>(embeddedAt);
+    if (!nullToAbsent || indexedAt != null) {
+      map['indexed_at'] = Variable<String>(indexedAt);
+    }
+    return map;
+  }
+
+  MessageVectorsCompanion toCompanion(bool nullToAbsent) {
+    return MessageVectorsCompanion(
+      id: Value(id),
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      embedding: Value(embedding),
+      dims: Value(dims),
+      embeddedHash: Value(embeddedHash),
+      embedModel: Value(embedModel),
+      receivedAt: receivedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(receivedAt),
+      embeddedAt: Value(embeddedAt),
+      indexedAt: indexedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(indexedAt),
+    );
+  }
+
+  factory MessageVector.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MessageVector(
+      id: serializer.fromJson<int>(json['id']),
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      embedding: serializer.fromJson<Uint8List>(json['embedding']),
+      dims: serializer.fromJson<int>(json['dims']),
+      embeddedHash: serializer.fromJson<String>(json['embedded_hash']),
+      embedModel: serializer.fromJson<String>(json['embed_model']),
+      receivedAt: serializer.fromJson<String?>(json['received_at']),
+      embeddedAt: serializer.fromJson<String>(json['embedded_at']),
+      indexedAt: serializer.fromJson<String?>(json['indexed_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'embedding': serializer.toJson<Uint8List>(embedding),
+      'dims': serializer.toJson<int>(dims),
+      'embedded_hash': serializer.toJson<String>(embeddedHash),
+      'embed_model': serializer.toJson<String>(embedModel),
+      'received_at': serializer.toJson<String?>(receivedAt),
+      'embedded_at': serializer.toJson<String>(embeddedAt),
+      'indexed_at': serializer.toJson<String?>(indexedAt),
+    };
+  }
+
+  MessageVector copyWith({
+    int? id,
+    String? source,
+    String? sourceMessageId,
+    Uint8List? embedding,
+    int? dims,
+    String? embeddedHash,
+    String? embedModel,
+    Value<String?> receivedAt = const Value.absent(),
+    String? embeddedAt,
+    Value<String?> indexedAt = const Value.absent(),
+  }) => MessageVector(
+    id: id ?? this.id,
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    embedding: embedding ?? this.embedding,
+    dims: dims ?? this.dims,
+    embeddedHash: embeddedHash ?? this.embeddedHash,
+    embedModel: embedModel ?? this.embedModel,
+    receivedAt: receivedAt.present ? receivedAt.value : this.receivedAt,
+    embeddedAt: embeddedAt ?? this.embeddedAt,
+    indexedAt: indexedAt.present ? indexedAt.value : this.indexedAt,
+  );
+  MessageVector copyWithCompanion(MessageVectorsCompanion data) {
+    return MessageVector(
+      id: data.id.present ? data.id.value : this.id,
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      embedding: data.embedding.present ? data.embedding.value : this.embedding,
+      dims: data.dims.present ? data.dims.value : this.dims,
+      embeddedHash: data.embeddedHash.present
+          ? data.embeddedHash.value
+          : this.embeddedHash,
+      embedModel: data.embedModel.present
+          ? data.embedModel.value
+          : this.embedModel,
+      receivedAt: data.receivedAt.present
+          ? data.receivedAt.value
+          : this.receivedAt,
+      embeddedAt: data.embeddedAt.present
+          ? data.embeddedAt.value
+          : this.embeddedAt,
+      indexedAt: data.indexedAt.present ? data.indexedAt.value : this.indexedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageVector(')
+          ..write('id: $id, ')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('embedding: $embedding, ')
+          ..write('dims: $dims, ')
+          ..write('embeddedHash: $embeddedHash, ')
+          ..write('embedModel: $embedModel, ')
+          ..write('receivedAt: $receivedAt, ')
+          ..write('embeddedAt: $embeddedAt, ')
+          ..write('indexedAt: $indexedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    source,
+    sourceMessageId,
+    $driftBlobEquality.hash(embedding),
+    dims,
+    embeddedHash,
+    embedModel,
+    receivedAt,
+    embeddedAt,
+    indexedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MessageVector &&
+          other.id == this.id &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          $driftBlobEquality.equals(other.embedding, this.embedding) &&
+          other.dims == this.dims &&
+          other.embeddedHash == this.embeddedHash &&
+          other.embedModel == this.embedModel &&
+          other.receivedAt == this.receivedAt &&
+          other.embeddedAt == this.embeddedAt &&
+          other.indexedAt == this.indexedAt);
+}
+
+class MessageVectorsCompanion extends UpdateCompanion<MessageVector> {
+  final Value<int> id;
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<Uint8List> embedding;
+  final Value<int> dims;
+  final Value<String> embeddedHash;
+  final Value<String> embedModel;
+  final Value<String?> receivedAt;
+  final Value<String> embeddedAt;
+  final Value<String?> indexedAt;
+  const MessageVectorsCompanion({
+    this.id = const Value.absent(),
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.embedding = const Value.absent(),
+    this.dims = const Value.absent(),
+    this.embeddedHash = const Value.absent(),
+    this.embedModel = const Value.absent(),
+    this.receivedAt = const Value.absent(),
+    this.embeddedAt = const Value.absent(),
+    this.indexedAt = const Value.absent(),
+  });
+  MessageVectorsCompanion.insert({
+    this.id = const Value.absent(),
+    required String source,
+    required String sourceMessageId,
+    required Uint8List embedding,
+    required int dims,
+    required String embeddedHash,
+    required String embedModel,
+    this.receivedAt = const Value.absent(),
+    required String embeddedAt,
+    this.indexedAt = const Value.absent(),
+  }) : source = Value(source),
+       sourceMessageId = Value(sourceMessageId),
+       embedding = Value(embedding),
+       dims = Value(dims),
+       embeddedHash = Value(embeddedHash),
+       embedModel = Value(embedModel),
+       embeddedAt = Value(embeddedAt);
+  static Insertable<MessageVector> custom({
+    Expression<int>? id,
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<Uint8List>? embedding,
+    Expression<int>? dims,
+    Expression<String>? embeddedHash,
+    Expression<String>? embedModel,
+    Expression<String>? receivedAt,
+    Expression<String>? embeddedAt,
+    Expression<String>? indexedAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (embedding != null) 'embedding': embedding,
+      if (dims != null) 'dims': dims,
+      if (embeddedHash != null) 'embedded_hash': embeddedHash,
+      if (embedModel != null) 'embed_model': embedModel,
+      if (receivedAt != null) 'received_at': receivedAt,
+      if (embeddedAt != null) 'embedded_at': embeddedAt,
+      if (indexedAt != null) 'indexed_at': indexedAt,
+    });
+  }
+
+  MessageVectorsCompanion copyWith({
+    Value<int>? id,
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<Uint8List>? embedding,
+    Value<int>? dims,
+    Value<String>? embeddedHash,
+    Value<String>? embedModel,
+    Value<String?>? receivedAt,
+    Value<String>? embeddedAt,
+    Value<String?>? indexedAt,
+  }) {
+    return MessageVectorsCompanion(
+      id: id ?? this.id,
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      embedding: embedding ?? this.embedding,
+      dims: dims ?? this.dims,
+      embeddedHash: embeddedHash ?? this.embeddedHash,
+      embedModel: embedModel ?? this.embedModel,
+      receivedAt: receivedAt ?? this.receivedAt,
+      embeddedAt: embeddedAt ?? this.embeddedAt,
+      indexedAt: indexedAt ?? this.indexedAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (embedding.present) {
+      map['embedding'] = Variable<Uint8List>(embedding.value);
+    }
+    if (dims.present) {
+      map['dims'] = Variable<int>(dims.value);
+    }
+    if (embeddedHash.present) {
+      map['embedded_hash'] = Variable<String>(embeddedHash.value);
+    }
+    if (embedModel.present) {
+      map['embed_model'] = Variable<String>(embedModel.value);
+    }
+    if (receivedAt.present) {
+      map['received_at'] = Variable<String>(receivedAt.value);
+    }
+    if (embeddedAt.present) {
+      map['embedded_at'] = Variable<String>(embeddedAt.value);
+    }
+    if (indexedAt.present) {
+      map['indexed_at'] = Variable<String>(indexedAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MessageVectorsCompanion(')
+          ..write('id: $id, ')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('embedding: $embedding, ')
+          ..write('dims: $dims, ')
+          ..write('embeddedHash: $embeddedHash, ')
+          ..write('embedModel: $embedModel, ')
+          ..write('receivedAt: $receivedAt, ')
+          ..write('embeddedAt: $embeddedAt, ')
+          ..write('indexedAt: $indexedAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -9020,6 +10927,10 @@ abstract class _$BondDatabase extends GeneratedDatabase {
   late final SenderPrefs senderPrefs = SenderPrefs(this);
   late final AppPrefs appPrefs = AppPrefs(this);
   late final Drafts drafts = Drafts(this);
+  late final Index ixDraftsConv = Index(
+    'ix_drafts_conv',
+    'CREATE INDEX ix_drafts_conv ON drafts (source, conversation_key)',
+  );
   late final MessageNotify messageNotify = MessageNotify(this);
   late final Index ixMessageNotifyOpen = Index(
     'ix_message_notify_open',
@@ -9028,6 +10939,28 @@ abstract class _$BondDatabase extends GeneratedDatabase {
   late final Index ixMessagesCreated = Index(
     'ix_messages_created',
     'CREATE INDEX ix_messages_created ON messages (created_at DESC)',
+  );
+  late final MessageProgress messageProgress = MessageProgress(this);
+  late final Index ixMessageProgressFeed = Index(
+    'ix_message_progress_feed',
+    'CREATE INDEX ix_message_progress_feed ON message_progress (received_at DESC, source_message_id DESC)',
+  );
+  late final Index ixMessageProgressVisible = Index(
+    'ix_message_progress_visible',
+    'CREATE INDEX ix_message_progress_visible ON message_progress (dropped, received_at DESC, source_message_id DESC)',
+  );
+  late final Index ixMessageProgressConv = Index(
+    'ix_message_progress_conv',
+    'CREATE INDEX ix_message_progress_conv ON message_progress (source, conversation_key)',
+  );
+  late final MessageVectors messageVectors = MessageVectors(this);
+  late final Index ixMessageVectorsMessage = Index(
+    'ix_message_vectors_message',
+    'CREATE UNIQUE INDEX ix_message_vectors_message ON message_vectors (source, source_message_id)',
+  );
+  late final Index ixMessageVectorsUnindexed = Index(
+    'ix_message_vectors_unindexed',
+    'CREATE INDEX ix_message_vectors_unindexed ON message_vectors (indexed_at)',
   );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
@@ -9057,9 +10990,17 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     senderPrefs,
     appPrefs,
     drafts,
+    ixDraftsConv,
     messageNotify,
     ixMessageNotifyOpen,
     ixMessagesCreated,
+    messageProgress,
+    ixMessageProgressFeed,
+    ixMessageProgressVisible,
+    ixMessageProgressConv,
+    messageVectors,
+    ixMessageVectorsMessage,
+    ixMessageVectorsUnindexed,
   ];
 }
 
@@ -13324,6 +15265,875 @@ typedef $MessageNotifyProcessedTableManager =
       MessageNotifyData,
       PrefetchHooks Function()
     >;
+typedef $MessageProgressCreateCompanionBuilder =
+    MessageProgressCompanion Function({
+      required String source,
+      required String sourceMessageId,
+      required String conversationKey,
+      required String receivedAt,
+      Value<String> ingestState,
+      Value<String> triageState,
+      Value<String> extractState,
+      Value<String> storylineState,
+      Value<String> settleState,
+      Value<String?> triageAt,
+      Value<String?> extractAt,
+      Value<String?> storylineAt,
+      Value<String?> settleAt,
+      Value<String> outcome,
+      Value<int> dropped,
+      Value<String?> dropReason,
+      Value<String?> storylineId,
+      Value<int> needsYou,
+      Value<String?> urgency,
+      required String createdAt,
+      required String updatedAt,
+      Value<String> draftState,
+      Value<String?> draftAt,
+      Value<int> rowid,
+    });
+typedef $MessageProgressUpdateCompanionBuilder =
+    MessageProgressCompanion Function({
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<String> conversationKey,
+      Value<String> receivedAt,
+      Value<String> ingestState,
+      Value<String> triageState,
+      Value<String> extractState,
+      Value<String> storylineState,
+      Value<String> settleState,
+      Value<String?> triageAt,
+      Value<String?> extractAt,
+      Value<String?> storylineAt,
+      Value<String?> settleAt,
+      Value<String> outcome,
+      Value<int> dropped,
+      Value<String?> dropReason,
+      Value<String?> storylineId,
+      Value<int> needsYou,
+      Value<String?> urgency,
+      Value<String> createdAt,
+      Value<String> updatedAt,
+      Value<String> draftState,
+      Value<String?> draftAt,
+      Value<int> rowid,
+    });
+
+class $MessageProgressFilterComposer
+    extends Composer<_$BondDatabase, MessageProgress> {
+  $MessageProgressFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get receivedAt => $composableBuilder(
+    column: $table.receivedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get ingestState => $composableBuilder(
+    column: $table.ingestState,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get triageState => $composableBuilder(
+    column: $table.triageState,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get extractState => $composableBuilder(
+    column: $table.extractState,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get storylineState => $composableBuilder(
+    column: $table.storylineState,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get settleState => $composableBuilder(
+    column: $table.settleState,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get triageAt => $composableBuilder(
+    column: $table.triageAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get extractAt => $composableBuilder(
+    column: $table.extractAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get storylineAt => $composableBuilder(
+    column: $table.storylineAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get settleAt => $composableBuilder(
+    column: $table.settleAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get outcome => $composableBuilder(
+    column: $table.outcome,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get dropped => $composableBuilder(
+    column: $table.dropped,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get dropReason => $composableBuilder(
+    column: $table.dropReason,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get storylineId => $composableBuilder(
+    column: $table.storylineId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get needsYou => $composableBuilder(
+    column: $table.needsYou,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get urgency => $composableBuilder(
+    column: $table.urgency,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get draftState => $composableBuilder(
+    column: $table.draftState,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get draftAt => $composableBuilder(
+    column: $table.draftAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $MessageProgressOrderingComposer
+    extends Composer<_$BondDatabase, MessageProgress> {
+  $MessageProgressOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get receivedAt => $composableBuilder(
+    column: $table.receivedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get ingestState => $composableBuilder(
+    column: $table.ingestState,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get triageState => $composableBuilder(
+    column: $table.triageState,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get extractState => $composableBuilder(
+    column: $table.extractState,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get storylineState => $composableBuilder(
+    column: $table.storylineState,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get settleState => $composableBuilder(
+    column: $table.settleState,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get triageAt => $composableBuilder(
+    column: $table.triageAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get extractAt => $composableBuilder(
+    column: $table.extractAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get storylineAt => $composableBuilder(
+    column: $table.storylineAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get settleAt => $composableBuilder(
+    column: $table.settleAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get outcome => $composableBuilder(
+    column: $table.outcome,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get dropped => $composableBuilder(
+    column: $table.dropped,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get dropReason => $composableBuilder(
+    column: $table.dropReason,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get storylineId => $composableBuilder(
+    column: $table.storylineId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get needsYou => $composableBuilder(
+    column: $table.needsYou,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get urgency => $composableBuilder(
+    column: $table.urgency,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get draftState => $composableBuilder(
+    column: $table.draftState,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get draftAt => $composableBuilder(
+    column: $table.draftAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $MessageProgressAnnotationComposer
+    extends Composer<_$BondDatabase, MessageProgress> {
+  $MessageProgressAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get conversationKey => $composableBuilder(
+    column: $table.conversationKey,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get receivedAt => $composableBuilder(
+    column: $table.receivedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get ingestState => $composableBuilder(
+    column: $table.ingestState,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get triageState => $composableBuilder(
+    column: $table.triageState,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get extractState => $composableBuilder(
+    column: $table.extractState,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get storylineState => $composableBuilder(
+    column: $table.storylineState,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get settleState => $composableBuilder(
+    column: $table.settleState,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get triageAt =>
+      $composableBuilder(column: $table.triageAt, builder: (column) => column);
+
+  GeneratedColumn<String> get extractAt =>
+      $composableBuilder(column: $table.extractAt, builder: (column) => column);
+
+  GeneratedColumn<String> get storylineAt => $composableBuilder(
+    column: $table.storylineAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get settleAt =>
+      $composableBuilder(column: $table.settleAt, builder: (column) => column);
+
+  GeneratedColumn<String> get outcome =>
+      $composableBuilder(column: $table.outcome, builder: (column) => column);
+
+  GeneratedColumn<int> get dropped =>
+      $composableBuilder(column: $table.dropped, builder: (column) => column);
+
+  GeneratedColumn<String> get dropReason => $composableBuilder(
+    column: $table.dropReason,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get storylineId => $composableBuilder(
+    column: $table.storylineId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get needsYou =>
+      $composableBuilder(column: $table.needsYou, builder: (column) => column);
+
+  GeneratedColumn<String> get urgency =>
+      $composableBuilder(column: $table.urgency, builder: (column) => column);
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get draftState => $composableBuilder(
+    column: $table.draftState,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get draftAt =>
+      $composableBuilder(column: $table.draftAt, builder: (column) => column);
+}
+
+class $MessageProgressTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          MessageProgress,
+          MessageProgressData,
+          $MessageProgressFilterComposer,
+          $MessageProgressOrderingComposer,
+          $MessageProgressAnnotationComposer,
+          $MessageProgressCreateCompanionBuilder,
+          $MessageProgressUpdateCompanionBuilder,
+          (
+            MessageProgressData,
+            BaseReferences<
+              _$BondDatabase,
+              MessageProgress,
+              MessageProgressData
+            >,
+          ),
+          MessageProgressData,
+          PrefetchHooks Function()
+        > {
+  $MessageProgressTableManager(_$BondDatabase db, MessageProgress table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $MessageProgressFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $MessageProgressOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $MessageProgressAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<String> conversationKey = const Value.absent(),
+                Value<String> receivedAt = const Value.absent(),
+                Value<String> ingestState = const Value.absent(),
+                Value<String> triageState = const Value.absent(),
+                Value<String> extractState = const Value.absent(),
+                Value<String> storylineState = const Value.absent(),
+                Value<String> settleState = const Value.absent(),
+                Value<String?> triageAt = const Value.absent(),
+                Value<String?> extractAt = const Value.absent(),
+                Value<String?> storylineAt = const Value.absent(),
+                Value<String?> settleAt = const Value.absent(),
+                Value<String> outcome = const Value.absent(),
+                Value<int> dropped = const Value.absent(),
+                Value<String?> dropReason = const Value.absent(),
+                Value<String?> storylineId = const Value.absent(),
+                Value<int> needsYou = const Value.absent(),
+                Value<String?> urgency = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+                Value<String> draftState = const Value.absent(),
+                Value<String?> draftAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => MessageProgressCompanion(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                conversationKey: conversationKey,
+                receivedAt: receivedAt,
+                ingestState: ingestState,
+                triageState: triageState,
+                extractState: extractState,
+                storylineState: storylineState,
+                settleState: settleState,
+                triageAt: triageAt,
+                extractAt: extractAt,
+                storylineAt: storylineAt,
+                settleAt: settleAt,
+                outcome: outcome,
+                dropped: dropped,
+                dropReason: dropReason,
+                storylineId: storylineId,
+                needsYou: needsYou,
+                urgency: urgency,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                draftState: draftState,
+                draftAt: draftAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String source,
+                required String sourceMessageId,
+                required String conversationKey,
+                required String receivedAt,
+                Value<String> ingestState = const Value.absent(),
+                Value<String> triageState = const Value.absent(),
+                Value<String> extractState = const Value.absent(),
+                Value<String> storylineState = const Value.absent(),
+                Value<String> settleState = const Value.absent(),
+                Value<String?> triageAt = const Value.absent(),
+                Value<String?> extractAt = const Value.absent(),
+                Value<String?> storylineAt = const Value.absent(),
+                Value<String?> settleAt = const Value.absent(),
+                Value<String> outcome = const Value.absent(),
+                Value<int> dropped = const Value.absent(),
+                Value<String?> dropReason = const Value.absent(),
+                Value<String?> storylineId = const Value.absent(),
+                Value<int> needsYou = const Value.absent(),
+                Value<String?> urgency = const Value.absent(),
+                required String createdAt,
+                required String updatedAt,
+                Value<String> draftState = const Value.absent(),
+                Value<String?> draftAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => MessageProgressCompanion.insert(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                conversationKey: conversationKey,
+                receivedAt: receivedAt,
+                ingestState: ingestState,
+                triageState: triageState,
+                extractState: extractState,
+                storylineState: storylineState,
+                settleState: settleState,
+                triageAt: triageAt,
+                extractAt: extractAt,
+                storylineAt: storylineAt,
+                settleAt: settleAt,
+                outcome: outcome,
+                dropped: dropped,
+                dropReason: dropReason,
+                storylineId: storylineId,
+                needsYou: needsYou,
+                urgency: urgency,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                draftState: draftState,
+                draftAt: draftAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $MessageProgressProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      MessageProgress,
+      MessageProgressData,
+      $MessageProgressFilterComposer,
+      $MessageProgressOrderingComposer,
+      $MessageProgressAnnotationComposer,
+      $MessageProgressCreateCompanionBuilder,
+      $MessageProgressUpdateCompanionBuilder,
+      (
+        MessageProgressData,
+        BaseReferences<_$BondDatabase, MessageProgress, MessageProgressData>,
+      ),
+      MessageProgressData,
+      PrefetchHooks Function()
+    >;
+typedef $MessageVectorsCreateCompanionBuilder =
+    MessageVectorsCompanion Function({
+      Value<int> id,
+      required String source,
+      required String sourceMessageId,
+      required Uint8List embedding,
+      required int dims,
+      required String embeddedHash,
+      required String embedModel,
+      Value<String?> receivedAt,
+      required String embeddedAt,
+      Value<String?> indexedAt,
+    });
+typedef $MessageVectorsUpdateCompanionBuilder =
+    MessageVectorsCompanion Function({
+      Value<int> id,
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<Uint8List> embedding,
+      Value<int> dims,
+      Value<String> embeddedHash,
+      Value<String> embedModel,
+      Value<String?> receivedAt,
+      Value<String> embeddedAt,
+      Value<String?> indexedAt,
+    });
+
+class $MessageVectorsFilterComposer
+    extends Composer<_$BondDatabase, MessageVectors> {
+  $MessageVectorsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get embedding => $composableBuilder(
+    column: $table.embedding,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get dims => $composableBuilder(
+    column: $table.dims,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get embeddedHash => $composableBuilder(
+    column: $table.embeddedHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get receivedAt => $composableBuilder(
+    column: $table.receivedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get indexedAt => $composableBuilder(
+    column: $table.indexedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $MessageVectorsOrderingComposer
+    extends Composer<_$BondDatabase, MessageVectors> {
+  $MessageVectorsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get embedding => $composableBuilder(
+    column: $table.embedding,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get dims => $composableBuilder(
+    column: $table.dims,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get embeddedHash => $composableBuilder(
+    column: $table.embeddedHash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get receivedAt => $composableBuilder(
+    column: $table.receivedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get indexedAt => $composableBuilder(
+    column: $table.indexedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $MessageVectorsAnnotationComposer
+    extends Composer<_$BondDatabase, MessageVectors> {
+  $MessageVectorsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<Uint8List> get embedding =>
+      $composableBuilder(column: $table.embedding, builder: (column) => column);
+
+  GeneratedColumn<int> get dims =>
+      $composableBuilder(column: $table.dims, builder: (column) => column);
+
+  GeneratedColumn<String> get embeddedHash => $composableBuilder(
+    column: $table.embeddedHash,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get receivedAt => $composableBuilder(
+    column: $table.receivedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get indexedAt =>
+      $composableBuilder(column: $table.indexedAt, builder: (column) => column);
+}
+
+class $MessageVectorsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          MessageVectors,
+          MessageVector,
+          $MessageVectorsFilterComposer,
+          $MessageVectorsOrderingComposer,
+          $MessageVectorsAnnotationComposer,
+          $MessageVectorsCreateCompanionBuilder,
+          $MessageVectorsUpdateCompanionBuilder,
+          (
+            MessageVector,
+            BaseReferences<_$BondDatabase, MessageVectors, MessageVector>,
+          ),
+          MessageVector,
+          PrefetchHooks Function()
+        > {
+  $MessageVectorsTableManager(_$BondDatabase db, MessageVectors table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $MessageVectorsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $MessageVectorsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $MessageVectorsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<Uint8List> embedding = const Value.absent(),
+                Value<int> dims = const Value.absent(),
+                Value<String> embeddedHash = const Value.absent(),
+                Value<String> embedModel = const Value.absent(),
+                Value<String?> receivedAt = const Value.absent(),
+                Value<String> embeddedAt = const Value.absent(),
+                Value<String?> indexedAt = const Value.absent(),
+              }) => MessageVectorsCompanion(
+                id: id,
+                source: source,
+                sourceMessageId: sourceMessageId,
+                embedding: embedding,
+                dims: dims,
+                embeddedHash: embeddedHash,
+                embedModel: embedModel,
+                receivedAt: receivedAt,
+                embeddedAt: embeddedAt,
+                indexedAt: indexedAt,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String source,
+                required String sourceMessageId,
+                required Uint8List embedding,
+                required int dims,
+                required String embeddedHash,
+                required String embedModel,
+                Value<String?> receivedAt = const Value.absent(),
+                required String embeddedAt,
+                Value<String?> indexedAt = const Value.absent(),
+              }) => MessageVectorsCompanion.insert(
+                id: id,
+                source: source,
+                sourceMessageId: sourceMessageId,
+                embedding: embedding,
+                dims: dims,
+                embeddedHash: embeddedHash,
+                embedModel: embedModel,
+                receivedAt: receivedAt,
+                embeddedAt: embeddedAt,
+                indexedAt: indexedAt,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $MessageVectorsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      MessageVectors,
+      MessageVector,
+      $MessageVectorsFilterComposer,
+      $MessageVectorsOrderingComposer,
+      $MessageVectorsAnnotationComposer,
+      $MessageVectorsCreateCompanionBuilder,
+      $MessageVectorsUpdateCompanionBuilder,
+      (
+        MessageVector,
+        BaseReferences<_$BondDatabase, MessageVectors, MessageVector>,
+      ),
+      MessageVector,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -13357,4 +16167,8 @@ class $BondDatabaseManager {
   $DraftsTableManager get drafts => $DraftsTableManager(_db, _db.drafts);
   $MessageNotifyTableManager get messageNotify =>
       $MessageNotifyTableManager(_db, _db.messageNotify);
+  $MessageProgressTableManager get messageProgress =>
+      $MessageProgressTableManager(_db, _db.messageProgress);
+  $MessageVectorsTableManager get messageVectors =>
+      $MessageVectorsTableManager(_db, _db.messageVectors);
 }

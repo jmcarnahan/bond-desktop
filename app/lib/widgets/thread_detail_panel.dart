@@ -53,6 +53,14 @@ class ThreadDetailPanel extends StatelessWidget {
   /// or sending, which is the arrangement the composer already lives under.
   final Widget? afterTranscript;
 
+  /// The answer offered to one message, drawn under it. Null — for a message or
+  /// altogether — means there is nothing to draw there.
+  ///
+  /// A builder rather than a list, for the same reason [afterTranscript] is a
+  /// widget: the panel renders a transcript and knows nothing about drafts. It
+  /// asks the host per message and places whatever comes back.
+  final Widget? Function(Message message)? suggestionFor;
+
   /// Opens the reply window. Every ask on this pane — the banner and each
   /// message's own line — is a call to action, so each one takes the reader
   /// there. Null leaves them all as statements, for a host with no reply to
@@ -69,6 +77,7 @@ class ThreadDetailPanel extends StatelessWidget {
     this.onSendToLater,
     this.onKeepInInbox,
     this.afterTranscript,
+    this.suggestionFor,
     this.onOpenReply,
   });
 
@@ -104,7 +113,8 @@ class ThreadDetailPanel extends StatelessWidget {
     final lastOut = latestOutboundAt(messages);
     final closed = conversation.state != ConversationState.needsReply;
 
-    for (final message in messages) {
+    for (var i = 0; i < messages.length; i++) {
+      final message = messages[i];
       final day = dayKeyOf(message);
       final label = formatDayLabel(message.receivedAt);
       if (label != null && (first || day != previousDay)) {
@@ -121,13 +131,30 @@ class ThreadDetailPanel extends StatelessWidget {
         lastOutboundAt: lastOut,
         conversationClosed: closed,
       );
+      final suggestion = suggestionFor?.call(message);
+      final header = previous == null || !sameRun(previous, message);
+      final next = i + 1 < messages.length ? messages[i + 1] : null;
+      final standalone = next == null || !sameRun(message, next);
+      final isLast = identical(message, messages.last);
+      // Only a message that is a run all by itself folds, and never the newest
+      // one. Folding a run's header while its continuations stayed up would
+      // hide half a run and leave the rest of it hanging under no name; and the
+      // last message is what the thread is about — a transcript that opens with
+      // its point folded away has answered the wrong question.
+      final collapsible = header && standalone && !isLast;
       items.add(MessageRow(
         key: ValueKey(message.id),
         message: message,
-        showHeader: previous == null || !sameRun(previous, message),
+        showHeader: header,
         openAsk: open,
         // Only a line that is actually on screen gets a tap.
         onAskTap: open ? onOpenReply : null,
+        suggestion: suggestion,
+        collapsible: collapsible,
+        // Folded by default only where there is nothing left to do: history the
+        // thread has moved past. An open ask or a live suggestion is the whole
+        // reason to scroll back, so neither ever starts hidden.
+        initiallyCollapsed: collapsible && !open && suggestion == null,
       ));
       previous = message;
     }

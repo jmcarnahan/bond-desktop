@@ -304,4 +304,355 @@ void main() {
         "UPDATE storylines SET cluster_hash = 'c-user' WHERE id = 'sl-user'");
     expect((await hashesOf())['sl-user'], ['h-user', 'c-user']);
   });
+
+  test('v7 to v8 reads every message back out of what the pipeline wrote',
+      () async {
+    final schema = await verifier.schemaAt(7);
+    // Six messages, one per shape the backfill has to tell apart. Everything
+    // shares `created_at` so that the one row with no `received_at` proves the
+    // fallback rather than inheriting it.
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, is_read, triage_status, gate_reason, urgency,
+        received_at, created_at, updated_at)
+      VALUES
+        ('email', 'm-done', 'c-done', 'inbound', 'Closing Friday', 0,
+          'triaged', NULL, 'high', '2026-09-01T10:00:00Z', 't', 't'),
+        ('email', 'm-gated', 'c-gated', 'inbound', 'Weekly digest', 0,
+          'skipped', 'newsletter', NULL, '2026-09-01T09:00:00Z', 't', 't'),
+        ('email', 'm-legacy', 'c-legacy', 'inbound', 'A chat', 0,
+          'skipped', NULL, NULL, '2026-09-01T09:30:00Z', 't', 't'),
+        ('email', 'm-inflight', 'c-inflight', 'inbound', 'Still going', 0,
+          'pending', NULL, NULL, '2026-09-01T11:00:00Z', 't', 't'),
+        ('email', 'm-quiet', 'c-quiet', 'inbound', 'FYI', 0,
+          'triaged', NULL, 'normal', '2026-09-01T08:00:00Z', 't', 't'),
+        ('email', 'm-undated', 'c-undated', 'inbound', 'No timestamp', 0,
+          'triaged', NULL, NULL, NULL, '2026-09-01T07:00:00Z', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO message_ai (source, source_message_id, extraction_json,
+        extracted_at)
+      VALUES ('email', 'm-done', '{"topics":[]}', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO work_items (task_kind, source, entity_id, status, created_at,
+        updated_at)
+      VALUES ('extract', 'email', 'm-inflight', 'processing', 't', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO storylines (id, title, status, created_by, title_locked,
+        charter_locked, pinned, created_at, updated_at)
+      VALUES ('sl-1', 'Closing', 'active', 'auto', 0, 0, 0, 't', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO storyline_members (storyline_id, source, conversation_key,
+        added_by, added_at)
+      VALUES ('sl-1', 'email', 'c-done', 'auto', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO conversation_ai (source, conversation_key, attention_score,
+        updated_at)
+      VALUES
+        ('email', 'c-done', 0.9, 't'),
+        ('email', 'c-quiet', 0.95, 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO message_notify (source, source_message_id, conversation_key,
+        state, reason, deadline_at, settled_at, created_at, updated_at)
+      VALUES
+        ('email', 'm-done', 'c-done', 'notified', 'settled', 't', 't', 't', 't'),
+        ('email', 'm-quiet', 'c-quiet', 'suppressed', 'not_worthy', 't', 't',
+          't', 't'),
+        ('email', 'm-inflight', 'c-inflight', 'pending', NULL, 't', NULL, 't',
+          't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 8);
+    addTearDown(db.close);
+
+    Future<Map<String, Object?>> progressOf(String id) async => (await db
+            .customSelect(
+                'SELECT * FROM message_progress WHERE source_message_id = ?',
+                variables: [Variable(id)])
+            .getSingle())
+        .data;
+
+    // A message the pipeline finished and announced: every stage read back out
+    // of the table that recorded it, the storyline denormalized onto the row,
+    // and the ask judged against the migration's literal threshold.
+    final done = await progressOf('m-done');
+    expect(
+      [
+        done['triage_state'],
+        done['extract_state'],
+        done['storyline_state'],
+        done['settle_state'],
+      ],
+      ['done', 'done', 'done', 'done'],
+    );
+    expect(done['outcome'], 'done');
+    expect(done['dropped'], 0);
+    expect(done['storyline_id'], 'sl-1');
+    expect(done['needs_you'], 1);
+    expect(done['urgency'], 'high');
+    expect(done['received_at'], '2026-09-01T10:00:00Z');
+    // Nothing is stamped: this app did not watch any of it happen, and a time
+    // written here would be a claim nobody observed. `null` rather than
+    // `isNull`, which drift exports into this file under the same name.
+    expect(
+      [
+        done['triage_at'],
+        done['extract_at'],
+        done['storyline_at'],
+        done['settle_at'],
+      ],
+      [null, null, null, null],
+    );
+
+    // The gate's verdict is the whole row: finished, dropped, and carrying the
+    // reason the "show dropped" toggle explains it with.
+    final gated = await progressOf('m-gated');
+    expect(
+      [
+        gated['triage_state'],
+        gated['extract_state'],
+        gated['storyline_state'],
+        gated['settle_state'],
+      ],
+      ['skipped', 'skipped', 'skipped', 'done'],
+    );
+    expect(gated['outcome'], 'dropped');
+    expect(gated['dropped'], 1);
+    expect(gated['drop_reason'], 'newsletter');
+
+    // `skipped` with no reason behind it is the legacy Teams tolerance, not a
+    // verdict — so it is not a drop, and the toggle does not claim it.
+    final legacy = await progressOf('m-legacy');
+    expect(legacy['triage_state'], 'skipped');
+    expect(legacy['dropped'], 0);
+    expect(legacy['drop_reason'], null);
+
+    // Mid-flight when the app was last closed: triage never ran, extraction is
+    // claimed, and nothing has settled. The storyline stage is `skipped`
+    // because no pass was ever queued for it — an absent work row is a real
+    // end state, not a bar to wait on forever.
+    final inflight = await progressOf('m-inflight');
+    expect(
+      [
+        inflight['triage_state'],
+        inflight['extract_state'],
+        inflight['storyline_state'],
+        inflight['settle_state'],
+      ],
+      ['pending', 'running', 'skipped', 'pending'],
+    );
+    expect(inflight['outcome'], 'pending');
+
+    // Judged not worth interrupting for: that IS the app deciding the user
+    // does not need it.
+    final quiet = await progressOf('m-quiet');
+    expect(quiet['outcome'], 'dropped');
+    expect(quiet['dropped'], 1);
+    expect(quiet['drop_reason'], 'not_worthy');
+    expect(quiet['needs_you'], 0);
+
+    // The paging cursor cannot hold a NULL, so a message with no timestamp of
+    // its own is paged by when it was stored.
+    expect((await progressOf('m-undated'))['received_at'],
+        '2026-09-01T07:00:00Z');
+
+    // `message_vectors` ships in the same step and stays empty until
+    // per-message embeddings exist.
+    final vectors =
+        await db.customSelect('SELECT COUNT(*) AS c FROM message_vectors')
+            .getSingle();
+    expect(vectors.data['c'], 0);
+
+    final indexes = (await db
+            .customSelect("SELECT name FROM sqlite_master WHERE type = 'index'")
+            .get())
+        .map((r) => r.data['name'])
+        .toSet();
+    expect(
+      indexes,
+      containsAll([
+        'ix_message_progress_feed',
+        'ix_message_progress_visible',
+        'ix_message_progress_conv',
+        'ix_message_vectors_message',
+        'ix_message_vectors_unindexed',
+      ]),
+    );
+
+    // A multi-storyline thread must not double-insert: the backfill reads
+    // membership through a scalar subquery, and a join here would have tripped
+    // the primary key rather than picking one.
+    final rows = await db
+        .customSelect('SELECT COUNT(*) AS c FROM message_progress')
+        .getSingle();
+    expect(rows.data['c'], 6);
+  });
+
+  test('v7 to v8 files a thread in two storylines exactly once', () async {
+    final schema = await verifier.schemaAt(7);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, triage_status, created_at, updated_at)
+      VALUES ('email', 'm-1', 'c1', 'inbound', 'triaged', 't', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO storylines (id, title, status, created_by, title_locked,
+        charter_locked, pinned, created_at, updated_at)
+      VALUES
+        ('sl-a', 'Closing', 'active', 'auto', 0, 0, 0, 't', 't'),
+        ('sl-b', 'Tahoe', 'active', 'user', 0, 0, 0, 't', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO storyline_members (storyline_id, source, conversation_key,
+        added_by, added_at)
+      VALUES
+        ('sl-a', 'email', 'c1', 'auto', '2026-09-01T10:00:00Z'),
+        ('sl-b', 'email', 'c1', 'user', '2026-09-01T11:00:00Z');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 8);
+    addTearDown(db.close);
+
+    final rows = await db
+        .customSelect('SELECT storyline_id FROM message_progress')
+        .get();
+    // One row, and the storyline it joined first — the same one
+    // `storylineIdsFor` would name.
+    expect(rows, hasLength(1));
+    expect(rows.single.data['storyline_id'], 'sl-a');
+  });
+
+  test('v8 to v9 re-keys the drafts on the message each one answers',
+      () async {
+    final schema = await verifier.schemaAt(8);
+    // Two threads, one draft each — the most a v8 mailbox could hold, since
+    // the old key was the thread.
+    schema.rawDatabase.execute("""
+      INSERT INTO drafts (source, conversation_key, reply_to_message_id, body,
+        evidence, status, graph_draft_id, web_link, created_at, updated_at,
+        options_json, options_dismissed)
+      VALUES
+        ('email', 'c-answered', 'm-answered', 'Friday works.', 'She asked.',
+          'suggested', 'g-1', 'https://outlook/g-1', 't1', 't2',
+          '[{"stance":"Confirm Friday","body":"Friday works."}]', 1),
+        ('teams', 'chat-1', 'chat-1-m1', 'Sending it now.', NULL, 'dismissed',
+          NULL, NULL, 't1', 't2', NULL, 0);
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 9);
+    addTearDown(db.close);
+
+    final rows = await db
+        .customSelect('SELECT * FROM drafts ORDER BY reply_to_message_id')
+        .get();
+    expect(rows, hasLength(2));
+    // Every column survives the recreate, the Outlook ids and the options
+    // included — a draft the user had saved to Outlook must still point at it.
+    final mail = rows.last.data;
+    expect(mail['conversation_key'], 'c-answered');
+    expect(mail['reply_to_message_id'], 'm-answered');
+    expect(mail['body'], 'Friday works.');
+    expect(mail['evidence'], 'She asked.');
+    expect(mail['status'], 'suggested');
+    expect(mail['graph_draft_id'], 'g-1');
+    expect(mail['web_link'], 'https://outlook/g-1');
+    expect(mail['created_at'], 't1');
+    expect(mail['updated_at'], 't2');
+    expect(
+      mail['options_json'],
+      '[{"stance":"Confirm Friday","body":"Friday works."}]',
+    );
+    expect(mail['options_dismissed'], 1);
+    expect(rows.first.data['conversation_key'], 'chat-1');
+
+    // The key really moved: two answers on one thread is now a legal pair of
+    // rows, and it would have collided under the old primary key.
+    await db.customStatement(
+      "INSERT INTO drafts (source, conversation_key, reply_to_message_id, "
+      "body, status, created_at, updated_at, options_dismissed) "
+      "VALUES ('email', 'c-answered', 'm-later', 'And Monday too.', "
+      "'suggested', 't3', 't3', 0)",
+    );
+    final onThread = await db
+        .customSelect(
+          "SELECT COUNT(*) AS c FROM drafts WHERE conversation_key = 'c-answered'",
+        )
+        .getSingle();
+    expect(onThread.data['c'], 2);
+  });
+
+  test('v8 to v9 reads the drafting stage off the drafts that exist',
+      () async {
+    final schema = await verifier.schemaAt(8);
+    schema.rawDatabase.execute("""
+      INSERT INTO drafts (source, conversation_key, reply_to_message_id, body,
+        status, created_at, updated_at, options_dismissed)
+      VALUES ('email', 'c-answered', 'm-answered', 'Friday works.',
+        'suggested', 't', 't', 0);
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO message_progress (source, source_message_id,
+        conversation_key, received_at, ingest_state, triage_state,
+        extract_state, storyline_state, settle_state, outcome, dropped,
+        needs_you, created_at, updated_at)
+      VALUES
+        ('email', 'm-answered', 'c-answered', '2026-09-01T10:00:00Z', 'done',
+          'done', 'done', 'done', 'done', 'done', 0, 1, 't', 't'),
+        ('email', 'm-quiet', 'c-quiet', '2026-09-01T09:00:00Z', 'done',
+          'done', 'done', 'done', 'done', 'done', 0, 0, 't', 't'),
+        ('email', 'm-open', 'c-open', '2026-09-01T08:00:00Z', 'done',
+          'done', 'pending', 'pending', 'pending', 'pending', 0, 0, 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 9);
+    addTearDown(db.close);
+
+    Future<Map<String, Object?>> progressOf(String id) async => (await db
+            .customSelect(
+                'SELECT * FROM message_progress WHERE source_message_id = ?',
+                variables: [Variable(id)])
+            .getSingle())
+        .data;
+
+    expect((await progressOf('m-answered'))['draft_state'], 'done');
+    expect((await progressOf('m-quiet'))['draft_state'], 'skipped');
+    // The open row is terminal too, and deliberately: nothing will ever queue
+    // draft work for a message stored before this version, and 'pending' would
+    // park its bar forever.
+    expect((await progressOf('m-open'))['draft_state'], 'skipped');
+    // Nothing is stamped — this app did not watch the history it is
+    // describing.
+    for (final id in ['m-answered', 'm-quiet', 'm-open']) {
+      expect((await progressOf(id))['draft_at'], null);
+    }
+  });
+
+  test('v8 migration leaves no vec tables behind', () async {
+    // The sqlite-vec index over `message_vectors` is built lazily, at first
+    // search, and never by a migration — because `migrateAndValidate` diffs
+    // the whole of `sqlite_master` against the snapshot, so a `vec0` virtual
+    // table created during a step would fail all 21 pairs in the group above
+    // rather than this one test. This is the guard that says so out loud, so a
+    // later hand moving the CREATE into a step or into `beforeOpen` gets a
+    // sentence back instead of a wall of migration failures.
+    final schema = await verifier.schemaAt(7);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 8);
+    addTearDown(db.close);
+
+    final vecTables = await db
+        .customSelect(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'vec_messages%'")
+        .get();
+    expect(vecTables, isEmpty);
+  });
 }

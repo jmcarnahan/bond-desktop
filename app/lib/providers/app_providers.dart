@@ -15,6 +15,7 @@ import '../services/backend/mail_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
+import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
@@ -26,8 +27,11 @@ import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
+import '../services/message_search.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
+import '../services/pipeline_progress.dart';
+import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
 import '../services/storyline_handler.dart';
@@ -35,6 +39,7 @@ import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
 import '../services/teams_sync.dart';
 import '../services/triage_queue.dart';
+import '../widgets/app_rail.dart' show RailSection;
 import 'navigation_provider.dart';
 import 'notify_routing.dart';
 import 'prefs_provider.dart';
@@ -59,6 +64,24 @@ final graphAuthProvider = Provider<GraphAuth>((ref) => GraphAuth());
 /// zero churn across the existing suite rather than a hundred rows that
 /// suddenly say "thinking…".
 final sessionStartProvider = Provider<DateTime?>((ref) => null);
+
+/// The pane the app opens on.
+///
+/// Home, because the whole point of that screen is to be left up: it is what
+/// the app looks like when nobody has asked it for anything in particular.
+///
+/// A provider rather than a constant so the screen tests that predate Home —
+/// they assert on a section overview from the first frame — can override it
+/// back to the section they were written against. `home_screen_test.dart` is
+/// deliberately the one that does NOT override, which is what pins this
+/// default.
+///
+/// Importing `app_rail.dart` for [RailSection] puts a widget import in a
+/// provider file, which is the precedent `navigation_provider.dart` set: the
+/// rail's stops ARE the app's section vocabulary.
+final initialSectionProvider = Provider<RailSection>(
+  (ref) => RailSection.home,
+);
 
 /// The MCP session and the wire client under it, built together because they
 /// are circular: the client asks the session for a bearer token at every
@@ -127,6 +150,25 @@ final activityLogProvider = Provider<ActivityLog>((ref) {
   return log;
 });
 
+/// The pipeline's live wire. It watches NOTHING, for [activityLogProvider]'s
+/// reason turned up one notch: a backend switch rebuilds the queues that
+/// publish onto it, and a home screen open across that switch has to keep the
+/// subscription it already has or its table would freeze mid-sync.
+final progressBusProvider = Provider<ProgressBus>((ref) {
+  final bus = ProgressBus();
+  ref.onDispose(bus.dispose);
+  return bus;
+});
+
+/// The recorder every stage writes through. Watches only the store and the
+/// bus, so it outlives a backend switch along with them.
+final pipelineProgressProvider = Provider<PipelineProgress>(
+  (ref) => PipelineProgress(
+    ref.watch(messageStoreProvider),
+    bus: ref.watch(progressBusProvider),
+  ),
+);
+
 /// The settle machine. Watches ONLY the store and the log, so a backend
 /// switch — which rebuilds the session, both backends, the sync service and
 /// the queues — leaves it standing: rebuilding it would reset the arm and
@@ -136,6 +178,7 @@ final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) 
   final coordinator = NotificationCoordinator(
     store,
     activityLog: ref.watch(activityLogProvider),
+    progress: ref.watch(pipelineProgressProvider),
     attentionThreshold: () async {
       final raw = await store.getPref(attentionThresholdKey);
       return (raw == null ? null : double.tryParse(raw)) ??
@@ -202,6 +245,9 @@ final syncServiceProvider = Provider<MailSync>(
     ref.watch(mailBackendProvider),
     ref.watch(messageStoreProvider),
     activityLog: ref.watch(activityLogProvider),
+    // What tells an open home screen that a message exists at all. Every later
+    // stage announces itself from the queues; ingest happens here.
+    progress: ref.watch(pipelineProgressProvider),
     // A callback, not a value: the account is a keychain read, and this
     // provider is built by plenty that never syncs. The sync asks once, on its
     // first pass; until the answer arrives no message is marked as addressed
@@ -236,6 +282,7 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
     ref.watch(messageStoreProvider),
     canSync: () => auth.hasScope('chat.read'),
     activityLog: ref.watch(activityLogProvider),
+    progress: ref.watch(pipelineProgressProvider),
   );
 });
 
@@ -308,6 +355,7 @@ final triageQueueProvider = Provider<TriageQueue>((ref) {
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
     gate: ref.watch(drainGateProvider),
     activityLog: ref.watch(activityLogProvider),
+    progress: ref.watch(pipelineProgressProvider),
   );
   ref.onDispose(queue.dispose);
   return queue;
@@ -340,6 +388,18 @@ final embeddingsClientProvider = Provider<EmbeddingsClient>(
   ),
 );
 
+/// Semantic search over messages.
+///
+/// A plain `Provider` because it holds nothing: it is the pairing of the
+/// embedding client with the store, and the one place that knows a query and a
+/// document are embedded under different prefixes.
+final messageSearchProvider = Provider<MessageSearch>(
+  (ref) => MessageSearch(
+    ref.watch(messageStoreProvider),
+    ref.watch(embeddingsClientProvider),
+  ),
+);
+
 /// The AI work queue. One for the whole app, for the same reason there is one
 /// [triageQueueProvider]: it is one queue over shared rows.
 ///
@@ -360,6 +420,18 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(fastLlmClientProvider),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        progress: ref.watch(pipelineProgressProvider),
+      ),
+      // After extraction and before the storylines. After, because the summary
+      // it embeds is triage's and the drain order keeps the fast server's slots
+      // for extraction while there is extraction left to do. Before, because it
+      // talks to no model at all: a park here is a park on the embedding
+      // server, and it parks only its own kind, so a missing `make embed` must
+      // never be allowed to sit in front of the storyline queue.
+      EmbedHandler(
+        ref.watch(messageStoreProvider),
+        ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
       ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
@@ -367,6 +439,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       StorylineAssignHandler(
         storylines,
         activityLog: ref.watch(activityLogProvider),
+        progress: ref.watch(pipelineProgressProvider),
       ),
       StorylineSweepHandler(storylines),
       // After the sweep and before drafts: a recruit is rare — it only exists
@@ -375,7 +448,9 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       StorylineRecruitHandler(storylines),
       // Last, and after both storyline passes: a draft reads the storyline
       // summary as background, so drafting before the sweep has run would
-      // write the one reply for this thread without it.
+      // write this message's reply without it. Last also means the work
+      // extraction queued at the top of this drain is picked up on the same
+      // pass rather than waiting for the next sync.
       //
       // The only handler still on the 27B. A draft is prose the user sends
       // under their own name — the one place the bigger model earns its
@@ -384,10 +459,12 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        progress: ref.watch(pipelineProgressProvider),
       ),
     ],
     gate: ref.watch(drainGateProvider),
     activityLog: ref.watch(activityLogProvider),
+    progress: ref.watch(pipelineProgressProvider),
   );
   ref.onDispose(worker.dispose);
   return worker;

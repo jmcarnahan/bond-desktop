@@ -16,13 +16,22 @@ import '../services/backend/teams_backend.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
 import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/pipeline_progress.dart';
 import '../services/teams_sync.dart' show TeamsSync;
 import '../widgets/composer.dart' show SendCapability;
 import 'app_providers.dart';
 import 'conversations_provider.dart';
 
-/// One conversation's suggested reply, and the send that a person — and only a
-/// person — can trigger.
+/// One conversation's suggested replies, and the send that a person — and only
+/// a person — can trigger.
+///
+/// A suggestion belongs to the MESSAGE it answers, never to the thread: the
+/// `drafts` table is keyed on `(source, reply_to_message_id)`, and a thread
+/// accumulates one row per message the model drafted for. [DraftState.draft] is
+/// simply the one the composer surface shows — the answer to the newest inbound
+/// message — while [DraftState.threadDrafts] carries every row the conversation
+/// holds, so the transcript can put each suggestion under the message it
+/// answers.
 ///
 /// The invariant this file exists to hold: [DraftNotifier.send] is the only
 /// method that reaches [GraphMail.sendDraft] or [TeamsBackend.sendChatMessage],
@@ -47,6 +56,46 @@ typedef DraftTarget = ({String source, String conversationKey});
 /// in front of somebody after a restart the user believed had cancelled it.
 typedef PendingSend = ({String body, DateTime sendsAt});
 
+/// What one pass over the `drafts` table answers: the row the composer surface
+/// shows, and every row the conversation holds keyed by the message it answers.
+/// The two always move together — see [DraftNotifier._reloadDrafts].
+typedef _DraftRead = ({
+  Map<String, Object?>? newest,
+  Map<String, Map<String, Object?>> byMessage,
+});
+
+/// The short ready-to-send replies stored on one `drafts` row, at most two.
+///
+/// Top-level because the cards are drawn per MESSAGE now: the transcript reads
+/// rows straight out of [DraftState.threadDrafts] and has to answer the same
+/// question about each of them, with exactly the same guards the composer's own
+/// row gets. Empty for the three states a body reads as absent in — no row,
+/// dismissed, sent — plus the fourth that belongs to the options alone: the user
+/// closed the cards but kept the draft. Malformed JSON reads as no options; a
+/// row written by a version that did not have them reads the same way.
+List<DraftOption> draftOptionsOf(Map<String, Object?> row) {
+  final status = row['status'] as String?;
+  if (status == 'dismissed' || status == 'sent') return const [];
+  if ((row['options_dismissed'] as int? ?? 0) == 1) return const [];
+  final raw = row['options_json'] as String? ?? '';
+  if (raw.isEmpty) return const [];
+  Object? decoded;
+  try {
+    decoded = jsonDecode(raw);
+  } on FormatException {
+    return const [];
+  }
+  if (decoded is! List) return const [];
+  return [
+    for (final entry in decoded)
+      if (entry is Map)
+        DraftOption(
+          stance: (entry['stance'] as Object?)?.toString() ?? '',
+          body: (entry['body'] as Object?)?.toString() ?? '',
+        ),
+  ];
+}
+
 /// What a send actually did, so the screen can say so.
 enum SendOutcome {
   /// The reply left the building.
@@ -65,9 +114,21 @@ enum SendOutcome {
 
 @immutable
 class DraftState {
-  /// The stored `drafts` row, or null when this conversation has no
-  /// suggestion.
+  /// The stored `drafts` row the composer surface is holding: the answer to the
+  /// thread's newest inbound message, or null when that message has none.
+  ///
+  /// One row out of [threadDrafts], not the thread's whole answer — a draft
+  /// belongs to the message it answers, and this is the one the reply box would
+  /// open with.
   final Map<String, Object?>? draft;
+
+  /// Every suggestion this conversation holds, keyed by the message it answers
+  /// — `reply_to_message_id`, which is exactly a `Message.id`.
+  ///
+  /// Whatever their status: a sent or dismissed row is still what happened to
+  /// that message, and the transcript is the layer that decides which of them
+  /// are still worth drawing.
+  final Map<String, Map<String, Object?>> threadDrafts;
 
   /// A draft is being written right now.
   final bool generating;
@@ -96,6 +157,7 @@ class DraftState {
 
   const DraftState({
     this.draft,
+    this.threadDrafts = const {},
     this.generating = false,
     this.sending = false,
     this.capability = SendCapability.copyOnly,
@@ -125,39 +187,19 @@ class DraftState {
     return value.isEmpty ? null : value;
   }
 
-  /// The short ready-to-send replies, at most two. Empty for the same three
-  /// states [body] is null in — no row, dismissed, sent — plus the fourth that
-  /// belongs to the options alone: the user closed the cards but kept the
-  /// draft. Malformed JSON reads as no options; a row written by a version
-  /// that did not have them reads the same way.
+  /// The short ready-to-send replies on the composer's own row, at most two.
+  /// [draftOptionsOf] answers the same question for every other message's row.
   List<DraftOption> get options {
     final row = draft;
     if (row == null) return const [];
-    final status = row['status'] as String?;
-    if (status == 'dismissed' || status == 'sent') return const [];
-    if ((row['options_dismissed'] as int? ?? 0) == 1) return const [];
-    final raw = row['options_json'] as String? ?? '';
-    if (raw.isEmpty) return const [];
-    Object? decoded;
-    try {
-      decoded = jsonDecode(raw);
-    } on FormatException {
-      return const [];
-    }
-    if (decoded is! List) return const [];
-    return [
-      for (final entry in decoded)
-        if (entry is Map)
-          DraftOption(
-            stance: (entry['stance'] as Object?)?.toString() ?? '',
-            body: (entry['body'] as Object?)?.toString() ?? '',
-          ),
-    ];
+    return draftOptionsOf(row);
   }
 
-  /// Whether "Suggest a reply" may run [DraftNotifier.generate] here: only a
-  /// thread whose suggestions were closed — status 'dismissed', or a
-  /// 'suggested' row whose cards were waved off — or one never drafted at all.
+  /// Whether "Suggest a reply" may run [DraftNotifier.generate] here. The
+  /// question is about [draft] alone — generate answers the newest inbound
+  /// message, so the row it would overwrite is that message's: only one whose
+  /// suggestions were closed — status 'dismissed', or a 'suggested' row whose
+  /// cards were waved off — or a message never drafted for at all.
   /// An 'edited' row is the user's own words and a 'sent' one is history;
   /// generate() deletes the row, so offering it beside either would offer to
   /// destroy it.
@@ -175,6 +217,7 @@ class DraftState {
 
   DraftState copyWith({
     Object? draft = _unset,
+    Map<String, Map<String, Object?>>? threadDrafts,
     bool? generating,
     bool? sending,
     SendCapability? capability,
@@ -186,6 +229,7 @@ class DraftState {
         draft: identical(draft, _unset)
             ? this.draft
             : draft as Map<String, Object?>?,
+        threadDrafts: threadDrafts ?? this.threadDrafts,
         generating: generating ?? this.generating,
         sending: sending ?? this.sending,
         capability: capability ?? this.capability,
@@ -223,6 +267,16 @@ class DraftNotifier extends StateNotifier<DraftState> {
 
   final AiWorker? _worker;
 
+  /// Where the needs-you exit is recorded when a reply leaves FROM HERE.
+  ///
+  /// The sync's `resolvesAsk` arm covers a reply sent anywhere else, but it
+  /// cannot cover this one for chats: the chat send writes its own outbound
+  /// row, and the next pull deliberately skips a row it already has — so the
+  /// fold that would have cleared the chip never runs. Mail would only be a
+  /// sync late, but late for mail and never for chats are both worse than
+  /// saying it now.
+  final PipelineProgress _pipeline;
+
   /// Called after a successful send, so the sent message folds in from
   /// `sentitems` on the next sync and the thread stops saying it needs a
   /// reply. Null in tests that exercise the draft alone.
@@ -254,6 +308,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     DraftTarget target, {
     TeamsBackend? teams,
     AiWorker? worker,
+    PipelineProgress pipeline = const PipelineProgress.disabled(),
     Future<void> Function()? onSent,
     Future<bool> Function(Uri url)? launch,
     Duration? undoWindow,
@@ -261,6 +316,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
         conversationKey = target.conversationKey,
         _teams = teams,
         _worker = worker,
+        _pipeline = pipeline,
         _onSent = onSent,
         _undoWindow = undoWindow ?? DraftNotifier.undoWindow,
         _launch = launch ??
@@ -298,25 +354,67 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// Reads the stored draft and what this build may do with it. Never throws:
   /// a database or keychain failure leaves the composer usable and unarmed.
   Future<void> load() async {
-    Map<String, Object?>? row;
-    try {
-      row = await _store.getDraft(_source, conversationKey);
-    } catch (_) {
-      row = state.draft;
-    }
+    final read = await _readDrafts();
     // The read is a round trip now, and this notifier can be disposed across
     // one — a thread closed while its draft was being read.
     if (!mounted) return;
     // Whatever was being generated has landed, or has stopped.
-    final settled = row != null && row['body'] != null;
+    final settled = read.newest != null && read.newest!['body'] != null;
     state = state.copyWith(
-      draft: row,
+      draft: read.newest,
+      threadDrafts: read.byMessage,
       generating: settled ? false : state.generating,
     );
 
     final capability = await _capability();
     if (!mounted) return;
     state = state.copyWith(capability: capability);
+  }
+
+  /// Re-reads both views of this conversation's suggestions after a write.
+  ///
+  /// Both, always: the composer's row and the transcript's cards come out of
+  /// the same table, and refreshing one alone is how an inline card goes on
+  /// offering options a dismissal already closed.
+  Future<void> _reloadDrafts() async {
+    final read = await _readDrafts();
+    if (!mounted) return;
+    state = state.copyWith(draft: read.newest, threadDrafts: read.byMessage);
+  }
+
+  /// The two reads behind every refresh: the newest inbound message's
+  /// suggestion, and every suggestion the conversation holds. A read that
+  /// throws answers with what state already had, which is what keeps [load]'s
+  /// never-throws contract.
+  Future<_DraftRead> _readDrafts() async {
+    try {
+      final newest = await _store.getDraft(_source, conversationKey);
+      final rows =
+          await _store.draftsForConversation(_source, conversationKey);
+      return (
+        newest: newest,
+        byMessage: {
+          for (final row in rows)
+            if ((row['reply_to_message_id'] as String? ?? '').isNotEmpty)
+              row['reply_to_message_id'] as String: row,
+        },
+      );
+    } catch (_) {
+      return (newest: state.draft, byMessage: state.threadDrafts);
+    }
+  }
+
+  /// Which stored draft row this pane is holding: the message it answers, or
+  /// null when there is no suggestion to write to.
+  ///
+  /// Every write to `drafts` goes through this. The table is keyed on the
+  /// message, so a write addressed by conversation would land on every
+  /// suggestion the thread has ever collected — including the answers to
+  /// messages the user did nothing about.
+  String? get _draftKey {
+    if (state.draft == null) return null;
+    final id = state.replyToMessageId;
+    return (id == null || id.isEmpty) ? null : id;
   }
 
   /// The best thing this grant can do with a reply. Falls to
@@ -348,16 +446,33 @@ class DraftNotifier extends StateNotifier<DraftState> {
 
   /// Asks for a draft, or for a different one.
   ///
+  /// The work is keyed on the MESSAGE, so this resolves the thread's newest
+  /// inbound one first — the same message the handler would have answered, and
+  /// the same message this pane is showing a suggestion for.
+  ///
   /// The requeue is what makes Regenerate work at all: the work row for a
-  /// thread that has already been drafted is `done`, and `enqueueWork` would
+  /// message that has already been drafted is `done`, and `enqueueWork` would
   /// ignore it forever. The existing draft is deleted first for the same
   /// reason — the handler returns early when one is already stored.
   Future<void> generate() async {
     if (state.generating) return;
     state = state.copyWith(generating: true, error: null);
     try {
-      await _store.deleteDraft(_source, conversationKey);
-      await _store.requeueWork('draft', _source, conversationKey);
+      final newest =
+          await _store.newestInboundMessage(_source, conversationKey);
+      final messageId = newest?['source_message_id'] as String?;
+      if (messageId == null || messageId.isEmpty) {
+        // A thread of the user's own sent mail, or one whose messages are not
+        // stored. There is nothing to answer, which is a sentence rather than
+        // a spinner that never stops.
+        state = state.copyWith(
+          generating: false,
+          error: 'There is nothing to reply to in this thread yet.',
+        );
+        return;
+      }
+      await _store.deleteDraftForMessage(_source, messageId);
+      await _store.requeueWork('draft', _source, messageId);
     } catch (e) {
       state = state.copyWith(
         generating: false,
@@ -388,7 +503,11 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// model's — and so a reopened thread shows what they typed, not what was
   /// suggested.
   Future<void> markEdited(String body) async {
-    if (state.draft == null) return;
+    // The row this pane is showing, by the message it answers — every write
+    // below keys on that, because a thread-scoped one would rewrite the
+    // answers to every message the thread ever collected.
+    final replyTo = _draftKey;
+    if (replyTo == null) return;
     // A sent reply's record must never be rewritten to "edited" by the
     // composer's trailing debounce — what reached the recipient is what the
     // row has to keep saying was sent.
@@ -396,7 +515,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
     try {
       await _store.updateDraftStatus(
         _source,
-        conversationKey,
+        replyTo,
         status: 'edited',
         body: body,
       );
@@ -405,33 +524,47 @@ class DraftNotifier extends StateNotifier<DraftState> {
       // not worth a banner over a composer the user is mid-sentence in.
       return;
     }
-    final row = await _store.getDraft(_source, conversationKey);
-    if (!mounted) return;
-    state = state.copyWith(draft: row);
+    await _reloadDrafts();
   }
 
   /// Throws the suggestion away. The row stays, marked `dismissed`, so the
   /// enqueue on the next list load does not immediately write another one.
   Future<void> dismiss() async {
-    if (state.draft == null) return;
+    final replyTo = _draftKey;
+    if (replyTo == null) return;
     await _store.updateDraftStatus(
       _source,
-      conversationKey,
+      replyTo,
       status: 'dismissed',
     );
-    final row = await _store.getDraft(_source, conversationKey);
+    await _reloadDrafts();
     if (!mounted) return;
-    state = state.copyWith(draft: row, error: null);
+    state = state.copyWith(error: null);
   }
 
   /// Closes the short replies and leaves the draft alone. The row survives so
   /// the next enqueue does not write the same two cards straight back.
   Future<void> dismissOptions() async {
-    if (state.draft == null) return;
-    await _store.dismissDraftOptions(_source, conversationKey);
-    final row = await _store.getDraft(_source, conversationKey);
+    final replyTo = _draftKey;
+    if (replyTo == null) return;
+    await _store.dismissDraftOptions(_source, replyTo);
+    await _reloadDrafts();
     if (!mounted) return;
-    state = state.copyWith(draft: row, error: null);
+    state = state.copyWith(error: null);
+  }
+
+  /// Closes one message's suggestion cards — the inline card's ×.
+  ///
+  /// Addressed by the message rather than by the thread because that is what
+  /// the user closed: a transcript can be showing several cards at once, and a
+  /// dismissal that landed on [_draftKey] would take the newest message's cards
+  /// away whichever card the × belonged to.
+  Future<void> dismissOptionsFor(String replyToMessageId) async {
+    if (replyToMessageId.isEmpty) return;
+    await _store.dismissDraftOptions(_source, replyToMessageId);
+    await _reloadDrafts();
+    if (!mounted) return;
+    state = state.copyWith(error: null);
   }
 
   /// Arms [send] to run in [undoWindow], and shows that it is armed.
@@ -444,7 +577,11 @@ class DraftNotifier extends StateNotifier<DraftState> {
   ///
   /// Refused while a send is in flight or another is already queued: a second
   /// pending send would need a second undo, and the bar only offers one.
-  Future<void> queueSend(String body) async {
+  ///
+  /// [replyTo] is the message the card that armed this belongs to. It rides in
+  /// the timer's closure rather than on [PendingSend], which stays exactly what
+  /// the undo row needs to draw: the text and the moment it goes.
+  Future<void> queueSend(String body, {String? replyTo}) async {
     if (state.sending || state.pending != null) return;
     final text = body.trim();
     if (text.isEmpty) return;
@@ -460,7 +597,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
       // no-op against a send already on the wire rather than a cancel that
       // appears to have worked.
       state = state.copyWith(pending: null);
-      unawaited(send(text));
+      unawaited(send(text, replyTo: replyTo));
     });
   }
 
@@ -481,7 +618,12 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// is no timer here, nothing calls it on a state change, and it takes the
   /// body as an argument rather than reading the stored draft, so what goes out
   /// is what was on screen.
-  Future<SendOutcome> send(String body) async {
+  ///
+  /// [replyTo] names the message being answered, for a card that belongs to one
+  /// — the transcript draws a card under every message that still has a live
+  /// suggestion, and a reply armed from an older one must go to that message
+  /// rather than to whatever the thread's newest is.
+  Future<SendOutcome> send(String body, {String? replyTo}) async {
     final text = body.trim();
     if (text.isEmpty || state.sending) return SendOutcome.failed;
 
@@ -492,18 +634,19 @@ class DraftNotifier extends StateNotifier<DraftState> {
 
     // Before the mail path, because none of it applies: a chat has no draft to
     // create, no message to reply TO, and no Outlook rung to fall back to.
-    if (_source == 'teams') return _sendChat(text);
+    if (_source == 'teams') return _sendChat(text, replyTo: replyTo);
 
-    // A thread only earns a generated draft when it ranks high enough, but
-    // the user can reply to ANY thread — so a missing draft row falls back to
-    // the newest inbound message, which is exactly what the draft handler
-    // itself replies to.
-    var replyTo = state.replyToMessageId;
-    if (replyTo == null || replyTo.isEmpty) {
+    // The card's own message first, then the composer's row. A thread only
+    // earns a generated draft when it ranks high enough, but the user can reply
+    // to ANY thread — so a missing draft row falls back to the newest inbound
+    // message, which is exactly what the draft handler itself replies to.
+    var target = replyTo;
+    if (target == null || target.isEmpty) target = state.replyToMessageId;
+    if (target == null || target.isEmpty) {
       final newest = await _store.newestInboundMessage(_source, conversationKey);
-      replyTo = newest?['source_message_id'] as String?;
+      target = newest?['source_message_id'] as String?;
     }
-    if (replyTo == null || replyTo.isEmpty) {
+    if (target == null || target.isEmpty) {
       state = state.copyWith(
         error: 'There is nothing to reply to in this thread yet.',
       );
@@ -512,7 +655,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
 
     state = state.copyWith(sending: true, error: null);
     try {
-      final draft = await _mail.createReplyDraft(replyTo);
+      final draft = await _mail.createReplyDraft(target);
       final draftId = draft['id'] as String? ?? '';
       final webLink = draft['webLink'] as String?;
       if (draftId.isEmpty) {
@@ -523,13 +666,17 @@ class DraftNotifier extends StateNotifier<DraftState> {
       await _mail.updateDraftBody(draftId, text);
 
       if (state.capability == SendCapability.draftToOutlook) {
-        return await _handOffToOutlook(draftId, webLink, text);
+        return await _handOffToOutlook(target, draftId, webLink, text);
       }
 
       await _mail.sendDraft(draftId);
+      // Keyed on the message just replied to — which is the message the stored
+      // draft answers whenever there is one, and the newest inbound message
+      // when there is not. A thread with no suggestion has no row to update
+      // and this write lands on nothing, which is the same as it always was.
       await _store.updateDraftStatus(
         _source,
-        conversationKey,
+        target,
         status: 'sent',
         body: text,
         graphDraftId: draftId,
@@ -548,9 +695,12 @@ class DraftNotifier extends StateNotifier<DraftState> {
         ConversationState.waiting,
       );
       await _store.clearCta(_source, conversationKey);
+      // The chip goes with the CTA — from here, not a sync later. The sync's
+      // own `resolvesAsk` clear will land on rows already at zero.
+      await _pipeline.clearNeedsYou(_source, conversationKey);
+      await _reloadDrafts();
       state = state.copyWith(
         sending: false,
-        draft: await _store.getDraft(_source, conversationKey),
         sendEpoch: state.sendEpoch + 1,
       );
       // The sent message lands in `sentitems` and folds in normally, which is
@@ -581,7 +731,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// reply as history rather than as news that reopens the thread. Mail cannot
   /// do any of this — `sendDraft` answers 202 with no body — which is why it
   /// still waits for `sentitems`.
-  Future<SendOutcome> _sendChat(String text) async {
+  Future<SendOutcome> _sendChat(String text, {String? replyTo}) async {
     final teams = _teams;
     if (teams == null) {
       // Wiring, not a runtime condition: `draftProvider` always supplies the
@@ -600,6 +750,19 @@ class DraftNotifier extends StateNotifier<DraftState> {
         await _store.upsertMessage(row);
         await _store.recomputeConversationCounts(_source, conversationKey);
       }
+      // A chat send never marked a draft row before. That was fine while only
+      // the newest suggestion was tappable — the row it would have marked was
+      // the only one on screen — and it is wrong now that an older message's
+      // card can send: without this, that card's row stays 'suggested' and the
+      // transcript offers the reply again straight after it went.
+      if (replyTo != null && replyTo.isNotEmpty) {
+        await _store.updateDraftStatus(
+          _source,
+          replyTo,
+          status: 'sent',
+          body: text,
+        );
+      }
       // Same two writes the mail path makes, and for the same reason: the reply
       // leaving IS the needs-you exit and the CTA's answer, said now rather
       // than whenever the user next refreshes Teams — which, under Microsoft's
@@ -610,10 +773,15 @@ class DraftNotifier extends StateNotifier<DraftState> {
         ConversationState.waiting,
       );
       await _store.clearCta(_source, conversationKey);
+      // For a chat this clear can ONLY happen here: the outbound row written
+      // above is one the next pull deliberately skips as already-seen, so the
+      // sync's `resolvesAsk` arm never runs for it and a chip left to that
+      // path would never come off.
+      await _pipeline.clearNeedsYou(_source, conversationKey);
       await _logSent();
+      await _reloadDrafts();
       state = state.copyWith(
         sending: false,
-        draft: await _store.getDraft(_source, conversationKey),
         sendEpoch: state.sendEpoch + 1,
       );
       await _onSent?.call();
@@ -634,22 +802,21 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// user finishes it there. The stored draft stays `suggested` — it was not
   /// sent, and marking it so would be a lie the next reader acts on.
   Future<SendOutcome> _handOffToOutlook(
+    String replyToMessageId,
     String draftId,
     String? webLink,
     String text,
   ) async {
     await _store.updateDraftStatus(
       _source,
-      conversationKey,
+      replyToMessageId,
       status: 'suggested',
       body: text,
       graphDraftId: draftId,
       webLink: webLink,
     );
-    state = state.copyWith(
-      sending: false,
-      draft: await _store.getDraft(_source, conversationKey),
-    );
+    await _reloadDrafts();
+    state = state.copyWith(sending: false);
     if (webLink != null && webLink.isNotEmpty) {
       final uri = Uri.tryParse(webLink);
       if (uri != null) await _launch(uri);
@@ -682,6 +849,7 @@ final draftProvider =
     target,
     teams: ref.watch(teamsBackendProvider),
     worker: ref.watch(aiWorkerProvider),
+    pipeline: ref.watch(pipelineProgressProvider),
     onSent: () => ref.read(conversationsProvider.notifier).load(),
   ),
 );
