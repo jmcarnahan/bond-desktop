@@ -2733,6 +2733,34 @@ FROM storylines s''';
     return result.isNotEmpty;
   }
 
+  /// Every live storyline whose description no longer describes its members.
+  ///
+  /// The heal behind the refresh pass. `requeueWork` revives only `done` and
+  /// `error` rows, so a refresh enqueued while an earlier one was `processing`
+  /// is swallowed — and nothing else would ever notice, because every other
+  /// trigger fires on an event that has already passed. This asks the durable
+  /// question instead: is what we last described still what is in here?
+  ///
+  /// `IS NOT` rather than `!=` because both columns are nullable and SQLite's
+  /// `!=` answers NULL — which is not true — for exactly the rows that most
+  /// need finding: a storyline nobody has ever described has a null
+  /// `refreshed_member_hash` and a real `member_hash`, and `IS NOT` calls that
+  /// the difference it is. It also excludes the shape that has neither: a
+  /// cluster tombstoned with no member rows is null on both sides, so
+  /// `NULL IS NOT NULL` is false and it stays out — as its `dismissed` status
+  /// already ensures.
+  Future<List<String>> staleRefreshStorylineIds() async {
+    final result = await db
+        .customSelect(
+          'SELECT id FROM storylines '
+          "WHERE status IN ('suggested', 'active') "
+          'AND refreshed_member_hash IS NOT member_hash '
+          'ORDER BY id ASC',
+        )
+        .get();
+    return [for (final row in result) row.data['id'] as String? ?? ''];
+  }
+
   /// Moves a storyline's activity stamp forward, never back. Threads are
   /// assigned in whatever order the queue drains them, so an older thread
   /// joining must not make a live storyline look stale.

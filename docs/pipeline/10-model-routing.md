@@ -18,7 +18,8 @@ model name field, but MLX-style runtimes route on it — which is why each
 client carries its own name constant (doc comment in `llm_client.dart`).
 
 Assignment: triage, extraction, and storyline membership-confirm get the fast
-client; storyline naming, reply decision, and drafting get the 27B. Changing
+client; storyline naming (`storyline_name`), storyline refresh
+(`storyline_refresh`), reply decision, and drafting get the 27B. Changing
 which slot serves a task is one line in `app_providers.dart` — and an update
 to that task's page here.
 
@@ -45,7 +46,7 @@ raw interpolation of message content into a prompt, ever.
 
 ## Task plumbing
 
-All six chat tasks implement `JsonTask` (`app/lib/services/llm/json_task.dart`):
+All seven chat tasks implement `JsonTask` (`app/lib/services/llm/json_task.dart`):
 a schema-constrained call whose defaults are temperature 0.2 / maxTokens 512,
 overridden per call site (see each stage's page). Decoding is
 grammar-constrained; `make bench-verify` asserts the server honours the

@@ -338,33 +338,154 @@ class StorylineService {
       await _store.touchStorylineActivity(best.id, lastMessageAt);
     }
 
-    await _refreshName(best.id);
+    await _enqueueRefreshAfterAssign(best);
     return AssignOutcome.assigned;
   }
 
-  /// Re-names a storyline when it has nothing to say for itself.
+  /// Decides whether one automatically filed thread is worth re-describing a
+  /// storyline for, and queues the pass when it is.
   ///
-  /// Only when the summary or the charter is missing, NOT on every membership
-  /// change. Naming costs a model call, assignment already spent one, and a
-  /// storyline whose name churns every time a thread lands reads as
-  /// instability rather than as freshness. A user who dislikes the name
-  /// renames it, which locks it.
+  /// A row on the queue rather than a call, and a gated row at that. Every
+  /// USER action enqueues a refresh unconditionally — a person who files a
+  /// thread by hand is telling the app the group has changed, and they are
+  /// looking at it. This path is the other one: threads arriving on their own,
+  /// one at a time, all day. Refreshing on each of them would dial the 27B
+  /// once per filed thread to re-write a description that reads the same, and
+  /// a name that churns every time a thread lands reads as instability.
   ///
-  /// The charter clause is what carries storylines written before there were
-  /// charters: each gets ONE naming call to draft one, and then converges,
-  /// because the same call that writes the charter also writes the summary.
-  Future<void> _refreshName(String storylineId) async {
-    final storyline = await _store.getStoryline(storylineId);
-    if (storyline == null) return;
-    final summary = storyline.summary;
-    final hasSummary = summary != null && summary.trim().isNotEmpty;
-    final needsCharter = !storyline.charterLocked &&
-        (storyline.charter == null || storyline.charter!.trim().isEmpty);
-    if (hasSummary && !needsCharter) return;
+  /// So the gate is the three cases where the description is genuinely behind:
+  /// a storyline with nothing to say for itself (no summary), one that never
+  /// drafted a charter and is not forbidden from having one, and one that has
+  /// grown by two or more members since it was last described. The last is a
+  /// count comparison rather than a timer because it is deterministic — a
+  /// re-run after a restart makes the same decision. Single-thread growth
+  /// coalesces into the sweep's catch-up instead, which asks the durable
+  /// question once per pass.
+  ///
+  /// Either way the cost is bounded: `requeueWork` is keyed on
+  /// `(kind, source, entity_id)`, so a storyline that collects ten threads in
+  /// one drain gets one refresh, not ten.
+  Future<void> _enqueueRefreshAfterAssign(Storyline storyline) async {
+    final summary = (storyline.summary ?? '').trim();
+    final charter = (storyline.charter ?? '').trim();
+    var wake = summary.isEmpty || (charter.isEmpty && !storyline.charterLocked);
 
-    final cards = await _cardsOf(storylineId);
+    final described = storyline.refreshedMemberCount;
+    // Null means never described, which the first clause has already caught
+    // for every storyline that has nothing written — a described-but-uncounted
+    // row is a pre-feature one, and the sweep's catch-up owns it.
+    if (!wake && described != null) {
+      final now = (await _store.membersOf(storyline.id)).length;
+      wake = now - described >= 2;
+    }
+    if (!wake) return;
+    await _store.requeueWork('storyline_refresh', _workSource, storyline.id);
+  }
+
+  // ── automatic: one storyline, on its own membership ────────────────────
+
+  /// Re-describes a storyline whose membership has moved.
+  ///
+  /// The pass that replaced converge-and-stop. A storyline used to be named
+  /// once and then never again: the title, summary and charter it got on the
+  /// day it was proposed were the ones it kept, however many threads joined
+  /// afterwards and however little the original description still fit. This
+  /// runs whenever the member set differs from the one the last description
+  /// was written against — and the equality of those two hashes is what stops
+  /// it running when nothing changed.
+  ///
+  /// Two branches, because describing a storyline for the first time and
+  /// re-describing one are different questions. A storyline with no summary,
+  /// or no charter it is allowed to have, is BOOTSTRAPPED with the same naming
+  /// call the sweep uses on a fresh cluster. One that already reads well is
+  /// EVOLVED: the model is handed what it says today and asked to change as
+  /// little as possible.
+  ///
+  /// Locks are honoured in both, and honoured twice: read before the call so
+  /// the model knows, and re-read after it so a user who renamed the storyline
+  /// while it ran still wins. A locked charter is never overwritten — the
+  /// model's version is parked in `charter_suggestion` for the About block to
+  /// offer.
+  Future<void> refresh(String storylineId) async {
+    final storyline = await _store.getStoryline(storylineId);
+    // Dismissed between the enqueue and the drain. Re-describing it would
+    // spend a call on a group nothing renders.
+    if (storyline == null ||
+        (storyline.status != 'active' && storyline.status != 'suggested')) {
+      return;
+    }
+
+    final members = await _store.membersOf(storylineId);
+    // The stored column is what the gate compares, because the stamp below
+    // writes to the same column and the two must speak one recipe. Derived
+    // from the member rows only when the column was never written — an older
+    // row, or one seeded straight into the store — so that such a storyline
+    // still converges instead of re-describing itself on every trigger.
+    final memberHash = storyline.memberHash ??
+        _hashOfThreads([
+          for (final member in members)
+            (source: member.source, key: member.conversationKey),
+        ]);
+
+    // Null means never described, and never described is not the same as
+    // unchanged: that storyline gets its first draft below.
+    final described = storyline.refreshedMemberHash;
+    if (described != null && described == memberHash) return;
+
+    final cards = await _cardsOf(members);
     if (cards.isEmpty) return;
 
+    // Everything the writes below compare against is captured HERE, before
+    // the model is dialled. See the stamp at the end for why.
+    final preCount = members.length;
+    final preCharter = storyline.charter;
+
+    final summary = (storyline.summary ?? '').trim();
+    final charter = (storyline.charter ?? '').trim();
+    final bootstrap =
+        summary.isEmpty || (charter.isEmpty && !storyline.charterLocked);
+
+    // What the unlocked path actually wrote to the charter column, and null
+    // when it wrote nothing. A parked suggestion is deliberately not this: it
+    // changes no criteria, so it recruits nothing.
+    final String? wroteCharter = bootstrap
+        ? await _bootstrapDescription(storylineId, cards)
+        : await _evolveDescription(
+            storylineId,
+            storyline,
+            cards,
+            _newSince(storyline.refreshedMemberCount, preCount, cards.length),
+          );
+
+    // The PRE-call hash and count, not the current ones. A thread filed by
+    // hand while the model was thinking is a thread this description never
+    // saw, and stamping what is true NOW would claim otherwise — the gate
+    // above would then read as "unchanged" and that thread would never be
+    // described. Stamping the old value leaves the storyline stale, which
+    // re-fires the pass, which is the correct outcome.
+    await _store.updateStoryline(
+      storylineId,
+      refreshedMemberHash: memberHash,
+      refreshedMemberCount: preCount,
+    );
+
+    // The charter is the membership contract, so a charter that moved is a
+    // reason to go looking again — the same thing a user saving one does.
+    // Only a real change, compared normalized: a model that returns the same
+    // sentences with different spacing must not put the pair into a loop.
+    if (wroteCharter != null &&
+        _normalized(wroteCharter) != _normalized(preCharter ?? '')) {
+      await _store.requeueWork('storyline_recruit', _workSource, storylineId);
+    }
+  }
+
+  /// The first description: the same naming call a fresh cluster gets.
+  ///
+  /// Returns the charter it wrote, or null when it wrote none.
+  Future<String?> _bootstrapDescription(
+    String storylineId,
+    List<String> cards,
+  ) async {
     final result = await runTask(
       _client,
       const NameStorylineTask(),
@@ -378,7 +499,7 @@ class StorylineService {
     // overwrite their text with the model's — and leave the lock set, so no
     // later pass would ever re-draft over the damage.
     final fresh = await _store.getStoryline(storylineId);
-    if (fresh == null) return;
+    if (fresh == null) return null;
 
     await _store.updateStoryline(
       storylineId,
@@ -393,9 +514,102 @@ class StorylineService {
     // contract `title_locked` gives the title. An empty answer is not written
     // either — a storyline whose charter was never drafted is judged against
     // its summary, which is strictly better than judging it against nothing.
-    if (!fresh.charterLocked && result.charter.isNotEmpty) {
-      await _store.updateStoryline(storylineId, charter: result.charter);
+    if (fresh.charterLocked || result.charter.isEmpty) return null;
+    await _store.updateStoryline(storylineId, charter: result.charter);
+    return result.charter;
+  }
+
+  /// The re-description: what it says today, what is in it now, and what
+  /// joined — with the smallest change that makes those agree.
+  ///
+  /// Returns the charter it wrote to the CHARTER COLUMN, or null. A suggestion
+  /// parked for a locked charter is not a write: it changes nothing anything
+  /// else reads, and until the user accepts it no membership question is
+  /// judged differently.
+  Future<String?> _evolveDescription(
+    String storylineId,
+    Storyline storyline,
+    List<String> cards,
+    int newCount,
+  ) async {
+    final result = await runTask(
+      _client,
+      const RefineStorylineTask(),
+      RefineInput(
+        currentTitle: storyline.title,
+        currentSummary: storyline.summary ?? '',
+        currentCharter: storyline.charter ?? '',
+        titleLocked: storyline.titleLocked,
+        charterLocked: storyline.charterLocked,
+        memberCards: cards,
+        addedCards: cards.sublist(cards.length - newCount),
+      ),
+      // Zero, like every other storyline call: the same members described
+      // twice must come back the same, or a re-run after a park would rewrite
+      // a title for no reason a user could see.
+      temperature: 0,
+    );
+
+    // The same post-call re-read the first draft makes, for the same reason:
+    // a lock set while the model was thinking is the newer fact.
+    final fresh = await _store.getStoryline(storylineId);
+    if (fresh == null) return null;
+
+    // Each field written on its own terms. An empty answer is the model
+    // declining to change that field, and what is stored stands — this is why
+    // the refresh validator has no placeholder title where the naming one
+    // does.
+    if (!fresh.titleLocked &&
+        result.title.isNotEmpty &&
+        result.title != fresh.title) {
+      await _store.updateStoryline(storylineId, title: result.title);
     }
+    if (result.summary.isNotEmpty) {
+      await _store.updateStoryline(storylineId, summary: result.summary);
+    }
+
+    if (!fresh.charterLocked) {
+      if (result.charter.isEmpty) return null;
+      await _store.updateStoryline(storylineId, charter: result.charter);
+      return result.charter;
+    }
+
+    // Locked: the model's charter is an offer, not a write. Compared
+    // normalized, because a model that echoes the user's sentence back with
+    // different spacing is agreeing with it, and offering a person their own
+    // words as an update is noise. Nothing to offer also CLEARS — a suggestion
+    // parked against an older member set is stale the moment this pass decides
+    // the charter already fits.
+    final suggestion = result.charter;
+    final stale = suggestion.isEmpty ||
+        _normalized(suggestion) == _normalized(fresh.charter ?? '');
+    await _store.updateStoryline(
+      storylineId,
+      charterSuggestion: stale ? null : suggestion,
+    );
+    return null;
+  }
+
+  /// How many of the member cards, in membership order, the last description
+  /// never saw.
+  ///
+  /// An approximation, and deliberately one. Nothing carries provenance to the
+  /// refresh: `payload_json` is NULL on every requeued row (a queue that
+  /// remembered which thread woke it would answer for a drain that already
+  /// coalesced ten of them), so the only facts available are how many members
+  /// there were when the description was written and the order the members
+  /// were added in. The newest N by `added_at` stand in for "the ones that
+  /// joined", which is exactly right unless a removal happened in between, and
+  /// then it is a smaller N — never a wrong slice.
+  ///
+  /// Clamped both ends: an unknown or larger previous count means nothing is
+  /// KNOWN to be new, and the answer can never exceed the cards in hand, since
+  /// a member whose conversation row is gone contributes no card.
+  static int _newSince(int? describedCount, int memberCount, int available) {
+    if (describedCount == null) return 0;
+    final grown = memberCount - describedCount;
+    if (grown <= 0) return 0;
+    return grown > available ? available : grown;
   }
 
   // ── automatic: one storyline, on the user's charter ────────────────────
@@ -512,6 +726,16 @@ class StorylineService {
       );
       recruited++;
     }
+
+    // A recruit that filed anything changed what this storyline is, and the
+    // description was written against the smaller group. Queued rather than
+    // called: the refresh handler is registered BEFORE this one, so the row
+    // waits for the next pump — a deliberate damper on the one cycle these
+    // two passes could form, since a refresh that widens a charter queues a
+    // recruit right back.
+    if (recruited > 0) {
+      await _store.requeueWork('storyline_refresh', _workSource, storylineId);
+    }
     // Always, zeroes included — the log is what decides what a person sees.
     // "Recruited 0 of 5" survives its quiet-kind check and shows: the model
     // was consulted and said no, which is an answer. An all-zero pass is
@@ -537,6 +761,19 @@ class StorylineService {
   /// about the same launch are one story, and the pass that cannot see both
   /// would propose the half it can.
   Future<void> sweep() async {
+    // Before the early returns, not after them, and that placement is the
+    // whole point: this heals refreshes that were LOST, and the sweep returns
+    // early on nearly every pass — there is usually no room and usually
+    // nothing unassigned to cluster. `requeueWork` revives only `done` and
+    // `error` rows, so a refresh queued while an earlier one was `processing`
+    // vanishes, and every other trigger fires on an event that has already
+    // gone by. Asking the durable question once per sync is what makes "the
+    // description eventually matches the members" true rather than likely.
+    // Costs one query and, on a mailbox where nothing moved, nothing else.
+    for (final id in await _store.staleRefreshStorylineIds()) {
+      await _store.requeueWork('storyline_refresh', _workSource, id);
+    }
+
     final pending =
         (await _store.loadStorylines(statuses: const ['suggested'])).length;
     final room = StorylineTuning.maxPendingSuggestions - pending;
@@ -883,17 +1120,43 @@ class StorylineService {
   /// A non-empty save locks the charter — the same contract a rename gives the
   /// title — and queues one [recruit] pass, revived rather than merely
   /// enqueued so the second edit of the day recruits again. Clearing the text
-  /// unlocks instead: the next naming refresh re-drafts a charter, and nothing
-  /// is recruited on the strength of a criteria the user just deleted.
+  /// unlocks and queues a [refresh] instead: the About block promises that
+  /// clearing a charter lets the model draft a new one, and until this queued
+  /// something that promise was not kept. Nothing is recruited on the strength
+  /// of criteria the user just deleted — the refresh writes a charter, and the
+  /// re-arm inside it is what goes looking afterwards.
+  ///
+  /// Both arms clear any parked suggestion. The user has just said what
+  /// belongs in this storyline; an offer written against what they said
+  /// before is stale by definition, and leaving it on screen would ask them
+  /// to answer a question they have already answered.
   Future<void> setCharter(String id, String charter) async {
     final trimmed = charter.trim();
     if (trimmed.isEmpty) {
-      await _store.updateStoryline(id, charter: null, charterLocked: false);
+      await _store.updateStoryline(
+        id,
+        charter: null,
+        charterLocked: false,
+        charterSuggestion: null,
+      );
+      await _store.requeueWork('storyline_refresh', _workSource, id);
       return;
     }
-    await _store.updateStoryline(id, charter: trimmed, charterLocked: true);
+    await _store.updateStoryline(
+      id,
+      charter: trimmed,
+      charterLocked: true,
+      charterSuggestion: null,
+    );
     await _store.requeueWork('storyline_recruit', _workSource, id);
   }
+
+  /// Throws away the charter the refresh pass parked. Nothing else moves: the
+  /// user's own charter and its lock are untouched, and the next refresh that
+  /// finds the group has outgrown it may park another — which is right, since
+  /// by then it is a different group.
+  Future<void> dismissCharterSuggestion(String id) =>
+      _store.updateStoryline(id, charterSuggestion: null);
 
   /// Files a thread into a storyline by hand. The member write clears any
   /// block the user's own earlier removal left, which is what makes putting a
@@ -904,6 +1167,11 @@ class StorylineService {
   /// `message_progress.storyline_id` and know nothing about member rows, so a
   /// thread added by hand used to appear on the timeline and the rail and
   /// nowhere else.
+  ///
+  /// And it queues a [refresh], unconditionally — unlike the automatic path,
+  /// which is gated. A person filing a thread by hand is saying this group is
+  /// about that too, and they are looking at the description while they say
+  /// it.
   Future<void> addThread(String id, String source, String key) async {
     await _store.addStorylineMember(id, source, key, addedBy: 'user');
     final storyline = await _store.getStoryline(id);
@@ -921,6 +1189,7 @@ class StorylineService {
     if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
       await _store.touchStorylineActivity(id, lastMessageAt);
     }
+    await _store.requeueWork('storyline_refresh', _workSource, id);
   }
 
   /// Takes a thread out, and blocks it from coming back. Always blocking:
@@ -931,6 +1200,10 @@ class StorylineService {
   /// membership is LEFT takes the pointer over: a thread in two storylines
   /// pulled out of one still belongs to the other, and a feed row that went
   /// blank would be telling the user it belongs to nothing.
+  ///
+  /// A removal changes what the storyline is about as surely as an addition
+  /// does, so it queues the same [refresh]. A storyline emptied down to
+  /// nothing is safe: the pass returns on a member set with no cards.
   Future<void> removeThread(String id, String source, String key) async {
     await _store.removeStorylineMember(id, source, key, block: true);
     await _store.updateStoryline(id, memberHash: await _memberHashOf(id));
@@ -939,6 +1212,7 @@ class StorylineService {
       await _store.stampStorylineId(source, key, clearingStorylineId: id),
     );
     await _stampPointer(source, key);
+    await _store.requeueWork('storyline_refresh', _workSource, id);
   }
 
   /// Points a thread's messages at the storyline the rest of the app would
@@ -1162,9 +1436,16 @@ class StorylineService {
     return displays;
   }
 
-  Future<List<String>> _cardsOf(String storylineId) async {
+  /// The naming card of every member that still has a conversation row, in
+  /// the order the members were given.
+  ///
+  /// Takes the members rather than the id because [refresh] needs the same
+  /// list twice — to count them and to card them — and because the ORDER is
+  /// load-bearing there: `membersOf` sorts by `added_at`, which is what lets
+  /// the tail of this list stand in for "the threads that just joined".
+  Future<List<String>> _cardsOf(List<StorylineMember> members) async {
     final cards = <String>[];
-    for (final member in await _store.membersOf(storylineId)) {
+    for (final member in members) {
       final row = await _store.getConversationRow(
         member.source,
         member.conversationKey,
@@ -1180,6 +1461,17 @@ class StorylineService {
     }
     return cards;
   }
+
+  /// Two pieces of prose compared as the same sentence: trimmed, runs of
+  /// whitespace flattened to one space, lower-cased.
+  ///
+  /// Used only to decide whether the charter MOVED — never to decide what is
+  /// stored, which is always the text exactly as it came back. A model that
+  /// returns the same charter with a newline where a space was has changed
+  /// nothing, and treating that as a change would put the refresh and the
+  /// recruit into a loop that re-ran on every drain.
+  static String _normalized(String value) =>
+      value.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
 
   /// The dedupe key for a storyline's current member set, read from the
   /// stored member rows — the source on each row, never an assumed one, since

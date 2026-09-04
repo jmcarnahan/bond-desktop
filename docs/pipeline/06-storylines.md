@@ -7,26 +7,105 @@ and kept or dismissed by the user. Four passes share the machinery, all in
 handler registration order in `app_providers.dart`** — that list's comments
 are the authority on sequencing.
 
-## The four passes
+## The four passes, in drain order
 
 1. **Assign** (`StorylineAssignHandler` → `assignConversation`) — when a
    conversation's card changes, cosine-shortlist it against live storyline
    centroids, then ask the model to confirm the best candidate. Every
    candidate's members and blocks are read in one query each for the whole
    pass (`memberContextRows`, `blockedStorylineIdsFor`), so filing one thread
-   costs the same against a mailbox of fifty storylines as against two. On join,
-   **Name** refreshes the storyline's title/summary/charter (`_refreshName`) —
-   but only when the summary or charter is missing or unlocked; a user-locked
-   charter is never overwritten.
+   costs the same against a mailbox of fifty storylines as against two. On
+   join, it *queues* a refresh rather than naming inline — under the gate in
+   the next section.
 2. **Sweep** (`StorylineSweepHandler` → `sweep`) — clusters *unassigned*
    threads by embedding similarity (gate: 2 similar threads form a proposal),
    names the proposal, then confirms each member individually. Rejected
    clusters are tombstoned by immutable `cluster_hash` (schema v7) so a
    dismissed suggestion stays dismissed even after membership drift.
-3. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
-   charter, judges up to 8 candidate threads against it.
+3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
+   storyline whose membership has moved. Its own section below.
+4. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
+   charter, or after a refresh widened one, judges up to 8 candidate threads
+   against it.
 
 A thread the user removes by hand is blocked — the model cannot put it back.
+
+## The refresh pass
+
+Storylines used to converge and stop: named once, on the day they were
+proposed, and never again however many threads joined. `refresh` is what makes
+the description follow the membership.
+
+**The gate** is `refreshed_member_hash == member_hash` (schema v10). Equal
+means the members have not changed since the description was written and the
+pass returns before any model call; NULL means never described, which is not
+the same as unchanged. Both hashes use the one write recipe (`_hashOfThreads`,
+source folded in).
+
+**Triggers** — every path that can change what a storyline is about, all via
+`requeueWork` (never `enqueueWork`; `payload_json` is NULL, so nothing carries
+provenance through the queue):
+
+| Trigger | When |
+|---|---|
+| `addThread` / `removeThread` | always — a user filing by hand is telling the app the group changed, and is looking at it |
+| `setCharter('')` | always — this is what makes the About block's "clearing it lets the model redraft" promise true |
+| `assignConversation` tail | **gated**: summary empty, or charter empty and unlocked, or `member_count - refreshed_member_count >= 2` |
+| `recruit` tail | when it filed ≥1 thread |
+| `sweep` catch-up | every live storyline where `refreshed_member_hash IS NOT member_hash` |
+
+The assign gate is the cost control: threads arrive one at a time all day, and
+re-describing on each would dial the 27B per filed thread to rewrite the same
+sentence. Single-thread growth coalesces into the sweep's catch-up instead. The
+count comparison is deterministic — a re-run after a restart decides the same —
+which a timer would not be. Either way `requeueWork` is keyed on
+`(kind, source, entity_id)`, so a storyline that collects ten threads in one
+drain gets one refresh.
+
+The sweep's catch-up runs **before** the sweep's early returns, and that
+placement is load-bearing: `requeueWork` revives only `done`/`error` rows, so a
+refresh queued while an earlier one was `processing` is swallowed, and every
+other trigger fires on an event that has already gone by. The sweep returns
+early on nearly every pass (no room, nothing unassigned), so a catch-up at the
+bottom would almost never run. `staleRefreshStorylineIds` uses `IS NOT` rather
+than `!=` — `!=` answers NULL for the never-described rows that most need
+finding — and its NULL-on-both-sides case excludes the tombstone shape.
+
+**Two branches.** Describing a storyline for the first time and re-describing
+one are different questions:
+
+- **Bootstrap** — summary empty, or charter empty and unlocked. Runs
+  `NameStorylineTask`, exactly as a fresh cluster gets.
+- **Evolve** — anything else. Runs `RefineStorylineTask` with the current
+  description, every member card, and the cards of the threads that joined
+  since. "Since" is derived from `member_count - refreshed_member_count` taken
+  off the tail of the members in `added_at` order — an approximation, and a
+  deliberate one, because the queue carries no provenance.
+
+**Locks.** Read before the call so the model knows (rendered as
+`Title is fixed: yes|no` inside the storyline fence), and re-read *after* it so
+a user who renamed the storyline while the model was thinking still wins. A
+locked title is returned verbatim; the summary is refreshed either way — it
+says where things stand, which no rename claimed. A locked charter is **never**
+overwritten: the model's version is parked in `charter_suggestion` for the
+About block to offer, and a suggestion that matches the stored charter
+(compared with whitespace flattened and case folded) clears rather than
+parking. Both arms of `setCharter` clear a parked suggestion — the user has
+just answered the question it was asking.
+
+**The stamp is the pre-call hash and count**, never the current ones. A thread
+filed by hand while the model was thinking is a thread this description never
+saw; stamping what is true *now* would leave the gate reading "unchanged" and
+that thread would never be described. Stamping stale re-fires the pass, which
+is the correct outcome.
+
+**Re-arm**: a refresh queues `storyline_recruit` only when it actually wrote a
+new charter to the `charter` column and the text changed under a normalized
+compare. A parked suggestion never re-arms — it changes no criteria until the
+user accepts it. That, plus handler ordering (refresh is registered *before*
+recruit, so a recruit's refresh waits a pump while a user edit refreshes and
+recruits in one drain) and monotone membership, is what bounds the one cycle
+these two passes could form.
 
 ## Filing a thread by hand
 
@@ -96,6 +175,19 @@ requirement.
 slot**, **temperature 0**. Names a group of threads: evidence sentence, a
 ≤6-word title in the owner's own vocabulary (generic labels explicitly
 banned), a present-tense one-sentence status summary, and a charter phrased as
-membership criteria so future threads can be judged against it. The doc
+membership criteria so future threads can be judged against it. Called from
+the sweep's `_propose` and from the refresh pass's bootstrap branch. The doc
 comment above the prompts explains the charter-vs-summary distinction — the
 charter is the membership contract, the summary is display text.
+
+**RefineStorylineTask** — same file, schema `storyline_refresh`, **prose / 27B
+slot**, **temperature 0**. The same four fields as naming, asked of a
+storyline that already has them: three fences (`storyline` with the current
+text and the two lock lines, `threads` with every member card, `new_threads`
+with what just joined — always present, `(none)` when nothing is known to be
+new). Its prompt is mostly about *not* changing things — continuity as the
+default answer, minimal drift on the charter, no noun that is not in the
+threads — because every word it moves is a word that moved under a person who
+had already read it. Its validator is separate from naming's for one reason:
+an empty title here keeps the stored one, where naming substitutes
+`Untitled storyline`.

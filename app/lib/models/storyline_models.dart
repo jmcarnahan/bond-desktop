@@ -47,10 +47,15 @@ class Storyline {
   /// forward — see `MessageStore.touchStorylineActivity`.
   final String? lastActivityAt;
 
+  /// The dedupe key for the member set as it stands, maintained by every
+  /// membership write. Null on a row that has no member set to describe — a
+  /// cluster the sweep tombstoned without ever storing one.
+  final String? memberHash;
+
   /// The membership as it stood the last time the refresh pass described this
-  /// storyline. The gate is an equality test against the current member hash,
-  /// so a thread added since leaves these stale and the pass runs again. Null
-  /// on a storyline nobody has described yet.
+  /// storyline. The gate is an equality test against [memberHash], so a thread
+  /// added since leaves these stale and the pass runs again. Null on a
+  /// storyline nobody has described yet.
   final String? refreshedMemberHash;
   final int? refreshedMemberCount;
 
@@ -85,6 +90,7 @@ class Storyline {
     this.charterLocked = false,
     this.pinned = false,
     this.lastActivityAt,
+    this.memberHash,
     this.refreshedMemberHash,
     this.refreshedMemberCount,
     this.charterSuggestion,
@@ -114,6 +120,7 @@ class Storyline {
       charterLocked: (row['charter_locked'] as num?)?.toInt() == 1,
       pinned: (row['pinned'] as num?)?.toInt() == 1,
       lastActivityAt: row['last_activity_at'] as String?,
+      memberHash: row['member_hash'] as String?,
       refreshedMemberHash: row['refreshed_member_hash'] as String?,
       refreshedMemberCount: (row['refreshed_member_count'] as num?)?.toInt(),
       charterSuggestion: row['charter_suggestion'] as String?,

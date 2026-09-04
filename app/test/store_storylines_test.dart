@@ -412,6 +412,43 @@ void main() {
     });
   });
 
+  group('staleRefreshStorylineIds', () {
+    test('names the live storylines whose description is behind', () async {
+      await seedStoryline('sl-stale', status: 'active', memberHash: 'h-now');
+      await store.updateStoryline('sl-stale',
+          refreshedMemberHash: 'h-then');
+      // Never described at all: a real member set and no record of describing
+      // it. `!=` would answer NULL here — which is not true — and this is
+      // exactly the row that most needs finding.
+      await seedStoryline('sl-never', status: 'suggested',
+          memberHash: 'h-now');
+
+      expect(await store.staleRefreshStorylineIds(), ['sl-never', 'sl-stale']);
+    });
+
+    test('leaves alone a storyline described exactly as it stands', () async {
+      await seedStoryline('sl-1', status: 'active', memberHash: 'h-now');
+      await store.updateStoryline('sl-1', refreshedMemberHash: 'h-now');
+
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+    });
+
+    test('a dismissed storyline is never asked to describe itself', () async {
+      await seedStoryline('sl-dead', status: 'dismissed', memberHash: 'h-now');
+
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+    });
+
+    test('a row with no member set at all stays out', () async {
+      // The tombstone shape: a cluster thrown out below the minimum size has
+      // no member rows, so both columns are null and there is nothing to
+      // describe. Null on both sides is not a difference.
+      await seedStoryline('sl-tomb', status: 'active');
+
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+    });
+  });
+
   group('dismissedHashExistsAny', () {
     test('finds a dismissed storyline by its member hash', () async {
       await seedStoryline('sl-1', status: 'dismissed', memberHash: 'h1');

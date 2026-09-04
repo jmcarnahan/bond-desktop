@@ -442,9 +442,16 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         progress: ref.watch(pipelineProgressProvider),
       ),
       StorylineSweepHandler(storylines),
+      // Between the sweep and the recruit, and the position is the point. A
+      // refresh may widen a charter, and a widened charter is what the recruit
+      // below goes hunting with — so a user's edit refreshes and recruits in
+      // ONE drain. The reverse pairing is damped by the same ordering: a
+      // recruit that files threads queues a refresh for the next pump rather
+      // than this one, which is what keeps the two from chasing each other.
+      StorylineRefreshHandler(storylines),
       // After the sweep and before drafts: a recruit is rare — it only exists
-      // when a charter was just saved — and the threads it files are exactly
-      // what the draft below should know about.
+      // when a charter was just saved, or a refresh moved one — and the
+      // threads it files are exactly what the draft below should know about.
       StorylineRecruitHandler(storylines),
       // Last, and after both storyline passes: a draft reads the storyline
       // summary as background, so drafting before the sweep has run would
