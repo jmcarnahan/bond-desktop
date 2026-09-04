@@ -102,6 +102,15 @@ enum AssignOutcome {
   noVector,
 }
 
+/// What one storyline's membership looks like to the two comparison passes:
+/// the mean of its members' vectors, everyone on any member thread, and the
+/// member threads themselves. Built by `StorylineService._memberContexts`.
+typedef _MemberContext = ({
+  List<double>? centroid,
+  Set<String> participants,
+  Set<String> memberThreads,
+});
+
 /// Groups conversations into storylines, and applies the user's corrections.
 ///
 /// Two entry points do the automatic work — [assignConversation] runs when one
@@ -226,13 +235,26 @@ class StorylineService {
     // thread nothing came close to.
     var blocked = false;
 
+    // Two reads for the whole pass, not two per candidate. Both questions the
+    // loop below asks are about state that cannot change while it runs, and
+    // asking them one storyline at a time made filing one thread cost a query
+    // per storyline plus a query per member of each — the pass got slower
+    // every time the mailbox grew a group.
+    final contexts =
+        await _memberContexts([for (final s in candidates) s.id]);
+    final blockedIn =
+        await _store.blockedStorylineIdsFor(source, conversationKey);
+
     for (final storyline in candidates) {
-      if (await _store.isMemberBlocked(storyline.id, source, conversationKey)) {
+      if (blockedIn.contains(storyline.id)) {
         blocked = true;
         continue;
       }
 
-      final context = await _memberContext(storyline.id);
+      // Absent means a storyline with no members at all — nothing to compare
+      // against, the same ending an absent centroid gets below.
+      final context = contexts[storyline.id];
+      if (context == null) continue;
       if (context.memberThreads.contains(_threadKey(source, conversationKey))) {
         continue;
       }
@@ -509,14 +531,16 @@ class StorylineService {
     final room = StorylineTuning.maxPendingSuggestions - pending;
     if (room <= 0) return;
 
-    // Asked per source and unioned. The keys are connector-issued and disjoint
-    // across sources in practice — Graph conversation ids and chat ids share
-    // no shape — so one flat set is safe to test membership against, and it is
-    // what keeps a chat already in a storyline out of the next sweep's
-    // clusters.
+    // Asked per source and unioned as [_threadKey] composites, because source
+    // and key together are what identifies a thread. The two connectors mint
+    // their keys with no knowledge of each other, and a flat set of bare keys
+    // let a chat that was already filed away — or one the user had pulled out
+    // of a storyline — hide an unrelated mail thread that happened to share
+    // its key from every sweep that ever ran.
     final taken = {
       for (final source in _sources)
-        ...await _store.assignedOrBlockedKeys(source),
+        for (final key in await _store.assignedOrBlockedKeys(source))
+          _threadKey(source, key),
     };
     final rows = <Map<String, Object?>>[];
     final vectors = <List<double>>[];
@@ -525,7 +549,9 @@ class StorylineService {
       sources: _sources,
     )) {
       final key = row['conversation_key'] as String? ?? '';
-      if (key.isEmpty || taken.contains(key)) continue;
+      if (key.isEmpty) continue;
+      final rowSource = row['source'] as String? ?? _workSource;
+      if (taken.contains(_threadKey(rowSource, key))) continue;
       // A finished thread is not the start of a story. Grouping done mail
       // would fill the rail with history nobody asked to be reminded of.
       if ((row['state'] as String?) == 'done') continue;
@@ -582,7 +608,7 @@ class StorylineService {
   /// cluster holding a member it links to, and otherwise opens one of its own.
   /// That makes the result a pure function of the input: same rows and same
   /// vectors in, same clusters out, which is what
-  /// [MessageStore.dismissedHashExists] depends on to recognise a suggestion
+  /// [MessageStore.dismissedHashExistsAny] depends on to recognise a suggestion
   /// the user already threw away.
   ///
   /// Full agglomerative clustering — repeatedly merging the closest pair —
@@ -641,10 +667,22 @@ class StorylineService {
   ) async {
     const nothing = (proposed: false, confirmed: 0, rejected: 0);
 
-    final clusterHash = _hashOfKeys([
-      for (final row in rows) row['conversation_key'] as String? ?? '',
-    ]);
-    if (await _store.dismissedHashExists(clusterHash)) return nothing;
+    final threads = [
+      for (final row in rows)
+        (
+          source: row['source'] as String? ?? _workSource,
+          key: row['conversation_key'] as String? ?? '',
+        ),
+    ];
+    final clusterHash = _hashOfThreads(threads);
+    // Both recipes for the one candidate set: the tombstones an older build
+    // wrote hashed the bare keys and can never be rewritten, so recognition
+    // has to keep speaking that language too. See [_legacyHashOfThreads].
+    if (await _store.dismissedHashExistsAny(
+      [clusterHash, _legacyHashOfThreads(threads)],
+    )) {
+      return nothing;
+    }
 
     final cards = <String>[];
     for (final row in rows) {
@@ -731,8 +769,8 @@ class StorylineService {
       // a row carrying its hash this same group would re-spend a naming call
       // and one confirmation per member on every sync, forever, to reach the
       // same answer. Dismissed is exactly the right status for that: nothing
-      // renders it, and `dismissedHashExists` above stops the rebuilt cluster
-      // before any model is dialled.
+      // renders it, and `dismissedHashExistsAny` above stops the rebuilt
+      // cluster before any model is dialled.
       //
       // `member_hash` stays null on purpose: no member rows are written below
       // this branch, so there is no stored set for it to describe. The cluster
@@ -766,9 +804,12 @@ class StorylineService {
       // storylines), so the identical cluster re-forms on the next sweep and
       // the cheap check above recognises it — before a single model call is
       // spent re-deriving an answer the user already refused.
-      memberHash: _hashOfKeys([
+      memberHash: _hashOfThreads([
         for (final survivor in survivors)
-          survivor.row['conversation_key'] as String? ?? '',
+          (
+            source: survivor.row['source'] as String? ?? _workSource,
+            key: survivor.row['conversation_key'] as String? ?? '',
+          ),
       ]),
       clusterHash: clusterHash,
     );
@@ -817,9 +858,9 @@ class StorylineService {
 
   /// Retires a storyline — a suggestion the user never wanted, or a kept one
   /// they are done with. Nothing else moves: the row keeps both hashes, which
-  /// is what [MessageStore.dismissedHashExists] reads when the very next sweep
-  /// rebuilds the same cluster, and the member rows stay as the record of what
-  /// the user was actually shown.
+  /// is what [MessageStore.dismissedHashExistsAny] reads when the very next
+  /// sweep rebuilds the same cluster, and the member rows stay as the record
+  /// of what the user was actually shown.
   Future<void> dismissSuggestion(String id) =>
       _store.updateStoryline(id, status: 'dismissed');
 
@@ -976,41 +1017,77 @@ class StorylineService {
     return [for (final value in sum) value / counted];
   }
 
-  /// One storyline's members, read once for comparison work: the mean member
-  /// vector (null when no member has one), every member participant
-  /// lower-cased, and the member threads themselves as [_threadKey]s.
+  /// Several storylines' members, read in ONE store call: per storyline the
+  /// mean member vector (null when no member has one), every member
+  /// participant lower-cased, and the member threads themselves as
+  /// [_threadKey]s.
   ///
   /// Shared by [assignConversation] and [recruit], which is the point — the
   /// two passes are mirror images, and a centroid computed two ways would let
   /// them disagree about the same storyline.
-  Future<
-      ({
-        List<double>? centroid,
-        Set<String> participants,
-        Set<String> memberThreads,
-      })> _memberContext(String storylineId) async {
-    final vectors = <List<double>>[];
-    final participants = <String>{};
-    final memberThreads = <String>{};
-    for (final member in await _store.membersOf(storylineId)) {
-      memberThreads.add(_threadKey(member.source, member.conversationKey));
-      final vector = await _vectorFor(member.source, member.conversationKey);
-      if (vector != null) vectors.add(vector);
-      final row = await _store.getConversationRow(
-        member.source,
-        member.conversationKey,
-      );
-      if (row == null) continue;
+  ///
+  /// Batched because [assignConversation] asks this of every live storyline
+  /// before it files one thread: read one storyline at a time it cost a query
+  /// per member of the whole mailbox's storyline set, for every thread that
+  /// arrived. A storyline with no members is simply absent from the map, which
+  /// callers read as [_emptyContext] — which is what it is.
+  Future<Map<String, _MemberContext>> _memberContexts(
+    List<String> storylineIds,
+  ) async {
+    final vectors = <String, List<List<double>>>{};
+    final participants = <String, Set<String>>{};
+    final memberThreads = <String, Set<String>>{};
+    for (final row in await _store.memberContextRows(
+      storylineIds,
+      embedModel: EmbeddingsClient.modelTag,
+    )) {
+      final id = row['storyline_id'] as String? ?? '';
+      if (id.isEmpty) continue;
+      final source = row['source'] as String? ?? _workSource;
+      final key = row['conversation_key'] as String? ?? '';
+      memberThreads
+          .putIfAbsent(id, () => <String>{})
+          .add(_threadKey(source, key));
+
+      // Null on a member the store found no comparable vector for — the join
+      // is what enforces the embedding model, for the reason [_vectorFor]
+      // gives. Such a member is still a member; it just cannot be averaged.
+      final blob = row['embedding'];
+      if (blob is Uint8List) {
+        final vector = decodeEmbedding(blob);
+        if (vector.isNotEmpty) vectors.putIfAbsent(id, () => []).add(vector);
+      }
+
+      // Empty on a member whose conversation row is gone: the row still
+      // arrives, carrying no participants, exactly as the per-member read it
+      // replaced skipped a missing row without dropping the membership.
+      final into = participants.putIfAbsent(id, () => <String>{});
       for (final display in _displaysOf(Conversation.fromRow(row))) {
-        participants.add(display.toLowerCase());
+        into.add(display.toLowerCase());
       }
     }
-    return (
-      centroid: _centroid(vectors),
-      participants: participants,
-      memberThreads: memberThreads,
-    );
+    return {
+      for (final entry in memberThreads.entries)
+        entry.key: (
+          centroid: _centroid(vectors[entry.key] ?? const <List<double>>[]),
+          participants: participants[entry.key] ?? const <String>{},
+          memberThreads: entry.value,
+        ),
+    };
   }
+
+  /// [_memberContexts] for one storyline, so the single-storyline callers read
+  /// as they always did and there is still only one implementation.
+  Future<_MemberContext> _memberContext(String storylineId) async =>
+      (await _memberContexts([storylineId]))[storylineId] ?? _emptyContext;
+
+  /// What a storyline nobody has filed anything into looks like: nothing to
+  /// average, nobody on it, no members.
+  static const _MemberContext _emptyContext = (
+    centroid: null,
+    participants: <String>{},
+    memberThreads: <String>{},
+  );
 
   /// A thread's identity across sources, for set membership. Newline-joined
   /// because a newline can appear in neither half.
@@ -1058,23 +1135,46 @@ class StorylineService {
     return cards;
   }
 
-  /// The dedupe key for a storyline's current member set: its conversation
-  /// keys, sorted, hashed. Sorted because membership is a set — the same
-  /// threads arriving in a different order are the same storyline.
+  /// The dedupe key for a storyline's current member set, read from the
+  /// stored member rows — the source on each row, never an assumed one, since
+  /// that half of a thread's identity is exactly what the hash is folding in.
   Future<String> _memberHashOf(String storylineId) async {
-    return _hashOfKeys([
+    return _hashOfThreads([
       for (final member in await _store.membersOf(storylineId))
-        member.conversationKey,
+        (source: member.source, key: member.conversationKey),
     ]);
   }
 
-  /// The one recipe behind `cluster_hash` and `member_hash`: conversation
-  /// keys, sorted, newline-joined, hashed. Every writer goes through here —
-  /// [MessageStore.dismissedHashExists] compares the two columns against a
-  /// hash built the same way, so a second recipe drifting from this one would
-  /// silently stop dismissals from being recognised.
-  String _hashOfKeys(Iterable<String> keys) =>
-      cardHash((keys.toList()..sort()).join('\n'));
+  /// Sorted, newline-joined, hashed — the mechanic both recipes below share.
+  /// Sorted because membership is a set: the same threads arriving in a
+  /// different order are the same storyline.
+  String _hashOfParts(Iterable<String> parts) =>
+      cardHash((parts.toList()..sort()).join('\n'));
+
+  /// The one recipe behind every hash this service WRITES, to either column:
+  /// the `'<source>\n<key>'` composites of the threads involved.
+  ///
+  /// The source is half of a thread's identity. The mail and chat connectors
+  /// mint their keys with no knowledge of each other, so a hash over the bare
+  /// key alone called a chat and a mail thread that happened to share one the
+  /// same group — and a dismissal of the one silenced the other for ever.
+  String _hashOfThreads(Iterable<({String source, String key})> threads) =>
+      _hashOfParts([for (final t in threads) _threadKey(t.source, t.key)]);
+
+  /// The recipe those writes used before the source was folded in: the bare
+  /// conversation keys, otherwise identical.
+  ///
+  /// Nothing writes it any more and nothing can rewrite what it wrote. A
+  /// cluster the model threw out entirely is tombstoned with no member rows at
+  /// all, so there is nothing left to re-hash it from: the old string on that
+  /// row is the only surviving record of what the user was spared, and it has
+  /// to keep answering for as long as the database does. Every dismissal check
+  /// therefore offers both recipes for the same candidate set — see
+  /// [MessageStore.dismissedHashExistsAny] — and takes either.
+  String _legacyHashOfThreads(
+    Iterable<({String source, String key})> threads,
+  ) =>
+      _hashOfParts([for (final t in threads) t.key]);
 }
 
 /// A fresh storyline id: `sl-` and sixteen hex characters.

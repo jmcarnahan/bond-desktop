@@ -2492,6 +2492,29 @@ FROM storylines s''';
     return result.isNotEmpty;
   }
 
+  /// Which storylines block this one thread — the mirror of
+  /// [blockedThreadsOf], read the other way round.
+  ///
+  /// One query for every candidate at once. The assignment pass asks this of
+  /// every live storyline before it compares anything, and asking one
+  /// storyline at a time made filing a single thread cost a query per
+  /// storyline in the mailbox.
+  Future<Set<String>> blockedStorylineIdsFor(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT storyline_id FROM storyline_member_blocks '
+          'WHERE source = ? AND conversation_key = ?',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return {
+      for (final row in result) row.data['storyline_id'] as String? ?? '',
+    };
+  }
+
   /// Every thread the user has removed from [storylineId], as
   /// `'<source>\n<conversation_key>'` composites — newline-joined because a
   /// newline can appear in neither half. The pane that offers threads to add
@@ -2522,9 +2545,53 @@ FROM storylines s''';
     return [for (final row in result) StorylineMember.fromRow(row.data)];
   }
 
+  /// Everything the comparison passes need about the members of
+  /// [storylineIds]: which threads they are, who is on each one, and each
+  /// one's vector.
+  ///
+  /// One query for the whole set. The assignment pass asks this of every live
+  /// storyline for every thread it considers, and walking members one at a
+  /// time made filing a single thread cost a query per member of every
+  /// storyline in the mailbox.
+  ///
+  /// Both joins are LEFT, and that is the contract rather than an accident. A
+  /// member whose conversation row is gone, or whose vector came from a
+  /// different embedding model, is still a member: its row comes back with a
+  /// null `participants_json` or a null `embedding`, so it contributes nothing
+  /// to a centroid and nobody to a participant list, but the caller still sees
+  /// that the thread is already filed here. [embedModel] rides the join rather
+  /// than the WHERE for exactly that reason — as a filter it would drop the
+  /// member entirely.
+  Future<List<Map<String, Object?>>> memberContextRows(
+    List<String> storylineIds, {
+    required String embedModel,
+  }) async {
+    if (storylineIds.isEmpty) return const [];
+    final result = await db
+        .customSelect(
+          'SELECT m.storyline_id AS storyline_id, m.source AS source, '
+          'm.conversation_key AS conversation_key, '
+          'c.participants_json AS participants_json, '
+          'a.embedding AS embedding '
+          'FROM storyline_members m '
+          'LEFT JOIN conversations c '
+          '  ON c.source = m.source '
+          '  AND c.conversation_key = m.conversation_key '
+          'LEFT JOIN conversation_ai a '
+          '  ON a.source = m.source '
+          '  AND a.conversation_key = m.conversation_key '
+          '  AND a.embed_model = ? '
+          'WHERE m.storyline_id IN (${_placeholders(storylineIds.length)}) '
+          'ORDER BY m.added_at ASC, m.conversation_key ASC',
+          variables: _args([embedModel, ...storylineIds]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
   /// Which live storylines one thread belongs to. Dismissed and archived ones
   /// are excluded: their member rows survive only as the record behind
-  /// [dismissedHashExists], and a thread is not "in" a suggestion the
+  /// [dismissedHashExistsAny], and a thread is not "in" a suggestion the
   /// user threw away.
   Future<List<String>> storylineIdsFor(
     String source,
@@ -2600,18 +2667,29 @@ FROM storylines s''';
   /// away. The sweep is deterministic, so without this a dismissed suggestion
   /// would be re-proposed identically on the very next sync.
   ///
-  /// Both hashes answer, because a storyline can be dismissed under a set that
-  /// is not the one it was proposed as. The `cluster_hash` arm recognises the
-  /// proposal-time group — immutable, and exactly what the sweep rebuilds. The
-  /// `member_hash` arm recognises the members as they stood at dismissal,
+  /// Both columns answer, because a storyline can be dismissed under a set
+  /// that is not the one it was proposed as. The `cluster_hash` arm recognises
+  /// the proposal-time group — immutable, and exactly what the sweep rebuilds.
+  /// The `member_hash` arm recognises the members as they stood at dismissal,
   /// maintained by every membership write, which is what catches a group the
   /// user pruned before saying no.
-  Future<bool> dismissedHashExists(String hash) async {
+  ///
+  /// A LIST of hashes rather than one, because the recipe behind these strings
+  /// changed when storyline hashes started folding the connector into every
+  /// member. Old rows cannot be rewritten — a cluster tombstoned below the
+  /// minimum size has no member rows at all, so nothing can rebuild what it
+  /// was — and a "no" the user gave once has to keep holding. The caller
+  /// offers every recipe for the same candidate set and any match is a match,
+  /// in one round trip rather than one per recipe.
+  Future<bool> dismissedHashExistsAny(List<String> hashes) async {
+    if (hashes.isEmpty) return false;
+    final placeholders = _placeholders(hashes.length);
     final result = await db
         .customSelect(
           "SELECT 1 FROM storylines WHERE status = 'dismissed' "
-          'AND (cluster_hash = ? OR member_hash = ?) LIMIT 1',
-          variables: _args([hash, hash]),
+          'AND (cluster_hash IN ($placeholders) '
+          'OR member_hash IN ($placeholders)) LIMIT 1',
+          variables: _args([...hashes, ...hashes]),
         )
         .get();
     return result.isNotEmpty;

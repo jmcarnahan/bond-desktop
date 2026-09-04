@@ -282,15 +282,15 @@ void main() {
     });
   });
 
-  group('dismissedHashExists', () {
+  group('dismissedHashExistsAny', () {
     test('finds a dismissed storyline by its member hash', () async {
       await seedStoryline('sl-1', status: 'dismissed', memberHash: 'h1');
       await seedStoryline('sl-2', status: 'suggested', memberHash: 'h2');
 
-      expect(await store.dismissedHashExists('h1'), isTrue);
+      expect(await store.dismissedHashExistsAny(['h1']), isTrue);
       // Still on screen, so not something to skip re-proposing.
-      expect(await store.dismissedHashExists('h2'), isFalse);
-      expect(await store.dismissedHashExists('h3'), isFalse);
+      expect(await store.dismissedHashExistsAny(['h2']), isFalse);
+      expect(await store.dismissedHashExistsAny(['h3']), isFalse);
     });
 
     test('finds a dismissed storyline by its cluster hash alone', () async {
@@ -298,8 +298,8 @@ void main() {
       // cluster hash and no members at all.
       await seedStoryline('sl-1', status: 'dismissed', clusterHash: 'c1');
 
-      expect(await store.dismissedHashExists('c1'), isTrue);
-      expect(await store.dismissedHashExists('h1'), isFalse);
+      expect(await store.dismissedHashExistsAny(['c1']), isTrue);
+      expect(await store.dismissedHashExistsAny(['h1']), isFalse);
     });
 
     test('finds a dismissed storyline by its member hash alone', () async {
@@ -313,8 +313,8 @@ void main() {
         clusterHash: 'c1',
       );
 
-      expect(await store.dismissedHashExists('h1'), isTrue);
-      expect(await store.dismissedHashExists('c1'), isTrue);
+      expect(await store.dismissedHashExistsAny(['h1']), isTrue);
+      expect(await store.dismissedHashExistsAny(['c1']), isTrue);
     });
 
     test('a live storyline answers for neither hash', () async {
@@ -332,9 +332,140 @@ void main() {
       );
 
       for (final hash in ['h1', 'c1', 'h2', 'c2']) {
-        expect(await store.dismissedHashExists(hash), isFalse,
+        expect(await store.dismissedHashExistsAny([hash]), isFalse,
             reason: '$hash belongs to a storyline still on screen');
       }
+    });
+
+    test('any one of the hashes offered is enough', () async {
+      // How the caller asks about a candidate set under both hash recipes at
+      // once: the current one, which folds the connector into every member,
+      // and the one older tombstones were written under and can never be
+      // rewritten to.
+      await seedStoryline('sl-1', status: 'dismissed', clusterHash: 'old');
+
+      expect(await store.dismissedHashExistsAny(['new', 'old']), isTrue);
+      expect(await store.dismissedHashExistsAny(['old', 'new']), isTrue);
+      expect(await store.dismissedHashExistsAny(['new', 'newer']), isFalse);
+    });
+
+    test('nothing asked about is nothing dismissed', () async {
+      await seedStoryline('sl-1', status: 'dismissed', clusterHash: 'c1');
+
+      expect(await store.dismissedHashExistsAny(const []), isFalse);
+    });
+  });
+
+  group('blockedStorylineIdsFor', () {
+    test('names only the storylines that block this thread', () async {
+      await seedStoryline('sl-1');
+      await seedStoryline('sl-2');
+      await seedStoryline('sl-3');
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      await store.removeStorylineMember('sl-3', 'email', 'c1', block: true);
+      await store.removeStorylineMember('sl-2', 'email', 'c2', block: true);
+
+      expect(await store.blockedStorylineIdsFor('email', 'c1'),
+          {'sl-1', 'sl-3'});
+      expect(await store.blockedStorylineIdsFor('email', 'c2'), {'sl-2'});
+      expect(await store.blockedStorylineIdsFor('email', 'c9'), isEmpty);
+    });
+
+    test('a block is about one connector', () async {
+      await seedStoryline('sl-1');
+      // One key, two connectors — which is normal: the mail and chat
+      // connectors mint their keys with no knowledge of each other. The user's
+      // "no" was about the chat.
+      await store.removeStorylineMember('sl-1', 'teams', 'shared', block: true);
+
+      expect(await store.blockedStorylineIdsFor('teams', 'shared'), {'sl-1'});
+      expect(await store.blockedStorylineIdsFor('email', 'shared'), isEmpty);
+    });
+  });
+
+  group('memberContextRows', () {
+    test('reads every storyline asked about in one call', () async {
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await seedConversation('c3');
+      for (final id in ['sl-1', 'sl-2', 'sl-3']) {
+        await seedStoryline(id, status: 'active');
+      }
+      await seedStoryline('sl-other', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-2', 'email', 'c2', addedBy: 'auto');
+      await store.addStorylineMember('sl-3', 'teams', 'c3', addedBy: 'auto');
+      await store.addStorylineMember('sl-other', 'email', 'c1',
+          addedBy: 'auto');
+
+      final rows = await store.memberContextRows(
+        const ['sl-1', 'sl-2', 'sl-3'],
+        embedModel: 'model-a',
+      );
+
+      expect(
+        {
+          for (final row in rows)
+            row['storyline_id']: '${row['source']}\n${row['conversation_key']}',
+        },
+        {'sl-1': 'email\nc1', 'sl-2': 'email\nc2', 'sl-3': 'teams\nc3'},
+      );
+      expect(await store.memberContextRows(const [], embedModel: 'model-a'),
+          isEmpty);
+    });
+
+    test('carries the participants and the vector of each member', () async {
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'subject': 'Homepage copy',
+        'participants_json': '[{"name":"Sarah Chen"}]',
+      });
+      await store.upsertConversationAi('email', 'c1',
+          embedding: Uint8List.fromList(const [1, 2, 3, 4]),
+          embedModel: 'model-a');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final row = (await store.memberContextRows(
+        const ['sl-1'],
+        embedModel: 'model-a',
+      ))
+          .single;
+
+      expect(row['participants_json'], '[{"name":"Sarah Chen"}]');
+      expect(row['embedding'], Uint8List.fromList(const [1, 2, 3, 4]));
+    });
+
+    test('a member with no comparable vector is still a member', () async {
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await store.upsertConversationAi('email', 'c1',
+          embedding: Uint8List.fromList(const [1, 2, 3, 4]),
+          embedModel: 'model-a');
+      // A vector from a different generation, and a member whose conversation
+      // row is gone entirely. Neither can be compared against anything, and
+      // both are still filed here — a caller that lost them would offer the
+      // user a thread the storyline already holds.
+      await store.upsertConversationAi('email', 'c2',
+          embedding: Uint8List.fromList(const [1, 2, 3, 4]),
+          embedModel: 'model-b');
+      await seedStoryline('sl-1', status: 'active');
+      for (final key in ['c1', 'c2', 'gone']) {
+        await store.addStorylineMember('sl-1', 'email', key, addedBy: 'auto');
+      }
+
+      final rows = await store.memberContextRows(
+        const ['sl-1'],
+        embedModel: 'model-a',
+      );
+
+      expect(rows.map((r) => r['conversation_key']), ['c1', 'c2', 'gone']);
+      expect(rows[0]['embedding'], isNotNull);
+      expect(rows[1]['embedding'], isNull);
+      expect(rows[2]['embedding'], isNull);
+      // No conversation row, so nobody is on it — and no row of its own to
+      // drop the membership from the answer.
+      expect(rows[2]['participants_json'], isNull);
     });
   });
 

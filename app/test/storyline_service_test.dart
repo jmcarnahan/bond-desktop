@@ -6,6 +6,9 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+// `show`: the one thing this file wants from the extraction pass is the hash
+// function behind both storyline hash recipes.
+import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
@@ -85,6 +88,37 @@ class HookedFakeLlm extends FakeLlm {
       temperature: temperature,
       think: think,
     );
+  }
+}
+
+/// A real [MessageStore] over a real database that counts the two reads the
+/// assignment pass hoisted out of its candidate loop.
+///
+/// A count rather than a stub because the store is not mockable and should not
+/// be: what these tests pin is that ONE pass makes ONE of each call however
+/// many storylines it walks, and only the store can say how many it was asked.
+class CountingStore extends MessageStore {
+  int memberContextCalls = 0;
+  int blockedIdCalls = 0;
+
+  CountingStore(super.db);
+
+  @override
+  Future<List<Map<String, Object?>>> memberContextRows(
+    List<String> storylineIds, {
+    required String embedModel,
+  }) {
+    memberContextCalls++;
+    return super.memberContextRows(storylineIds, embedModel: embedModel);
+  }
+
+  @override
+  Future<Set<String>> blockedStorylineIdsFor(
+    String source,
+    String conversationKey,
+  ) {
+    blockedIdCalls++;
+    return super.blockedStorylineIdsFor(source, conversationKey);
   }
 }
 
@@ -418,6 +452,38 @@ void main() {
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('one pass reads member context once, not per candidate', () async {
+      final counting = CountingStore(db);
+      // Three live storylines to walk. Read one candidate at a time this is
+      // three of each call — and a query per member inside each of them.
+      await seedStoryline(counting,
+          id: 'sl-far', memberKey: 'far', memberVector: vectorAt(-0.9));
+      await seedStoryline(counting,
+          id: 'sl-near', memberKey: 'near', memberVector: vectorAt(0.95));
+      await seedStoryline(counting,
+          id: 'sl-blocked', memberKey: 'blocked', memberVector: vectorAt(1));
+      await seed(counting, 'c1', vector: vectorAt(0.9));
+      // So the hoisted block read is exercised too, not merely made.
+      await counting.removeStorylineMember('sl-blocked', 'email', 'c1',
+          block: true);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final outcome = await StorylineService(counting, llm)
+          .assignConversation('email', 'c1');
+
+      expect(counting.memberContextCalls, 1);
+      expect(counting.blockedIdCalls, 1);
+      // And it still picks the right storyline of the three: the blocked one
+      // sits closest and is passed over, the far one never comes near the
+      // gate.
+      expect(outcome, AssignOutcome.assigned);
+      expect(
+        (await counting.membersOf('sl-near')).map((m) => m.conversationKey),
+        ['near', 'c1'],
+      );
+      expect(await counting.membersOf('sl-blocked'), hasLength(1));
     });
   });
 
@@ -979,7 +1045,9 @@ void main() {
       // so there is no stored set for `member_hash` to describe.
       expect(hashes['cluster_hash'], isNotNull);
       expect(hashes['member_hash'], null);
-      expect(await store.dismissedHashExists(hashes['cluster_hash']! as String),
+      expect(
+          await store
+              .dismissedHashExistsAny([hashes['cluster_hash']! as String]),
           isTrue);
       // Nothing to answer in the rail.
       expect(await store.loadStorylines(statuses: const ['suggested']),
@@ -1360,6 +1428,107 @@ void main() {
           .map((m) => m.conversationKey)
           .toSet(), {'c4', 'c5'});
     });
+
+    /// One key on two connectors, plus a third thread to pair whichever of
+    /// them is still free. Normal, and not a collision to be avoided: the mail
+    /// and chat connectors mint their keys with no knowledge of each other.
+    Future<void> seedSharedKeyMailbox(MessageStore into) async {
+      await seed(into, 'shared',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(into, 'shared',
+          source: 'teams',
+          vector: vectorAt(0.95),
+          lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(into, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T02:00:00Z');
+      await into.insertStoryline(
+        id: 'sl-existing',
+        title: 'Existing',
+        status: 'active',
+        createdBy: 'user',
+      );
+    }
+
+    test('a chat and a mail thread sharing a conversation key are not confused',
+        () async {
+      await seedSharedKeyMailbox(store);
+      // The MAIL thread is spoken for. The chat under the same key has never
+      // been looked at.
+      await store.addStorylineMember('sl-existing', 'email', 'shared',
+          addedBy: 'user');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      // Read as a bare key, "shared is taken" swallowed the chat as well and
+      // left the pool one lone thread — under the sweep's floor, so nothing
+      // was ever proposed.
+      final proposed =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect(
+        {
+          for (final m in await store.membersOf(proposed.id))
+            m.conversationKey: m.source,
+        },
+        {'shared': 'teams', 'c2': 'email'},
+      );
+    });
+
+    test('a thread taken by one source is still available in the other',
+        () async {
+      await seedSharedKeyMailbox(store);
+      // The block arm of the same confusion. The user's "no" was about the
+      // chat, and it says nothing about the mail thread under that key.
+      await store.removeStorylineMember('sl-existing', 'teams', 'shared',
+          block: true);
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final proposed =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect(
+        {
+          for (final m in await store.membersOf(proposed.id))
+            m.conversationKey: m.source,
+        },
+        {'shared': 'email', 'c2': 'email'},
+      );
+    });
+
+    test('a dismissed cluster is recognised under either hash recipe',
+        () async {
+      await seedMailbox(store);
+      // The tombstone an older build left: hashed over the bare conversation
+      // keys, before the recipe folded the connector in. Nothing can rewrite
+      // it — a cluster thrown out below the minimum size has no member rows to
+      // rebuild what it was — so recognition has to keep speaking that
+      // language for as long as the row exists.
+      await store.insertStoryline(
+        id: 'sl-old',
+        title: 'Website redesign',
+        status: 'dismissed',
+        createdBy: 'auto',
+        clusterHash: cardHash('c1\nc2'),
+      );
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      // The sweep rebuilds exactly that pair, and stops on a hash nothing in
+      // the app writes any more — before a single model call.
+      expect(llm.schemas, isEmpty);
+      expect(await store.loadStorylines(), isEmpty);
+    });
   });
 
   group('user actions', () {
@@ -1410,7 +1579,7 @@ void main() {
       // The member rows are the record of what the user was shown, and the
       // hashes on the row are what recognise the group when it re-forms.
       expect(await store.membersOf('sl-1'), hasLength(1));
-      expect(await store.dismissedHashExists('h1'), isTrue);
+      expect(await store.dismissedHashExistsAny(['h1']), isTrue);
     });
 
     test('renaming locks the title', () async {
