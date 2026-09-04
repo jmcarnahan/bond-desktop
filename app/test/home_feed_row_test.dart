@@ -20,6 +20,7 @@ HomeFeedRow _row({
   String triage = 'done',
   String extract = 'done',
   String storyline = 'done',
+  String draft = 'done',
   String settle = 'done',
   String outcome = 'pending',
   bool dropped = false,
@@ -40,6 +41,7 @@ HomeFeedRow _row({
       triageState: triage,
       extractState: extract,
       storylineState: storyline,
+      draftState: draft,
       settleState: settle,
       outcome: outcome,
       dropped: dropped,
@@ -124,6 +126,7 @@ void main() {
         triage: 'done',
         extract: 'running',
         storyline: 'skipped',
+        draft: 'pending',
         settle: 'error',
       ),
     );

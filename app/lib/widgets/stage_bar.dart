@@ -3,9 +3,9 @@ import 'package:flutter/material.dart';
 import '../models/home_models.dart';
 import '../theme/tokens.dart';
 
-/// One message's trip through the pipeline, as four segments.
+/// One message's trip through the pipeline, as five segments.
 ///
-/// Four and not five: ingest is the row existing at all, so a segment for it
+/// Five and not six: ingest is the row existing at all, so a segment for it
 /// would be full on every row ever rendered and would say nothing.
 ///
 /// **A running segment is a static half-fill, never a creep.** A bar that
@@ -22,14 +22,20 @@ import '../theme/tokens.dart';
 class HomeStageBar extends StatelessWidget {
   /// The stages in pipeline order. Also the key order the widget builds in, so
   /// a test can walk them.
-  static const List<String> stages = ['triage', 'extract', 'storyline', 'settle'];
+  static const List<String> stages = [
+    'triage',
+    'extract',
+    'storyline',
+    'draft',
+    'settle',
+  ];
 
   /// The track, shared with the feed row's column grid.
   static const double trackWidth = 200;
   static const double trackHeight = 6;
 
   /// Gap between segments. Small enough to read as one bar, wide enough that
-  /// four full segments are still four.
+  /// five full segments are still five.
   static const double segmentGap = 2;
 
   static const Duration fillDuration = Duration(milliseconds: 240);
@@ -45,6 +51,7 @@ class HomeStageBar extends StatelessWidget {
   final String triageState;
   final String extractState;
   final String storylineState;
+  final String draftState;
   final String settleState;
 
   /// A row the pipeline has finished with. Dims the bar and drops the caption:
@@ -56,6 +63,7 @@ class HomeStageBar extends StatelessWidget {
     required this.triageState,
     required this.extractState,
     required this.storylineState,
+    required this.draftState,
     required this.settleState,
     this.muted = false,
   });
@@ -67,13 +75,15 @@ class HomeStageBar extends StatelessWidget {
   })  : triageState = row.triageState,
         extractState = row.extractState,
         storylineState = row.storylineState,
+        draftState = row.draftState,
         settleState = row.settleState;
 
-  /// The four states by stage name — what [captionFor] reads.
+  /// The five states by stage name — what [captionFor] reads.
   static Map<String, String> statesOf(HomeFeedRow row) => {
         'triage': row.triageState,
         'extract': row.extractState,
         'storyline': row.storylineState,
+        'draft': row.draftState,
         'settle': row.settleState,
       };
 
@@ -83,6 +93,7 @@ class HomeStageBar extends StatelessWidget {
     'triage': 'triaging…',
     'extract': 'extracting…',
     'storyline': 'grouping…',
+    'draft': 'drafting…',
     'settle': 'settling…',
   };
 
@@ -142,6 +153,7 @@ class HomeStageBar extends StatelessWidget {
       'triage': triageState,
       'extract': extractState,
       'storyline': storylineState,
+      'draft': draftState,
       'settle': settleState,
     };
     final caption = muted ? null : captionFor(states);

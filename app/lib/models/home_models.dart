@@ -45,6 +45,12 @@ class HomeFeedRow {
   final String triageState;
   final String extractState;
   final String storylineState;
+
+  /// Where the reply pipeline got to. `skipped` is the common end here: most
+  /// messages are not worth answering, and a bar that waited for a draft that
+  /// was never going to be written would never finish.
+  final String draftState;
+
   final String settleState;
 
   /// `pending` while the pipeline is still working, then `done` or `dropped`.
@@ -83,6 +89,7 @@ class HomeFeedRow {
     required this.triageState,
     required this.extractState,
     required this.storylineState,
+    required this.draftState,
     required this.settleState,
     required this.outcome,
     required this.dropped,
@@ -104,6 +111,7 @@ class HomeFeedRow {
         triageState: row['triage_state'] as String? ?? 'pending',
         extractState: row['extract_state'] as String? ?? 'pending',
         storylineState: row['storyline_state'] as String? ?? 'pending',
+        draftState: row['draft_state'] as String? ?? 'pending',
         settleState: row['settle_state'] as String? ?? 'pending',
         outcome: row['outcome'] as String? ?? 'pending',
         dropped: (row['dropped'] as num?)?.toInt() == 1,

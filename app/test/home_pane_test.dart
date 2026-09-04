@@ -25,6 +25,7 @@ HomeFeedRow _row(int index) => HomeFeedRow(
       triageState: 'done',
       extractState: 'done',
       storylineState: 'done',
+      draftState: 'done',
       settleState: 'done',
       outcome: 'done',
       dropped: false,

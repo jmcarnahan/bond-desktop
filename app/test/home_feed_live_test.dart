@@ -130,6 +130,26 @@ void main() {
       expect(notifier.state.entering, isEmpty);
       await quiet(tester);
     });
+
+    testWidgets('the draft segment fills off the same patch as the other four',
+        (tester) async {
+      await seedThree();
+      final notifier = build();
+      await notifier.load();
+      expect(notifier.state.rows[1].draftState, 'pending');
+
+      // The reply pipeline is the slow one — two model calls stand between
+      // these two ticks, and the bar has to say so for the whole of it.
+      await progress.noteDraft('email', 'm2', state: 'running');
+      await settleTicks(tester);
+      expect(notifier.state.rows[1].draftState, 'running');
+      expect(idsOf(notifier), ['m3', 'm2', 'm1']);
+
+      await progress.noteDraft('email', 'm2', state: 'done');
+      await settleTicks(tester);
+      expect(notifier.state.rows[1].draftState, 'done');
+      await quiet(tester);
+    });
   });
 
   group('an arrival', () {

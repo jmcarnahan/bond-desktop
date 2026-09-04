@@ -4,7 +4,7 @@ import 'package:bond_inbox/widgets/stage_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// What the four segments say, and — the load-bearing one — what they do NOT
+/// What the five segments say, and — the load-bearing one — what they do NOT
 /// do: a running stage is a static half-fill, and nothing on this screen
 /// creeps or loops. A perpetual animation here is a widget suite that never
 /// settles and a bar that claims to know how far through a model call it is.
@@ -13,6 +13,7 @@ HomeFeedRow _row({
   String triage = 'pending',
   String extract = 'pending',
   String storyline = 'pending',
+  String draft = 'pending',
   String settle = 'pending',
   String outcome = 'pending',
 }) =>
@@ -24,6 +25,7 @@ HomeFeedRow _row({
       triageState: triage,
       extractState: extract,
       storylineState: storyline,
+      draftState: draft,
       settleState: settle,
       outcome: outcome,
       dropped: false,
@@ -105,6 +107,20 @@ void main() {
               triage: 'done',
               extract: 'done',
               storyline: 'done',
+              draft: 'running',
+            ),
+          ),
+        ),
+        'drafting…',
+      );
+      expect(
+        HomeStageBar.captionFor(
+          HomeStageBar.statesOf(
+            _row(
+              triage: 'done',
+              extract: 'done',
+              storyline: 'done',
+              draft: 'skipped',
               settle: 'running',
             ),
           ),
@@ -120,6 +136,15 @@ void main() {
         ),
         'triaging…',
       );
+      // Drafting rides the same worker drain as extraction, so the two are
+      // genuinely running at once on a busy pump — and extraction is the one
+      // the draft is queued behind.
+      expect(
+        HomeStageBar.captionFor(
+          HomeStageBar.statesOf(_row(extract: 'running', draft: 'running')),
+        ),
+        'extracting…',
+      );
     });
 
     test('says nothing when nothing is running', () {
@@ -131,6 +156,7 @@ void main() {
               triage: 'done',
               extract: 'skipped',
               storyline: 'done',
+              draft: 'skipped',
               settle: 'done',
             ),
           ),
@@ -141,6 +167,13 @@ void main() {
   });
 
   group('the widget', () {
+    test('the stages are the pipeline, in the order it runs them', () {
+      expect(
+        HomeStageBar.stages,
+        ['triage', 'extract', 'storyline', 'draft', 'settle'],
+      );
+    });
+
     testWidgets('renders one segment per stage, keyed', (tester) async {
       await tester.pumpWidget(_host(HomeStageBar.forRow(_row())));
 
@@ -151,6 +184,39 @@ void main() {
           reason: '$stage has a segment',
         );
       }
+    });
+
+    testWidgets('forRow carries the draft stage onto the bar', (tester) async {
+      await tester.pumpWidget(
+        _host(HomeStageBar.forRow(_row(draft: 'running'))),
+      );
+
+      expect(
+        tester.widget<HomeStageBar>(find.byType(HomeStageBar)).draftState,
+        'running',
+      );
+      expect(find.text('drafting…'), findsOneWidget);
+    });
+
+    testWidgets('a message not worth answering outlines its draft segment',
+        (tester) async {
+      await tester.pumpWidget(
+        _host(HomeStageBar.forRow(_row(triage: 'done', draft: 'skipped'))),
+      );
+
+      final decoration = tester
+          .widget<AnimatedContainer>(
+            find.byKey(HomeStageBar.segmentKey('draft')),
+          )
+          .decoration as BoxDecoration;
+      expect(decoration.border, isNotNull);
+      // The neighbour it is decided against next to is still merely owed.
+      final settle = tester
+          .widget<AnimatedContainer>(
+            find.byKey(HomeStageBar.segmentKey('settle')),
+          )
+          .decoration as BoxDecoration;
+      expect(settle.border, isNull);
     });
 
     testWidgets('a running stage says so under the bar', (tester) async {

@@ -3121,11 +3121,12 @@ LIMIT ?
   /// rows with rows that have holes in them.
   /// The column list alone, so a read that needs the same row shape over a
   /// DIFFERENT set of joins — [semanticSearch] comes in through
-  /// `message_vectors` — can have it without copying eighteen column names
+  /// `message_vectors` — can have it without copying nineteen column names
   /// that [HomeFeedRow.fromRow] then has to keep agreeing with.
   static const String _homeFeedColumns = '''
 p.source, p.source_message_id, p.conversation_key, p.received_at,
-  p.triage_state, p.extract_state, p.storyline_state, p.settle_state,
+  p.triage_state, p.extract_state, p.storyline_state, p.draft_state,
+  p.settle_state,
   p.outcome, p.dropped, p.drop_reason, p.storyline_id, p.needs_you, p.urgency,
   m.subject, m.from_name, m.from_address, s.title AS storyline_title''';
 

@@ -276,6 +276,19 @@ void main() {
       expect(row.outcome, 'pending');
       expect(row.key, (source: 'email', id: 'm1'));
     });
+
+    test('the bar gets the draft stage too — the fifth segment', () async {
+      await seed('m1', outcome: 'pending');
+      await store.writeDraftProgress('email', 'm1', state: 'running');
+
+      expect((await store.pageHomeFeed()).single.draftState, 'running');
+      // The same projection feeds the live patch read, which is the only way
+      // the segment ever moves without a reload.
+      final patched = await store.progressRowsFor([
+        (source: 'email', id: 'm1'),
+      ]);
+      expect(patched.single.draftState, 'running');
+    });
   });
 
   group('the live patch read', () {

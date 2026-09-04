@@ -53,6 +53,7 @@ HomeFeedRow _row(String id, {String subject = 'Subject'}) => HomeFeedRow(
       triageState: 'done',
       extractState: 'done',
       storylineState: 'done',
+      draftState: 'done',
       settleState: 'done',
       outcome: 'done',
       dropped: false,
