@@ -336,6 +336,44 @@ void main() {
       expect((await conversation())['cta_text'], isNotNull);
     });
 
+    test('a card\'s send marks that message\'s suggestion sent', () async {
+      // A chat send marked no draft row at all until the cards moved under the
+      // messages they answer. It was harmless while only the newest suggestion
+      // was tappable; now an older card can send, and a row left 'suggested'
+      // would offer the reply again straight after it went.
+      await seedChat();
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'chat-1',
+        replyToMessageId: 'm1',
+        body: 'Sending it over now.',
+      );
+
+      await (await loaded()).send('Sending it over now.', replyTo: 'm1');
+
+      final draft = (await store.getDraftForMessage('teams', 'm1'))!;
+      expect(draft['status'], 'sent');
+      expect(draft['body'], 'Sending it over now.');
+    });
+
+    test('and a send that names no message changes no suggestion', () async {
+      // The composer's own send, which resolves its target elsewhere. Pinned
+      // because it is existing behaviour and not an oversight.
+      await seedChat();
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'chat-1',
+        replyToMessageId: 'm1',
+        body: 'Sending it over now.',
+      );
+
+      await (await loaded()).send('Typed from scratch.');
+
+      final draft = (await store.getDraftForMessage('teams', 'm1'))!;
+      expect(draft['status'], 'suggested');
+      expect(draft['body'], 'Sending it over now.');
+    });
+
     test('without the grant the reply only reaches the clipboard', () async {
       // The bottom rung of the chat ladder. Nothing may leave the machine.
       await seedChat();

@@ -5,8 +5,15 @@ import '../services/llm/draft_task.dart' show DraftOption;
 import '../theme/tokens.dart';
 import 'composer.dart' show Composer;
 
-/// The short answers, under the newest message: at most two cards, each one a
-/// reply that could go as it stands.
+/// The short answers to one message: at most two cards, each one a reply that
+/// could go as it stands.
+///
+/// Drawn twice over, from the same widget. Under the transcript it is the
+/// composer's doorway and the undo row; inline, under each message that still
+/// has a live suggestion, it is the cards alone — [showReplyRow] hides the
+/// trailing row there, because the `Reply…`/`Suggest a reply` affordance is
+/// about the THREAD and belongs once, at the bottom, rather than repeated under
+/// every message the model answered.
 ///
 /// Machine-written text reads the same everywhere in this app — the accent rule
 /// down the left is the composer's, and it means the same thing here: these
@@ -53,6 +60,11 @@ class QuickReplyBar extends StatefulWidget {
   /// A suggestion is being written right now.
   final bool suggesting;
 
+  /// Whether the trailing `Reply…` row is drawn. False on an inline card, where
+  /// the way into the composer already sits at the end of the transcript — and
+  /// where a bar with no options has nothing left to draw at all.
+  final bool showReplyRow;
+
   const QuickReplyBar({
     super.key,
     this.options = const [],
@@ -64,6 +76,7 @@ class QuickReplyBar extends StatefulWidget {
     this.onUndo,
     this.onSuggest,
     this.suggesting = false,
+    this.showReplyRow = true,
   });
 
   @override
@@ -113,7 +126,9 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
   Widget build(BuildContext context) {
     final queued = widget.pending;
     if (queued != null) return _tile(_pendingRow(queued));
-    if (widget.options.isEmpty) return _replyRow();
+    // Nothing to offer and no row to offer it in: an inline card with no
+    // options is not an empty state, it is a card that should not be there.
+    if (widget.options.isEmpty) return _replyRow() ?? const SizedBox.shrink();
     return _tile(
       Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -148,7 +163,7 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
               style: BondType.caption,
             ),
           const SizedBox(height: BondSpacing.s4),
-          _replyRow(),
+          ?_replyRow(),
         ],
       ),
     );
@@ -281,24 +296,32 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
   /// Asking for a suggestion sits beside it, and only where there is nothing to
   /// suggest yet — that is what makes a dismissal reversible: the × takes the
   /// cards away, and this button is how they come back.
-  Widget _replyRow() {
+  ///
+  /// Null when there is nothing left to draw. Without [showReplyRow] the two
+  /// buttons are gone — they are about the thread, and an inline card is about
+  /// one message — but the × stays: it closes THESE cards, and it is the only
+  /// thing on the row that belongs to them.
+  Widget? _replyRow() {
     final suggest = widget.onSuggest;
+    final canDismiss = widget.options.isNotEmpty && widget.onDismiss != null;
+    if (!widget.showReplyRow && !canDismiss) return null;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        TextButton.icon(
-          onPressed: widget.onReply,
-          icon: const Icon(Icons.reply_outlined, size: 16),
-          label: const Text('Reply…'),
-        ),
-        if (suggest != null && widget.options.isEmpty)
+        if (widget.showReplyRow)
+          TextButton.icon(
+            onPressed: widget.onReply,
+            icon: const Icon(Icons.reply_outlined, size: 16),
+            label: const Text('Reply…'),
+          ),
+        if (widget.showReplyRow && suggest != null && widget.options.isEmpty)
           TextButton.icon(
             onPressed: widget.suggesting ? null : suggest,
             icon: const Icon(Icons.auto_awesome, size: 16),
             label: Text(widget.suggesting ? 'Drafting…' : 'Suggest a reply'),
           ),
         const Spacer(),
-        if (widget.options.isNotEmpty && widget.onDismiss != null)
+        if (canDismiss)
           IconButton(
             // Arms rather than closes: what the × means has not changed, only
             // how many taps it takes to mean it.

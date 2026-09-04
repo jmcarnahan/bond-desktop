@@ -83,6 +83,19 @@ String? dayKeyOf(Message m) => dayKeyOfIso(m.receivedAt);
 /// Consecutive messages from the same sender collapse under the first one's
 /// header. Bodies are plain-text [SelectableText] — mail content is NEVER
 /// markdown-rendered.
+///
+/// A row can also be FOLDED, which is a different thing from the `Show more`
+/// clamp on a long body: folded, the message keeps its header and gives up its
+/// body to a single muted line. The rules the host cannot see and this row
+/// therefore does not invent:
+///
+/// - Folding is offered only where [collapsible] says so, and starts folded
+///   only where [initiallyCollapsed] does. Both are the host's call, because
+///   both need the whole thread to answer.
+/// - What survives the fold is what says the message still wants something: an
+///   open ask keeps its line, and a message carrying a [suggestion] says so in
+///   one caption. A folded row must never be the reason an answer went unsent.
+/// - The user's own toggle outlives every rebuild. Nothing recomputes it.
 class MessageRow extends StatefulWidget {
   final Message message;
 
@@ -98,12 +111,27 @@ class MessageRow extends StatefulWidget {
   /// has nowhere to send the tap must not look like it takes one.
   final VoidCallback? onAskTap;
 
+  /// The answer offered to THIS message, drawn under it when the row is open.
+  /// The row knows nothing about drafts — the host builds the card and this
+  /// only places it, beneath the ask it answers.
+  final Widget? suggestion;
+
+  /// Whether the header folds this message away. False renders exactly what it
+  /// always did: no chevron, no tap, nothing to fold.
+  final bool collapsible;
+
+  /// Whether it starts folded. Read once, at construction — see [_collapsed].
+  final bool initiallyCollapsed;
+
   const MessageRow({
     super.key,
     required this.message,
     this.showHeader = true,
     this.openAsk = false,
     this.onAskTap,
+    this.suggestion,
+    this.collapsible = false,
+    this.initiallyCollapsed = false,
   });
 
   @override
@@ -113,9 +141,24 @@ class MessageRow extends StatefulWidget {
 class _MessageRowState extends State<MessageRow> {
   bool _expanded = false;
 
+  /// Whether this message is folded to its header.
+  ///
+  /// Seeded once and NEVER recomputed — there is deliberately no
+  /// `didUpdateWidget` arm for it. A transcript rebuilds on every sync, every
+  /// draft reload and every inbox setState; re-reading
+  /// [MessageRow.initiallyCollapsed] on any of those would fold a message the
+  /// user had just opened, under their cursor, for a reason they could not see.
+  late bool _collapsed;
+
   /// The avatar's diameter, and the width the gutter keeps reserved on
   /// continuation rows so bodies stay in one column.
   static const double _avatarSize = 36;
+
+  @override
+  void initState() {
+    super.initState();
+    _collapsed = widget.initiallyCollapsed && widget.collapsible;
+  }
 
   String get _body {
     // The preview stands in until the body arrives: bodies are fetched per
@@ -132,7 +175,9 @@ class _MessageRowState extends State<MessageRow> {
         .trimRight();
   }
 
-  bool get _collapsible {
+  /// Whether the body is long enough to earn the `Show more` clamp. Unrelated
+  /// to [_collapsed], which folds the whole message rather than trimming it.
+  bool get _bodyOverflows {
     final body = _body;
     return body.length > _maxChars ||
         '\n'.allMatches(body).length + 1 > _maxLines;
@@ -140,7 +185,7 @@ class _MessageRowState extends State<MessageRow> {
 
   String get _visibleBody {
     final body = _body;
-    if (_expanded || !_collapsible) return body;
+    if (_expanded || !_bodyOverflows) return body;
     // Clamp to the first N lines, then the char cap, whichever hits first.
     final lines = body.split('\n');
     var clamped =
@@ -180,6 +225,12 @@ class _MessageRowState extends State<MessageRow> {
             : '$when · triaging';
     final summary = message.summary;
 
+    // A queued reply is always the thread's last message and always on its way
+    // out; folding it would hide the only thing on screen saying so.
+    final folds = widget.collapsible && !pending;
+    final collapsed = folds && _collapsed;
+    final suggestion = widget.suggestion;
+
     final row = Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -193,62 +244,74 @@ class _MessageRowState extends State<MessageRow> {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (widget.showHeader) ...[
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
-                  children: [
-                    Flexible(
-                      child: Text(
-                        _senderName,
-                        style:
-                            BondType.body.copyWith(fontWeight: FontWeight.w600),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    if (meta.isNotEmpty) ...[
-                      const SizedBox(width: BondSpacing.s8),
-                      Text(meta, style: BondType.caption),
-                    ],
-                  ],
-                ),
+                _header(meta, folds: folds),
                 const SizedBox(height: 2),
               ],
-              SelectableText(
-                _visibleBody,
-                style: BondType.body.copyWith(
-                  color: BondColors.ink,
-                  height: 1.4,
-                ),
-              ),
-              if (_collapsible) ...[
-                const SizedBox(height: BondSpacing.s4),
-                _ShowToggle(
-                  expanded: _expanded,
-                  onTap: () => setState(() => _expanded = !_expanded),
-                ),
-              ],
-              if (pending) ...[
-                const SizedBox(height: BondSpacing.s4),
-                Text('Sending…', style: BondType.caption),
-              ],
-              // The model's one-line read of this message, labelled as the
-              // model's: it sits under mail the user can see for themselves, and
-              // it must never be mistaken for something the sender wrote.
-              if (summary != null && summary.isNotEmpty) ...[
-                const SizedBox(height: 2),
+              if (collapsed)
+                // One line of what was said, and then only what still wants
+                // something: the fold hides reading, never answering.
                 Text(
-                  'AI: $summary',
+                  _body.split('\n').firstWhere(
+                        (line) => line.trim().isNotEmpty,
+                        orElse: () => '',
+                      ),
                   style: BondType.caption.copyWith(color: BondColors.inkMuted),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                )
+              else ...[
+                SelectableText(
+                  _visibleBody,
+                  style: BondType.body.copyWith(
+                    color: BondColors.ink,
+                    height: 1.4,
+                  ),
                 ),
+                if (_bodyOverflows) ...[
+                  const SizedBox(height: BondSpacing.s4),
+                  _ShowToggle(
+                    expanded: _expanded,
+                    onTap: () => setState(() => _expanded = !_expanded),
+                  ),
+                ],
+                if (pending) ...[
+                  const SizedBox(height: BondSpacing.s4),
+                  Text('Sending…', style: BondType.caption),
+                ],
+                // The model's one-line read of this message, labelled as the
+                // model's: it sits under mail the user can see for themselves,
+                // and it must never be mistaken for something the sender wrote.
+                if (summary != null && summary.isNotEmpty) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    'AI: $summary',
+                    style:
+                        BondType.caption.copyWith(color: BondColors.inkMuted),
+                  ),
+                ],
               ],
               // The ask this message is still waiting on. The thread banner
               // carries only the newest one, so an older message keeps its own
-              // here until a reply answers it.
+              // here until a reply answers it. Folded or not: a message that
+              // wants an answer has to say so from behind the fold too.
               if (widget.openAsk) ...[
                 const SizedBox(height: BondSpacing.s4),
                 _askLine(message),
+              ]
+              // No ask, but an answer waiting under the fold — the hint that
+              // there is something actionable here, in the ask's place.
+              else if (collapsed && suggestion != null) ...[
+                const SizedBox(height: BondSpacing.s4),
+                Text(
+                  '✨ Suggested reply',
+                  style: BondType.caption.copyWith(color: BondColors.inkMuted),
+                ),
               ],
+              if (!collapsed && suggestion != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: BondSpacing.s8),
+                  child: suggestion,
+                ),
             ],
           ),
         ),
@@ -260,6 +323,53 @@ class _MessageRowState extends State<MessageRow> {
         top: widget.showHeader ? BondSpacing.s16 : BondSpacing.s4,
       ),
       child: Opacity(opacity: pending ? 0.6 : 1, child: row),
+    );
+  }
+
+  /// Who said it and when — and, where the row folds, the whole affordance for
+  /// folding it. The header is the target rather than a separate button: it is
+  /// the one part of the message that stays whichever way the row is, so the
+  /// place to press is the same open and closed.
+  ///
+  /// Its own transparent Material, because ink paints on the nearest Material
+  /// ANCESTOR — which is behind the pane's opaque surface, the same trap
+  /// `_askLine` and `thread_detail_panel._ctaBanner` document.
+  Widget _header(String meta, {required bool folds}) {
+    final line = Row(
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
+      children: [
+        Flexible(
+          child: Text(
+            _senderName,
+            style: BondType.body.copyWith(fontWeight: FontWeight.w600),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        if (meta.isNotEmpty) ...[
+          const SizedBox(width: BondSpacing.s8),
+          Text(meta, style: BondType.caption),
+        ],
+        if (folds) ...[
+          const SizedBox(width: BondSpacing.s4),
+          Icon(
+            _collapsed ? Icons.expand_more : Icons.expand_less,
+            size: 16,
+            color: BondColors.inkMuted,
+          ),
+        ],
+      ],
+    );
+
+    if (!folds) return line;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        onTap: () => setState(() => _collapsed = !_collapsed),
+        borderRadius: BondRadii.smAll,
+        child: line,
+      ),
     );
   }
 

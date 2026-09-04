@@ -119,7 +119,7 @@ void main() {
 
   tearDown(() => db.close());
 
-  DraftNotifier notifierFor({String key = 'conv-1'}) {
+  DraftNotifier notifierFor({String key = 'conv-1', Duration? undoWindow}) {
     final notifier = DraftNotifier(
       store,
       GraphAuth(httpClient: never, store: tokens),
@@ -130,6 +130,7 @@ void main() {
         launched.add(url);
         return true;
       },
+      undoWindow: undoWindow,
     );
     addTearDown(notifier.dispose);
     return notifier;
@@ -429,6 +430,143 @@ void main() {
 
       expect(await notifier.send('   '), SendOutcome.failed);
       expect(mail.calls, isEmpty);
+    });
+  });
+
+  /// A thread whose transcript holds more than one answerable message. The
+  /// suggestions are drawn under the messages they answer, so a tap on an older
+  /// card has to reply to THAT message — not to whatever the thread's newest
+  /// one happens to be.
+  group('replying to a message other than the newest', () {
+    /// Two inbound messages, each with its own suggestion.
+    Future<void> seedTwo() async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'older-inbound',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'newest-inbound',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'received_at': '2026-08-30T10:00:00Z',
+      });
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'older-inbound',
+        body: 'answering the older one',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'newest-inbound',
+        body: 'answering the newest one',
+      );
+    }
+
+    test('the reply goes to the message the card belongs to', () async {
+      await seedTwo();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      final outcome =
+          await notifier.send('About that older one.', replyTo: 'older-inbound');
+
+      expect(outcome, SendOutcome.sent);
+      expect(mail.calls.first, 'createReply:older-inbound');
+    });
+
+    test('and only that message\'s suggestion is marked sent', () async {
+      await seedTwo();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('About that older one.', replyTo: 'older-inbound');
+
+      expect(
+        (await store.getDraftForMessage('email', 'older-inbound'))!['status'],
+        'sent',
+      );
+      // The newest message has not been answered, and its suggestion must
+      // still be on offer.
+      expect(
+        (await store.getDraftForMessage('email', 'newest-inbound'))!['status'],
+        'suggested',
+      );
+    });
+
+    test('without one, the send still targets the thread\'s stored draft',
+        () async {
+      await seedTwo();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('Whatever this thread is waiting on.');
+
+      expect(mail.calls.first, 'createReply:newest-inbound');
+    });
+
+    test('the target survives the undo window', () async {
+      // The queued send fires from a timer, long after the tap: the message it
+      // answers rides in the closure, because [PendingSend] carries only what
+      // the undo row draws.
+      await seedTwo();
+      const window = Duration(milliseconds: 50);
+      final notifier = notifierFor(undoWindow: window);
+      await notifier.load();
+
+      await notifier.queueSend('About that older one.',
+          replyTo: 'older-inbound');
+      expect(mail.calls, isEmpty, reason: 'nothing goes while it is open');
+      await Future<void>.delayed(window * 4);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(mail.calls.first, 'createReply:older-inbound');
+      expect(
+        (await store.getDraftForMessage('email', 'older-inbound'))!['status'],
+        'sent',
+      );
+    });
+
+    test('every stored suggestion loads, keyed by the message it answers',
+        () async {
+      await seedTwo();
+      final notifier = notifierFor();
+
+      await notifier.load();
+
+      expect(
+        notifier.state.threadDrafts.keys.toSet(),
+        {'older-inbound', 'newest-inbound'},
+      );
+      expect(
+        notifier.state.threadDrafts['older-inbound']!['body'],
+        'answering the older one',
+      );
+      // And the composer's own row is still the newest message's alone.
+      expect(notifier.state.body, 'answering the newest one');
+    });
+
+    test('a dismissal closes one message\'s cards and leaves the rest',
+        () async {
+      await seedTwo();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.dismissOptionsFor('older-inbound');
+
+      expect(
+        notifier.state.threadDrafts['older-inbound']!['options_dismissed'],
+        1,
+      );
+      expect(
+        notifier.state.threadDrafts['newest-inbound']!['options_dismissed'],
+        0,
+      );
     });
   });
 

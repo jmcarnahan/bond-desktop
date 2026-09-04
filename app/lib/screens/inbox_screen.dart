@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/message_models.dart';
+import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
@@ -1625,10 +1626,63 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ];
 
+    // Over the SHOWN transcript, optimistic bubble included: an outbound after
+    // a message answered it, and the reply the user just queued counts. That is
+    // what makes every card in the thread close at once the moment a send is
+    // armed, rather than leaving older ones tappable behind a reply already on
+    // its way.
+    final lastOut = latestOutboundAt(shown);
+    final notifier = ref.read(draftProvider(target).notifier);
+
+    /// The suggestion offered under one message, or null where there is none
+    /// left to offer.
+    ///
+    /// Every guard here is about honesty rather than tidiness: a card that can
+    /// still be tapped is a card that can still send, so it goes the moment its
+    /// message has been answered — by a synced reply or by a queued one.
+    Widget? cardFor(Message m) {
+      if (!m.inbound) return null;
+      final row = draft.threadDrafts[m.id];
+      if (row == null) return null;
+      // 'edited' is the user's own words and belongs in the composer; 'sent'
+      // and 'dismissed' are over.
+      if ((row['status'] as String?) != 'suggested') return null;
+      final options = draftOptionsOf(row);
+      // Covers the closed-cards case too: `options_dismissed` reads as none.
+      if (options.isEmpty) return null;
+      // Strict, mirroring `hasOpenAsk`: an outbound at the same instant did not
+      // answer this one.
+      if (lastOut != null && lastOut.compareTo(m.receivedAt ?? '') > 0) {
+        return null;
+      }
+      final armed = draft.capability == SendCapability.send;
+      return QuickReplyBar(
+        showReplyRow: false,
+        options: options,
+        armed: armed,
+        onPick: (option) {
+          // The same honest split `_pickQuickReply` makes: without a send grant
+          // a tap opens the box with the words in it rather than appearing to
+          // send them.
+          if (!armed) {
+            setState(() => _replyOpenFor = selected.id);
+            unawaited(notifier.markEdited(option.body));
+            return;
+          }
+          unawaited(_queueQuickReply(target, option.body, replyTo: m.id));
+        },
+        onReply: () => setState(() => _replyOpenFor = selected.id),
+        onDismiss: () => unawaited(notifier.dismissOptionsFor(m.id)),
+      );
+    }
+
     final panel = ThreadDetailPanel(
       key: ValueKey(selected.id),
       conversation: selected,
       messages: shown,
+      // The suggestions sit with the messages they answer. The panel places
+      // them and never learns what they are.
+      suggestionFor: cardFor,
       onMarkDone: () => ref
           .read(conversationsProvider.notifier)
           .markDone(selected.source, selected.id),
@@ -1731,7 +1785,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// The suggestions under the transcript, and everything a tap on one can do.
+  /// The bar under the transcript: the composer's doorway, the way to ask for a
+  /// suggestion, and the undo row while a send is queued.
+  ///
+  /// It carries no cards any more — a suggestion answers one message, and it is
+  /// drawn under that message. What is left here is what belongs to the THREAD
+  /// rather than to any message in it.
   Widget _quickReplies(
     Conversation selected,
     DraftTarget target,
@@ -1739,11 +1798,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ) {
     final notifier = ref.read(draftProvider(target).notifier);
     return QuickReplyBar(
-      options: draft.options,
+      options: const [],
       armed: draft.capability == SendCapability.send,
       onPick: (option) => unawaited(_pickQuickReply(selected, option)),
       onReply: () => setState(() => _replyOpenFor = selected.id),
-      onDismiss: () => unawaited(notifier.dismissOptions()),
       pending: draft.pending,
       onUndo: () => _cancelQueuedSend(target),
       // The way back from the ×, and the way in for a thread the queue never
@@ -1782,13 +1840,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     await _queueQuickReply(target, option.body);
   }
 
-  /// Arms the send a tapped card asked for, wherever the card was — under the
-  /// transcript or on a storyline's episode. One helper because the two
+  /// Arms the send a tapped card asked for, wherever the card was — inline
+  /// under a message, or on a storyline's episode. One helper because the two
   /// surfaces must not drift: the announcement, the undo window and the words
   /// on the snackbar are the same promise either way.
-  Future<void> _queueQuickReply(DraftTarget target, String body) async {
+  ///
+  /// [replyTo] is the message an inline card belongs to. Omitted, the send
+  /// resolves its own target the way it always did — the thread's stored draft,
+  /// then its newest inbound message.
+  Future<void> _queueQuickReply(
+    DraftTarget target,
+    String body, {
+    String? replyTo,
+  }) async {
     setState(() => _announceSendsFor.add(target));
-    await ref.read(draftProvider(target).notifier).queueSend(body);
+    await ref
+        .read(draftProvider(target).notifier)
+        .queueSend(body, replyTo: replyTo);
     _toast('Reply sending.', onUndo: () => _cancelQueuedSend(target));
   }
 

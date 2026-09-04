@@ -2739,6 +2739,26 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
     return Map<String, Object?>.from(result.first.data);
   }
 
+  /// Every suggestion stored against this conversation's messages, whatever
+  /// their status — the thread view decides which are still showable.
+  ///
+  /// Unordered on purpose: the caller already holds the transcript, and the
+  /// order that matters is the messages', not the drafts'. Keyed reads off the
+  /// `(source, conversation_key)` index, so a thread with a long history of
+  /// answered messages costs one indexed scan rather than one query per row.
+  Future<List<Map<String, Object?>>> draftsForConversation(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM drafts WHERE source = ? AND conversation_key = ?',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
   /// The suggestion a THREAD would show: the one answering its newest inbound
   /// message, and only that one.
   ///

@@ -328,6 +328,82 @@ void main() {
     });
   });
 
+  /// What the TRANSCRIPT reads: every answer the thread has collected, so each
+  /// one can be drawn under the message it answers.
+  group('the whole thread\'s drafts', () {
+    test('come back for the conversation asked for, and no other', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'answering the first',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm2',
+        body: 'answering the second',
+      );
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-2',
+        replyToMessageId: 'other-m1',
+        body: 'a different thread entirely',
+      );
+
+      final rows = await store.draftsForConversation('email', 'conv-1');
+
+      expect(rows, hasLength(2));
+      // The message each one answers is what tells them apart — it is the key
+      // the transcript looks them up by.
+      expect(
+        {for (final row in rows) row['reply_to_message_id']: row['body']},
+        {'m1': 'answering the first', 'm2': 'answering the second'},
+      );
+    });
+
+    test('a status the thread will not draw is still returned', () async {
+      // The read is unfiltered on purpose: which of these are still showable is
+      // the thread view's question, and it needs the sent one to know a reply
+      // already went.
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'already gone',
+      );
+      await store.updateDraftStatus('email', 'm1', status: 'sent');
+
+      final rows = await store.draftsForConversation('email', 'conv-1');
+
+      expect(rows.single['status'], 'sent');
+    });
+
+    test('and it is keyed by connector as well as by thread', () async {
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'the mail answer',
+      );
+      await store.upsertDraft(
+        source: 'teams',
+        conversationKey: 'conv-1',
+        replyToMessageId: 'm1',
+        body: 'the chat answer',
+      );
+
+      expect(
+        (await store.draftsForConversation('teams', 'conv-1')).single['body'],
+        'the chat answer',
+      );
+    });
+
+    test('a thread nobody drafted for reads as none', () async {
+      expect(await store.draftsForConversation('email', 'conv-1'), isEmpty);
+    });
+  });
+
   group('quick-reply options', () {
     const options =
         '[{"stance":"Confirm Friday","body":"Friday works."},'
