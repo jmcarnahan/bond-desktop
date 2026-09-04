@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
+import 'package:bond_inbox/data/conversation_vec_index.dart';
 // `show`: drift generates an `ActivityEvent` row class from the
 // `activity_events` table, and this file means the log's own.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
@@ -17,8 +19,10 @@ import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/vec_test_db.dart';
 
 /// An [LlmClient] that answers from a per-schema script and never opens a
 /// socket.
@@ -123,6 +127,42 @@ class CountingStore extends MessageStore {
     blockedIdCalls++;
     return super.blockedStorylineIdsFor(source, conversationKey);
   }
+}
+
+/// A [MessageStore] that counts the sweep's KNN probes.
+///
+/// [CountingStore]'s shape and its reason: the store is not mockable and
+/// should not be, and only it can say whether the indexed path ran at all. A
+/// count of zero is how the equivalence test below would notice that its
+/// "indexed" run had quietly fallen back and was comparing the arithmetic
+/// against itself.
+class ProbingStore extends MessageStore {
+  int neighborProbes = 0;
+
+  ProbingStore(super.db);
+
+  @override
+  Future<List<({String source, String key, double similarity})>>
+      conversationNeighbors(Uint8List vector, {required int k}) {
+    neighborProbes++;
+    return super.conversationNeighbors(vector, k: k);
+  }
+}
+
+/// A [MessageStore] that reports no clustering index, whatever this process
+/// has loaded.
+///
+/// The seam for the fallback, overriding the one method that decides: a failed
+/// backfill, a missing native extension and a connection opened before the
+/// extension was registered all reach the sweep as this same `null`. Faking it
+/// here rather than unloading a process-global native extension, which is not
+/// something a test can do to the rest of the suite.
+class UnindexedStore extends MessageStore {
+  UnindexedStore(super.db);
+
+  @override
+  Future<int?> prepareConversationIndex({required String embedModel}) async =>
+      null;
 }
 
 /// A unit vector whose cosine against `[1, 0]` is exactly [c]. Two dimensions
@@ -3070,6 +3110,237 @@ void main() {
       await StorylineService(store, llm).recap('sl-nope');
 
       expect(llm.schemas, isEmpty);
+    });
+  });
+
+  group('the indexed sweep', () {
+    // The native asset is expected to be here. The guard exists so a build
+    // without code assets reports a skip rather than failures about geometry.
+    late bool available;
+    setUpAll(() {
+      available = ensureSqliteVecLoaded();
+      if (!available) {
+        printOnFailure('sqlite-vec native asset missing — vec tests skipped');
+      }
+    });
+
+    /// Every thread this corpus holds: its key, when it last moved, and where
+    /// it sits.
+    ///
+    /// Ten threads in five orthogonal planes, so a group's geometry can be
+    /// read off its own two angles and nothing else. [ray]'s planes are
+    /// mutually orthogonal, which puts every cross-group cosine at exactly 0
+    /// and leaves only the within-group angles to reason about.
+    ///
+    ///  * `a1 a2 a3` — three rays 0.05 rad apart: a cluster of three.
+    ///  * `b1 b2` — the same, one plane over: a cluster of two.
+    ///  * `e1 e2` — `acos(0.652)` apart, so 0.002 ABOVE the 0.65 link
+    ///    threshold: a cluster the gate only just admits.
+    ///  * `f1 f2` — `acos(0.648)` apart, 0.002 BELOW it: two singletons, and
+    ///    the other side of the same `>=`.
+    ///  * `n1` — alone in a plane of its own.
+    ///
+    /// The two 0.002 margins are the edge this pins, and they are deliberately
+    /// margins rather than an exact 0.65. The index computes its distances
+    /// natively over packed float32 and the fallback accumulates a dot product
+    /// in Dart; the two agree to about 1e-6 (see
+    /// `conversation_vec_index_test.dart`), which is far inside 0.002 and far
+    /// outside anything that could make a pair land exactly ON the threshold
+    /// reproducibly. A test written at exactly 0.65 would be a coin toss about
+    /// float representation rather than a statement about the gate.
+    const threshold = 0.65;
+    final corpus = <({String key, String at, int plane, double angle})>[
+      (key: 'a1', at: '2026-08-29T10:00:00Z', plane: 0, angle: 0.00),
+      (key: 'a2', at: '2026-08-29T09:00:00Z', plane: 0, angle: 0.05),
+      (key: 'a3', at: '2026-08-29T08:00:00Z', plane: 0, angle: 0.10),
+      (key: 'b1', at: '2026-08-29T07:00:00Z', plane: 1, angle: 0.00),
+      (key: 'b2', at: '2026-08-29T06:00:00Z', plane: 1, angle: 0.05),
+      (key: 'e1', at: '2026-08-29T05:00:00Z', plane: 2, angle: 0.00),
+      (
+        key: 'e2',
+        at: '2026-08-29T04:00:00Z',
+        plane: 2,
+        angle: math.acos(threshold + 0.002),
+      ),
+      (key: 'f1', at: '2026-08-29T03:00:00Z', plane: 3, angle: 0.00),
+      (
+        key: 'f2',
+        at: '2026-08-29T02:00:00Z',
+        plane: 3,
+        angle: math.acos(threshold - 0.002),
+      ),
+      (key: 'n1', at: '2026-08-29T01:00:00Z', plane: 4, angle: 0.00),
+    ];
+
+    /// A unit vector in the plane spanned by dimensions `2 * plane` and
+    /// `2 * plane + 1`, at [radians], padded to the index's width.
+    List<double> ray(int plane, double radians) {
+      final v = List<double>.filled(ConversationVectorIndex.dims, 0.0);
+      v[plane * 2] = math.cos(radians);
+      v[plane * 2 + 1] = math.sin(radians);
+      return v;
+    }
+
+    Future<void> seedCorpus(MessageStore into) async {
+      for (final thread in corpus) {
+        await seed(
+          into,
+          thread.key,
+          vector: ray(thread.plane, thread.angle),
+          lastMessageAt: thread.at,
+        );
+      }
+    }
+
+    /// The model this corpus is scripted against: three clusters reach it in
+    /// size order — `a` (three), then `b` and `e` (two each, in the order they
+    /// were built) — and the last of them is thrown out whole, so the pass
+    /// leaves a tombstone behind as well as two suggestions.
+    FakeLlm scriptedLlm() => FakeLlm({
+          'storyline_name': [
+            nameAnswer(title: 'The first group'),
+            nameAnswer(title: 'The second group'),
+            nameAnswer(title: 'The rejected group'),
+          ],
+          'storyline_membership': [
+            confirmAnswer(evidence: 'a1'),
+            confirmAnswer(evidence: 'a2'),
+            confirmAnswer(evidence: 'a3'),
+            confirmAnswer(evidence: 'b1'),
+            confirmAnswer(evidence: 'b2'),
+            confirmAnswer(belongs: false, evidence: 'e1 is not this'),
+            confirmAnswer(belongs: false, evidence: 'e2 is not this'),
+          ],
+        });
+
+    /// Everything the sweep decided, in a form two runs can be compared by:
+    /// the status, the title, BOTH hashes, and the member set of every
+    /// storyline the pass wrote — sorted, so nothing turns on the random ids.
+    ///
+    /// `cluster_hash` is in here on purpose. It is the identity a dismissed
+    /// cluster is tombstoned under, and the reason the clustering function has
+    /// to be a pure function of its input: if the two paths grouped the same
+    /// threads differently, this column is where it would show.
+    Future<List<String>> decisionsOf(BondDatabase d, MessageStore s) async {
+      final rows = await d
+          .customSelect('SELECT id, title, status, member_hash, cluster_hash '
+              'FROM storylines')
+          .get();
+      final out = <String>[];
+      for (final row in rows) {
+        final members = await s.membersOf(row.data['id'] as String);
+        final keys = [
+          for (final m in members) '${m.source}/${m.conversationKey}',
+        ]..sort();
+        out.add('${row.data['status']} | ${row.data['title']} | '
+            'member=${row.data['member_hash']} | '
+            'cluster=${row.data['cluster_hash']} | ${keys.join(',')}');
+      }
+      return out..sort();
+    }
+
+    test('the index and the arithmetic agree on every cluster', () async {
+      if (!available) return;
+
+      final indexedDb = vecTestDb();
+      final indexedStore = ProbingStore(indexedDb);
+      await seedCorpus(indexedStore);
+      final indexedLlm = scriptedLlm();
+      await StorylineService(indexedStore, indexedLlm).sweep();
+      final indexed = await decisionsOf(indexedDb, indexedStore);
+      final probes = indexedStore.neighborProbes;
+      await indexedDb.close();
+
+      final plainDb = vecTestDb();
+      final plainStore = UnindexedStore(plainDb);
+      await seedCorpus(plainStore);
+      final plainLlm = scriptedLlm();
+      await StorylineService(plainStore, plainLlm).sweep();
+      final plain = await decisionsOf(plainDb, plainStore);
+      await plainDb.close();
+
+      // One probe per candidate, which is what says the index path actually
+      // ran. Without it a silent fallback would make this test compare the
+      // arithmetic against itself and pass for the wrong reason.
+      expect(probes, corpus.length);
+
+      // The whole claim of this phase, in one line.
+      expect(indexed, plain);
+
+      // And what they agree ON, spelled out, so a change that broke both
+      // paths identically could not slip through as an equivalence.
+      expect(indexed, hasLength(3));
+      expect(
+        indexed.map((d) => d.split(' | ').last).toList(),
+        [
+          // The rejected cluster keeps no members — it is a tombstone.
+          '',
+          'email/a1,email/a2,email/a3',
+          'email/b1,email/b2',
+        ],
+      );
+      // e1 and e2 sit 0.002 above the gate and were grouped — into the third
+      // cluster, the one the model threw out. f1 and f2 sit 0.002 below it and
+      // never became a cluster at all, which is why exactly three groups were
+      // named and not four.
+      expect(indexed.where((d) => d.startsWith('dismissed')), hasLength(1));
+      expect(indexedLlm.callsFor('storyline_name'), 3);
+      expect(indexedLlm.schemas, plainLlm.schemas);
+      expect(indexedLlm.userMessages, plainLlm.userMessages);
+    });
+
+    test('a corpus the index cannot answer for falls back without proposing '
+        'nonsense', () async {
+      if (!available) return;
+
+      // The store reports no index, which is what a failed backfill, a missing
+      // native extension, and a connection opened before the extension was
+      // registered all look like from the sweep's side.
+      final db = vecTestDb();
+      final store = UnindexedStore(db);
+      await seedCorpus(store);
+      final llm = scriptedLlm();
+
+      await StorylineService(store, llm).sweep();
+
+      final members = <String, List<String>>{};
+      for (final storyline in await store.loadStorylines()) {
+        members[storyline.title] = [
+          for (final m in await store.membersOf(storyline.id)) m.conversationKey,
+        ]..sort();
+      }
+      expect(members['The first group'], ['a1', 'a2', 'a3']);
+      expect(members['The second group'], ['b1', 'b2']);
+      await db.close();
+    });
+
+    test('one candidate at the wrong width sends the whole pass to the '
+        'arithmetic', () async {
+      if (!available) return;
+
+      // A corpus caught mid-model-change: the index skips the narrow row, so
+      // it holds a hole exactly where a link might be. Trusting it for the
+      // rows it DID absorb would be the one way this feature could quietly
+      // change what the app proposes, so the pass declines the index entirely.
+      final db = vecTestDb();
+      final store = ProbingStore(db);
+      await seedCorpus(store);
+      await seed(store, 'narrow',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T00:30:00Z');
+      final llm = scriptedLlm();
+
+      await StorylineService(store, llm).sweep();
+
+      expect(store.neighborProbes, 0);
+      final members = <String, List<String>>{};
+      for (final storyline in await store.loadStorylines()) {
+        members[storyline.title] = [
+          for (final m in await store.membersOf(storyline.id)) m.conversationKey,
+        ]..sort();
+      }
+      expect(members['The first group'], ['a1', 'a2', 'a3']);
+      expect(members['The second group'], ['b1', 'b2']);
+      await db.close();
     });
   });
 }

@@ -6,6 +6,7 @@ import 'package:drift/drift.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
+import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
 import 'progress_sql.dart';
 import 'vec_index.dart';
@@ -126,6 +127,13 @@ class MessageStore {
   /// memoizes its answer per connection, so one that outlived a database swap
   /// would keep reporting on a connection nobody is using any more.
   late final MessageVectorIndex _vecIndex = MessageVectorIndex(db);
+
+  /// The nearest-neighbour index over the clustering corpus, owned here for
+  /// [_vecIndex]'s reasons and held separately because it is a different
+  /// corpus answering a different question — the sweep's "which threads are
+  /// near this one", not search's "which messages are near this query".
+  late final ConversationVectorIndex _conversationIndex =
+      ConversationVectorIndex(db);
 
   static String _nowIso() => DateTime.now().toUtc().toIso8601String();
 
@@ -1617,6 +1625,11 @@ RETURNING *
     // [MessageVectorIndex.rebuild] over an empty table is a drop and an empty
     // refill, and it fail-softs to nothing on a build without the extension.
     await _vecIndex.rebuild();
+    // The clustering index, for the same reason and by the same argument. It
+    // resets rather than rebuilds because `conversation_ai` has just been
+    // emptied, so there is nothing to refill from; the next sweep's diff is
+    // what fills it again.
+    await _conversationIndex.reset();
   }
 
   // ── per-message AI output ────────────────────────────────────────────
@@ -2678,6 +2691,32 @@ FROM storylines s''';
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
+
+  /// Brings the clustering index level with `conversation_ai` and returns how
+  /// many rows it then holds — `null` when there is no usable index, which is
+  /// the caller's signal to do the arithmetic itself.
+  ///
+  /// The count is the point of the return type: a KNN probe over this index
+  /// has to ask for as many neighbours as the index holds to be certain it saw
+  /// every one of them, and the sweep cannot know that number on its own.
+  ///
+  /// Overridable for the same reason [memberContextRows] is: a test that has
+  /// to exercise the fallback needs a store that reports no index, and the
+  /// alternative — unloading a process-global native extension — is not one.
+  Future<int?> prepareConversationIndex({required String embedModel}) async {
+    if (!await _conversationIndex.ensureReady()) return null;
+    return _conversationIndex.backfill(embedModel: embedModel);
+  }
+
+  /// The [k] threads nearest [vector] in the clustering index, as cosine
+  /// similarities, closest first. Empty when the index is unavailable — which
+  /// only a caller that skipped [prepareConversationIndex] can be surprised by.
+  ///
+  /// The probe's own thread is among them, at similarity 1: the index cannot
+  /// tell which row asked, so excluding it belongs to whoever knows.
+  Future<List<({String source, String key, double similarity})>>
+      conversationNeighbors(Uint8List vector, {required int k}) =>
+          _conversationIndex.neighbors(vector, k: k);
 
   /// Every thread the sweep must leave alone: already in a live storyline, or
   /// explicitly kept out of one. Blocks count because a thread the user pulled

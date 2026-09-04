@@ -19,9 +19,11 @@ are the authority on sequencing.
    the next section.
 2. **Sweep** (`StorylineSweepHandler` → `sweep`) — clusters *unassigned*
    threads by embedding similarity (gate: 2 similar threads form a proposal),
-   names the proposal, then confirms each member individually. Rejected
-   clusters are tombstoned by immutable `cluster_hash` (schema v7) so a
-   dismissed suggestion stays dismissed even after membership drift.
+   names the proposal, then confirms each member individually. Pair-discovery
+   runs on the sqlite-vec index when there is one and on Dart arithmetic when
+   there is not, to the same clusters either way — its own section below.
+   Rejected clusters are tombstoned by immutable `cluster_hash` (schema v7) so
+   a dismissed suggestion stays dismissed even after membership drift.
 3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
    storyline whose membership has moved. Its own section below.
 4. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
@@ -234,6 +236,36 @@ the window with a non-null `storyline_id`, and `hotStorylines` groups by it —
 filing one long thread by hand can add many messages to both at once. That is
 the intended reading (the messages really are in that storyline), not a
 double-count.
+
+## How the sweep finds its pairs
+
+Clustering is two halves, and only one of them moved. **Forming** the clusters
+is single-link greedy agglomeration in `StorylineService._clusterBy` — each
+thread, in the order the store handed them over, joins the first existing
+cluster holding a member it links to. That is a pure function of its input, and
+has to stay one: `cluster_hash` is what tombstones a dismissed suggestion, so
+the same threads must group the same way on every run for a dismissal to hold.
+**Finding** the linked pairs is the half an index can do faster, and it now
+does — `ConversationVectorIndex` (see `05-embeddings.md`), diff-backfilled at
+sweep start, one KNN probe per candidate, `1 - distance` converted back to the
+cosine similarity the same `>= clusterLinkThreshold` decides on.
+
+**The results are identical, unconditionally, by design.** Each probe asks for
+as many neighbours as the *index* holds — not as many as there are candidates —
+so it comes back with the whole corpus and no link can be crowded out by a
+thread that is already filed. What that buys is native distance arithmetic over
+packed float32, not a better asymptotic: an index that made the sweep faster by
+proposing different storylines would be a bug wearing a benchmark.
+
+**Brute force is the fallback, and it is not exceptional.** The sweep does its
+own arithmetic when there is no usable index (the ordinary state of a build
+without the native extension), when the diff backfill cannot complete, when a
+candidate's vector is not the index's width — a corpus caught mid-model-change
+has rows the index skipped, and a hole in the index is a link the probes cannot
+find — and when a probe fails to find its own row, which is the cheap check
+that the index really does hold every candidate. Falling back is a `debugPrint`
+once per process and nothing else: never a park, never a crash, and never a
+different answer.
 
 ## Cross-source identity
 

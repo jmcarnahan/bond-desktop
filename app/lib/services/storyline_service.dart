@@ -2,6 +2,9 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
+import '../data/conversation_vec_index.dart';
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
@@ -950,6 +953,11 @@ class StorylineService {
 
     if (rows.length < StorylineTuning.sweepMinUnassigned) return;
 
+    // Pair-discovery, on the index when there is one and in Dart when there is
+    // not. The two answers are the same clusters either way — see
+    // [_indexedLinks] — so nothing below this line knows which ran.
+    final clusters = await _clusterCandidates(rows, vectors);
+
     // Room is spent on PROPOSALS, not on clusters considered: the pass is
     // deterministic and largest-first, so a dismissed cluster that merely
     // consumed a slot would consume that same slot on every future sweep and
@@ -958,7 +966,7 @@ class StorylineService {
     var confirmed = 0;
     var rejected = 0;
     var attempted = 0;
-    for (final cluster in _cluster(vectors)) {
+    for (final cluster in clusters) {
       if (proposed >= room) break;
       final tally = await _propose([for (final index in cluster) rows[index]]);
       attempted++;
@@ -986,35 +994,154 @@ class StorylineService {
     }
   }
 
-  /// Single-link greedy agglomeration, in one pass.
+  /// The clusters this sweep will consider, from whichever pair-discovery is
+  /// available.
   ///
-  /// Each conversation, in the order the store handed them over (newest first,
-  /// key ascending — a total order with no ties), joins the FIRST existing
-  /// cluster holding a member it links to, and otherwise opens one of its own.
-  /// That makes the result a pure function of the input: same rows and same
-  /// vectors in, same clusters out, which is what
-  /// [MessageStore.dismissedHashExistsAny] depends on to recognise a suggestion
-  /// the user already threw away.
+  /// The split is deliberate and narrow: finding the linked PAIRS is the part
+  /// an index can do faster, and forming the clusters out of them is the part
+  /// whose determinism the tombstones depend on. So both paths hand the same
+  /// question to the same [_clusterBy], and the only thing that varies is who
+  /// answered "does row i link to row j".
+  Future<List<List<int>>> _clusterCandidates(
+    List<Map<String, Object?>> rows,
+    List<List<double>> vectors,
+  ) async {
+    final links = await _indexedLinks(rows, vectors);
+    if (links == null) return _cluster(vectors);
+    return _clusterBy(vectors.length, (i, j) => links[i].contains(j));
+  }
+
+  /// The link adjacency read off the vec0 index, or null when the index cannot
+  /// answer for this candidate set and the caller must do the arithmetic.
+  ///
+  /// **This is an equivalence, not an approximation.** Every probe asks for as
+  /// many neighbours as the index HOLDS, so each one comes back with the whole
+  /// corpus and the same `>=` against the same threshold decides each pair. The
+  /// win being bought is that the distances are computed natively over packed
+  /// float32 instead of a Dart triple-accumulation per pair; it is emphatically
+  /// not an asymptotic one, and asking for fewer neighbours to get one would
+  /// mean the sweep proposing different storylines depending on whether an
+  /// optional native extension had loaded. Note that the index holds the whole
+  /// clustering corpus and the candidates are a subset of it — filed and
+  /// finished threads are indexed too — which is exactly why `k` is the index's
+  /// row count and not the candidate count: a `k` of the latter would let
+  /// already-filed threads crowd a genuine candidate out of a probe's answer.
+  ///
+  /// Three ways to decline, all of them quiet:
+  ///
+  /// * a candidate whose vector is not the index's width — a corpus caught
+  ///   mid-model-change has rows the index skipped, and a hole in the index is
+  ///   a link the probes cannot find;
+  /// * no usable index at all, which is the ordinary state of a build without
+  ///   the native extension;
+  /// * a probe that does not find its own row, which is the one cheap check
+  ///   that says the index really does hold every candidate.
+  Future<List<Set<int>>?> _indexedLinks(
+    List<Map<String, Object?>> rows,
+    List<List<double>> vectors,
+  ) async {
+    for (final vector in vectors) {
+      if (vector.length != ConversationVectorIndex.dims) return null;
+    }
+
+    final indexed = await _store.prepareConversationIndex(
+      embedModel: EmbeddingsClient.modelTag,
+    );
+    if (indexed == null) {
+      _reportBruteForce();
+      return null;
+    }
+
+    final position = <String, int>{};
+    for (var i = 0; i < rows.length; i++) {
+      final source = rows[i]['source'] as String? ?? _workSource;
+      final key = rows[i]['conversation_key'] as String? ?? '';
+      position[_threadKey(source, key)] = i;
+    }
+
+    final links = [for (var i = 0; i < rows.length; i++) <int>{}];
+    for (var i = 0; i < rows.length; i++) {
+      final blob = rows[i]['embedding'];
+      if (blob is! Uint8List) return null;
+      final hits = await _store.conversationNeighbors(blob, k: indexed);
+      var foundSelf = false;
+      for (final hit in hits) {
+        final j = position[_threadKey(hit.source, hit.key)];
+        if (j == null) continue;
+        if (j == i) {
+          foundSelf = true;
+          continue;
+        }
+        if (hit.similarity < StorylineTuning.clusterLinkThreshold) continue;
+        // Written both ways from either sighting. Cosine is symmetric and each
+        // probe sees the whole corpus, so this is a formality — but it is the
+        // formality that makes the adjacency a genuine undirected graph rather
+        // than something whose clusters could turn on which row was probed
+        // first.
+        links[i].add(j);
+        links[j].add(i);
+      }
+      if (!foundSelf) return null;
+    }
+    return links;
+  }
+
+  /// Says once, per process, that the sweep is clustering the slow way.
+  ///
+  /// Static because the interesting thing is the BUILD — an app without the
+  /// native extension will fall back on every sweep forever, and a line per
+  /// sweep would be noise about a fact that cannot change. The shape is
+  /// `EmbeddingsClient._fail`'s report-once, minus the storage it needs to key
+  /// several reasons.
+  static bool _fallbackReported = false;
+
+  static void _reportBruteForce() {
+    if (_fallbackReported) return;
+    _fallbackReported = true;
+    debugPrint('storylines: no clustering index — sweeping by arithmetic');
+  }
+
+  /// Single-link greedy agglomeration over [vectors], every pair compared in
+  /// Dart — the fallback, and the definition both paths are measured against.
   ///
   /// Full agglomerative clustering — repeatedly merging the closest pair —
   /// would find slightly better groups and is O(n³) on a list that is
   /// re-clustered after every sync. This pass is O(n²) against a mailbox of a
   /// few hundred live threads, and the model call behind each proposal is the
   /// part that decides quality anyway.
+  static List<List<int>> _cluster(List<List<double>> vectors) => _clusterBy(
+        vectors.length,
+        (i, j) =>
+            cosine(vectors[i], vectors[j]) >=
+            StorylineTuning.clusterLinkThreshold,
+      );
+
+  /// Single-link greedy agglomeration, in one pass, over [count] rows and the
+  /// one question [linked] answers about them.
+  ///
+  /// Each conversation, in the order the store handed them over (newest first,
+  /// key ascending — a total order with no ties), joins the FIRST existing
+  /// cluster holding a member it links to, and otherwise opens one of its own.
+  /// That makes the result a pure function of the input: same rows and same
+  /// links in, same clusters out, which is what
+  /// [MessageStore.dismissedHashExistsAny] depends on to recognise a suggestion
+  /// the user already threw away. [linked] is therefore required to be pure and
+  /// symmetric — both callers above satisfy that, one by arithmetic and one by
+  /// construction — because a link that depended on the order it was asked in
+  /// would put that property back at risk.
   ///
   /// Returned largest-first, so the [take] above keeps the strongest
   /// proposals; ties break on the earlier cluster, which preserves the recency
   /// order the rows arrived in.
-  static List<List<int>> _cluster(List<List<double>> vectors) {
+  static List<List<int>> _clusterBy(
+    int count,
+    bool Function(int i, int j) linked,
+  ) {
     final clusters = <List<int>>[];
-    for (var i = 0; i < vectors.length; i++) {
+    for (var i = 0; i < count; i++) {
       var joined = false;
       for (final cluster in clusters) {
-        final links = cluster.any(
-          (member) =>
-              cosine(vectors[i], vectors[member]) >=
-              StorylineTuning.clusterLinkThreshold,
-        );
+        final links = cluster.any((member) => linked(i, member));
         if (!links) continue;
         cluster.add(i);
         joined = true;
