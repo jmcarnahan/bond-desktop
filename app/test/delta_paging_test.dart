@@ -57,6 +57,15 @@ http.Response jsonOk(Object body) => http.Response(
       headers: const {'content-type': 'application/json'},
     );
 
+/// Yesterday, so a defaulted message is always inside the triage window.
+/// An absolute date here rots: it sat still while `triageWindowDays` walked
+/// past it, and the backlog gate started skipping fixtures that were fresh
+/// the day they were written.
+final String _freshReceivedAt = DateTime.now()
+    .toUtc()
+    .subtract(const Duration(days: 1))
+    .toIso8601String();
+
 /// One message as a delta page renders it — the tier-one fields only.
 Map<String, dynamic> graphMessage({
   required String id,
@@ -65,7 +74,10 @@ Map<String, dynamic> graphMessage({
   String fromName = 'Sarah Whitfield',
   String fromAddress = 'sarah@example.com',
   List<String> to = const ['lo@bond.com'],
-  String? receivedDateTime = '2026-08-28T10:00:00Z',
+  // Null means "fresh": [_freshReceivedAt] fills it in below. A default has
+  // to be a constant, and the one constant worth writing here is no date at
+  // all.
+  String? receivedDateTime,
   bool isRead = false,
   bool isDraft = false,
   String preview = 'Preview text',
@@ -84,7 +96,7 @@ Map<String, dynamic> graphMessage({
             'emailAddress': {'name': null, 'address': address}
           },
       ],
-      'receivedDateTime': receivedDateTime,
+      'receivedDateTime': receivedDateTime ?? _freshReceivedAt,
       'isRead': isRead,
       'isDraft': isDraft,
       'bodyPreview': preview,

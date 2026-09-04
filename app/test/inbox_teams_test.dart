@@ -92,6 +92,15 @@ const String _withChat = '$_coreScopes https://graph.microsoft.com/Chat.Read';
 const String _withChatWrite =
     '$_coreScopes https://graph.microsoft.com/Chat.ReadWrite';
 
+/// Yesterday's date, carrying the fixtures' hour-of-day so their ordering
+/// stays readable at the call sites. Relative because absolute dates rot: a
+/// literal that was fresh the day it was written aged out of the app's
+/// recency windows, and rows the tests reached for stopped being listed.
+String _at(int hour) {
+  final day = DateTime.now().toUtc().subtract(const Duration(days: 1));
+  return DateTime.utc(day.year, day.month, day.day, hour).toIso8601String();
+}
+
 void main() {
   late BondDatabase db;
   late MessageStore store;
@@ -122,7 +131,7 @@ void main() {
       'direction': 'inbound',
       'from_name': 'Sarah Whitfield',
       'from_address': 'teams:u1',
-      'received_at': '2026-08-28T11:00:00Z',
+      'received_at': _at(11),
       'body_text': body,
       'body_preview': 'Any word on the CD?',
       'triage_status': 'skipped',
@@ -134,8 +143,8 @@ void main() {
       'subject': subject,
       'participants_json': '[{"name":"Sarah Whitfield","email":"teams:u1"}]',
       'state': 'needs_reply',
-      'last_message_at': '2026-08-28T11:00:00Z',
-      'last_inbound_at': '2026-08-28T11:00:00Z',
+      'last_message_at': _at(11),
+      'last_inbound_at': _at(11),
       'last_message_preview': 'Any word on the CD?',
     });
     await store.recomputeConversationCounts('teams', key);
@@ -145,8 +154,11 @@ void main() {
     String key, {
     String subject = 'Homepage copy',
     String body = 'The homepage copy is in.',
-    String at = '2026-08-28T09:00:00Z',
+    // Null means 9am yesterday — a default has to be a constant, and the one
+    // constant worth writing here is no date at all.
+    String? at,
   }) async {
+    at ??= _at(9);
     await store.upsertMessage({
       'source_message_id': '$key-m1',
       'conversation_key': key,
@@ -269,7 +281,7 @@ void main() {
     await seedMail(
       'shared',
       body: 'the mail transcript',
-      at: '2026-08-28T13:00:00Z',
+      at: _at(13),
     );
     await pumpScreen(tester);
 
@@ -445,7 +457,7 @@ void main() {
         'source_message_id': 'c1-m2',
         'conversation_key': 'c1',
         'direction': 'outbound',
-        'received_at': '2026-08-28T10:00:00Z',
+        'received_at': _at(10),
         'body_text': 'Already answered this one.',
       });
       await pumpScreen(tester);
