@@ -58,6 +58,33 @@ CREATE TABLE messages (
   addressed_me INTEGER NOT NULL DEFAULT 0,
   reply_expected INTEGER,
   deadline TEXT,
+  -- `needs_you_verdict` is the needs-you pass's answer to the only question
+  -- the rail exists to ask: does this one want the owner? NULL means the pass
+  -- has never judged this row, which is NOT the same as "no" — the unjudged
+  -- rows ARE the worklist, so nothing may read NULL as 0. 0 is a judgement
+  -- that the message does not need the owner; 1 is a judgement that it does.
+  --
+  -- Written by the `needs_you` work handler and by nobody else — the
+  -- deterministic floor or, later, the model. Ingest never touches it: what a
+  -- connector knows lands in `addressed_me`, which is a fact about the
+  -- message, while this is a verdict about it.
+  --
+  -- `needs_you_reason` says why: 'teams_direct' from the floor, or the
+  -- model's own evidence sentence.
+  needs_you_verdict INTEGER,
+  needs_you_reason TEXT,
+  -- `gate_override` is the owner's hand on the gates, and it is tri-state in
+  -- the same way the verdict above is. NULL means nobody has overridden
+  -- anything and the pipeline's own call stands. 'user' means the owner
+  -- restored this message from the dropped pile, and no gate may drop it
+  -- again — not the sender gate, not the header gate, not the backlog cap.
+  --
+  -- The stamp is durable on purpose. `gate_reason` is a derivation and gets
+  -- recomputed on every triage claim; this outranks every future one. It
+  -- mirrors the `created_by`/`added_by = 'user'` stamps on storylines (see
+  -- `MessageStore.stampStorylineId`): the user is telling the app what the
+  -- old messages were always about, and that word outlives the passes.
+  gate_override TEXT,
   PRIMARY KEY (source, source_message_id)
 ) STRICT;
 

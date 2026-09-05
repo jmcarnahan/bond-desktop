@@ -257,6 +257,31 @@ void main() {
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
+
+    test('an open needs-you work row holds the row open', () async {
+      // Waited on exactly like extraction: the verdict it is about to write is
+      // an ask this settle reads, so settling first would announce — or stay
+      // silent about — a message on an answer that had not arrived.
+      await seedCandidate();
+      await store.enqueueWork('needs_you', 'email', 'm-1');
+      await sweep();
+
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      await store.writeWork('needs_you', 'email', 'm-1', status: 'done');
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+    });
+
+    test('an absent needs-you row counts as finished, not as pending',
+        () async {
+      // The gated and beyond-cap rows are never queued for this pass at all,
+      // and a row that waits for work nothing will ever enqueue would sit open
+      // until the deadline forced it.
+      await seedCandidate();
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+    });
   });
 
   // Worthiness is an AND: the message must ask something of the reader, AND
@@ -365,6 +390,91 @@ void main() {
 
       expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
       expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
+    });
+  });
+
+  // The needs-you stage's verdict, read as an ask alongside triage's. Every
+  // candidate below is NARROW — triage found nothing to ask about — so the
+  // verdict column is the only thing that can speak, and the tri-state is
+  // tested one value at a time: yes, judged no, and never judged.
+  group('the needs-you verdict', () {
+    /// A candidate whose triage asks nothing, with [verdict] written onto it.
+    ///
+    /// The score is rewritten AFTER the verdict on purpose: writing a verdict
+    /// bumps the message's `updated_at`, which correctly makes the existing
+    /// score a verdict about an older version of the row. Restamping it is what
+    /// the pipeline does in real life, and here it keeps these tests about
+    /// worthiness rather than about completeness.
+    Future<void> seedJudged(bool? verdict) async {
+      await seedCandidate(replyExpected: false);
+      if (verdict != null) {
+        await store.writeNeedsYouVerdict(
+          'email',
+          'm-1',
+          verdict: verdict,
+          reason: 'model says so',
+        );
+      }
+      await store.writeAttentionScore('email', 'conv-1', 0.9);
+    }
+
+    test('a judged yes is an ask on its own', () async {
+      // Nothing triage wrote asks anything here, so this announcement exists
+      // entirely because the needs-you pass said the message wants the owner.
+      await seedJudged(true);
+      await sweep();
+
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'notified');
+      expect(row['reason'], 'settled');
+      expect(emitted.single.sourceMessageId, 'm-1');
+    });
+
+    test('a judged no adds nothing', () async {
+      await seedJudged(false);
+      await sweep();
+
+      expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
+      expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
+      expect(emitted, isEmpty);
+    });
+
+    test('an unjudged message adds nothing either', () async {
+      // NULL is "no pass has looked at this", which is not a yes — the same
+      // rule `reply_expected` takes, and the reason both are read with `== 1`.
+      await seedJudged(null);
+      final stored = await store.getMessageRow('email', 'm-1');
+      expect(stored!['needs_you_verdict'], isNull);
+
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
+      expect(emitted, isEmpty);
+    });
+
+    test('a judged yes is still gated by the attention threshold', () async {
+      // The recorded decision: the verdict is the ask half only. It buys no
+      // exemption from the user's one loudness control.
+      await seedCandidate(replyExpected: false);
+      await store.writeNeedsYouVerdict('email', 'm-1',
+          verdict: true, reason: 'model says so');
+      await store.writeAttentionScore('email', 'conv-1', 0.1);
+      await sweep();
+
+      expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
+      expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
+      expect(emitted, isEmpty);
+    });
+
+    test('a judged yes is still gated by the Later bucket', () async {
+      await seedCandidate(replyExpected: false, bucket: 'later');
+      await store.writeNeedsYouVerdict('email', 'm-1',
+          verdict: true, reason: 'model says so');
+      await store.writeAttentionScore('email', 'conv-1', 0.9);
+      await sweep();
+
+      expect(await notifyRow('m-1'), containsPair('state', 'suppressed'));
+      expect(await notifyRow('m-1'), containsPair('reason', 'not_worthy'));
+      expect(emitted, isEmpty);
     });
   });
 

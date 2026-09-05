@@ -19,6 +19,7 @@ void main() {
     required void Function(String) onAboutMeChanged,
     Future<bool> Function(String)? hasScope,
     VoidCallback? onSignInAgain,
+    VoidCallback? onEditNeedsYouRules,
     bool showActivityLog = false,
     void Function(bool)? onShowActivityLogChanged,
     NotifyStyle notifyStyle = NotifyStyle.native,
@@ -37,6 +38,7 @@ void main() {
                 aboutMe: aboutMe,
                 onThresholdChanged: onThresholdChanged,
                 onAboutMeChanged: onAboutMeChanged,
+                onEditNeedsYouRules: onEditNeedsYouRules,
                 showActivityLog: showActivityLog,
                 onShowActivityLogChanged: onShowActivityLogChanged,
                 notifyStyle: notifyStyle,
@@ -66,6 +68,33 @@ void main() {
     expect(find.text('Anything plausible'), findsOneWidget);
     expect(find.text('About me & my role'), findsOneWidget);
     expect(find.byType(Slider), findsOneWidget);
+  });
+
+  testWidgets('no rules row without a host wired to open the pane',
+      (tester) async {
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+
+    expect(find.text('What counts as needing you…'), findsNothing);
+  });
+
+  testWidgets('the rules row hands the host the pane to open', (tester) async {
+    var opened = 0;
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+      onEditNeedsYouRules: () => opened++,
+    );
+
+    expect(find.text('What counts as needing you…'), findsOneWidget);
+    await tester.tap(find.text('What counts as needing you…'));
+    await tester.pump();
+
+    expect(opened, 1);
   });
 
   testWidgets('the slider reads right-is-more, so it renders inverted',

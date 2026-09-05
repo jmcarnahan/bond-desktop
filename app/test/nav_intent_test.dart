@@ -250,7 +250,7 @@ void main() {
     await seedThread('c1', 'Homepage copy');
     await pumpScreen(tester);
 
-    await request(tester, OpenSectionIntent(RailSection.later));
+    await request(tester, OpenSectionIntent(RailSection.archive));
 
     expect(find.byType(LaterDigestPanel), findsOneWidget);
 
@@ -265,7 +265,7 @@ void main() {
     await pumpScreen(tester);
 
     await request(tester, OpenThreadIntent('email', 'c1'));
-    await request(tester, OpenSectionIntent(RailSection.later));
+    await request(tester, OpenSectionIntent(RailSection.archive));
     await request(tester, OpenThreadIntent('email', 'c1'));
 
     expect(find.byType(ThreadDetailPanel), findsOneWidget);

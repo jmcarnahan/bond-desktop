@@ -302,9 +302,21 @@ class TriageQueue {
     // the next launch.
     final sw = Stopwatch()..start();
 
+    // The owner restored this one from the dropped pile, so no gate gets to
+    // take it again. Read once and held for the whole claim, deliberately:
+    // the stamp is the user's word and nothing inside a claim changes it —
+    // the mid-claim re-read below refreshes body and headers, not that.
+    //
+    // It lives here rather than in `gates.dart` for the same reason
+    // `MessageStore.stampStorylineId` lives in the store: the gate functions
+    // stay pure judgements about a message, while the override is a fact
+    // about what the user did with it. That belongs at the call site.
+    final overridden = (current['gate_override'] as String?) == 'user';
+
     // Tier one, on the delta page's own fields. Free, and it is what keeps
     // the fetch below off every no-reply and every message the user sent.
-    final senderGate = gateFor(message, userAddress: _userAddress);
+    final senderGate =
+        overridden ? null : gateFor(message, userAddress: _userAddress);
     if (senderGate != null) {
       // No activity row, here or at the header gate below. A `triage` row
       // means the model was consulted, and a gate is the mechanism that keeps
@@ -349,7 +361,8 @@ class TriageQueue {
     // Again, because the gates that read headers had nothing to read a moment
     // ago. Re-running the sender gate too is free and keeps this one call
     // the single place a gate decision is made.
-    final headerGate = gateFor(message, userAddress: _userAddress);
+    final headerGate =
+        overridden ? null : gateFor(message, userAddress: _userAddress);
     if (headerGate != null) {
       await _writeTriage(
         source,

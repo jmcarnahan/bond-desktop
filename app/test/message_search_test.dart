@@ -116,6 +116,26 @@ void main() {
       expect((result as MessageSearchUnavailable).reason, isNotEmpty);
     });
 
+    test('the archive still answers with what text can find', () async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'gated',
+        'conversation_key': 'c-gated',
+        'direction': 'inbound',
+        'subject': 'Invoice 4471 is overdue',
+        'received_at': '2026-08-29T10:00:00Z',
+      });
+
+      final result =
+          await MessageSearch(store, downServer()).searchArchive('invoice');
+
+      // The contrast with the test above, and the reason the archive's result
+      // type is not the sealed one: a down server narrows this answer, where
+      // on Home it replaces it.
+      expect([for (final row in result.rows) row.sourceMessageId], ['gated']);
+      expect(result.notice, startsWith('Text matches only'));
+      expect(result.query, 'invoice');
+    });
   });
 
   group('end to end', () {
@@ -343,6 +363,56 @@ void main() {
       // DELETE FROM message_vectors cannot reach inside the virtual table;
       // the rebuild at the end of the wipe is what makes this zero.
       expect(await indexRows(), 0);
+    });
+
+    group('the archive searches both ways at once', () {
+      /// A message the gate threw out: stored, never embedded, so the index
+      /// has no way of knowing it exists.
+      Future<void> seedGated() async {
+        await seed(id: 'gated', subject: 'Invoice from the newsletter');
+        await store.writeSettledProgress(
+          'email',
+          'gated',
+          needsYou: false,
+          reason: 'newsletter',
+          dropped: true,
+        );
+      }
+
+      test('meaning ranks first and text fills in behind it', () async {
+        if (!available) return;
+        await seedCorpus();
+        await seedGated();
+
+        final result =
+            await MessageSearch(store, server.client).searchArchive('invoice');
+
+        final ids = [for (final row in result.rows) row.sourceMessageId];
+        expect(ids.first, 'inv', reason: 'the nearest message is still first');
+        // Behind everything the index ranked, because it has no rank of its
+        // own — but present, which is the point.
+        expect(ids.indexOf('gated'), greaterThan(ids.indexOf('inv')));
+        expect(ids, contains('gated'));
+        expect(result.notice, isNull, reason: 'both halves ran');
+      });
+
+      test('a message both halves find is one row', () async {
+        if (!available) return;
+        await seedCorpus();
+
+        final result =
+            await MessageSearch(store, server.client).searchArchive('invoice');
+
+        // `inv` is the top semantic hit AND a literal text match; the merge
+        // keys on the feed key, so it arrives once.
+        final keys = {for (final row in result.rows) row.feedKey};
+        expect(keys, hasLength(result.rows.length));
+        expect(
+          [for (final row in result.rows) row.sourceMessageId]
+              .where((id) => id == 'inv'),
+          hasLength(1),
+        );
+      });
     });
 
     test('a wrong-width vector is skipped rather than poisoning the index',

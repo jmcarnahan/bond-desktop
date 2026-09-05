@@ -53,6 +53,7 @@ void main() {
     String? ctaText = 'Reply to Dana',
     ConversationState state = ConversationState.needsReply,
     VoidCallback? onOpenReply,
+    VoidCallback? onReopen,
     Widget? Function(Message message)? suggestionFor,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
@@ -68,6 +69,7 @@ void main() {
           ),
           messages: messages,
           onMarkDone: () {},
+          onReopen: onReopen,
           onOpenReply: onOpenReply,
           suggestionFor: suggestionFor,
         ),
@@ -454,5 +456,56 @@ void main() {
 
     expect(find.text('Confirm the date'), findsOneWidget);
     expect(find.text('Send the deck'), findsNothing);
+  });
+
+  group('reopen', () {
+    testWidgets('a done thread offers it where Mark done used to sit',
+        (tester) async {
+      await pump(
+        tester,
+        state: ConversationState.done,
+        messages: [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')],
+        onReopen: () {},
+      );
+
+      expect(find.text('Reopen'), findsOneWidget);
+      expect(find.text('Mark done'), findsNothing);
+    });
+
+    testWidgets('tapping it asks the host', (tester) async {
+      var reopened = 0;
+      await pump(
+        tester,
+        state: ConversationState.done,
+        messages: [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')],
+        onReopen: () => reopened++,
+      );
+
+      await tester.tap(find.text('Reopen'));
+      await tester.pump();
+
+      expect(reopened, 1);
+    });
+
+    testWidgets('a live thread is still the one that closes', (tester) async {
+      await pump(
+        tester,
+        messages: [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')],
+        onReopen: () {},
+      );
+
+      expect(find.text('Mark done'), findsOneWidget);
+      expect(find.text('Reopen'), findsNothing);
+    });
+
+    testWidgets('a host with nowhere to put it gets no button', (tester) async {
+      await pump(
+        tester,
+        state: ConversationState.done,
+        messages: [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')],
+      );
+
+      expect(find.text('Reopen'), findsNothing);
+    });
   });
 }

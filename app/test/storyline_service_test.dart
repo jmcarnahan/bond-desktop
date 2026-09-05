@@ -1725,6 +1725,355 @@ void main() {
     });
   });
 
+  group('sweep probe (join, not seed)', () {
+    /// The same four unassigned threads the sweep group clusters: c1 and c2
+    /// link, c3 and c4 link to nothing.
+    Future<void> seedMailbox(MessageStore into) async {
+      await seed(into, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(into, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(into, 'c3',
+          vector: vectorAt(0), lastMessageAt: '2026-08-29T02:00:00Z');
+      await seed(into, 'c4',
+          vector: vectorAt(-0.9), lastMessageAt: '2026-08-29T01:00:00Z');
+    }
+
+    /// One finished thread, seeded `done` from the start — never marked done
+    /// afterwards, which is the call an old test in the sweep group forgets to
+    /// await.
+    Future<void> seedDone(
+      MessageStore into,
+      String key, {
+      required List<double> vector,
+      String lastMessageAt = '2026-08-29T05:00:00Z',
+    }) =>
+        seed(into, key,
+            vector: vector, state: 'done', lastMessageAt: lastMessageAt);
+
+    test('a finished thread near a newborn storyline joins it', () async {
+      await seedMailbox(store);
+      await seedDone(store, 'd1', vector: vectorAt(0.95));
+      // Two cluster members first, in the order the sweep reads the rows, and
+      // then the one probe candidate.
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [
+          confirmAnswer(evidence: 'c1 is the homepage copy review.'),
+          confirmAnswer(evidence: 'c2 is the same review, continued.'),
+          confirmAnswer(evidence: 'd1 is where the redesign was agreed.'),
+        ],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      final members = await store.membersOf(storyline.id);
+      expect(members.map((m) => m.conversationKey).toSet(), {'c1', 'c2', 'd1'});
+      final joinedMember = members.firstWhere((m) => m.conversationKey == 'd1');
+      expect(joinedMember.addedBy, 'auto');
+      // The model's own sentence about the finished thread, not the cluster's.
+      expect(joinedMember.evidence, 'd1 is where the redesign was agreed.');
+      // Two members plus the one candidate the probe put in front of it.
+      expect(llm.callsFor('storyline_membership'), 3);
+      // d1 is the newest thread in the group, so the activity stamp follows
+      // it exactly as it follows any other member that joins.
+      expect(storyline.lastActivityAt, '2026-08-29T05:00:00Z');
+    });
+
+    test('a finished thread far from the cluster is never offered', () async {
+      await seedMailbox(store);
+      await seedDone(store, 'd1', vector: vectorAt(0));
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect((await store.membersOf(storyline.id))
+          .map((m) => m.conversationKey)
+          .toSet(), {'c1', 'c2'});
+      // Under the gate, so the model never hears about it at all — the
+      // embedding is what decides what gets a call.
+      expect(llm.callsFor('storyline_membership'), 2);
+    });
+
+    test('a yes the model is not confident about keeps the thread out',
+        () async {
+      await seedMailbox(store);
+      await seedDone(store, 'd1', vector: vectorAt(0.95));
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(),
+          confirmAnswer(confidence: 'low'),
+        ],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect((await store.membersOf(storyline.id))
+          .map((m) => m.conversationKey)
+          .toSet(), {'c1', 'c2'});
+      // It WAS asked — the same `low is a no` rule every other membership path
+      // applies, not a gate that kept it away.
+      expect(llm.callsFor('storyline_membership'), 3);
+    });
+
+    test('a probe join burns no refresh and rewrites no cluster hash',
+        () async {
+      await seedMailbox(store);
+      await seedDone(store, 'd1', vector: vectorAt(0.95));
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      // Born described, and the probe must not undo that: both hashes are
+      // recomputed over the final set of three, so the description written
+      // seconds ago is not re-derived by a 27B call for nothing.
+      expect(storyline.memberHash, memberHashOf(['c1', 'c2', 'd1']));
+      expect(storyline.refreshedMemberHash, storyline.memberHash);
+      expect(storyline.refreshedMemberCount, 3);
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+      // The cluster is still the pair the sweep built and the user is being
+      // asked about. The probe answered a different question.
+      final clusterHash = (await db
+              .customSelect(
+                'SELECT cluster_hash FROM storylines WHERE id = ?',
+                variables: [Variable(storyline.id)],
+              )
+              .getSingle())
+          .data['cluster_hash'];
+      expect(clusterHash, memberHashOf(['c1', 'c2']));
+    });
+
+    test('a finished thread already spoken for is never offered', () async {
+      await seedMailbox(store);
+      await seedDone(store, 'd1', vector: vectorAt(0.95));
+      // Active rather than suggested, so it consumes no room in the rail —
+      // what it consumes is d1, which the taken-set check reads before the
+      // done divert ever runs.
+      await store.insertStoryline(
+        id: 'sl-existing',
+        title: 'Existing',
+        status: 'active',
+        createdBy: 'user',
+      );
+      await store.addStorylineMember('sl-existing', 'email', 'd1',
+          addedBy: 'user');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect((await store.membersOf(storyline.id))
+          .map((m) => m.conversationKey)
+          .toSet(), {'c1', 'c2'});
+      expect(llm.callsFor('storyline_membership'), 2);
+    });
+
+    test('the probe stops at the recruit cap however many are near', () async {
+      await seedMailbox(store);
+      // Ten identical finished threads: same vector, so the same score, and
+      // the tie is broken by the order the store hands them over — newest
+      // first, which is d10 down to d01.
+      for (var i = 1; i <= 10; i++) {
+        await seedDone(
+          store,
+          'd${i.toString().padLeft(2, '0')}',
+          vector: vectorAt(0.95),
+          lastMessageAt: '2026-08-28T10:${i.toString().padLeft(2, '0')}:00Z',
+        );
+      }
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      // Two cluster members and eight candidates — never all ten. A newborn
+      // storyline is not an excuse to spend a confirmation on every finished
+      // thread in the mailbox.
+      expect(llm.callsFor('storyline_membership'),
+          2 + StorylineTuning.recruitMaxCandidates);
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect(
+        (await store.membersOf(storyline.id))
+            .map((m) => m.conversationKey)
+            .toSet(),
+        {'c1', 'c2', 'd10', 'd09', 'd08', 'd07', 'd06', 'd05', 'd04', 'd03'},
+      );
+    });
+
+    test('a cluster the model threw out probes nothing', () async {
+      await seedMailbox(store);
+      await seedDone(store, 'd1', vector: vectorAt(0.95));
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer(belongs: false)],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      // Both members rejected, so the cluster is tombstoned. A group the model
+      // just threw out must not go recruiting history to make itself big
+      // enough to ship — d1 is never asked.
+      expect(llm.callsFor('storyline_membership'), 2);
+      final tombstone =
+          (await store.loadStorylines(statuses: const ['dismissed'])).single;
+      expect(await store.membersOf(tombstone.id), isEmpty);
+      expect(await store.loadStorylines(statuses: const ['suggested']),
+          isEmpty);
+    });
+
+    test('a server that parks mid-probe leaves the hashes telling the truth',
+        () async {
+      await seedMailbox(store);
+      // Two candidates over the gate, scored apart so the order is theirs:
+      // d1 first, then the park lands on d2.
+      await seedDone(store, 'd1', vector: vectorAt(0.95));
+      await seedDone(store, 'd2',
+          vector: vectorAt(0.8), lastMessageAt: '2026-08-29T04:30:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(),
+          confirmAnswer(),
+          const LlmUnavailableException('server off'),
+        ],
+      });
+
+      await expectLater(
+        StorylineService(store, llm).sweep(),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+
+      // The join that landed stays, exactly as recruit keeps what already
+      // landed — and because the hash write shares its breath, the columns
+      // describe the set of three that actually exists, not the seed pair.
+      // Equal columns means no 27B refresh is spent on the interruption.
+      final storyline =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect(
+        (await store.membersOf(storyline.id))
+            .map((m) => m.conversationKey)
+            .toSet(),
+        {'c1', 'c2', 'd1'},
+      );
+      expect(storyline.memberHash, memberHashOf(['c1', 'c2', 'd1']));
+      expect(storyline.refreshedMemberHash, storyline.memberHash);
+      expect(storyline.refreshedMemberCount, 3);
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+    });
+
+    test('the first recap already reads the thread the probe joined', () async {
+      await seedMailbox(store);
+      await seedDone(store, 'd1', vector: vectorAt(0.95));
+      await seedMessage(store, 'c1', 'm-c1',
+          receivedAt: '2026-08-29T04:00:00Z');
+      await seedMessage(store, 'c2', 'm-c2',
+          receivedAt: '2026-08-29T03:00:00Z');
+      await seedMessage(store, 'd1', 'm-d1',
+          receivedAt: '2026-08-29T05:00:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+        'storyline_recap': [recapAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.sweep();
+      expect(await drainRecap(service), isNotNull);
+
+      // The probe runs before `_propose` returns, so the recap row the birth
+      // queued — drained in this same pass — sees the joined thread. Deferring
+      // the probe would have the storyline's very first recap describe a group
+      // it is no longer.
+      final recap = llm.userMessages[llm.schemas.indexOf('storyline_recap')];
+      expect(recap, contains('Subject for d1'));
+    });
+
+    test('a finished thread joins at most one storyline per pass', () async {
+      // Two clusters that do not link to each other — the b-pair sits about
+      // 70° off the c-pair, well under `clusterLinkThreshold` — with one
+      // finished thread parked between them, over the probe's gate against
+      // both centroids.
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'b1',
+          vector: vectorAt(0.3), lastMessageAt: '2026-08-29T02:00:00Z');
+      await seed(store, 'b2',
+          vector: vectorAt(0.15), lastMessageAt: '2026-08-29T01:00:00Z');
+      await seedDone(store, 'd1', vector: vectorAt(0.73));
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer(), nameAnswer(title: 'Vendor invoices')],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final byMembers = {
+        for (final storyline
+            in await store.loadStorylines(statuses: const ['suggested']))
+          (await store.membersOf(storyline.id))
+              .map((m) => m.conversationKey)
+              .toSet(): storyline.id,
+      };
+      // The first proposal takes it; the second is never even offered it. The
+      // sweep's own taken-set could not have known — that storyline did not
+      // exist when the set was read — and no other automatic path lets one
+      // thread sit in two storylines.
+      expect(byMembers.keys, containsAll([
+        {'c1', 'c2', 'd1'},
+        {'b1', 'b2'},
+      ]));
+      // Two members each, plus the one probe candidate the first proposal was
+      // offered. The second proposal's probe had nothing left to ask about.
+      expect(llm.callsFor('storyline_membership'), 5);
+    });
+
+    test('the probe never widens the pool a cluster is formed from', () async {
+      // Two finished threads that sit right on top of each other and nothing
+      // else. They would cluster happily if they were candidates — the whole
+      // point is that they are not, so the pass has nothing to be born and
+      // never reaches the model at all.
+      await seedDone(store, 'd1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T05:00:00Z');
+      await seedDone(store, 'd2',
+          vector: vectorAt(0.95), lastMessageAt: '2026-08-29T04:00:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.loadStorylines(), isEmpty);
+    });
+  });
+
   group('user actions', () {
     test('creating a storyline locks its title and files the thread', () async {
       await seed(store, 'c1', lastMessageAt: '2026-08-29T10:00:00Z');
@@ -2103,6 +2452,46 @@ void main() {
       // it is zero — the hash check turned the cluster away before any model
       // call — and the log suppresses that as the genuine nothing it is.
       expect(detail, isEmpty);
+    });
+
+    test('a sweep counts what its probe joined, apart from what it confirmed',
+        () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(store, 'd1',
+          vector: vectorAt(0.95),
+          state: 'done',
+          lastMessageAt: '2026-08-29T05:00:00Z');
+
+      final detail = await sweepAndRecord(FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      }));
+
+      expect(detail['proposed'], 1);
+      // Two, not three: `confirmed` is the cluster's own members being judged,
+      // and the finished thread was never in the cluster.
+      expect(detail['confirmed'], 2);
+      expect(detail['rejected'], 0);
+      expect(detail['joined'], 1);
+      // A number, always — the log's quiet-kind check only understands those,
+      // and a null or a string here would make every all-zero sweep loud.
+      expect(detail['joined'], isA<int>());
+    });
+
+    test('a sweep with no finished thread to offer notes a numeric zero',
+        () async {
+      await seed(store, 'c1', vector: vectorAt(1));
+      await seed(store, 'c2', vector: vectorAt(0.9));
+
+      final detail = await sweepAndRecord(FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      }));
+
+      expect(detail['joined'], 0);
     });
 
     test('a sweep with nothing to cluster writes no row at all', () async {

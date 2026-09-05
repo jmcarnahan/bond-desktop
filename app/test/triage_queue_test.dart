@@ -362,6 +362,67 @@ void main() {
     });
   });
 
+  /// The owner's override, at both tiers.
+  ///
+  /// A gate is a judgement the claim re-derives every time, so clearing a
+  /// `gate_reason` is not enough to bring a message back — the next claim
+  /// would reach the same verdict. These pin that the stamp outranks it.
+  group('gate override', () {
+    test('a restored message reaches the model past the sender gate',
+        () async {
+      await seedMessage(id: 'm1', from: 'no-reply@example.com');
+      await store.restoreMessage('email', 'm1');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages.length, 1);
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
+    test('the same message without the stamp is still gated', () async {
+      // The other direction, spelled here rather than leaned on: the seed
+      // above is only evidence about the override if this one is evidence
+      // that the gate would otherwise have fired on it. (`a gated message is
+      // skipped without reaching the model` pins the same rule for
+      // `no-reply@bank.com`.)
+      await seedMessage(id: 'm1', from: 'no-reply@example.com');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages, isEmpty);
+      final row = await messageRow('m1');
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'no_reply');
+    });
+
+    test('a restored message survives the header gate after its fetch',
+        () async {
+      await seedMessage(
+        id: 'm1',
+        withBody: false,
+        bodyPreview: 'This week in rates',
+      );
+      await store.restoreMessage('email', 'm1');
+      final llm = FakeLlm([answer()]);
+      final fetch = FakeDetailFetch(
+        store,
+        bodyText: 'Body',
+        headers: const {'list-unsubscribe': '<mailto:stop@example.com>'},
+      );
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      // The fetch still happens — the override is about the verdict, not
+      // about skipping the work that informs it — and the newsletter gate
+      // that fired on exactly these headers a test ago does not.
+      expect(fetch.fetched, ['m1']);
+      expect(llm.userMessages.length, 1);
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+  });
+
   group('two-tier fetch', () {
     test('a bodyless message is fetched before the model sees it', () async {
       await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');

@@ -58,6 +58,11 @@ class ConversationListPane extends StatelessWidget {
   /// processing hints at all.
   final DateTime? processingSince;
 
+  /// Puts a closed thread back into the working inbox. Offered on the DONE
+  /// section only, and only when a host passed one — a Reopen beside a live
+  /// thread is an action with nothing to undo.
+  final void Function(String source, String conversationKey)? onReopen;
+
   const ConversationListPane({
     super.key,
     required this.sources,
@@ -68,6 +73,7 @@ class ConversationListPane extends StatelessWidget {
     this.selectedSource,
     this.sectionsOverride,
     this.processingSince,
+    this.onReopen,
   });
 
   List<Conversation> _inState(ConversationState state) => [
@@ -110,6 +116,13 @@ class ConversationListPane extends StatelessWidget {
             ('DONE', _inState(ConversationState.done)),
           ],
       };
+
+  /// Whether rows carry a Reopen. The done section as THIS pane bucketed it,
+  /// never a section a host labelled 'DONE' through [sectionsOverride] — the
+  /// rows under an override are the caller's own, and reopening a live thread
+  /// does nothing anyone asked for.
+  bool get _showReopen =>
+      onReopen != null && sectionsOverride == null && filter == InboxFilter.done;
 
   @override
   Widget build(BuildContext context) {
@@ -155,15 +168,41 @@ class ConversationListPane extends StatelessWidget {
             for (final c in rows)
               Padding(
                 padding: const EdgeInsets.only(bottom: BondSpacing.s8),
-                child: ConversationRow(
-                  conversation: c,
-                  selected: c.id == selectedId &&
-                      (selectedSource == null || selectedSource == c.source),
-                  onTap: () => onSelect(c.source, c.id),
-                  processingSince: processingSince,
-                ),
+                child: _row(c),
               ),
           ],
+      ],
+    );
+  }
+
+  /// One thread's card, with Reopen beside it where the section offers one.
+  /// The button sits outside the card rather than in it: [ConversationRow] is
+  /// the same row everywhere it appears, and a card that grows an action in
+  /// one list is a card that reads differently in the others.
+  Widget _row(Conversation c) {
+    final row = ConversationRow(
+      conversation: c,
+      selected: c.id == selectedId &&
+          (selectedSource == null || selectedSource == c.source),
+      onTap: () => onSelect(c.source, c.id),
+      processingSince: processingSince,
+    );
+    if (!_showReopen) return row;
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: row),
+        const SizedBox(width: BondSpacing.s8),
+        TextButton(
+          onPressed: () => onReopen!(c.source, c.id),
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+            minimumSize: const Size(0, 32),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          child: const Text('Reopen'),
+        ),
       ],
     );
   }

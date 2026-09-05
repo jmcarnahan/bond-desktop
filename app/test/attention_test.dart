@@ -33,6 +33,7 @@ double _score({
   bool? needsAction,
   String? deadline,
   bool addressedMe = false,
+  bool? needsYouVerdict,
 }) {
   return attentionScore(
     conversation: _conv(
@@ -48,6 +49,7 @@ double _score({
     latestNeedsAction: needsAction,
     latestDeadline: deadline,
     addressedMe: addressedMe,
+    needsYouVerdict: needsYouVerdict,
     now: _now,
   );
 }
@@ -403,6 +405,142 @@ void main() {
       expect(
         _score(addressedMe: true, senderPref: 'later'),
         0,
+      );
+    });
+  });
+
+  group('the needs-you verdict', () {
+    /// The same call [_score] makes, with the verdict argument LEFT OFF
+    /// rather than passed as null — what every caller looked like before the
+    /// needs-you stage existed, and the baseline the two "moves nothing"
+    /// tests below compare against exactly.
+    double omitted({
+      String? intent,
+      double replyRate = 0,
+      bool? replyExpected,
+      bool? needsAction,
+      bool addressedMe = false,
+    }) =>
+        attentionScore(
+          conversation: _conv(),
+          latestIntent: intent,
+          senderReplyRate: replyRate,
+          latestReplyExpected: replyExpected,
+          latestNeedsAction: needsAction,
+          addressedMe: addressedMe,
+          now: _now,
+        );
+
+    test('a judged yes breaks the quiet temper', () {
+      // The complaint this phase answers: a 1:1 message triage read as an FYI,
+      // which the needs-you stage then read whole and called the user's to
+      // answer. Tempered it sits at 0.35 and never reaches Needs You; judged it
+      // scores from the full needs-reply base and clears the default cut with
+      // no slider override.
+      final tempered =
+          omitted(intent: 'fyi', replyExpected: false, needsAction: false);
+      final judged = _score(
+        intent: 'fyi',
+        replyExpected: false,
+        needsAction: false,
+        needsYouVerdict: true,
+      );
+
+      expect(tempered, closeTo(AttentionTuning.waitingBase, 1e-9));
+      expect(tempered, lessThan(AttentionTuning.defaultThreshold));
+      expect(judged, greaterThan(tempered));
+      expect(judged, closeTo(AttentionTuning.needsReplyBase, 1e-9));
+      expect(judged, greaterThan(AttentionTuning.defaultThreshold));
+    });
+
+    test('and the broken temper hands back the reply-rate nudge', () {
+      // The temper's load-bearing half is the skipped rate bonus. Breaking it
+      // returns that too, so a well-answered sender's judged message scores
+      // 1.0 + 0.2 rather than the tempered 0.35.
+      expect(
+        _score(
+          intent: 'fyi',
+          replyRate: 1,
+          replyExpected: false,
+          needsAction: false,
+          needsYouVerdict: true,
+        ),
+        closeTo(
+          AttentionTuning.needsReplyBase + AttentionTuning.replyRateMax,
+          1e-9,
+        ),
+      );
+    });
+
+    test('a judged yes earns the direct boost without being addressed', () {
+      // Exactly the directBoost path and nothing else: the verdict scores the
+      // same as a message addressed to the user alone.
+      expect(
+        _score(addressedMe: false, needsYouVerdict: true, replyExpected: null),
+        _score(addressedMe: true, replyExpected: null),
+      );
+      expect(
+        _score(addressedMe: false, needsYouVerdict: true),
+        closeTo(AttentionTuning.directBoost, 1e-9),
+      );
+    });
+
+    test('a judged NO moves nothing at all', () {
+      // The fence, on the side that matters most: the stage having looked and
+      // declined must score identically to the stage never having run.
+      expect(
+        _score(
+          intent: 'fyi',
+          replyExpected: false,
+          needsAction: false,
+          needsYouVerdict: false,
+        ),
+        omitted(intent: 'fyi', replyExpected: false, needsAction: false),
+        reason: 'temper-shaped',
+      );
+      expect(
+        _score(addressedMe: true, replyExpected: null, needsYouVerdict: false),
+        omitted(addressedMe: true, replyExpected: null),
+        reason: 'boost-shaped',
+      );
+    });
+
+    test('and neither does an explicit null', () {
+      // Null is "nothing judged this message" — the handler errored, or has
+      // not run. It reads as absence, never as a no.
+      expect(
+        _score(
+          intent: 'fyi',
+          replyExpected: false,
+          needsAction: false,
+          needsYouVerdict: null,
+        ),
+        omitted(intent: 'fyi', replyExpected: false, needsAction: false),
+        reason: 'temper-shaped',
+      );
+      expect(
+        _score(addressedMe: true, replyExpected: null, needsYouVerdict: null),
+        omitted(addressedMe: true, replyExpected: null),
+        reason: 'boost-shaped',
+      );
+    });
+
+    test('an explicit "no reply wanted" still declines the boost', () {
+      // The interaction between the two fences. The verdict breaks the temper
+      // — the score is the full base, not 0.35 — but the boost's `!= false`
+      // wins over both `addressedMe` and the verdict, so nothing multiplies.
+      final score = _score(
+        intent: 'fyi',
+        replyExpected: false,
+        needsAction: false,
+        addressedMe: true,
+        needsYouVerdict: true,
+      );
+
+      expect(score, closeTo(AttentionTuning.needsReplyBase, 1e-9));
+      expect(
+        score,
+        lessThan(AttentionTuning.needsReplyBase * AttentionTuning.directBoost),
       );
     });
   });

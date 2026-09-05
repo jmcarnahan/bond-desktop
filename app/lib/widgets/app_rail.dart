@@ -11,7 +11,7 @@ import 'time_format.dart';
 /// The rail's stops. [RailSection.home] leads because it is where the app
 /// lands, and because it is the only one that is about the pipeline rather
 /// than about a pile of mail.
-enum RailSection { home, needsYou, storylines, conversations, later }
+enum RailSection { home, needsYou, storylines, conversations, archive }
 
 extension RailSectionLabel on RailSection {
   String get label => switch (this) {
@@ -19,7 +19,7 @@ extension RailSectionLabel on RailSection {
         RailSection.needsYou => 'Needs You',
         RailSection.storylines => 'Storylines',
         RailSection.conversations => 'Conversations',
-        RailSection.later => 'Later',
+        RailSection.archive => 'Archive',
       };
 }
 
@@ -384,11 +384,15 @@ class _AppRailState extends State<AppRail> {
                     ],
                   ),
                   ..._section(
-                    RailSection.later,
+                    RailSection.archive,
                     rows: [
                       for (final (dayKey, count) in widget.laterDays)
                         _laterDayItem(dayKey, count),
                     ],
+                    // Deferred mail only, though the section now holds done
+                    // threads too: a done pile grows without bound and asks
+                    // nothing of anyone, and badging it would put a number on
+                    // the rail that never goes back down.
                     badge: widget.laterCount == 0
                         ? null
                         : _badge(widget.laterCount, attention: false),

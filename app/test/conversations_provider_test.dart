@@ -91,12 +91,17 @@ void main() {
     });
   }
 
-  Future<void> seedMessage(String key, String id) async {
+  Future<void> seedMessage(
+    String key,
+    String id, {
+    String direction = 'inbound',
+    String receivedAt = '2026-08-28T10:00:00Z',
+  }) async {
     await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
-      'direction': 'inbound',
-      'received_at': '2026-08-28T10:00:00Z',
+      'direction': direction,
+      'received_at': receivedAt,
       'body_text': 'body of $id',
     });
   }
@@ -349,6 +354,119 @@ void main() {
           )
           .getSingle();
       expect(row.data['needs_you'], 1);
+    });
+  });
+
+  group('reopenThread', () {
+    test('their message last means the user owes a reply', () async {
+      await seedConversation('c1', state: 'done');
+      await seedMessage('c1', 'm1', direction: 'outbound');
+      await seedMessage(
+        'c1',
+        'm2',
+        receivedAt: '2026-08-28T11:00:00Z',
+      );
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      await notifier.reopenThread('email', 'c1');
+
+      expect(
+        (notifier.state as ConversationsLoaded).conversations.single.state,
+        ConversationState.needsReply,
+      );
+      expect(
+        (await store.loadConversations(sources: const ['email'])).single.state,
+        ConversationState.needsReply,
+      );
+    });
+
+    test('the user speaking last means they are waiting on somebody',
+        () async {
+      await seedConversation('c1', state: 'done');
+      await seedMessage('c1', 'm1');
+      await seedMessage(
+        'c1',
+        'm2',
+        direction: 'outbound',
+        receivedAt: '2026-08-28T11:00:00Z',
+      );
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      await notifier.reopenThread('email', 'c1');
+
+      expect(
+        (notifier.state as ConversationsLoaded).conversations.single.state,
+        ConversationState.waiting,
+      );
+    });
+
+    test('a thread with no messages asks nothing of anyone', () async {
+      await seedConversation('c1', state: 'done');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      await notifier.reopenThread('email', 'c1');
+
+      expect(
+        (notifier.state as ConversationsLoaded).conversations.single.state,
+        ConversationState.waiting,
+      );
+    });
+
+    test('a thread closed out of Later comes out of Later with it', () async {
+      await seedConversation('c1', state: 'done');
+      await seedMessage('c1', 'm1');
+      await store.setConversationBucket(
+        'email',
+        'c1',
+        bucket: 'later',
+        reason: 'ai',
+      );
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      await notifier.reopenThread('email', 'c1');
+
+      expect(
+        (notifier.state as ConversationsLoaded).conversations.single.bucket,
+        isNull,
+      );
+      final rows = await store.loadConversations(sources: const ['email']);
+      expect(rows.single.bucket, isNull);
+      // As the user, so the scoring sweep cannot defer it again on the next
+      // pass — reopening IS the person saying this belongs in the inbox.
+      expect((await store.bucketReasons())['c1'], 'user');
+    });
+
+    test('a thread that was never deferred keeps its empty bucket', () async {
+      await seedConversation('c1', state: 'done');
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.load();
+
+      await notifier.reopenThread('email', 'c1');
+
+      expect((await store.bucketReasons())['c1'], isNull);
+    });
+
+    test('a failed write puts the row back', () async {
+      await seedConversation('c1', state: 'done');
+      await seedMessage('c1', 'm1');
+      final notifier = ConversationsNotifier(UnwritableStore(db), sync);
+      await notifier.load();
+
+      await notifier.reopenThread('email', 'c1');
+
+      final state = notifier.state as ConversationsLoaded;
+      expect(state.conversations.single.state, ConversationState.done);
+      expect(state.loadError, contains("Couldn't save"));
+    });
+
+    test('does nothing before the first load', () async {
+      final notifier = ConversationsNotifier(store, sync);
+      await notifier.reopenThread('email', 'c1');
+      expect(notifier.state, isA<ConversationsInitial>());
     });
   });
 

@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 10;
+  int get schemaVersion => 12;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -428,6 +428,48 @@ UPDATE storylines
    AND charter IS NOT NULL AND TRIM(charter) != ''
 ''');
               },
+              // v11 — the needs-you pass gets a place to put its answer.
+              // `needs_you_verdict` is tri-state and `needs_you_reason` says
+              // what stands behind it.
+              //
+              // No backfill, and that is the design rather than an omission:
+              // NULL means nobody has judged this row, so every migrated
+              // message is exactly what the pass is looking for. Writing a 0
+              // here would claim a verdict this app never reached, and take
+              // the whole stored mailbox out of the worklist on the way.
+              //
+              // One guard per column, the v3–v5 discipline: a quit between
+              // the two ALTERs must not leave a replay that skips the second
+              // because the first already exists.
+              from10To11: (m, schema) async {
+                if (!await _columnExists('messages', 'needs_you_verdict')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.needsYouVerdict,
+                  );
+                }
+                if (!await _columnExists('messages', 'needs_you_reason')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.needsYouReason,
+                  );
+                }
+              },
+              // v12 — restore's override stamp. `gate_override` records that
+              // the owner pulled a message back past the gates, so no later
+              // re-derivation may drop it again.
+              //
+              // No backfill, and again that is the design: NULL is the correct
+              // value for every existing row, because nobody has restored
+              // them. The stamp only ever comes from the owner's own hand.
+              from11To12: (m, schema) async {
+                if (!await _columnExists('messages', 'gate_override')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.gateOverride,
+                  );
+                }
+              },
             ),
           ),
         ),
@@ -480,6 +522,12 @@ UPDATE storylines
 /// - `needs_you` is judged against a literal threshold ([needsYouSql]) because
 ///   a migration must not read preferences; rows still open when the app
 ///   launches are restated by the first settle sweep.
+/// - That SQL is also frozen at its v8 SHAPE, which is what `verdict: false`
+///   asks for. This migration replays whenever a v1..v7 database is opened by a
+///   build at v10 or beyond, and `messages.needs_you_verdict` does not exist
+///   until v10 — widening the predicate here would make `from7To8` throw
+///   "no such column" on exactly those upgrades. `test/migration_test.dart` is
+///   the detector.
 final String _backfillProgress = '''
 INSERT OR IGNORE INTO message_progress (
   source, source_message_id, conversation_key, received_at,
@@ -589,7 +637,7 @@ FROM (
       (SELECT n.reason FROM message_notify n
         WHERE n.source = m.source
           AND n.source_message_id = m.source_message_id) AS notify_reason,
-      ${needsYouSql(threshold: backfillNeedsYouThreshold)} AS needs_you
+      ${needsYouSql(threshold: backfillNeedsYouThreshold, verdict: false)} AS needs_you
     FROM messages m
   ) d
 ) e

@@ -393,22 +393,32 @@ class ExtractHandler extends WorkHandler {
 /// Whether a stored message looks, on its own row, like something the user
 /// might have to answer.
 ///
-/// Four signals, all written by the fast triage, and any one of them is
-/// enough: the sender is waiting, the reader has to do something, the message
-/// is loud, or it names a date. Read off the row rather than re-judged,
-/// because the point is to be cheap — the expensive judgement is the model
-/// call this gate decides whether to spend.
+/// Five signals, and any one of them is enough: the needs-you stage read the
+/// message and called it the user's to answer, the sender is waiting, the
+/// reader has to do something, the message is loud, or it names a date. Read
+/// off the row rather than re-judged, because the point is to be cheap — the
+/// expensive judgement is the model call this gate decides whether to spend.
+///
+/// The first is the odd one out: the other four are the fast triage's fields
+/// ABOUT the message, while `needs_you_verdict` is the needs-you stage's answer
+/// about the message as a whole. It is on the row here because NeedsYouHandler
+/// is registered ahead of ExtractHandler in the worker precisely so its verdict
+/// is written before this reads it, and it is what puts a message in front of
+/// the drafting model when triage saw no reply cue at all. NULL — the handler
+/// errored, or never ran — and 0 change nothing, and the gate degrades to
+/// exactly the four-signal shape it had.
 ///
 /// Outbound mail answers false. The user's own message needs no reply from
 /// them, and extraction only ever sees inbound rows anyway, so this is a guard
 /// rather than a case.
 ///
-/// The two flags come back as INTEGERs — sqlite has no bool, and a STRICT
-/// column holds 0 or 1 — so both are compared against 1 rather than trusted to
-/// be truthy.
+/// The flags come back as INTEGERs — sqlite has no bool, and a STRICT column
+/// holds 0 or 1 — so each is compared against 1 rather than trusted to be
+/// truthy.
 bool asksForAReply(Map<String, Object?> row) {
   if (row['direction'] != 'inbound') return false;
-  return row['reply_expected'] == 1 ||
+  return row['needs_you_verdict'] == 1 ||
+      row['reply_expected'] == 1 ||
       row['needs_action'] == 1 ||
       row['urgency'] == 'urgent' ||
       row['urgency'] == 'high' ||

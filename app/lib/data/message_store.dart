@@ -27,6 +27,14 @@ const String dbOwnerKey = 'db_owner';
 /// the setting normally.
 const String aboutMeKey = 'about_me';
 
+/// The owner's own criteria for the needs-you judgement, added to the rules
+/// the prompt already carries. One person's text like [aboutMeKey], and
+/// cleared by [wipeAll] for the same reason: inherited by the next identity it
+/// would decide what THEIR inbox interrupts them about. Declared here beside
+/// [aboutMeKey] because the wipe is what has to name it, and re-exported by
+/// `prefs_provider.dart` for everything that reads or writes the setting.
+const String needsYouRulesKey = 'needs_you_rules';
+
 /// When each background pass last completed, ISO-8601 UTC.
 ///
 /// They live in `app_prefs` rather than being derived from `activity_events`
@@ -562,6 +570,27 @@ WHERE source = ? AND conversation_key = ?
     );
   }
 
+  /// Which way the thread's last message went, or null when it has none.
+  ///
+  /// Reopening a done thread has to put it back into a state, and the only
+  /// honest answer to which one is who spoke last: their message means the
+  /// user owes a reply, the user's own means they are waiting on somebody.
+  Future<String?> newestMessageDirection(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT direction FROM messages '
+          'WHERE source = ? AND conversation_key = ? '
+          'ORDER BY received_at DESC LIMIT 1',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return result.first.data['direction'] as String?;
+  }
+
   /// How many message ids one read-ack carries, newest first.
   static const int _readAckCap = 100;
 
@@ -830,12 +859,18 @@ RETURNING *
   /// stopped caring about weeks ago, so only the freshest slice stays in the
   /// queue. Nothing is deleted — a skipped message still renders, it just
   /// never reaches the model.
+  ///
+  /// A restored message is exempt: the stamp is the user's explicit ask for
+  /// this one row, so it is never demoted back to backlog even when it sits
+  /// far outside the newest slice — which is exactly where a restore from the
+  /// archive usually finds it.
   Future<void> capPendingTriage(int cap, {String source = 'email'}) async {
     await db.customUpdate(
       '''
 UPDATE messages SET triage_status = 'skipped', gate_reason = 'backlog',
   updated_at = ?
 WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
+  AND (gate_override IS NULL OR gate_override <> 'user')
   AND source_message_id NOT IN (
     SELECT source_message_id FROM messages
     WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
@@ -962,6 +997,29 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       "AND triage_status = 'skipped' AND gate_reason = ? "
       'AND received_at >= ?',
       variables: _args([_nowIso(), source, gateReason, sinceIso]),
+    );
+  }
+
+  /// The owner pulling one message back past the gates.
+  ///
+  /// The `gate_override` stamp is what separates this from [rependGatedTriage]:
+  /// that one clears a reason ONCE, and the next claim is free to re-derive the
+  /// same gate and drop the message again. This stamp is durable, and it
+  /// outranks every future re-derivation — the triage queue skips both gate
+  /// calls for a stamped row and [capPendingTriage] refuses to demote it. It is
+  /// the `created_by`/`added_by = 'user'` idea from storylines (see
+  /// [stampStorylineId]) applied to the gates.
+  ///
+  /// Attempts and the last error reset because a restore is a fresh ask, not a
+  /// retry: whatever the row spent before the gate took it is not held against
+  /// the run the owner just asked for.
+  Future<void> restoreMessage(String source, String sourceMessageId) async {
+    await db.customUpdate(
+      "UPDATE messages SET gate_override = 'user', triage_status = 'pending', "
+      'gate_reason = NULL, triage_attempts = 0, triage_error = NULL, '
+      'updated_at = ? '
+      'WHERE source = ? AND source_message_id = ?',
+      variables: _args([_nowIso(), source, sourceMessageId]),
     );
   }
 
@@ -1187,6 +1245,37 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     );
   }
 
+  /// Records what the needs-you pass decided about one message.
+  ///
+  /// Targeted like [writeTriage], and for the same reason: this stage owns
+  /// exactly two columns, and a write that carried the rest of the row would
+  /// be free to undo a triage that finished while the pass was thinking.
+  ///
+  /// [verdict] is tri-state, and the null arm is a real answer rather than a
+  /// missing argument: it puts the row back on the worklist. `false` is a
+  /// judgement that the message does not need the owner, which is a different
+  /// fact from never having been judged, and nothing may read the two as one.
+  Future<void> writeNeedsYouVerdict(
+    String source,
+    String sourceMessageId, {
+    required bool? verdict,
+    String? reason,
+  }) async {
+    await db.customUpdate(
+      'UPDATE messages SET needs_you_verdict = ?, needs_you_reason = ?, '
+      'updated_at = ? WHERE source = ? AND source_message_id = ?',
+      variables: _args([
+        verdict == null ? null : (verdict ? 1 : 0),
+        // NULL, not '': the same rule `label` takes in [writeTriage] — an
+        // empty reason is no reason, and it should read like one.
+        (reason == null || reason.isEmpty) ? null : reason,
+        _nowIso(),
+        source,
+        sourceMessageId,
+      ]),
+    );
+  }
+
   // ── work queue ───────────────────────────────────────────────────────
 
   /// Distinguishes "this argument was not passed" from "this argument was
@@ -1244,6 +1333,51 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     String source = 'email',
     List<String> triageStatuses = const ['pending', 'processing', 'triaged'],
     List<String>? gateReasons,
+  }) =>
+      _enqueueMessageBacklog(
+        kind: 'extract',
+        cap: cap,
+        sinceIso: sinceIso,
+        source: source,
+        triageStatuses: triageStatuses,
+        gateReasons: gateReasons,
+      );
+
+  /// Queues the needs-you judgement for the same messages extraction gets, and
+  /// returns how many rows that added.
+  ///
+  /// [enqueueExtractBacklog]'s twin, argument for argument, and the symmetry is
+  /// load-bearing rather than convenient: the same filter and the same caps are
+  /// what guarantee that every row extraction will read has been through this
+  /// pass first. Two different windows here would leave extraction reading a
+  /// verdict for some messages and NULL — "never judged" — for others, with
+  /// nothing on the row to say which kind of NULL it was looking at.
+  Future<int> enqueueNeedsYouBacklog({
+    int cap = 150,
+    required String sinceIso,
+    String source = 'email',
+    List<String> triageStatuses = const ['pending', 'processing', 'triaged'],
+    List<String>? gateReasons,
+  }) =>
+      _enqueueMessageBacklog(
+        kind: 'needs_you',
+        cap: cap,
+        sinceIso: sinceIso,
+        source: source,
+        triageStatuses: triageStatuses,
+        gateReasons: gateReasons,
+      );
+
+  /// The backlog enqueue both per-message kinds run, with [kind] the only
+  /// thing that differs — one statement, so the two queues cannot drift apart
+  /// into covering different sets of messages.
+  Future<int> _enqueueMessageBacklog({
+    required String kind,
+    required int cap,
+    required String sinceIso,
+    required String source,
+    required List<String> triageStatuses,
+    required List<String>? gateReasons,
   }) async {
     // An empty list would render as `IN ()`, which sqlite rejects. Nothing is
     // queued because nothing was asked for.
@@ -1257,7 +1391,7 @@ INSERT OR IGNORE INTO work_items (
   task_kind, source, entity_id, status, attempts, error, payload_json,
   created_at, updated_at
 )
-SELECT 'extract', source, source_message_id, 'pending', 0, NULL, NULL,
+SELECT ?, source, source_message_id, 'pending', 0, NULL, NULL,
   COALESCE(received_at, ?), ?
 FROM messages
 WHERE source = ? AND direction = 'inbound'
@@ -1268,6 +1402,7 @@ ORDER BY received_at DESC
 LIMIT ?
 ''',
       variables: _args([
+        kind,
         now,
         now,
         source,
@@ -1578,17 +1713,19 @@ RETURNING *
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` SURVIVES, with two exceptions. What this method isolates is
+  /// `app_prefs` SURVIVES, with three exceptions. What this method isolates is
   /// one person's presence: which backend the app talks through, which server
   /// it points at, and where the slider sits are the machine's configuration,
   /// not the previous account's data, and wiping them turned every account
   /// switch into a re-setup. The exceptions are [dbOwnerKey] — the identity
   /// claim on these rows, which must not outlive the rows it describes, or
-  /// the next sign-in would read the wiped mailbox as still owned — and
-  /// [aboutMeKey], which is one person's self-description and would otherwise
-  /// be inherited by the next identity and steer THEIR triage. Both callers
-  /// depend on the first: sign-out leaves the database unclaimed, and
-  /// `IdentityGuard` writes the new owner immediately after.
+  /// the next sign-in would read the wiped mailbox as still owned — and the
+  /// two texts one person wrote about themselves and their inbox:
+  /// [aboutMeKey], which would otherwise be inherited by the next identity and
+  /// steer THEIR triage, and [needsYouRulesKey], which would decide what
+  /// interrupts them. Both callers depend on the first: sign-out leaves the
+  /// database unclaimed, and `IdentityGuard` writes the new owner immediately
+  /// after.
   Future<void> wipeAll() async {
     const tables = [
       'messages',
@@ -1613,8 +1750,8 @@ RETURNING *
         await db.customUpdate('DELETE FROM $table');
       }
       await db.customUpdate(
-        'DELETE FROM app_prefs WHERE key IN (?, ?)',
-        variables: _args([dbOwnerKey, aboutMeKey]),
+        'DELETE FROM app_prefs WHERE key IN (?, ?, ?)',
+        variables: _args([dbOwnerKey, aboutMeKey, needsYouRulesKey]),
       );
     });
     // The vec0 index is derived from `message_vectors`, and the DELETE above
@@ -1847,8 +1984,9 @@ RETURNING *
   /// lookup would be a query per row.
   ///
   /// The triage judgment columns ride along on the same row — `needs_action`,
-  /// `reply_expected`, `deadline`, `addressed_me` — because the scorer reads
-  /// them about exactly this message, the newest inbound one.
+  /// `reply_expected`, `deadline`, `addressed_me`, `needs_you_verdict` —
+  /// because the scorer reads them about exactly this message, the newest
+  /// inbound one.
   Future<Map<String, Map<String, Object?>>> latestInboundMeta({
     List<String> sources = const ['email'],
   }) async {
@@ -1857,7 +1995,7 @@ RETURNING *
         .customSelect(
           'SELECT conversation_key, source, source_message_id, from_address, '
           '  received_at, extraction_json, needs_action, reply_expected, '
-          '  deadline, addressed_me FROM ('
+          '  deadline, addressed_me, needs_you_verdict FROM ('
           '  SELECT m.conversation_key AS conversation_key, m.source AS source, '
           '    m.source_message_id AS source_message_id, '
           '    m.from_address AS from_address, m.received_at AS received_at, '
@@ -1865,6 +2003,7 @@ RETURNING *
           '    m.needs_action AS needs_action, '
           '    m.reply_expected AS reply_expected, '
           '    m.deadline AS deadline, m.addressed_me AS addressed_me, '
+          '    m.needs_you_verdict AS needs_you_verdict, '
           '    ROW_NUMBER() OVER ('
           '      PARTITION BY m.source, m.conversation_key '
           '      ORDER BY m.received_at DESC, m.source_message_id DESC'
@@ -2899,6 +3038,34 @@ FROM storylines s''';
     );
   }
 
+  /// Puts the needs-you items a model-less build finished back in the queue,
+  /// and returns how many that was.
+  ///
+  /// The one-shot catch-up for a real state on disk: the first build of this
+  /// pass had only the deterministic floor, so every message below the floor
+  /// came back `done` with a NULL verdict — and `INSERT OR IGNORE` will never
+  /// offer those rows again. Its caller runs it once behind a pref, because
+  /// what it is catching up on happened once.
+  ///
+  /// The predicate is deliberately simple, and the price of that is precision:
+  /// gated and outbound rows whose verdict is NULL are revived too, and leave
+  /// again through the handler's own guards. That costs one queue row each,
+  /// once, against a predicate that would otherwise have to restate every
+  /// guard the handler already owns.
+  Future<int> reviveUnjudgedNeedsYou() {
+    return db.customUpdate(
+      "UPDATE work_items SET status = 'pending', attempts = 0, error = NULL, "
+      'updated_at = ? '
+      "WHERE task_kind = 'needs_you' AND status = 'done' "
+      'AND EXISTS (SELECT 1 FROM messages m '
+      'WHERE m.source = work_items.source '
+      'AND m.source_message_id = work_items.entity_id '
+      "AND m.direction = 'inbound' "
+      'AND m.needs_you_verdict IS NULL)',
+      variables: _args([_nowIso()]),
+    );
+  }
+
   // ── drafts ───────────────────────────────────────────────────────────
 
   /// Writes the one draft a MESSAGE is allowed, replacing whatever was there.
@@ -3339,6 +3506,10 @@ RETURNING source_message_id
   /// over-waits when a sibling thread queued the work. That is the intended
   /// trade: announcing a message under the wrong storyline is worse than
   /// announcing it a few seconds late, and the deadline bounds how late.
+  ///
+  /// `needs_you_open` is keyed by MESSAGE, like `extract_open`, and is waited
+  /// on the same way: a verdict that is still being decided is one the settle
+  /// would otherwise announce without.
   Future<List<Map<String, Object?>>> openNotifyCandidates({
     int limit = 50,
   }) async {
@@ -3347,10 +3518,15 @@ RETURNING source_message_id
           '''
 SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
   m.subject, m.from_name, m.summary, m.urgency, m.deadline, m.needs_action,
-  m.reply_expected, m.is_read, m.triage_status, m.received_at,
+  m.reply_expected, m.needs_you_verdict, m.is_read, m.triage_status,
+  m.received_at,
   m.updated_at AS message_updated_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   ai.attention_score, ai.bucket, ai.updated_at AS ai_updated_at,
+  EXISTS (SELECT 1 FROM work_items w
+          WHERE w.task_kind = 'needs_you' AND w.source = n.source
+            AND w.entity_id = n.source_message_id
+            AND w.status IN ('pending','processing')) AS needs_you_open,
   EXISTS (SELECT 1 FROM work_items w
           WHERE w.task_kind = 'extract' AND w.source = n.source
             AND w.entity_id = n.source_message_id
@@ -3522,6 +3698,40 @@ RETURNING received_at
         source,
         sourceMessageId,
       ]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// Opens one finished row back up — the reverse of the one-way cascade
+  /// [writeTriageProgress] writes on a gate skip. Same return contract as
+  /// [writeTriageProgress].
+  ///
+  /// All five stages go back to `pending` because all five are about to run
+  /// again. `ingest_state` is not among them and must not be: the message
+  /// itself exists and was never in doubt — only what the pipeline made of it
+  /// was. `needs_you`, `urgency` and `storyline_id` are left alone too; triage
+  /// and settle will restate them, and clearing them here would only blank the
+  /// row's rail position for the seconds in between.
+  ///
+  /// `drop_reason` is cleared unconditionally, which no other writer does.
+  /// [writeSettledProgress] only ever writes the reason on the way DOWN (its
+  /// `CASE WHEN ?2 = 1`), so a row it un-drops keeps the stale reason it was
+  /// dropped for. A restored row must not carry the old reason forward.
+  Future<String?> restoreProgress(String source, String sourceMessageId) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET
+  triage_state = 'pending', extract_state = 'pending',
+  storyline_state = 'pending', draft_state = 'pending',
+  settle_state = 'pending',
+  triage_at = NULL, extract_at = NULL, storyline_at = NULL,
+  draft_at = NULL, settle_at = NULL,
+  outcome = 'pending', dropped = 0, drop_reason = NULL,
+  updated_at = ?1
+WHERE source = ?2 AND source_message_id = ?3
+RETURNING received_at
+''',
+      variables: _args([_nowIso(), source, sourceMessageId]),
     );
     return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
   }
@@ -3883,16 +4093,35 @@ WHERE received_at >= ?
   /// [includeDropped] chooses which index the read walks:
   /// `ix_message_progress_visible` leads with `dropped`, so hiding dropped
   /// rows is an equality seek rather than a filter over everything.
+  ///
+  /// [onlyDropped] is the other end of that same seek — `dropped = 1` — and is
+  /// what the Archive's Dropped tab reads. It is a list rather than a search
+  /// because a gate-dropped message never reached the embedder, so there is no
+  /// vector to ask about it; the index that hides these rows from Home is the
+  /// index that gathers them here.
+  ///
+  /// The two flags name disjoint questions — "and also the dropped ones" and
+  /// "the dropped ones only" — so a caller passing both is asking two things
+  /// at once and means neither.
   Future<List<HomeFeedRow>> pageHomeFeed({
     String? beforeReceivedAt,
     String? beforeSourceMessageId,
     int limit = 50,
     bool includeDropped = false,
+    bool onlyDropped = false,
     List<String> sources = const ['email', 'teams'],
   }) async {
+    assert(
+      !(onlyDropped && includeDropped),
+      'onlyDropped and includeDropped are different questions; pass one',
+    );
     if (sources.isEmpty) return const [];
     final places = _placeholders(sources.length);
-    final visible = includeDropped ? '' : 'p.dropped = 0 AND ';
+    final visible = onlyDropped
+        ? 'p.dropped = 1 AND '
+        : includeDropped
+            ? ''
+            : 'p.dropped = 0 AND ';
     final first = beforeReceivedAt == null || beforeSourceMessageId == null;
 
     final result = first
@@ -4177,6 +4406,75 @@ $where
       if (ranked.length == limit) break;
     }
     return ranked;
+  }
+
+  /// Escapes what LIKE would otherwise read as a wildcard. The escape
+  /// character goes first, or the backslashes the other two rules write would
+  /// themselves be escaped a moment later.
+  static String _escapeLike(String value) => value
+      .replaceAll('\\', r'\\')
+      .replaceAll('%', r'\%')
+      .replaceAll('_', r'\_');
+
+  /// Feed rows whose subject or body contains every word of [query], newest
+  /// first.
+  ///
+  /// The text fallback that makes gate-dropped mail findable. A message the
+  /// gate threw out never reached the embedder, so no vector was ever written
+  /// for it and [semanticSearch] cannot see it however well it matches — which
+  /// leaves the one pile a person is most likely to come looking for
+  /// unsearchable by the only search there is.
+  ///
+  /// Dropped rows are included ALWAYS rather than behind a flag: the archive
+  /// is this read's only caller, and hiding them here would remove the reason
+  /// it exists.
+  ///
+  /// Deliberately LIKE and not FTS — the corpus is one person's history and a
+  /// scan of it is cheap at that size. Revisit if it gets slow; an FTS5 table
+  /// is a migration and a write path, not a change to this signature.
+  Future<List<HomeFeedRow>> textSearchMessages(
+    String query, {
+    int limit = 50,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (sources.isEmpty) return const [];
+    final terms = query.trim().toLowerCase().split(RegExp(r'\s+'))
+      ..removeWhere((term) => term.isEmpty);
+    if (terms.isEmpty) return const [];
+
+    // AND across terms, OR across columns: a two-word query is a narrowing,
+    // and the two words are allowed to sit in different columns of the same
+    // message — a subject and a body are one text as far as the reader who
+    // typed them is concerned.
+    final where = StringBuffer();
+    final args = <Object?>[];
+    for (final term in terms) {
+      final pattern = '%${_escapeLike(term)}%';
+      if (where.isNotEmpty) where.write(' AND ');
+      // Three bindings of the same pattern rather than one named parameter:
+      // every statement here is written against positional `?`.
+      where.write(
+        "(LOWER(m.subject) LIKE ? ESCAPE '\\' "
+        "OR LOWER(COALESCE(m.body_preview, '')) LIKE ? ESCAPE '\\' "
+        "OR LOWER(COALESCE(m.body_text, '')) LIKE ? ESCAPE '\\')",
+      );
+      args.addAll([pattern, pattern, pattern]);
+    }
+    where.write(' AND p.source IN (${_placeholders(sources.length)})');
+    args.addAll(sources);
+
+    final result = await db
+        .customSelect(
+          '''
+$_homeFeedSelect
+WHERE $where
+ORDER BY p.received_at DESC, p.source_message_id DESC
+LIMIT ?
+''',
+          variables: _args([...args, limit]),
+        )
+        .get();
+    return [for (final row in result) HomeFeedRow.fromRow(row.data)];
   }
 
   /// The storylines the window was busiest with, most messages first.

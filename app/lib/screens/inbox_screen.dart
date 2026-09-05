@@ -9,6 +9,7 @@ import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
+import '../providers/archive_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/home_provider.dart';
@@ -19,16 +20,19 @@ import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/llm/needs_you_task.dart'
+    show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
 import '../widgets/app_rail.dart';
+import '../widgets/archive_pane.dart';
 import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/home_pane.dart';
 import '../widgets/inline_alert.dart';
-import '../widgets/later_digest.dart';
+import '../widgets/needs_you_rules_pane.dart';
 import '../widgets/notification_ribbon.dart';
 import '../widgets/quick_replies.dart';
 import '../widgets/settings_dialog.dart';
@@ -106,11 +110,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// for the same reason they are exclusive with each other.
   String? _selectedLaterDay;
 
+  /// Which pile Archive is showing. Kept here rather than in the pane so the
+  /// tab survives every rebuild the sixty-second poll causes.
+  ArchiveTab _archiveTab = ArchiveTab.later;
+
   /// Whether the main pane is showing the activity log. Exclusive with the
   /// three selections above for the same reason they are exclusive with each
   /// other: the pane shows exactly one thing, and every setter clears the rest
   /// rather than racing to be rendered.
   bool _showingActivityLog = false;
+
+  /// Whether the main pane is showing the Needs You rules editor. It joins the
+  /// same exclusive set as [_showingActivityLog] and the three selections
+  /// above: one thing in the pane, and every setter clears the rest.
+  bool _showingNeedsYouRules = false;
 
   /// The storyline the add-thread pane is picking a conversation for. An
   /// overlay on the storyline selection rather than a peer of it: back returns
@@ -380,6 +393,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _showingNeedsYouRules = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -419,6 +433,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _showingNeedsYouRules = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -432,6 +447,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   void _selectSection(RailSection section) {
+    // Arriving at Archive with the Dropped pile already picked re-reads it,
+    // exactly as picking the pile does: the list has no bus behind it, so
+    // arrival is its only chance to be current. The tab itself survives the
+    // trip away on purpose — coming back lands on the pile the user left.
+    if (section == RailSection.archive && _archiveTab == ArchiveTab.dropped) {
+      ref.read(archiveProvider.notifier).refreshDropped();
+    }
     setState(() {
       _section = section;
       _selectedId = null;
@@ -439,6 +461,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _showingNeedsYouRules = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -447,15 +470,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// Opens one day's Later digest. The section moves with it, so backing out of
-  /// the day lands on the whole pile rather than wherever the user was before.
+  /// the day lands on the whole pile rather than wherever the user was before —
+  /// and the tab moves with it too, since a day only means anything in Later.
   void _selectLaterDay(String dayKey) {
     setState(() {
-      _section = RailSection.later;
+      _section = RailSection.archive;
+      _archiveTab = ArchiveTab.later;
       _selectedLaterDay = dayKey;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
       _showingActivityLog = false;
+      _showingNeedsYouRules = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -469,6 +495,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _openActivityLog() {
     setState(() {
       _showingActivityLog = true;
+      _showingNeedsYouRules = false;
+      _selectedId = null;
+      _selectedSource = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
+      _railOpen = false;
+      _replyOpenFor = null;
+    });
+  }
+
+  /// Opens the Needs You rules editor — a pane like the activity log, reached
+  /// from Settings, clearing whatever the user was reading.
+  void _openNeedsYouRules() {
+    setState(() {
+      _showingNeedsYouRules = true;
+      _showingActivityLog = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -1006,6 +1050,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Navigator.of(context).pop();
           _signOut();
         },
+        onEditNeedsYouRules: () {
+          Navigator.of(context).pop();
+          _openNeedsYouRules();
+        },
         isTargetSignedIn: () async {
           if (!mounted) return false;
           return ref.read(authSessionProvider).isSignedIn;
@@ -1036,9 +1084,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ref.invalidate(threadProvider);
             ref.invalidate(draftProvider);
             ref.invalidate(storylineTimelineProvider);
-            // And the previous person's about-me text, which the notifier
-            // still holds in memory — same reason SignInScreen clears it.
+            // And the previous person's about-me text and needs-you rules,
+            // which the notifier still holds in memory — same reason
+            // SignInScreen clears them.
             unawaited(ref.read(appPrefsProvider.notifier).setAboutMe(''));
+            unawaited(
+              ref.read(appPrefsProvider.notifier).setNeedsYouRules(''),
+            );
           }
           _reloadAfterBackendChange();
         },
@@ -1176,6 +1228,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
     if (_showingActivityLog) return _activityLog();
+    if (_showingNeedsYouRules) return _needsYouRules();
 
     final addingTo = _addingToStorylineId;
     if (addingTo != null) {
@@ -1744,6 +1797,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onMarkDone: () => ref
           .read(conversationsProvider.notifier)
           .markDone(selected.source, selected.id),
+      onReopen: () => ref
+          .read(conversationsProvider.notifier)
+          .reopenThread(selected.source, selected.id),
       onBack: () => setState(() {
         _selectedId = null;
         _selectedSource = null;
@@ -2012,6 +2068,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
   }
 
+  /// The editor for the owner's own needs-you criteria. It commits on Save
+  /// only — the pane owns that contract, so there is nothing to write here on
+  /// the way out.
+  Widget _needsYouRules() {
+    final prefs = ref.watch(appPrefsProvider);
+    return NeedsYouRulesPane(
+      value: prefs.needsYouRules,
+      defaultRules: needsYouDefaultRules,
+      fixedTail: needsYouOutputContract,
+      maxLength: needsYouRulesCap,
+      onSave: (text) =>
+          unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouRules(text)),
+      onBack: () => setState(() => _showingNeedsYouRules = false),
+    );
+  }
+
   /// What the sync and the local model have been doing, over the last week.
   ///
   /// [activitySnapshotProvider] re-reads once per recorded event, so a sync
@@ -2060,11 +2132,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Widget _overview(List<Conversation> conversations, String? loadError) {
     final section = _selectedLaterDay != null
-        ? RailSection.later
+        ? RailSection.archive
         : (_section ?? RailSection.needsYou);
     final day = _selectedLaterDay;
-    final title = (section == RailSection.later && day != null)
-        ? 'Later · ${formatDayLabel(day) ?? day}'
+    final title = (section == RailSection.archive && day != null)
+        ? 'Archive · ${formatDayLabel(day) ?? day}'
         : section.label;
 
     return Padding(
@@ -2103,13 +2175,57 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Widget _overviewBody(RailSection section, List<Conversation> conversations) {
     if (section == RailSection.storylines) return _storylinesOverview();
-    if (section == RailSection.later) {
-      return LaterDigestPanel(
+    if (section == RailSection.archive) {
+      final archive = ref.watch(archiveProvider);
+      return ArchivePane(
         conversations: conversations,
+        sources: _sources,
+        // A day row is a Later row, so opening one puts the pane on the tab
+        // that can show it whatever the user last picked.
+        tab: _selectedLaterDay == null ? _archiveTab : ArchiveTab.later,
+        // Picking a pile leaves the day narrowing: while a day is selected
+        // the ternary above pins the pane to Later, so a tap that kept the
+        // day would leave the other two pills dead under the user's finger.
+        onTab: (tab) {
+          // Entering the pile re-reads its first page. The dropped list has no
+          // bus behind it — a sweep can add to it while the user is elsewhere
+          // — so arriving is the moment it is worth being current.
+          if (tab == ArchiveTab.dropped) {
+            ref.read(archiveProvider.notifier).refreshDropped();
+          }
+          setState(() {
+            _archiveTab = tab;
+            _selectedLaterDay = null;
+          });
+        },
         dayFilter: _selectedLaterDay,
         onOpen: (source, id) => _select(id, source: source),
         onKeepSender: _keepSender,
         onKeepThread: _keepThread,
+        onReopen: (source, key) => ref
+            .read(conversationsProvider.notifier)
+            .reopenThread(source, key),
+        droppedRows: archive.droppedRows,
+        droppedLoaded: archive.droppedLoaded,
+        droppedLoadingMore: archive.droppedLoadingMore,
+        droppedError: archive.droppedError,
+        onLoadMoreDropped: () =>
+            ref.read(archiveProvider.notifier).loadMoreDropped(),
+        onOpenStoryline: _selectStoryline,
+        // The pane sheds the row first and the pipeline catches up: the
+        // service's own writes are what make it true, and its two pumps are
+        // fire-and-forget by contract.
+        onRestore: (source, id) {
+          ref.read(archiveProvider.notifier).noteRestored(source, id);
+          unawaited(ref.read(restoreServiceProvider).restore(source, id));
+        },
+        search: archive.search,
+        searching: archive.searching,
+        searchNotice: archive.searchNotice,
+        onSearch: (query) =>
+            ref.read(archiveProvider.notifier).submitSearch(query),
+        onExitSearch: () => ref.read(archiveProvider.notifier).exitSearch(),
+        now: DateTime.now(),
       );
     }
 
@@ -2140,7 +2256,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // return before this switch. The arms exist so the analyzer keeps this
       // exhaustive when a stop is added.
       RailSection.home ||
-      RailSection.later ||
+      RailSection.archive ||
       RailSection.storylines =>
         const <(String, List<Conversation>)>[],
     };

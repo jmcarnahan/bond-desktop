@@ -85,6 +85,7 @@ class ActivityLogPanel extends StatefulWidget {
     'storyline_sweep': 'Storyline sweep',
     'storyline_recruit': 'Storyline recruit',
     'embed_fail': 'Embeddings',
+    'restore': 'Restore',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -180,6 +181,8 @@ class ActivityLogPanel extends StatefulWidget {
             : '$label — $count messages';
       case 'storyline':
         return 'Storylines updated';
+      case 'restore':
+        return 'Restored a filtered message';
       case 'storyline_sweep':
         final proposed = detail['proposed'];
         final confirmed = detail['confirmed'];
@@ -191,9 +194,14 @@ class ActivityLogPanel extends StatefulWidget {
         if (confirmed is! num || rejected is! num) {
           return '$label — ${proposed.toInt()} proposed';
         }
-        return '$label — ${proposed.toInt()} proposed, '
+        final sentence = '$label — ${proposed.toInt()} proposed, '
             '${confirmed.toInt()} ${confirmed == 1 ? 'thread' : 'threads'} '
             'confirmed, ${rejected.toInt()} rejected';
+        // The same degradation once more, for the finished threads the
+        // post-birth probe pulled in. Rows written before the probe existed
+        // end at "rejected", exactly as they were written.
+        final joined = detail['joined'];
+        return joined is num ? '$sentence, ${joined.toInt()} joined' : sentence;
       case 'storyline_recruit':
         final recruited = detail['recruited'];
         final considered = detail['considered'];

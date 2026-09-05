@@ -28,12 +28,14 @@ import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
+import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
 import '../services/pipeline_progress.dart';
 import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
+import '../services/restore_service.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
@@ -400,6 +402,27 @@ final messageSearchProvider = Provider<MessageSearch>(
   ),
 );
 
+/// Restoring one gate-dropped message.
+///
+/// A plain `Provider` for [messageSearchProvider]'s reason: it holds nothing
+/// of its own, it is the wiring between the store, the recorder, and the two
+/// drains that have to be woken once the rows are written.
+///
+/// `read` inside the pump closures, on the callbacks-outlive-the-body
+/// precedent documented at [embeddingsClientProvider]: the closures are called
+/// long after this body returns, and a `watch` would tie this service's
+/// lifetime to the queues'.
+final restoreServiceProvider = Provider<RestoreService>(
+  (ref) => RestoreService(
+    ref.watch(messageStoreProvider),
+    progress: ref.watch(pipelineProgressProvider),
+    ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+    pumpTriage: () => ref.read(triageQueueProvider).pump(),
+    pumpWork: () => ref.read(aiWorkerProvider).pump(),
+    activityLog: ref.watch(activityLogProvider),
+  ),
+);
+
 /// The AI work queue. One for the whole app, for the same reason there is one
 /// [triageQueueProvider]: it is one queue over shared rows.
 ///
@@ -410,7 +433,31 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
   final worker = AiWorker(
     ref.watch(messageStoreProvider),
     handlers: [
-      // Extraction first, and it drains completely before either storyline
+      // First, and it drains completely before extraction starts. The verdict
+      // has to be ON the row before anything asks about it: extraction's draft
+      // pre-gate reads the message as it stands, and the settle pass asks the
+      // same row later in the drain. Running the two alongside each other would
+      // have half the mailbox pre-gated against a verdict that had not been
+      // written yet.
+      NeedsYouHandler(
+        ref.watch(messageStoreProvider),
+        // Bulk work: the fast server. See [fastLlmClientProvider].
+        ref.watch(fastLlmClientProvider),
+        activityLog: ref.watch(activityLogProvider),
+        // A callback, not a value: the account is a keychain read, and this
+        // provider is built by plenty that never drains. The handler asks
+        // once, on the first message that reaches the model; until the answer
+        // arrives the prompt simply names no owner.
+        owner: () => ref.read(authSessionProvider).storedAccount.then(
+              (account) => account == null
+                  ? null
+                  : (
+                      name: account.displayName,
+                      address: account.mail ?? account.userPrincipalName,
+                    ),
+            ),
+      ),
+      // Extraction next, and it drains completely before either storyline
       // handler starts. That order is the point: extraction is what writes the
       // embeddings both storyline passes compare, so running them alongside it
       // would have them clustering a mailbox half of which has no vector yet.

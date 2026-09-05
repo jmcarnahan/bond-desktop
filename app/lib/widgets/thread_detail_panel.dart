@@ -22,6 +22,12 @@ class ThreadDetailPanel extends StatelessWidget {
   /// Flips the thread to done.
   final VoidCallback onMarkDone;
 
+  /// Puts a done thread back into the working inbox — the same button in the
+  /// same place, saying the opposite thing, because a thread the user closed
+  /// by mistake is read from here. Null hides it, for a host with nowhere to
+  /// put a reopened thread.
+  final VoidCallback? onReopen;
+
   /// Returns to the section overview. Null hides the back affordance, for
   /// layouts where the thread is not something you navigated into.
   final VoidCallback? onBack;
@@ -72,6 +78,7 @@ class ThreadDetailPanel extends StatelessWidget {
     required this.conversation,
     required this.messages,
     required this.onMarkDone,
+    this.onReopen,
     this.onBack,
     this.onAddToStoryline,
     this.onSendToLater,
@@ -345,6 +352,19 @@ class ThreadDetailPanel extends StatelessWidget {
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
               child: const Text('Mark done'),
+            ),
+          ] else if (onReopen != null) ...[
+            const SizedBox(width: BondSpacing.s4),
+            TextButton(
+              onPressed: onReopen,
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: BondSpacing.s8,
+                ),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: const Text('Reopen'),
             ),
           ],
           ?_overflowMenu(),

@@ -21,6 +21,11 @@ import '../theme/tokens.dart';
 /// plain [StatefulWidget] over callbacks rather than reaching for the providers
 /// itself, so the screen owns the wiring and a test can drive it with nothing
 /// but closures.
+///
+/// That dialog shape is now legacy: the house direction is full screens rather
+/// than popups, and this one converts to a screen on its next real rework —
+/// which is why the Needs You rules editor already lives outside it, as a pane
+/// this dialog only points at.
 class SettingsDialog extends StatefulWidget {
   /// Where the Needs You cut sits now, 0..1.
   final double threshold;
@@ -35,6 +40,12 @@ class SettingsDialog extends StatefulWidget {
   /// Fired once, when the dialog closes. Text is not a thing to save per
   /// keystroke, and there is nothing on screen waiting to read it.
   final void Function(String value) onAboutMeChanged;
+
+  /// Sends the user to the Needs You rules editor, which is a pane and not a
+  /// section of this dialog: it is a page of text with its own Save, and a
+  /// popup is the wrong place for one. Null hides the row entirely — the same
+  /// discipline [hasScope] follows.
+  final VoidCallback? onEditNeedsYouRules;
 
   /// Whether the rail is currently offering the activity log.
   final bool showActivityLog;
@@ -127,6 +138,7 @@ class SettingsDialog extends StatefulWidget {
     required this.aboutMe,
     required this.onThresholdChanged,
     required this.onAboutMeChanged,
+    this.onEditNeedsYouRules,
     this.showActivityLog = false,
     this.onShowActivityLogChanged,
     this.notifyStyle = NotifyStyle.native,
@@ -352,6 +364,19 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   ),
                 ],
               ),
+              // Under the slider because it refines the same question the
+              // slider tunes: the slider says how much gets through, this says
+              // what "needs you" means in the first place.
+              if (widget.onEditNeedsYouRules != null) ...[
+                const SizedBox(height: BondSpacing.s4),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: widget.onEditNeedsYouRules,
+                    child: const Text('What counts as needing you…'),
+                  ),
+                ),
+              ],
               const SizedBox(height: BondSpacing.s24),
               Text(
                 'About me & my role',

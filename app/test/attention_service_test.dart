@@ -382,6 +382,99 @@ void main() {
     });
   });
 
+  group('the needs-you verdict reaches the score', () {
+    test('a 1:1 chat FYI the stage judged yes climbs back into Needs You',
+        () async {
+      // The complaint end to end. Both threads are the same shape — a chat
+      // message triage read as a quiet FYI on a thread nobody answered — and
+      // the only difference is that the needs-you stage read one of them whole
+      // and found a real ask in it. The tempered one stays out of Needs You;
+      // the judged one clears the default cut with no slider moved.
+      await seed(
+        'tc-judged',
+        source: 'teams',
+        state: 'needs_reply',
+        from: 'teams:priya',
+        replyExpected: false,
+        intent: 'fyi',
+        importance: 'low',
+      );
+      await store.writeNeedsYouVerdict(
+        'teams',
+        'tc-judged-m1',
+        verdict: true,
+        reason: 'asks you to confirm the room before Thursday',
+      );
+      await seed(
+        'tc-unjudged',
+        source: 'teams',
+        state: 'needs_reply',
+        from: 'teams:priya',
+        replyExpected: false,
+        intent: 'fyi',
+        importance: 'low',
+      );
+
+      await service.recomputeAll(sources: both, now: now);
+
+      expect(
+        (await scoreOf('tc-judged', source: 'teams'))!,
+        closeTo(AttentionTuning.needsReplyBase * decay, 1e-9),
+      );
+      expect(
+        (await scoreOf('tc-judged', source: 'teams'))!,
+        greaterThan(AttentionTuning.defaultThreshold),
+      );
+      expect(
+        (await scoreOf('tc-unjudged', source: 'teams'))!,
+        closeTo(AttentionTuning.waitingBase * decay, 1e-9),
+      );
+      expect(
+        (await scoreOf('tc-unjudged', source: 'teams'))!,
+        lessThan(AttentionTuning.defaultThreshold),
+      );
+    });
+
+    test('the meta row carries the NEWEST message\'s verdict, not the thread\'s',
+        () async {
+      // The verdict is per-message, and the scorer asks about one message: the
+      // newest inbound one. An older message judged yes says nothing about the
+      // heads-up that landed after it.
+      await store.upsertConversation({
+        'conversation_key': 'c-two',
+        'state': 'needs_reply',
+        'last_message_at': justNow,
+        'last_inbound_at': justNow,
+      });
+      await store.upsertMessage({
+        'source_message_id': 'c-two-old',
+        'conversation_key': 'c-two',
+        'direction': 'inbound',
+        'from_address': 'alex@example.com',
+        'received_at': '2026-08-28T10:00:00Z',
+      });
+      await store.upsertMessage({
+        'source_message_id': 'c-two-new',
+        'conversation_key': 'c-two',
+        'direction': 'inbound',
+        'from_address': 'alex@example.com',
+        'received_at': justNow,
+      });
+      await store.writeNeedsYouVerdict('email', 'c-two-old', verdict: true);
+
+      final meta = await store.latestInboundMeta();
+
+      expect(meta['c-two']!['source_message_id'], 'c-two-new');
+      expect(meta['c-two']!['needs_you_verdict'], isNull);
+
+      // And the column really does ride along once it is on that message.
+      await store.writeNeedsYouVerdict('email', 'c-two-new',
+          verdict: false, reason: 'nothing here to answer');
+
+      expect((await store.latestInboundMeta())['c-two']!['needs_you_verdict'], 0);
+    });
+  });
+
   group('bucket sweep', () {
     test('files a low-value fyi into Later', () async {
       await seed('c1', intent: 'fyi', importance: 'low');

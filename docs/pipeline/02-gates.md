@@ -36,4 +36,29 @@ usefully — two gates that deliberately do **not** exist. Keep that comment
 authoritative; this page is the map to it.
 
 A gated message is not hidden: it lands with a drop reason, visible via the
-home screen's "Show dropped" toggle (PR #10).
+home screen's "Show dropped" toggle (PR #10) and the Archive section's
+Dropped tab, which is also where Restore lives.
+
+## Restoring a gated message
+
+A gate verdict is a derivation, re-run on every triage claim — so clearing
+`gate_reason` alone would last exactly one sync. Restore instead stamps
+`messages.gate_override` (schema v12, tri-state: `NULL` = the pipeline's
+call stands, `'user'` = the owner restored this message), and the stamp is
+durable: both `gateFor` calls in `_triageClaimed` are skipped for a stamped
+row, and `capPendingTriage` exempts it from the backlog demotion a first-run
+sync would otherwise apply. The gate functions in `gates.dart` stay pure —
+the override lives at the call site, because it is a fact about what the
+user did, not a judgement about the message.
+
+`RestoreService` (`app/lib/services/restore_service.dart`) runs the whole
+sequence: reset the message row and the `message_progress` cascade, fetch
+the mail body (gated mail was skipped before tier 2 ever fetched; Teams
+bodies arrived whole at ingest), requeue `extract` / `needs_you` /
+`embed_message` (the draft is chained from the extract handler, as always),
+then pump triage and the AI worker — chained in that order under the shared
+`DrainGate`, so the handlers never read an untriaged row.
+
+A restored message never toasts, deliberately: `admitNotifyCandidates` is
+recency-floored and inserts with `INSERT OR IGNORE`, and restore is the user
+pulling history back, not new mail arriving.

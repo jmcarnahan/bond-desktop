@@ -664,6 +664,37 @@ void main() {
       );
     });
 
+    test('a sweep says what its probe joined, when it had a probe', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 1,
+            'confirmed': 2,
+            'rejected': 0,
+            'joined': 1,
+          },
+        )),
+        'Storyline sweep — 1 proposed, 2 threads confirmed, 0 rejected, '
+        '1 joined',
+      );
+      // The finished threads are their own count, never folded into the
+      // cluster's: this pass confirmed two members and pulled in none.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_sweep',
+          detail: const {
+            'proposed': 1,
+            'confirmed': 2,
+            'rejected': 0,
+            'joined': 0,
+          },
+        )),
+        'Storyline sweep — 1 proposed, 2 threads confirmed, 0 rejected, '
+        '0 joined',
+      );
+    });
+
     test('a recruit says how many of its candidates it took', () {
       expect(
         ActivityLogPanel.describe(_event(

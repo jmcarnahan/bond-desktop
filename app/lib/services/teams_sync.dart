@@ -254,6 +254,16 @@ class TeamsSync {
         source: source,
       );
 
+      // And the needs-you verdict, over exactly the rows above — same cap,
+      // same window, for the reason [MessageStore.enqueueNeedsYouBacklog]
+      // gives. It matters most here: a chat is where the deterministic floor
+      // actually fires.
+      final queuedNeedsYou = await _store.enqueueNeedsYouBacklog(
+        cap: _extractCap,
+        sinceIso: floor,
+        source: source,
+      );
+
       // And their search vectors, over the same window and the same idempotent
       // insert — a chat is searchable on the same terms mail is.
       await _store.enqueueEmbedBacklog(
@@ -281,6 +291,7 @@ class TeamsSync {
           'chats_seen': chatsSeen,
           'chats_fetched': chatsFetched,
           'queued_extract': queued,
+          'queued_needs_you': queuedNeedsYou,
           'revived_triage': revivedTriage,
           // Only when they happened — see `sync_service.dart`.
           if (reclaimedTriage > 0) 'reclaimed_triage': reclaimedTriage,

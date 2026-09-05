@@ -232,6 +232,63 @@ void main() {
       expect(second.map((r) => r.sourceMessageId), ['m3']);
     });
 
+    test('onlyDropped answers with the filtered pile, newest first', () async {
+      await seed('kept', receivedAt: '2026-09-01T13:00:00Z');
+      await seed(
+        'older',
+        receivedAt: '2026-09-01T11:00:00Z',
+        dropped: true,
+        dropReason: 'newsletter',
+      );
+      await seed(
+        'newer',
+        receivedAt: '2026-09-01T12:00:00Z',
+        dropped: true,
+        dropReason: 'fyi',
+      );
+
+      final pile = await store.pageHomeFeed(onlyDropped: true);
+
+      expect(pile.map((r) => r.sourceMessageId), ['newer', 'older']);
+      expect(pile.map((r) => r.dropReason), ['fyi', 'newsletter']);
+    });
+
+    test('the cursor walks the dropped pile without skipping or repeating',
+        () async {
+      // One timestamp across the page boundary, which is where a cursor that
+      // only compared time would show a row twice or lose one.
+      await seed('d1', receivedAt: '2026-09-01T12:00:00Z', dropped: true);
+      await seed('d2', receivedAt: '2026-09-01T12:00:00Z', dropped: true);
+      await seed('live', receivedAt: '2026-09-01T12:00:00Z');
+      await seed('d3', receivedAt: '2026-09-01T11:00:00Z', dropped: true);
+
+      final first = await store.pageHomeFeed(limit: 1, onlyDropped: true);
+      final second = await store.pageHomeFeed(
+        beforeReceivedAt: first.last.receivedAt,
+        beforeSourceMessageId: first.last.sourceMessageId,
+        limit: 5,
+        onlyDropped: true,
+      );
+
+      expect(first.map((r) => r.sourceMessageId), ['d2']);
+      expect(second.map((r) => r.sourceMessageId), ['d1', 'd3']);
+    });
+
+    test('the two piles never overlap, whichever end is asked for', () async {
+      await seed('live', receivedAt: '2026-09-01T13:00:00Z');
+      await seed('gone', receivedAt: '2026-09-01T12:00:00Z', dropped: true);
+
+      expect(
+        (await store.pageHomeFeed(onlyDropped: true))
+            .map((r) => r.sourceMessageId),
+        ['gone'],
+      );
+      expect(
+        (await store.pageHomeFeed()).map((r) => r.sourceMessageId),
+        ['live'],
+      );
+    });
+
     test('a row carries the storyline it was filed under, by name', () async {
       await seedStoryline('sl-1');
       await seed('m1', storylineId: 'sl-1');

@@ -1008,6 +1008,13 @@ class StorylineService {
   /// Mail and chat are clustered together, in one pool. A thread and a chat
   /// about the same launch are one story, and the pass that cannot see both
   /// would propose the half it can.
+  ///
+  /// Finished threads join but never seed. They are kept out of the clustering
+  /// — a storyline built from done mail is a pile of history nobody asked for
+  /// — and handed instead to the probe at the end of [_propose], which offers
+  /// the closest of them to a storyline this pass just gave birth to. Without
+  /// that, a thread marked done on Monday could never be part of a story that
+  /// formed on Tuesday, while [recruit] has always been free to find it.
   Future<void> sweep() async {
     // Before the early returns, not after them, and that placement is the
     // whole point: this heals refreshes that were LOST, and the sweep returns
@@ -1051,6 +1058,9 @@ class StorylineService {
     };
     final rows = <Map<String, Object?>>[];
     final vectors = <List<double>>[];
+    // The finished threads this pass may OFFER but never group — see the
+    // divert below, and [_propose]'s probe for what becomes of them.
+    final doneCandidates = <({Map<String, Object?> row, List<double> vector})>[];
     for (final row in await _store.conversationsWithEmbeddings(
       embedModel: EmbeddingsClient.modelTag,
       sources: _sources,
@@ -1058,14 +1068,24 @@ class StorylineService {
       final key = row['conversation_key'] as String? ?? '';
       if (key.isEmpty) continue;
       final rowSource = row['source'] as String? ?? _workSource;
+      // Before the divert, deliberately: a thread already filed into a
+      // storyline, or one the user pulled out of one, is not on offer to a new
+      // storyline either.
       if (taken.contains(_threadKey(rowSource, key))) continue;
-      // A finished thread is not the start of a story. Grouping done mail
-      // would fill the rail with history nobody asked to be reminded of.
-      if ((row['state'] as String?) == 'done') continue;
       final blob = row['embedding'];
       if (blob is! Uint8List) continue;
       final vector = decodeEmbedding(blob);
       if (vector.isEmpty) continue;
+      // A finished thread is not the start of a story. Grouping done mail
+      // would fill the rail with history nobody asked to be reminded of — so
+      // it is diverted rather than discarded: it may JOIN a storyline born in
+      // this pass, it just never seeds one. Diverted rows count toward
+      // neither the unassigned floor below nor the clustering, which is what
+      // keeps "never seeds one" true rather than nearly true.
+      if ((row['state'] as String?) == 'done') {
+        doneCandidates.add((row: row, vector: vector));
+        continue;
+      }
       rows.add(row);
       vectors.add(vector);
     }
@@ -1084,10 +1104,23 @@ class StorylineService {
     var proposed = 0;
     var confirmed = 0;
     var rejected = 0;
+    var joined = 0;
     var attempted = 0;
+    // The taken-set of this pass, growing as it runs. `taken` above was read
+    // before any of these storylines existed, and the same `doneCandidates`
+    // list is offered to every proposal — so without this, a finished thread
+    // sitting between two newborn clusters could be offered to both and join
+    // both, which is a state no other automatic path can produce: the
+    // assignment pass files a thread into its single best storyline, and the
+    // sweep's own taken-set keeps it out of the pool afterwards.
+    final claimedByProbe = <String>{};
     for (final cluster in clusters) {
       if (proposed >= room) break;
-      final tally = await _propose([for (final index in cluster) rows[index]]);
+      final tally = await _propose(
+        [for (final index in cluster) rows[index]],
+        doneCandidates: doneCandidates,
+        claimedByProbe: claimedByProbe,
+      );
       attempted++;
       if (tally.proposed) proposed++;
       // Summed across every cluster the pass named, the tombstoned ones
@@ -1096,6 +1129,10 @@ class StorylineService {
       // interesting row this pass can write.
       confirmed += tally.confirmed;
       rejected += tally.rejected;
+      // Kept apart from the two above on purpose: `confirmed` and `rejected`
+      // count the CLUSTER's members being judged, and a finished thread the
+      // probe pulled in was never part of the cluster.
+      joined += tally.joined;
     }
 
     // Once at the end, not once per proposal: the sweep is one unit of work
@@ -1109,6 +1146,10 @@ class StorylineService {
         'proposed': proposed,
         'confirmed': confirmed,
         'rejected': rejected,
+        // A number, always, and never a null or a string: the quiet-kind
+        // check reads these as numerics, and a non-numeric here would make
+        // every all-zero sweep loud again.
+        'joined': joined,
       });
     }
   }
@@ -1311,13 +1352,31 @@ class StorylineService {
   /// whole, and a naming pass that wrote "this excludes unrelated work
   /// requests" would file the unrelated work requests anyway.
   ///
+  /// A storyline that IS born then runs one bounded probe over
+  /// [doneCandidates] — the finished threads the sweep diverted out of the
+  /// clustering — offering the closest of them the same membership question
+  /// its cluster members just answered. It runs here, before the return,
+  /// rather than as a pass of its own: the recap row was queued a few lines
+  /// above and the recap handler drains after the sweep's in this same pass,
+  /// so a thread that joins now is in the storyline's very first recap.
+  ///
   /// Returns a tally rather than a bool: the sweep budgets its room on
   /// proposals, but the activity row is about the judging, which happens
-  /// whether or not anything is proposed.
-  Future<({bool proposed, int confirmed, int rejected})> _propose(
-    List<Map<String, Object?>> rows,
-  ) async {
-    const nothing = (proposed: false, confirmed: 0, rejected: 0);
+  /// whether or not anything is proposed. `confirmed` and `rejected` are the
+  /// CLUSTER's members being judged and nothing else — the probe's own
+  /// confirmations are reported only as `joined`, because a finished thread
+  /// that was offered and turned away was never a member of the group the
+  /// user is being asked about.
+  /// [claimedByProbe] is the sweep's running set of threads an earlier
+  /// proposal in the SAME pass already took — read and written by the probe,
+  /// so one finished thread joins at most one newborn storyline.
+  Future<({bool proposed, int confirmed, int rejected, int joined})> _propose(
+    List<Map<String, Object?>> rows, {
+    List<({Map<String, Object?> row, List<double> vector})> doneCandidates =
+        const [],
+    Set<String>? claimedByProbe,
+  }) async {
+    const nothing = (proposed: false, confirmed: 0, rejected: 0, joined: 0);
 
     final threads = [
       for (final row in rows)
@@ -1437,7 +1496,15 @@ class StorylineService {
         createdBy: 'auto',
         clusterHash: clusterHash,
       );
-      return (proposed: false, confirmed: survivors.length, rejected: rejected);
+      // No probe on this branch, and that is the point of saying so: a group
+      // the model just threw out must not go recruiting history to make
+      // itself big enough to ship.
+      return (
+        proposed: false,
+        confirmed: survivors.length,
+        rejected: rejected,
+        joined: 0,
+      );
     }
 
     final memberHash = _hashOfThreads([
@@ -1498,7 +1565,143 @@ class StorylineService {
         await _store.touchStorylineActivity(id, lastMessageAt);
       }
     }
-    return (proposed: true, confirmed: survivors.length, rejected: rejected);
+
+    // The probe: join, not seed. The storyline exists now, so the finished
+    // threads the sweep would not cluster can be asked the one question that
+    // was never available to them — not "are you the start of a story", which
+    // they are not, but "do you belong to this one".
+    var joined = 0;
+    final claimed = claimedByProbe ?? <String>{};
+    if (doneCandidates.isNotEmpty) {
+      // The centroid over the SURVIVOR vectors, computed in memory rather
+      // than through [_memberContext]: the member rows were written a few
+      // lines above, and reading them back would buy a query to learn what
+      // this stack frame is already holding.
+      final survivorVectors = <List<double>>[];
+      for (final survivor in survivors) {
+        final blob = survivor.row['embedding'];
+        if (blob is! Uint8List) continue;
+        final vector = decodeEmbedding(blob);
+        if (vector.isNotEmpty) survivorVectors.add(vector);
+      }
+      final centroid = _centroid(survivorVectors);
+      if (centroid != null) {
+        final memberThreads = {
+          for (final survivor in survivors)
+            _threadKey(
+              survivor.row['source'] as String? ?? _workSource,
+              survivor.row['conversation_key'] as String? ?? '',
+            ),
+        };
+
+        // Scored, then top-N, ties broken by arrival index — [recruit]'s
+        // recipe exactly, and for its reason: `List.sort` makes no stability
+        // promise, and this pass has to answer the same way twice.
+        final scored = <({int index, Map<String, Object?> row, double score})>[];
+        var order = 0;
+        for (final candidate in doneCandidates) {
+          final candidateIndex = order++;
+          final row = candidate.row;
+          final key = row['conversation_key'] as String? ?? '';
+          if (key.isEmpty) continue;
+          final rowSource = row['source'] as String? ?? _workSource;
+          final thread = _threadKey(rowSource, key);
+          if (memberThreads.contains(thread)) continue;
+          // Taken by an earlier proposal in this same pass — the sweep's
+          // taken-set could not know about it, because that storyline did not
+          // exist when the set was read.
+          if (claimed.contains(thread)) continue;
+          final score = cosine(candidate.vector, centroid);
+          // The lower assignment gate, as the recruit uses for every
+          // candidate: the embedding decides what the model looks at, and the
+          // model decides membership.
+          if (score < StorylineTuning.assignCosineGateWithOverlap) continue;
+          scored.add((index: candidateIndex, row: row, score: score));
+        }
+        scored.sort((a, b) {
+          final byScore = b.score.compareTo(a.score);
+          return byScore != 0 ? byScore : a.index.compareTo(b.index);
+        });
+        final considered =
+            scored.take(StorylineTuning.recruitMaxCandidates).toList();
+
+        if (considered.isNotEmpty) {
+          // Read back from the stored members, not the `storylineParticipants`
+          // list above: that one still holds everyone the confirm stage
+          // rejected, and a finished thread is judged against the group as it
+          // actually stands — the same snapshot [recruit] takes.
+          final postParticipants = await _participantsOfStoryline(id);
+          for (final candidate in considered) {
+            final row = candidate.row;
+            final rowSource = row['source'] as String? ?? _workSource;
+            final key = row['conversation_key'] as String? ?? '';
+            final cardData = await _store.newestInboundCardData(rowSource, key);
+
+            final confirm = await runTask(
+              _confirmClient,
+              const ConfirmMembershipTask(),
+              ConfirmInput(
+                storyline: proposal,
+                storylineParticipants: postParticipants,
+                candidateCard: enrichedCardForConversationRow(row, cardData),
+              ),
+              // Zero, like every other membership call in this file.
+              temperature: 0,
+            );
+            // A `low` yes is a no, the same rule the cluster members above
+            // were held to.
+            if (!confirm.belongs || confirm.confidence == 'low') continue;
+
+            await _store.addStorylineMember(
+              id,
+              rowSource,
+              key,
+              addedBy: 'auto',
+              evidence: confirm.evidence,
+            );
+            final lastMessageAt = row['last_message_at'] as String?;
+            if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
+              await _store.touchStorylineActivity(id, lastMessageAt);
+            }
+            claimed.add(_threadKey(rowSource, key));
+            joined++;
+
+            // In the same breath as the membership write, for [recruit]'s
+            // reason: a server that parks on a LATER candidate must not leave
+            // the hashes describing a set that no longer exists. Both hash
+            // columns, and their equality is the point — the storyline is
+            // born described (the title, summary and charter were written
+            // seconds ago), and leaving `member_hash` ahead of
+            // `refreshed_member_hash` would put this row into
+            // `staleRefreshStorylineIds` and spend a 27B Refine call on a
+            // description that is already right. The count follows the same
+            // truth, and `recapThrough` is cleared exactly as every other
+            // member-add path clears it, so the recap already queued above
+            // covers the threads that just joined. At most eight extra
+            // writes, the same cost recruit accepts.
+            //
+            // `cluster_hash` is untouched, here as everywhere: it names the
+            // group the sweep built and the user is being asked about, and
+            // the probe did not change that question.
+            final finalHash = await _memberHashOf(id);
+            await _store.updateStoryline(
+              id,
+              memberHash: finalHash,
+              refreshedMemberHash: finalHash,
+              refreshedMemberCount: survivors.length + joined,
+              recapThrough: null,
+            );
+          }
+        }
+      }
+    }
+
+    return (
+      proposed: true,
+      confirmed: survivors.length,
+      rejected: rejected,
+      joined: joined,
+    );
   }
 
   // ── user actions ───────────────────────────────────────────────────────

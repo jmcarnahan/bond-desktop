@@ -160,6 +160,28 @@ class SyncService implements MailSync {
         source: _source,
       );
 
+      // The needs-you verdict, over exactly the rows above. Same cap and same
+      // window on purpose — see [MessageStore.enqueueNeedsYouBacklog]: the two
+      // queues covering one set of messages is what lets a reader tell "judged
+      // no" from "never judged" without a second column to say which.
+      final queuedNeedsYou = await _store.enqueueNeedsYouBacklog(
+        cap: firstRunTriageCap,
+        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        source: _source,
+      );
+
+      // The one-time catch-up for the build that judged only the floor: its
+      // below-floor items finished `done` with a NULL verdict, and the
+      // `OR IGNORE` enqueue above will never offer them again. Ran once, and
+      // the pref is what says so. The count stays null until it runs — "did
+      // not run" and "ran and found nothing" are different facts, and the
+      // activity row says which.
+      int? revivedNeedsYou;
+      if (await _store.getPref('needs_you_model_revive') == null) {
+        revivedNeedsYou = await _store.reviveUnjudgedNeedsYou();
+        await _store.setPref('needs_you_model_revive', '1');
+      }
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -184,6 +206,7 @@ class SyncService implements MailSync {
           'inbox': inbox,
           'sent': sent,
           'queued_extract': queued,
+          'queued_needs_you': queuedNeedsYou,
           'revived_triage': revivedTriage,
           'revived_work': revivedWork,
           // Only when they happened. A zero here would read as an event where
@@ -197,6 +220,7 @@ class SyncService implements MailSync {
             'revived_terminal_work': revivedTerminalWork,
           if (rejudged > 0) 'rejudged_triage': rejudged,
           'backfilled_addressed_me': ?backfilled,
+          'revived_needs_you': ?revivedNeedsYou,
           if (inboxResync || sentResync) 'resync': true,
         },
       );

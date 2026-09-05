@@ -695,6 +695,96 @@ void main() {
     expect((await refreshedOf())['sl-uncharted'], ['h-later', 3]);
   });
 
+  test(
+      'v10 to v11 adds the needs-you verdict columns and leaves them unjudged',
+      () async {
+    final schema = await verifier.schemaAt(10);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, addressed_me, triage_status, created_at, updated_at)
+      VALUES
+        ('teams', 't-direct', 'chat-1', 'inbound', NULL, 1, 'triaged', 't', 't'),
+        ('email', 'm-1', 'c1', 'inbound', 'Closing Friday', 0, 'triaged',
+          't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 11);
+    addTearDown(db.close);
+
+    Future<Map<String, Object?>> messageOf(String id) async => (await db
+            .customSelect(
+                'SELECT * FROM messages WHERE source_message_id = ?',
+                variables: [Variable(id)])
+            .getSingle())
+        .data;
+
+    // NULL on every migrated row, the direct chat included — and that is the
+    // design rather than an omission. The unjudged rows ARE the worklist, so a
+    // backfilled 0 would claim a verdict this app never reached and take the
+    // whole stored mailbox out of the pass's reach on the way. `null` rather
+    // than `isNull`, which drift exports into this file under the same name.
+    for (final id in ['t-direct', 'm-1']) {
+      final row = await messageOf(id);
+      expect(row['needs_you_verdict'], null);
+      expect(row['needs_you_reason'], null);
+    }
+    // The facts each row already carried survive untouched: this step reads
+    // nothing and writes nothing.
+    expect((await messageOf('t-direct'))['addressed_me'], 1);
+    expect((await messageOf('m-1'))['subject'], 'Closing Friday');
+
+    // And the columns take a write, which a STRICT table would reject if the
+    // step had declared either as the wrong type.
+    await db.customStatement(
+        "UPDATE messages SET needs_you_verdict = 1, "
+        "needs_you_reason = 'teams_direct' WHERE source_message_id = 't-direct'");
+    final judged = await messageOf('t-direct');
+    expect(judged['needs_you_verdict'], 1);
+    expect(judged['needs_you_reason'], 'teams_direct');
+  });
+
+  test('v11 to v12 adds the gate override column and leaves it unstamped',
+      () async {
+    final schema = await verifier.schemaAt(11);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, triage_status, gate_reason, created_at, updated_at)
+      VALUES
+        ('email', 'm-news', 'c1', 'inbound', 'This week at Northwind',
+          'skipped', 'newsletter', 't', 't'),
+        ('email', 'm-live', 'c2', 'inbound', 'Closing Friday', 'triaged',
+          NULL, 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 12);
+    addTearDown(db.close);
+
+    Future<Map<String, Object?>> messageOf(String id) async => (await db
+            .customSelect(
+                'SELECT * FROM messages WHERE source_message_id = ?',
+                variables: [Variable(id)])
+            .getSingle())
+        .data;
+
+    // NULL on every migrated row, the gated one included — the design rather
+    // than an omission. The stamp only ever means "the owner restored this",
+    // and nobody has restored anything, so there is nothing to backfill.
+    for (final id in ['m-news', 'm-live']) {
+      expect((await messageOf(id))['gate_override'], null);
+    }
+    // What each row already carried survives: this step reads nothing.
+    expect((await messageOf('m-news'))['gate_reason'], 'newsletter');
+    expect((await messageOf('m-live'))['subject'], 'Closing Friday');
+
+    // And the column takes a write, which a STRICT table would reject if the
+    // step had declared it as the wrong type.
+    await db.customStatement("UPDATE messages SET gate_override = 'user' "
+        "WHERE source_message_id = 'm-news'");
+    expect((await messageOf('m-news'))['gate_override'], 'user');
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

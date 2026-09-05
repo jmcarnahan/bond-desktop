@@ -137,6 +137,38 @@ class HomeFeedRow {
   /// finds its row. Newline as the joint — neither connector's ids contain
   /// one.
   String get feedKey => '$source\n$sourceMessageId';
+
+  /// This row as it will read once Restore has run — the optimistic twin of
+  /// `MessageStore.restoreProgress`, the same reset spelled on the model.
+  ///
+  /// It exists so a pane can show the row un-dropped in the same frame the
+  /// button was pressed in, rather than waiting on the write and the re-read.
+  /// [needsYou], [urgency] and the storyline fields carry over untouched for
+  /// the store method's reason: triage and settle will restate them, and
+  /// blanking them here would only make the row flicker on its way to the
+  /// same values. The identity and text fields are facts about the message
+  /// and were never in question.
+  HomeFeedRow restored() => HomeFeedRow(
+        source: source,
+        sourceMessageId: sourceMessageId,
+        conversationKey: conversationKey,
+        receivedAt: receivedAt,
+        triageState: 'pending',
+        extractState: 'pending',
+        storylineState: 'pending',
+        draftState: 'pending',
+        settleState: 'pending',
+        outcome: 'pending',
+        dropped: false,
+        dropReason: null,
+        storylineId: storylineId,
+        storylineTitle: storylineTitle,
+        needsYou: needsYou,
+        urgency: urgency,
+        subject: subject,
+        fromName: fromName,
+        fromAddress: fromAddress,
+      );
 }
 
 /// One semantic-search result: a feed row, and how far its message sat from
@@ -172,6 +204,35 @@ class HomeSearch {
   final List<SemanticHit> hits;
 
   const HomeSearch(this.query, this.hits);
+}
+
+/// The archive pane's result set: what a search of the whole history came back
+/// with, and whether half of it was missing.
+///
+/// Rows and not hits, because only some of them have a distance to carry — the
+/// rest arrive from a text match, which ranks by date and knows nothing about
+/// meaning. A shape that insisted on a distance would have to invent one.
+///
+/// [notice] travels WITH the results rather than beside them on the screen:
+/// "these came from text only" is a fact about THIS result set — the answer is
+/// narrower than it looks — and not a standing condition of the pane.
+///
+/// Down here beside [HomeSearch] for its reason: the pane renders this and the
+/// pane reads no providers.
+@immutable
+class ArchiveSearch {
+  /// The query the [rows] answer, trimmed — so a set that landed after the box
+  /// was typed into again is labelled by what it is.
+  final String query;
+
+  /// Semantic matches first, in rank order, then text matches the index did
+  /// not already return. Never null: empty is a real answer.
+  final List<HomeFeedRow> rows;
+
+  /// Non-null when the semantic half could not run and text answered alone.
+  final String? notice;
+
+  const ArchiveSearch(this.query, this.rows, this.notice);
 }
 
 /// The numbers over the feed, all of them over one window.
