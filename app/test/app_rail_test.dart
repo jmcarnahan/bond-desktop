@@ -354,7 +354,7 @@ void main() {
       expect(find.text('NEEDS YOU'), findsOneWidget);
       expect(find.text('STORYLINES'), findsOneWidget);
       expect(find.text('CONVERSATIONS'), findsOneWidget);
-      expect(find.text('LATER'), findsOneWidget);
+      expect(find.text('ARCHIVE'), findsOneWidget);
     });
 
     testWidgets('the empty sections say so rather than going blank',
@@ -420,7 +420,7 @@ void main() {
     });
   });
 
-  group('AppRail Later', () {
+  group('AppRail Archive', () {
     Future<void> pumpRail(
       WidgetTester tester, {
       required List<Conversation> conversations,
@@ -432,7 +432,7 @@ void main() {
       await tester.pumpWidget(_host(AppRail(
         conversations: conversations,
         selectedId: null,
-        selectedSection: RailSection.later,
+        selectedSection: RailSection.archive,
         selectedLaterDay: selectedLaterDay,
         laterCount: laterRows(conversations).length,
         laterDays: laterDayCounts(conversations),
@@ -442,11 +442,43 @@ void main() {
       )));
     }
 
+    testWidgets('the section is named for everything it holds', (tester) async {
+      await pumpRail(tester, conversations: [_conv(id: 'a')]);
+
+      expect(find.text('ARCHIVE'), findsOneWidget);
+      expect(find.text('LATER'), findsNothing);
+    });
+
     testWidgets('an empty pile keeps the placeholder and no badge',
         (tester) async {
       await pumpRail(tester, conversations: [_conv(id: 'a')]);
 
       expect(find.text('Nothing deferred yet'), findsOneWidget);
+    });
+
+    testWidgets('a done thread is in the section but not on the badge',
+        (tester) async {
+      await pumpRail(tester, conversations: [
+        _conv(
+          id: 'a',
+          who: 'Alice',
+          bucket: 'later',
+          lastMessageAt: '2026-01-14T10:00:00',
+        ),
+        _conv(
+          id: 'b',
+          who: 'Bruno',
+          state: ConversationState.done,
+          lastMessageAt: '2026-01-14T18:00:00',
+        ),
+      ]);
+
+      // The day rows and the badge are the DEFERRED pile: a done pile grows
+      // without bound and asks nothing of anyone, so a number over it would
+      // never go back down.
+      expect(find.text('Wed, Jan 14 — 1'), findsOneWidget);
+      expect(find.text('1'), findsOneWidget);
+      expect(find.text('Bruno'), findsNothing);
     });
 
     testWidgets('a day row per day, with the count in the label',

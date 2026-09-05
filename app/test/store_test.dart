@@ -381,6 +381,43 @@ void main() {
     });
   });
 
+  group('newestMessageDirection', () {
+    test('answers with whoever spoke last', () async {
+      await store.upsertMessage(messageRow(
+        id: 'm1',
+        conversationKey: 'c1',
+        direction: 'inbound',
+        receivedAt: '2026-08-28T10:00:00Z',
+      ));
+      await store.upsertMessage(messageRow(
+        id: 'm2',
+        conversationKey: 'c1',
+        direction: 'outbound',
+        receivedAt: '2026-08-28T11:00:00Z',
+      ));
+
+      expect(await store.newestMessageDirection('email', 'c1'), 'outbound');
+    });
+
+    test('reads one thread on one source and no other', () async {
+      await store.upsertMessage(messageRow(
+        id: 'm1',
+        conversationKey: 'c1',
+        direction: 'inbound',
+      ));
+      await store.upsertMessage(messageRow(
+        source: 'teams',
+        id: 'm2',
+        conversationKey: 'c1',
+        direction: 'outbound',
+      ));
+
+      expect(await store.newestMessageDirection('email', 'c1'), 'inbound');
+      expect(await store.newestMessageDirection('teams', 'c1'), 'outbound');
+      expect(await store.newestMessageDirection('email', 'c2'), isNull);
+    });
+  });
+
   group('delta links', () {
     test('round-trip, overwrite, and clear', () async {
       expect(await store.getDeltaLink('inbox'), isNull);

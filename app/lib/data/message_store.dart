@@ -570,6 +570,27 @@ WHERE source = ? AND conversation_key = ?
     );
   }
 
+  /// Which way the thread's last message went, or null when it has none.
+  ///
+  /// Reopening a done thread has to put it back into a state, and the only
+  /// honest answer to which one is who spoke last: their message means the
+  /// user owes a reply, the user's own means they are waiting on somebody.
+  Future<String?> newestMessageDirection(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT direction FROM messages '
+          'WHERE source = ? AND conversation_key = ? '
+          'ORDER BY received_at DESC LIMIT 1',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return result.first.data['direction'] as String?;
+  }
+
   /// How many message ids one read-ack carries, newest first.
   static const int _readAckCap = 100;
 

@@ -465,6 +465,90 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
     }
   }
 
+  /// Brings a done thread back into the working inbox — [markDone] run
+  /// backwards, on screen first and with the same restore on failure.
+  ///
+  /// The state it lands in is re-derived rather than remembered: nothing stores
+  /// what a thread was before it was closed, and guessing `needs_reply` would
+  /// put a thread the user already answered back on the pile of things they
+  /// owe. The last message's direction is the answer — see
+  /// `newestMessageDirection`. A thread with no messages at all lands in
+  /// `waiting`, which asks nothing of anyone.
+  ///
+  /// A thread closed out of Later comes out of Later with it. `(null, 'user')`
+  /// rather than a bare clear: reopening is the person saying this belongs in
+  /// the inbox, and the scoring sweep must not defer it again on the next pass.
+  ///
+  /// No [clearNeedsYou] counterpart — reopening asks nothing new of the user,
+  /// so there is no chip to raise, and the triage pass writes one if there is.
+  Future<void> reopenThread(String source, String conversationKey) async {
+    if (state is! ConversationsLoaded) return;
+
+    final ConversationState next;
+    try {
+      final direction =
+          await _store.newestMessageDirection(source, conversationKey);
+      next = direction == 'inbound'
+          ? ConversationState.needsReply
+          : ConversationState.waiting;
+    } catch (_) {
+      final latest = state;
+      if (latest is! ConversationsLoaded) return;
+      // Nothing flipped yet, so there is nothing to put back — the rows on
+      // screen are already the truth, and only the message is news.
+      state = latest.withRows(
+        latest.conversations,
+        "Couldn't save that just now — the thread is unchanged.",
+      );
+      return;
+    }
+    if (!mounted) return;
+
+    // Snapshotted AFTER the await above: the optimistic flip must be built
+    // from whatever the screen shows now, or an edit that landed during the
+    // read — somebody marking a second thread done — gets silently undone.
+    final current = state;
+    if (current is! ConversationsLoaded) return;
+
+    final wasLater = current.conversations.any(
+      (c) =>
+          c.id == conversationKey && c.source == source && c.bucket == 'later',
+    );
+
+    state = current.withRows([
+      for (final c in current.conversations)
+        if (c.id == conversationKey && c.source == source)
+          wasLater
+              ? c.copyWith(state: next).withBucket(null)
+              : c.copyWith(state: next)
+        else
+          c,
+    ], current.loadError);
+
+    try {
+      await _store.setConversationState(source, conversationKey, next);
+      if (wasLater) {
+        await _store.setConversationBucket(
+          source,
+          conversationKey,
+          bucket: null,
+          reason: 'user',
+        );
+      }
+      // On the success path only, for [markDone]'s reason: opening a thread
+      // back up is the mirror of closing it, and it is worth recording — but
+      // not for a write that never landed.
+      await _logImplicit('thread', conversationKey, 'up');
+    } catch (_) {
+      final latest = state;
+      if (latest is! ConversationsLoaded) return;
+      state = latest.withRows(
+        current.conversations,
+        "Couldn't save that just now — the thread is unchanged.",
+      );
+    }
+  }
+
   /// The user opened this thread, so it is read. Locally first and instantly —
   /// the server ack is a queued row somebody else drains.
   ///

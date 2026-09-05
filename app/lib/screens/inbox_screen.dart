@@ -25,12 +25,12 @@ import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
 import '../widgets/app_rail.dart';
+import '../widgets/archive_pane.dart';
 import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/home_pane.dart';
 import '../widgets/inline_alert.dart';
-import '../widgets/later_digest.dart';
 import '../widgets/needs_you_rules_pane.dart';
 import '../widgets/notification_ribbon.dart';
 import '../widgets/quick_replies.dart';
@@ -108,6 +108,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The open Later day, as a `yyyy-mm-dd` key. Exclusive with the two above
   /// for the same reason they are exclusive with each other.
   String? _selectedLaterDay;
+
+  /// Which pile Archive is showing. Kept here rather than in the pane so the
+  /// tab survives every rebuild the sixty-second poll causes.
+  ArchiveTab _archiveTab = ArchiveTab.later;
 
   /// Whether the main pane is showing the activity log. Exclusive with the
   /// three selections above for the same reason they are exclusive with each
@@ -458,10 +462,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// Opens one day's Later digest. The section moves with it, so backing out of
-  /// the day lands on the whole pile rather than wherever the user was before.
+  /// the day lands on the whole pile rather than wherever the user was before —
+  /// and the tab moves with it too, since a day only means anything in Later.
   void _selectLaterDay(String dayKey) {
     setState(() {
-      _section = RailSection.later;
+      _section = RailSection.archive;
+      _archiveTab = ArchiveTab.later;
       _selectedLaterDay = dayKey;
       _selectedId = null;
       _selectedSource = null;
@@ -1783,6 +1789,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onMarkDone: () => ref
           .read(conversationsProvider.notifier)
           .markDone(selected.source, selected.id),
+      onReopen: () => ref
+          .read(conversationsProvider.notifier)
+          .reopenThread(selected.source, selected.id),
       onBack: () => setState(() {
         _selectedId = null;
         _selectedSource = null;
@@ -2115,11 +2124,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Widget _overview(List<Conversation> conversations, String? loadError) {
     final section = _selectedLaterDay != null
-        ? RailSection.later
+        ? RailSection.archive
         : (_section ?? RailSection.needsYou);
     final day = _selectedLaterDay;
-    final title = (section == RailSection.later && day != null)
-        ? 'Later · ${formatDayLabel(day) ?? day}'
+    final title = (section == RailSection.archive && day != null)
+        ? 'Archive · ${formatDayLabel(day) ?? day}'
         : section.label;
 
     return Padding(
@@ -2158,13 +2167,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Widget _overviewBody(RailSection section, List<Conversation> conversations) {
     if (section == RailSection.storylines) return _storylinesOverview();
-    if (section == RailSection.later) {
-      return LaterDigestPanel(
+    if (section == RailSection.archive) {
+      return ArchivePane(
         conversations: conversations,
+        sources: _sources,
+        // A day row is a Later row, so opening one puts the pane on the tab
+        // that can show it whatever the user last picked.
+        tab: _selectedLaterDay == null ? _archiveTab : ArchiveTab.later,
+        // Picking a pile leaves the day narrowing: while a day is selected
+        // the ternary above pins the pane to Later, so a tap that kept the
+        // day would leave the other two pills dead under the user's finger.
+        onTab: (tab) => setState(() {
+          _archiveTab = tab;
+          _selectedLaterDay = null;
+        }),
         dayFilter: _selectedLaterDay,
         onOpen: (source, id) => _select(id, source: source),
         onKeepSender: _keepSender,
         onKeepThread: _keepThread,
+        onReopen: (source, key) => ref
+            .read(conversationsProvider.notifier)
+            .reopenThread(source, key),
       );
     }
 
@@ -2195,7 +2218,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // return before this switch. The arms exist so the analyzer keeps this
       // exhaustive when a stop is added.
       RailSection.home ||
-      RailSection.later ||
+      RailSection.archive ||
       RailSection.storylines =>
         const <(String, List<Conversation>)>[],
     };
