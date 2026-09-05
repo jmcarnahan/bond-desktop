@@ -82,6 +82,29 @@ void main() {
     }
   }
 
+  /// A message the gate threw out: no conversation row, because the Dropped
+  /// pile is messages rather than threads.
+  Future<void> seedDropped(String subject, {String id = 'dropped-1'}) async {
+    const receivedAt = '2026-09-01T10:00:00Z';
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'email-$id',
+      'conversation_key': 'c-$id',
+      'direction': 'inbound',
+      'subject': subject,
+      'from_name': 'Alex Rivera',
+      'from_address': 'alex.rivera@example.com',
+      'received_at': receivedAt,
+      'created_at': receivedAt,
+      'updated_at': receivedAt,
+    });
+    await db.customUpdate(
+      "UPDATE message_progress SET dropped = 1, drop_reason = 'newsletter', "
+      "outcome = 'dropped', triage_state = 'done', settle_state = 'done' "
+      "WHERE source = 'email' AND source_message_id = 'email-$id'",
+    );
+  }
+
   Future<void> pumpScreen(WidgetTester tester) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -134,5 +157,47 @@ void main() {
     expect(find.byType(LaterDigestPanel), findsNothing);
     expect(find.textContaining('Archive · '), findsNothing);
     expect(find.text('Homepage copy'), findsOneWidget);
+  });
+
+  testWidgets('arriving at Dropped reads the pile', (tester) async {
+    // Nothing else pulls this list — no bus, no first-load — so the tab entry
+    // is the only reason a dropped message is ever on screen.
+    await seedDropped('Weekly roundup');
+    await pumpScreen(tester);
+
+    expect(find.text('Weekly roundup'), findsNothing);
+
+    await tester.tap(find.widgetWithText(BondFilterPill, 'Dropped'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Weekly roundup'), findsOneWidget);
+    expect(find.text('Newsletter'), findsOneWidget);
+  });
+
+  testWidgets('coming back to Archive re-reads the pile the user left up',
+      (tester) async {
+    // The dropped list has no bus behind it, so a message that fell while the
+    // user was elsewhere only appears because arrival re-reads page one — the
+    // rail tap is the arrival here, not the pill tap.
+    await seedDropped('Weekly roundup');
+    await pumpScreen(tester);
+
+    await tester.tap(find.widgetWithText(BondFilterPill, 'Dropped'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Weekly roundup'), findsOneWidget);
+
+    await tester.tap(find.text('CONVERSATIONS'));
+    await tester.pump();
+    await seedDropped('Quarterly digest', id: 'dropped-2');
+    await tester.tap(find.text('ARCHIVE'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Quarterly digest'), findsOneWidget,
+        reason: 'the tab survived the trip away and arrival re-read it');
   });
 }

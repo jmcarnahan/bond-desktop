@@ -38,6 +38,7 @@ class _FlakyStore extends MessageStore {
     String? beforeSourceMessageId,
     int limit = 50,
     bool includeDropped = false,
+    bool onlyDropped = false,
     List<String> sources = const ['email', 'teams'],
   }) async {
     pageCalls++;
@@ -52,6 +53,7 @@ class _FlakyStore extends MessageStore {
       beforeSourceMessageId: beforeSourceMessageId,
       limit: limit,
       includeDropped: includeDropped,
+      onlyDropped: onlyDropped,
       sources: sources,
     );
   }

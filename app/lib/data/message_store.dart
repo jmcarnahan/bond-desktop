@@ -4030,16 +4030,35 @@ WHERE received_at >= ?
   /// [includeDropped] chooses which index the read walks:
   /// `ix_message_progress_visible` leads with `dropped`, so hiding dropped
   /// rows is an equality seek rather than a filter over everything.
+  ///
+  /// [onlyDropped] is the other end of that same seek — `dropped = 1` — and is
+  /// what the Archive's Dropped tab reads. It is a list rather than a search
+  /// because a gate-dropped message never reached the embedder, so there is no
+  /// vector to ask about it; the index that hides these rows from Home is the
+  /// index that gathers them here.
+  ///
+  /// The two flags name disjoint questions — "and also the dropped ones" and
+  /// "the dropped ones only" — so a caller passing both is asking two things
+  /// at once and means neither.
   Future<List<HomeFeedRow>> pageHomeFeed({
     String? beforeReceivedAt,
     String? beforeSourceMessageId,
     int limit = 50,
     bool includeDropped = false,
+    bool onlyDropped = false,
     List<String> sources = const ['email', 'teams'],
   }) async {
+    assert(
+      !(onlyDropped && includeDropped),
+      'onlyDropped and includeDropped are different questions; pass one',
+    );
     if (sources.isEmpty) return const [];
     final places = _placeholders(sources.length);
-    final visible = includeDropped ? '' : 'p.dropped = 0 AND ';
+    final visible = onlyDropped
+        ? 'p.dropped = 1 AND '
+        : includeDropped
+            ? ''
+            : 'p.dropped = 0 AND ';
     final first = beforeReceivedAt == null || beforeSourceMessageId == null;
 
     final result = first

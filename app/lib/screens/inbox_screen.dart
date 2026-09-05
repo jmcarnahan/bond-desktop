@@ -9,6 +9,7 @@ import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
+import '../providers/archive_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/home_provider.dart';
@@ -446,6 +447,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   void _selectSection(RailSection section) {
+    // Arriving at Archive with the Dropped pile already picked re-reads it,
+    // exactly as picking the pile does: the list has no bus behind it, so
+    // arrival is its only chance to be current. The tab itself survives the
+    // trip away on purpose — coming back lands on the pile the user left.
+    if (section == RailSection.archive && _archiveTab == ArchiveTab.dropped) {
+      ref.read(archiveProvider.notifier).refreshDropped();
+    }
     setState(() {
       _section = section;
       _selectedId = null;
@@ -2168,6 +2176,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Widget _overviewBody(RailSection section, List<Conversation> conversations) {
     if (section == RailSection.storylines) return _storylinesOverview();
     if (section == RailSection.archive) {
+      final archive = ref.watch(archiveProvider);
       return ArchivePane(
         conversations: conversations,
         sources: _sources,
@@ -2177,10 +2186,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // Picking a pile leaves the day narrowing: while a day is selected
         // the ternary above pins the pane to Later, so a tap that kept the
         // day would leave the other two pills dead under the user's finger.
-        onTab: (tab) => setState(() {
-          _archiveTab = tab;
-          _selectedLaterDay = null;
-        }),
+        onTab: (tab) {
+          // Entering the pile re-reads its first page. The dropped list has no
+          // bus behind it — a sweep can add to it while the user is elsewhere
+          // — so arriving is the moment it is worth being current.
+          if (tab == ArchiveTab.dropped) {
+            ref.read(archiveProvider.notifier).refreshDropped();
+          }
+          setState(() {
+            _archiveTab = tab;
+            _selectedLaterDay = null;
+          });
+        },
         dayFilter: _selectedLaterDay,
         onOpen: (source, id) => _select(id, source: source),
         onKeepSender: _keepSender,
@@ -2188,6 +2205,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onReopen: (source, key) => ref
             .read(conversationsProvider.notifier)
             .reopenThread(source, key),
+        droppedRows: archive.droppedRows,
+        droppedLoaded: archive.droppedLoaded,
+        droppedLoadingMore: archive.droppedLoadingMore,
+        droppedError: archive.droppedError,
+        onLoadMoreDropped: () =>
+            ref.read(archiveProvider.notifier).loadMoreDropped(),
+        onOpenStoryline: _selectStoryline,
+        now: DateTime.now(),
       );
     }
 
