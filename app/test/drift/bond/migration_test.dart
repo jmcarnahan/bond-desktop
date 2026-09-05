@@ -744,6 +744,47 @@ void main() {
     expect(judged['needs_you_reason'], 'teams_direct');
   });
 
+  test('v11 to v12 adds the gate override column and leaves it unstamped',
+      () async {
+    final schema = await verifier.schemaAt(11);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, triage_status, gate_reason, created_at, updated_at)
+      VALUES
+        ('email', 'm-news', 'c1', 'inbound', 'This week at Northwind',
+          'skipped', 'newsletter', 't', 't'),
+        ('email', 'm-live', 'c2', 'inbound', 'Closing Friday', 'triaged',
+          NULL, 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 12);
+    addTearDown(db.close);
+
+    Future<Map<String, Object?>> messageOf(String id) async => (await db
+            .customSelect(
+                'SELECT * FROM messages WHERE source_message_id = ?',
+                variables: [Variable(id)])
+            .getSingle())
+        .data;
+
+    // NULL on every migrated row, the gated one included — the design rather
+    // than an omission. The stamp only ever means "the owner restored this",
+    // and nobody has restored anything, so there is nothing to backfill.
+    for (final id in ['m-news', 'm-live']) {
+      expect((await messageOf(id))['gate_override'], null);
+    }
+    // What each row already carried survives: this step reads nothing.
+    expect((await messageOf('m-news'))['gate_reason'], 'newsletter');
+    expect((await messageOf('m-live'))['subject'], 'Closing Friday');
+
+    // And the column takes a write, which a STRICT table would reject if the
+    // step had declared it as the wrong type.
+    await db.customStatement("UPDATE messages SET gate_override = 'user' "
+        "WHERE source_message_id = 'm-news'");
+    expect((await messageOf('m-news'))['gate_override'], 'user');
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

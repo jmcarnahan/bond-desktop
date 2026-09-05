@@ -859,12 +859,18 @@ RETURNING *
   /// stopped caring about weeks ago, so only the freshest slice stays in the
   /// queue. Nothing is deleted — a skipped message still renders, it just
   /// never reaches the model.
+  ///
+  /// A restored message is exempt: the stamp is the user's explicit ask for
+  /// this one row, so it is never demoted back to backlog even when it sits
+  /// far outside the newest slice — which is exactly where a restore from the
+  /// archive usually finds it.
   Future<void> capPendingTriage(int cap, {String source = 'email'}) async {
     await db.customUpdate(
       '''
 UPDATE messages SET triage_status = 'skipped', gate_reason = 'backlog',
   updated_at = ?
 WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
+  AND (gate_override IS NULL OR gate_override <> 'user')
   AND source_message_id NOT IN (
     SELECT source_message_id FROM messages
     WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
@@ -991,6 +997,29 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       "AND triage_status = 'skipped' AND gate_reason = ? "
       'AND received_at >= ?',
       variables: _args([_nowIso(), source, gateReason, sinceIso]),
+    );
+  }
+
+  /// The owner pulling one message back past the gates.
+  ///
+  /// The `gate_override` stamp is what separates this from [rependGatedTriage]:
+  /// that one clears a reason ONCE, and the next claim is free to re-derive the
+  /// same gate and drop the message again. This stamp is durable, and it
+  /// outranks every future re-derivation — the triage queue skips both gate
+  /// calls for a stamped row and [capPendingTriage] refuses to demote it. It is
+  /// the `created_by`/`added_by = 'user'` idea from storylines (see
+  /// [stampStorylineId]) applied to the gates.
+  ///
+  /// Attempts and the last error reset because a restore is a fresh ask, not a
+  /// retry: whatever the row spent before the gate took it is not held against
+  /// the run the owner just asked for.
+  Future<void> restoreMessage(String source, String sourceMessageId) async {
+    await db.customUpdate(
+      "UPDATE messages SET gate_override = 'user', triage_status = 'pending', "
+      'gate_reason = NULL, triage_attempts = 0, triage_error = NULL, '
+      'updated_at = ? '
+      'WHERE source = ? AND source_message_id = ?',
+      variables: _args([_nowIso(), source, sourceMessageId]),
     );
   }
 
@@ -3669,6 +3698,40 @@ RETURNING received_at
         source,
         sourceMessageId,
       ]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// Opens one finished row back up — the reverse of the one-way cascade
+  /// [writeTriageProgress] writes on a gate skip. Same return contract as
+  /// [writeTriageProgress].
+  ///
+  /// All five stages go back to `pending` because all five are about to run
+  /// again. `ingest_state` is not among them and must not be: the message
+  /// itself exists and was never in doubt — only what the pipeline made of it
+  /// was. `needs_you`, `urgency` and `storyline_id` are left alone too; triage
+  /// and settle will restate them, and clearing them here would only blank the
+  /// row's rail position for the seconds in between.
+  ///
+  /// `drop_reason` is cleared unconditionally, which no other writer does.
+  /// [writeSettledProgress] only ever writes the reason on the way DOWN (its
+  /// `CASE WHEN ?2 = 1`), so a row it un-drops keeps the stale reason it was
+  /// dropped for. A restored row must not carry the old reason forward.
+  Future<String?> restoreProgress(String source, String sourceMessageId) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET
+  triage_state = 'pending', extract_state = 'pending',
+  storyline_state = 'pending', draft_state = 'pending',
+  settle_state = 'pending',
+  triage_at = NULL, extract_at = NULL, storyline_at = NULL,
+  draft_at = NULL, settle_at = NULL,
+  outcome = 'pending', dropped = 0, drop_reason = NULL,
+  updated_at = ?1
+WHERE source = ?2 AND source_message_id = ?3
+RETURNING received_at
+''',
+      variables: _args([_nowIso(), source, sourceMessageId]),
     );
     return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
   }

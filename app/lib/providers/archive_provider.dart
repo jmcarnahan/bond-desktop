@@ -248,6 +248,39 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
     );
   }
 
+  /// The optimistic half of Restore: the pile sheds the row now, and a search
+  /// hit sheds its Dropped chip and its Restore button now.
+  ///
+  /// No store call here, deliberately — `RestoreService` owns every write, and
+  /// the next [refreshDropped] read is what makes this true rather than merely
+  /// shown. The two halves are split for the reason the home feed splits them:
+  /// a button that waits on a database round trip before the row moves reads
+  /// as a button that did not work.
+  void noteRestored(String source, String sourceMessageId) {
+    bool isTarget(HomeFeedRow row) =>
+        row.source == source && row.sourceMessageId == sourceMessageId;
+
+    final search = state.search;
+    state = state.copyWith(
+      droppedRows: [
+        for (final row in state.droppedRows)
+          if (!isTarget(row)) row,
+      ],
+      // A search spans the piles, so the hit stays in the list — it is still
+      // an answer to the query. Only what the gates did to it is undone.
+      search: search == null
+          ? null
+          : ArchiveSearch(
+              search.query,
+              [
+                for (final row in search.rows)
+                  if (isTarget(row)) row.restored() else row,
+              ],
+              search.notice,
+            ),
+    );
+  }
+
   /// Back to the three piles.
   ///
   /// The stamp moves first: an answer still in flight belongs to a search that

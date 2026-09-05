@@ -85,6 +85,7 @@ class ActivityLogPanel extends StatefulWidget {
     'storyline_sweep': 'Storyline sweep',
     'storyline_recruit': 'Storyline recruit',
     'embed_fail': 'Embeddings',
+    'restore': 'Restore',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -180,6 +181,8 @@ class ActivityLogPanel extends StatefulWidget {
             : '$label — $count messages';
       case 'storyline':
         return 'Storylines updated';
+      case 'restore':
+        return 'Restored a filtered message';
       case 'storyline_sweep':
         final proposed = detail['proposed'];
         final confirmed = detail['confirmed'];

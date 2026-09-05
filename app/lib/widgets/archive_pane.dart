@@ -96,6 +96,11 @@ class ArchivePane extends StatefulWidget {
   /// Opens the storyline a dropped message was filed under, from its chip.
   final void Function(String storylineId) onOpenStoryline;
 
+  /// The owner pulling one filtered message back through the pipeline. Keyed
+  /// by `(source, sourceMessageId)` and not by thread, because a gate takes
+  /// one message and a restore gives back exactly that one.
+  final void Function(String source, String sourceMessageId) onRestore;
+
   /// What a query came back with, or null for the tabs.
   final ArchiveSearch? search;
 
@@ -135,6 +140,7 @@ class ArchivePane extends StatefulWidget {
     required this.droppedError,
     required this.onLoadMoreDropped,
     required this.onOpenStoryline,
+    required this.onRestore,
     required this.search,
     required this.searching,
     required this.searchNotice,
@@ -305,7 +311,7 @@ class _ArchivePaneState extends State<ArchivePane> {
               itemCount: search.rows.length,
               itemBuilder: (context, index) {
                 final row = search.rows[index];
-                return HomeFeedRowTile(
+                final tile = HomeFeedRowTile(
                   key: ValueKey<String>('archive-search-${row.feedKey}'),
                   row: row,
                   now: widget.now,
@@ -313,6 +319,11 @@ class _ArchivePaneState extends State<ArchivePane> {
                   onOpenThread: widget.onOpen,
                   onOpenStoryline: widget.onOpenStoryline,
                 );
+                // A search spans the piles, so only the rows the gates took
+                // get the way back: a hit that was never dropped has nothing
+                // to be restored from.
+                if (!row.dropped) return tile;
+                return _withRestore(tile, row, widget.onRestore);
               },
             ),
           ),
@@ -346,9 +357,39 @@ class _ArchivePaneState extends State<ArchivePane> {
             onLoadMore: widget.onLoadMoreDropped,
             onOpenThread: widget.onOpen,
             onOpenStoryline: widget.onOpenStoryline,
+            onRestore: widget.onRestore,
           ),
       };
 }
+
+/// One dropped row's tile, with Restore beside it.
+///
+/// The button sits OUTSIDE the tile for [ConversationListPane]'s reason:
+/// [HomeFeedRowTile] is the same row on the home feed and in both of Archive's
+/// lists, and a tile that grows an action in one place is a tile that reads
+/// differently in the others. Shared by the Dropped pile and the search
+/// results so the two cannot drift apart.
+Widget _withRestore(
+  Widget tile,
+  HomeFeedRow row,
+  void Function(String source, String sourceMessageId) onRestore,
+) =>
+    Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: tile),
+        const SizedBox(width: BondSpacing.s8),
+        TextButton(
+          onPressed: () => onRestore(row.source, row.sourceMessageId),
+          style: TextButton.styleFrom(
+            padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+            minimumSize: const Size(0, 32),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+          child: const Text('Restore'),
+        ),
+      ],
+    );
 
 /// The Dropped pile as the home feed's table, because it is the home feed's
 /// rows: same columns, same drop-reason chips, same words for what happened.
@@ -365,6 +406,7 @@ class _DroppedList extends StatefulWidget {
   final VoidCallback onLoadMore;
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
+  final void Function(String source, String sourceMessageId) onRestore;
 
   const _DroppedList({
     required this.rows,
@@ -375,6 +417,7 @@ class _DroppedList extends StatefulWidget {
     required this.onLoadMore,
     required this.onOpenThread,
     required this.onOpenStoryline,
+    required this.onRestore,
   });
 
   /// How close to the bottom the viewport has to get before the next page is
@@ -468,7 +511,7 @@ class _DroppedListState extends State<_DroppedList> {
                   );
                 }
                 final row = widget.rows[index];
-                return HomeFeedRowTile(
+                final tile = HomeFeedRowTile(
                   key: ValueKey<String>('dropped-${row.feedKey}'),
                   row: row,
                   now: widget.now,
@@ -478,6 +521,7 @@ class _DroppedListState extends State<_DroppedList> {
                   onOpenThread: widget.onOpenThread,
                   onOpenStoryline: widget.onOpenStoryline,
                 );
+                return _withRestore(tile, row, widget.onRestore);
               },
             ),
           ),

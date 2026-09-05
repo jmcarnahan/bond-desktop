@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 11;
+  int get schemaVersion => 12;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -452,6 +452,21 @@ UPDATE storylines
                   await m.addColumn(
                     schema.messages,
                     schema.messages.needsYouReason,
+                  );
+                }
+              },
+              // v12 — restore's override stamp. `gate_override` records that
+              // the owner pulled a message back past the gates, so no later
+              // re-derivation may drop it again.
+              //
+              // No backfill, and again that is the design: NULL is the correct
+              // value for every existing row, because nobody has restored
+              // them. The stamp only ever comes from the owner's own hand.
+              from11To12: (m, schema) async {
+                if (!await _columnExists('messages', 'gate_override')) {
+                  await m.addColumn(
+                    schema.messages,
+                    schema.messages.gateOverride,
                   );
                 }
               },

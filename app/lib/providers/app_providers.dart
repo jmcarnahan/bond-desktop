@@ -35,6 +35,7 @@ import '../services/pipeline_progress.dart';
 import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
+import '../services/restore_service.dart';
 import '../services/storyline_handler.dart';
 import '../services/storyline_service.dart';
 import '../services/sync_service.dart';
@@ -398,6 +399,27 @@ final messageSearchProvider = Provider<MessageSearch>(
   (ref) => MessageSearch(
     ref.watch(messageStoreProvider),
     ref.watch(embeddingsClientProvider),
+  ),
+);
+
+/// Restoring one gate-dropped message.
+///
+/// A plain `Provider` for [messageSearchProvider]'s reason: it holds nothing
+/// of its own, it is the wiring between the store, the recorder, and the two
+/// drains that have to be woken once the rows are written.
+///
+/// `read` inside the pump closures, on the callbacks-outlive-the-body
+/// precedent documented at [embeddingsClientProvider]: the closures are called
+/// long after this body returns, and a `watch` would tie this service's
+/// lifetime to the queues'.
+final restoreServiceProvider = Provider<RestoreService>(
+  (ref) => RestoreService(
+    ref.watch(messageStoreProvider),
+    progress: ref.watch(pipelineProgressProvider),
+    ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+    pumpTriage: () => ref.read(triageQueueProvider).pump(),
+    pumpWork: () => ref.read(aiWorkerProvider).pump(),
+    activityLog: ref.watch(activityLogProvider),
   ),
 );
 

@@ -3,6 +3,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/services/restore_service.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart'
     show RailSection, laterDayLabel;
@@ -107,7 +108,10 @@ void main() {
     );
   }
 
-  Future<void> pumpScreen(WidgetTester tester) async {
+  Future<void> pumpScreen(
+    WidgetTester tester, {
+    List<Override> overrides = const [],
+  }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -118,6 +122,7 @@ void main() {
         initialSectionProvider.overrideWithValue(RailSection.archive),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
+        ...overrides,
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -238,5 +243,48 @@ void main() {
 
     expect(find.widgetWithText(BondFilterPill, 'Dropped'), findsOneWidget);
     expect(find.text('Vendor invoice 4471'), findsNothing);
+  });
+
+  testWidgets('restoring a dropped message clears the pile and the drop',
+      (tester) async {
+    await seedDropped('Weekly roundup');
+    // The real service, wired as the app wires it, MINUS the two pumps: what
+    // this test is about is the screen's half — the tap reaching the notifier
+    // and the service's writes landing in the store — while the drains those
+    // pumps start are model work whose per-item heartbeat timers outlive a
+    // widget test's tree. `restore_service_test.dart` runs them against real
+    // queues, which is where they belong.
+    await pumpScreen(tester, overrides: [
+      restoreServiceProvider.overrideWith((ref) => RestoreService(
+            ref.watch(messageStoreProvider),
+            progress: ref.watch(pipelineProgressProvider),
+            ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+          )),
+    ]);
+
+    await tester.tap(find.widgetWithText(BondFilterPill, 'Dropped'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Weekly roundup'), findsOneWidget);
+
+    await tester.tap(find.text('Restore'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    // Optimistic: the row is gone before any read came back.
+    expect(find.text('Weekly roundup'), findsNothing);
+
+    final message = (await store.getMessageRow('email', 'email-dropped-1'))!;
+    expect(message['gate_override'], 'user');
+    expect(message['triage_status'], isNot('skipped'));
+
+    final progress = (await db.customSelect(
+      'SELECT * FROM message_progress '
+      "WHERE source = 'email' AND source_message_id = 'email-dropped-1'",
+    ).getSingle())
+        .data;
+    expect(progress['dropped'], 0);
+    expect(progress['drop_reason'], null);
   });
 }

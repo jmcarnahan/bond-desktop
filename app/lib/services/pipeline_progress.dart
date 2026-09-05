@@ -221,6 +221,21 @@ class PipelineProgress {
         ),
       );
 
+  /// The whole-row reset behind Restore: every stage back to `pending`, the
+  /// drop undone.
+  ///
+  /// The tick goes out under `triage`/`pending`, which is honest rather than
+  /// nominal — triage is the first thing about to run on this message. As with
+  /// [clearNeedsYou], the live screen re-reads the whole row behind any tick,
+  /// so one tick carries the other four stages with it.
+  Future<void> noteRestored(String source, String sourceMessageId) => _one(
+        source,
+        sourceMessageId,
+        'triage',
+        'pending',
+        (store) => store.restoreProgress(source, sourceMessageId),
+      );
+
   /// Takes the Needs You chip off a thread the user has answered or finished,
   /// and says so per message.
   ///

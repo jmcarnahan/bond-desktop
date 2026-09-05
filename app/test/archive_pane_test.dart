@@ -73,6 +73,7 @@ void main() {
     String? droppedError,
     VoidCallback? onLoadMoreDropped,
     void Function(String)? onOpenStoryline,
+    void Function(String, String)? onRestore,
     ArchiveSearch? search,
     bool searching = false,
     String? searchNotice,
@@ -99,6 +100,7 @@ void main() {
           droppedError: droppedError,
           onLoadMoreDropped: onLoadMoreDropped ?? () {},
           onOpenStoryline: onOpenStoryline ?? (_) {},
+          onRestore: onRestore ?? (_, _) {},
           search: search,
           searching: searching,
           searchNotice: searchNotice,
@@ -412,6 +414,56 @@ void main() {
       await tester.testTextInput.receiveAction(TextInputAction.search);
 
       expect(asked, ['invoice']);
+    });
+  });
+
+  group('restore', () {
+    testWidgets('every dropped row offers a way back', (tester) async {
+      final restored = <(String, String)>[];
+      await pump(
+        tester,
+        conversations: const [],
+        tab: ArchiveTab.dropped,
+        droppedRows: [
+          _dropped(id: 'd1', subject: 'Weekly roundup'),
+          _dropped(id: 'd2', source: 'teams', subject: 'Standup notes'),
+        ],
+        onRestore: (source, id) => restored.add((source, id)),
+      );
+
+      expect(find.text('Restore'), findsNWidgets(2));
+
+      await tester.tap(find.text('Restore').first);
+      await tester.pump();
+
+      // The pair, not the thread key: a gate takes one message and a restore
+      // gives back exactly that one.
+      expect(restored, [('email', 'd1')]);
+    });
+
+    testWidgets('only the dropped hits in a search get one', (tester) async {
+      final restored = <(String, String)>[];
+      final live = _dropped(id: 'live', subject: 'Invoice 4472 is paid')
+          .restored();
+      await pump(
+        tester,
+        conversations: const [],
+        search: ArchiveSearch(
+          'invoice',
+          [_dropped(id: 'd1', subject: 'Invoice 4471 is overdue'), live],
+          null,
+        ),
+        onRestore: (source, id) => restored.add((source, id)),
+      );
+
+      // A search spans the piles, and a hit that was never dropped has
+      // nothing to be restored from.
+      expect(find.text('Restore'), findsOneWidget);
+
+      await tester.tap(find.text('Restore'));
+      await tester.pump();
+
+      expect(restored, [('email', 'd1')]);
     });
   });
 

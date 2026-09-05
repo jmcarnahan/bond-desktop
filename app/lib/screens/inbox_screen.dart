@@ -2212,6 +2212,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onLoadMoreDropped: () =>
             ref.read(archiveProvider.notifier).loadMoreDropped(),
         onOpenStoryline: _selectStoryline,
+        // The pane sheds the row first and the pipeline catches up: the
+        // service's own writes are what make it true, and its two pumps are
+        // fire-and-forget by contract.
+        onRestore: (source, id) {
+          ref.read(archiveProvider.notifier).noteRestored(source, id);
+          unawaited(ref.read(restoreServiceProvider).restore(source, id));
+        },
         search: archive.search,
         searching: archive.searching,
         searchNotice: archive.searchNotice,

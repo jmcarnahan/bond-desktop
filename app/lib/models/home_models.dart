@@ -137,6 +137,38 @@ class HomeFeedRow {
   /// finds its row. Newline as the joint — neither connector's ids contain
   /// one.
   String get feedKey => '$source\n$sourceMessageId';
+
+  /// This row as it will read once Restore has run — the optimistic twin of
+  /// `MessageStore.restoreProgress`, the same reset spelled on the model.
+  ///
+  /// It exists so a pane can show the row un-dropped in the same frame the
+  /// button was pressed in, rather than waiting on the write and the re-read.
+  /// [needsYou], [urgency] and the storyline fields carry over untouched for
+  /// the store method's reason: triage and settle will restate them, and
+  /// blanking them here would only make the row flicker on its way to the
+  /// same values. The identity and text fields are facts about the message
+  /// and were never in question.
+  HomeFeedRow restored() => HomeFeedRow(
+        source: source,
+        sourceMessageId: sourceMessageId,
+        conversationKey: conversationKey,
+        receivedAt: receivedAt,
+        triageState: 'pending',
+        extractState: 'pending',
+        storylineState: 'pending',
+        draftState: 'pending',
+        settleState: 'pending',
+        outcome: 'pending',
+        dropped: false,
+        dropReason: null,
+        storylineId: storylineId,
+        storylineTitle: storylineTitle,
+        needsYou: needsYou,
+        urgency: urgency,
+        subject: subject,
+        fromName: fromName,
+        fromAddress: fromAddress,
+      );
 }
 
 /// One semantic-search result: a feed row, and how far its message sat from

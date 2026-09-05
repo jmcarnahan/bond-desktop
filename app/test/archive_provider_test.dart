@@ -332,5 +332,146 @@ void main() {
       expect(notifier.state.searchNotice, null);
       expect(notifier.state.search, isNotNull);
     });
+
+    /// Restore's optimistic half, which is the only writing this notifier
+    /// does not do: the service owns every store write, and this is what the
+    /// screen shows in the frame before the next read makes it true.
+    group('noteRestored', () {
+      HomeFeedRow droppedRow(String id) => HomeFeedRow(
+            source: 'email',
+            sourceMessageId: id,
+            conversationKey: 'c-$id',
+            receivedAt: '2026-09-01T10:00:00Z',
+            triageState: 'done',
+            extractState: 'skipped',
+            storylineState: 'skipped',
+            draftState: 'skipped',
+            settleState: 'done',
+            outcome: 'dropped',
+            dropped: true,
+            dropReason: 'newsletter',
+            subject: 'This week at Northwind',
+          );
+
+      test('the pile sheds the row and leaves the others', () async {
+        await seed(store, 'd1', receivedAt: '2026-09-01T11:00:00Z');
+        await seed(store, 'd2', receivedAt: '2026-09-01T10:00:00Z');
+        final notifier = ArchiveNotifier(store);
+        addTearDown(notifier.dispose);
+        await notifier.refreshDropped();
+
+        notifier.noteRestored('email', 'd1');
+
+        expect(
+          notifier.state.droppedRows.map((r) => r.sourceMessageId),
+          ['d2'],
+        );
+      });
+
+      test('a matching search hit is patched rather than removed', () async {
+        final notifier = notifierWith(
+          (query) async => ArchiveSearchResult(
+            query,
+            [droppedRow('a'), droppedRow('b')],
+            'text only',
+          ),
+        );
+        await notifier.submitSearch('northwind');
+
+        notifier.noteRestored('email', 'a');
+
+        final search = notifier.state.search!;
+        // Still an answer to the query — only what the gates did to it is
+        // undone.
+        expect(search.rows.map((r) => r.sourceMessageId), ['a', 'b']);
+        expect(search.rows.first.dropped, false);
+        expect(search.rows.first.dropReason, null);
+        expect(search.rows.first.subject, 'This week at Northwind');
+        expect(search.rows.last.dropped, true);
+        expect(search.query, 'northwind');
+        expect(search.notice, 'text only');
+      });
+
+      test('an id in neither list changes nothing', () async {
+        await seed(store, 'd1');
+        final notifier = ArchiveNotifier(store);
+        addTearDown(notifier.dispose);
+        await notifier.refreshDropped();
+
+        notifier.noteRestored('email', 'never-seen');
+
+        expect(
+          notifier.state.droppedRows.map((r) => r.sourceMessageId),
+          ['d1'],
+        );
+        expect(notifier.state.search, null);
+      });
+
+      test('with no search up, the search stays null', () async {
+        await seed(store, 'd1');
+        final notifier = ArchiveNotifier(store);
+        addTearDown(notifier.dispose);
+        await notifier.refreshDropped();
+
+        notifier.noteRestored('email', 'd1');
+
+        expect(notifier.state.droppedRows, isEmpty);
+        expect(notifier.state.search, null);
+      });
+    });
+  });
+
+  /// The model half of the same reset, which the notifier above leans on.
+  group('HomeFeedRow.restored', () {
+    test('undoes the drop and reopens every stage, keeping the message',
+        () {
+      const row = HomeFeedRow(
+        source: 'email',
+        sourceMessageId: 'm1',
+        conversationKey: 'c-m1',
+        receivedAt: '2026-09-01T10:00:00Z',
+        triageState: 'skipped',
+        extractState: 'skipped',
+        storylineState: 'skipped',
+        draftState: 'skipped',
+        settleState: 'done',
+        outcome: 'dropped',
+        dropped: true,
+        dropReason: 'newsletter',
+        storylineId: 'sl-1',
+        storylineTitle: 'Acme renewal',
+        needsYou: true,
+        urgency: 'high',
+        subject: 'This week at Northwind',
+        fromName: 'Alex Rivera',
+        fromAddress: 'alex.rivera@example.com',
+      );
+
+      final restored = row.restored();
+
+      expect(restored.dropped, false);
+      expect(restored.dropReason, null);
+      expect(restored.outcome, 'pending');
+      expect(restored.triageState, 'pending');
+      expect(restored.extractState, 'pending');
+      expect(restored.storylineState, 'pending');
+      expect(restored.draftState, 'pending');
+      expect(restored.settleState, 'pending');
+
+      // Triage and settle will restate these; blanking them here would only
+      // make the row flicker on its way back to the same values.
+      expect(restored.needsYou, true);
+      expect(restored.urgency, 'high');
+      expect(restored.storylineId, 'sl-1');
+      expect(restored.storylineTitle, 'Acme renewal');
+
+      // And the message itself was never in question.
+      expect(restored.feedKey, row.feedKey);
+      expect(restored.conversationKey, 'c-m1');
+      expect(restored.receivedAt, '2026-09-01T10:00:00Z');
+      expect(restored.subject, 'This week at Northwind');
+      expect(restored.fromName, 'Alex Rivera');
+      expect(restored.fromAddress, 'alex.rivera@example.com');
+    });
   });
 }
