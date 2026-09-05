@@ -236,8 +236,8 @@ and a **DECIDED** list — each rendered only when the pass found something for
 it — and a quiet "as of *n*h ago" read off `recap_through`, which dates the
 paragraph by the newest message it has *read* rather than by when it ran. The
 recap **replaces** the one-line `summary` in that header; the summary is still
-what the rail and the overview cards show, and it is the header's text until
-the recap pass has written one. `recapOpenItems` / `recapDecisions` on
+what the rail shows, and it is the header's text until the recap pass has
+written one. `recapOpenItems` / `recapDecisions` on
 `Storyline` are the only decoders of the two JSON columns, and they are
 tolerant in the same way the message models are: a half-written column costs
 the lists, never the render.
@@ -255,6 +255,15 @@ empty one that unlocks and queues a redraft — because the user has just
 answered the question the suggestion was asking. Neither offer appears while
 the charter field is open: the field is where the user would be answering the
 suggestion anyway.
+
+The Storylines overview cards lead with the recap too — the paragraph alone, up
+to four lines, falling back to the `summary` until a recap exists; what is open
+and what was decided stay on the storyline screen, where there is room to read
+them rather than skim past them. Beside the *Storylines* heading is a quiet
+**Sync**, which runs the ordinary sync (both connectors, exactly as the poll
+and the rail's refresh do) and reads *Syncing…* while it does: nothing
+storyline-shaped is needed, because that pass ends by requeueing the sweep and
+the sweep's catch-ups drain the refreshes and recaps that were owed.
 
 Refresh and recap both report progress under their own kinds, and
 `StorylinesNotifier` listens for both, so a pass that rewrites a title or a
