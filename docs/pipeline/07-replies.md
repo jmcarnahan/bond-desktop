@@ -6,6 +6,13 @@ each draft is keyed to the message it answers. `DraftHandler`
 27B slot**, and only for messages that passed the cheap `asksForAReply`
 pre-gate in extraction (see [04-extraction.md](04-extraction.md)).
 
+That pre-gate has a fifth signal: a `needs_you_verdict` of 1, the needs-you
+stage's read of the whole message (see [11-needs-you.md](11-needs-you.md)).
+`NeedsYouHandler` drains before extraction, so the verdict is on the row by the
+time the gate reads it. It only ever **widens** what reaches this file — the
+`ReplyDecisionTask` below still owns the actual reply decision, and a "no" from
+the 27B closes the draft stage `skipped` however the message got here.
+
 ## Reply decision — should we spend drafting time at all
 
 | | |

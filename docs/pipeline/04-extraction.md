@@ -14,7 +14,14 @@ facts out of each message, then fans out three cheap follow-ons:
 3. **Draft pre-gate** (`_queueDraft`) — `asksForAReply(row)` decides whether a
    `draft` work row is written or the draft stage closes as `skipped`. This is
    the cheap filter before the 27B's reply decision (see
-   [07-replies.md](07-replies.md)).
+   [07-replies.md](07-replies.md)). Five signals off the row, any one enough:
+   `needs_you_verdict = 1`, `reply_expected`, `needs_action`, an urgent/high
+   urgency, or a named deadline. The first is the needs-you stage's
+   whole-message verdict (see [11-needs-you.md](11-needs-you.md)) rather than
+   one of triage's fields, and it is on the row because `NeedsYouHandler`
+   drains ahead of this handler in the worker. A judged yes puts a message in
+   front of the drafting model even when triage saw no reply cue at all; NULL
+   and 0 change nothing, and the gate degrades to its old four-signal shape.
 
 It also embeds the message's own document vector on the fast path
 (`_embedMessage`) — see [05-embeddings.md](05-embeddings.md).

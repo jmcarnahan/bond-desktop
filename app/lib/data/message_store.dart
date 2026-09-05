@@ -1921,8 +1921,9 @@ RETURNING *
   /// lookup would be a query per row.
   ///
   /// The triage judgment columns ride along on the same row — `needs_action`,
-  /// `reply_expected`, `deadline`, `addressed_me` — because the scorer reads
-  /// them about exactly this message, the newest inbound one.
+  /// `reply_expected`, `deadline`, `addressed_me`, `needs_you_verdict` —
+  /// because the scorer reads them about exactly this message, the newest
+  /// inbound one.
   Future<Map<String, Map<String, Object?>>> latestInboundMeta({
     List<String> sources = const ['email'],
   }) async {
@@ -1931,7 +1932,7 @@ RETURNING *
         .customSelect(
           'SELECT conversation_key, source, source_message_id, from_address, '
           '  received_at, extraction_json, needs_action, reply_expected, '
-          '  deadline, addressed_me FROM ('
+          '  deadline, addressed_me, needs_you_verdict FROM ('
           '  SELECT m.conversation_key AS conversation_key, m.source AS source, '
           '    m.source_message_id AS source_message_id, '
           '    m.from_address AS from_address, m.received_at AS received_at, '
@@ -1939,6 +1940,7 @@ RETURNING *
           '    m.needs_action AS needs_action, '
           '    m.reply_expected AS reply_expected, '
           '    m.deadline AS deadline, m.addressed_me AS addressed_me, '
+          '    m.needs_you_verdict AS needs_you_verdict, '
           '    ROW_NUMBER() OVER ('
           '      PARTITION BY m.source, m.conversation_key '
           '      ORDER BY m.received_at DESC, m.source_message_id DESC'

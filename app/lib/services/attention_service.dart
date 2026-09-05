@@ -75,6 +75,7 @@ class AttentionService {
             latestNeedsAction: _tristate(latest?['needs_action']),
             latestDeadline: latest?['deadline'] as String?,
             addressedMe: ((latest?['addressed_me'] as num?) ?? 0) != 0,
+            needsYouVerdict: _tristate(latest?['needs_you_verdict']),
             now: at,
           ),
         );
@@ -150,16 +151,17 @@ class AttentionService {
     );
   }
 
-  /// One of triage's 0/1/NULL judgment columns, as a nullable bool.
+  /// One of the 0/1/NULL judgment columns — triage's, or the needs-you
+  /// stage's — as a nullable bool.
   ///
-  /// The null has to survive the trip intact: it means v2 never judged this
-  /// message, which the scorer treats as a different thing from v2 having
+  /// The null has to survive the trip intact: it means nothing ever judged this
+  /// message, which the scorer treats as a different thing from a stage having
   /// judged it and said no. Anything that is not a number reads as null for
   /// the same reason a corrupt extraction does — "nothing is known here" is the
   /// conservative answer, and it is the one the scorer already handles.
   ///
   /// (`message_models.dart` has the identical conversion as `_boolFromInt`, but
-  /// it is library-private and not worth widening for two call sites.)
+  /// it is library-private and not worth widening for three call sites.)
   static bool? _tristate(Object? raw) => raw is num ? raw != 0 : null;
 
   /// The stored extraction, or null when there is none and when what is stored

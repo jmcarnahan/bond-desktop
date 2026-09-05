@@ -1,7 +1,7 @@
 # 11 · Needs-you verdict
 
-**Who reads this verdict.** The **notification settle** does, as of this phase
-— see `09-notifications.md`. Three readers, together so the tile and the toast
+**Who reads this verdict.** The **notification settle** does — see
+`09-notifications.md`. Three readers, together so the tile and the toast
 cannot disagree: `notifyWorthy` counts `needs_you_verdict = 1` as a
 message-level ask; `needsYouSql` counts it in the same position, so the settle
 sweep's backstop writes the same `message_progress.needs_you`; and
@@ -10,8 +10,17 @@ sweep's backstop writes the same `message_progress.needs_you`; and
 threshold, the `later` bucket and the `done` state gate a judged yes exactly as
 they gate every other ask.
 
-Attention scoring and the draft pre-gate still do **not** read it; those land in
-later phases of this round.
+**Attention scoring** reads it too — see [08-attention.md](08-attention.md).
+`attentionScore` takes the newest inbound message's verdict off the
+`latestInboundMeta` row: a judged yes breaks the quiet-FYI temper and earns the
+direct boost, while NULL and 0 move nothing. It changes the score, never the
+threshold; the slider still gates.
+
+**The draft pre-gate** reads it as well — see
+[04-extraction.md](04-extraction.md). `asksForAReply` counts
+`needs_you_verdict = 1` as a fifth reason to spend the 27B's time, which is why
+this handler is registered ahead of `ExtractHandler`. It only widens what gets
+asked about; `ReplyDecisionTask` still decides whether a draft is written.
 
 **What happens.** `NeedsYouHandler`
 (`app/lib/services/needs_you_handler.dart`, run by `AiWorker`) answers one

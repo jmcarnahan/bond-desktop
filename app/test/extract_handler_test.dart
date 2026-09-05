@@ -6,6 +6,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -757,6 +758,72 @@ void main() {
       expect(await draftStateOf('m1'), 'skipped');
     });
 
+    test('the needs-you stage alone is enough to queue one', () async {
+      // Nothing triage wrote asks for anything: no reply expected, no action,
+      // normal urgency, no date. The needs-you stage read the message whole and
+      // said it is the user's to answer, and that is the fifth signal — the
+      // handler runs ahead of this one in the worker precisely so the verdict
+      // is on the row by the time this reads it.
+      await seedMessage();
+      await seedConversation();
+      await triageSaid();
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'Priya is waiting on your number');
+
+      await extract();
+
+      expect(await queuedDrafts(), ['m1']);
+      expect(await draftStateOf('m1'), 'pending');
+    });
+
+    test('but a judged no leaves the narrow row exactly where it was', () async {
+      await seedMessage();
+      await seedConversation();
+      await triageSaid();
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: false, reason: 'a heads-up, nothing to answer');
+
+      await extract();
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(await draftStateOf('m1'), 'skipped');
+    });
+
+    test('and so does a verdict nothing ever wrote', () async {
+      // NULL — the handler errored, or never ran. The gate degrades to exactly
+      // the four-signal shape it had before the stage existed.
+      await seedMessage();
+      await seedConversation();
+      await triageSaid();
+      await store.writeNeedsYouVerdict('email', 'm1', verdict: null);
+
+      await extract();
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(await draftStateOf('m1'), 'skipped');
+    });
+
+    test('a verdict on the user\'s own mail does not get past the guard',
+        () async {
+      // The inbound guard runs first and nothing after it can reopen the
+      // question: the user needs no reply to themselves.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'o1',
+        'conversation_key': 'conv-1',
+        'direction': 'outbound',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'Sent it over. — Jo',
+      });
+      await triageSaid(id: 'o1');
+      await store.writeNeedsYouVerdict('email', 'o1', verdict: true);
+
+      await extract(id: 'o1');
+
+      expect(await queuedDrafts(), isEmpty);
+      expect(await draftStateOf('o1'), 'skipped');
+    });
+
     test('a message that vanished is skipped, not left waiting', () async {
       await store.upsertMessage({
         'source': 'email',
@@ -822,6 +889,51 @@ void main() {
       expect(await store.getExtraction('email', 'm1'), isNotNull);
       expect(embeddings.clusteringInputs.length, 1);
       expect(embeddings.documentInputs.length, 1);
+    });
+
+    test('a message queued on its needs-you verdict still faces the 27B',
+        () async {
+      // The pre-gate only ever WIDENS what gets asked about. Nothing triage
+      // wrote asks for anything here, so this message reaches drafting on the
+      // verdict alone — and the reply decision behind the queue still closes it
+      // with a no, without a drafting call being spent.
+      await seedConversation();
+      await seedMessage();
+      await store.writeTriage(
+        'email',
+        'm1',
+        status: 'triaged',
+        result: TriageResult(
+          urgency: 'normal',
+          category: 'work',
+          summary: 'what it says',
+          needsAction: false,
+          actionItems: const [],
+          replyExpected: false,
+          deadline: '',
+        ),
+      );
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'Priya is waiting on your number');
+      await store.enqueueWork('extract', 'email', 'm1');
+      final drafting = FakeLlm([
+        {'needs_reply': false, 'reason': 'A heads-up; nobody is waiting.'}
+      ]);
+      final worker = AiWorker(
+        store,
+        handlers: [
+          ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client),
+          DraftHandler(store, drafting),
+        ],
+      );
+
+      await worker.pump();
+      await worker.pump();
+
+      expect(await store.workCounts('draft'), {'done': 1});
+      expect(drafting.userMessages, hasLength(1),
+          reason: 'the decision ran and the drafting model was never reached');
+      expect(await store.getDraftForMessage('email', 'm1'), isNull);
     });
 
     test('a model server that is down leaves the item queued', () async {

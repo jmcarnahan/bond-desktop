@@ -102,7 +102,8 @@ class AttentionTuning {
 ///    [AttentionTuning.recencyHalfLifeDays].
 /// 7. Multiplied by [AttentionTuning.keepBoost] for a `keep` sender.
 /// 8. Multiplied by [AttentionTuning.directBoost] when the message was
-///    addressed to the user singularly and nothing said no reply is wanted.
+///    addressed to the user singularly — or the needs-you stage judged it a
+///    real ask — and nothing said no reply is wanted.
 /// 9. Clamped.
 ///
 /// **The quiet temper (steps 2 and 5).** A thread can sit in `needsReply`
@@ -127,12 +128,32 @@ class AttentionTuning {
 /// same as it having looked and said no — an unjudged thread scores exactly as
 /// it did before any of this existed.
 ///
+/// **The needs-you verdict.** [needsYouVerdict] is the needs-you stage's
+/// whole-message answer about that same newest inbound message, and it is the
+/// one input here that reads the message rather than triage's fields about it.
+/// It moves the score in exactly two places, both above: a judged YES breaks
+/// the quiet temper (step 2, so the thread scores from
+/// [AttentionTuning.needsReplyBase] and keeps its reply-rate nudge) and earns
+/// the direct boost (step 8) on its own, without [addressedMe]. That pairing is
+/// what lets a 1:1 Teams FYI the stage judged a real ask clear the default
+/// threshold with no slider override.
+///
+/// Null and false move NOTHING. The fences are written to be asymmetric on
+/// purpose — `!= true` on the temper, `== true` on the boost — so that a
+/// message the stage never judged (null) and one it judged and declined (false)
+/// both score exactly as they did before this input existed.
+///
+/// And it deliberately does not touch the THRESHOLD. A judged yes raises the
+/// score through the same arithmetic every other signal uses and then takes its
+/// chances against the user's slider like everything else; nothing here gets a
+/// bypass into Needs You.
+///
 /// [latestIntent] is the intent from the newest inbound message's extraction,
 /// null when nothing has extracted it yet. [senderReplyRate] is a 0..1 fraction
 /// and is clamped, so a caller cannot push a thread up by handing over a rate
 /// of 40. [senderPref] is `'keep'`, `'later'`, or null. [latestNeedsAction],
-/// [latestDeadline] and [addressedMe] all describe that same newest inbound
-/// message.
+/// [latestDeadline], [addressedMe] and [needsYouVerdict] all describe that same
+/// newest inbound message.
 double attentionScore({
   required Conversation conversation,
   String? latestIntent,
@@ -142,6 +163,7 @@ double attentionScore({
   bool? latestNeedsAction,
   String? latestDeadline,
   bool addressedMe = false,
+  bool? needsYouVerdict,
   required DateTime now,
 }) {
   // Both hard zeros, checked before anything else: a thread the user has
@@ -150,10 +172,15 @@ double attentionScore({
   if (conversation.state == ConversationState.done) return 0;
 
   // Every clause is a separate reason to leave the thread alone, so every one
-  // of them has to agree before the temper fires: triage said no reply is
-  // wanted, it named no action and no date, and the extraction read the message
-  // as an FYI rather than an ask.
-  final quietFyi = conversation.state == ConversationState.needsReply &&
+  // of them has to agree before the temper fires: the needs-you stage did not
+  // call it a real ask, triage said no reply is wanted, it named no action and
+  // no date, and the extraction read the message as an FYI rather than an ask.
+  //
+  // `!= true` on the first clause: a verdict nobody wrote (null) and one the
+  // stage declined (false) leave the temper exactly as it was, and only a
+  // judged yes breaks it.
+  final quietFyi = needsYouVerdict != true &&
+      conversation.state == ConversationState.needsReply &&
       latestReplyExpected == false &&
       latestNeedsAction != true &&
       (latestDeadline == null || latestDeadline.isEmpty) &&
@@ -191,8 +218,15 @@ double attentionScore({
   // `!= false` rather than `== true` on purpose: a direct message triage has
   // never judged still gets the boost, and only an explicit "nobody is waiting
   // on this" declines it. That also makes this mutually exclusive with the
-  // temper by construction, which requires the explicit false.
-  if (addressedMe && latestReplyExpected != false) {
+  // temper by construction, which requires the explicit false — still true of
+  // the widened condition, since the temper's clauses are unchanged.
+  //
+  // The verdict earns the boost on `== true` alone, the opposite fence from
+  // the temper's: being addressed is a fact about the header and reads as a
+  // signal even unjudged, while a needs-you verdict IS a judgment, so its
+  // absence says nothing to boost on.
+  if ((addressedMe || needsYouVerdict == true) &&
+      latestReplyExpected != false) {
     score *= AttentionTuning.directBoost;
   }
 
