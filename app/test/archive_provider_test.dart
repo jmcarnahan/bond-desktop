@@ -1,9 +1,12 @@
+import 'dart:async';
+
 // `show BondDatabase`: drift generates row classes whose names collide with
 // the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/providers/archive_provider.dart';
+import 'package:bond_inbox/services/message_search.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -189,5 +192,145 @@ void main() {
     // And the sentence goes away when a read works again.
     await notifier.refreshDropped();
     expect(notifier.state.droppedError, null);
+  });
+
+  group('search', () {
+    /// A row shaped enough to be told apart from another one. The search half
+    /// of this notifier never reads the database — the runner is the seam —
+    /// so a literal is the whole fixture.
+    HomeFeedRow row(String id) => HomeFeedRow(
+          source: 'email',
+          sourceMessageId: id,
+          conversationKey: 'c-$id',
+          receivedAt: '2026-09-01T10:00:00Z',
+          triageState: 'done',
+          extractState: 'done',
+          storylineState: 'done',
+          draftState: 'skipped',
+          settleState: 'done',
+          outcome: 'done',
+          dropped: false,
+          subject: 'Invoice $id',
+        );
+
+    ArchiveNotifier notifierWith(ArchiveSearchRunner runner) {
+      final notifier = ArchiveNotifier(store, searchRunner: runner);
+      addTearDown(notifier.dispose);
+      return notifier;
+    }
+
+    test('a submitted query lands as results', () async {
+      final notifier = notifierWith(
+        (query) async => ArchiveSearchResult(query, [row('a')], null),
+      );
+
+      await notifier.submitSearch('  invoice  ');
+
+      expect(notifier.state.search?.query, 'invoice',
+          reason: 'the query is trimmed before it is asked');
+      expect(notifier.state.search?.rows.single.sourceMessageId, 'a');
+      expect(notifier.state.searching, false);
+      expect(notifier.state.searchNotice, null);
+    });
+
+    test('a blank query is not a question', () async {
+      var asked = 0;
+      final notifier = notifierWith((query) async {
+        asked++;
+        return ArchiveSearchResult(query, const [], null);
+      });
+
+      await notifier.submitSearch('   ');
+
+      expect(asked, 0);
+      expect(notifier.state.search, null);
+      expect(notifier.state.searching, false);
+    });
+
+    test('a slow first answer never overwrites a faster second', () async {
+      final held = Completer<ArchiveSearchResult>();
+      final notifier = notifierWith((query) {
+        if (query == 'first') return held.future;
+        return Future.value(ArchiveSearchResult(query, [row('b')], null));
+      });
+
+      final first = notifier.submitSearch('first');
+      await notifier.submitSearch('second');
+      expect(notifier.state.search?.query, 'second');
+
+      held.complete(ArchiveSearchResult('first', [row('a')], null));
+      await first;
+
+      expect(notifier.state.search?.query, 'second',
+          reason: 'the stamp moved before the first query was ever asked');
+      expect(notifier.state.search?.rows.single.sourceMessageId, 'b');
+    });
+
+    test('a runner that throws says so and leaves the piles alone', () async {
+      final notifier = notifierWith(
+        (_) async => throw StateError('the index is unreadable'),
+      );
+
+      await notifier.submitSearch('invoice');
+
+      expect(notifier.state.searchNotice, isNotNull);
+      expect(notifier.state.search, null,
+          reason: 'nothing answered, so there is nothing to show');
+      expect(notifier.state.searching, false);
+    });
+
+    test('a result that only text could answer still lands as results',
+        () async {
+      final notifier = notifierWith(
+        (query) async => ArchiveSearchResult(
+          query,
+          [row('a')],
+          'Text matches only — the embedding server is not reachable.',
+        ),
+      );
+
+      await notifier.submitSearch('invoice');
+
+      // The difference from Home: the search RAN, so the body swaps and the
+      // sentence rides on the rows rather than in place of them.
+      expect(notifier.state.search, isNotNull);
+      expect(notifier.state.search?.notice, startsWith('Text matches only'));
+      expect(notifier.state.searchNotice, null);
+    });
+
+    test('leaving search clears it, and a late answer cannot bring it back',
+        () async {
+      final held = Completer<ArchiveSearchResult>();
+      final notifier = notifierWith((_) => held.future);
+
+      final pending = notifier.submitSearch('invoice');
+      notifier.exitSearch();
+      expect(notifier.state.search, null);
+      expect(notifier.state.searching, false);
+      expect(notifier.state.searchNotice, null);
+
+      held.complete(ArchiveSearchResult('invoice', [row('a')], null));
+      await pending;
+
+      expect(notifier.state.search, null,
+          reason: 'the answer belongs to a search that no longer exists');
+    });
+
+    test('a failed search stops saying so once one works', () async {
+      var fail = true;
+      final notifier = notifierWith((query) async {
+        if (fail) throw StateError('the index is unreadable');
+        return ArchiveSearchResult(query, [row('a')], null);
+      });
+
+      await notifier.submitSearch('invoice');
+      expect(notifier.state.searchNotice, isNotNull);
+
+      fail = false;
+      await notifier.submitSearch('invoice');
+
+      expect(notifier.state.searchNotice, null);
+      expect(notifier.state.search, isNotNull);
+    });
   });
 }

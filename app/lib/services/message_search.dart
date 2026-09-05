@@ -30,6 +30,27 @@ class MessageSearchUnavailable extends MessageSearchResult {
   const MessageSearchUnavailable(this.reason);
 }
 
+/// What a search of the archive came back with: rows, and a sentence when the
+/// semantic half of it could not run.
+///
+/// Plain rather than part of [MessageSearchResult]'s sealed pair, because the
+/// archive's search still ANSWERS when the embedding server is down — the text
+/// pass runs either way. So unavailability here is a notice ON a result, where
+/// above it is a case INSTEAD of one.
+class ArchiveSearchResult {
+  /// The query as it was searched, trimmed.
+  final String query;
+
+  /// Semantic matches first in rank order, then the text matches the index did
+  /// not already return.
+  final List<HomeFeedRow> rows;
+
+  /// Non-null when only the text pass contributed.
+  final String? notice;
+
+  const ArchiveSearchResult(this.query, this.rows, this.notice);
+}
+
 /// Turns a sentence a person typed into ranked messages.
 ///
 /// The search screen's ONLY door: it never reaches [EmbeddingsClient] or
@@ -85,5 +106,55 @@ class MessageSearch {
       );
     }
     return MessageSearchHits(text, hits);
+  }
+
+  /// The same question asked of the whole history, both ways at once.
+  ///
+  /// Scope is ALL of it, dropped rows included, because the archive's selling
+  /// point is "I know I got that email" — a search that quietly skipped the
+  /// pile the gate threw out would answer that sentence with silence.
+  ///
+  /// The text pass runs EVERY time and not only as a rescue: gate-dropped
+  /// messages have no vectors at all, so they are unreachable by meaning no
+  /// matter how well the embedding server is running. Semantic ranking goes
+  /// first because when it works it is the better answer; text fills in behind
+  /// it with whatever it never had a chance to see.
+  Future<ArchiveSearchResult> searchArchive(
+    String query, {
+    int limit = 50,
+  }) async {
+    final text = query.trim();
+
+    String? notice;
+    var semantic = const <SemanticHit>[];
+
+    final result = await _embeddings.embedResult(
+      text,
+      prefix: EmbeddingsClient.searchQueryPrefix,
+    );
+    final vector = result.vector;
+    if (vector == null) {
+      notice = 'Text matches only — the embedding server '
+          '${result.reason ?? 'did not answer'}.';
+    } else {
+      final hits = await _store.semanticSearch(
+        encodeEmbedding(vector),
+        embedModel: EmbeddingsClient.documentModelTag,
+        limit: limit,
+        includeDropped: true,
+      );
+      if (hits == null) {
+        notice = 'Text matches only — the semantic index is unavailable.';
+      } else {
+        semantic = hits;
+      }
+    }
+
+    final rows = [for (final hit in semantic) hit.row];
+    final seen = {for (final row in rows) row.feedKey};
+    for (final row in await _store.textSearchMessages(text, limit: limit)) {
+      if (seen.add(row.feedKey)) rows.add(row);
+    }
+    return ArchiveSearchResult(text, rows, notice);
   }
 }

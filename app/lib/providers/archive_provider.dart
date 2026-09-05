@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
 import '../models/home_models.dart';
+import '../services/message_search.dart';
 import 'app_providers.dart';
 
 /// What the Archive's Dropped tab is looking at: every message the pipeline
@@ -27,6 +28,11 @@ import 'app_providers.dart';
 const String _droppedStaleMessage =
     "Couldn't read the dropped pile just now — showing what was already here.";
 
+/// How the pane asks its question. A callback rather than a [MessageSearch],
+/// on the home feed's precedent: the notifier owes nothing to the embedding
+/// server or the index, so a test can hand it an answer without either.
+typedef ArchiveSearchRunner = Future<ArchiveSearchResult> Function(String query);
+
 @immutable
 class ArchiveState {
   /// Newest first, the order the store hands them over.
@@ -46,17 +52,34 @@ class ArchiveState {
   /// Non-null when the newest read failed. The rows above it are still real.
   final String? droppedError;
 
+  /// The results a query came back with, or null for the tabs. Cross-tab by
+  /// nature: one search spans all three piles, because the reader asking it
+  /// does not know which one holds the answer.
+  final ArchiveSearch? search;
+
+  /// A query is out and no answer has landed yet.
+  final bool searching;
+
+  /// Only ever the sentence for a search that could not be RUN. A search that
+  /// ran on text alone carries its own notice on [ArchiveSearch] instead,
+  /// because that one is a fact about the results underneath it.
+  final String? searchNotice;
+
   const ArchiveState({
     this.droppedRows = const [],
     this.droppedLoaded = false,
     this.droppedLoadingMore = false,
     this.droppedAtEnd = false,
     this.droppedError,
+    this.search,
+    this.searching = false,
+    this.searchNotice,
   });
 
   /// [clearDroppedError] rather than a nullable-means-keep [droppedError]: a
   /// banner that could only be set and never cleared would outlive the failure
-  /// it described.
+  /// it described. [clearSearch] and [clearSearchNotice] are the same rule —
+  /// leaving search is the whole point of having entered it.
   ArchiveState copyWith({
     List<HomeFeedRow>? droppedRows,
     bool? droppedLoaded,
@@ -64,6 +87,11 @@ class ArchiveState {
     bool? droppedAtEnd,
     String? droppedError,
     bool clearDroppedError = false,
+    ArchiveSearch? search,
+    bool? searching,
+    String? searchNotice,
+    bool clearSearch = false,
+    bool clearSearchNotice = false,
   }) =>
       ArchiveState(
         droppedRows: droppedRows ?? this.droppedRows,
@@ -72,6 +100,10 @@ class ArchiveState {
         droppedAtEnd: droppedAtEnd ?? this.droppedAtEnd,
         droppedError:
             clearDroppedError ? null : (droppedError ?? this.droppedError),
+        search: clearSearch ? null : (search ?? this.search),
+        searching: searching ?? this.searching,
+        searchNotice:
+            clearSearchNotice ? null : (searchNotice ?? this.searchNotice),
       );
 }
 
@@ -83,6 +115,10 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
 
   final MessageStore _store;
 
+  /// Null in the tests that only walk the dropped pile: a notifier with no
+  /// runner simply has no search, rather than half of one.
+  final ArchiveSearchRunner? _searchRunner;
+
   /// Incremented per [refreshDropped]; anything that comes back stale writes
   /// nothing. [loadMoreDropped] reads it without incrementing — an older page
   /// must never win over a newer first page, and must never invalidate one.
@@ -93,7 +129,14 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
   /// defensive.
   bool _loadingMore = false;
 
-  ArchiveNotifier(this._store) : super(const ArchiveState());
+  /// Incremented per [submitSearch] and again on the way out, so an answer
+  /// that lands late writes nothing. Separate from [_fetchSeq]: a page read
+  /// and a query are different questions and neither invalidates the other.
+  int _searchSeq = 0;
+
+  ArchiveNotifier(this._store, {ArchiveSearchRunner? searchRunner})
+      : _searchRunner = searchRunner,
+        super(const ArchiveState());
 
   /// The newest page, read fresh.
   ///
@@ -162,6 +205,62 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
       _loadingMore = false;
     }
   }
+
+  /// Asks the history a sentence and shows what comes back.
+  ///
+  /// Submission is the whole gate, the home feed's reason: a query costs an
+  /// embedding call, so this runs on Enter and never on a keystroke.
+  ///
+  /// Unlike Home, a result ALWAYS swaps the body in. Home refuses when the
+  /// index is down because it would be trading a working feed for an empty
+  /// list; here the search still ran — the text pass answered — so a result
+  /// carrying a notice is still a result, and the notice rides on it.
+  /// [ArchiveState.searchNotice] is left for the one case that is not an
+  /// answer at all: the runner throwing.
+  Future<void> submitSearch(String query) async {
+    final text = query.trim();
+    if (text.isEmpty) return;
+    final runner = _searchRunner;
+    if (runner == null) return;
+
+    final seq = ++_searchSeq;
+    state = state.copyWith(searching: true, clearSearchNotice: true);
+
+    final ArchiveSearchResult result;
+    try {
+      result = await runner(text);
+    } catch (e) {
+      // [MessageSearch] answers rather than throws, by contract — but the
+      // runner crosses the database on its way there, and a screen left
+      // searching forever is the one outcome this must not have.
+      if (seq != _searchSeq || !mounted) return;
+      debugPrint('archive search failed: $e');
+      state = state.copyWith(
+        searching: false,
+        searchNotice: "Search failed — couldn't read the index.",
+      );
+      return;
+    }
+    if (seq != _searchSeq || !mounted) return;
+    state = state.copyWith(
+      search: ArchiveSearch(result.query, result.rows, result.notice),
+      searching: false,
+    );
+  }
+
+  /// Back to the three piles.
+  ///
+  /// The stamp moves first: an answer still in flight belongs to a search that
+  /// no longer exists, and it must not land on the tabs the reader just
+  /// returned to.
+  void exitSearch() {
+    _searchSeq++;
+    state = state.copyWith(
+      clearSearch: true,
+      searching: false,
+      clearSearchNotice: true,
+    );
+  }
 }
 
 /// NOT autoDispose: the pages walked belong to the session, not to the frame,
@@ -169,5 +268,9 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
 /// Entering the tab re-reads page one, which is what keeps that list honest.
 final archiveProvider =
     StateNotifierProvider<ArchiveNotifier, ArchiveState>((ref) {
-  return ArchiveNotifier(ref.watch(messageStoreProvider));
+  return ArchiveNotifier(
+    ref.watch(messageStoreProvider),
+    searchRunner: (query) =>
+        ref.read(messageSearchProvider).searchArchive(query),
+  );
 });

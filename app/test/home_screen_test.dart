@@ -67,6 +67,20 @@ class _FakeSearch implements MessageSearch {
       [for (final row in rows) SemanticHit(row, 0.1)],
     );
   }
+
+  /// The archive's door, answered off the store's text read — the half of it
+  /// that needs no server. Here only because the interface has it; this file's
+  /// screen is Home.
+  @override
+  Future<ArchiveSearchResult> searchArchive(
+    String query, {
+    int limit = 50,
+  }) async =>
+      ArchiveSearchResult(
+        query.trim(),
+        await store.textSearchMessages(query, limit: limit),
+        null,
+      );
 }
 
 void main() {

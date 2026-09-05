@@ -4345,6 +4345,75 @@ $where
     return ranked;
   }
 
+  /// Escapes what LIKE would otherwise read as a wildcard. The escape
+  /// character goes first, or the backslashes the other two rules write would
+  /// themselves be escaped a moment later.
+  static String _escapeLike(String value) => value
+      .replaceAll('\\', r'\\')
+      .replaceAll('%', r'\%')
+      .replaceAll('_', r'\_');
+
+  /// Feed rows whose subject or body contains every word of [query], newest
+  /// first.
+  ///
+  /// The text fallback that makes gate-dropped mail findable. A message the
+  /// gate threw out never reached the embedder, so no vector was ever written
+  /// for it and [semanticSearch] cannot see it however well it matches — which
+  /// leaves the one pile a person is most likely to come looking for
+  /// unsearchable by the only search there is.
+  ///
+  /// Dropped rows are included ALWAYS rather than behind a flag: the archive
+  /// is this read's only caller, and hiding them here would remove the reason
+  /// it exists.
+  ///
+  /// Deliberately LIKE and not FTS — the corpus is one person's history and a
+  /// scan of it is cheap at that size. Revisit if it gets slow; an FTS5 table
+  /// is a migration and a write path, not a change to this signature.
+  Future<List<HomeFeedRow>> textSearchMessages(
+    String query, {
+    int limit = 50,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (sources.isEmpty) return const [];
+    final terms = query.trim().toLowerCase().split(RegExp(r'\s+'))
+      ..removeWhere((term) => term.isEmpty);
+    if (terms.isEmpty) return const [];
+
+    // AND across terms, OR across columns: a two-word query is a narrowing,
+    // and the two words are allowed to sit in different columns of the same
+    // message — a subject and a body are one text as far as the reader who
+    // typed them is concerned.
+    final where = StringBuffer();
+    final args = <Object?>[];
+    for (final term in terms) {
+      final pattern = '%${_escapeLike(term)}%';
+      if (where.isNotEmpty) where.write(' AND ');
+      // Three bindings of the same pattern rather than one named parameter:
+      // every statement here is written against positional `?`.
+      where.write(
+        "(LOWER(m.subject) LIKE ? ESCAPE '\\' "
+        "OR LOWER(COALESCE(m.body_preview, '')) LIKE ? ESCAPE '\\' "
+        "OR LOWER(COALESCE(m.body_text, '')) LIKE ? ESCAPE '\\')",
+      );
+      args.addAll([pattern, pattern, pattern]);
+    }
+    where.write(' AND p.source IN (${_placeholders(sources.length)})');
+    args.addAll(sources);
+
+    final result = await db
+        .customSelect(
+          '''
+$_homeFeedSelect
+WHERE $where
+ORDER BY p.received_at DESC, p.source_message_id DESC
+LIMIT ?
+''',
+          variables: _args([...args, limit]),
+        )
+        .get();
+    return [for (final row in result) HomeFeedRow.fromRow(row.data)];
+  }
+
   /// The storylines the window was busiest with, most messages first.
   ///
   /// Counts messages that landed IN THE WINDOW rather than the storylines'

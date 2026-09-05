@@ -2212,6 +2212,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onLoadMoreDropped: () =>
             ref.read(archiveProvider.notifier).loadMoreDropped(),
         onOpenStoryline: _selectStoryline,
+        search: archive.search,
+        searching: archive.searching,
+        searchNotice: archive.searchNotice,
+        onSearch: (query) =>
+            ref.read(archiveProvider.notifier).submitSearch(query),
+        onExitSearch: () => ref.read(archiveProvider.notifier).exitSearch(),
         now: DateTime.now(),
       );
     }

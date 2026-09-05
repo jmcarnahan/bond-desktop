@@ -56,6 +56,15 @@ void main() {
   // the rest of the process, so every connection opened after it has the
   // extension and a second test here would be asserting the opposite thing.
   test('a missing index reads as unavailable, never as "no matches"', () async {
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'gated',
+      'conversation_key': 'c-gated',
+      'direction': 'inbound',
+      'subject': 'Invoice 4471 is overdue',
+      'received_at': '2026-08-29T10:00:00Z',
+    });
+
     // The store's half first. The two answers are different sentences, and
     // only a nullable return can hold both: `const []` cannot say "there is
     // nothing to search WITH".
@@ -74,5 +83,16 @@ void main() {
     // mailbox, made on the strength of a feature being switched off.
     expect(result, isA<MessageSearchUnavailable>());
     expect((result as MessageSearchUnavailable).reason, contains('index'));
+
+    // The archive over the same missing index: still an answer, because the
+    // text pass never needed one. Same connection and therefore the same test
+    // — a second one here would open a connection the registration above has
+    // already reached.
+    final archive =
+        await MessageSearch(store, workingServer()).searchArchive('invoice');
+
+    expect([for (final row in archive.rows) row.sourceMessageId], ['gated']);
+    expect(archive.notice, startsWith('Text matches only'));
+    expect(archive.notice, contains('index'));
   });
 }

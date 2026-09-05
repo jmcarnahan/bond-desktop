@@ -1,6 +1,7 @@
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/archive_pane.dart';
+import 'package:bond_inbox/widgets/chips.dart' show BondFilterPill;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/later_digest.dart';
 import 'package:flutter/material.dart';
@@ -72,6 +73,11 @@ void main() {
     String? droppedError,
     VoidCallback? onLoadMoreDropped,
     void Function(String)? onOpenStoryline,
+    ArchiveSearch? search,
+    bool searching = false,
+    String? searchNotice,
+    void Function(String)? onSearch,
+    VoidCallback? onExitSearch,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -93,6 +99,11 @@ void main() {
           droppedError: droppedError,
           onLoadMoreDropped: onLoadMoreDropped ?? () {},
           onOpenStoryline: onOpenStoryline ?? (_) {},
+          search: search,
+          searching: searching,
+          searchNotice: searchNotice,
+          onSearch: onSearch ?? (_) {},
+          onExitSearch: onExitSearch ?? () {},
           now: _now,
         ),
       ),
@@ -277,6 +288,131 @@ void main() {
     await tester.pump();
 
     expect(opened, [('teams', 'c-d1')]);
+  });
+
+  group('search', () {
+    ArchiveSearch results(List<HomeFeedRow> rows, {String? notice}) =>
+        ArchiveSearch('invoice', rows, notice);
+
+    testWidgets('results take the place of the tabs, pills and all',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: [_conv(id: 'a', bucket: 'later')],
+        search: results([
+          _dropped(id: 'd1', subject: 'Invoice 4471 is overdue'),
+          _dropped(id: 'd2', subject: 'Invoice 4472 is paid'),
+        ]),
+      );
+
+      expect(find.text('Invoice 4471 is overdue'), findsOneWidget);
+      expect(find.text('Invoice 4472 is paid'), findsOneWidget);
+      expect(find.text('2 results for “invoice”'), findsOneWidget);
+      expect(find.text('Back to archive'), findsOneWidget);
+      // A search spans all three piles, so none of them may look selected
+      // under it.
+      expect(find.widgetWithText(BondFilterPill, 'Later'), findsNothing);
+      expect(find.widgetWithText(BondFilterPill, 'Done'), findsNothing);
+      expect(find.widgetWithText(BondFilterPill, 'Dropped'), findsNothing);
+      expect(find.byType(LaterDigestPanel), findsNothing);
+    });
+
+    testWidgets('one result is counted in the singular', (tester) async {
+      await pump(
+        tester,
+        conversations: const [],
+        search: results([_dropped(id: 'd1', subject: 'Invoice 4471')]),
+      );
+
+      expect(find.text('1 result for “invoice”'), findsOneWidget);
+    });
+
+    testWidgets('the way back asks the host to leave search', (tester) async {
+      var left = 0;
+      await pump(
+        tester,
+        conversations: const [],
+        search: results([_dropped(id: 'd1')]),
+        onExitSearch: () => left++,
+      );
+
+      await tester.tap(find.text('Back to archive'));
+      await tester.pump();
+
+      expect(left, 1);
+    });
+
+    testWidgets('a text-only answer says so over its own rows', (tester) async {
+      await pump(
+        tester,
+        conversations: const [],
+        search: results(
+          [_dropped(id: 'd1', subject: 'Invoice 4471')],
+          notice: 'Text matches only — the embedding server is not reachable.',
+        ),
+      );
+
+      expect(
+        find.text('Text matches only — the embedding server is not reachable.'),
+        findsOneWidget,
+      );
+      expect(find.text('Invoice 4471'), findsOneWidget,
+          reason: 'the notice qualifies the rows, it does not replace them');
+    });
+
+    testWidgets('a query in flight says so over the pile that is still up',
+        (tester) async {
+      await pump(
+        tester,
+        tab: ArchiveTab.dropped,
+        conversations: const [],
+        droppedRows: [_dropped(id: 'd1', subject: 'Weekly roundup')],
+        searching: true,
+      );
+
+      expect(find.text('Searching…'), findsOneWidget);
+      expect(find.text('Weekly roundup'), findsOneWidget);
+    });
+
+    testWidgets('a search that found nothing says so about the history',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: [_conv(id: 'a', bucket: 'later')],
+        search: results(const []),
+      );
+
+      expect(find.text('Nothing in your history matches that.'),
+          findsOneWidget);
+      expect(find.text('0 results for “invoice”'), findsOneWidget);
+    });
+
+    testWidgets('a search that could not run at all is a notice on the tabs',
+        (tester) async {
+      await pump(
+        tester,
+        conversations: [_conv(id: 'a', bucket: 'later', subject: 'Launch')],
+        searchNotice: "Search failed — couldn't read the index.",
+      );
+
+      expect(find.text("Search failed — couldn't read the index."),
+          findsOneWidget);
+      expect(find.byType(LaterDigestPanel), findsOneWidget,
+          reason: 'nothing answered, so the piles are still what is on screen');
+    });
+
+    testWidgets('enter submits, and only enter', (tester) async {
+      final asked = <String>[];
+      await pump(tester, conversations: const [], onSearch: asked.add);
+
+      await tester.enterText(find.byType(TextField), 'invoice');
+      await tester.pump();
+      expect(asked, isEmpty, reason: 'every query is one embedding call');
+
+      await tester.testTextInput.receiveAction(TextInputAction.search);
+
+      expect(asked, ['invoice']);
+    });
   });
 
   testWidgets('a day filter narrows the later tab and nothing else',

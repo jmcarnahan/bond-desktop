@@ -6,8 +6,10 @@ import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart'
     show RailSection, laterDayLabel;
+import 'package:bond_inbox/widgets/archive_pane.dart' show ArchivePane;
 import 'package:bond_inbox/widgets/chips.dart' show BondFilterPill;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
+import 'package:bond_inbox/widgets/home_search.dart' show HomeSearchField;
 import 'package:bond_inbox/widgets/later_digest.dart';
 import 'package:bond_inbox/widgets/time_format.dart' show dayKeyOfIso;
 import 'package:flutter/material.dart';
@@ -199,5 +201,42 @@ void main() {
 
     expect(find.text('Quarterly digest'), findsOneWidget,
         reason: 'the tab survived the trip away and arrival re-read it');
+  });
+
+  testWidgets('a search finds gate-dropped mail without entering its pile',
+      (tester) async {
+    // No embedding server answers in a widget test, which is the case worth
+    // pinning rather than one to work around: the semantic half fails, the
+    // text half runs anyway, and a message the gate threw out — which never
+    // had a vector to be found by — is still the answer.
+    await seedDropped('Vendor invoice 4471');
+    await pumpScreen(tester);
+
+    expect(find.text('Vendor invoice 4471'), findsNothing,
+        reason: 'the Dropped pile has not been opened');
+
+    final box = find.descendant(
+      of: find.byType(HomeSearchField),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(box, 'invoice');
+    await tester.testTextInput.receiveAction(TextInputAction.search);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+    await tester.pump(ArchivePane.searchSwap);
+
+    expect(find.text('Vendor invoice 4471'), findsOneWidget);
+    expect(find.widgetWithText(BondFilterPill, 'Dropped'), findsNothing,
+        reason: 'the answer spans the piles, so no pill may claim it');
+
+    await tester.tap(find.text('Back to archive'));
+    await tester.pump();
+    // Past the end of the swap, not up to it: the outgoing body is still in
+    // the tree for the frame the animation finishes on.
+    await tester.pump(ArchivePane.searchSwap * 2);
+
+    expect(find.widgetWithText(BondFilterPill, 'Dropped'), findsOneWidget);
+    expect(find.text('Vendor invoice 4471'), findsNothing);
   });
 }

@@ -6,6 +6,8 @@ import '../theme/tokens.dart';
 import 'chips.dart';
 import 'conversation_list_pane.dart';
 import 'home_feed_row.dart';
+import 'home_search.dart';
+import 'inline_alert.dart';
 import 'later_digest.dart';
 
 /// The three piles Archive holds, in the order they are offered.
@@ -33,9 +35,15 @@ extension ArchiveTabLabel on ArchiveTab {
 /// question. Later is what is still waiting for a quieter moment; a closed
 /// thread is not waiting for anything.
 ///
+/// Search cuts across all three: the reader who cannot find a thread does not
+/// know which pile swallowed it, so one query answers over the whole history —
+/// dropped mail included — and takes the place of the tabs while it is up.
+///
 /// Dumb by construction: props and callbacks only, no `ref` and no provider
-/// reads. The screen owns the tab, the selection and every write.
-class ArchivePane extends StatelessWidget {
+/// reads. The screen owns the tab, the selection and every write. Stateful for
+/// one thing only — the search box's controller, which holds text nobody has
+/// submitted yet and so belongs to the view.
+class ArchivePane extends StatefulWidget {
   /// The whole inbox. Each tab picks its own rows out, so the caller never has
   /// to keep three filters in agreement.
   final List<Conversation> conversations;
@@ -88,9 +96,27 @@ class ArchivePane extends StatelessWidget {
   /// Opens the storyline a dropped message was filed under, from its chip.
   final void Function(String storylineId) onOpenStoryline;
 
+  /// What a query came back with, or null for the tabs.
+  final ArchiveSearch? search;
+
+  /// A query is out and no answer has landed yet.
+  final bool searching;
+
+  /// Non-null when a search could not run at all. The notice for a search that
+  /// ran on text alone rides on [ArchiveSearch] instead, next to the rows it
+  /// is a statement about.
+  final String? searchNotice;
+
+  final ValueChanged<String> onSearch;
+  final VoidCallback onExitSearch;
+
   /// The clock, injected so a test pins what "3h ago" means — the same reason
   /// [HomeFeedRowTile] takes one.
   final DateTime now;
+
+  /// The tabs⇄results body swap. The home pane's duration, because it is the
+  /// same gesture: one body replacing another rather than a page load.
+  static const Duration searchSwap = Duration(milliseconds: 160);
 
   const ArchivePane({
     super.key,
@@ -109,8 +135,35 @@ class ArchivePane extends StatelessWidget {
     required this.droppedError,
     required this.onLoadMoreDropped,
     required this.onOpenStoryline,
+    required this.search,
+    required this.searching,
+    required this.searchNotice,
+    required this.onSearch,
+    required this.onExitSearch,
     required this.now,
   });
+
+  @override
+  State<ArchivePane> createState() => _ArchivePaneState();
+}
+
+class _ArchivePaneState extends State<ArchivePane> {
+  /// The typed query. View state exactly as a scroll position is: the question
+  /// belongs to the box, the answer belongs to the notifier.
+  final TextEditingController _searchText = TextEditingController();
+
+  @override
+  void dispose() {
+    _searchText.dispose();
+    super.dispose();
+  }
+
+  /// The one way out, whichever affordance asked for it: the box empties and
+  /// the piles come back.
+  void _exitSearch() {
+    _searchText.clear();
+    widget.onExitSearch();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -119,47 +172,180 @@ class ArchivePane extends StatelessWidget {
       children: [
         Row(
           children: [
-            for (final option in ArchiveTab.values) ...[
-              BondFilterPill(
-                label: option.label,
-                selected: option == tab,
-                onTap: () => onTab(option),
+            // Hidden while results are up: a search answers across all three
+            // piles, and a pill still looking selected over it would claim the
+            // rows below belong to one of them.
+            if (widget.search == null)
+              for (final option in ArchiveTab.values) ...[
+                BondFilterPill(
+                  label: option.label,
+                  selected: option == widget.tab,
+                  onTap: () => widget.onTab(option),
+                ),
+                const SizedBox(width: BondSpacing.s8),
+              ],
+            // Always present, which is also what holds the row's height steady
+            // across the swap.
+            Expanded(
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: HomeSearchField(
+                  controller: _searchText,
+                  active: widget.search != null || widget.searching,
+                  onSubmit: widget.onSearch,
+                  onClear: _exitSearch,
+                ),
               ),
-              const SizedBox(width: BondSpacing.s8),
-            ],
+            ),
           ],
         ),
         const SizedBox(height: BondSpacing.s16),
-        Expanded(child: _body()),
+        // Attention rather than error: the piles under it are all still there,
+        // and one way of looking through them is off.
+        if (widget.searchNotice != null) ...[
+          InlineAlert(
+            severity: InlineAlertSeverity.attention,
+            text: widget.searchNotice!,
+            maxLines: 2,
+          ),
+          const SizedBox(height: BondSpacing.s12),
+        ],
+        // A line, never a spinner, and never in place of the body: whatever
+        // was on screen stays there until the answer lands.
+        if (widget.searching) ...[
+          Text('Searching…', style: BondType.caption),
+          const SizedBox(height: BondSpacing.s8),
+        ],
+        Expanded(
+          child: AnimatedSwitcher(
+            duration: ArchivePane.searchSwap,
+            child: widget.search == null
+                ? KeyedSubtree(
+                    key: const ValueKey<String>('archive-tabs'),
+                    child: _body(),
+                  )
+                : KeyedSubtree(
+                    key: const ValueKey<String>('archive-search'),
+                    child: _searchBody(widget.search!),
+                  ),
+          ),
+        ),
       ],
     );
   }
 
-  Widget _body() => switch (tab) {
+  /// What a query came back with: how many, for what, and the way back.
+  Widget _searchBody(ArchiveSearch search) {
+    final count = search.rows.length;
+    final notice = search.notice;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(
+            horizontal: BondSpacing.s4,
+            vertical: BondSpacing.s8,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '$count result${count == 1 ? '' : 's'} for “${search.query}”',
+                  style: BondType.small,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: BondSpacing.s12),
+              // The row's storyline link, not a Material button: this is a way
+              // back inside a body, and a raised control here would outrank
+              // the results it sits over.
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: _exitSearch,
+                  borderRadius: BondRadii.smAll,
+                  child: Text(
+                    'Back to archive',
+                    style: BondType.small.copyWith(
+                      fontWeight: FontWeight.w600,
+                      color: BondColors.primary,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        // Between the count and the rows, because it qualifies THEM: these are
+        // the text matches, and whatever only the index could have found is
+        // missing from the list below.
+        if (notice != null) ...[
+          InlineAlert(
+            severity: InlineAlertSeverity.attention,
+            text: notice,
+            maxLines: 2,
+          ),
+          const SizedBox(height: BondSpacing.s12),
+        ],
+        if (search.rows.isEmpty)
+          Expanded(
+            child: Center(
+              child: Text(
+                'Nothing in your history matches that.',
+                style: BondType.small.copyWith(color: BondColors.inkMuted),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          )
+        else ...[
+          const HomeFeedHeaderRow(),
+          Expanded(
+            child: ListView.builder(
+              itemCount: search.rows.length,
+              itemBuilder: (context, index) {
+                final row = search.rows[index];
+                return HomeFeedRowTile(
+                  key: ValueKey<String>('archive-search-${row.feedKey}'),
+                  row: row,
+                  now: widget.now,
+                  muteBar: true,
+                  onOpenThread: widget.onOpen,
+                  onOpenStoryline: widget.onOpenStoryline,
+                );
+              },
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _body() => switch (widget.tab) {
         ArchiveTab.later => LaterDigestPanel(
-            conversations: conversations,
-            dayFilter: dayFilter,
-            onOpen: onOpen,
-            onKeepSender: onKeepSender,
-            onKeepThread: onKeepThread,
+            conversations: widget.conversations,
+            dayFilter: widget.dayFilter,
+            onOpen: widget.onOpen,
+            onKeepSender: widget.onKeepSender,
+            onKeepThread: widget.onKeepThread,
           ),
         ArchiveTab.done => ConversationListPane(
-            sources: sources,
+            sources: widget.sources,
             filter: InboxFilter.done,
-            conversations: conversations,
+            conversations: widget.conversations,
             selectedId: null,
-            onSelect: onOpen,
-            onReopen: onReopen,
+            onSelect: widget.onOpen,
+            onReopen: widget.onReopen,
           ),
         ArchiveTab.dropped => _DroppedList(
-            rows: droppedRows,
-            loaded: droppedLoaded,
-            loadingMore: droppedLoadingMore,
-            error: droppedError,
-            now: now,
-            onLoadMore: onLoadMoreDropped,
-            onOpenThread: onOpen,
-            onOpenStoryline: onOpenStoryline,
+            rows: widget.droppedRows,
+            loaded: widget.droppedLoaded,
+            loadingMore: widget.droppedLoadingMore,
+            error: widget.droppedError,
+            now: widget.now,
+            onLoadMore: widget.onLoadMoreDropped,
+            onOpenThread: widget.onOpen,
+            onOpenStoryline: widget.onOpenStoryline,
           ),
       };
 }
