@@ -110,11 +110,25 @@ disposes the provider that built the handler.
 an edit mid-drain applies to the rest of the drain. Stored **verbatim** — the
 pane trims before it calls, and trimming again in the store would mean the text
 in the field and the text the model reads are not the same string. Capped at
-`needsYouRulesCap` = 800, which is also the `maxLength` the editor will
-enforce: a cap the editor did not show would silently drop the end of what
-somebody typed. It is one person's text, so `wipeAll` clears it alongside
-`about_me` — inherited by the next identity it would decide what *they* get
-interrupted about.
+`needsYouRulesCap` = 800, which is also the `maxLength` the editor enforces: a
+cap the editor did not show would silently drop the end of what somebody typed.
+It is one person's text, so `wipeAll` clears it alongside `about_me` —
+inherited by the next identity it would decide what *they* get interrupted
+about.
+
+**Where it is edited.** Settings → **"What counts as needing you…"**, which
+pops the dialog and opens `NeedsYouRulesPane` — a full screen with a back
+button (`app/lib/widgets/needs_you_rules_pane.dart`), not a field inside the
+dialog, because it is a page of text with its own Save. **Save is the only
+thing that commits**: Cancel, the back arrow, and being disposed all discard,
+unlike the about-me field beside it, which saves on the way out however the
+dialog was dismissed. Clearing the field is likewise local until Save — and the
+button says "Clear my rules", not "Reset to default", because there is no text
+to restore; clearing removes the owner's additions so the defaults stand alone.
+The pane trims, the store keeps the result verbatim. A collapsed disclosure,
+"What Bond already asks", shows `needsYouDefaultRules` **verbatim** — the exact
+text the model reads before the owner's, so somebody writing a rule against one
+of the defaults is aiming at the words that are really there.
 
 The owner's about-me text is deliberately **not** in this prompt. Two
 owner-authored free-texts in one call is the charter-versus-summary confusion

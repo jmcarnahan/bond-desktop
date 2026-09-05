@@ -19,6 +19,8 @@ import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/llm/needs_you_task.dart'
+    show needsYouDefaultRules, needsYouRulesCap;
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
@@ -29,6 +31,7 @@ import '../widgets/conversation_list_pane.dart';
 import '../widgets/home_pane.dart';
 import '../widgets/inline_alert.dart';
 import '../widgets/later_digest.dart';
+import '../widgets/needs_you_rules_pane.dart';
 import '../widgets/notification_ribbon.dart';
 import '../widgets/quick_replies.dart';
 import '../widgets/settings_dialog.dart';
@@ -111,6 +114,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// other: the pane shows exactly one thing, and every setter clears the rest
   /// rather than racing to be rendered.
   bool _showingActivityLog = false;
+
+  /// Whether the main pane is showing the Needs You rules editor. It joins the
+  /// same exclusive set as [_showingActivityLog] and the three selections
+  /// above: one thing in the pane, and every setter clears the rest.
+  bool _showingNeedsYouRules = false;
 
   /// The storyline the add-thread pane is picking a conversation for. An
   /// overlay on the storyline selection rather than a peer of it: back returns
@@ -341,6 +349,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _showingNeedsYouRules = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -380,6 +389,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _showingNeedsYouRules = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -400,6 +410,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
+      _showingNeedsYouRules = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -417,6 +428,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedStorylineId = null;
       _showingActivityLog = false;
+      _showingNeedsYouRules = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -430,6 +442,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _openActivityLog() {
     setState(() {
       _showingActivityLog = true;
+      _showingNeedsYouRules = false;
+      _selectedId = null;
+      _selectedSource = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
+      _railOpen = false;
+      _replyOpenFor = null;
+    });
+  }
+
+  /// Opens the Needs You rules editor — a pane like the activity log, reached
+  /// from Settings, clearing whatever the user was reading.
+  void _openNeedsYouRules() {
+    setState(() {
+      _showingNeedsYouRules = true;
+      _showingActivityLog = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -967,6 +997,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Navigator.of(context).pop();
           _signOut();
         },
+        onEditNeedsYouRules: () {
+          Navigator.of(context).pop();
+          _openNeedsYouRules();
+        },
         isTargetSignedIn: () async {
           if (!mounted) return false;
           return ref.read(authSessionProvider).isSignedIn;
@@ -1141,6 +1175,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
     if (_showingActivityLog) return _activityLog();
+    if (_showingNeedsYouRules) return _needsYouRules();
 
     final addingTo = _addingToStorylineId;
     if (addingTo != null) {
@@ -1956,6 +1991,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // it stays put rather than timing out under the user.
         break;
     }
+  }
+
+  /// The editor for the owner's own needs-you criteria. It commits on Save
+  /// only — the pane owns that contract, so there is nothing to write here on
+  /// the way out.
+  Widget _needsYouRules() {
+    final prefs = ref.watch(appPrefsProvider);
+    return NeedsYouRulesPane(
+      value: prefs.needsYouRules,
+      defaultRules: needsYouDefaultRules,
+      maxLength: needsYouRulesCap,
+      onSave: (text) =>
+          unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouRules(text)),
+      onBack: () => setState(() => _showingNeedsYouRules = false),
+    );
   }
 
   /// What the sync and the local model have been doing, over the last week.
