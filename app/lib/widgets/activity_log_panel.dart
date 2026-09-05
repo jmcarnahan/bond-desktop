@@ -194,9 +194,14 @@ class ActivityLogPanel extends StatefulWidget {
         if (confirmed is! num || rejected is! num) {
           return '$label — ${proposed.toInt()} proposed';
         }
-        return '$label — ${proposed.toInt()} proposed, '
+        final sentence = '$label — ${proposed.toInt()} proposed, '
             '${confirmed.toInt()} ${confirmed == 1 ? 'thread' : 'threads'} '
             'confirmed, ${rejected.toInt()} rejected';
+        // The same degradation once more, for the finished threads the
+        // post-birth probe pulled in. Rows written before the probe existed
+        // end at "rejected", exactly as they were written.
+        final joined = detail['joined'];
+        return joined is num ? '$sentence, ${joined.toInt()} joined' : sentence;
       case 'storyline_recruit':
         final recruited = detail['recruited'];
         final considered = detail['considered'];

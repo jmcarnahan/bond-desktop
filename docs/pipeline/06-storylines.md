@@ -23,7 +23,9 @@ are the authority on sequencing.
    runs on the sqlite-vec index when there is one and on Dart arithmetic when
    there is not, to the same clusters either way — its own section below.
    Rejected clusters are tombstoned by immutable `cluster_hash` (schema v7) so
-   a dismissed suggestion stays dismissed even after membership drift.
+   a dismissed suggestion stays dismissed even after membership drift. Finished
+   threads are held out of the clustering and offered to the newborn storyline
+   afterwards instead — "join, not seed", its own section below.
 3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
    storyline whose membership has moved. Its own section below.
 4. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
@@ -385,6 +387,58 @@ find — and when a probe fails to find its own row, which is the cheap check
 that the index really does hold every candidate. Falling back says why, once
 per distinct reason, and nothing else: never a park, never a crash, and never a
 different answer.
+
+## Join, not seed
+
+A finished thread never *seeds* a storyline. The sweep keeps `done` rows out of
+the clustering entirely — grouping finished mail would fill the rail with
+history nobody asked to be reminded of — and that has not changed. What changed
+is what happens to them afterwards: instead of being discarded, they are
+diverted into a candidate list, and a storyline that is actually born in this
+pass runs one bounded probe over it before `_propose` returns.
+
+The probe is the recruit pass in miniature, against the group that just came
+into existence. Candidates have already passed the sweep's taken-set filter, so
+a thread already filed into a storyline — or one the user pulled out of one —
+is never offered; the rest are scored against the centroid of the *surviving*
+members, gated at `assignCosineGateWithOverlap`, and the top
+`recruitMaxCandidates` by cosine each get the same `ConfirmMembershipTask` call
+recruit and assign make, against the charter the naming call wrote seconds ago,
+at temperature zero, with `low` still treated as a no. They are judged against
+the participants of the storyline as it actually stands, read back from the
+stored members rather than from the pre-confirmation cluster.
+
+This closes an asymmetry rather than opening a door. `recruit` has always
+considered done threads — it walks every embedded thread in the mailbox and has
+never filtered on state — so a charter edit could already pull a finished thread
+in. Only a *sweep-born* storyline was blind to the thread that was marked done
+last week, which is exactly the thread most likely to be the beginning of the
+story it just formed around.
+
+One pass may propose up to three storylines, and every one of them is offered
+the same candidate list, so the probe also carries a taken-set of its own that
+grows as the pass runs. The sweep's `assignedOrBlockedKeys` set was read before
+any of these storylines existed and cannot cover them; without the running set,
+a finished thread sitting between two newborn clusters could join both, which is
+a state no other automatic path can produce — `assignConversation` files a
+thread into its single best storyline and nothing else.
+
+Two further limits are worth naming. The tombstone branch probes nothing: a cluster the
+model threw out below `minClusterSize` must not go recruiting history to make
+itself big enough to ship. And when the probe files anything, **both** member
+hash columns are recomputed over the final set, so `member_hash ==
+refreshed_member_hash` still holds — the storyline is born described, and a
+probe join must not send it to `staleRefreshStorylineIds` and spend a 27B Refine
+call re-describing what was written moments ago. `recap_through` is cleared as
+every other member-add path clears it, so the recap already queued by the birth
+covers the joined threads too; the recap handler drains after the sweep's in the
+same pass, which is why the probe runs inline rather than as a pass of its own.
+`cluster_hash` is never rewritten: it names the group the user is being asked
+about, and the probe did not change that question.
+
+In the activity row the probe reports itself as `joined`, kept separate from
+`confirmed` and `rejected` — those two count the cluster's own members being
+judged, and a finished thread that was offered and turned away was never one.
 
 ## Cross-source identity
 
