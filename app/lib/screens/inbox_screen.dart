@@ -1435,6 +1435,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         });
         unawaited(notifier.dismiss(storyline.id));
       },
+      // The overview's Sync, on the screen you land on when you open one of
+      // its cards. Same call, same flag: the pane is built from this screen's
+      // build path, so the label follows _syncing without the panel holding
+      // any state of its own.
+      onSync: _syncNow,
+      syncing: _syncing,
       // The suggestions ride on the episode they answer, not under the spine:
       // a storyline is several conversations, and a card offering to reply has
       // to say which one it would reply to.
@@ -2069,10 +2075,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Row(
             children: [
               Expanded(child: Text(title, style: BondType.title)),
-              // Only here. Every other pane is a view of the mailbox the
-              // sixty-second poll already keeps current; a storyline is
-              // rewritten by a sweep, and this is how the user asks for the
-              // pass that runs one.
+              // Here and on the storyline screen, and nowhere else. Every
+              // other pane is a view of the mailbox the sixty-second poll
+              // already keeps current; a storyline is rewritten by a sweep,
+              // and this is how the user asks for the pass that runs one.
               if (section == RailSection.storylines) _syncButton(),
             ],
           ),

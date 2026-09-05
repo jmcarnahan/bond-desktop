@@ -244,6 +244,8 @@ void main() {
         newestFirst: false,
         onToggleSort: () {},
         onDismiss: () {},
+        onSync: () async {},
+        syncing: false,
       )));
 
       // Both marked here, mail included: a storyline holds threads and chats,

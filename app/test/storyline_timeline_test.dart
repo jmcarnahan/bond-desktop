@@ -159,6 +159,8 @@ void main() {
     bool newestFirst = false,
     VoidCallback? onToggleSort,
     VoidCallback? onDismiss,
+    Future<void> Function()? onSync,
+    bool syncing = false,
     Widget Function(StorylineEpisode episode)? episodeFooter,
     void Function(StorylineEpisode episode)? onAskTap,
   }) async {
@@ -181,6 +183,8 @@ void main() {
           newestFirst: newestFirst,
           onToggleSort: onToggleSort ?? () {},
           onDismiss: onDismiss ?? () {},
+          onSync: onSync ?? () async {},
+          syncing: syncing,
           episodeFooter: episodeFooter,
           onAskTap: onAskTap,
         ),
@@ -206,6 +210,33 @@ void main() {
 
       await pumpPanel(tester, onBack: () {});
       expect(find.byIcon(Icons.arrow_back), findsOneWidget);
+    });
+
+    testWidgets('the header offers Sync and fires it', (tester) async {
+      var synced = 0;
+      await pumpPanel(tester, onSync: () async => synced++);
+
+      expect(find.text('Sync'), findsOneWidget);
+
+      await tester.tap(find.text('Sync'));
+      await tester.pumpAndSettle();
+
+      expect(synced, 1);
+    });
+
+    testWidgets('a running sync is inert and says so', (tester) async {
+      var synced = 0;
+      await pumpPanel(tester, onSync: () async => synced++, syncing: true);
+
+      // The screen owns the flag, so the panel's only job is to say what it
+      // is being told and to stop asking for a second pull.
+      expect(find.text('Syncing…'), findsOneWidget);
+      expect(find.text('Sync'), findsNothing);
+
+      await tester.tap(find.text('Syncing…'));
+      await tester.pumpAndSettle();
+
+      expect(synced, 0);
     });
   });
 
@@ -960,11 +991,19 @@ void main() {
       await pumpPanel(tester, storyline: _recapped());
 
       expect(find.text(paragraph), findsOneWidget);
-      expect(find.text('OPEN'), findsOneWidget);
-      expect(find.text('Who signs off the new hero copy?'), findsOneWidget);
-      expect(find.text('DECIDED'), findsOneWidget);
-      expect(find.text('Launch moved to the 14th.'), findsOneWidget);
+      expect(find.text('OPEN · 1'), findsOneWidget);
+      expect(find.text('DECIDED · 1'), findsOneWidget);
       expect(find.text('as of 3h ago'), findsOneWidget);
+
+      // The lists come folded, so their contents are one tap away rather than
+      // between the paragraph and the spine.
+      await tester.tap(find.text('OPEN · 1'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('DECIDED · 1'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Who signs off the new hero copy?'), findsOneWidget);
+      expect(find.text('Launch moved to the 14th.'), findsOneWidget);
 
       // The one-liner is the rail's text, not this screen's: showing both
       // would be the same answer twice at two lengths.
@@ -975,8 +1014,71 @@ void main() {
       await pumpPanel(tester);
 
       expect(find.text(summary), findsOneWidget);
-      expect(find.text('OPEN'), findsNothing);
-      expect(find.text('DECIDED'), findsNothing);
+      expect(find.textContaining('OPEN'), findsNothing);
+      expect(find.textContaining('DECIDED'), findsNothing);
+    });
+
+    testWidgets('the lists are folded until asked', (tester) async {
+      await pumpPanel(
+        tester,
+        storyline: _recapped(
+          openJson: '["Who signs off the new hero copy?","Pick a date"]',
+          decidedJson: '["Launch moved to the 14th."]',
+        ),
+      );
+
+      // The heading counts what is folded behind it — OPEN on its own would
+      // not tell the reader whether the tap is worth making.
+      expect(find.text('OPEN · 2'), findsOneWidget);
+      expect(find.text('DECIDED · 1'), findsOneWidget);
+      expect(find.text('Who signs off the new hero copy?'), findsNothing);
+      expect(find.text('Pick a date'), findsNothing);
+      expect(find.text('Launch moved to the 14th.'), findsNothing);
+    });
+
+    testWidgets('OPEN opens on a tap and folds on the next', (tester) async {
+      await pumpPanel(tester, storyline: _recapped());
+
+      await tester.tap(find.text('OPEN · 1'));
+      await tester.pumpAndSettle();
+      expect(find.text('Who signs off the new hero copy?'), findsOneWidget);
+      // The heading stays where it is and keeps its count: unfolding a list
+      // is not the list replacing its own heading.
+      expect(find.text('OPEN · 1'), findsOneWidget);
+
+      await tester.tap(find.text('OPEN · 1'));
+      await tester.pumpAndSettle();
+      expect(find.text('Who signs off the new hero copy?'), findsNothing);
+    });
+
+    testWidgets('the two lists fold independently', (tester) async {
+      await pumpPanel(tester, storyline: _recapped());
+
+      await tester.tap(find.text('OPEN · 1'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Who signs off the new hero copy?'), findsOneWidget);
+      // What is still owed and what has been settled are separate questions,
+      // and opening one is not asking the other.
+      expect(find.text('Launch moved to the 14th.'), findsNothing);
+
+      await tester.tap(find.text('DECIDED · 1'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Who signs off the new hero copy?'), findsOneWidget);
+      expect(find.text('Launch moved to the 14th.'), findsOneWidget);
+    });
+
+    testWidgets('an empty list still shows no heading', (tester) async {
+      await pumpPanel(
+        tester,
+        storyline: _recapped(openJson: '[]'),
+      );
+
+      // Nothing outstanding is not a fold with nothing behind it: there is no
+      // OPEN heading to tap at all, while DECIDED keeps its own.
+      expect(find.textContaining('OPEN'), findsNothing);
+      expect(find.text('DECIDED · 1'), findsOneWidget);
     });
 
     testWidgets('empty lists render no Open or Decided headings',
@@ -987,8 +1089,8 @@ void main() {
       );
 
       expect(find.text(paragraph), findsOneWidget);
-      expect(find.text('OPEN'), findsNothing);
-      expect(find.text('DECIDED'), findsNothing);
+      expect(find.textContaining('OPEN'), findsNothing);
+      expect(find.textContaining('DECIDED'), findsNothing);
     });
 
     testWidgets('a column that is not a list of strings shows nothing',
@@ -1001,8 +1103,8 @@ void main() {
       // The paragraph is still the header: a half-written column costs the
       // lists, not the recap.
       expect(find.text(paragraph), findsOneWidget);
-      expect(find.text('OPEN'), findsNothing);
-      expect(find.text('DECIDED'), findsNothing);
+      expect(find.textContaining('OPEN'), findsNothing);
+      expect(find.textContaining('DECIDED'), findsNothing);
       expect(tester.takeException(), isNull);
     });
   });

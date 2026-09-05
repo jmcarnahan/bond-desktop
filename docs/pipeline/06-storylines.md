@@ -234,13 +234,16 @@ The storyline screen (`StorylineTimelinePanel`) leads with the recap: the
 paragraph in body type directly under the title, then a compact **OPEN** list
 and a **DECIDED** list — each rendered only when the pass found something for
 it — and a quiet "as of *n*h ago" read off `recap_through`, which dates the
-paragraph by the newest message it has *read* rather than by when it ran. The
-recap **replaces** the one-line `summary` in that header; the summary is still
-what the rail shows, and it is the header's text until the recap pass has
-written one. `recapOpenItems` / `recapDecisions` on
-`Storyline` are the only decoders of the two JSON columns, and they are
-tolerant in the same way the message models are: a half-written column costs
-the lists, never the render.
+paragraph by the newest message it has *read* rather than by when it ran. Both
+lists arrive folded to their heading and count — **OPEN · 2** — and each
+unfolds on a tap of its own, because a long storyline can carry half a dozen
+items in each and twelve bullet lines between the paragraph and the spine is a
+header nobody reads to the end of. The recap **replaces** the one-line
+`summary` in that header; the summary is still what the rail shows, and it is
+the header's text until the recap pass has written one. `recapOpenItems` /
+`recapDecisions` on `Storyline` are the only decoders of the two JSON columns,
+and they are tolerant in the same way the message models are: a half-written
+column costs the lists, never the render.
 
 The parked charter surfaces in the About block, under the charter itself, as
 **SUGGESTED UPDATE** with **Use this** and **Discard** (not "Dismiss" — that
@@ -263,7 +266,12 @@ them rather than skim past them. Beside the *Storylines* heading is a quiet
 **Sync**, which runs the ordinary sync (both connectors, exactly as the poll
 and the rail's refresh do) and reads *Syncing…* while it does: nothing
 storyline-shaped is needed, because that pass ends by requeueing the sweep and
-the sweep's catch-ups drain the refreshes and recaps that were owed.
+the sweep's catch-ups drain the refreshes and recaps that were owed. The same
+button sits at the end of the storyline screen's own button row, so opening a
+storyline does not mean going back to the overview to ask for the pass that
+brings it up to date. It is one action and one flag: the screen owns the sync
+and hands the panel the label, which is why both buttons read *Syncing…*
+together.
 
 Refresh and recap both report progress under their own kinds, and
 `StorylinesNotifier` listens for both, so a pass that rewrites a title or a

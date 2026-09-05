@@ -178,9 +178,16 @@ void main() {
     await tester.pump();
   }
 
-  /// Opens the storyline named [title] in the main pane.
-  Future<void> openStoryline(WidgetTester tester, String title) async {
-    await pumpInbox(tester);
+  /// Opens the storyline named [title] in the main pane. [sync] and
+  /// [teamsSync] are handed straight to [pumpInbox], for the tests that press
+  /// this screen's own Sync.
+  Future<void> openStoryline(
+    WidgetTester tester,
+    String title, {
+    MailSync? sync,
+    TeamsSync? teamsSync,
+  }) async {
+    await pumpInbox(tester, sync: sync, teamsSync: teamsSync);
 
     // The rail's storylines section is expanded by default, so the row is
     // already on screen.
@@ -834,8 +841,9 @@ void main() {
       expect(find.text('Copy is signed off.'), findsOneWidget);
       // A card is a way in, not the screen itself: what is open and what was
       // decided are on the storyline, where there is room to read them.
-      expect(find.text('OPEN'), findsNothing);
-      expect(find.text('DECIDED'), findsNothing);
+      // Not even the counted heading the storyline screen folds them to.
+      expect(find.textContaining('OPEN'), findsNothing);
+      expect(find.textContaining('DECIDED'), findsNothing);
       expect(find.text('Pick a launch date'), findsNothing);
       expect(find.text('Homepage copy approved'), findsNothing);
       expect(find.textContaining('as of'), findsNothing);
@@ -884,6 +892,29 @@ void main() {
       expect(sync.syncs, before + 1);
 
       gate.complete();
+      await settleQueues(tester);
+      expect(find.text('Sync'), findsOneWidget);
+    });
+
+    testWidgets('the storyline screen syncs too', (tester) async {
+      await seedCard();
+      final sync = _FakeSync();
+
+      // Not the overview: opening a card leaves that pane behind, and the
+      // button found here is the storyline header's own.
+      await openStoryline(
+        tester,
+        'Website redesign',
+        sync: sync,
+        teamsSync: _FakeTeamsSync(),
+      );
+      final before = sync.syncs;
+
+      await tester.tap(find.text('Sync'));
+      await tester.pump();
+
+      expect(sync.syncs, before + 1);
+
       await settleQueues(tester);
       expect(find.text('Sync'), findsOneWidget);
     });

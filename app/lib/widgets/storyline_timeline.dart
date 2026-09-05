@@ -77,6 +77,17 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// every ask a statement.
   final void Function(StorylineEpisode episode)? onAskTap;
 
+  /// The same action the overview's Sync runs: the ordinary two-connector
+  /// pull, whose tail heals the refreshes and recaps the storylines were owed.
+  /// Asking for mail from this screen is asking for this storyline to be
+  /// brought up to date.
+  final Future<void> Function() onSync;
+
+  /// Whether that pull is running right now. The flag rides in rather than
+  /// living here because the panel is pure: the screen owns the sync, and it
+  /// is the same sync the overview's button is already holding a label up for.
+  final bool syncing;
+
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -93,6 +104,8 @@ class StorylineTimelinePanel extends StatefulWidget {
     required this.newestFirst,
     required this.onToggleSort,
     required this.onDismiss,
+    required this.onSync,
+    required this.syncing,
     this.episodeFooter,
     this.onAskTap,
   });
@@ -117,6 +130,14 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
 
   bool _showMembers = false;
   bool _showAbout = false;
+
+  /// Whether each of the recap's two lists is unfolded. Both start folded, and
+  /// they fold independently: a storyline can carry half a dozen open items
+  /// and as many settled ones, and twelve bullet lines between the paragraph
+  /// and the spine is a header nobody reads to the end of. The counts ride on
+  /// the headings, so a folded list still says how much is behind it.
+  bool _openExpanded = false;
+  bool _decidedExpanded = false;
   bool _editingTitle = false;
   bool _editingCharter = false;
   bool _confirmingDismiss = false;
@@ -613,6 +634,15 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                         () => setState(() => _confirmingDismiss = false),
                       ),
                     ],
+                    const SizedBox(width: BondSpacing.s4),
+                    // Last in the row: it is the only button here that is not
+                    // about this storyline in particular. A running pull says
+                    // so and takes no second tap — the screen holds the flag,
+                    // so the label is the same one the overview shows.
+                    _quietButton(
+                      widget.syncing ? 'Syncing…' : 'Sync',
+                      widget.syncing ? null : widget.onSync,
+                    ),
                   ],
                 ),
               ],
@@ -630,7 +660,8 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   ///
   /// The two lists under it stay quiet and compact: they are what is still
   /// open and what has been settled, and a paragraph that has to compete with
-  /// them for the eye is a paragraph nobody reads. Either can be empty — a
+  /// them for the eye is a paragraph nobody reads. That is also why they are
+  /// folded to a counted heading until asked for. Either can be empty — a
   /// storyline with nothing outstanding shows no OPEN heading at all.
   Widget _recapBlock(Storyline storyline, String recap) {
     final open = storyline.recapOpenItems;
@@ -651,8 +682,19 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(recap, style: BondType.body),
-            ..._recapList('OPEN', open),
-            ..._recapList('DECIDED', decided),
+            ..._recapList(
+              'OPEN',
+              open,
+              expanded: _openExpanded,
+              onToggle: () => setState(() => _openExpanded = !_openExpanded),
+            ),
+            ..._recapList(
+              'DECIDED',
+              decided,
+              expanded: _decidedExpanded,
+              onToggle: () =>
+                  setState(() => _decidedExpanded = !_decidedExpanded),
+            ),
             if (asOf != null) ...[
               const SizedBox(height: BondSpacing.s4),
               // What the recap has read up to, not when it ran: a pass that
@@ -667,25 +709,48 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
-  /// One heading and its lines, or nothing at all when there is nothing to
-  /// head.
-  List<Widget> _recapList(String heading, List<String> items) {
+  /// One heading and — when [expanded] — its lines, or nothing at all when
+  /// there is nothing to head. An empty list has no heading to fold, so it is
+  /// still absent entirely rather than present and folded.
+  ///
+  /// The heading carries its own count and is the thing you tap. It stays a
+  /// heading while it does: the tappable text idiom [_titleField] uses, not
+  /// the row's `_quietButton`, because a pair of blue buttons here would read
+  /// as actions on the storyline and would out-shout the paragraph they sit
+  /// under.
+  List<Widget> _recapList(
+    String heading,
+    List<String> items, {
+    required bool expanded,
+    required VoidCallback onToggle,
+  }) {
     if (items.isEmpty) return const [];
     return [
       const SizedBox(height: BondSpacing.s8),
-      Text(heading, style: BondType.label),
-      for (final item in items)
-        Padding(
-          padding: const EdgeInsets.only(top: 2),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('·', style: BondType.caption),
-              const SizedBox(width: BondSpacing.s4),
-              Expanded(child: Text(item, style: BondType.caption)),
-            ],
-          ),
+      InkWell(
+        onTap: onToggle,
+        borderRadius: BondRadii.smAll,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          // The count is what a folded heading has to say for itself: OPEN on
+          // its own leaves the reader with no way to tell whether the tap is
+          // worth making.
+          child: Text('$heading · ${items.length}', style: BondType.label),
         ),
+      ),
+      if (expanded)
+        for (final item in items)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('·', style: BondType.caption),
+                const SizedBox(width: BondSpacing.s4),
+                Expanded(child: Text(item, style: BondType.caption)),
+              ],
+            ),
+          ),
     ];
   }
 
@@ -937,7 +1002,9 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
-  Widget _quietButton(String label, VoidCallback onPressed) {
+  /// A null [onPressed] is the row's inert state — the button stays where it
+  /// is and stops answering, which is what a label like 'Syncing…' needs.
+  Widget _quietButton(String label, VoidCallback? onPressed) {
     return TextButton(
       onPressed: onPressed,
       style: TextButton.styleFrom(
