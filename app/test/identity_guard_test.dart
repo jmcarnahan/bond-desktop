@@ -191,6 +191,7 @@ void main() {
       await store.setPref(dbOwnerKey, 'ada@example.test');
       await store.setPref(backendModeKey, backendModeSdk);
       await store.setPref(aboutMeKey, 'An LO in Denver');
+      await store.setPref(needsYouRulesKey, 'Invoices always need me');
       await seedMail('m1');
       await store.setDeltaLink('inbox', 'cursor-1');
 
@@ -211,6 +212,9 @@ void main() {
       // inherited by Grace it would steer Grace's triage with Ada's words.
       expect(await store.getPref(backendModeKey), backendModeSdk);
       expect(await store.getPref(aboutMeKey), isNull);
+      // And Ada's needs-you rules, on the same reasoning: they would decide
+      // what Grace is interrupted about.
+      expect(await store.getPref(needsYouRulesKey), isNull);
     });
 
     test('an unclaimed database after a sign-out wipe is claimed, not wiped',

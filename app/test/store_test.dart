@@ -1006,12 +1006,16 @@ void main() {
       // person's self-description, which the next identity must not inherit.
       await store.setPref('backend_mode', 'sdk');
       await store.setPref(aboutMeKey, 'An LO in Denver');
+      await store.setPref(needsYouRulesKey, 'Invoices always need me');
       await store.setPref(dbOwnerKey, 'ada@example.test');
 
       await store.wipeAll();
 
       expect(await store.getPref('backend_mode'), 'sdk');
       expect(await store.getPref(aboutMeKey), isNull);
+      // The other text one person wrote about their own inbox: inherited, it
+      // would decide what the next identity gets interrupted about.
+      expect(await store.getPref(needsYouRulesKey), isNull);
       expect(await store.getPref(dbOwnerKey), isNull);
     });
   });

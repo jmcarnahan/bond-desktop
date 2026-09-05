@@ -26,6 +26,14 @@ const String dbOwnerKey = 'db_owner';
 /// the setting normally.
 const String aboutMeKey = 'about_me';
 
+/// The owner's own criteria for the needs-you judgement, added to the rules
+/// the prompt already carries. One person's text like [aboutMeKey], and
+/// cleared by [wipeAll] for the same reason: inherited by the next identity it
+/// would decide what THEIR inbox interrupts them about. Declared here beside
+/// [aboutMeKey] because the wipe is what has to name it, and re-exported by
+/// `prefs_provider.dart` for everything that reads or writes the setting.
+const String needsYouRulesKey = 'needs_you_rules';
+
 /// When each background pass last completed, ISO-8601 UTC.
 ///
 /// They live in `app_prefs` rather than being derived from `activity_events`
@@ -1647,17 +1655,19 @@ RETURNING *
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` SURVIVES, with two exceptions. What this method isolates is
+  /// `app_prefs` SURVIVES, with three exceptions. What this method isolates is
   /// one person's presence: which backend the app talks through, which server
   /// it points at, and where the slider sits are the machine's configuration,
   /// not the previous account's data, and wiping them turned every account
   /// switch into a re-setup. The exceptions are [dbOwnerKey] — the identity
   /// claim on these rows, which must not outlive the rows it describes, or
-  /// the next sign-in would read the wiped mailbox as still owned — and
-  /// [aboutMeKey], which is one person's self-description and would otherwise
-  /// be inherited by the next identity and steer THEIR triage. Both callers
-  /// depend on the first: sign-out leaves the database unclaimed, and
-  /// `IdentityGuard` writes the new owner immediately after.
+  /// the next sign-in would read the wiped mailbox as still owned — and the
+  /// two texts one person wrote about themselves and their inbox:
+  /// [aboutMeKey], which would otherwise be inherited by the next identity and
+  /// steer THEIR triage, and [needsYouRulesKey], which would decide what
+  /// interrupts them. Both callers depend on the first: sign-out leaves the
+  /// database unclaimed, and `IdentityGuard` writes the new owner immediately
+  /// after.
   Future<void> wipeAll() async {
     const tables = [
       'messages',
@@ -1682,8 +1692,8 @@ RETURNING *
         await db.customUpdate('DELETE FROM $table');
       }
       await db.customUpdate(
-        'DELETE FROM app_prefs WHERE key IN (?, ?)',
-        variables: _args([dbOwnerKey, aboutMeKey]),
+        'DELETE FROM app_prefs WHERE key IN (?, ?, ?)',
+        variables: _args([dbOwnerKey, aboutMeKey, needsYouRulesKey]),
       );
     });
     // The vec0 index is derived from `message_vectors`, and the DELETE above
@@ -2728,6 +2738,34 @@ FROM storylines s''';
       "status = 'pending', updated_at = excluded.updated_at "
       "WHERE work_items.status IN ('done', 'error')",
       variables: _args([kind, source, entityId, now, now]),
+    );
+  }
+
+  /// Puts the needs-you items a model-less build finished back in the queue,
+  /// and returns how many that was.
+  ///
+  /// The one-shot catch-up for a real state on disk: the first build of this
+  /// pass had only the deterministic floor, so every message below the floor
+  /// came back `done` with a NULL verdict — and `INSERT OR IGNORE` will never
+  /// offer those rows again. Its caller runs it once behind a pref, because
+  /// what it is catching up on happened once.
+  ///
+  /// The predicate is deliberately simple, and the price of that is precision:
+  /// gated and outbound rows whose verdict is NULL are revived too, and leave
+  /// again through the handler's own guards. That costs one queue row each,
+  /// once, against a predicate that would otherwise have to restate every
+  /// guard the handler already owns.
+  Future<int> reviveUnjudgedNeedsYou() {
+    return db.customUpdate(
+      "UPDATE work_items SET status = 'pending', attempts = 0, error = NULL, "
+      'updated_at = ? '
+      "WHERE task_kind = 'needs_you' AND status = 'done' "
+      'AND EXISTS (SELECT 1 FROM messages m '
+      'WHERE m.source = work_items.source '
+      'AND m.source_message_id = work_items.entity_id '
+      "AND m.direction = 'inbound' "
+      'AND m.needs_you_verdict IS NULL)',
+      variables: _args([_nowIso()]),
     );
   }
 

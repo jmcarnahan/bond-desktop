@@ -448,6 +448,83 @@ void main() {
     });
   });
 
+  group('reviveUnjudgedNeedsYou', () {
+    /// A finished needs-you item over a message with no verdict on it —
+    /// exactly what the build that judged only the floor left behind.
+    Future<void> seedFinished(String id, {bool? verdict}) async {
+      await store.upsertMessage(messageRow(id: id));
+      await store.enqueueWork('needs_you', 'email', id);
+      await store.writeWork('needs_you', 'email', id, status: 'done');
+      if (verdict != null) {
+        await store.writeNeedsYouVerdict('email', id, verdict: verdict);
+      }
+    }
+
+    test('a done item over an unjudged message goes back in the queue',
+        () async {
+      await seedFinished('m1');
+      await store.writeWork('needs_you', 'email', 'm1',
+          status: 'done', error: 'an old failure', attempts: 2);
+
+      expect(await store.reviveUnjudgedNeedsYou(), 1);
+
+      final row = await workRow('needs_you', 'm1');
+      expect(row['status'], 'pending');
+      expect(row['attempts'], 0);
+      expect(row['error'], isNull);
+    });
+
+    test('a message that has been judged is left finished', () async {
+      // Both verdicts count as judged: 0 is an answer, and re-asking would
+      // spend model time to reproduce it.
+      await seedFinished('yes', verdict: true);
+      await seedFinished('no', verdict: false);
+
+      expect(await store.reviveUnjudgedNeedsYou(), 0);
+
+      expect((await workRow('needs_you', 'yes'))['status'], 'done');
+      expect((await workRow('needs_you', 'no'))['status'], 'done');
+    });
+
+    test('work that has not finished is left where it is', () async {
+      // A pending row would lose its place in the drain order, and a
+      // processing one is being held by a worker right now.
+      await store.upsertMessage(messageRow(id: 'waiting'));
+      await store.upsertMessage(messageRow(id: 'running'));
+      await store.enqueueWork('needs_you', 'email', 'waiting');
+      await store.enqueueWork('needs_you', 'email', 'running');
+      await store
+          .writeWork('needs_you', 'email', 'running', status: 'processing');
+
+      expect(await store.reviveUnjudgedNeedsYou(), 0);
+
+      expect((await workRow('needs_you', 'waiting'))['status'], 'pending');
+      expect((await workRow('needs_you', 'running'))['status'], 'processing');
+    });
+
+    test('another kind over the same unjudged message is not touched',
+        () async {
+      await store.upsertMessage(messageRow(id: 'm1'));
+      await store.enqueueWork('extract', 'email', 'm1');
+      await store.writeWork('extract', 'email', 'm1', status: 'done');
+
+      expect(await store.reviveUnjudgedNeedsYou(), 0);
+
+      expect((await workRow('extract', 'm1'))['status'], 'done');
+    });
+
+    test('the count is how many it revived', () async {
+      await seedFinished('m1');
+      await seedFinished('m2');
+      await seedFinished('m3', verdict: true);
+
+      expect(await store.reviveUnjudgedNeedsYou(), 2);
+      // And nothing is left to revive on a second call, which is what makes
+      // the caller's ran-once pref a belt rather than the only guard.
+      expect(await store.reviveUnjudgedNeedsYou(), 0);
+    });
+  });
+
   group('message_ai', () {
     test('writes, reads back, and overwrites in place', () async {
       expect(await store.getExtraction('email', 'm1'), isNull);

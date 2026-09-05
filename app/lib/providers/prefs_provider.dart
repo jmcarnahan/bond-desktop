@@ -5,7 +5,7 @@ import '../data/message_store.dart';
 import '../services/attention.dart';
 import 'app_providers.dart';
 
-export '../data/message_store.dart' show aboutMeKey;
+export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
 
 /// Which Microsoft backend the app talks through.
 ///
@@ -65,6 +65,12 @@ class AppPrefs {
   /// the next phase's prompts.
   final String aboutMe;
 
+  /// The user's extra criteria for the needs-you judgement, fed fenced into
+  /// `NeedsYouTask` on top of the rules the prompt already carries. Empty is
+  /// the normal state: the defaults are meant to work for somebody who never
+  /// opens this field.
+  final String needsYouRules;
+
   /// [backendModeMcp] or [backendModeSdk]. Nothing above here parses it: the
   /// providers compare it against those two constants.
   final String backendMode;
@@ -99,6 +105,7 @@ class AppPrefs {
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
+    this.needsYouRules = '',
     this.backendMode = backendModeMcp,
     this.mcpServerUrl = defaultMcpServerUrl,
     this.showActivityLog = false,
@@ -116,6 +123,7 @@ class AppPrefs {
   AppPrefs copyWith({
     double? attentionThreshold,
     String? aboutMe,
+    String? needsYouRules,
     String? backendMode,
     String? mcpServerUrl,
     bool? showActivityLog,
@@ -126,6 +134,7 @@ class AppPrefs {
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
         aboutMe: aboutMe ?? this.aboutMe,
+        needsYouRules: needsYouRules ?? this.needsYouRules,
         backendMode: backendMode ?? this.backendMode,
         mcpServerUrl: mcpServerUrl ?? this.mcpServerUrl,
         showActivityLog: showActivityLog ?? this.showActivityLog,
@@ -189,6 +198,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       attentionThreshold: (raw == null ? null : double.tryParse(raw)) ??
           AttentionTuning.defaultThreshold,
       aboutMe: await store.getPref(aboutMeKey) ?? '',
+      needsYouRules: await store.getPref(needsYouRulesKey) ?? '',
       backendMode: _mode(await store.getPref(backendModeKey)),
       mcpServerUrl: _serverUrl(await store.getPref(mcpServerUrlKey)),
       // Anything that is not the string this notifier writes reads as off,
@@ -260,6 +270,14 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setAboutMe(String value) async {
     state = state.copyWith(aboutMe: value);
     await _store.setPref(aboutMeKey, value);
+  }
+
+  /// Stored VERBATIM — the pane trims before it calls, and trimming again here
+  /// would mean the text in the field and the text the model reads are not the
+  /// same string.
+  Future<void> setNeedsYouRules(String value) async {
+    state = state.copyWith(needsYouRules: value);
+    await _store.setPref(needsYouRulesKey, value);
   }
 
   /// Switches which backend the app talks through.

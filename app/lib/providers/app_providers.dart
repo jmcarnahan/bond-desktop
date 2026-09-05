@@ -419,7 +419,21 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // written yet.
       NeedsYouHandler(
         ref.watch(messageStoreProvider),
+        // Bulk work: the fast server. See [fastLlmClientProvider].
+        ref.watch(fastLlmClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        // A callback, not a value: the account is a keychain read, and this
+        // provider is built by plenty that never drains. The handler asks
+        // once, on the first message that reaches the model; until the answer
+        // arrives the prompt simply names no owner.
+        owner: () => ref.read(authSessionProvider).storedAccount.then(
+              (account) => account == null
+                  ? null
+                  : (
+                      name: account.displayName,
+                      address: account.mail ?? account.userPrincipalName,
+                    ),
+            ),
       ),
       // Extraction next, and it drains completely before either storyline
       // handler starts. That order is the point: extraction is what writes the

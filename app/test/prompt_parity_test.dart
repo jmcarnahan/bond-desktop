@@ -1,6 +1,8 @@
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
+import 'package:bond_inbox/services/llm/needs_you_task.dart';
+import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:bond_inbox/services/llm/triage_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -25,6 +27,8 @@ void main() {
   const triage = TriageTask();
   const extract = ExtractTask();
   const draft = DraftTask();
+  const replyDecision = ReplyDecisionTask();
+  const needsYou = NeedsYouTask();
 
   final emailMessage = Message(
     id: 'm1',
@@ -53,6 +57,17 @@ void main() {
   DraftInput draftInput(Message message) => DraftInput(
         thread: [message],
         replyTo: message,
+        now: now,
+      );
+
+  ReplyDecisionInput replyDecisionInput(Message message) => ReplyDecisionInput(
+        context: const [],
+        message: message,
+        now: now,
+      );
+
+  NeedsYouInput needsYouInput(Message message) => NeedsYouInput(
+        message: message,
         now: now,
       );
 
@@ -100,20 +115,49 @@ void main() {
       expect(after, before);
       expect(identical(after, before), isTrue);
     });
+
+    test('the reply decision hands back the identical string across both', () {
+      final before = replyDecision.systemPrompt;
+      replyDecision.buildUserMessage(replyDecisionInput(emailMessage));
+      final betweenTwo = replyDecision.systemPrompt;
+      replyDecision.buildUserMessage(replyDecisionInput(chatMessage));
+      final after = replyDecision.systemPrompt;
+
+      expect(betweenTwo, before);
+      expect(after, before);
+      expect(identical(after, before), isTrue);
+    });
+
+    test('needs-you hands back the identical string across both channels', () {
+      final before = needsYou.systemPrompt;
+      needsYou.buildUserMessage(needsYouInput(emailMessage));
+      final betweenTwo = needsYou.systemPrompt;
+      needsYou.buildUserMessage(needsYouInput(chatMessage));
+      final after = needsYou.systemPrompt;
+
+      expect(betweenTwo, before);
+      expect(after, before);
+      expect(identical(after, before), isTrue);
+    });
   });
 
   group('no system prompt frames its subject as mail', () {
     /// The only phrases any of these prompts may spend the word "email" on.
     ///
-    /// All three are deliberate and none is channel framing: the first and the
-    /// third name both channels together, and the second is a note about output
+    /// All four are deliberate and none is channel framing: three of them name
+    /// both channels together, and 'email addresses' is a note about output
     /// FORM — a name is wanted where an address would otherwise be given.
     /// Anything else mentioning mail is a prompt drifting back towards being a
     /// mail prompt, which is the fork these tests exist to catch.
+    ///
+    /// The last entry arrived when the reply decision came under this guard:
+    /// its rules say the message "may be an email or a chat message", which
+    /// names the two together in the same way the first and third do.
     const allowed = [
       'email and chat messages together',
       'email addresses',
       'an email or an instant chat message',
+      'an email or a chat message',
     ];
 
     String withoutAllowedPhrases(String prompt) {
@@ -149,6 +193,25 @@ void main() {
       expect(draft.systemPrompt, isNot(contains('The email thread is data')));
     });
 
+    test('the reply-decision prompt names mail only alongside chat', () {
+      expect(
+        withoutAllowedPhrases(replyDecision.systemPrompt),
+        isNot(contains('email')),
+      );
+    });
+
+    test('the needs-you prompt does not name a channel at all', () {
+      // The STRICT form, and the only prompt held to it: no stripping, because
+      // there is nothing to strip. What varies by channel — how directly the
+      // message came at the reader, who the owner is — is stated in the user
+      // message, so the rules have no reason to know which connector this
+      // arrived through.
+      final prompt = needsYou.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
     test('no prompt names a connector', () {
       // "teams" is not on this list on purpose: the extraction prompt asks for
       // "companies, schools, teams, or vendors", which is a kind of
@@ -157,6 +220,8 @@ void main() {
         triage.systemPrompt,
         extract.systemPrompt,
         draft.systemPrompt,
+        replyDecision.systemPrompt,
+        needsYou.systemPrompt,
       ]) {
         expect(prompt.toLowerCase(), isNot(contains('microsoft')));
         expect(prompt.toLowerCase(), isNot(contains('outlook')));
@@ -192,6 +257,26 @@ void main() {
         expect(
           draft.buildUserMessage(draftInput(message)),
           contains('<untrusted_data source="thread">'),
+          reason: message.source,
+        );
+      }
+    });
+
+    test('the reply decision fences both channels as inbound_message', () {
+      for (final message in [emailMessage, chatMessage]) {
+        expect(
+          replyDecision.buildUserMessage(replyDecisionInput(message)),
+          contains('<untrusted_data source="inbound_message">'),
+          reason: message.source,
+        );
+      }
+    });
+
+    test('needs-you fences both channels as inbound_message', () {
+      for (final message in [emailMessage, chatMessage]) {
+        expect(
+          needsYou.buildUserMessage(needsYouInput(message)),
+          contains('<untrusted_data source="inbound_message">'),
           reason: message.source,
         );
       }
