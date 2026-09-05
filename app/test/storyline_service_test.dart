@@ -285,6 +285,8 @@ void main() {
     String direction = 'inbound',
     String fromName = 'Sarah',
     String? body,
+    String triageStatus = 'pending',
+    String? gateReason,
   }) =>
       into.upsertMessage({
         'source': source,
@@ -296,6 +298,8 @@ void main() {
         'from_address': 'sarah@example.com',
         'received_at': receivedAt,
         'body_text': body ?? 'body of $id',
+        'triage_status': triageStatus,
+        'gate_reason': gateReason,
       });
 
   /// The storyline pointer one message carries, straight from the column the
@@ -3102,6 +3106,116 @@ void main() {
 
       expect(llm.schemas, isEmpty);
       expect(await store.nextPendingWork('storyline_recap'), isNull);
+    });
+
+    test('the sweep queues a recap for a storyline that never had one',
+        () async {
+      await seedStoryline(store);
+      await seedMessage(store, 'member', 'm1');
+      // Described and settled: its members match what was said about them, so
+      // the refresh catch-up has nothing to say, and no mail has landed since,
+      // so none of the recap's own triggers ever fires. Every storyline the
+      // v10 backfill called described looks exactly like this, and none of
+      // them has ever been recapped.
+      await markDescribed('sl-1', ['member']);
+
+      await StorylineService(store, FakeLlm(const {})).sweep();
+
+      // Found on a sweep that returns early, which is the whole reason the
+      // catch-up runs at the head of the pass.
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('the sweep recaps a storyline the user replied into', () async {
+      await seedStoryline(store);
+      await seedMessage(store, 'member', 'm1',
+          receivedAt: '2026-08-28T10:00:00Z');
+      await markDescribed('sl-1', ['member']);
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      // The sent copy folding in from `sentitems`, gated exactly as the ingest
+      // gates it. This is the whole mail reply path: no per-message trigger
+      // wakes it, and none needs to — every sync ends by requeueing the sweep,
+      // and the recap handler drains after the sweep's in the same pass.
+      await seedMessage(store, 'member', 'm2',
+          receivedAt: '2026-08-29T09:00:00Z',
+          direction: 'outbound',
+          fromName: 'Jordan',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+
+      await StorylineService(store, FakeLlm(const {})).sweep();
+
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('the sweep leaves a fully-recapped storyline alone', () async {
+      await seedStoryline(store);
+      await seedMessage(store, 'member', 'm1');
+      await markDescribed('sl-1', ['member']);
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      await store.writeWork('storyline_recap', 'email', 'sl-1',
+          status: 'done');
+
+      await StorylineService(store, FakeLlm(const {})).sweep();
+
+      expect(await store.nextPendingWork('storyline_recap'), isNull);
+    });
+
+    test('a storyline the sweep proposes is born described and recaps in its '
+        'own drain', () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seedMessage(store, 'c1', 'm1');
+      await seedMessage(store, 'c2', 'm2');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer(), confirmAnswer()],
+        'storyline_recap': [recapAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      // The proposal IS the description — `NameStorylineTask` wrote the title,
+      // summary and charter from these two threads seconds ago — so the
+      // refresh columns record that rather than leaving the next sweep to
+      // spend a Refine call re-describing a set that never moved.
+      expect(storyline.refreshedMemberHash, memberHashOf(['c1', 'c2']));
+      expect(storyline.refreshedMemberHash, storyline.memberHash);
+      expect(storyline.refreshedMemberCount, 2);
+
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], storyline.id);
+
+      // And the recap handler drains after the sweep's, so the storyline the
+      // user is first shown already says where it stands.
+      expect(await drainRecap(service), storyline.id);
+      expect((await store.getStoryline(storyline.id))!.recapText,
+          contains('The homepage copy is approved'));
+    });
+
+    test('a newborn storyline does not wake the refresh pass', () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer(), confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      expect(await store.staleRefreshStorylineIds(),
+          isNot(contains(storyline.id)));
     });
 
     test('an unknown storyline is a quiet no-op, not a throw', () async {

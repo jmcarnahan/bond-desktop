@@ -37,14 +37,19 @@ void main() {
     String id, {
     required String receivedAt,
     String? subject,
+    String direction = 'inbound',
+    String triageStatus = 'pending',
+    String? gateReason,
   }) async {
     await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
-      'direction': 'inbound',
+      'direction': direction,
       'received_at': receivedAt,
       'subject': subject ?? key,
       'body_text': 'body of $id',
+      'triage_status': triageStatus,
+      'gate_reason': gateReason,
     });
   }
 
@@ -449,6 +454,108 @@ void main() {
     });
   });
 
+  group('staleRecapStorylineIds', () {
+    // One live storyline with one member thread, which is the shape every
+    // test in this group varies from.
+    Future<void> seedMember(String id, String key) async {
+      await seedConversation(key);
+      await store.addStorylineMember(id, 'email', key, addedBy: 'auto');
+    }
+
+    test('a storyline that never recapped is stale', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+
+      expect(await store.staleRecapStorylineIds(), ['sl-1']);
+    });
+
+    test('a recap that has read everything is not', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+
+      expect(await store.staleRecapStorylineIds(), isEmpty);
+    });
+
+    test('a newer message makes it stale again', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      await seedMessage('c1', 'm2', receivedAt: '2026-08-29T09:00:00Z');
+
+      expect(await store.staleRecapStorylineIds(), ['sl-1']);
+    });
+
+    test('a gated newer message does not', () async {
+      // The recap window cannot see this message, so waking the pass for it
+      // would queue a storyline that reads nothing, stamps nothing, and is
+      // queued again by the very next sweep.
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      await seedMessage('c1', 'm2',
+          receivedAt: '2026-08-29T09:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'newsletter');
+
+      expect(await store.staleRecapStorylineIds(), isEmpty);
+    });
+
+    test('a chat skipped only for being a chat still counts', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1',
+          receivedAt: '2026-08-29T09:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'teams_source');
+
+      expect(await store.staleRecapStorylineIds(), ['sl-1']);
+    });
+
+    test('a reply the user sent makes the recap stale', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      await seedMessage('c1', 'm2',
+          receivedAt: '2026-08-29T09:00:00Z',
+          direction: 'outbound',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+
+      // The user answering is the biggest change there is to who-owes-whom.
+      // A recap that slept through it goes on saying they owe a reply they
+      // have already sent.
+      expect(await store.staleRecapStorylineIds(), ['sl-1']);
+    });
+
+    test('a storyline with nothing to read is left alone', () async {
+      // Never recapped, and it must stay that way: `recap` would open an
+      // empty window and return without a watermark, so queueing this is a
+      // wakeup that repeats on every sweep forever.
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+
+      expect(await store.staleRecapStorylineIds(), isEmpty);
+    });
+
+    test("a dismissed storyline is nobody's business", () async {
+      await seedStoryline('sl-dead', status: 'dismissed');
+      await seedMember('sl-dead', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+
+      expect(await store.staleRecapStorylineIds(), isEmpty);
+    });
+  });
+
   group('dismissedHashExistsAny', () {
     test('finds a dismissed storyline by its member hash', () async {
       await seedStoryline('sl-1', status: 'dismissed', memberHash: 'h1');
@@ -791,6 +898,30 @@ void main() {
       // Triage threw it out as a newsletter, and a recap narrating the
       // vendor's marketing mail would be describing the wrong storyline.
       expect(rows.map((r) => r['source_message_id']), ['m1']);
+    });
+
+    test("the user's own reply is in the window", () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      // Exactly what the ingest writes for a sent message: skipped, with
+      // `outbound` as the reason. That gate is about not spending model calls
+      // on the user's own mail — it was never a statement about the story.
+      await seedMessage('c1', 'm2',
+          receivedAt: '2026-08-01T10:00:00Z',
+          direction: 'outbound',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1');
+
+      // Newest first, so the reply leads the window the service reverses —
+      // which puts it last in the chronology the model reads, where an answer
+      // belongs. Without it the recap sees every question ever put to the user
+      // and none of their answers.
+      expect(rows.map((r) => r['source_message_id']), ['m2', 'm1']);
+      expect(rows.first['direction'], 'outbound');
     });
 
     test('a chat skipped only for being a chat still counts', () async {

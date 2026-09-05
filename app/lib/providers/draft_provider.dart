@@ -749,6 +749,7 @@ class DraftNotifier extends StateNotifier<DraftState> {
       if (row != null) {
         await _store.upsertMessage(row);
         await _store.recomputeConversationCounts(_source, conversationKey);
+        await _queueRecap();
       }
       // A chat send never marked a draft row before. That was fine while only
       // the newest suggestion was tappable — the row it would have marked was
@@ -795,6 +796,35 @@ class DraftNotifier extends StateNotifier<DraftState> {
     } catch (e) {
       state = state.copyWith(sending: false, error: 'Could not send: $e');
       return SendOutcome.failed;
+    }
+  }
+
+  /// Wakes the recap of every storyline this chat is filed in, because the
+  /// user just changed the answer to the question a recap exists to ask.
+  ///
+  /// Called from the chat send and from nowhere else, and the asymmetry is the
+  /// same one the `clearNeedsYou` above explains. Every OTHER outbound row in
+  /// this app lands at ingest — the sent copy folding in from `sentitems`, or a
+  /// chat reply sent from Teams itself arriving on a pull — and every sync ends
+  /// by requeueing `storyline_sweep`, whose recap catch-up
+  /// ([MessageStore.staleRecapStorylineIds]) finds those storylines and whose
+  /// recap handler drains later in the same pass. Wiring a per-message requeue
+  /// into the mail ingest would buy nothing and would cost a query per message
+  /// inside the page transaction, on first syncs that can run to six figures.
+  ///
+  /// The chat send is the one outbound row no ingest will ever see: it is
+  /// written here with the id Graph assigned, and the next pull deliberately
+  /// skips it as already-known. Without this line a chat reply would wait for
+  /// the next sync's catch-up to notice it.
+  ///
+  /// Mirrors `ExtractHandler._queueRecap`, label included — `requeueWork` is
+  /// keyed on `(kind, source, entity_id)`, and 'email' is the label
+  /// `StorylineService` writes storyline work under for BOTH connectors.
+  Future<void> _queueRecap() async {
+    for (final storylineId
+        in await _store.storylineIdsFor(_source, conversationKey)) {
+      if (storylineId.isEmpty) continue;
+      await _store.requeueWork('storyline_recap', 'email', storylineId);
     }
   }
 

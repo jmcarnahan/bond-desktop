@@ -914,6 +914,17 @@ class StorylineService {
       await _store.requeueWork('storyline_refresh', _workSource, id);
     }
 
+    // The same heal for the recap, and it has more to fix than the refresh
+    // does. The recap's other triggers all fire on a message arriving, so a
+    // storyline that is already described and has had no new mail reaches
+    // none of them — which is every storyline the v10 backfill called
+    // described, none of which has ever been recapped, plus any recap wakeup
+    // a `processing` row swallowed. The recap handler drains AFTER this one,
+    // so what is queued here runs in the same pass.
+    for (final id in await _store.staleRecapStorylineIds()) {
+      await _store.requeueWork('storyline_recap', _workSource, id);
+    }
+
     final pending =
         (await _store.loadStorylines(statuses: const ['suggested'])).length;
     final room = StorylineTuning.maxPendingSuggestions - pending;
@@ -1300,6 +1311,13 @@ class StorylineService {
       return (proposed: false, confirmed: survivors.length, rejected: rejected);
     }
 
+    final memberHash = _hashOfThreads([
+      for (final survivor in survivors)
+        (
+          source: survivor.row['source'] as String? ?? _workSource,
+          key: survivor.row['conversation_key'] as String? ?? '',
+        ),
+    ]);
     await _store.insertStoryline(
       id: id,
       title: result.title,
@@ -1316,15 +1334,26 @@ class StorylineService {
       // storylines), so the identical cluster re-forms on the next sweep and
       // the cheap check above recognises it — before a single model call is
       // spent re-deriving an answer the user already refused.
-      memberHash: _hashOfThreads([
-        for (final survivor in survivors)
-          (
-            source: survivor.row['source'] as String? ?? _workSource,
-            key: survivor.row['conversation_key'] as String? ?? '',
-          ),
-      ]),
+      memberHash: memberHash,
       clusterHash: clusterHash,
     );
+    // Born described. The proposal IS the description: [NameStorylineTask]
+    // wrote this title, summary and charter from this exact member set,
+    // seconds ago, so stamping the refresh columns here records something
+    // true rather than claiming a pass ran. Leaving them null would have the
+    // next sweep's refresh catch-up spend a Refine call re-describing a set
+    // that has not moved — and this is the same claim the v10 backfill makes
+    // about every storyline it found already described.
+    await _store.updateStoryline(
+      id,
+      refreshedMemberHash: memberHash,
+      refreshedMemberCount: survivors.length,
+    );
+    // Recapped in the same drain rather than a sync later. The recap handler
+    // runs after the sweep's, so a storyline born in this pass shows its
+    // recap the first time the user ever sees it — without this it waits for
+    // the next sweep's catch-up to notice it has never been read.
+    await _store.requeueWork('storyline_recap', _workSource, id);
     for (final survivor in survivors) {
       await _store.addStorylineMember(
         id,

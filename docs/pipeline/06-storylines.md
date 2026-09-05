@@ -50,6 +50,17 @@ pass returns before any model call; NULL means never described, which is not
 the same as unchanged. Both hashes use the one write recipe (`_hashOfThreads`,
 source folded in).
 
+**A proposed storyline is born described.** `_propose` stamps
+`refreshed_member_hash`/`refreshed_member_count` on the kept path, right where
+it inserts the row: `NameStorylineTask` has just written that title, summary and
+charter from exactly those confirmed members, so the columns record something
+true rather than claiming a pass ran. Without the stamp the next sweep's
+catch-up would read the row as never described and spend a Refine call
+re-writing a description seconds old over a member set that has not moved. It is
+the same claim the v10 backfill makes about the storylines it found already
+described. The below-minimum tombstone branch stamps nothing — it has no member
+rows to describe.
+
 **Triggers** — every path that can change what a storyline is about, all via
 `requeueWork` (never `enqueueWork`; `payload_json` is NULL, so nothing carries
 provenance through the queue):
@@ -146,6 +157,17 @@ are excluded on exactly `EmbedHandler`'s rule — `triage_status = 'skipped'`
 unless `gate_reason = 'teams_source'` — so a recap never narrates the vendor's
 newsletters, and a chat row `skipped` only for being a chat still counts.
 
+**The owner's own messages are never excluded**, whatever their triage columns
+say: `direction = 'outbound'` is the first arm of that predicate.
+`triageStatusOnInsert` marks every outbound message `skipped`/`outbound`, but
+that gate answers *does this need the user?* — it is cost control, about not
+spending model calls on the user's own mail, and it was never a claim about the
+narrative. The recap's entire subject is who owes whom, and the reply the user
+sent is the largest single fact in that judgement; without the arm the window is
+every question ever put to them and not one of their answers, and the model
+writes open items they settled last week. Nothing above the SQL needed changing
+— the prompt already renders these lines as `You`.
+
 **The gate** is the `recap_through` watermark (schema v10): the pass returns
 before any model call when `recap_through >= ` the newest `received_at` in the
 window. ISO-8601 with a fixed offset compares correctly as a string, so no
@@ -162,6 +184,25 @@ would leave the gate reading fresh and that message would never be recapped.
 | `ExtractHandler` tail | a message's facts land in a thread that is already in ≥1 storyline (`storylineIdsFor`), one requeue per storyline. Deliberately outside `_refreshCard` and not behind a successful embed — the recap has nothing to do with the vector, and a down embedding server must not cost it a message |
 | `addThread` | always — a hand-filed thread brings its own messages, and the user is looking |
 | `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story |
+| `_propose` | always, on the kept path — the recap handler drains after the sweep's, so a storyline born in this pass shows its recap in the same drain rather than a sync later |
+| `DraftNotifier._sendChat` | a chat reply the user sent from this app, per storyline the chat is filed in. **The only outbound row wired directly**, because it is the only one no ingest will ever see: the chat send writes its own row with the id Graph assigned, and the next pull skips it as already-known |
+| `sweep` catch-up | every live storyline holding a message the recap has not read: `recap_through` NULL, or a newer `received_at` than it. `staleRecapStorylineIds` repeats `recentStorylineMessages`' gate exclusion (`triage_status <> 'skipped'` unless `gate_reason = 'teams_source'`) and its own `received_at` guard, because the question asked must be the one the pass answers — a storyline queued over messages the recap cannot read would stamp no watermark and be queued again forever. A storyline with no qualifying messages at all is left alone for the same reason |
+
+The recap's catch-up matters more than the refresh's, because every other
+trigger here fires on a message *arriving*: a storyline that is already
+described and has had no new mail reaches none of them. That is every row the
+v10 backfill called described — none of which had ever been recapped — plus any
+recap wakeup a `processing` row swallowed. Like the refresh's, it runs at the
+head of `sweep` so an early return does not skip it.
+
+It is also the **reply path**, and deliberately so. Every outbound row but the
+chat send's lands at ingest — the sent copy folding in from `sentitems`, or a
+reply sent from Outlook, a phone, or Teams itself arriving on a pull — and every
+sync ends by requeueing `storyline_sweep`, so the sync that folds a reply in is
+the drain that recaps it. Wiring a per-message requeue into the mail ingest
+would buy no latency and would cost a `storylineIdsFor` query per message inside
+`_ingestPage`'s page transaction, on first syncs that run to six figures. One
+indexed question per sync replaces it.
 
 `removeThread` is absent where the refresh table has it, and the watermark is
 why. Removing a thread adds no messages, so the newest `received_at` left in
@@ -171,7 +212,10 @@ therefore go on describing a thread that has just been filed out of the
 storyline until something new is said in one of the threads that remain. That
 is the one place the watermark's cheapness shows, and it is a known edge rather
 than a design: the pass is keyed to *messages arriving*, and a removal is the
-only event that changes the story without one.
+only event that changes the story without one. The catch-up does not close it
+either, and could not: its `EXISTS` asks whether a member thread holds a message
+newer than the watermark, and a removal — which adds no messages — leaves that
+answer no.
 
 Bursts coalesce for free: `requeueWork` is keyed on
 `(kind, source, entity_id)`, so ten messages landing in one drain leave one

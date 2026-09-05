@@ -288,6 +288,38 @@ void main() {
       expect(reply['addressed_me'], 0);
     });
 
+    test('a sent reply recaps the storyline it belongs to', () async {
+      await seedChat();
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'The CD for the Whitfield file',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'teams', 'chat-1',
+          addedBy: 'auto');
+      await store.writeWork('storyline_recap', 'email', 'sl-1',
+          status: 'done');
+
+      await (await loaded()).send('Sent it over just now.');
+
+      // The one outbound row in this app that no ingest will ever see — the
+      // next pull skips it as already-known — so the recap has to be woken
+      // here or wait for the next sync's catch-up. The label is 'email' for
+      // both connectors, exactly as `StorylineService` writes it.
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+      expect(work?['source'], 'email');
+    });
+
+    test('a reply into a thread no storyline holds queues no recap', () async {
+      await seedChat();
+
+      await (await loaded()).send('Sent it over just now.');
+
+      expect(await store.nextPendingWork('storyline_recap'), isNull);
+    });
+
     test('flips the thread to waiting and answers the CTA', () async {
       await seedChat();
       await (await loaded()).send('On it.');

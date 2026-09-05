@@ -2800,6 +2800,68 @@ FROM storylines s''';
     return [for (final row in result) row.data['id'] as String? ?? ''];
   }
 
+  /// Every live storyline holding a message the recap has not read.
+  ///
+  /// The heal behind the recap pass, and it answers the same durable question
+  /// [staleRefreshStorylineIds] does — for a pass whose every other trigger
+  /// fires on a message ARRIVING. A storyline that already matches its
+  /// description and has had no new mail since trips none of those triggers,
+  /// so without this a storyline the recap has never read stays unread
+  /// forever: every row the v10 backfill described, and every recap wakeup a
+  /// `processing` row swallowed.
+  ///
+  /// Every predicate here is load-bearing, and all of them for one reason —
+  /// this must ask the question the pass itself will answer, or a storyline it
+  /// queues is a storyline it re-queues on every sweep for the rest of time.
+  ///
+  /// The gate exclusion is [recentStorylineMessages]' rule, character for
+  /// character — the outbound arm included: skipped messages are not in the
+  /// recap's window, except the owner's own and except chats, which are only
+  /// ever skipped for being chats. Without it a storyline whose only newer
+  /// messages are gated would be queued, find nothing to read, and stamp no
+  /// watermark — and be queued again on the next sweep.
+  ///
+  /// The outbound arm is not merely parity, it is the point: a reply the user
+  /// sent must make the recap stale, or the recap goes on saying they owe an
+  /// answer they have already given. It is also what makes this catch-up the
+  /// prompt path rather than a slow one — every sync ends by requeueing
+  /// `storyline_sweep`, and the recap handler drains after the sweep's, so the
+  /// sync that folds a sent reply in is the drain that recaps it.
+  ///
+  /// The `received_at` guard is the same anti-loop for the timestampless: the
+  /// recap takes its watermark from the newest message in the window and
+  /// returns early when there is none, so a row that can never move the
+  /// watermark must never be the reason to run.
+  ///
+  /// One `EXISTS` serves both arms. `s.recap_through IS NULL` is the storyline
+  /// nobody has recapped; `msg.received_at > s.recap_through` is the one that
+  /// has fallen behind. Both live inside the message test on purpose — a
+  /// storyline with no qualifying messages AT ALL is deliberately left alone
+  /// even with a null watermark, because [StorylineService.recap] would find
+  /// an empty window, return, and never converge.
+  Future<List<String>> staleRecapStorylineIds() async {
+    final result = await db
+        .customSelect(
+          'SELECT s.id FROM storylines s '
+          "WHERE s.status IN ('suggested', 'active') "
+          'AND EXISTS ('
+          '  SELECT 1 FROM storyline_members m '
+          '  JOIN messages msg ON msg.source = m.source '
+          '    AND msg.conversation_key = m.conversation_key '
+          '  WHERE m.storyline_id = s.id '
+          "    AND msg.received_at IS NOT NULL AND msg.received_at != '' "
+          "    AND (msg.direction = 'outbound' "
+          "         OR msg.triage_status <> 'skipped' "
+          "         OR msg.gate_reason = 'teams_source') "
+          '    AND (s.recap_through IS NULL '
+          '         OR msg.received_at > s.recap_through)'
+          ') '
+          'ORDER BY s.id ASC',
+        )
+        .get();
+    return [for (final row in result) row.data['id'] as String? ?? ''];
+  }
+
   /// Moves a storyline's activity stamp forward, never back. Threads are
   /// assigned in whatever order the queue drains them, so an older thread
   /// joining must not make a live storyline look stale.
@@ -3160,6 +3222,18 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   /// exception is the same legacy tolerance — a chat row stored before chats
   /// were triaged is `skipped` for no judgement anyone made, and dropping it
   /// would silently empty the recap of a chat-only storyline.
+  ///
+  /// **The owner's own messages are never gated out**, whatever their triage
+  /// columns say, and that arm comes first for a reason. `triageStatusOnInsert`
+  /// marks every outbound message `skipped`/`outbound`, but that gate answers
+  /// "does this need the user?" — it is about not spending model calls on the
+  /// user's own mail, and it was never a statement about the narrative. The
+  /// recap's whole subject is who owes whom, and the reply the user sent is the
+  /// single most important fact in that judgement: without this arm the window
+  /// is every question ever asked of them and not one of their answers, so the
+  /// model reads a storyline where the user has gone silent and writes open
+  /// items they settled last week. The recap prompt already renders these as
+  /// `You`, so nothing above this query needed changing.
   Future<List<Map<String, Object?>>> recentStorylineMessages(
     String storylineId, {
     int limit = 12,
@@ -3180,7 +3254,8 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
           'LEFT JOIN conversations c '
           '  ON c.source = m.source AND c.conversation_key = m.conversation_key '
           'WHERE sm.storyline_id = ? '
-          "AND (m.triage_status <> 'skipped' "
+          "AND (m.direction = 'outbound' "
+          "     OR m.triage_status <> 'skipped' "
           "     OR m.gate_reason = 'teams_source') "
           'ORDER BY m.received_at DESC, m.source_message_id DESC '
           'LIMIT ?',
