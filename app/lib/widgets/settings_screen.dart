@@ -11,12 +11,16 @@ import '../providers/prefs_provider.dart'
         mcpDeployedUrl,
         mcpLocalUrl;
 import '../services/backend/backend_types.dart' show AuthException;
+import '../services/llm/model_probe.dart' show ModelProbeResult;
+import '../services/llm/model_slots.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'inline_alert.dart';
 import 'needs_you_rules_editor.dart';
 import 'pane_surface.dart';
+import 'settings_models_body.dart';
 import 'settings_section.dart';
+import 'time_format.dart' show relativeTime;
 
 /// What the user gets to say about how the inbox behaves, plus what Microsoft
 /// has actually let this app do.
@@ -165,6 +169,63 @@ class SettingsScreen extends StatefulWidget {
   /// still renders if [onShowActivityLogChanged] is wired.
   final VoidCallback? onOpenActivityLog;
 
+  /// Where each slot points NOW, with "follow the build" already resolved by
+  /// the host into the build's own values.
+  final Map<ModelSlot, LlmTarget> slotTargets;
+
+  /// Whether each slot is still on those build values — what the editors
+  /// render as `Default` rather than as `Custom`.
+  final Map<ModelSlot, bool> slotIsDefault;
+
+  /// What this build was compiled with, per slot. Deliberately NOT named
+  /// `slotDefaults`: a field of that name would shadow the const map of the
+  /// same name in the constructor's own default expression below.
+  final Map<ModelSlot, LlmTarget> compiledDefaults;
+
+  /// The authored stage → slot table the section displays. A parameter so a
+  /// test can hand it a short one; the app always passes [pipelineStages].
+  final List<PipelineStageInfo> stages;
+
+  /// Asks a server what it serves, for the editors' 'Check server'. Null takes
+  /// the button off every editor and the embeddings card — the editors still
+  /// work, with the model as a typed name — on the same discipline as every
+  /// other optional control here: a host that cannot ask does not offer to.
+  final Future<ModelProbeResult> Function(String url)? probeServer;
+
+  /// Fired by a slot editor's Save. **Null hides the whole Models section**,
+  /// the same discipline every other optional section follows: a host that
+  /// cannot store a change must not offer the controls that make one.
+  final void Function(ModelSlot slot, {required String url, required String model})?
+      onSlotTargetChanged;
+
+  /// Fired by 'Use build defaults'. Null leaves the button inert rather than
+  /// hiding the section — the section's premise is [onSlotTargetChanged].
+  final void Function(ModelSlot slot)? onSlotReset;
+
+  /// When mail, Teams and the storyline sweep last ran. Null means never, and
+  /// reads as 'never' rather than as a blank.
+  final String? lastMailSyncIso;
+  final String? lastTeamsSyncIso;
+  final String? lastSweepIso;
+
+  /// The clock the relative times are measured against. Passed rather than
+  /// read from [DateTime.now] so a test can pin it and assert an exact string.
+  final DateTime Function() now;
+
+  /// Pulls mail, chats and acks now. Null hides the whole Sync & data section.
+  final VoidCallback? onRefreshNow;
+
+  /// Signs out AND wipes this device's copy of the mailbox — the rail's Sign
+  /// out, in other words, and deliberately not [onSignOutOfServer], which
+  /// leaves one server's session and keeps the mail. Null hides the block.
+  final Future<void> Function()? onSignOutAndClear;
+
+  /// Already composed by the host as `1.0.0 (1)`. Null when the platform did
+  /// not answer, which is the ordinary case in a widget test.
+  final String? appVersion;
+
+  final String? databasePath;
+
   const SettingsScreen({
     super.key,
     required this.threshold,
@@ -200,7 +261,33 @@ class SettingsScreen extends StatefulWidget {
     this.onHomeShowDroppedChanged,
     this.storylineNewestFirst = false,
     this.onStorylineNewestFirstChanged,
+    this.slotTargets = slotDefaults,
+    this.slotIsDefault = const {
+      ModelSlot.fast: true,
+      ModelSlot.prose: true,
+      ModelSlot.embed: true,
+    },
+    this.compiledDefaults = slotDefaults,
+    this.stages = pipelineStages,
+    this.probeServer,
+    this.onSlotTargetChanged,
+    this.onSlotReset,
+    this.lastMailSyncIso,
+    this.lastTeamsSyncIso,
+    this.lastSweepIso,
+    this.now = DateTime.now,
+    this.onRefreshNow,
+    this.onSignOutAndClear,
+    this.appVersion,
+    this.databasePath,
   });
+
+  /// Keyed because their labels are ordinary words a test would otherwise have
+  /// to find among the section bodies around them.
+  static const Key refreshNowKey = ValueKey('settings-refresh-now');
+  static const Key signOutClearKey = ValueKey('settings-sign-out-clear');
+  static const Key signOutConfirmKey = ValueKey('settings-sign-out-confirm');
+  static const Key signOutKeepKey = ValueKey('settings-sign-out-keep');
 
   /// The three extended permissions, in the order they matter to the user:
   /// label, the bare scope each one is really asking about, and whether a
@@ -280,6 +367,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// Which sections are open, by title. Several may be; none is by default.
   /// Deliberately not persisted — see the [SettingsSection] doc.
   final Set<String> _open = <String>{};
+
+  /// Whether the wipe button has been armed — see [_signOutBlock]. Reset by
+  /// 'Keep' and by the wipe completing, never by a rebuild: an armed button is
+  /// a state the user put it in.
+  bool _confirmingClear = false;
+
+  /// True while the wipe is running. Both buttons go inert: it takes a
+  /// keychain round trip and a database delete, and a second click on either
+  /// of them while that is out would be a race over the same rows.
+  bool _clearing = false;
+
+  /// Whatever the last wipe attempt said went wrong, shown under the pair and
+  /// cleared by the next attempt.
+  String? _clearError;
 
   late final TextEditingController _aboutMe = TextEditingController(
     text: widget.aboutMe,
@@ -464,14 +565,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// The sections, in order. A section whose wiring is absent is absent — the
   /// same discipline every optional row in the dialog followed.
   ///
-  /// Adding Models for real, or Sync & data, or About, is inserting one entry
-  /// here and one builder below. Nothing else knows the order.
+  /// Adding a section is inserting one entry here and one builder below.
+  /// Nothing else knows the order.
   List<Widget> _sections() {
+    // Once per build, so every relative time on the screen is measured against
+    // the same instant: two rows a millisecond apart on the boundary of a
+    // minute would otherwise disagree with each other.
+    final now = widget.now();
     return [
       _section('About me', _aboutMeSummary(), _aboutMeBody()),
       if (_connectionWired)
         _section('Microsoft connection', _connectionSummary(), _connectionBody()),
-      _section('Models', 'Configured at build time', _modelsBody()),
+      if (widget.onSlotTargetChanged != null)
+        _section(
+          'Models',
+          SettingsModelsBody.summary(widget.slotTargets),
+          _modelsBody(),
+        ),
       _section('Needs You', _needsYouSummary(), _needsYouBody()),
       if (widget.onNotifyStyleChanged != null)
         _section('Notifications', _notifySummary(), _notifyBody()),
@@ -481,6 +591,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _section('Home & feed', _homeSummary(), _homeBody()),
       if (widget.onStorylineNewestFirstChanged != null)
         _section('Storylines', _storylinesSummary(), _storylinesBody()),
+      if (widget.onRefreshNow != null)
+        _section('Sync & data', _syncSummary(now), _syncBody(now)),
+      if (widget.appVersion != null || widget.databasePath != null)
+        _section('About', _aboutSummary(), _aboutBody()),
     ];
   }
 
@@ -1077,13 +1191,204 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
-  // ── Models (placeholder) ──────────────────────────────────────────────────
+  // ── Models ────────────────────────────────────────────────────────────────
 
-  Widget _modelsBody() => Text(
-    'The bulk and prose models this build talks to are set at build time, '
-    'in the Makefile. Choosing them here is a later round.',
-    style: BondType.small,
+  Widget _modelsBody() => SettingsModelsBody(
+    targets: widget.slotTargets,
+    isDefault: widget.slotIsDefault,
+    compiledDefaults: widget.compiledDefaults,
+    stages: widget.stages,
+    probe: widget.probeServer,
+    onSave: widget.onSlotTargetChanged!,
+    onReset: widget.onSlotReset ?? (_) {},
   );
+
+  // ── Sync & data ───────────────────────────────────────────────────────────
+
+  String _syncSummary(DateTime now) {
+    final mail = widget.lastMailSyncIso;
+    final teams = widget.lastTeamsSyncIso;
+    if (mail == null && teams == null) return 'Not synced yet';
+    return 'Mail synced ${relativeTime(mail, now) ?? 'never'} · '
+        'Teams ${relativeTime(teams, now) ?? 'never'}';
+  }
+
+  /// The width the three stamp labels share. A column, not a padding: the
+  /// three relative times have to line up or the block reads as three
+  /// unrelated sentences.
+  static const double _stampLabelWidth = 140;
+
+  /// When each source last ran, one button to run them all now, and the one
+  /// destructive action in the app that is not the rail's own.
+  Widget _syncBody(DateTime now) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _stampRow('Mail', widget.lastMailSyncIso, now),
+        _stampRow('Teams', widget.lastTeamsSyncIso, now),
+        _stampRow('Storyline sweep', widget.lastSweepIso, now),
+        const SizedBox(height: BondSpacing.s12),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton.tonal(
+            key: SettingsScreen.refreshNowKey,
+            onPressed: widget.onRefreshNow,
+            child: const Text('Refresh now'),
+          ),
+        ),
+        if (widget.onSignOutAndClear != null) ..._signOutBlock(),
+      ],
+    );
+  }
+
+  Widget _stampRow(String label, String? iso, DateTime now) {
+    return Row(
+      children: [
+        SizedBox(
+          width: _stampLabelWidth,
+          child: Text(
+            label,
+            style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+          ),
+        ),
+        Expanded(
+          child: Text(relativeTime(iso, now) ?? 'never', style: BondType.small),
+        ),
+      ],
+    );
+  }
+
+  /// Wiping this device, in two clicks that are not the same click twice.
+  ///
+  /// The house rule forbids a confirmation dialog, so the confirmation is the
+  /// button changing shape in place: the first tap REPLACES 'Sign out and
+  /// clear local data' with a red 'Yes, clear and sign out' beside a 'Keep'.
+  /// The second click therefore lands on a different button, in a different
+  /// place, that did not exist a moment ago — which is the whole of the
+  /// protection a modal would have given, without the popup.
+  List<Widget> _signOutBlock() {
+    return [
+      const SizedBox(height: BondSpacing.s24),
+      const Divider(height: 1, color: BondColors.border),
+      const SizedBox(height: BondSpacing.s12),
+      Text(
+        'This device',
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        "Removes this account's mail, chats, storylines and drafts from this "
+        'device and returns to the sign-in screen. Nothing on the server '
+        'changes.',
+        style: BondType.caption,
+      ),
+      const SizedBox(height: BondSpacing.s8),
+      if (!_confirmingClear)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton(
+            key: SettingsScreen.signOutClearKey,
+            onPressed: () => setState(() => _confirmingClear = true),
+            child: const Text('Sign out and clear local data'),
+          ),
+        )
+      else
+        OverflowBar(
+          alignment: MainAxisAlignment.start,
+          spacing: BondSpacing.s8,
+          children: [
+            FilledButton(
+              key: SettingsScreen.signOutConfirmKey,
+              style: FilledButton.styleFrom(
+                backgroundColor: BondColors.error,
+                foregroundColor: BondColors.surface,
+              ),
+              onPressed: _clearing ? null : () => unawaited(_signOutAndClear()),
+              child: const Text('Yes, clear and sign out'),
+            ),
+            TextButton(
+              key: SettingsScreen.signOutKeepKey,
+              // Keep also drops a failure from the last attempt: the user has
+              // stood down, and a stale "failed" under a single disarmed
+              // button would read as a live problem.
+              onPressed: _clearing
+                  ? null
+                  : () => setState(() {
+                      _confirmingClear = false;
+                      _clearError = null;
+                    }),
+              child: const Text('Keep'),
+            ),
+          ],
+        ),
+      if (_clearError case final error?) ...[
+        const SizedBox(height: BondSpacing.s8),
+        InlineAlert(severity: InlineAlertSeverity.error, text: error),
+      ],
+    ];
+  }
+
+  /// Nothing here may escape as an unhandled async error, for the same reason
+  /// [_signIn] catches everything: it runs off a button press nobody awaits,
+  /// and the host may unmount this pane in the middle of it — signing out
+  /// takes the whole screen back to the gate.
+  Future<void> _signOutAndClear() async {
+    setState(() {
+      _clearing = true;
+      _clearError = null;
+    });
+    try {
+      await widget.onSignOutAndClear!();
+      if (!mounted) return;
+      setState(() {
+        _clearing = false;
+        _confirmingClear = false;
+      });
+    } on Object {
+      if (!mounted) return;
+      setState(() {
+        _clearing = false;
+        _clearError = 'Sign-out failed.';
+      });
+    }
+  }
+
+  // ── About ─────────────────────────────────────────────────────────────────
+
+  String _aboutSummary() => widget.appVersion == null
+      ? 'Version unknown'
+      : 'Bond ${widget.appVersion}';
+
+  /// What this build is and where it keeps the mailbox — the two things a bug
+  /// report needs and nothing else on this screen answers.
+  Widget _aboutBody() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('Version ${widget.appVersion ?? 'unknown'}', style: BondType.small),
+        if (widget.databasePath case final path?) ...[
+          const SizedBox(height: BondSpacing.s12),
+          Text(
+            'Database',
+            style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: BondSpacing.s4),
+          // Selectable because the only useful thing to do with a path is
+          // paste it somewhere else.
+          SelectableText(path, style: BondType.mono),
+        ],
+        const SizedBox(height: BondSpacing.s12),
+        Text(
+          'Local model servers are configured in the Models section above.',
+          style: BondType.caption,
+        ),
+        Text(
+          'The pipeline is documented in docs/pipeline in the repository.',
+          style: BondType.caption,
+        ),
+      ],
+    );
+  }
 
   // ── Needs You ─────────────────────────────────────────────────────────────
 

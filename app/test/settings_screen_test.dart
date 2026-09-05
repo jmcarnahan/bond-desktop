@@ -413,7 +413,6 @@ void main() {
     for (final title in const [
       'About me',
       'Microsoft connection',
-      'Models',
       'Needs You',
       'Notifications',
       'Activity log',

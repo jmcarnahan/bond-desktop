@@ -32,8 +32,7 @@ Future<BondDatabase> openAppDb() async {
     debugPrint('sqlite-vec: native extension unavailable — '
         'semantic search will be off');
   }
-  final dir = await getApplicationSupportDirectory();
-  final path = p.join(dir.path, 'bond_inbox.db');
+  final path = await appDatabasePath();
   await adoptLegacyDatabase(path);
   final db = BondDatabase.open(path);
   try {
@@ -43,4 +42,19 @@ Future<BondDatabase> openAppDb() async {
     debugPrint('sqlite-vec: unavailable on this connection — $e');
   }
   return db;
+}
+
+/// Where the app's database file is, without opening it.
+///
+/// It exists so the About section can show the user where their data actually
+/// lives, and so that answer and [openAppDb] can never disagree about the file
+/// name: the literal `bond_inbox.db` is written once, here, and both callers
+/// go through this.
+///
+/// Locating a directory opens no connection, so this is safe to call on its
+/// own — a settings screen asking where the file is must not be a second
+/// database handle.
+Future<String> appDatabasePath() async {
+  final dir = await getApplicationSupportDirectory();
+  return p.join(dir.path, 'bond_inbox.db');
 }

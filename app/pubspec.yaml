@@ -67,6 +67,7 @@ dependencies:
   # and only local_desktop_notifier.dart is allowed to import it, so a bump is
   # a one-file review.
   flutter_local_notifications: ^22.3.0
+  package_info_plus: ^10.2.1
 
 dev_dependencies:
   flutter_test:

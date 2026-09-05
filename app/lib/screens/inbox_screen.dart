@@ -20,6 +20,9 @@ import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/llm/model_probe.dart';
+// [ModelSlot] arrives with `prefs_provider.dart`, which re-exports it — a
+// second import of `model_slots.dart` for the same declaration is redundant.
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../services/triage_queue.dart';
@@ -123,6 +126,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// set as [_showingActivityLog] and the three selections above: one thing
   /// in the pane, and every setter clears the rest.
   bool _showingSettings = false;
+
+  /// One HTTP client for every server check the settings screen makes, closed
+  /// with the screen. Held here rather than built per check because a client
+  /// per button press leaks a connection pool per press, and the probe is
+  /// diagnostics that a user can hammer.
+  final ModelServerProbe _probe = ModelServerProbe();
 
   /// The storyline the add-thread pane is picking a conversation for. An
   /// overlay on the storyline selection rather than a peer of it: back returns
@@ -229,6 +238,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void dispose() {
     _poll?.cancel();
     WidgetsBinding.instance.removeObserver(this);
+    _probe.close();
     super.dispose();
   }
 
@@ -1011,6 +1021,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Widget _settings() {
     final prefs = ref.watch(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
+    // `watch` is legal here because this runs inside `build`, and it is what
+    // keeps the three sync stamps live while the pane is open: the activity
+    // snapshot re-reads on every recorded event, so a sync that lands behind
+    // Settings moves the numbers in it. The two below answer null in a widget
+    // test, where there is no platform on the other end of the channel — the
+    // About section then says 'Version unknown' rather than throwing.
+    final activity = ref.watch(activitySnapshotProvider).valueOrNull;
+    final appInfo = ref.watch(appInfoProvider).valueOrNull;
+    final databasePath = ref.watch(databasePathProvider).valueOrNull;
     return SettingsScreen(
       onBack: _closeSettings,
       onHome: () => _selectSection(RailSection.home),
@@ -1129,6 +1148,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // actually stop being this user's.
         _reloadAfterBackendChange();
       },
+      // The effective targets, defaults already resolved: the editors open on
+      // real values rather than on the empty strings that mean "follow the
+      // build" in the database.
+      slotTargets: {
+        for (final slot in ModelSlot.values) slot: prefs.targetFor(slot),
+      },
+      slotIsDefault: {
+        for (final slot in ModelSlot.values) slot: prefs.isSlotDefault(slot),
+      },
+      probeServer: _probe.probe,
+      onSlotTargetChanged: (slot, {required url, required model}) =>
+          unawaited(switch (slot) {
+            ModelSlot.fast => notifier.setFastLlmTarget(url: url, model: model),
+            ModelSlot.prose => notifier.setProseLlmTarget(
+              url: url,
+              model: model,
+            ),
+            // Display only — the screen offers no editor for it, and a write
+            // that arrived here anyway must not invent one.
+            ModelSlot.embed => Future<void>.value(),
+          }),
+      onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
+      lastMailSyncIso: activity?.lastMailSyncIso,
+      lastTeamsSyncIso: activity?.lastTeamsSyncIso,
+      lastSweepIso: activity?.lastSweepIso,
+      onRefreshNow: () => unawaited(_refreshAll()),
+      // The rail's Sign out, the whole wipe — deliberately NOT
+      // [onSignOutOfServer] above, which leaves one server's session and
+      // keeps the mail on this device.
+      onSignOutAndClear: _signOut,
+      appVersion: appInfo == null
+          ? null
+          : '${appInfo.version} (${appInfo.build})',
+      databasePath: databasePath,
     );
   }
 

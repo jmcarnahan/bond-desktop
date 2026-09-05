@@ -1,10 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
 // Storyline, …) whose names collide with the app's models.
 import '../data/database.dart' show BondDatabase;
+import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
@@ -576,4 +578,37 @@ final storylineServiceProvider = Provider<StorylineService>(
     // already depend on.
     progress: ref.watch(pipelineProgressProvider),
   ),
+);
+
+/// This build's version and build number, for the About section.
+///
+/// A `FutureProvider` because the answer comes off a platform channel — the
+/// bundle's own `Info.plist` on macOS — and a widget cannot await. The record
+/// shape keeps the two halves together: the section renders them as
+/// `1.0.0 (1)`, and a version with no build behind it is not a thing this app
+/// wants to have to reason about.
+///
+/// In a widget test there is no platform on the other end of that channel and
+/// the call throws `MissingPluginException`, which the provider turns into an
+/// `AsyncError`. The host reads it with `valueOrNull`, so a test sees null and
+/// the About section quietly says 'Version unknown' — nothing is faked and
+/// nothing throws. A test that wants a version overrides this provider.
+final appInfoProvider = FutureProvider<({String version, String build})>(
+  (ref) async {
+    final info = await PackageInfo.fromPlatform();
+    return (version: info.version, build: info.buildNumber);
+  },
+);
+
+/// Where the database file is, for the About section.
+///
+/// Same shape and the same reason as [appInfoProvider]: locating the platform's
+/// application-support directory is asynchronous, so the path cannot be read
+/// inside a build. It opens nothing — see [appDatabasePath] — so watching it
+/// from a settings pane costs one directory lookup, not a second connection.
+///
+/// `path_provider` is a plugin too, so this also answers null in a widget test
+/// unless the test overrides it.
+final databasePathProvider = FutureProvider<String>(
+  (ref) => appDatabasePath(),
 );

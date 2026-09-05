@@ -350,6 +350,12 @@ Knobs:
 - All five are passed through by `make app-run` and `make app-build` only when
   you set them: `make app-run FAST_LLAMA_URL=http://localhost:9000/v1/chat/completions`.
   Unset means the app's own defaults, which is not the same as empty.
+- The two chat slots can also be repointed at runtime — **Settings → Models**
+  lets you change a slot's server URL and pick a model from what that server
+  lists, without a rebuild. The dart-defines stay the build's defaults, and
+  **Use build defaults** returns a slot to them. Embeddings is not switchable
+  (every stored vector is tagged with its model); see
+  [docs/settings.md](docs/settings.md).
 - `MODEL_PORT` and `CTX_SIZE` are overridable per invocation:
   `make model CTX_SIZE=65536`, `make model MODEL_PORT=8081`.
 - `SETUP_WAIT` — how long `make setup` polls for `/health`. Default 1800s.
