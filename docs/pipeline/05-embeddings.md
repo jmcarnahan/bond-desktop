@@ -5,12 +5,33 @@ are never mixed:
 
 1. **Clustering corpus** — one vector per *conversation card*, used by the
    storyline sweep to find threads about the same thing. Written by
-   `ExtractHandler._refreshCard`.
+   `ExtractHandler._refreshCard` into `conversation_ai.embedding`.
 2. **Document corpus** — one vector per *message*, used by semantic search
    (sqlite-vec, PR #10). Written on the fast path by
    `ExtractHandler._embedMessage` and healed by the `embed_message` work queue
    in `EmbedHandler` (`app/lib/services/embed_handler.dart`) for anything the
    fast path missed.
+
+**Each corpus has its own sqlite-vec index, and the separation above holds
+through them.** `MessageVectorIndex` (`vec_messages`, over `message_vectors`)
+answers search; `ConversationVectorIndex` (`vec_conversations`, over
+`conversation_ai`) answers the sweep. Both are `vec0` virtual tables at
+`float[768] distance_metric=cosine`, both are created **lazily on first use and
+never in a migration or `beforeOpen`** — drift's `SchemaVerifier` diffs the
+whole of `sqlite_master`, so a virtual table appearing during a migration step
+fails every migration pair in the suite — and both are derived, so losing one
+costs a rebuild and not a single model call.
+
+Their *bookkeeping* differs, because their durable sides do.
+`message_vectors` has an `indexed_at` column, so the message index files the
+unstamped rows and stamps them. `conversation_ai` has no such column and does
+not gain one for a derived index's convenience: `ConversationVectorIndex`
+carries the `(source, conversation_key)` pair and the `embedded_hash` on the
+vec0 row itself (sqlite-vec *auxiliary* columns), and its backfill is a **diff**
+— insert what is missing, replace what re-embedded under a new hash, delete
+what left the corpus or was re-tagged to another model. That diff is a full
+scan of both sides, run once per sweep against a few hundred rows; it is worth
+revisiting if the clustering corpus ever reaches the tens of thousands.
 
 **No chat-model call.** The server is a third llama-server in embedding mode.
 

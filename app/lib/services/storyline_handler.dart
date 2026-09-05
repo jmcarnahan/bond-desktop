@@ -3,9 +3,9 @@ import 'ai_worker.dart';
 import 'pipeline_progress.dart';
 import 'storyline_service.dart';
 
-/// The two storyline queues, as work handlers.
+/// The storyline queues, as work handlers.
 ///
-/// Both are thin on purpose: the worker owns claiming, retrying and parking,
+/// All are thin on purpose: the worker owns claiming, retrying and parking,
 /// and everything a handler adds on top of calling the service is behaviour
 /// the worker can no longer see.
 
@@ -80,6 +80,12 @@ class StorylineAssignHandler extends WorkHandler {
 /// user just saved. Queued only by `StorylineService.setCharter`, one row per
 /// storyline id — a second save before the first pass drains changes nothing,
 /// which is exactly right: the pass reads the charter when it runs.
+///
+/// That holds by itself only while the row is still PENDING. A save landing
+/// after the row went `processing` enqueues against that row and is swallowed
+/// — `requeueWork` revives only `done` and `error` — and no catch-up exists
+/// for this kind. `StorylineService.recruit` closes it from the inside, by
+/// re-reading the charter when its hunt ends and hunting again if it moved.
 class StorylineRecruitHandler extends WorkHandler {
   final StorylineService _service;
 
@@ -95,6 +101,66 @@ class StorylineRecruitHandler extends WorkHandler {
     // retrying it would produce the same nothing twice.
     if (id.isEmpty) return Future<void>.value();
     return _service.recruit(id);
+  }
+}
+
+/// Re-describes one storyline whose membership has moved — its title, its
+/// summary, and its charter when the charter is the model's own. Queued by
+/// every path that changes who is in a storyline: the user's add and remove,
+/// a cleared charter, the assignment pass under its growth gate, a recruit
+/// that filed something, and the sweep's catch-up for the ones that were lost.
+///
+/// Registered BETWEEN the sweep and the recruit, and the position is
+/// behaviour. `AiWorker._drainAll` walks handlers in list order once per pass,
+/// so a row written for a LATER handler drains in the same pass and a row for
+/// an earlier one waits: a user edit refreshes and then recruits in one drain,
+/// while a recruit that files threads has its refresh wait a pass. That is the
+/// damper on the only cycle these two can form.
+class StorylineRefreshHandler extends WorkHandler {
+  final StorylineService _service;
+
+  StorylineRefreshHandler(this._service);
+
+  @override
+  String get kind => 'storyline_refresh';
+
+  @override
+  Future<void> run(Map<String, Object?> item) {
+    final id = item['entity_id'] as String? ?? '';
+    // An empty id is a row nothing can be done about. Done, not failed —
+    // retrying it would produce the same nothing twice.
+    if (id.isEmpty) return Future<void>.value();
+    return _service.refresh(id);
+  }
+}
+
+/// Re-writes one storyline's running state of play — where it stands, what is
+/// still open, what has been decided — from the newest messages across its
+/// member threads. Queued by every path that changes what has been SAID in a
+/// storyline: a message's facts landing in a member thread, a thread filed by
+/// hand, and the refresh pass, whose membership change is a change to the
+/// story.
+///
+/// Registered AFTER the recruit, and the position is behaviour for the same
+/// reason the refresh's is. `AiWorker._drainAll` walks handlers in list order
+/// once per pass, so the threads a recruit just filed are in the recap written
+/// in that same drain rather than a pump later. It stays ahead of the draft
+/// handler, which is last for its own reasons.
+class StorylineRecapHandler extends WorkHandler {
+  final StorylineService _service;
+
+  StorylineRecapHandler(this._service);
+
+  @override
+  String get kind => 'storyline_recap';
+
+  @override
+  Future<void> run(Map<String, Object?> item) {
+    final id = item['entity_id'] as String? ?? '';
+    // An empty id is a row nothing can be done about. Done, not failed —
+    // retrying it would produce the same nothing twice.
+    if (id.isEmpty) return Future<void>.value();
+    return _service.recap(id);
   }
 }
 

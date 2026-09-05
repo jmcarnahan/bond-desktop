@@ -171,7 +171,27 @@ CREATE TABLE storylines (
   -- dismissal is recognised on either: this column matches the cluster the
   -- sweep rebuilds, `member_hash` matches the set as it stood when the user
   -- said no. NULL on anything a person made — no cluster proposed it.
-  cluster_hash TEXT
+  cluster_hash TEXT,
+  -- v10 — a storyline evolves after it is named. The membership as it stood
+  -- the last time the refresh pass described this storyline: the gate is an
+  -- equality test against `member_hash`, so a thread added since leaves these
+  -- stale and re-fires the pass. NULL means never described.
+  refreshed_member_hash TEXT,
+  refreshed_member_count INTEGER,
+  -- v10 — what the refresh pass would write to `charter` if the charter were
+  -- not the user's. A locked charter is never overwritten; the model's version
+  -- is parked here for the user to accept or dismiss. NULL when there is
+  -- nothing on offer.
+  charter_suggestion TEXT,
+  -- v10 — the recap: where things stand across every member thread, so the
+  -- reader need not re-read them. `recap_open_json` and `recap_decisions_json`
+  -- are JSON arrays of short strings; `recap_through` is the `received_at` of
+  -- the newest message the recap has seen, which is what makes the pass skip
+  -- a storyline nothing has happened in.
+  recap_text TEXT,
+  recap_open_json TEXT,
+  recap_decisions_json TEXT,
+  recap_through TEXT
 ) STRICT;
 
 CREATE INDEX ix_storylines_status ON storylines(status, last_activity_at DESC);

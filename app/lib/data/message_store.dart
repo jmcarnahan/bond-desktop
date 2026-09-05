@@ -6,6 +6,7 @@ import 'package:drift/drift.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
+import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
 import 'progress_sql.dart';
 import 'vec_index.dart';
@@ -134,6 +135,13 @@ class MessageStore {
   /// memoizes its answer per connection, so one that outlived a database swap
   /// would keep reporting on a connection nobody is using any more.
   late final MessageVectorIndex _vecIndex = MessageVectorIndex(db);
+
+  /// The nearest-neighbour index over the clustering corpus, owned here for
+  /// [_vecIndex]'s reasons and held separately because it is a different
+  /// corpus answering a different question — the sweep's "which threads are
+  /// near this one", not search's "which messages are near this query".
+  late final ConversationVectorIndex _conversationIndex =
+      ConversationVectorIndex(db);
 
   static String _nowIso() => DateTime.now().toUtc().toIso8601String();
 
@@ -1704,6 +1712,11 @@ RETURNING *
     // [MessageVectorIndex.rebuild] over an empty table is a drop and an empty
     // refill, and it fail-softs to nothing on a build without the extension.
     await _vecIndex.rebuild();
+    // The clustering index, for the same reason and by the same argument. It
+    // resets rather than rebuilds because `conversation_ai` has just been
+    // emptied, so there is nothing to refill from; the next sweep's diff is
+    // what fills it again.
+    await _conversationIndex.reset();
   }
 
   // ── per-message AI output ────────────────────────────────────────────
@@ -2412,6 +2425,13 @@ FROM storylines s''';
     bool? pinned,
     String? lastActivityAt,
     String? memberHash,
+    Object? refreshedMemberHash = _unset,
+    Object? refreshedMemberCount = _unset,
+    Object? charterSuggestion = _unset,
+    Object? recapText = _unset,
+    Object? recapOpenJson = _unset,
+    Object? recapDecisionsJson = _unset,
+    Object? recapThrough = _unset,
   }) async {
     final sets = <String>['updated_at = ?'];
     final args = <Object?>[_nowIso()];
@@ -2451,6 +2471,37 @@ FROM storylines s''';
     if (memberHash != null) {
       sets.add('member_hash = ?');
       args.add(memberHash);
+    }
+    // The v10 columns all take the sentinel rather than a plain nullable: a
+    // refresh clearing a charter suggestion and a caller not touching it are
+    // different writes, and every one of these is cleared by somebody.
+    if (!identical(refreshedMemberHash, _unset)) {
+      sets.add('refreshed_member_hash = ?');
+      args.add(refreshedMemberHash as String?);
+    }
+    if (!identical(refreshedMemberCount, _unset)) {
+      sets.add('refreshed_member_count = ?');
+      args.add(refreshedMemberCount as int?);
+    }
+    if (!identical(charterSuggestion, _unset)) {
+      sets.add('charter_suggestion = ?');
+      args.add(charterSuggestion as String?);
+    }
+    if (!identical(recapText, _unset)) {
+      sets.add('recap_text = ?');
+      args.add(recapText as String?);
+    }
+    if (!identical(recapOpenJson, _unset)) {
+      sets.add('recap_open_json = ?');
+      args.add(recapOpenJson as String?);
+    }
+    if (!identical(recapDecisionsJson, _unset)) {
+      sets.add('recap_decisions_json = ?');
+      args.add(recapDecisionsJson as String?);
+    }
+    if (!identical(recapThrough, _unset)) {
+      sets.add('recap_through = ?');
+      args.add(recapThrough as String?);
     }
 
     args.add(id);
@@ -2581,6 +2632,29 @@ FROM storylines s''';
     return result.isNotEmpty;
   }
 
+  /// Which storylines block this one thread — the mirror of
+  /// [blockedThreadsOf], read the other way round.
+  ///
+  /// One query for every candidate at once. The assignment pass asks this of
+  /// every live storyline before it compares anything, and asking one
+  /// storyline at a time made filing a single thread cost a query per
+  /// storyline in the mailbox.
+  Future<Set<String>> blockedStorylineIdsFor(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT storyline_id FROM storyline_member_blocks '
+          'WHERE source = ? AND conversation_key = ?',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return {
+      for (final row in result) row.data['storyline_id'] as String? ?? '',
+    };
+  }
+
   /// Every thread the user has removed from [storylineId], as
   /// `'<source>\n<conversation_key>'` composites — newline-joined because a
   /// newline can appear in neither half. The pane that offers threads to add
@@ -2611,9 +2685,53 @@ FROM storylines s''';
     return [for (final row in result) StorylineMember.fromRow(row.data)];
   }
 
+  /// Everything the comparison passes need about the members of
+  /// [storylineIds]: which threads they are, who is on each one, and each
+  /// one's vector.
+  ///
+  /// One query for the whole set. The assignment pass asks this of every live
+  /// storyline for every thread it considers, and walking members one at a
+  /// time made filing a single thread cost a query per member of every
+  /// storyline in the mailbox.
+  ///
+  /// Both joins are LEFT, and that is the contract rather than an accident. A
+  /// member whose conversation row is gone, or whose vector came from a
+  /// different embedding model, is still a member: its row comes back with a
+  /// null `participants_json` or a null `embedding`, so it contributes nothing
+  /// to a centroid and nobody to a participant list, but the caller still sees
+  /// that the thread is already filed here. [embedModel] rides the join rather
+  /// than the WHERE for exactly that reason — as a filter it would drop the
+  /// member entirely.
+  Future<List<Map<String, Object?>>> memberContextRows(
+    List<String> storylineIds, {
+    required String embedModel,
+  }) async {
+    if (storylineIds.isEmpty) return const [];
+    final result = await db
+        .customSelect(
+          'SELECT m.storyline_id AS storyline_id, m.source AS source, '
+          'm.conversation_key AS conversation_key, '
+          'c.participants_json AS participants_json, '
+          'a.embedding AS embedding '
+          'FROM storyline_members m '
+          'LEFT JOIN conversations c '
+          '  ON c.source = m.source '
+          '  AND c.conversation_key = m.conversation_key '
+          'LEFT JOIN conversation_ai a '
+          '  ON a.source = m.source '
+          '  AND a.conversation_key = m.conversation_key '
+          '  AND a.embed_model = ? '
+          'WHERE m.storyline_id IN (${_placeholders(storylineIds.length)}) '
+          'ORDER BY m.added_at ASC, m.conversation_key ASC',
+          variables: _args([embedModel, ...storylineIds]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
   /// Which live storylines one thread belongs to. Dismissed and archived ones
   /// are excluded: their member rows survive only as the record behind
-  /// [dismissedHashExists], and a thread is not "in" a suggestion the
+  /// [dismissedHashExistsAny], and a thread is not "in" a suggestion the
   /// user threw away.
   Future<List<String>> storylineIdsFor(
     String source,
@@ -2663,6 +2781,32 @@ FROM storylines s''';
     return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
+  /// Brings the clustering index level with `conversation_ai` and returns how
+  /// many rows it then holds — `null` when there is no usable index, which is
+  /// the caller's signal to do the arithmetic itself.
+  ///
+  /// The count is the point of the return type: a KNN probe over this index
+  /// has to ask for as many neighbours as the index holds to be certain it saw
+  /// every one of them, and the sweep cannot know that number on its own.
+  ///
+  /// Overridable for the same reason [memberContextRows] is: a test that has
+  /// to exercise the fallback needs a store that reports no index, and the
+  /// alternative — unloading a process-global native extension — is not one.
+  Future<int?> prepareConversationIndex({required String embedModel}) async {
+    if (!await _conversationIndex.ensureReady()) return null;
+    return _conversationIndex.backfill(embedModel: embedModel);
+  }
+
+  /// The [k] threads nearest [vector] in the clustering index, as cosine
+  /// similarities, closest first. Empty when the index is unavailable — which
+  /// only a caller that skipped [prepareConversationIndex] can be surprised by.
+  ///
+  /// The probe's own thread is among them, at similarity 1: the index cannot
+  /// tell which row asked, so excluding it belongs to whoever knows.
+  Future<List<({String source, String key, double similarity})>>
+      conversationNeighbors(Uint8List vector, {required int k}) =>
+          _conversationIndex.neighbors(vector, k: k);
+
   /// Every thread the sweep must leave alone: already in a live storyline, or
   /// explicitly kept out of one. Blocks count because a thread the user pulled
   /// out of a group is not a thread to propose a new group around.
@@ -2689,21 +2833,122 @@ FROM storylines s''';
   /// away. The sweep is deterministic, so without this a dismissed suggestion
   /// would be re-proposed identically on the very next sync.
   ///
-  /// Both hashes answer, because a storyline can be dismissed under a set that
-  /// is not the one it was proposed as. The `cluster_hash` arm recognises the
-  /// proposal-time group — immutable, and exactly what the sweep rebuilds. The
-  /// `member_hash` arm recognises the members as they stood at dismissal,
+  /// Both columns answer, because a storyline can be dismissed under a set
+  /// that is not the one it was proposed as. The `cluster_hash` arm recognises
+  /// the proposal-time group — immutable, and exactly what the sweep rebuilds.
+  /// The `member_hash` arm recognises the members as they stood at dismissal,
   /// maintained by every membership write, which is what catches a group the
   /// user pruned before saying no.
-  Future<bool> dismissedHashExists(String hash) async {
+  ///
+  /// A LIST of hashes rather than one, because the recipe behind these strings
+  /// changed when storyline hashes started folding the connector into every
+  /// member. Old rows cannot be rewritten — a cluster tombstoned below the
+  /// minimum size has no member rows at all, so nothing can rebuild what it
+  /// was — and a "no" the user gave once has to keep holding. The caller
+  /// offers every recipe for the same candidate set and any match is a match,
+  /// in one round trip rather than one per recipe.
+  Future<bool> dismissedHashExistsAny(List<String> hashes) async {
+    if (hashes.isEmpty) return false;
+    final placeholders = _placeholders(hashes.length);
     final result = await db
         .customSelect(
           "SELECT 1 FROM storylines WHERE status = 'dismissed' "
-          'AND (cluster_hash = ? OR member_hash = ?) LIMIT 1',
-          variables: _args([hash, hash]),
+          'AND (cluster_hash IN ($placeholders) '
+          'OR member_hash IN ($placeholders)) LIMIT 1',
+          variables: _args([...hashes, ...hashes]),
         )
         .get();
     return result.isNotEmpty;
+  }
+
+  /// Every live storyline whose description no longer describes its members.
+  ///
+  /// The heal behind the refresh pass. `requeueWork` revives only `done` and
+  /// `error` rows, so a refresh enqueued while an earlier one was `processing`
+  /// is swallowed — and nothing else would ever notice, because every other
+  /// trigger fires on an event that has already passed. This asks the durable
+  /// question instead: is what we last described still what is in here?
+  ///
+  /// `IS NOT` rather than `!=` because both columns are nullable and SQLite's
+  /// `!=` answers NULL — which is not true — for exactly the rows that most
+  /// need finding: a storyline nobody has ever described has a null
+  /// `refreshed_member_hash` and a real `member_hash`, and `IS NOT` calls that
+  /// the difference it is. It also excludes the shape that has neither: a
+  /// cluster tombstoned with no member rows is null on both sides, so
+  /// `NULL IS NOT NULL` is false and it stays out — as its `dismissed` status
+  /// already ensures.
+  Future<List<String>> staleRefreshStorylineIds() async {
+    final result = await db
+        .customSelect(
+          'SELECT id FROM storylines '
+          "WHERE status IN ('suggested', 'active') "
+          'AND refreshed_member_hash IS NOT member_hash '
+          'ORDER BY id ASC',
+        )
+        .get();
+    return [for (final row in result) row.data['id'] as String? ?? ''];
+  }
+
+  /// Every live storyline holding a message the recap has not read.
+  ///
+  /// The heal behind the recap pass, and it answers the same durable question
+  /// [staleRefreshStorylineIds] does — for a pass whose every other trigger
+  /// fires on a message ARRIVING. A storyline that already matches its
+  /// description and has had no new mail since trips none of those triggers,
+  /// so without this a storyline the recap has never read stays unread
+  /// forever: every row the v10 backfill described, and every recap wakeup a
+  /// `processing` row swallowed.
+  ///
+  /// Every predicate here is load-bearing, and all of them for one reason —
+  /// this must ask the question the pass itself will answer, or a storyline it
+  /// queues is a storyline it re-queues on every sweep for the rest of time.
+  ///
+  /// The gate exclusion is [recentStorylineMessages]' rule, character for
+  /// character — the outbound arm included: skipped messages are not in the
+  /// recap's window, except the owner's own and except chats, which are only
+  /// ever skipped for being chats. Without it a storyline whose only newer
+  /// messages are gated would be queued, find nothing to read, and stamp no
+  /// watermark — and be queued again on the next sweep.
+  ///
+  /// The outbound arm is not merely parity, it is the point: a reply the user
+  /// sent must make the recap stale, or the recap goes on saying they owe an
+  /// answer they have already given. It is also what makes this catch-up the
+  /// prompt path rather than a slow one — every sync ends by requeueing
+  /// `storyline_sweep`, and the recap handler drains after the sweep's, so the
+  /// sync that folds a sent reply in is the drain that recaps it.
+  ///
+  /// The `received_at` guard is the same anti-loop for the timestampless: the
+  /// recap takes its watermark from the newest message in the window and
+  /// returns early when there is none, so a row that can never move the
+  /// watermark must never be the reason to run.
+  ///
+  /// One `EXISTS` serves both arms. `s.recap_through IS NULL` is the storyline
+  /// nobody has recapped; `msg.received_at > s.recap_through` is the one that
+  /// has fallen behind. Both live inside the message test on purpose — a
+  /// storyline with no qualifying messages AT ALL is deliberately left alone
+  /// even with a null watermark, because [StorylineService.recap] would find
+  /// an empty window, return, and never converge.
+  Future<List<String>> staleRecapStorylineIds() async {
+    final result = await db
+        .customSelect(
+          'SELECT s.id FROM storylines s '
+          "WHERE s.status IN ('suggested', 'active') "
+          'AND EXISTS ('
+          '  SELECT 1 FROM storyline_members m '
+          '  JOIN messages msg ON msg.source = m.source '
+          '    AND msg.conversation_key = m.conversation_key '
+          '  WHERE m.storyline_id = s.id '
+          "    AND msg.received_at IS NOT NULL AND msg.received_at != '' "
+          "    AND (msg.direction = 'outbound' "
+          "         OR msg.triage_status <> 'skipped' "
+          "         OR msg.gate_reason = 'teams_source') "
+          '    AND (s.recap_through IS NULL '
+          '         OR msg.received_at > s.recap_through)'
+          ') '
+          'ORDER BY s.id ASC',
+        )
+        .get();
+    return [for (final row in result) row.data['id'] as String? ?? ''];
   }
 
   /// Moves a storyline's activity stamp forward, never back. Threads are
@@ -3064,6 +3309,74 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
           'AND m.source IN (${_placeholders(sources.length)}) '
           'ORDER BY m.received_at ASC, m.source_message_id ASC',
           variables: _args([storylineId, ...sources]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// The newest [limit] messages across every thread in [storylineId], newest
+  /// first — the window the recap pass reads.
+  ///
+  /// Newest FIRST, where [storylineTimeline] is oldest first, because the two
+  /// have opposite problems. The timeline renders everything and scrolls; this
+  /// takes a fixed-size tail off an unbounded history, and `ORDER BY … DESC
+  /// LIMIT ?` is the only way to ask for the last twelve without reading the
+  /// first thousand. The caller reverses what it gets — "where does this stand
+  /// now" is a question about the END of a sequence, so the model reads them
+  /// chronologically.
+  ///
+  /// The subject falls back to the CONVERSATION's, and that is not cosmetic: a
+  /// chat message carries no subject at all (`TeamsSync.messageRow` stores
+  /// null rather than inventing one), so without the fallback every line of a
+  /// chat member thread would arrive with no thread name and the model could
+  /// not tell one thread's messages from another's. The join is LEFT so a
+  /// message that outran its own conversation row still comes back.
+  ///
+  /// Gated messages are excluded on exactly [EmbedHandler]'s rule: triage
+  /// flipped them to `skipped` because they are newsletters, no-reply senders
+  /// or auto-generated mail, and a recap that narrated the vendor's marketing
+  /// mail would be describing the wrong storyline. The `teams_source`
+  /// exception is the same legacy tolerance — a chat row stored before chats
+  /// were triaged is `skipped` for no judgement anyone made, and dropping it
+  /// would silently empty the recap of a chat-only storyline.
+  ///
+  /// **The owner's own messages are never gated out**, whatever their triage
+  /// columns say, and that arm comes first for a reason. `triageStatusOnInsert`
+  /// marks every outbound message `skipped`/`outbound`, but that gate answers
+  /// "does this need the user?" — it is about not spending model calls on the
+  /// user's own mail, and it was never a statement about the narrative. The
+  /// recap's whole subject is who owes whom, and the reply the user sent is the
+  /// single most important fact in that judgement: without this arm the window
+  /// is every question ever asked of them and not one of their answers, so the
+  /// model reads a storyline where the user has gone silent and writes open
+  /// items they settled last week. The recap prompt already renders these as
+  /// `You`, so nothing above this query needed changing.
+  Future<List<Map<String, Object?>>> recentStorylineMessages(
+    String storylineId, {
+    int limit = 12,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.source AS source, '
+          'm.source_message_id AS source_message_id, '
+          'm.conversation_key AS conversation_key, '
+          'COALESCE(m.subject, c.subject) AS subject, '
+          'm.direction AS direction, m.from_name AS from_name, '
+          'm.body_preview AS body_preview, m.body_text AS body_text, '
+          'm.received_at AS received_at '
+          'FROM messages m '
+          'JOIN storyline_members sm '
+          '  ON sm.source = m.source '
+          '  AND sm.conversation_key = m.conversation_key '
+          'LEFT JOIN conversations c '
+          '  ON c.source = m.source AND c.conversation_key = m.conversation_key '
+          'WHERE sm.storyline_id = ? '
+          "AND (m.direction = 'outbound' "
+          "     OR m.triage_status <> 'skipped' "
+          "     OR m.gate_reason = 'teams_source') "
+          'ORDER BY m.received_at DESC, m.source_message_id DESC '
+          'LIMIT ?',
+          variables: _args([storylineId, limit]),
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
@@ -3435,6 +3748,67 @@ RETURNING source_message_id, received_at
 ''',
       variables: _args([state, _nowIso(), storylineId, source, conversationKey]),
     );
+    return [
+      for (final row in rows)
+        (
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
+  /// Points one conversation's messages at a storyline, or stops pointing them
+  /// at one — and touches nothing else.
+  ///
+  /// The narrow twin of [writeStorylineProgress], for the membership a PERSON
+  /// decided. It exists separately because the two writes answer different
+  /// questions: that one records how far the assignment pass got, and the
+  /// stages it writes are what the settle machine and the draft close-out
+  /// read. Filing a thread by hand moved no stage — it moved a pointer — and
+  /// borrowing the pass's write to do it would restart a settled row's
+  /// pipeline for a decision that was never the pipeline's.
+  ///
+  /// Unguarded on `settle_state`, which is the other half of the split. The
+  /// pass is bounded by it so a thread that keeps growing cannot rewrite the
+  /// history above it; a hand-filed thread must do exactly that, because the
+  /// user is telling the app what the old messages were always about.
+  ///
+  /// Exactly one of [storylineId] and [clearingStorylineId] per call. Clearing
+  /// names the storyline it is clearing rather than blanking the column: a
+  /// thread can sit in two storylines, and taking it out of one must leave the
+  /// other's stamp where it is.
+  ///
+  /// Returns the rows it touched, so [PipelineProgress.noteStorylineLink] can
+  /// tick a live screen without a second read.
+  Future<List<({String sourceMessageId, String receivedAt})>> stampStorylineId(
+    String source,
+    String conversationKey, {
+    String? storylineId,
+    String? clearingStorylineId,
+  }) async {
+    // Thrown, not asserted: with both null the stamp arm below would blanket-
+    // null every row of the conversation — the exact write the clearing
+    // predicate exists to forbid — and a release build strips asserts.
+    if ((storylineId == null) == (clearingStorylineId == null)) {
+      throw ArgumentError(
+        'stampStorylineId writes a stamp or clears one, never both or neither',
+      );
+    }
+    final clearing = clearingStorylineId;
+    final rows = clearing != null
+        ? await db.customWriteReturning(
+            'UPDATE message_progress SET storyline_id = NULL, updated_at = ? '
+            'WHERE source = ? AND conversation_key = ? AND storyline_id = ? '
+            'RETURNING source_message_id, received_at',
+            variables: _args([_nowIso(), source, conversationKey, clearing]),
+          )
+        : await db.customWriteReturning(
+            'UPDATE message_progress SET storyline_id = ?, updated_at = ? '
+            'WHERE source = ? AND conversation_key = ? '
+            'RETURNING source_message_id, received_at',
+            variables:
+                _args([storylineId, _nowIso(), source, conversationKey]),
+          );
     return [
       for (final row in rows)
         (

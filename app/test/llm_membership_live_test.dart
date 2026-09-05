@@ -27,7 +27,7 @@ import 'fixtures/membership_cases.dart';
 ///
 /// The big server goes first on every case. Neither ordering is fair — the
 /// second call of a pair runs against a warmer machine — but a FIXED order
-/// makes the bias the same for all twelve.
+/// makes the bias the same for every case in the set.
 
 /// The SERVICE's reading of an answer, which is the one that decides whether a
 /// thread is filed: `low` is a no however confidently the model said yes.

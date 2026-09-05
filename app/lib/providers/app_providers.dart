@@ -467,10 +467,24 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         progress: ref.watch(pipelineProgressProvider),
       ),
       StorylineSweepHandler(storylines),
+      // Between the sweep and the recruit, and the position is the point. A
+      // refresh may widen a charter, and a widened charter is what the recruit
+      // below goes hunting with — so a user's edit refreshes and recruits in
+      // ONE drain. The reverse pairing is damped by the same ordering: a
+      // recruit that files threads queues a refresh for the next pump rather
+      // than this one, which is what keeps the two from chasing each other.
+      StorylineRefreshHandler(storylines),
       // After the sweep and before drafts: a recruit is rare — it only exists
-      // when a charter was just saved — and the threads it files are exactly
-      // what the draft below should know about.
+      // when a charter was just saved, or a refresh moved one — and the
+      // threads it files are exactly what the draft below should know about.
       StorylineRecruitHandler(storylines),
+      // After the recruit, so a thread the recruit just filed is in the recap
+      // written on this same drain rather than a pump later — the recap is the
+      // storyline screen's centrepiece, and a member the user can see in the
+      // timeline while the recap still talks about the group without it is the
+      // one inconsistency they would notice. Still ahead of the draft, which
+      // is last on its own terms.
+      StorylineRecapHandler(storylines),
       // Last, and after both storyline passes: a draft reads the storyline
       // summary as background, so drafting before the sweep has run would
       // write this message's reply without it. Last also means the work
@@ -514,5 +528,10 @@ final storylineServiceProvider = Provider<StorylineService>(
     confirmClient: ref.watch(fastLlmClientProvider),
     activityLog: ref.watch(activityLogProvider),
     embeddings: ref.watch(embeddingsClientProvider),
+    // Only the user actions write through it — see [StorylineService]. The
+    // recorder watches the store and the bus, both of which outlive a backend
+    // switch, so taking it here costs this provider nothing it did not
+    // already depend on.
+    progress: ref.watch(pipelineProgressProvider),
   ),
 );

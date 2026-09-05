@@ -219,6 +219,49 @@ void main() {
       expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isTrue);
     });
 
+    test('accepting a suggestion routes through setCharter', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await store.updateStoryline('sl-1',
+          charter: 'The homepage threads.',
+          charterLocked: true,
+          charterSuggestion: 'The homepage threads and the press briefing.');
+      final notifier = StorylinesNotifier(store, service);
+      await notifier.load();
+
+      await notifier.acceptCharterSuggestion(
+          'sl-1', 'The homepage threads and the press briefing.');
+
+      // Accepting the model's sentence is the user saying it, so it lands as
+      // a save would: locked, the suggestion answered, and the recruit that
+      // any charter save queues waiting to run.
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, 'The homepage threads and the press briefing.');
+      expect(storyline.charterLocked, isTrue);
+      expect(storyline.charterSuggestion, isNull);
+      expect((await store.nextPendingWork('storyline_recruit'))?['entity_id'],
+          'sl-1');
+    });
+
+    test('dismissing clears only the suggestion', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await store.updateStoryline('sl-1',
+          charter: 'The homepage threads.',
+          charterLocked: true,
+          charterSuggestion: 'The homepage threads and the press briefing.');
+      final notifier = StorylinesNotifier(store, service);
+      await notifier.load();
+
+      await notifier.dismissCharterSuggestion('sl-1');
+
+      final storyline =
+          (notifier.state as StorylinesLoaded).storylines.single;
+      expect(storyline.charterSuggestion, isNull);
+      expect(storyline.charter, 'The homepage threads.');
+      expect(storyline.charterLocked, isTrue);
+      // Nothing was queued: the user's own charter has not moved.
+      expect(await store.nextPendingWork('storyline_recruit'), isNull);
+    });
+
     test('create returns the new id and lands it in the list', () async {
       await seedConversation('c1');
       final notifier = StorylinesNotifier(store, service);
@@ -269,6 +312,25 @@ void main() {
 
       expect((notifier.state as StorylinesLoaded).storylines, hasLength(1));
     });
+
+    // Both rewrite the row the list renders — refresh the title, summary and
+    // charter, recap the paragraph the header leads with — so both have to
+    // land on screen without waiting for the next poll.
+    for (final kind in const ['storyline_refresh', 'storyline_recap']) {
+      test('a $kind report reloads too', () async {
+        final worker = AiWorker(store, handlers: [SilentHandler(kind)]);
+        addTearDown(worker.dispose);
+        final notifier = StorylinesNotifier(store, service, aiWorker: worker);
+        addTearDown(notifier.dispose);
+        await notifier.load();
+
+        await seedStoryline('sl-1');
+        await worker.pump();
+        await settle();
+
+        expect((notifier.state as StorylinesLoaded).storylines, hasLength(1));
+      });
+    }
 
     test('another queue\'s report changes nothing', () async {
       final worker = AiWorker(store, handlers: [SilentHandler('extract')]);

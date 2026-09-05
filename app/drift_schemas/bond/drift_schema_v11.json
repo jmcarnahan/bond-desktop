@@ -314,6 +314,26 @@
             "default_dart": null,
             "default_client_dart": null,
             "dsl_features": []
+          },
+          {
+            "name": "needs_you_verdict",
+            "getter_name": "needsYouVerdict",
+            "moor_type": "int",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
+          },
+          {
+            "name": "needs_you_reason",
+            "getter_name": "needsYouReason",
+            "moor_type": "string",
+            "nullable": true,
+            "customConstraints": "",
+            "default_dart": null,
+            "default_client_dart": null,
+            "dsl_features": []
           }
         ],
         "is_virtual": false,
@@ -2378,7 +2398,7 @@
       "sql": [
         {
           "dialect": "sqlite",
-          "sql": "CREATE TABLE IF NOT EXISTS \"messages\" (\"source\" TEXT NOT NULL DEFAULT 'email', \"source_message_id\" TEXT NOT NULL, \"internet_message_id\" TEXT, \"conversation_key\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"subject\" TEXT, \"from_name\" TEXT, \"from_address\" TEXT, \"to_json\" TEXT NOT NULL DEFAULT '[]', \"received_at\" TEXT, \"is_read\" INTEGER NOT NULL DEFAULT 0, \"body_preview\" TEXT, \"body_text\" TEXT, \"has_attachments\" INTEGER NOT NULL DEFAULT 0, \"source_meta_json\" TEXT, \"triage_status\" TEXT NOT NULL DEFAULT 'pending', \"triage_attempts\" INTEGER NOT NULL DEFAULT 0, \"triage_error\" TEXT, \"gate_reason\" TEXT, \"urgency\" TEXT, \"category\" TEXT, \"summary\" TEXT, \"needs_action\" INTEGER, \"action_items_json\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"label\" TEXT, \"addressed_me\" INTEGER NOT NULL DEFAULT 0, \"reply_expected\" INTEGER, \"deadline\" TEXT, PRIMARY KEY(source, source_message_id)) STRICT;"
+          "sql": "CREATE TABLE IF NOT EXISTS \"messages\" (\"source\" TEXT NOT NULL DEFAULT 'email', \"source_message_id\" TEXT NOT NULL, \"internet_message_id\" TEXT, \"conversation_key\" TEXT NOT NULL, \"direction\" TEXT NOT NULL, \"subject\" TEXT, \"from_name\" TEXT, \"from_address\" TEXT, \"to_json\" TEXT NOT NULL DEFAULT '[]', \"received_at\" TEXT, \"is_read\" INTEGER NOT NULL DEFAULT 0, \"body_preview\" TEXT, \"body_text\" TEXT, \"has_attachments\" INTEGER NOT NULL DEFAULT 0, \"source_meta_json\" TEXT, \"triage_status\" TEXT NOT NULL DEFAULT 'pending', \"triage_attempts\" INTEGER NOT NULL DEFAULT 0, \"triage_error\" TEXT, \"gate_reason\" TEXT, \"urgency\" TEXT, \"category\" TEXT, \"summary\" TEXT, \"needs_action\" INTEGER, \"action_items_json\" TEXT, \"created_at\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"label\" TEXT, \"addressed_me\" INTEGER NOT NULL DEFAULT 0, \"reply_expected\" INTEGER, \"deadline\" TEXT, \"needs_you_verdict\" INTEGER, \"needs_you_reason\" TEXT, PRIMARY KEY(source, source_message_id)) STRICT;"
         }
       ]
     },

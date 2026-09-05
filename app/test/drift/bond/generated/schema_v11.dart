@@ -258,6 +258,22 @@ class Messages extends Table with TableInfo {
     requiredDuringInsert: false,
     $customConstraints: '',
   );
+  late final GeneratedColumn<int> needsYouVerdict = GeneratedColumn<int>(
+    'needs_you_verdict',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  late final GeneratedColumn<String> needsYouReason = GeneratedColumn<String>(
+    'needs_you_reason',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -290,6 +306,8 @@ class Messages extends Table with TableInfo {
     addressedMe,
     replyExpected,
     deadline,
+    needsYouVerdict,
+    needsYouReason,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -2228,8 +2246,8 @@ class MessageVectors extends Table with TableInfo {
   bool get dontWriteConstraints => true;
 }
 
-class DatabaseAtV10 extends GeneratedDatabase {
-  DatabaseAtV10(QueryExecutor e) : super(e);
+class DatabaseAtV11 extends GeneratedDatabase {
+  DatabaseAtV11(QueryExecutor e) : super(e);
   late final Messages messages = Messages(this);
   late final Index ixMessagesConv = Index(
     'ix_messages_conv',
@@ -2357,5 +2375,5 @@ class DatabaseAtV10 extends GeneratedDatabase {
     ixMessageVectorsUnindexed,
   ];
   @override
-  int get schemaVersion => 10;
+  int get schemaVersion => 11;
 }

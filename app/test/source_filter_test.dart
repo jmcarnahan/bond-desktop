@@ -236,12 +236,16 @@ void main() {
         onBack: null,
         onRename: (_) {},
         onSetCharter: (_) {},
+        onAcceptSuggestion: (_) {},
+        onDismissSuggestion: () {},
         onRemoveThread: (_, _) {},
         onOpenThread: (_, _) {},
         onAddThread: () {},
         newestFirst: false,
         onToggleSort: () {},
         onDismiss: () {},
+        onSync: () async {},
+        syncing: false,
       )));
 
       // Both marked here, mail included: a storyline holds threads and chats,

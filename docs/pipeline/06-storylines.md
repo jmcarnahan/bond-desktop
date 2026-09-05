@@ -19,14 +19,22 @@ are the authority on sequencing.
    the next section.
 2. **Sweep** (`StorylineSweepHandler` → `sweep`) — clusters *unassigned*
    threads by embedding similarity (gate: 2 similar threads form a proposal),
-   names the proposal, then confirms each member individually. Rejected
-   clusters are tombstoned by immutable `cluster_hash` (schema v7) so a
-   dismissed suggestion stays dismissed even after membership drift.
+   names the proposal, then confirms each member individually. Pair-discovery
+   runs on the sqlite-vec index when there is one and on Dart arithmetic when
+   there is not, to the same clusters either way — its own section below.
+   Rejected clusters are tombstoned by immutable `cluster_hash` (schema v7) so
+   a dismissed suggestion stays dismissed even after membership drift.
 3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
    storyline whose membership has moved. Its own section below.
 4. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
    charter, or after a refresh widened one, judges up to 8 candidate threads
-   against it.
+   against it. It hunts again if the charter moved while it ran: a save landing
+   after the row went `processing` enqueues against that row and is swallowed,
+   and this is the one pass with no sweep catch-up to find it later, so the
+   wakeup has to live inside the pass. Bounded by the user rather than the
+   model — an extra lap needs a save *during* the previous one, and at
+   temperature zero a lap with no save would ask the same questions of the same
+   threads.
 5. **Recap** (`StorylineRecapHandler` → `recap`) — re-writes the storyline's
    running state of play from the newest messages across its member threads.
    Its own section below.
@@ -46,7 +54,30 @@ the description follow the membership.
 means the members have not changed since the description was written and the
 pass returns before any model call; NULL means never described, which is not
 the same as unchanged. Both hashes use the one write recipe (`_hashOfThreads`,
-source folded in).
+source folded in). A NULL `member_hash` — a fixture, or a row from before the
+column was written — is derived from the member rows for the gate *and healed
+into the column* by the same stamp: the gate reads Dart and the catch-up reads
+SQL, and `NULL IS NOT <hash>` keeps such a row stale forever if the two do not
+speak the same value. The heal re-reads the column first, so a hash written by
+a thread filed mid-call is never overwritten with the older derived one.
+
+**An empty member set is still an answer.** A storyline whose members were all
+removed, or whose conversation rows are gone, has no cards to describe it from,
+so the pass makes no model call — but it stamps. Nothing to describe *is* a
+description of the empty set, and without the stamp the catch-up re-queued the
+pass on every sync for the life of the database. A thread joining later moves
+`member_hash` and re-fires it.
+
+**A proposed storyline is born described.** `_propose` stamps
+`refreshed_member_hash`/`refreshed_member_count` on the kept path, right where
+it inserts the row: `NameStorylineTask` has just written that title, summary and
+charter from exactly those confirmed members, so the columns record something
+true rather than claiming a pass ran. Without the stamp the next sweep's
+catch-up would read the row as never described and spend a Refine call
+re-writing a description seconds old over a member set that has not moved. It is
+the same claim the v10 backfill makes about the storylines it found already
+described. The below-minimum tombstone branch stamps nothing — it has no member
+rows to describe.
 
 **Triggers** — every path that can change what a storyline is about, all via
 `requeueWork` (never `enqueueWork`; `payload_json` is NULL, so nothing carries
@@ -56,7 +87,7 @@ provenance through the queue):
 |---|---|
 | `addThread` / `removeThread` | always — a user filing by hand is telling the app the group changed, and is looking at it |
 | `setCharter('')` | always — this is what makes the About block's "clearing it lets the model redraft" promise true |
-| `assignConversation` tail | **gated**: summary empty, or charter empty and unlocked, or `member_count - refreshed_member_count >= 2` |
+| `assignConversation` tail | **gated**: summary empty, or charter empty and unlocked, or `member_count - refreshed_member_count >= 2`. The growth clause needs a recorded count — a described-but-uncounted row is a pre-feature one, and the sweep catch-up owns it. And on a sync drain the gate is moot anyway: any assignment moves `member_hash`, so the same drain's sweep catch-up queues the refresh whatever the gate said. What it really governs is drains with no pending sweep row — a UI pump |
 | `recruit` tail | when it filed ≥1 thread |
 | `sweep` catch-up | every live storyline where `refreshed_member_hash IS NOT member_hash` |
 
@@ -93,11 +124,11 @@ one are different questions:
 a user who renamed the storyline while the model was thinking still wins. A
 locked title is returned verbatim; the summary is refreshed either way — it
 says where things stand, which no rename claimed. A locked charter is **never**
-overwritten: the model's version is parked in `charter_suggestion` for the
-About block to offer, and a suggestion that matches the stored charter
-(compared with whitespace flattened and case folded) clears rather than
-parking. Both arms of `setCharter` clear a parked suggestion — the user has
-just answered the question it was asking.
+overwritten: the model's version is parked in `charter_suggestion`, and a
+suggestion that matches the stored charter (compared with whitespace flattened
+and case folded) clears rather than parking. What the About block then does
+with a parked suggestion — and what happens when the user answers it — is
+under *What the user sees*.
 
 **The stamp is the pre-call hash and count**, never the current ones. A thread
 filed by hand while the model was thinking is a thread this description never
@@ -144,6 +175,17 @@ are excluded on exactly `EmbedHandler`'s rule — `triage_status = 'skipped'`
 unless `gate_reason = 'teams_source'` — so a recap never narrates the vendor's
 newsletters, and a chat row `skipped` only for being a chat still counts.
 
+**The owner's own messages are never excluded**, whatever their triage columns
+say: `direction = 'outbound'` is the first arm of that predicate.
+`triageStatusOnInsert` marks every outbound message `skipped`/`outbound`, but
+that gate answers *does this need the user?* — it is cost control, about not
+spending model calls on the user's own mail, and it was never a claim about the
+narrative. The recap's entire subject is who owes whom, and the reply the user
+sent is the largest single fact in that judgement; without the arm the window is
+every question ever put to them and not one of their answers, and the model
+writes open items they settled last week. Nothing above the SQL needed changing
+— the prompt already renders these lines as `You`.
+
 **The gate** is the `recap_through` watermark (schema v10): the pass returns
 before any model call when `recap_through >= ` the newest `received_at` in the
 window. ISO-8601 with a fixed offset compares correctly as a string, so no
@@ -152,14 +194,68 @@ the refresh stamps its pre-call hash: a message that landed while the model was
 thinking is a message this recap never read, and stamping what is true *now*
 would leave the gate reading fresh and that message would never be recapped.
 
+**The gate is time AND membership**, because a watermark alone answers the
+wrong question. It measures the window it was taken over, and a membership
+change makes that a different window — so every site that writes
+`member_hash` clears `recap_through` in the same `updateStoryline` call:
+`assignConversation`, `recruit`'s per-candidate write, `addThread`,
+`removeThread`. (`_propose` needs no clear; a newborn's watermark is already
+NULL.) Without it a thread filed by hand — usually an old one, since it is a
+thread the user went *looking* for — is a silent no-op on every trigger that
+queues a recap, because the mark is already past every message on it. The clear
+is explicit rather than an omission: `recap_through` takes the v10 `_unset`
+sentinel, and omitting it is what "leave this column alone" means.
+
+It adds no permanent work. After the clear the catch-up's NULL arm selects the
+storyline only when an eligible message exists; the pass then reads and stamps
+a fresh mark, and a model that declines the window stamps it anyway (see *Empty
+answers* below), so there is no arm that clears without eventually stamping. A
+storyline emptied of everything readable is not selected at all — no eligible
+message — and converges as silence.
+
 **Triggers** — every path that changes what has been *said*, all via
 `requeueWork`:
 
 | Trigger | When |
 |---|---|
 | `ExtractHandler` tail | a message's facts land in a thread that is already in ≥1 storyline (`storylineIdsFor`), one requeue per storyline. Deliberately outside `_refreshCard` and not behind a successful embed — the recap has nothing to do with the vector, and a down embedding server must not cost it a message |
-| `addThread` | always — a hand-filed thread brings its own messages, and the user is looking |
-| `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story |
+| `addThread` | always — a hand-filed thread brings its own messages, and the user is looking. The membership clear is what lets that recap past the gate when those messages are old ones |
+| `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story. This is `removeThread`'s route in |
+| `_propose` | always, on the kept path — the recap handler drains after the sweep's, so a storyline born in this pass shows its recap in the same drain rather than a sync later |
+| `DraftNotifier._sendChat` | a chat reply the user sent from this app, per storyline the chat is filed in. **The only outbound row wired directly**, because it is the only one no ingest will ever see: the chat send writes its own row with the id Graph assigned, and the next pull skips it as already-known |
+| `sweep` catch-up | every live storyline holding a message the recap has not read: `recap_through` NULL, or a newer `received_at` than it. `staleRecapStorylineIds` repeats `recentStorylineMessages`' gate exclusion (`triage_status <> 'skipped'` unless `gate_reason = 'teams_source'`) and its own `received_at` guard, because the question asked must be the one the pass answers — a storyline queued over messages the recap cannot read would stamp no watermark and be queued again forever. A storyline with no qualifying messages at all is left alone for the same reason |
+
+The recap's catch-up matters more than the refresh's, because every other
+trigger here fires on a message *arriving*: a storyline that is already
+described and has had no new mail reaches none of them. That is every row the
+v10 backfill called described — none of which had ever been recapped — plus any
+recap wakeup a `processing` row swallowed. Like the refresh's, it runs at the
+head of `sweep` so an early return does not skip it.
+
+It is also the **reply path**, and deliberately so. Every outbound row but the
+chat send's lands at ingest — the sent copy folding in from `sentitems`, or a
+reply sent from Outlook, a phone, or Teams itself arriving on a pull — and every
+sync ends by requeueing `storyline_sweep`, so the sync that folds a reply in is
+the drain that recaps it. Wiring a per-message requeue into the mail ingest
+would buy no latency and would cost a `storylineIdsFor` query per message inside
+`_ingestPage`'s page transaction, on first syncs that run to six figures. One
+indexed question per sync replaces it.
+
+`removeThread` is absent where the refresh table has it because it needs no row
+of its own: the refresh it queues re-queues the recap from its own tail. What
+makes that reach the model is the watermark clear above, and a removal is the
+case it was most needed for — it is the one membership change that adds no
+message anywhere, so nothing else could ever make the recap stale. Before the
+clear, a recap went on narrating a thread the user had just filed out until
+something new was said in the threads that remain; the catch-up could not close
+it either, since its `EXISTS` asks whether a member thread holds a message
+*newer than the watermark* and a removal leaves that answer no.
+
+The one case left is a storyline emptied down to nothing: the refresh finds no
+cards, so it stamps and returns without queueing a recap, and the stale recap
+text stays on the row. It is visible only on a live storyline with no readable
+members, and the alternative — a recap pass over an empty window — has nothing
+to write.
 
 Bursts coalesce for free: `requeueWork` is keyed on
 `(kind, source, entity_id)`, so ten messages landing in one drain leave one
@@ -168,9 +264,64 @@ state at run time rather than a payload. Nothing carries provenance through the
 queue.
 
 **Empty answers keep the previous recap standing.** A model that comes back
-with no recap text writes *nothing at all* — not the text, not the lists, not
-the watermark. A thin answer must never cost the user the catch-up they had,
-and leaving the watermark behind means the next message to land asks again.
+with no recap text leaves the text and both lists exactly as they were: a thin
+answer must never cost the user the catch-up they had. The watermark still
+moves, and it is not claiming the recap covers those messages — it records that
+the model was *asked* about this window and declined it. Without the stamp the
+sweep's catch-up finds the storyline stale on every sync and re-dials the 27B,
+at temperature zero, over the same window, for an answer that cannot come back
+different. The next message moves the window, and a different window is a
+different question — which is when asking again is worth a call.
+
+## What the user sees
+
+The storyline screen (`StorylineTimelinePanel`) leads with the recap: the
+paragraph in body type directly under the title, then a compact **OPEN** list
+and a **DECIDED** list — each rendered only when the pass found something for
+it — and a quiet "as of *n*h ago" read off `recap_through`, which dates the
+paragraph by the newest message it has *read* rather than by when it ran. Both
+lists arrive folded to their heading and count — **OPEN · 2** — and each
+unfolds on a tap of its own, because a long storyline can carry half a dozen
+items in each and twelve bullet lines between the paragraph and the spine is a
+header nobody reads to the end of. The recap **replaces** the one-line
+`summary` in that header; the summary is still what the rail shows, and it is
+the header's text until the recap pass has written one. `recapOpenItems` /
+`recapDecisions` on `Storyline` are the only decoders of the two JSON columns,
+and they are tolerant in the same way the message models are: a half-written
+column costs the lists, never the render.
+
+The parked charter surfaces in the About block, under the charter itself, as
+**SUGGESTED UPDATE** with **Use this** and **Discard** (not "Dismiss" — that
+word already retires the whole storyline in the header above). *Use this* is a
+two-step, as removing a thread is, because it overwrites a sentence the user
+wrote: the second tap reads *Replace the charter*. Accepting routes through
+`setCharter`, so it does everything a hand-typed save does — trims, locks,
+clears the suggestion, and queues the recruit that hunts for threads matching
+the new criteria. *Discard* is one tap and clears the column alone. Typing a
+charter by hand clears it too — both arms of `setCharter` do, including the
+empty one that unlocks and queues a redraft — because the user has just
+answered the question the suggestion was asking. Neither offer appears while
+the charter field is open: the field is where the user would be answering the
+suggestion anyway.
+
+The Storylines overview cards lead with the recap too — the paragraph alone, up
+to four lines, falling back to the `summary` until a recap exists; what is open
+and what was decided stay on the storyline screen, where there is room to read
+them rather than skim past them. Beside the *Storylines* heading is a quiet
+**Sync**, which runs the ordinary sync (both connectors, exactly as the poll
+and the rail's refresh do) and reads *Syncing…* while it does: nothing
+storyline-shaped is needed, because that pass ends by requeueing the sweep and
+the sweep's catch-ups drain the refreshes and recaps that were owed. The same
+button sits at the end of the storyline screen's own button row, so opening a
+storyline does not mean going back to the overview to ask for the pass that
+brings it up to date. It is one action and one flag: the screen owns the sync
+and hands the panel the label, which is why both buttons read *Syncing…*
+together.
+
+Refresh and recap both report progress under their own kinds, and
+`StorylinesNotifier` listens for both, so a pass that rewrites a title or a
+recap lands on the rail and the open storyline within the list's 400 ms
+debounce rather than at the next poll.
 
 ## Filing a thread by hand
 
@@ -204,6 +355,36 @@ the window with a non-null `storyline_id`, and `hotStorylines` groups by it —
 filing one long thread by hand can add many messages to both at once. That is
 the intended reading (the messages really are in that storyline), not a
 double-count.
+
+## How the sweep finds its pairs
+
+Clustering is two halves, and only one of them moved. **Forming** the clusters
+is single-link greedy agglomeration in `StorylineService._clusterBy` — each
+thread, in the order the store handed them over, joins the first existing
+cluster holding a member it links to. That is a pure function of its input, and
+has to stay one: `cluster_hash` is what tombstones a dismissed suggestion, so
+the same threads must group the same way on every run for a dismissal to hold.
+**Finding** the linked pairs is the half an index can do faster, and it now
+does — `ConversationVectorIndex` (see `05-embeddings.md`), diff-backfilled at
+sweep start, one KNN probe per candidate, `1 - distance` converted back to the
+cosine similarity the same `>= clusterLinkThreshold` decides on.
+
+**The results are identical, unconditionally, by design.** Each probe asks for
+as many neighbours as the *index* holds — not as many as there are candidates —
+so it comes back with the whole corpus and no link can be crowded out by a
+thread that is already filed. What that buys is native distance arithmetic over
+packed float32, not a better asymptotic: an index that made the sweep faster by
+proposing different storylines would be a bug wearing a benchmark.
+
+**Brute force is the fallback, and it is not exceptional.** The sweep does its
+own arithmetic when there is no usable index (the ordinary state of a build
+without the native extension), when the diff backfill cannot complete, when a
+candidate's vector is not the index's width — a corpus caught mid-model-change
+has rows the index skipped, and a hole in the index is a link the probes cannot
+find — and when a probe fails to find its own row, which is the cheap check
+that the index really does hold every candidate. Falling back says why, once
+per distinct reason, and nothing else: never a park, never a crash, and never a
+different answer.
 
 ## Cross-source identity
 

@@ -6,10 +6,11 @@ import 'corpus.dart';
 /// The work the PROSE slot is asked to do, written down once.
 ///
 /// `corpus.dart` is the mail the bulk slot classifies; this is the other half
-/// of the app's model work — naming a storyline and drafting a reply — and it
-/// needs its own fixtures because neither task takes a single message as
-/// input. Naming takes a whole storyline's worth of conversation cards;
-/// drafting takes a thread and the message at the end of it.
+/// of the app's model work — naming a storyline, catching a reader up on one,
+/// and drafting a reply — and it needs its own fixtures because none of the
+/// three takes a single message as input. Naming takes a whole storyline's
+/// worth of conversation cards; a recap takes what was said across all of its
+/// threads at once; drafting takes a thread and the message at the end of it.
 ///
 /// Entirely fictional, and deliberately so, for the same reason `corpus.dart`
 /// is: this repo is public. The inbox belongs to Alex Rivera, who runs a small
@@ -37,6 +38,46 @@ class NameCase {
   final List<String> cards;
 
   const NameCase(this.id, this.cards);
+}
+
+/// One storyline to catch a reader up on, as the recap task sees it.
+///
+/// Unlike [NameCase] these lines are hand-written rather than built by the
+/// production formatter, because the one that makes them
+/// (`StorylineService._recapLine`) is private to the service and reads a store
+/// row, not a model. The shape is pinned in `prose_cases_test.dart` instead:
+/// `[subject] sender: text`, the subject bracket dropped when a chat has none,
+/// and the inbox owner rendered as `You` — the distinction the recap most has
+/// to get right, since a thread whose last word is the reader's is a thread
+/// nobody is waiting on them for.
+class RecapCase {
+  /// Stable slug, so a row in the live table names the case it came from.
+  final String id;
+
+  final String title;
+
+  /// The membership contract, exactly as the storyline stores it. Empty is
+  /// legal — a storyline named before charters existed is recapped from its
+  /// messages alone.
+  final String charter;
+
+  /// The recap as it stood before these messages, or empty for the first one.
+  /// The interesting cases are the non-empty ones: the prompt asks the model
+  /// to carry forward what is still true, and dropping an item that has just
+  /// been settled is exactly the judgement being read.
+  final String previousRecap;
+
+  /// The window, OLDEST FIRST — the order `RecapInput.messageLines` wants,
+  /// because the model is asked where things stand at the END of it.
+  final List<String> messageLines;
+
+  const RecapCase({
+    required this.id,
+    required this.title,
+    required this.charter,
+    required this.previousRecap,
+    required this.messageLines,
+  });
 }
 
 /// One thread to draft a reply to, named by corpus id rather than copied.
@@ -174,6 +215,86 @@ final List<NameCase> nameCases = [
           'than a roof box.',
     ),
   ]),
+];
+
+/// Three storylines to catch a reader up on.
+///
+/// The three are the states a recap has to handle, not three flavours of the
+/// same one. A storyline mid-flight, where something was decided and something
+/// else is still owed — the ordinary case. The SAME storyline a few messages
+/// later, where the thing that was owed has just been settled: the previous
+/// recap rides in saying it is open, and a model that merely rewrites what it
+/// was handed will say so again. And a quiet storyline where nothing is
+/// outstanding at all, which is the one the block most has to survive — an
+/// inbox that only speaks up about work owed is silent about the storylines
+/// that are going well, and inventing an open question to fill the list is
+/// worse than an empty one.
+///
+/// They reuse the naming set's world (`conference-talk`, `kitchen-renovation`)
+/// on purpose: reading a recap next to the cards it was written from is how a
+/// person tells "carried forward" apart from "made up".
+const List<RecapCase> recapCases = [
+  RecapCase(
+    id: 'talk-midflight',
+    title: 'Northline Design Week talk',
+    charter: 'The Northline Design Week talk — the accepted slot, the slides, '
+        'and the venue logistics.',
+    previousRecap: '',
+    messageLines: [
+      '[Talk accepted — Northline Design Week] Priya Raman: You are on the '
+          'Thursday morning track, forty minutes including questions. Can you '
+          'send a title and a one-paragraph blurb by the end of the week?',
+      '[Talk accepted — Northline Design Week] You: Confirmed for Thursday '
+          'morning. Title and blurb to follow.',
+      '[Slides review before the dry run] Priya Raman: Read the first draft. '
+          'The middle third runs long — I would cut the second case study '
+          'entirely.',
+      '[Slides review before the dry run] You: Agreed, the second case study '
+          'goes. I will re-time it tonight.',
+      '[AV check and speaker logistics] Northline Events: Do you need an HDMI '
+          'adapter or will you present from our machine? We can also offer a '
+          'stage rehearsal on the Wednesday evening.',
+    ],
+  ),
+  RecapCase(
+    id: 'talk-open-item-settled',
+    title: 'Northline Design Week talk',
+    charter: 'The Northline Design Week talk — the accepted slot, the slides, '
+        'and the venue logistics.',
+    previousRecap: 'The Thursday morning slot is confirmed and the slides are '
+        'being cut down after Priya read the first draft. Alex still owes '
+        'Priya a title and a blurb, and the venue is waiting on an answer '
+        'about the adapter.',
+    messageLines: [
+      '[Talk accepted — Northline Design Week] You: Title and blurb attached '
+          '— "Drawing before deciding", two hundred words.',
+      '[Talk accepted — Northline Design Week] Priya Raman: Blurb is in the '
+          'programme, thank you. Nothing else needed from you until the dry '
+          'run.',
+      '[AV check and speaker logistics] You: I will bring my own laptop and '
+          'an HDMI adapter, so no need for yours.',
+      '[AV check and speaker logistics] Northline Events: Noted. The '
+          'Wednesday evening rehearsal is still open if you want it — let us '
+          'know by Monday.',
+    ],
+  ),
+  RecapCase(
+    id: 'kitchen-quiet',
+    title: 'Kitchen remodel',
+    charter: 'The kitchen at home — the quote, the worktops, and scheduling '
+        'the trades.',
+    previousRecap: 'Dana is holding an October slot and the worktop pick has '
+        'come down to walnut or the pale quartz. Ray has two days free in the '
+        'second week of October and wants them held or released.',
+    messageLines: [
+      '[Worktop samples — walnut or the pale quartz] You: Going with the pale '
+          'quartz.',
+      '[Worktop samples — walnut or the pale quartz] Dana Whitfield: Ordered. '
+          'Four week lead time, as quoted.',
+      '[Plumber availability for the sink move] Ray Okonjo: Holding the 8th '
+          'and the 9th then. Nothing needed from you until the week before.',
+    ],
+  ),
 ];
 
 /// Five threads to draft replies to.

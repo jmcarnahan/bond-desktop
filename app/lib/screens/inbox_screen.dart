@@ -169,6 +169,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// When Teams was last pulled, by any route. Null until the first one.
   DateTime? _lastTeamsRefresh;
 
+  /// Whether the Storylines pane's own Sync is running. Local to this screen
+  /// on purpose: it says nothing about the pipeline that the rail's counters
+  /// do not already say — it is one button's label, and one button's label is
+  /// not worth a provider.
+  bool _syncing = false;
+
   /// The stored "Teams last synced" stamp, read once and re-read only after a
   /// pull. See [_teamsFreshness].
   Future<String?>? _teamsSyncedAt;
@@ -238,9 +244,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The list AND whatever thread is open. Refreshing only the list is the
   /// bug that reads as "the app is broken": the row updates, the transcript
   /// beside it does not, and the two disagree on screen.
-  void _refresh() {
+  ///
+  /// Returns the mail sync's own future — awaited by nothing on the timer or
+  /// button paths, and by [_syncNow] alone, which has a label to hold up for
+  /// as long as the pull is actually running.
+  Future<void> _refresh() async {
     if (!mounted) return;
-    ref.read(conversationsProvider.notifier).load();
+    final mail = ref.read(conversationsProvider.notifier).load();
     ref.read(storylinesProvider.notifier).load();
     final selected = _selectedId;
     if (selected != null) {
@@ -273,6 +283,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (storyline != null) {
       ref.read(storylineTimelineProvider(storyline).notifier).load();
     }
+    // Last, so every load above is already started: they run beside the sync,
+    // not behind it.
+    await mail;
   }
 
   /// What the refresh button does: the mail refresh the timer also runs, plus
@@ -284,9 +297,35 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// did. Refresh is the second way a parked ack gets another go — the first
   /// is reopening the thread.
   Future<void> _refreshAll() async {
-    _refresh();
+    final mail = _refresh();
     unawaited(ref.read(readAckQueueProvider).pump());
     await _refreshTeams();
+    // Held to the end rather than awaited first: the two pulls go out
+    // together, as they always have, and this future is only here so a caller
+    // that wants to know when the whole thing is done can find out.
+    await mail;
+  }
+
+  /// The Storylines pane's Sync: [_refreshAll] and nothing else.
+  ///
+  /// There is no second, storyline-shaped sync to build. The ordinary pull
+  /// ends by requeueing the sweep, and the sweep's catch-ups drain the
+  /// refreshes and recaps that were owed — so asking for mail is already
+  /// asking for the storylines to be brought up to date.
+  Future<void> _syncNow() async {
+    if (_syncing) return;
+    setState(() => _syncing = true);
+    try {
+      await _refreshAll();
+    } catch (e) {
+      // Every leg of the sync turns its own failure into the banner this pane
+      // already shows. Anything arriving here is a bug worth a trace, and
+      // never worth leaving the button saying "Syncing…" for the rest of the
+      // session — which is what the `finally` is for.
+      debugPrint('manual sync failed: $e');
+    } finally {
+      if (mounted) setState(() => _syncing = false);
+    }
   }
 
   /// The Teams pull, and the stamp that keeps the resume path from repeating
@@ -1345,19 +1384,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             if (!already.contains(storyline.id)) storyline,
         ],
         onBack: () => setState(() => _pickingStorylineForThread = null),
-        onPick: (id) {
-          ref
+        // Both awaited, and both reload the storyline they filed into — the
+        // same ending `_addThreadPane.onPick` has. Fired and forgotten, the
+        // pane closed over a write that had not landed, and the storyline's
+        // spine showed the thread only when the next debounce happened to
+        // come round.
+        onPick: (id) async {
+          await ref
               .read(storylinesProvider.notifier)
               .addThread(id, thread.source, thread.id);
+          if (!mounted) return;
           setState(() => _pickingStorylineForThread = null);
+          ref.read(storylineTimelineProvider(id).notifier).load();
         },
-        onCreate: (title) {
-          ref.read(storylinesProvider.notifier).create(
+        onCreate: (title) async {
+          final id = await ref.read(storylinesProvider.notifier).create(
                 title,
                 conversationKey: thread.id,
                 source: thread.source,
               );
+          if (!mounted) return;
           setState(() => _pickingStorylineForThread = null);
+          ref.read(storylineTimelineProvider(id).notifier).load();
         },
       ),
     );
@@ -1399,6 +1447,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }),
       onRename: (title) => notifier.rename(storyline.id, title),
       onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
+      onAcceptSuggestion: (charter) =>
+          notifier.acceptCharterSuggestion(storyline.id, charter),
+      onDismissSuggestion: () =>
+          notifier.dismissCharterSuggestion(storyline.id),
       onRemoveThread: (source, key) async {
         await notifier.removeThread(storyline.id, source, key);
         if (!mounted) return;
@@ -1422,6 +1474,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         });
         unawaited(notifier.dismiss(storyline.id));
       },
+      // The overview's Sync, on the screen you land on when you open one of
+      // its cards. Same call, same flag: the pane is built from this screen's
+      // build path, so the label follows _syncing without the panel holding
+      // any state of its own.
+      onSync: _syncNow,
+      syncing: _syncing,
       // The suggestions ride on the episode they answer, not under the spine:
       // a storyline is several conversations, and a card offering to reply has
       // to say which one it would reply to.
@@ -2069,7 +2127,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(title, style: BondType.title),
+          Row(
+            children: [
+              Expanded(child: Text(title, style: BondType.title)),
+              // Here and on the storyline screen, and nowhere else. Every
+              // other pane is a view of the mailbox the sixty-second poll
+              // already keeps current; a storyline is rewritten by a sweep,
+              // and this is how the user asks for the pass that runs one.
+              if (section == RailSection.storylines) _syncButton(),
+            ],
+          ),
           const SizedBox(height: BondSpacing.s16),
           if (loadError != null) ...[
             InlineAlert(
@@ -2145,6 +2212,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
+  /// The Sync action beside the Storylines heading. Quiet — a text button in
+  /// the pane's own idiom, the same one the cards keep/dismiss with — because
+  /// it is an offer, not the thing the pane is for.
+  ///
+  /// Inert while it runs, and saying so: a second pull started on top of the
+  /// first would race the same connectors for nothing.
+  Widget _syncButton() {
+    return TextButton(
+      onPressed: _syncing ? null : _syncNow,
+      child: Text(_syncing ? 'Syncing…' : 'Sync'),
+    );
+  }
+
   /// Every storyline as a card. Suggestions carry their two answers on the
   /// row, so the whole section can be cleared without opening anything.
   Widget _storylinesOverview() {
@@ -2165,7 +2245,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       separatorBuilder: (_, _) => const SizedBox(height: BondSpacing.s8),
       itemBuilder: (context, index) {
         final storyline = storylines[index];
-        final summary = storyline.summary ?? '';
+        // The recap in place of the one-line summary, exactly as the
+        // storyline's own header does it: the two answer the same question at
+        // different lengths, and the longer answer is the better card. The
+        // paragraph ONLY — what is open and what was decided stay on the
+        // storyline screen, where there is room to read them.
+        final recap = storyline.recapText ?? '';
+        final blurb = recap.isNotEmpty ? recap : (storyline.summary ?? '');
         return Material(
           color: BondColors.surface,
           borderRadius: BondRadii.mdAll,
@@ -2194,12 +2280,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
-                        if (summary.isNotEmpty) ...[
+                        if (blurb.isNotEmpty) ...[
                           const SizedBox(height: 2),
                           Text(
-                            summary,
+                            blurb,
                             style: BondType.caption,
-                            maxLines: 2,
+                            maxLines: 4,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ],
