@@ -2341,6 +2341,47 @@ void main() {
         ['member', 'c1'],
       );
     });
+
+    test('a charter saved while the hunt ran is hunted with', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      const second = 'The launch party for the Northline site, and the venue.';
+      late final StorylineService service;
+      var calls = 0;
+      final llm = HookedFakeLlm(
+        {
+          'storyline_membership': [
+            // The first lap turns the candidate away, so it is still a
+            // candidate when the second lap asks about it against the new
+            // charter.
+            confirmAnswer(belongs: false),
+            confirmAnswer(),
+          ],
+        },
+        (schema) async {
+          if (schema != 'storyline_membership' || calls++ > 0) return;
+          // The save lands with the recruit row already `processing`, so its
+          // own requeue is swallowed and no catch-up exists to find it. The
+          // only thing that can notice is the pass itself.
+          await service.setCharter('sl-1', second);
+        },
+      );
+      service = StorylineService(store, llm);
+
+      await service.recruit('sl-1');
+
+      // Two laps, and the second one asked against the text the user saved
+      // rather than the text the pass started with.
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect(llm.userMessages.first, isNot(contains(second)));
+      expect(llm.userMessages.last, contains(second));
+      // And it stopped: the charter did not move under the second lap, so
+      // there is no third.
+      expect(
+        (await store.membersOf('sl-1')).map((m) => m.conversationKey),
+        ['member', 'c1'],
+      );
+    });
   });
 
   group('setCharter', () {
@@ -2725,11 +2766,48 @@ void main() {
 
       await StorylineService(store, llm).refresh('sl-1');
 
-      // No cards, so nothing to describe it from — and nothing is stamped
-      // either, so the storyline is described the moment it holds a thread
-      // again.
+      // No cards, so nothing to describe it from and no reason to dial the
+      // model. The stamp lands regardless: nothing to describe IS a
+      // description of the empty set, and a thread joining later moves
+      // `member_hash` and re-fires the pass.
       expect(llm.schemas, isEmpty);
-      expect((await store.getStoryline('sl-1'))!.refreshedMemberHash, isNull);
+      expect((await store.getStoryline('sl-1'))!.refreshedMemberHash,
+          isNotNull);
+    });
+
+    test('a storyline emptied of everything readable converges', () async {
+      await seedStoryline(store);
+      await store.removeStorylineMember('sl-1', 'email', 'member',
+          block: true);
+
+      await StorylineService(store, FakeLlm(const {})).refresh('sl-1');
+
+      // The whole point of the stamp. Without it the sweep's catch-up asks
+      // this durable question on every sync forever and gets the same answer:
+      // a live storyline whose description does not match its members. It
+      // costs no model call, but it queues and drains a pass per sync for the
+      // life of the database.
+      expect(await store.staleRefreshStorylineIds(), isNot(contains('sl-1')));
+    });
+
+    test('a row that never had a member hash converges', () async {
+      // `seedStoryline` writes members without touching `member_hash`, which
+      // is every fixture and every storyline from before the column existed.
+      await seedStoryline(store);
+      expect((await store.getStoryline('sl-1'))!.memberHash, isNull);
+      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      // The gate derives the hash from the member rows when the column is
+      // NULL, but the catch-up asks SQL, and `NULL IS NOT <hash>` is true
+      // however many times the pass runs. So the pass heals the column it
+      // derived around — the two have to speak the same value or this row is
+      // stale forever.
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.memberHash, isNotNull);
+      expect(storyline.memberHash, storyline.refreshedMemberHash);
+      expect(await store.staleRefreshStorylineIds(), isNot(contains('sl-1')));
     });
 
     test('clearing a charter re-drafts one', () async {
@@ -3063,13 +3141,89 @@ void main() {
 
       final storyline = (await store.getStoryline('sl-1'))!;
       expect(llm.callsFor('storyline_recap'), 1);
-      // Nothing written at all — not the text, not the lists, not the
-      // watermark. A thin answer must never cost the user the catch-up they
-      // had, and leaving the watermark behind means the next message asks
-      // again.
+      // The text and the lists stand: a thin answer must never cost the user
+      // the catch-up they had.
       expect(storyline.recapText, 'A recap worth keeping.');
       expect(storyline.recapOpenJson, '["something still open"]');
-      expect(storyline.recapThrough, '2026-08-01T09:00:00Z');
+      // The watermark moves anyway, and it is recording that the model was
+      // ASKED about this window rather than that the recap covers it. See the
+      // test below for what leaving it behind would cost.
+      expect(storyline.recapThrough, '2026-08-01T11:00:00Z');
+    });
+
+    test('a declined window is not re-asked every sync', () async {
+      await seedTwoThreads();
+      final llm = FakeLlm({'storyline_recap': [recapAnswer(recap: '   ')]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      // The sweep's catch-up asks the durable question every single sync, so
+      // an unstamped decline is a 27B call per sync, at temperature zero, over
+      // the same window, for an answer that cannot come back different.
+      expect(await store.staleRecapStorylineIds(), isNot(contains('sl-1')));
+
+      // A new message is a different window, which is a different question —
+      // and that is exactly when asking again is worth the call.
+      await seedMessage(store, 'c2', 'm4',
+          receivedAt: '2026-08-02T09:00:00Z', body: 'the photos are in');
+      expect(await store.staleRecapStorylineIds(), contains('sl-1'));
+    });
+
+    test('a hand-filed old thread reaches the recap', () async {
+      await seedStoryline(store);
+      await seedMessage(store, 'member', 'm1',
+          receivedAt: '2026-08-10T09:00:00Z', body: 'the copy looks good');
+      // Recapped right up to the newest thing anyone has said.
+      await store.updateStoryline('sl-1',
+          recapText: 'The copy is approved.',
+          recapThrough: '2026-08-10T09:00:00Z');
+      // The thread a person went looking for, which is why every message on it
+      // predates the mark.
+      await seed(store, 'c2');
+      await seedMessage(store, 'c2', 'm2',
+          receivedAt: '2026-08-01T09:00:00Z', body: 'the venue is booked');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final service = StorylineService(store, llm);
+
+      await service.addThread('sl-1', 'email', 'c2');
+      expect(await drainRecap(service), 'sl-1');
+
+      // The watermark was taken over a member set this thread was not in, so
+      // it has no business gating a recap over the set it is in now. Without
+      // the clear the pass returns at the gate having said nothing, and the
+      // filing never reaches the block the storyline screen leads with — until
+      // unrelated mail happens to land.
+      expect(llm.callsFor('storyline_recap'), 1);
+      expect(llm.userMessages.single, contains('the venue is booked'));
+      expect(llm.userMessages.single, contains('the copy looks good'));
+      // And a fresh mark: the window it just read is the whole window.
+      expect((await store.getStoryline('sl-1'))!.recapThrough,
+          '2026-08-10T09:00:00Z');
+    });
+
+    test('a removal re-recaps what remains', () async {
+      await seedTwoThreads();
+      await store.updateStoryline('sl-1',
+          recapText: 'Dana has the venue booked.',
+          recapThrough: '2026-08-01T11:00:00Z');
+      final llm = FakeLlm({
+        'storyline_refresh': [refineAnswer()],
+        'storyline_recap': [recapAnswer(recap: 'The venue is somebody else.')],
+      });
+      final service = StorylineService(store, llm);
+
+      // The one membership change that adds no message anywhere: nothing new
+      // was said, so nothing but the clear can make the recap stale.
+      await service.removeThread('sl-1', 'email', 'c2');
+      expect(await drainRefresh(service), 'sl-1');
+      expect(await drainRecap(service), 'sl-1');
+
+      // Re-read and re-stamped, over the threads that are left — rather than
+      // going on narrating a thread the user just pulled out.
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.recapText, 'The venue is somebody else.');
+      expect(storyline.recapThrough, '2026-08-01T11:00:00Z');
+      expect(llm.userMessages.last, isNot(contains('the venue is booked')));
     });
 
     test('a hand-added thread recaps the storyline', () async {

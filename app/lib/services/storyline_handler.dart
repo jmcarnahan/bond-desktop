@@ -80,6 +80,12 @@ class StorylineAssignHandler extends WorkHandler {
 /// user just saved. Queued only by `StorylineService.setCharter`, one row per
 /// storyline id — a second save before the first pass drains changes nothing,
 /// which is exactly right: the pass reads the charter when it runs.
+///
+/// That holds by itself only while the row is still PENDING. A save landing
+/// after the row went `processing` enqueues against that row and is swallowed
+/// — `requeueWork` revives only `done` and `error` — and no catch-up exists
+/// for this kind. `StorylineService.recruit` closes it from the inside, by
+/// re-reading the charter when its hunt ends and hunting again if it moved.
 class StorylineRecruitHandler extends WorkHandler {
   final StorylineService _service;
 

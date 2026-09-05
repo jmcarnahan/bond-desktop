@@ -329,6 +329,17 @@ class StorylineService {
     await _store.updateStoryline(
       best.id,
       memberHash: await _memberHashOf(best.id),
+      // Membership is part of the story, so a membership change retires the
+      // recap's watermark. That watermark was measured against the OLD member
+      // set, and letting it gate a recap over the NEW one is how a thread
+      // filed in August — every message on it older than the mark — reaches a
+      // storyline screen whose centrepiece never mentions it. An explicit
+      // clear, not an omission: `recapThrough` takes the v10 sentinel, and
+      // leaving it out is what "do not touch this column" means. The next
+      // recap re-reads the whole window across the current members and stamps
+      // a fresh mark, so this costs one call and never a loop. Every other
+      // site that writes `member_hash` does the same — see this comment.
+      recapThrough: null,
     );
     // The name rather than the id, because this is read by a person in the
     // activity panel, and because a filing that happened is the whole point of
@@ -368,6 +379,14 @@ class StorylineService {
   /// Either way the cost is bounded: `requeueWork` is keyed on
   /// `(kind, source, entity_id)`, so a storyline that collects ten threads in
   /// one drain gets one refresh, not ten.
+  ///
+  /// And the gate is narrower than it looks. Every assignment moves
+  /// `member_hash`, so on any drain that also holds a sweep row the catch-up
+  /// at the head of [sweep] queues the refresh whatever this decided — which
+  /// is every drain a sync starts. What this gate actually governs is the
+  /// drains with no sweep row in them, a pump the UI kicked off: there, and
+  /// only there, is a single quiet thread's refresh genuinely deferred to the
+  /// next sync.
   Future<void> _enqueueRefreshAfterAssign(Storyline storyline) async {
     final summary = (storyline.summary ?? '').trim();
     final charter = (storyline.charter ?? '').trim();
@@ -435,8 +454,23 @@ class StorylineService {
     final described = storyline.refreshedMemberHash;
     if (described != null && described == memberHash) return;
 
+    // A storyline whose members were all removed, or whose conversation rows
+    // are gone, has nothing to describe it from — and nothing to describe IS a
+    // description of the empty set, so it is stamped like any other answer.
+    // Returning without the stamp left the description permanently behind the
+    // members, which the sweep's catch-up would re-queue on every sync
+    // forever. A later membership change moves `member_hash` and re-fires this
+    // pass, which is the only event that could make the answer different.
     final cards = await _cardsOf(members);
-    if (cards.isEmpty) return;
+    if (cards.isEmpty) {
+      await _store.updateStoryline(
+        storylineId,
+        memberHash: await _healedMemberHash(storyline, memberHash),
+        refreshedMemberHash: memberHash,
+        refreshedMemberCount: members.length,
+      );
+      return;
+    }
 
     // Everything the writes below compare against is captured HERE, before
     // the model is dialled. See the stamp at the end for why.
@@ -468,6 +502,7 @@ class StorylineService {
     // re-fires the pass, which is the correct outcome.
     await _store.updateStoryline(
       storylineId,
+      memberHash: await _healedMemberHash(storyline, memberHash),
       refreshedMemberHash: memberHash,
       refreshedMemberCount: preCount,
     );
@@ -488,6 +523,29 @@ class StorylineService {
     // returns above skip this deliberately; a refresh that found nothing
     // changed changed nothing for the recap either.
     await _store.requeueWork('storyline_recap', _workSource, storylineId);
+  }
+
+  /// The value [refresh] should write to `member_hash`, or null to leave the
+  /// column alone — [MessageStore.updateStoryline] takes this one as a plain
+  /// nullable, so null means "not this call's business".
+  ///
+  /// A one-time heal for rows seeded before anything wrote the column: a
+  /// fixture, or a storyline from before the hash existed. The refresh gate
+  /// falls back to deriving the hash from the member rows when the column is
+  /// NULL, but the sweep's catch-up asks SQL —
+  /// `refreshed_member_hash IS NOT member_hash` — and NULL is not any hash, so
+  /// such a row is stale forever however many times the pass runs. The gate
+  /// and the column have to speak the same value or the catch-up never closes.
+  ///
+  /// Re-read rather than trusted from the snapshot, because the caller took
+  /// that snapshot before dialling the model: a thread filed while the model
+  /// was thinking wrote a NEWER hash, and overwriting it with the derived
+  /// pre-call one would make the two columns agree about a member set that no
+  /// longer exists — the one outcome the pre-call stamp exists to prevent.
+  Future<String?> _healedMemberHash(Storyline snapshot, String derived) async {
+    if (snapshot.memberHash != null) return null;
+    final current = await _store.getStoryline(snapshot.id);
+    return current?.memberHash == null ? derived : null;
   }
 
   // ── automatic: one storyline, on what was said in it ───────────────────
@@ -561,11 +619,22 @@ class StorylineService {
       temperature: 0,
     );
 
-    // A model with nothing to say must not blank a good recap. The stored
-    // text stands and the watermark stays behind it, so the next message to
-    // land asks again — which is a far better failure than a storyline screen
-    // that went empty because one call came back thin.
-    if (result.recap.isEmpty) return;
+    // A model with nothing to say must not blank a good recap: the stored text
+    // and both lists stand, which is a far better failure than a storyline
+    // screen that went empty because one call came back thin.
+    //
+    // The watermark still moves, and it is not claiming the recap covers these
+    // messages — it records that the model was ASKED about this window and
+    // declined it. Without the stamp the sweep's catch-up finds the same
+    // storyline stale on every single sync and re-dials the 27B, at
+    // temperature zero, over the same window, for an answer that cannot come
+    // back different. The next message to land moves the window, and a
+    // different window is a different question — which is exactly when asking
+    // again is worth a call.
+    if (result.recap.isEmpty) {
+      await _store.updateStoryline(storylineId, recapThrough: newestSeen);
+      return;
+    }
 
     await _store.updateStoryline(
       storylineId,
@@ -764,123 +833,162 @@ class StorylineService {
   /// stronger invitation to look than a shared participant is — and the top
   /// [StorylineTuning.recruitMaxCandidates] by cosine each get the same
   /// confirmation call a normal assignment gets, against that charter.
+  ///
+  /// It hunts until the charter stops moving under it — see the loop below for
+  /// why a save that lands mid-hunt has no other way of being noticed.
   Future<void> recruit(String storylineId) async {
-    final storyline = await _store.getStoryline(storylineId);
+    final found = await _store.getStoryline(storylineId);
     // Dismissed between the save and the drain. Recruiting into it would
     // resurrect a group the user threw away, silently.
-    if (storyline == null ||
-        (storyline.status != 'active' && storyline.status != 'suggested')) {
+    if (found == null ||
+        (found.status != 'active' && found.status != 'suggested')) {
       return;
     }
+    var storyline = found;
 
-    final context = await _memberContext(storylineId);
-    final centroid = context.centroid;
-    if (centroid == null) {
-      // No member vectors means no ranking. The all-zero note is quiet on
-      // purpose — the log's quiet-kind check suppresses it as the genuine
-      // nothing it is (see the note at the end of this method).
-      _log.note({'recruited': 0, 'considered': 0});
-      return;
-    }
+    // The hunt runs again when the charter it hunted with is no longer the
+    // charter on the row. `requeueWork` cannot cover this one: a save that
+    // lands while this pass is running enqueues against its OWN `processing`
+    // row and is swallowed, and unlike the refresh and the recap there is no
+    // sweep catch-up to find it later — nothing durable records that a
+    // charter was never hunted with. So the pass carries its own wakeup.
+    //
+    // Bounded by the user, not by the model: an extra lap happens only when a
+    // save landed DURING the previous one, and at temperature zero a lap with
+    // no save in it would ask the same questions of the same threads and get
+    // the same answers. Membership only grows, so each lap has fewer
+    // candidates left to consider than the last.
+    bool charterMoved;
+    do {
+      // What this lap is hunting with, kept so the bottom can tell whether it
+      // is still what the row says.
+      final charterUsed = _normalized(storyline.charter ?? '');
 
-    // One read of the blocks, not one per candidate. The loop below walks
-    // every embedded thread in the mailbox, and the user is sitting in front
-    // of the charter they just saved waiting for this pass — a query per
-    // thread turned that wait into a function of mailbox size. Same set, same
-    // gate, same order.
-    final blocked = await _store.blockedThreadsOf(storylineId);
-
-    // Scored, then top-N. Ties break on the store's own order (newest first,
-    // key ascending), and the sort is made deterministic by index because
-    // List.sort makes no stability promise of its own.
-    final scored = <({int index, Map<String, Object?> row, double score})>[];
-    var index = 0;
-    for (final row in await _store.conversationsWithEmbeddings(
-      embedModel: EmbeddingsClient.modelTag,
-      sources: _sources,
-    )) {
-      final order = index++;
-      final key = row['conversation_key'] as String? ?? '';
-      if (key.isEmpty) continue;
-      final rowSource = row['source'] as String? ?? _workSource;
-      if (context.memberThreads.contains(_threadKey(rowSource, key))) continue;
-      if (blocked.contains(_threadKey(rowSource, key))) continue;
-      final blob = row['embedding'];
-      if (blob is! Uint8List) continue;
-      final vector = decodeEmbedding(blob);
-      if (vector.isEmpty) continue;
-      final score = cosine(vector, centroid);
-      if (score < StorylineTuning.assignCosineGateWithOverlap) continue;
-      scored.add((index: order, row: row, score: score));
-    }
-    scored.sort((a, b) {
-      final byScore = b.score.compareTo(a.score);
-      return byScore != 0 ? byScore : a.index.compareTo(b.index);
-    });
-    final considered =
-        scored.take(StorylineTuning.recruitMaxCandidates).toList();
-
-    // One snapshot for every candidate: the storyline as the user saved it is
-    // what all eight are judged against, not a group that grows under the
-    // later candidates as the earlier ones land.
-    final storylineParticipants = await _participantsOfStoryline(storylineId);
-
-    var recruited = 0;
-    for (final candidate in considered) {
-      final row = candidate.row;
-      final rowSource = row['source'] as String? ?? _workSource;
-      final key = row['conversation_key'] as String? ?? '';
-      final cardData = await _store.newestInboundCardData(rowSource, key);
-
-      final result = await runTask(
-        _confirmClient,
-        const ConfirmMembershipTask(),
-        ConfirmInput(
-          storyline: storyline,
-          storylineParticipants: storylineParticipants,
-          candidateCard: enrichedCardForConversationRow(row, cardData),
-        ),
-        // Zero for the reason assignment runs at zero: a re-run after a park
-        // must not move different threads.
-        temperature: 0,
-      );
-      if (!result.belongs || result.confidence == 'low') continue;
-
-      await _store.addStorylineMember(
-        storylineId,
-        rowSource,
-        key,
-        addedBy: 'auto',
-        evidence: result.evidence,
-      );
-      final lastMessageAt = row['last_message_at'] as String?;
-      if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
-        await _store.touchStorylineActivity(storylineId, lastMessageAt);
+      final context = await _memberContext(storylineId);
+      final centroid = context.centroid;
+      if (centroid == null) {
+        // No member vectors means no ranking. The all-zero note is quiet on
+        // purpose — the log's quiet-kind check suppresses it as the genuine
+        // nothing it is (see the note at the end of this method).
+        _log.note({'recruited': 0, 'considered': 0});
+        return;
       }
-      // In the same breath as the membership write, like every other add
-      // path: a park on a later candidate must not leave the hash describing
-      // a set that no longer exists. At most eight extra writes.
-      await _store.updateStoryline(
-        storylineId,
-        memberHash: await _memberHashOf(storylineId),
-      );
-      recruited++;
-    }
 
-    // A recruit that filed anything changed what this storyline is, and the
-    // description was written against the smaller group. Queued rather than
-    // called: the refresh handler is registered BEFORE this one, so the row
-    // waits for the next pump — a deliberate damper on the one cycle these
-    // two passes could form, since a refresh that widens a charter queues a
-    // recruit right back.
-    if (recruited > 0) {
-      await _store.requeueWork('storyline_refresh', _workSource, storylineId);
-    }
-    // Always, zeroes included — the log is what decides what a person sees.
-    // "Recruited 0 of 5" survives its quiet-kind check and shows: the model
-    // was consulted and said no, which is an answer. An all-zero pass is
-    // suppressed there as the genuine nothing it is.
-    _log.note({'recruited': recruited, 'considered': considered.length});
+      // One read of the blocks, not one per candidate. The loop below walks
+      // every embedded thread in the mailbox, and the user is sitting in front
+      // of the charter they just saved waiting for this pass — a query per
+      // thread turned that wait into a function of mailbox size. Same set, same
+      // gate, same order.
+      final blocked = await _store.blockedThreadsOf(storylineId);
+
+      // Scored, then top-N. Ties break on the store's own order (newest first,
+      // key ascending), and the sort is made deterministic by index because
+      // List.sort makes no stability promise of its own.
+      final scored = <({int index, Map<String, Object?> row, double score})>[];
+      var index = 0;
+      for (final row in await _store.conversationsWithEmbeddings(
+        embedModel: EmbeddingsClient.modelTag,
+        sources: _sources,
+      )) {
+        final order = index++;
+        final key = row['conversation_key'] as String? ?? '';
+        if (key.isEmpty) continue;
+        final rowSource = row['source'] as String? ?? _workSource;
+        final thread = _threadKey(rowSource, key);
+        if (context.memberThreads.contains(thread)) continue;
+        if (blocked.contains(thread)) continue;
+        final blob = row['embedding'];
+        if (blob is! Uint8List) continue;
+        final vector = decodeEmbedding(blob);
+        if (vector.isEmpty) continue;
+        final score = cosine(vector, centroid);
+        if (score < StorylineTuning.assignCosineGateWithOverlap) continue;
+        scored.add((index: order, row: row, score: score));
+      }
+      scored.sort((a, b) {
+        final byScore = b.score.compareTo(a.score);
+        return byScore != 0 ? byScore : a.index.compareTo(b.index);
+      });
+      final considered =
+          scored.take(StorylineTuning.recruitMaxCandidates).toList();
+
+      // One snapshot for every candidate: the storyline as the user saved it is
+      // what all eight are judged against, not a group that grows under the
+      // later candidates as the earlier ones land.
+      final storylineParticipants = await _participantsOfStoryline(storylineId);
+
+      var recruited = 0;
+      for (final candidate in considered) {
+        final row = candidate.row;
+        final rowSource = row['source'] as String? ?? _workSource;
+        final key = row['conversation_key'] as String? ?? '';
+        final cardData = await _store.newestInboundCardData(rowSource, key);
+
+        final result = await runTask(
+          _confirmClient,
+          const ConfirmMembershipTask(),
+          ConfirmInput(
+            storyline: storyline,
+            storylineParticipants: storylineParticipants,
+            candidateCard: enrichedCardForConversationRow(row, cardData),
+          ),
+          // Zero for the reason assignment runs at zero: a re-run after a park
+          // must not move different threads.
+          temperature: 0,
+        );
+        if (!result.belongs || result.confidence == 'low') continue;
+
+        await _store.addStorylineMember(
+          storylineId,
+          rowSource,
+          key,
+          addedBy: 'auto',
+          evidence: result.evidence,
+        );
+        final lastMessageAt = row['last_message_at'] as String?;
+        if (lastMessageAt != null && lastMessageAt.isNotEmpty) {
+          await _store.touchStorylineActivity(storylineId, lastMessageAt);
+        }
+        // In the same breath as the membership write, like every other add
+        // path: a park on a later candidate must not leave the hash describing
+        // a set that no longer exists. At most eight extra writes.
+        await _store.updateStoryline(
+          storylineId,
+          memberHash: await _memberHashOf(storylineId),
+          // Cleared with the hash, for the reason spelled out in
+          // [assignConversation]: this thread's messages may all predate the
+          // mark, and a mark taken over the old members must not gate the
+          // recap over the new ones.
+          recapThrough: null,
+        );
+        recruited++;
+      }
+
+      // A recruit that filed anything changed what this storyline is, and the
+      // description was written against the smaller group. Queued rather than
+      // called: the refresh handler is registered BEFORE this one, so the row
+      // waits for the next pump — a deliberate damper on the one cycle these
+      // two passes could form, since a refresh that widens a charter queues a
+      // recruit right back.
+      if (recruited > 0) {
+        await _store.requeueWork('storyline_refresh', _workSource, storylineId);
+      }
+      // Always, zeroes included — the log is what decides what a person sees.
+      // "Recruited 0 of 5" survives its quiet-kind check and shows: the model
+      // was consulted and said no, which is an answer. An all-zero pass is
+      // suppressed there as the genuine nothing it is.
+      _log.note({'recruited': recruited, 'considered': considered.length});
+
+      final fresh = await _store.getStoryline(storylineId);
+      // Dismissed while the hunt ran — the same judgement as the guard at the
+      // top, asked again because a whole pass has gone by since.
+      if (fresh == null ||
+          (fresh.status != 'active' && fresh.status != 'suggested')) {
+        return;
+      }
+      charterMoved = _normalized(fresh.charter ?? '') != charterUsed;
+      if (charterMoved) storyline = fresh;
+    } while (charterMoved);
   }
 
   // ── automatic: the whole mailbox ───────────────────────────────────────
@@ -1038,28 +1146,40 @@ class StorylineService {
   /// row count and not the candidate count: a `k` of the latter would let
   /// already-filed threads crowd a genuine candidate out of a probe's answer.
   ///
-  /// Three ways to decline, all of them quiet:
+  /// Four ways to decline, and each of them says why — once per distinct
+  /// reason, per process:
   ///
   /// * a candidate whose vector is not the index's width — a corpus caught
   ///   mid-model-change has rows the index skipped, and a hole in the index is
   ///   a link the probes cannot find;
   /// * no usable index at all, which is the ordinary state of a build without
   ///   the native extension;
+  /// * a candidate whose stored embedding is not bytes, which is a corrupt row
+  ///   rather than a missing feature;
   /// * a probe that does not find its own row, which is the one cheap check
   ///   that says the index really does hold every candidate.
+  ///
+  /// The answer is the same in all four — fall back to the arithmetic, cluster
+  /// identically, propose the same storylines — so none of them is an error.
+  /// But a build that quietly clusters the slow way forever and a corpus with
+  /// one bad row are very different things to be told about, and the report is
+  /// the only place that distinction survives.
   Future<List<Set<int>>?> _indexedLinks(
     List<Map<String, Object?>> rows,
     List<List<double>> vectors,
   ) async {
     for (final vector in vectors) {
-      if (vector.length != ConversationVectorIndex.dims) return null;
+      if (vector.length != ConversationVectorIndex.dims) {
+        _reportBruteForce("a candidate vector is not the index's width");
+        return null;
+      }
     }
 
     final indexed = await _store.prepareConversationIndex(
       embedModel: EmbeddingsClient.modelTag,
     );
     if (indexed == null) {
-      _reportBruteForce();
+      _reportBruteForce('no usable index');
       return null;
     }
 
@@ -1073,7 +1193,10 @@ class StorylineService {
     final links = [for (var i = 0; i < rows.length; i++) <int>{}];
     for (var i = 0; i < rows.length; i++) {
       final blob = rows[i]['embedding'];
-      if (blob is! Uint8List) return null;
+      if (blob is! Uint8List) {
+        _reportBruteForce('a candidate blob is not bytes');
+        return null;
+      }
       final hits = await _store.conversationNeighbors(blob, k: indexed);
       var foundSelf = false;
       for (final hit in hits) {
@@ -1092,24 +1215,30 @@ class StorylineService {
         links[i].add(j);
         links[j].add(i);
       }
-      if (!foundSelf) return null;
+      if (!foundSelf) {
+        _reportBruteForce('the index does not hold every candidate');
+        return null;
+      }
     }
     return links;
   }
 
-  /// Says once, per process, that the sweep is clustering the slow way.
-  ///
-  /// Static because the interesting thing is the BUILD — an app without the
-  /// native extension will fall back on every sweep forever, and a line per
-  /// sweep would be noise about a fact that cannot change. The shape is
-  /// `EmbeddingsClient._fail`'s report-once, minus the storage it needs to key
-  /// several reasons.
-  static bool _fallbackReported = false;
+  /// Reasons already reported. Static because the interesting thing is the
+  /// BUILD — an app without the native extension falls back on every sweep
+  /// forever, and a line per sweep would be noise about a fact that cannot
+  /// change.
+  static final Set<String> _fallbackReported = {};
 
-  static void _reportBruteForce() {
-    if (_fallbackReported) return;
-    _fallbackReported = true;
-    debugPrint('storylines: no clustering index — sweeping by arithmetic');
+  /// Says once, per process, per distinct [reason], that the sweep is
+  /// clustering the slow way.
+  ///
+  /// Keyed on the reason rather than on the fact, exactly like
+  /// `EmbeddingsClient._fail`: the four declines are told apart by nothing
+  /// else, and a single flag would let whichever one happened first hide the
+  /// rest for the life of the process.
+  static void _reportBruteForce(String reason) {
+    if (!_fallbackReported.add(reason)) return;
+    debugPrint('storylines: sweeping by arithmetic — $reason');
   }
 
   /// Single-link greedy agglomeration over [vectors], every pair compared in
@@ -1478,6 +1607,13 @@ class StorylineService {
     await _store.updateStoryline(
       id,
       memberHash: await _memberHashOf(id),
+      // Cleared with the hash, for the reason spelled out in
+      // [assignConversation] — and this is the path it was written for. A
+      // thread a person files by hand is usually one they went looking for,
+      // which means an old one, and without this the recap requeued below
+      // would find the mark already past every message on it and return
+      // having said nothing.
+      recapThrough: null,
       // Filing a thread into a suggestion is accepting it — the same write
       // [keepSuggestion] makes. Nothing is left to ask about a group the user
       // is already putting threads into.
@@ -1504,10 +1640,22 @@ class StorylineService {
   ///
   /// A removal changes what the storyline is about as surely as an addition
   /// does, so it queues the same [refresh]. A storyline emptied down to
-  /// nothing is safe: the pass returns on a member set with no cards.
+  /// nothing is safe: the pass stamps on a member set with no cards and says
+  /// nothing.
+  ///
+  /// It is also the one membership change that adds no message anywhere, which
+  /// is why clearing the recap watermark matters most here: the recap the
+  /// refresh tail queues has no new mail to make it stale, and would return at
+  /// its own gate still describing a thread that is gone.
   Future<void> removeThread(String id, String source, String key) async {
     await _store.removeStorylineMember(id, source, key, block: true);
-    await _store.updateStoryline(id, memberHash: await _memberHashOf(id));
+    await _store.updateStoryline(
+      id,
+      memberHash: await _memberHashOf(id),
+      // Cleared with the hash, for the reason spelled out in
+      // [assignConversation].
+      recapThrough: null,
+    );
     _progress.noteStorylineLink(
       source,
       await _store.stampStorylineId(source, key, clearingStorylineId: id),

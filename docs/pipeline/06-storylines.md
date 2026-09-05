@@ -28,7 +28,13 @@ are the authority on sequencing.
    storyline whose membership has moved. Its own section below.
 4. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
    charter, or after a refresh widened one, judges up to 8 candidate threads
-   against it.
+   against it. It hunts again if the charter moved while it ran: a save landing
+   after the row went `processing` enqueues against that row and is swallowed,
+   and this is the one pass with no sweep catch-up to find it later, so the
+   wakeup has to live inside the pass. Bounded by the user rather than the
+   model — an extra lap needs a save *during* the previous one, and at
+   temperature zero a lap with no save would ask the same questions of the same
+   threads.
 5. **Recap** (`StorylineRecapHandler` → `recap`) — re-writes the storyline's
    running state of play from the newest messages across its member threads.
    Its own section below.
@@ -48,7 +54,19 @@ the description follow the membership.
 means the members have not changed since the description was written and the
 pass returns before any model call; NULL means never described, which is not
 the same as unchanged. Both hashes use the one write recipe (`_hashOfThreads`,
-source folded in).
+source folded in). A NULL `member_hash` — a fixture, or a row from before the
+column was written — is derived from the member rows for the gate *and healed
+into the column* by the same stamp: the gate reads Dart and the catch-up reads
+SQL, and `NULL IS NOT <hash>` keeps such a row stale forever if the two do not
+speak the same value. The heal re-reads the column first, so a hash written by
+a thread filed mid-call is never overwritten with the older derived one.
+
+**An empty member set is still an answer.** A storyline whose members were all
+removed, or whose conversation rows are gone, has no cards to describe it from,
+so the pass makes no model call — but it stamps. Nothing to describe *is* a
+description of the empty set, and without the stamp the catch-up re-queued the
+pass on every sync for the life of the database. A thread joining later moves
+`member_hash` and re-fires it.
 
 **A proposed storyline is born described.** `_propose` stamps
 `refreshed_member_hash`/`refreshed_member_count` on the kept path, right where
@@ -69,7 +87,7 @@ provenance through the queue):
 |---|---|
 | `addThread` / `removeThread` | always — a user filing by hand is telling the app the group changed, and is looking at it |
 | `setCharter('')` | always — this is what makes the About block's "clearing it lets the model redraft" promise true |
-| `assignConversation` tail | **gated**: summary empty, or charter empty and unlocked, or `member_count - refreshed_member_count >= 2` |
+| `assignConversation` tail | **gated**: summary empty, or charter empty and unlocked, or `member_count - refreshed_member_count >= 2`. The growth clause needs a recorded count — a described-but-uncounted row is a pre-feature one, and the sweep catch-up owns it. And on a sync drain the gate is moot anyway: any assignment moves `member_hash`, so the same drain's sweep catch-up queues the refresh whatever the gate said. What it really governs is drains with no pending sweep row — a UI pump |
 | `recruit` tail | when it filed ≥1 thread |
 | `sweep` catch-up | every live storyline where `refreshed_member_hash IS NOT member_hash` |
 
@@ -176,14 +194,33 @@ the refresh stamps its pre-call hash: a message that landed while the model was
 thinking is a message this recap never read, and stamping what is true *now*
 would leave the gate reading fresh and that message would never be recapped.
 
+**The gate is time AND membership**, because a watermark alone answers the
+wrong question. It measures the window it was taken over, and a membership
+change makes that a different window — so every site that writes
+`member_hash` clears `recap_through` in the same `updateStoryline` call:
+`assignConversation`, `recruit`'s per-candidate write, `addThread`,
+`removeThread`. (`_propose` needs no clear; a newborn's watermark is already
+NULL.) Without it a thread filed by hand — usually an old one, since it is a
+thread the user went *looking* for — is a silent no-op on every trigger that
+queues a recap, because the mark is already past every message on it. The clear
+is explicit rather than an omission: `recap_through` takes the v10 `_unset`
+sentinel, and omitting it is what "leave this column alone" means.
+
+It adds no permanent work. After the clear the catch-up's NULL arm selects the
+storyline only when an eligible message exists; the pass then reads and stamps
+a fresh mark, and a model that declines the window stamps it anyway (see *Empty
+answers* below), so there is no arm that clears without eventually stamping. A
+storyline emptied of everything readable is not selected at all — no eligible
+message — and converges as silence.
+
 **Triggers** — every path that changes what has been *said*, all via
 `requeueWork`:
 
 | Trigger | When |
 |---|---|
 | `ExtractHandler` tail | a message's facts land in a thread that is already in ≥1 storyline (`storylineIdsFor`), one requeue per storyline. Deliberately outside `_refreshCard` and not behind a successful embed — the recap has nothing to do with the vector, and a down embedding server must not cost it a message |
-| `addThread` | always — a hand-filed thread brings its own messages, and the user is looking |
-| `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story |
+| `addThread` | always — a hand-filed thread brings its own messages, and the user is looking. The membership clear is what lets that recap past the gate when those messages are old ones |
+| `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story. This is `removeThread`'s route in |
 | `_propose` | always, on the kept path — the recap handler drains after the sweep's, so a storyline born in this pass shows its recap in the same drain rather than a sync later |
 | `DraftNotifier._sendChat` | a chat reply the user sent from this app, per storyline the chat is filed in. **The only outbound row wired directly**, because it is the only one no ingest will ever see: the chat send writes its own row with the id Graph assigned, and the next pull skips it as already-known |
 | `sweep` catch-up | every live storyline holding a message the recap has not read: `recap_through` NULL, or a newer `received_at` than it. `staleRecapStorylineIds` repeats `recentStorylineMessages`' gate exclusion (`triage_status <> 'skipped'` unless `gate_reason = 'teams_source'`) and its own `received_at` guard, because the question asked must be the one the pass answers — a storyline queued over messages the recap cannot read would stamp no watermark and be queued again forever. A storyline with no qualifying messages at all is left alone for the same reason |
@@ -204,18 +241,21 @@ would buy no latency and would cost a `storylineIdsFor` query per message inside
 `_ingestPage`'s page transaction, on first syncs that run to six figures. One
 indexed question per sync replaces it.
 
-`removeThread` is absent where the refresh table has it, and the watermark is
-why. Removing a thread adds no messages, so the newest `received_at` left in
-the storyline is older than the recap has already read: the refresh a removal
-queues does re-queue the recap, and that recap returns at the gate. A recap can
-therefore go on describing a thread that has just been filed out of the
-storyline until something new is said in one of the threads that remain. That
-is the one place the watermark's cheapness shows, and it is a known edge rather
-than a design: the pass is keyed to *messages arriving*, and a removal is the
-only event that changes the story without one. The catch-up does not close it
-either, and could not: its `EXISTS` asks whether a member thread holds a message
-newer than the watermark, and a removal — which adds no messages — leaves that
-answer no.
+`removeThread` is absent where the refresh table has it because it needs no row
+of its own: the refresh it queues re-queues the recap from its own tail. What
+makes that reach the model is the watermark clear above, and a removal is the
+case it was most needed for — it is the one membership change that adds no
+message anywhere, so nothing else could ever make the recap stale. Before the
+clear, a recap went on narrating a thread the user had just filed out until
+something new was said in the threads that remain; the catch-up could not close
+it either, since its `EXISTS` asks whether a member thread holds a message
+*newer than the watermark* and a removal leaves that answer no.
+
+The one case left is a storyline emptied down to nothing: the refresh finds no
+cards, so it stamps and returns without queueing a recap, and the stale recap
+text stays on the row. It is visible only on a live storyline with no readable
+members, and the alternative — a recap pass over an empty window — has nothing
+to write.
 
 Bursts coalesce for free: `requeueWork` is keyed on
 `(kind, source, entity_id)`, so ten messages landing in one drain leave one
@@ -224,9 +264,14 @@ state at run time rather than a payload. Nothing carries provenance through the
 queue.
 
 **Empty answers keep the previous recap standing.** A model that comes back
-with no recap text writes *nothing at all* — not the text, not the lists, not
-the watermark. A thin answer must never cost the user the catch-up they had,
-and leaving the watermark behind means the next message to land asks again.
+with no recap text leaves the text and both lists exactly as they were: a thin
+answer must never cost the user the catch-up they had. The watermark still
+moves, and it is not claiming the recap covers those messages — it records that
+the model was *asked* about this window and declined it. Without the stamp the
+sweep's catch-up finds the storyline stale on every sync and re-dials the 27B,
+at temperature zero, over the same window, for an answer that cannot come back
+different. The next message moves the window, and a different window is a
+different question — which is when asking again is worth a call.
 
 ## What the user sees
 
@@ -337,8 +382,8 @@ without the native extension), when the diff backfill cannot complete, when a
 candidate's vector is not the index's width — a corpus caught mid-model-change
 has rows the index skipped, and a hole in the index is a link the probes cannot
 find — and when a probe fails to find its own row, which is the cheap check
-that the index really does hold every candidate. Falling back is a `debugPrint`
-once per process and nothing else: never a park, never a crash, and never a
+that the index really does hold every candidate. Falling back says why, once
+per distinct reason, and nothing else: never a park, never a crash, and never a
 different answer.
 
 ## Cross-source identity
