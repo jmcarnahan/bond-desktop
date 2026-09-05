@@ -419,6 +419,12 @@ UPDATE message_progress SET draft_state = CASE
 /// - `needs_you` is judged against a literal threshold ([needsYouSql]) because
 ///   a migration must not read preferences; rows still open when the app
 ///   launches are restated by the first settle sweep.
+/// - That SQL is also frozen at its v8 SHAPE, which is what `verdict: false`
+///   asks for. This migration replays whenever a v1..v7 database is opened by a
+///   build at v10 or beyond, and `messages.needs_you_verdict` does not exist
+///   until v10 — widening the predicate here would make `from7To8` throw
+///   "no such column" on exactly those upgrades. `test/migration_test.dart` is
+///   the detector.
 final String _backfillProgress = '''
 INSERT OR IGNORE INTO message_progress (
   source, source_message_id, conversation_key, received_at,
@@ -528,7 +534,7 @@ FROM (
       (SELECT n.reason FROM message_notify n
         WHERE n.source = m.source
           AND n.source_message_id = m.source_message_id) AS notify_reason,
-      ${needsYouSql(threshold: backfillNeedsYouThreshold)} AS needs_you
+      ${needsYouSql(threshold: backfillNeedsYouThreshold, verdict: false)} AS needs_you
     FROM messages m
   ) d
 ) e

@@ -1,8 +1,17 @@
 # 11 · Needs-you verdict
 
-**Every reader of this verdict lands in a later phase of this round.** As of
-this phase the stage judges a message and stores the answer; nothing in the app
-reads `needs_you_verdict` yet.
+**Who reads this verdict.** The **notification settle** does, as of this phase
+— see `09-notifications.md`. Three readers, together so the tile and the toast
+cannot disagree: `notifyWorthy` counts `needs_you_verdict = 1` as a
+message-level ask; `needsYouSql` counts it in the same position, so the settle
+sweep's backstop writes the same `message_progress.needs_you`; and
+`_isComplete` holds a candidate open while its `needs_you` work item is still
+`pending` or `processing`. It is the **ask half only** — the attention
+threshold, the `later` bucket and the `done` state gate a judged yes exactly as
+they gate every other ask.
+
+Attention scoring and the draft pre-gate still do **not** read it; those land in
+later phases of this round.
 
 **What happens.** `NeedsYouHandler`
 (`app/lib/services/needs_you_handler.dart`, run by `AiWorker`) answers one

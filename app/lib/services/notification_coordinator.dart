@@ -45,8 +45,21 @@ import 'pipeline_progress.dart';
 /// this: [NotificationCoordinator]'s decision table suppresses it first.
 /// `needsYouSql`, which judges the rows this never sees, has to carry that
 /// guard itself.
+///
+/// `needs_you_verdict` is an ask in its own right, and the only one that was
+/// decided about THIS message as a whole rather than inferred from a field:
+/// the needs-you stage wrote it either from the deterministic Teams floor or
+/// from a confident model yes, so a 1 here is already the considered answer to
+/// "does this want the owner". It is the ASK HALF ONLY. The volume half below
+/// is untouched by it — the attention threshold, the `later` bucket and the
+/// `done` state still gate a judged yes exactly as they gate every other ask,
+/// because the user's one loudness control does not get an exception carved
+/// into it for the newest stage. NULL and 0 add nothing, per the `== 1` rule
+/// above: never judged is not a yes, and judged no is not a veto either — the
+/// other asks stand on their own.
 bool notifyWorthy(Map<String, Object?> row, {required double threshold}) {
-  final ask = _int(row['reply_expected']) == 1 ||
+  final ask = _int(row['needs_you_verdict']) == 1 ||
+      _int(row['reply_expected']) == 1 ||
       _int(row['needs_action']) == 1 ||
       row['urgency'] == 'urgent' ||
       row['urgency'] == 'high' ||
@@ -104,7 +117,17 @@ class NotificationCoordinator {
 
   /// The activity kinds that can change a verdict. A sync or a draft event
   /// moves nothing this reads, so it does not wake the sweep.
-  static const Set<String> _pipelineKinds = {'triage', 'extract', 'storyline'};
+  ///
+  /// These are activity-row kinds, and `AiWorker` stamps each row with its
+  /// handler's `kind` — so `needs_you` here is `NeedsYouHandler.kind`, the same
+  /// string as its `work_items.task_kind`. It earns a place because the pass
+  /// both writes an ask this reads and holds the row open until it lands.
+  static const Set<String> _pipelineKinds = {
+    'triage',
+    'needs_you',
+    'extract',
+    'storyline',
+  };
 
   /// The reasons that mean **the app decided the user does not need this**,
   /// which is exactly what `dropped` records. `read`, `done` and `stale` are
@@ -350,6 +373,14 @@ class NotificationCoordinator {
   bool _isComplete(Map<String, Object?> row) {
     const terminal = {'triaged', 'error', 'skipped'};
     if (!terminal.contains(row['triage_status'])) return false;
+    // `== 1` where its neighbours are `!= 0`, deliberately. Both spellings
+    // agree on the values [openNotifyCandidates] actually projects, which are
+    // 0 and 1. They differ on an ABSENT key — a row built somewhere else, or a
+    // future projection that forgets this one — where the value reads null:
+    // `!= 0` would call that open and wait until the deadline for a stage that
+    // may never have been queued, while this reads it as complete, which is
+    // what the coordinator did before this stage existed.
+    if (_int(row['needs_you_open']) == 1) return false;
     if (_int(row['extract_open']) != 0) return false;
     if (_int(row['storyline_open']) != 0) return false;
     if (row['attention_score'] == null) return false;

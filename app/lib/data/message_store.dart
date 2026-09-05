@@ -3141,6 +3141,10 @@ RETURNING source_message_id
   /// over-waits when a sibling thread queued the work. That is the intended
   /// trade: announcing a message under the wrong storyline is worse than
   /// announcing it a few seconds late, and the deadline bounds how late.
+  ///
+  /// `needs_you_open` is keyed by MESSAGE, like `extract_open`, and is waited
+  /// on the same way: a verdict that is still being decided is one the settle
+  /// would otherwise announce without.
   Future<List<Map<String, Object?>>> openNotifyCandidates({
     int limit = 50,
   }) async {
@@ -3149,10 +3153,15 @@ RETURNING source_message_id
           '''
 SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
   m.subject, m.from_name, m.summary, m.urgency, m.deadline, m.needs_action,
-  m.reply_expected, m.is_read, m.triage_status, m.received_at,
+  m.reply_expected, m.needs_you_verdict, m.is_read, m.triage_status,
+  m.received_at,
   m.updated_at AS message_updated_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   ai.attention_score, ai.bucket, ai.updated_at AS ai_updated_at,
+  EXISTS (SELECT 1 FROM work_items w
+          WHERE w.task_kind = 'needs_you' AND w.source = n.source
+            AND w.entity_id = n.source_message_id
+            AND w.status IN ('pending','processing')) AS needs_you_open,
   EXISTS (SELECT 1 FROM work_items w
           WHERE w.task_kind = 'extract' AND w.source = n.source
             AND w.entity_id = n.source_message_id

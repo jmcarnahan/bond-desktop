@@ -22,9 +22,22 @@
 /// divergence: the coordinator's decision table suppresses a read message
 /// before worthiness is ever asked, so this is where that guard has to live
 /// instead.
-String needsYouSql({required String threshold}) => '''
+///
+/// [verdict] exists for ONE caller: the v8 backfill in `database.dart`, which
+/// interpolates this SQL from inside `from7To8`. That migration replays on any
+/// v1..v7 database being brought up to v10 or beyond, and at the moment it runs
+/// the `needs_you_verdict` column does not exist yet — it arrives in v10. So the
+/// migration keeps the spelling it originally ran with, frozen at `false`, and
+/// every live caller takes the default and reads the verdict.
+String needsYouSql({required String threshold, bool verdict = true}) {
+  // Carries its own indentation, and the `false` arm carries the indentation
+  // the first clause used to have, so that arm renders byte-for-byte what the
+  // migration ran before this parameter existed.
+  final verdictClause =
+      verdict ? '       m.needs_you_verdict = 1\n    OR ' : '       ';
+  return '''
 CASE WHEN (
-       m.reply_expected = 1
+${verdictClause}m.reply_expected = 1
     OR m.needs_action = 1
     OR m.urgency IN ('urgent', 'high')
     OR COALESCE(m.deadline, '') <> ''
@@ -47,6 +60,7 @@ CASE WHEN (
          WHERE ai.source = m.source AND ai.conversation_key = m.conversation_key
       ), 0) >= $threshold
 THEN 1 ELSE 0 END''';
+}
 
 /// The attention floor the v8 backfill judges history against.
 ///

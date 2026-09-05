@@ -622,6 +622,32 @@ void main() {
 
       expect((await progressOf('m1'))['needs_you'], 0);
     });
+
+    test('a judged needs-you yes is an ask nothing else here provides',
+        () async {
+      // No urgency, no needs_action, no deadline, no CTA — the needs-you
+      // verdict is the only clause in the predicate that can be true, so this
+      // is the SQL side of the same fact the coordinator's toast reads.
+      await ingest('m1');
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'names the owner and asks for a date');
+      await finishStages('m1');
+      await store.writeAttentionScore('email', 'c1', 0.9);
+
+      expect(await progress.sweepSettled(threshold: 0.5), 1);
+      expect((await progressOf('m1'))['needs_you'], 1);
+    });
+
+    test('a judged needs-you no leaves the message needing nobody', () async {
+      await ingest('m1');
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: false, reason: 'a status update, addressed to the team');
+      await finishStages('m1');
+      await store.writeAttentionScore('email', 'c1', 0.9);
+
+      expect(await progress.sweepSettled(threshold: 0.5), 1);
+      expect((await progressOf('m1'))['needs_you'], 0);
+    });
     test('it waits for the reply suggestion too', () async {
       await ingest('m1');
       await progress.noteTriage('email', 'm1', state: 'done');
