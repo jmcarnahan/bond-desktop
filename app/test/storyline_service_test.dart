@@ -1,18 +1,28 @@
+import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
+import 'package:bond_inbox/data/conversation_vec_index.dart';
 // `show`: drift generates an `ActivityEvent` row class from the
 // `activity_events` table, and this file means the log's own.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
+// `show`: the one thing this file wants from the extraction pass is the hash
+// function behind both storyline hash recipes.
+import 'package:bond_inbox/services/extract_handler.dart' show cardHash;
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
+import 'package:bond_inbox/services/progress_bus.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
 import 'fixtures/test_db.dart';
+import 'fixtures/vec_test_db.dart';
 
 /// An [LlmClient] that answers from a per-schema script and never opens a
 /// socket.
@@ -88,6 +98,73 @@ class HookedFakeLlm extends FakeLlm {
   }
 }
 
+/// A real [MessageStore] over a real database that counts the two reads the
+/// assignment pass hoisted out of its candidate loop.
+///
+/// A count rather than a stub because the store is not mockable and should not
+/// be: what these tests pin is that ONE pass makes ONE of each call however
+/// many storylines it walks, and only the store can say how many it was asked.
+class CountingStore extends MessageStore {
+  int memberContextCalls = 0;
+  int blockedIdCalls = 0;
+
+  CountingStore(super.db);
+
+  @override
+  Future<List<Map<String, Object?>>> memberContextRows(
+    List<String> storylineIds, {
+    required String embedModel,
+  }) {
+    memberContextCalls++;
+    return super.memberContextRows(storylineIds, embedModel: embedModel);
+  }
+
+  @override
+  Future<Set<String>> blockedStorylineIdsFor(
+    String source,
+    String conversationKey,
+  ) {
+    blockedIdCalls++;
+    return super.blockedStorylineIdsFor(source, conversationKey);
+  }
+}
+
+/// A [MessageStore] that counts the sweep's KNN probes.
+///
+/// [CountingStore]'s shape and its reason: the store is not mockable and
+/// should not be, and only it can say whether the indexed path ran at all. A
+/// count of zero is how the equivalence test below would notice that its
+/// "indexed" run had quietly fallen back and was comparing the arithmetic
+/// against itself.
+class ProbingStore extends MessageStore {
+  int neighborProbes = 0;
+
+  ProbingStore(super.db);
+
+  @override
+  Future<List<({String source, String key, double similarity})>>
+      conversationNeighbors(Uint8List vector, {required int k}) {
+    neighborProbes++;
+    return super.conversationNeighbors(vector, k: k);
+  }
+}
+
+/// A [MessageStore] that reports no clustering index, whatever this process
+/// has loaded.
+///
+/// The seam for the fallback, overriding the one method that decides: a failed
+/// backfill, a missing native extension and a connection opened before the
+/// extension was registered all reach the sweep as this same `null`. Faking it
+/// here rather than unloading a process-global native extension, which is not
+/// something a test can do to the rest of the suite.
+class UnindexedStore extends MessageStore {
+  UnindexedStore(super.db);
+
+  @override
+  Future<int?> prepareConversationIndex({required String embedModel}) async =>
+      null;
+}
+
 /// A unit vector whose cosine against `[1, 0]` is exactly [c]. Two dimensions
 /// is all these tests need — the gates are cosine thresholds, and a 768-wide
 /// vector would only make the arithmetic harder to read.
@@ -112,6 +189,49 @@ Map<String, dynamic> nameAnswer({
       'summary': summary,
       'charter': charter,
     };
+
+/// The refresh task's answer. Shaped like [nameAnswer] and defaulted to the
+/// text `seedStoryline` already stores, so a test that scripts nothing in
+/// particular is scripting the continuity answer — the description coming back
+/// unchanged, which is what this pass is supposed to do most of the time.
+Map<String, dynamic> refineAnswer({
+  String evidence = 'Every thread is still the website redesign.',
+  String title = 'Website redesign',
+  String summary = 'The studio is reviewing the homepage copy.',
+  String charter = 'The redesign of the Northline Studio website — the '
+      'homepage copy, the new photography, and the launch date.',
+}) =>
+    {
+      'evidence': evidence,
+      'title': title,
+      'summary': summary,
+      'charter': charter,
+    };
+
+/// The recap task's answer. Both lists are non-empty by default, so a test
+/// that scripts nothing in particular still exercises the JSON round trip the
+/// two columns are for.
+Map<String, dynamic> recapAnswer({
+  String evidence = 'The studio moved the launch date.',
+  String recap = 'The homepage copy is approved and the launch moved to '
+      'October 9. Sarah is waiting on the photography.',
+  List<String> openItems = const ['Sarah owes the photo selects to Dana'],
+  List<String> decisions = const ['Launch moved to October 9'],
+}) =>
+    {
+      'evidence': evidence,
+      'recap': recap,
+      'open_items': openItems,
+      'decisions': decisions,
+    };
+
+/// The dedupe key the service writes for a member set, spelled out: the
+/// `'<source>\n<key>'` composites, sorted, newline-joined, hashed. The same
+/// recipe `_hashOfThreads` uses — written out here rather than reached for,
+/// because a test that computed the hash by calling the code under test would
+/// agree with it however wrong both were.
+String memberHashOf(List<String> keys, {String source = 'email'}) =>
+    cardHash(([for (final key in keys) '$source\n$key']..sort()).join('\n'));
 
 void main() {
   late BondDatabase db;
@@ -154,6 +274,58 @@ void main() {
     );
   }
 
+  /// One message on a thread, and with it the `message_progress` row
+  /// `upsertMessage` writes — the row the storyline pointer lands on.
+  Future<void> seedMessage(
+    MessageStore into,
+    String key,
+    String id, {
+    String receivedAt = '2026-08-28T10:00:00Z',
+    String source = 'email',
+    String direction = 'inbound',
+    String fromName = 'Sarah',
+    String? body,
+    String triageStatus = 'pending',
+    String? gateReason,
+  }) =>
+      into.upsertMessage({
+        'source': source,
+        'source_message_id': id,
+        'conversation_key': key,
+        'direction': direction,
+        'subject': 'Subject for $key',
+        'from_name': fromName,
+        'from_address': 'sarah@example.com',
+        'received_at': receivedAt,
+        'body_text': body ?? 'body of $id',
+        'triage_status': triageStatus,
+        'gate_reason': gateReason,
+      });
+
+  /// The storyline pointer one message carries, straight from the column the
+  /// home feed joins on.
+  Future<String?> pointerOf(String id, {String source = 'email'}) async =>
+      (await db
+              .customSelect(
+                'SELECT storyline_id FROM message_progress '
+                'WHERE source = ? AND source_message_id = ?',
+                variables: [Variable(source), Variable(id)],
+              )
+              .getSingle())
+          .data['storyline_id'] as String?;
+
+  /// Pins when a membership was made. `added_at` is written at millisecond
+  /// resolution, and every test below that turns on WHICH membership is oldest
+  /// says so here rather than trusting two writes to land in different
+  /// milliseconds.
+  Future<void> memberAddedAt(String id, String key, String iso) =>
+      db.customUpdate(
+        'UPDATE storyline_members SET added_at = ? '
+        'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+        variables: [Variable(iso), Variable(id), const Variable('email'),
+            Variable(key)],
+      );
+
   /// A storyline with one member, both already embedded.
   Future<void> seedStoryline(
     MessageStore into, {
@@ -185,6 +357,42 @@ void main() {
     );
     if (titleLocked) await into.updateStoryline(id, titleLocked: true);
     await into.addStorylineMember(id, 'email', memberKey, addedBy: 'auto');
+  }
+
+  /// Runs the refresh a preceding action queued, exactly as
+  /// `StorylineRefreshHandler` would: take the pending row, hand its entity id
+  /// to the service.
+  ///
+  /// Every path that changes a storyline's membership now QUEUES the
+  /// re-description instead of making it inline, so a test about what the
+  /// description says has two halves — the action, and the drain. Returns the
+  /// storyline id the row named, or null when nothing was queued.
+  /// Stamps a storyline as having been described exactly as its members stand
+  /// — the state the refresh gate short-circuits on. Both columns, because the
+  /// gate is an equality test between them and `seedStoryline` writes neither.
+  Future<void> markDescribed(String id, List<String> keys) =>
+      store.updateStoryline(
+        id,
+        memberHash: memberHashOf(keys),
+        refreshedMemberHash: memberHashOf(keys),
+        refreshedMemberCount: keys.length,
+      );
+
+  Future<String?> drainRefresh(StorylineService service) async {
+    final work = await store.nextPendingWork('storyline_refresh');
+    if (work == null) return null;
+    final id = work['entity_id'] as String;
+    await service.refresh(id);
+    return id;
+  }
+
+  /// The same, for the recap row — exactly what `StorylineRecapHandler` does.
+  Future<String?> drainRecap(StorylineService service) async {
+    final work = await store.nextPendingWork('storyline_recap');
+    if (work == null) return null;
+    final id = work['entity_id'] as String;
+    await service.recap(id);
+    return id;
   }
 
   group('assignConversation', () {
@@ -386,8 +594,12 @@ void main() {
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer(title: 'A name the model preferred')],
       });
+      final service = StorylineService(store, llm);
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      await service.assignConversation('email', 'c1');
+      // The assignment queues the description rather than writing it; the
+      // drain is what dials the model. See the refresh group below.
+      await drainRefresh(service);
 
       final storyline = (await store.getStoryline('sl-1'))!;
       // The user named it. No later pass takes that back.
@@ -404,8 +616,10 @@ void main() {
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer(title: 'Brightsea launch')],
       });
+      final service = StorylineService(store, llm);
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      await service.assignConversation('email', 'c1');
+      await drainRefresh(service);
 
       expect((await store.getStoryline('sl-1'))!.title, 'Brightsea launch');
     });
@@ -418,6 +632,38 @@ void main() {
       await StorylineService(store, llm).assignConversation('email', 'c1');
 
       expect(await store.membersOf('sl-1'), hasLength(2));
+    });
+
+    test('one pass reads member context once, not per candidate', () async {
+      final counting = CountingStore(db);
+      // Three live storylines to walk. Read one candidate at a time this is
+      // three of each call — and a query per member inside each of them.
+      await seedStoryline(counting,
+          id: 'sl-far', memberKey: 'far', memberVector: vectorAt(-0.9));
+      await seedStoryline(counting,
+          id: 'sl-near', memberKey: 'near', memberVector: vectorAt(0.95));
+      await seedStoryline(counting,
+          id: 'sl-blocked', memberKey: 'blocked', memberVector: vectorAt(1));
+      await seed(counting, 'c1', vector: vectorAt(0.9));
+      // So the hoisted block read is exercised too, not merely made.
+      await counting.removeStorylineMember('sl-blocked', 'email', 'c1',
+          block: true);
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      final outcome = await StorylineService(counting, llm)
+          .assignConversation('email', 'c1');
+
+      expect(counting.memberContextCalls, 1);
+      expect(counting.blockedIdCalls, 1);
+      // And it still picks the right storyline of the three: the blocked one
+      // sits closest and is passed over, the far one never comes near the
+      // gate.
+      expect(outcome, AssignOutcome.assigned);
+      expect(
+        (await counting.membersOf('sl-near')).map((m) => m.conversationKey),
+        ['near', 'c1'],
+      );
+      expect(await counting.membersOf('sl-blocked'), hasLength(1));
     });
   });
 
@@ -601,8 +847,10 @@ void main() {
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
+      final service = StorylineService(store, llm);
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      await service.assignConversation('email', 'c1');
+      await drainRefresh(service);
 
       final naming = llm.userMessages[llm.schemas.indexOf('storyline_name')];
       expect(naming, contains('The studio sent the homepage copy back.'));
@@ -621,8 +869,10 @@ void main() {
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
+      final service = StorylineService(store, llm);
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      await service.assignConversation('email', 'c1');
+      await drainRefresh(service);
 
       expect(llm.callsFor('storyline_name'), 1);
       expect((await store.getStoryline('sl-1'))!.charter,
@@ -641,8 +891,10 @@ void main() {
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
+      final service = StorylineService(store, llm);
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      await service.assignConversation('email', 'c1');
+      await drainRefresh(service);
 
       final storyline = (await store.getStoryline('sl-1'))!;
       // The naming call still happened — the summary was missing — and it
@@ -668,8 +920,10 @@ void main() {
         await store.updateStoryline('sl-1',
             charter: 'Only the launch.', charterLocked: true);
       });
+      final service = StorylineService(store, llm);
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      await service.assignConversation('email', 'c1');
+      await drainRefresh(service);
 
       final storyline = (await store.getStoryline('sl-1'))!;
       expect(storyline.charter, 'Only the launch.');
@@ -686,6 +940,10 @@ void main() {
       // No script for naming: a second backfill call would throw here, which
       // is what makes "converges" a claim this test can check.
       expect(llm.callsFor('storyline_name'), 0);
+      // And nothing is queued to make one later either. A storyline that
+      // reads well and grew by one thread is left as it is — see 'one quiet
+      // thread does not wake the describer'.
+      expect(await store.nextPendingWork('storyline_refresh'), isNull);
     });
 
     test('a proposed storyline is stored with its charter', () async {
@@ -743,8 +1001,10 @@ void main() {
         'storyline_membership': [confirmAnswer()],
         'storyline_name': [nameAnswer()],
       });
+      final service = StorylineService(store, llm);
 
-      await StorylineService(store, llm).assignConversation('email', 'c1');
+      await service.assignConversation('email', 'c1');
+      await drainRefresh(service);
 
       // The cards are clamped as a SET, not one by one — a storyline of nine
       // threads has to fit in one prompt however long each summary ran.
@@ -979,7 +1239,9 @@ void main() {
       // so there is no stored set for `member_hash` to describe.
       expect(hashes['cluster_hash'], isNotNull);
       expect(hashes['member_hash'], null);
-      expect(await store.dismissedHashExists(hashes['cluster_hash']! as String),
+      expect(
+          await store
+              .dismissedHashExistsAny([hashes['cluster_hash']! as String]),
           isTrue);
       // Nothing to answer in the rail.
       expect(await store.loadStorylines(statuses: const ['suggested']),
@@ -1360,6 +1622,107 @@ void main() {
           .map((m) => m.conversationKey)
           .toSet(), {'c4', 'c5'});
     });
+
+    /// One key on two connectors, plus a third thread to pair whichever of
+    /// them is still free. Normal, and not a collision to be avoided: the mail
+    /// and chat connectors mint their keys with no knowledge of each other.
+    Future<void> seedSharedKeyMailbox(MessageStore into) async {
+      await seed(into, 'shared',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(into, 'shared',
+          source: 'teams',
+          vector: vectorAt(0.95),
+          lastMessageAt: '2026-08-29T03:00:00Z');
+      await seed(into, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T02:00:00Z');
+      await into.insertStoryline(
+        id: 'sl-existing',
+        title: 'Existing',
+        status: 'active',
+        createdBy: 'user',
+      );
+    }
+
+    test('a chat and a mail thread sharing a conversation key are not confused',
+        () async {
+      await seedSharedKeyMailbox(store);
+      // The MAIL thread is spoken for. The chat under the same key has never
+      // been looked at.
+      await store.addStorylineMember('sl-existing', 'email', 'shared',
+          addedBy: 'user');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      // Read as a bare key, "shared is taken" swallowed the chat as well and
+      // left the pool one lone thread — under the sweep's floor, so nothing
+      // was ever proposed.
+      final proposed =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect(
+        {
+          for (final m in await store.membersOf(proposed.id))
+            m.conversationKey: m.source,
+        },
+        {'shared': 'teams', 'c2': 'email'},
+      );
+    });
+
+    test('a thread taken by one source is still available in the other',
+        () async {
+      await seedSharedKeyMailbox(store);
+      // The block arm of the same confusion. The user's "no" was about the
+      // chat, and it says nothing about the mail thread under that key.
+      await store.removeStorylineMember('sl-existing', 'teams', 'shared',
+          block: true);
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final proposed =
+          (await store.loadStorylines(statuses: const ['suggested'])).single;
+      expect(
+        {
+          for (final m in await store.membersOf(proposed.id))
+            m.conversationKey: m.source,
+        },
+        {'shared': 'email', 'c2': 'email'},
+      );
+    });
+
+    test('a dismissed cluster is recognised under either hash recipe',
+        () async {
+      await seedMailbox(store);
+      // The tombstone an older build left: hashed over the bare conversation
+      // keys, before the recipe folded the connector in. Nothing can rewrite
+      // it — a cluster thrown out below the minimum size has no member rows to
+      // rebuild what it was — so recognition has to keep speaking that
+      // language for as long as the row exists.
+      await store.insertStoryline(
+        id: 'sl-old',
+        title: 'Website redesign',
+        status: 'dismissed',
+        createdBy: 'auto',
+        clusterHash: cardHash('c1\nc2'),
+      );
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      // The sweep rebuilds exactly that pair, and stops on a hash nothing in
+      // the app writes any more — before a single model call.
+      expect(llm.schemas, isEmpty);
+      expect(await store.loadStorylines(), isEmpty);
+    });
   });
 
   group('user actions', () {
@@ -1410,7 +1773,7 @@ void main() {
       // The member rows are the record of what the user was shown, and the
       // hashes on the row are what recognise the group when it re-forms.
       expect(await store.membersOf('sl-1'), hasLength(1));
-      expect(await store.dismissedHashExists('h1'), isTrue);
+      expect(await store.dismissedHashExistsAny(['h1']), isTrue);
     });
 
     test('renaming locks the title', () async {
@@ -1496,6 +1859,134 @@ void main() {
       await service.addThread('sl-1', 'email', 'c1');
 
       expect((await store.getStoryline('sl-1'))!.status, 'active');
+    });
+  });
+
+  /// Where a hand-filed thread SHOWS UP. The timeline and the rail read
+  /// member rows; the home feed and the hot strip read
+  /// `message_progress.storyline_id`, and until the user actions stamped it a
+  /// thread the user filed appeared on half the app.
+  group('the pointer a user action leaves', () {
+    test('a hand-added thread is visible where the pipeline stamped rows',
+        () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1', receivedAt: '2026-08-27T09:00:00Z');
+      await seedMessage(store, 'c1', 'm2', receivedAt: '2026-08-28T09:00:00Z');
+      // Another thread entirely — the stamp is per conversation.
+      await seed(store, 'c2');
+      await seedMessage(store, 'c2', 'm9');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.addThread('sl-1', 'email', 'c1');
+
+      expect(await pointerOf('m1'), 'sl-1');
+      expect(await pointerOf('m2'), 'sl-1');
+      expect(await pointerOf('m9'), isNull);
+    });
+
+    test('adding to a second storyline does not steal the pointer', () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1');
+      for (final id in ['sl-1', 'sl-2']) {
+        await store.insertStoryline(
+          id: id,
+          title: 'Website redesign',
+          status: 'active',
+          createdBy: 'auto',
+        );
+      }
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await memberAddedAt('sl-1', 'c1', '2026-08-01T00:00:00Z');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.addThread('sl-2', 'email', 'c1');
+
+      // Oldest membership wins, because that is the id
+      // `PipelineProgress.assignedStorylineId` would pick — the two answers
+      // have to agree or they fight over the column.
+      expect(await pointerOf('m1'), 'sl-1');
+      expect(await store.storylineIdsFor('email', 'c1'), ['sl-1', 'sl-2']);
+    });
+
+    test('a clear hands the pointer to the remaining membership', () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1');
+      for (final id in ['sl-1', 'sl-2']) {
+        await store.insertStoryline(
+          id: id,
+          title: 'Website redesign',
+          status: 'active',
+          createdBy: 'auto',
+        );
+        await store.addStorylineMember(id, 'email', 'c1', addedBy: 'auto');
+      }
+      await memberAddedAt('sl-1', 'c1', '2026-08-01T00:00:00Z');
+      await memberAddedAt('sl-2', 'c1', '2026-08-02T00:00:00Z');
+      await store.stampStorylineId('email', 'c1', storylineId: 'sl-1');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.removeThread('sl-1', 'email', 'c1');
+
+      // Not blank: the thread still belongs to sl-2, and a feed row that went
+      // empty would be saying it belongs to nothing.
+      expect(await pointerOf('m1'), 'sl-2');
+    });
+
+    test('removing the last membership leaves the rows pointing at nothing',
+        () async {
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(store, FakeLlm(const {}));
+      await service.addThread('sl-1', 'email', 'c1');
+
+      await service.removeThread('sl-1', 'email', 'c1');
+
+      expect(await pointerOf('m1'), isNull);
+    });
+
+    test('a hand-filed thread ticks the screen once per message it moved',
+        () async {
+      final bus = ProgressBus();
+      addTearDown(bus.dispose);
+      final ticks = <ProgressTick>[];
+      bus.ticks.listen(ticks.add);
+
+      await seed(store, 'c1');
+      await seedMessage(store, 'c1', 'm1', receivedAt: '2026-08-27T09:00:00Z');
+      await seedMessage(store, 'c1', 'm2', receivedAt: '2026-08-28T09:00:00Z');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(
+        store,
+        FakeLlm(const {}),
+        progress: PipelineProgress(store, bus: bus),
+      );
+
+      await service.addThread('sl-1', 'email', 'c1');
+      await pumpEventQueue();
+
+      expect(ticks.map((t) => t.sourceMessageId), ['m1', 'm2']);
+      expect(ticks.map((t) => t.stage).toSet(), {'storyline'});
+      expect(ticks.map((t) => t.state).toSet(), {'done'});
+      // The feed's sort key rides along, so a listener can tell a patch from a
+      // prepend without re-reading.
+      expect(ticks.first.receivedAt, '2026-08-27T09:00:00Z');
     });
   });
 
@@ -1850,6 +2341,47 @@ void main() {
         ['member', 'c1'],
       );
     });
+
+    test('a charter saved while the hunt ran is hunted with', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      const second = 'The launch party for the Northline site, and the venue.';
+      late final StorylineService service;
+      var calls = 0;
+      final llm = HookedFakeLlm(
+        {
+          'storyline_membership': [
+            // The first lap turns the candidate away, so it is still a
+            // candidate when the second lap asks about it against the new
+            // charter.
+            confirmAnswer(belongs: false),
+            confirmAnswer(),
+          ],
+        },
+        (schema) async {
+          if (schema != 'storyline_membership' || calls++ > 0) return;
+          // The save lands with the recruit row already `processing`, so its
+          // own requeue is swallowed and no catch-up exists to find it. The
+          // only thing that can notice is the pass itself.
+          await service.setCharter('sl-1', second);
+        },
+      );
+      service = StorylineService(store, llm);
+
+      await service.recruit('sl-1');
+
+      // Two laps, and the second one asked against the text the user saved
+      // rather than the text the pass started with.
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect(llm.userMessages.first, isNot(contains(second)));
+      expect(llm.userMessages.last, contains(second));
+      // And it stopped: the charter did not move under the second lap, so
+      // there is no third.
+      expect(
+        (await store.membersOf('sl-1')).map((m) => m.conversationKey),
+        ['member', 'c1'],
+      );
+    });
   });
 
   group('setCharter', () {
@@ -1894,6 +2426,1189 @@ void main() {
 
       final work = await store.nextPendingWork('storyline_recruit');
       expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('a save clears a suggestion the user has now answered', () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1',
+          charterSuggestion: 'Also the launch party.');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.setCharter('sl-1', 'Only the homepage copy.');
+
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, isNull);
+    });
+
+    test('and clearing the charter clears it too', () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1',
+          charterSuggestion: 'Also the launch party.');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.setCharter('sl-1', '   ');
+
+      // An offer written against criteria that no longer exist is not an offer
+      // worth showing.
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, isNull);
+    });
+
+    test('dismissing a suggestion leaves the charter and its lock alone',
+        () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1',
+          charter: 'Only the homepage copy.',
+          charterLocked: true,
+          charterSuggestion: 'Also the launch party.');
+
+      await StorylineService(store, FakeLlm(const {}))
+          .dismissCharterSuggestion('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charterSuggestion, isNull);
+      expect(storyline.charter, 'Only the homepage copy.');
+      expect(storyline.charterLocked, isTrue);
+    });
+  });
+
+  group('refresh', () {
+    /// The charter the model widens to in the tests below — the stored one
+    /// with one clause added, which is what "minimal drift" looks like when it
+    /// works.
+    const widened = 'The redesign of the Northline Studio website — the '
+        'homepage copy, the new photography, the launch date, and the launch '
+        'party.';
+
+    test('a hand-added thread widens a model-authored charter', () async {
+      await seedStoryline(store);
+      await markDescribed('sl-1', ['member']);
+      await seed(store, 'c2', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_refresh': [
+          refineAnswer(
+            title: 'Website redesign and launch',
+            summary: 'The launch party venue is the open question.',
+            charter: widened,
+          )
+        ],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.addThread('sl-1', 'email', 'c2');
+      expect(await drainRefresh(service), 'sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      // The charter is the model's own text, so the model may amend it.
+      expect(storyline.charter, widened);
+      expect(storyline.charterSuggestion, isNull);
+      expect(storyline.title, 'Website redesign and launch');
+      expect(storyline.summary, 'The launch party venue is the open question.');
+      // Described as the two threads it now holds.
+      expect(storyline.refreshedMemberHash, memberHashOf(['member', 'c2']));
+      expect(storyline.refreshedMemberCount, 2);
+    });
+
+    test('runs at temperature zero — the same members must read the same twice',
+        () async {
+      await seedStoryline(store);
+      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      expect(llm.temperatures, [0]);
+    });
+
+    test('a hand-added thread never touches a charter the user wrote',
+        () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1',
+          charter: 'Only the homepage copy.', charterLocked: true);
+      await markDescribed('sl-1', ['member']);
+      await seed(store, 'c2', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_refresh': [
+          refineAnswer(charter: 'The homepage copy and the launch party.')
+        ],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.addThread('sl-1', 'email', 'c2');
+      await drainRefresh(service);
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, 'Only the homepage copy.');
+      expect(storyline.charterLocked, isTrue);
+      // The model's version is parked where the About block can offer it,
+      // which is the whole difference between this and the test above.
+      expect(storyline.charterSuggestion,
+          'The homepage copy and the launch party.');
+    });
+
+    test('a charter that no longer fits earns a suggestion, not an overwrite',
+        () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1',
+          charter: 'Only the homepage copy.', charterLocked: true);
+      final llm = FakeLlm({
+        'storyline_refresh': [refineAnswer(charter: widened)],
+      });
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, 'Only the homepage copy.');
+      expect(storyline.charterSuggestion, widened);
+      // A parked suggestion changes no criteria, so nothing goes hunting on
+      // the strength of it. The recruit waits for the user to accept.
+      expect(await store.nextPendingWork('storyline_recruit'), isNull);
+    });
+
+    test('a suggestion the charter caught up with is cleared', () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1', charterLocked: true);
+      await store.updateStoryline('sl-1',
+          charterSuggestion: 'A wider charter nobody needs any more.');
+      // The model answers with the stored charter, spaced differently: the
+      // same sentence, so there is nothing left to offer.
+      final llm = FakeLlm({
+        'storyline_refresh': [
+          refineAnswer(
+            charter: '  The redesign of the Northline Studio website —   the '
+                'homepage copy, the new photography, and the launch date. ',
+          )
+        ],
+      });
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, isNull);
+    });
+
+    test('a locked title survives a refresh that renamed everything else',
+        () async {
+      await seedStoryline(store, titleLocked: true);
+      final llm = FakeLlm({
+        'storyline_refresh': [
+          refineAnswer(
+            title: 'A name the model preferred',
+            summary: 'The photography is back.',
+            charter: widened,
+          )
+        ],
+      });
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.title, 'Website redesign');
+      expect(storyline.summary, 'The photography is back.');
+      expect(storyline.charter, widened);
+    });
+
+    test('a summary is refreshed even when both locks are set', () async {
+      await seedStoryline(store, titleLocked: true);
+      await store.updateStoryline('sl-1', charterLocked: true);
+      final llm = FakeLlm({
+        'storyline_refresh': [
+          refineAnswer(
+            title: 'A name the model preferred',
+            summary: 'The launch date moved to October.',
+            charter: widened,
+          )
+        ],
+      });
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      // Both locks hold, and the one thing neither lock claimed still moves:
+      // where the storyline STANDS is not something a rename took ownership
+      // of.
+      expect(storyline.title, 'Website redesign');
+      expect(storyline.charter,
+          startsWith('The redesign of the Northline Studio website'));
+      expect(storyline.charterSuggestion, widened);
+      expect(storyline.summary, 'The launch date moved to October.');
+    });
+
+    test('an empty title from the model keeps the stored one', () async {
+      await seedStoryline(store);
+      final llm = FakeLlm({'storyline_refresh': [refineAnswer(title: '')]});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      // The naming task would have written 'Untitled storyline' here. A
+      // storyline being re-described already has a name.
+      expect((await store.getStoryline('sl-1'))!.title, 'Website redesign');
+    });
+
+    test('a refresh that describes an unchanged member set never reaches the '
+        'model', () async {
+      await seedStoryline(store);
+      await markDescribed('sl-1', ['member']);
+      // An empty script: any call at all throws rather than answering.
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('the threads that joined since the last description are pointed out',
+        () async {
+      await seedStoryline(store);
+      await markDescribed('sl-1', ['member']);
+      await seed(store, 'c2', subject: 'Launch party venue');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'user');
+      await store.updateStoryline('sl-1',
+          memberHash: memberHashOf(['member', 'c2']));
+      // Which member is newest is the only thing the "new" fence can be
+      // derived from, so it is pinned rather than left to two writes landing
+      // in different milliseconds.
+      await memberAddedAt('sl-1', 'member', '2026-08-01T09:00:00Z');
+      await memberAddedAt('sl-1', 'c2', '2026-08-02T09:00:00Z');
+      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      final newFence = llm.userMessages.single.split('"new_threads"').last;
+      expect(newFence, contains('Launch party venue'));
+      expect(newFence, isNot(contains('Subject for member')));
+      // And the whole membership still rides the threads fence.
+      expect(llm.userMessages.single, contains('Subject for member'));
+    });
+
+    test('a storyline described before anyone counted its members points out '
+        'nothing', () async {
+      await seedStoryline(store);
+      // A pre-feature row: the hash says the description is stale, but there
+      // is no count to subtract, so nothing is KNOWN to be new.
+      await store.updateStoryline('sl-1',
+          memberHash: memberHashOf(['member']),
+          refreshedMemberHash: 'an-older-member-set');
+      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      final newFence = llm.userMessages.single.split('"new_threads"').last;
+      expect(newFence, contains('(none)'));
+    });
+
+    test('a thread added while the refresh was in flight leaves the hash stale',
+        () async {
+      await seedStoryline(store);
+      await seed(store, 'c2', vector: vectorAt(0.9));
+      final llm = HookedFakeLlm({
+        'storyline_refresh': [refineAnswer()],
+      }, (schemaName) async {
+        if (schemaName != 'storyline_refresh') return;
+        await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'user');
+        await store.updateStoryline('sl-1',
+            memberHash: memberHashOf(['member', 'c2']));
+      });
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      // Stamped with what the description actually saw — one thread — even
+      // though there are two now. The gate reads that as stale and the pass
+      // runs again, which is the only outcome that describes the new thread.
+      expect(storyline.refreshedMemberHash, memberHashOf(['member']));
+      expect(storyline.refreshedMemberCount, 1);
+      expect(storyline.memberHash, memberHashOf(['member', 'c2']));
+    });
+
+    test('a charter the refresh did not change recruits nothing', () async {
+      await seedStoryline(store);
+      final llm = FakeLlm({
+        'storyline_refresh': [
+          // The stored charter with its spacing mangled. A model that returns
+          // the same sentence differently spaced has changed nothing, and
+          // treating that as a change would put refresh and recruit into a
+          // loop that re-ran on every drain.
+          refineAnswer(
+            charter: 'The redesign of the Northline Studio website —  the '
+                'homepage copy,\nthe new photography, and the launch date.',
+          )
+        ],
+      });
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      expect(await store.nextPendingWork('storyline_recruit'), isNull);
+    });
+
+    test('a charter the refresh widened sends the model hunting', () async {
+      await seedStoryline(store);
+      final llm = FakeLlm({
+        'storyline_refresh': [refineAnswer(charter: widened)],
+      });
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      final work = await store.nextPendingWork('storyline_recruit');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('a dismissed storyline is not refreshed', () async {
+      await seedStoryline(store, status: 'dismissed');
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('a storyline emptied by removals is not refreshed', () async {
+      await seedStoryline(store);
+      await store.removeStorylineMember('sl-1', 'email', 'member',
+          block: true);
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      // No cards, so nothing to describe it from and no reason to dial the
+      // model. The stamp lands regardless: nothing to describe IS a
+      // description of the empty set, and a thread joining later moves
+      // `member_hash` and re-fires the pass.
+      expect(llm.schemas, isEmpty);
+      expect((await store.getStoryline('sl-1'))!.refreshedMemberHash,
+          isNotNull);
+    });
+
+    test('a storyline emptied of everything readable converges', () async {
+      await seedStoryline(store);
+      await store.removeStorylineMember('sl-1', 'email', 'member',
+          block: true);
+
+      await StorylineService(store, FakeLlm(const {})).refresh('sl-1');
+
+      // The whole point of the stamp. Without it the sweep's catch-up asks
+      // this durable question on every sync forever and gets the same answer:
+      // a live storyline whose description does not match its members. It
+      // costs no model call, but it queues and drains a pass per sync for the
+      // life of the database.
+      expect(await store.staleRefreshStorylineIds(), isNot(contains('sl-1')));
+    });
+
+    test('a row that never had a member hash converges', () async {
+      // `seedStoryline` writes members without touching `member_hash`, which
+      // is every fixture and every storyline from before the column existed.
+      await seedStoryline(store);
+      expect((await store.getStoryline('sl-1'))!.memberHash, isNull);
+      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      // The gate derives the hash from the member rows when the column is
+      // NULL, but the catch-up asks SQL, and `NULL IS NOT <hash>` is true
+      // however many times the pass runs. So the pass heals the column it
+      // derived around — the two have to speak the same value or this row is
+      // stale forever.
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.memberHash, isNotNull);
+      expect(storyline.memberHash, storyline.refreshedMemberHash);
+      expect(await store.staleRefreshStorylineIds(), isNot(contains('sl-1')));
+    });
+
+    test('clearing a charter re-drafts one', () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1', charterLocked: true);
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer(charter: 'A charter the model drafted.')],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.setCharter('sl-1', '   ');
+      expect(await drainRefresh(service), 'sl-1');
+
+      // The bootstrap branch, not the refresh one: a storyline with no charter
+      // it is allowed to have is being described for the first time again, and
+      // there is no current text for the continuity prompt to preserve.
+      expect(llm.schemas, ['storyline_name']);
+      expect((await store.getStoryline('sl-1'))!.charter,
+          'A charter the model drafted.');
+    });
+
+    test('a recruit that filed threads refreshes the name', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).recruit('sl-1');
+
+      final work = await store.nextPendingWork('storyline_refresh');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('a recruit that filed nothing leaves the description alone', () async {
+      await seedStoryline(store);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(belongs: false)],
+      });
+
+      await StorylineService(store, llm).recruit('sl-1');
+
+      expect(await store.nextPendingWork('storyline_refresh'), isNull);
+    });
+
+    test('one quiet thread does not wake the describer', () async {
+      await seedStoryline(store);
+      await markDescribed('sl-1', ['member']);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).assignConversation('email', 'c1');
+
+      // It reads well and it grew by one. Re-describing on every thread that
+      // lands would dial the 27B all day to write the same sentence; the
+      // sweep's catch-up picks this up when the mailbox next syncs.
+      expect(await store.membersOf('sl-1'), hasLength(2));
+      expect(await store.nextPendingWork('storyline_refresh'), isNull);
+    });
+
+    test('two threads since the last description do wake it', () async {
+      await seedStoryline(store);
+      await markDescribed('sl-1', ['member']);
+      await seed(store, 'c1', vector: vectorAt(0.9));
+      await seed(store, 'c2', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_membership': [confirmAnswer(), confirmAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.assignConversation('email', 'c1');
+      await service.assignConversation('email', 'c2');
+
+      final work = await store.nextPendingWork('storyline_refresh');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('the sweep requeues a storyline whose refresh was swallowed',
+        () async {
+      await seedStoryline(store);
+      await store.updateStoryline('sl-1',
+          memberHash: memberHashOf(['member']));
+      // The lost wakeup: `requeueWork` revives only done and error rows, so a
+      // refresh queued while an earlier one was `processing` vanished. All
+      // that is left of it is a finished row and a description that does not
+      // match the members.
+      await store.writeWork('storyline_refresh', 'email', 'sl-1',
+          status: 'done');
+
+      await StorylineService(store, FakeLlm(const {})).sweep();
+
+      // Found by the durable question rather than by an event — and found on
+      // a sweep that returned early, which is why the catch-up runs before
+      // the early returns rather than after them.
+      final work = await store.nextPendingWork('storyline_refresh');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('the sweep leaves a storyline that already reads well alone',
+        () async {
+      await seedStoryline(store);
+      await markDescribed('sl-1', ['member']);
+      await store.writeWork('storyline_refresh', 'email', 'sl-1',
+          status: 'done');
+
+      await StorylineService(store, FakeLlm(const {})).sweep();
+
+      expect(await store.nextPendingWork('storyline_refresh'), isNull);
+    });
+
+    test('an unknown storyline is a quiet no-op, not a throw', () async {
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).refresh('sl-nope');
+
+      expect(llm.schemas, isEmpty);
+    });
+  });
+
+  group('recap', () {
+    /// A storyline of two threads with messages on both, interleaved in time.
+    /// The recap's whole point is that it reads them as one chronology.
+    Future<void> seedTwoThreads() async {
+      await seedStoryline(store);
+      await seed(store, 'c2');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'user');
+      await seedMessage(store, 'member', 'm1',
+          receivedAt: '2026-08-01T09:00:00Z', body: 'the copy looks good');
+      await seedMessage(store, 'c2', 'm2',
+          receivedAt: '2026-08-01T10:00:00Z',
+          fromName: 'Dana',
+          body: 'the venue is booked');
+      await seedMessage(store, 'member', 'm3',
+          receivedAt: '2026-08-01T11:00:00Z',
+          direction: 'outbound',
+          body: 'sending it on to the studio');
+    }
+
+    test('a recap reads the newest messages across every member thread',
+        () async {
+      await seedTwoThreads();
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.schemas, ['storyline_recap']);
+      final user = llm.userMessages.single;
+      // Both threads, and in the order they were said rather than the order
+      // the store handed them over: "where does this stand now" is a question
+      // about the end of a sequence.
+      expect(user.indexOf('the copy looks good'),
+          lessThan(user.indexOf('the venue is booked')));
+      expect(user.indexOf('the venue is booked'),
+          lessThan(user.indexOf('sending it on to the studio')));
+      // Each line names its thread and who spoke, and the owner's own message
+      // is theirs rather than a name the reader would have to recognise.
+      expect(user, contains('[Subject for member] Sarah: the copy looks good'));
+      expect(user, contains('[Subject for c2] Dana: the venue is booked'));
+      expect(user, contains('You: sending it on to the studio'));
+    });
+
+    test('runs at temperature zero — the same window must read the same twice',
+        () async {
+      await seedTwoThreads();
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.temperatures, [0]);
+    });
+
+    test('a recap that has seen the newest message never reaches the model',
+        () async {
+      await seedTwoThreads();
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-01T11:00:00Z', recapText: 'Already said.');
+      // An empty script: any call at all throws rather than answering.
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.schemas, isEmpty);
+      expect((await store.getStoryline('sl-1'))!.recapText, 'Already said.');
+    });
+
+    test('a burst of arrivals coalesces into one recap call', () async {
+      await seedTwoThreads();
+      // Three messages landing in member threads is three requeues — what
+      // `ExtractHandler` writes as each one's facts land.
+      for (var i = 0; i < 3; i++) {
+        await store.requeueWork('storyline_recap', 'email', 'sl-1');
+      }
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final service = StorylineService(store, llm);
+
+      // One row on the queue for three arrivals, because `requeueWork` is
+      // keyed on `(kind, source, entity_id)`.
+      expect(await store.workCounts('storyline_recap'), {'pending': 1});
+      expect(await drainRecap(service), 'sl-1');
+
+      // And the one pass that ran read the whole burst, which is the point:
+      // the recap describes current state, so coalescing loses nothing.
+      expect(llm.callsFor('storyline_recap'), 1);
+    });
+
+    test('a dismissed storyline gets no recap', () async {
+      await seedStoryline(store, status: 'dismissed');
+      await seedMessage(store, 'member', 'm1');
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.schemas, isEmpty);
+    });
+
+    test('a storyline with nothing said in it is a quiet no-op', () async {
+      await seedStoryline(store);
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.schemas, isEmpty);
+      expect((await store.getStoryline('sl-1'))!.recapThrough, isNull);
+    });
+
+    test('open items and decisions survive the round trip', () async {
+      await seedTwoThreads();
+      final llm = FakeLlm({
+        'storyline_recap': [
+          recapAnswer(
+            recap: 'The launch is set and the photos are the last thing.',
+            openItems: const ['Dana owes Sarah the photo selects', 'Book the room'],
+            decisions: const ['Launch moved to October 9'],
+          )
+        ],
+      });
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.recapText,
+          'The launch is set and the photos are the last thing.');
+      expect(jsonDecode(storyline.recapOpenJson!),
+          ['Dana owes Sarah the photo selects', 'Book the room']);
+      expect(jsonDecode(storyline.recapDecisionsJson!),
+          ['Launch moved to October 9']);
+      // The watermark is the newest message the call actually read.
+      expect(storyline.recapThrough, '2026-08-01T11:00:00Z');
+    });
+
+    test('an honest empty list is stored as an empty list', () async {
+      await seedTwoThreads();
+      final llm = FakeLlm({
+        'storyline_recap': [
+          recapAnswer(openItems: const [], decisions: const [])
+        ],
+      });
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      // Not null and not absent: "the model looked and found nothing
+      // outstanding" is a different fact from "no recap has run".
+      expect(jsonDecode(storyline.recapOpenJson!), isEmpty);
+      expect(jsonDecode(storyline.recapDecisionsJson!), isEmpty);
+    });
+
+    test('a previous recap rides into the next call', () async {
+      await seedTwoThreads();
+      await store.updateStoryline('sl-1',
+          recapText: 'The studio was still reviewing the homepage copy.',
+          recapThrough: '2026-08-01T09:00:00Z');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      // Carried forward rather than started from scratch, which is what keeps
+      // the block from re-narrating the whole storyline every time a message
+      // lands.
+      expect(llm.userMessages.single,
+          contains('Previous recap: The studio was still reviewing the '
+              'homepage copy.'));
+    });
+
+    test('the storyline the recap is about rides in with it', () async {
+      await seedTwoThreads();
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.userMessages.single, contains('Title: Website redesign'));
+      expect(llm.userMessages.single,
+          contains('Charter: The redesign of the Northline Studio website'));
+    });
+
+    test('a message landing while the recap ran leaves the watermark behind it',
+        () async {
+      await seedTwoThreads();
+      final llm = HookedFakeLlm({
+        'storyline_recap': [recapAnswer()],
+      }, (schemaName) async {
+        if (schemaName != 'storyline_recap') return;
+        await seedMessage(store, 'c2', 'm4',
+            receivedAt: '2026-08-01T12:00:00Z', body: 'one more thing');
+      });
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      // Stamped with the newest message the call actually READ, not the newest
+      // there is now. Claiming otherwise would leave the gate reading fresh
+      // and that message would never be recapped.
+      expect(storyline.recapThrough, '2026-08-01T11:00:00Z');
+
+      // Which the gate reads as stale, so the pass runs again — the only
+      // outcome that gets the new message into the recap.
+      final second = FakeLlm({'storyline_recap': [recapAnswer()]});
+      await StorylineService(store, second).recap('sl-1');
+      expect(second.callsFor('storyline_recap'), 1);
+      expect(second.userMessages.single, contains('one more thing'));
+    });
+
+    test('a model with nothing to say does not blank a good recap', () async {
+      await seedTwoThreads();
+      await store.updateStoryline('sl-1',
+          recapText: 'A recap worth keeping.',
+          recapOpenJson: '["something still open"]',
+          recapThrough: '2026-08-01T09:00:00Z');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer(recap: '   ')]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(llm.callsFor('storyline_recap'), 1);
+      // The text and the lists stand: a thin answer must never cost the user
+      // the catch-up they had.
+      expect(storyline.recapText, 'A recap worth keeping.');
+      expect(storyline.recapOpenJson, '["something still open"]');
+      // The watermark moves anyway, and it is recording that the model was
+      // ASKED about this window rather than that the recap covers it. See the
+      // test below for what leaving it behind would cost.
+      expect(storyline.recapThrough, '2026-08-01T11:00:00Z');
+    });
+
+    test('a declined window is not re-asked every sync', () async {
+      await seedTwoThreads();
+      final llm = FakeLlm({'storyline_recap': [recapAnswer(recap: '   ')]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      // The sweep's catch-up asks the durable question every single sync, so
+      // an unstamped decline is a 27B call per sync, at temperature zero, over
+      // the same window, for an answer that cannot come back different.
+      expect(await store.staleRecapStorylineIds(), isNot(contains('sl-1')));
+
+      // A new message is a different window, which is a different question —
+      // and that is exactly when asking again is worth the call.
+      await seedMessage(store, 'c2', 'm4',
+          receivedAt: '2026-08-02T09:00:00Z', body: 'the photos are in');
+      expect(await store.staleRecapStorylineIds(), contains('sl-1'));
+    });
+
+    test('a hand-filed old thread reaches the recap', () async {
+      await seedStoryline(store);
+      await seedMessage(store, 'member', 'm1',
+          receivedAt: '2026-08-10T09:00:00Z', body: 'the copy looks good');
+      // Recapped right up to the newest thing anyone has said.
+      await store.updateStoryline('sl-1',
+          recapText: 'The copy is approved.',
+          recapThrough: '2026-08-10T09:00:00Z');
+      // The thread a person went looking for, which is why every message on it
+      // predates the mark.
+      await seed(store, 'c2');
+      await seedMessage(store, 'c2', 'm2',
+          receivedAt: '2026-08-01T09:00:00Z', body: 'the venue is booked');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+      final service = StorylineService(store, llm);
+
+      await service.addThread('sl-1', 'email', 'c2');
+      expect(await drainRecap(service), 'sl-1');
+
+      // The watermark was taken over a member set this thread was not in, so
+      // it has no business gating a recap over the set it is in now. Without
+      // the clear the pass returns at the gate having said nothing, and the
+      // filing never reaches the block the storyline screen leads with — until
+      // unrelated mail happens to land.
+      expect(llm.callsFor('storyline_recap'), 1);
+      expect(llm.userMessages.single, contains('the venue is booked'));
+      expect(llm.userMessages.single, contains('the copy looks good'));
+      // And a fresh mark: the window it just read is the whole window.
+      expect((await store.getStoryline('sl-1'))!.recapThrough,
+          '2026-08-10T09:00:00Z');
+    });
+
+    test('a removal re-recaps what remains', () async {
+      await seedTwoThreads();
+      await store.updateStoryline('sl-1',
+          recapText: 'Dana has the venue booked.',
+          recapThrough: '2026-08-01T11:00:00Z');
+      final llm = FakeLlm({
+        'storyline_refresh': [refineAnswer()],
+        'storyline_recap': [recapAnswer(recap: 'The venue is somebody else.')],
+      });
+      final service = StorylineService(store, llm);
+
+      // The one membership change that adds no message anywhere: nothing new
+      // was said, so nothing but the clear can make the recap stale.
+      await service.removeThread('sl-1', 'email', 'c2');
+      expect(await drainRefresh(service), 'sl-1');
+      expect(await drainRecap(service), 'sl-1');
+
+      // Re-read and re-stamped, over the threads that are left — rather than
+      // going on narrating a thread the user just pulled out.
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.recapText, 'The venue is somebody else.');
+      expect(storyline.recapThrough, '2026-08-01T11:00:00Z');
+      expect(llm.userMessages.last, isNot(contains('the venue is booked')));
+    });
+
+    test('a hand-added thread recaps the storyline', () async {
+      await seedStoryline(store);
+      await seed(store, 'c2');
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).addThread('sl-1', 'email', 'c2');
+
+      // A thread filed by hand brings its own messages, so where this
+      // storyline stands changed the moment it landed.
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('a refresh queues a recap behind it', () async {
+      await seedStoryline(store);
+      final llm = FakeLlm({'storyline_refresh': [refineAnswer()]});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      // Membership moved, so the story moved: the recap was written against a
+      // set of threads that is no longer the whole story.
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('a refresh that found nothing changed queues no recap', () async {
+      await seedStoryline(store);
+      await markDescribed('sl-1', ['member']);
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).refresh('sl-1');
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.nextPendingWork('storyline_recap'), isNull);
+    });
+
+    test('the sweep queues a recap for a storyline that never had one',
+        () async {
+      await seedStoryline(store);
+      await seedMessage(store, 'member', 'm1');
+      // Described and settled: its members match what was said about them, so
+      // the refresh catch-up has nothing to say, and no mail has landed since,
+      // so none of the recap's own triggers ever fires. Every storyline the
+      // v10 backfill called described looks exactly like this, and none of
+      // them has ever been recapped.
+      await markDescribed('sl-1', ['member']);
+
+      await StorylineService(store, FakeLlm(const {})).sweep();
+
+      // Found on a sweep that returns early, which is the whole reason the
+      // catch-up runs at the head of the pass.
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('the sweep recaps a storyline the user replied into', () async {
+      await seedStoryline(store);
+      await seedMessage(store, 'member', 'm1',
+          receivedAt: '2026-08-28T10:00:00Z');
+      await markDescribed('sl-1', ['member']);
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      // The sent copy folding in from `sentitems`, gated exactly as the ingest
+      // gates it. This is the whole mail reply path: no per-message trigger
+      // wakes it, and none needs to — every sync ends by requeueing the sweep,
+      // and the recap handler drains after the sweep's in the same pass.
+      await seedMessage(store, 'member', 'm2',
+          receivedAt: '2026-08-29T09:00:00Z',
+          direction: 'outbound',
+          fromName: 'Jordan',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+
+      await StorylineService(store, FakeLlm(const {})).sweep();
+
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+    });
+
+    test('the sweep leaves a fully-recapped storyline alone', () async {
+      await seedStoryline(store);
+      await seedMessage(store, 'member', 'm1');
+      await markDescribed('sl-1', ['member']);
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      await store.writeWork('storyline_recap', 'email', 'sl-1',
+          status: 'done');
+
+      await StorylineService(store, FakeLlm(const {})).sweep();
+
+      expect(await store.nextPendingWork('storyline_recap'), isNull);
+    });
+
+    test('a storyline the sweep proposes is born described and recaps in its '
+        'own drain', () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      await seedMessage(store, 'c1', 'm1');
+      await seedMessage(store, 'c2', 'm2');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer(), confirmAnswer()],
+        'storyline_recap': [recapAnswer()],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      // The proposal IS the description — `NameStorylineTask` wrote the title,
+      // summary and charter from these two threads seconds ago — so the
+      // refresh columns record that rather than leaving the next sweep to
+      // spend a Refine call re-describing a set that never moved.
+      expect(storyline.refreshedMemberHash, memberHashOf(['c1', 'c2']));
+      expect(storyline.refreshedMemberHash, storyline.memberHash);
+      expect(storyline.refreshedMemberCount, 2);
+
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], storyline.id);
+
+      // And the recap handler drains after the sweep's, so the storyline the
+      // user is first shown already says where it stands.
+      expect(await drainRecap(service), storyline.id);
+      expect((await store.getStoryline(storyline.id))!.recapText,
+          contains('The homepage copy is approved'));
+    });
+
+    test('a newborn storyline does not wake the refresh pass', () async {
+      await seed(store, 'c1',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T04:00:00Z');
+      await seed(store, 'c2',
+          vector: vectorAt(0.9), lastMessageAt: '2026-08-29T03:00:00Z');
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer(), confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final storyline = (await store.loadStorylines()).single;
+      expect(await store.staleRefreshStorylineIds(),
+          isNot(contains(storyline.id)));
+    });
+
+    test('an unknown storyline is a quiet no-op, not a throw', () async {
+      final llm = FakeLlm(const {});
+
+      await StorylineService(store, llm).recap('sl-nope');
+
+      expect(llm.schemas, isEmpty);
+    });
+  });
+
+  group('the indexed sweep', () {
+    // The native asset is expected to be here. The guard exists so a build
+    // without code assets reports a skip rather than failures about geometry.
+    late bool available;
+    setUpAll(() {
+      available = ensureSqliteVecLoaded();
+      if (!available) {
+        printOnFailure('sqlite-vec native asset missing — vec tests skipped');
+      }
+    });
+
+    /// Every thread this corpus holds: its key, when it last moved, and where
+    /// it sits.
+    ///
+    /// Ten threads in five orthogonal planes, so a group's geometry can be
+    /// read off its own two angles and nothing else. [ray]'s planes are
+    /// mutually orthogonal, which puts every cross-group cosine at exactly 0
+    /// and leaves only the within-group angles to reason about.
+    ///
+    ///  * `a1 a2 a3` — three rays 0.05 rad apart: a cluster of three.
+    ///  * `b1 b2` — the same, one plane over: a cluster of two.
+    ///  * `e1 e2` — `acos(0.652)` apart, so 0.002 ABOVE the 0.65 link
+    ///    threshold: a cluster the gate only just admits.
+    ///  * `f1 f2` — `acos(0.648)` apart, 0.002 BELOW it: two singletons, and
+    ///    the other side of the same `>=`.
+    ///  * `n1` — alone in a plane of its own.
+    ///
+    /// The two 0.002 margins are the edge this pins, and they are deliberately
+    /// margins rather than an exact 0.65. The index computes its distances
+    /// natively over packed float32 and the fallback accumulates a dot product
+    /// in Dart; the two agree to about 1e-6 (see
+    /// `conversation_vec_index_test.dart`), which is far inside 0.002 and far
+    /// outside anything that could make a pair land exactly ON the threshold
+    /// reproducibly. A test written at exactly 0.65 would be a coin toss about
+    /// float representation rather than a statement about the gate.
+    const threshold = 0.65;
+    final corpus = <({String key, String at, int plane, double angle})>[
+      (key: 'a1', at: '2026-08-29T10:00:00Z', plane: 0, angle: 0.00),
+      (key: 'a2', at: '2026-08-29T09:00:00Z', plane: 0, angle: 0.05),
+      (key: 'a3', at: '2026-08-29T08:00:00Z', plane: 0, angle: 0.10),
+      (key: 'b1', at: '2026-08-29T07:00:00Z', plane: 1, angle: 0.00),
+      (key: 'b2', at: '2026-08-29T06:00:00Z', plane: 1, angle: 0.05),
+      (key: 'e1', at: '2026-08-29T05:00:00Z', plane: 2, angle: 0.00),
+      (
+        key: 'e2',
+        at: '2026-08-29T04:00:00Z',
+        plane: 2,
+        angle: math.acos(threshold + 0.002),
+      ),
+      (key: 'f1', at: '2026-08-29T03:00:00Z', plane: 3, angle: 0.00),
+      (
+        key: 'f2',
+        at: '2026-08-29T02:00:00Z',
+        plane: 3,
+        angle: math.acos(threshold - 0.002),
+      ),
+      (key: 'n1', at: '2026-08-29T01:00:00Z', plane: 4, angle: 0.00),
+    ];
+
+    /// A unit vector in the plane spanned by dimensions `2 * plane` and
+    /// `2 * plane + 1`, at [radians], padded to the index's width.
+    List<double> ray(int plane, double radians) {
+      final v = List<double>.filled(ConversationVectorIndex.dims, 0.0);
+      v[plane * 2] = math.cos(radians);
+      v[plane * 2 + 1] = math.sin(radians);
+      return v;
+    }
+
+    Future<void> seedCorpus(MessageStore into) async {
+      for (final thread in corpus) {
+        await seed(
+          into,
+          thread.key,
+          vector: ray(thread.plane, thread.angle),
+          lastMessageAt: thread.at,
+        );
+      }
+    }
+
+    /// The model this corpus is scripted against: three clusters reach it in
+    /// size order — `a` (three), then `b` and `e` (two each, in the order they
+    /// were built) — and the last of them is thrown out whole, so the pass
+    /// leaves a tombstone behind as well as two suggestions.
+    FakeLlm scriptedLlm() => FakeLlm({
+          'storyline_name': [
+            nameAnswer(title: 'The first group'),
+            nameAnswer(title: 'The second group'),
+            nameAnswer(title: 'The rejected group'),
+          ],
+          'storyline_membership': [
+            confirmAnswer(evidence: 'a1'),
+            confirmAnswer(evidence: 'a2'),
+            confirmAnswer(evidence: 'a3'),
+            confirmAnswer(evidence: 'b1'),
+            confirmAnswer(evidence: 'b2'),
+            confirmAnswer(belongs: false, evidence: 'e1 is not this'),
+            confirmAnswer(belongs: false, evidence: 'e2 is not this'),
+          ],
+        });
+
+    /// Everything the sweep decided, in a form two runs can be compared by:
+    /// the status, the title, BOTH hashes, and the member set of every
+    /// storyline the pass wrote — sorted, so nothing turns on the random ids.
+    ///
+    /// `cluster_hash` is in here on purpose. It is the identity a dismissed
+    /// cluster is tombstoned under, and the reason the clustering function has
+    /// to be a pure function of its input: if the two paths grouped the same
+    /// threads differently, this column is where it would show.
+    Future<List<String>> decisionsOf(BondDatabase d, MessageStore s) async {
+      final rows = await d
+          .customSelect('SELECT id, title, status, member_hash, cluster_hash '
+              'FROM storylines')
+          .get();
+      final out = <String>[];
+      for (final row in rows) {
+        final members = await s.membersOf(row.data['id'] as String);
+        final keys = [
+          for (final m in members) '${m.source}/${m.conversationKey}',
+        ]..sort();
+        out.add('${row.data['status']} | ${row.data['title']} | '
+            'member=${row.data['member_hash']} | '
+            'cluster=${row.data['cluster_hash']} | ${keys.join(',')}');
+      }
+      return out..sort();
+    }
+
+    test('the index and the arithmetic agree on every cluster', () async {
+      if (!available) return;
+
+      final indexedDb = vecTestDb();
+      final indexedStore = ProbingStore(indexedDb);
+      await seedCorpus(indexedStore);
+      final indexedLlm = scriptedLlm();
+      await StorylineService(indexedStore, indexedLlm).sweep();
+      final indexed = await decisionsOf(indexedDb, indexedStore);
+      final probes = indexedStore.neighborProbes;
+      await indexedDb.close();
+
+      final plainDb = vecTestDb();
+      final plainStore = UnindexedStore(plainDb);
+      await seedCorpus(plainStore);
+      final plainLlm = scriptedLlm();
+      await StorylineService(plainStore, plainLlm).sweep();
+      final plain = await decisionsOf(plainDb, plainStore);
+      await plainDb.close();
+
+      // One probe per candidate, which is what says the index path actually
+      // ran. Without it a silent fallback would make this test compare the
+      // arithmetic against itself and pass for the wrong reason.
+      expect(probes, corpus.length);
+
+      // The whole claim of this phase, in one line.
+      expect(indexed, plain);
+
+      // And what they agree ON, spelled out, so a change that broke both
+      // paths identically could not slip through as an equivalence.
+      expect(indexed, hasLength(3));
+      expect(
+        indexed.map((d) => d.split(' | ').last).toList(),
+        [
+          // The rejected cluster keeps no members — it is a tombstone.
+          '',
+          'email/a1,email/a2,email/a3',
+          'email/b1,email/b2',
+        ],
+      );
+      // e1 and e2 sit 0.002 above the gate and were grouped — into the third
+      // cluster, the one the model threw out. f1 and f2 sit 0.002 below it and
+      // never became a cluster at all, which is why exactly three groups were
+      // named and not four.
+      expect(indexed.where((d) => d.startsWith('dismissed')), hasLength(1));
+      expect(indexedLlm.callsFor('storyline_name'), 3);
+      expect(indexedLlm.schemas, plainLlm.schemas);
+      expect(indexedLlm.userMessages, plainLlm.userMessages);
+    });
+
+    test('a corpus the index cannot answer for falls back without proposing '
+        'nonsense', () async {
+      if (!available) return;
+
+      // The store reports no index, which is what a failed backfill, a missing
+      // native extension, and a connection opened before the extension was
+      // registered all look like from the sweep's side.
+      final db = vecTestDb();
+      final store = UnindexedStore(db);
+      await seedCorpus(store);
+      final llm = scriptedLlm();
+
+      await StorylineService(store, llm).sweep();
+
+      final members = <String, List<String>>{};
+      for (final storyline in await store.loadStorylines()) {
+        members[storyline.title] = [
+          for (final m in await store.membersOf(storyline.id)) m.conversationKey,
+        ]..sort();
+      }
+      expect(members['The first group'], ['a1', 'a2', 'a3']);
+      expect(members['The second group'], ['b1', 'b2']);
+      await db.close();
+    });
+
+    test('one candidate at the wrong width sends the whole pass to the '
+        'arithmetic', () async {
+      if (!available) return;
+
+      // A corpus caught mid-model-change: the index skips the narrow row, so
+      // it holds a hole exactly where a link might be. Trusting it for the
+      // rows it DID absorb would be the one way this feature could quietly
+      // change what the app proposes, so the pass declines the index entirely.
+      final db = vecTestDb();
+      final store = ProbingStore(db);
+      await seedCorpus(store);
+      await seed(store, 'narrow',
+          vector: vectorAt(1), lastMessageAt: '2026-08-29T00:30:00Z');
+      final llm = scriptedLlm();
+
+      await StorylineService(store, llm).sweep();
+
+      expect(store.neighborProbes, 0);
+      final members = <String, List<String>>{};
+      for (final storyline in await store.loadStorylines()) {
+        members[storyline.title] = [
+          for (final m in await store.membersOf(storyline.id)) m.conversationKey,
+        ]..sort();
+      }
+      expect(members['The first group'], ['a1', 'a2', 'a3']);
+      expect(members['The second group'], ['b1', 'b2']);
+      await db.close();
     });
   });
 }

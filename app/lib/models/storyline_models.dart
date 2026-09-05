@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart' show immutable;
 
 import 'message_models.dart';
@@ -8,6 +10,25 @@ import 'message_models.dart';
 /// Defensive in the same way `message_models.dart` is: every field reads
 /// through a nullable cast with a default, so neither a half-written row nor a
 /// column an older build never wrote can throw during a render.
+
+/// The short strings a JSON array column holds, or nothing at all. Tolerant
+/// in the same way `_decodeJsonList` in `message_models.dart` is: a null
+/// column, text that is not JSON, JSON that is not a list, and entries that
+/// are not strings all read as "nothing to show" rather than throwing during
+/// a render.
+List<String> _decodeStringList(String? raw) {
+  if (raw == null || raw.isEmpty) return const [];
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! List) return const [];
+    return [
+      for (final entry in decoded)
+        if (entry is String) entry,
+    ];
+  } on FormatException {
+    return const [];
+  }
+}
 
 /// One storyline as stored, plus the two counts the list query derives.
 ///
@@ -47,6 +68,33 @@ class Storyline {
   /// forward — see `MessageStore.touchStorylineActivity`.
   final String? lastActivityAt;
 
+  /// The dedupe key for the member set as it stands, maintained by every
+  /// membership write. Null on a row that has no member set to describe — a
+  /// cluster the sweep tombstoned without ever storing one.
+  final String? memberHash;
+
+  /// The membership as it stood the last time the refresh pass described this
+  /// storyline. The gate is an equality test against [memberHash], so a thread
+  /// added since leaves these stale and the pass runs again. Null on a
+  /// storyline nobody has described yet.
+  final String? refreshedMemberHash;
+  final int? refreshedMemberCount;
+
+  /// What the refresh pass would have written to [charter] if the charter were
+  /// not the user's. A locked charter is never overwritten — the model's
+  /// version waits here for the user to accept or dismiss it.
+  final String? charterSuggestion;
+
+  /// The recap: where things stand across every member thread, so the reader
+  /// need not re-read them. [recapOpenJson] and [recapDecisionsJson] are JSON
+  /// arrays of short strings, kept as text because nothing but the recap pane
+  /// reads them. [recapThrough] is the `received_at` of the newest message the
+  /// recap has seen — what makes the pass skip a storyline nothing happened in.
+  final String? recapText;
+  final String? recapOpenJson;
+  final String? recapDecisionsJson;
+  final String? recapThrough;
+
   /// Derived by the list query, not stored: how many threads belong to this
   /// storyline, and how many of those are awaiting a reply.
   final int memberCount;
@@ -63,11 +111,26 @@ class Storyline {
     this.charterLocked = false,
     this.pinned = false,
     this.lastActivityAt,
+    this.memberHash,
+    this.refreshedMemberHash,
+    this.refreshedMemberCount,
+    this.charterSuggestion,
+    this.recapText,
+    this.recapOpenJson,
+    this.recapDecisionsJson,
+    this.recapThrough,
     this.memberCount = 0,
     this.openCount = 0,
   });
 
   bool get isSuggested => status == 'suggested';
+
+  /// The recap's open questions and settled decisions, decoded. The recap
+  /// pass writes both columns as JSON arrays of short strings and nothing but
+  /// the storyline header reads them, so these getters are the only decoder —
+  /// and they never throw, whatever the column holds.
+  List<String> get recapOpenItems => _decodeStringList(recapOpenJson);
+  List<String> get recapDecisions => _decodeStringList(recapDecisionsJson);
 
   /// A row from `storylines`, optionally carrying the `member_count` /
   /// `open_count` the list query joins on. Both default to zero, so a bare
@@ -85,6 +148,14 @@ class Storyline {
       charterLocked: (row['charter_locked'] as num?)?.toInt() == 1,
       pinned: (row['pinned'] as num?)?.toInt() == 1,
       lastActivityAt: row['last_activity_at'] as String?,
+      memberHash: row['member_hash'] as String?,
+      refreshedMemberHash: row['refreshed_member_hash'] as String?,
+      refreshedMemberCount: (row['refreshed_member_count'] as num?)?.toInt(),
+      charterSuggestion: row['charter_suggestion'] as String?,
+      recapText: row['recap_text'] as String?,
+      recapOpenJson: row['recap_open_json'] as String?,
+      recapDecisionsJson: row['recap_decisions_json'] as String?,
+      recapThrough: row['recap_through'] as String?,
       memberCount: (row['member_count'] as num?)?.toInt() ?? 0,
       openCount: (row['open_count'] as num?)?.toInt() ?? 0,
     );

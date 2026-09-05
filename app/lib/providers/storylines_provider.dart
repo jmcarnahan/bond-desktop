@@ -60,10 +60,16 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
 
   /// The kinds whose progress means the storyline list may have changed.
   /// Extraction and triage report constantly and change nothing here.
+  ///
+  /// Refresh and recap are in here because both rewrite the row the surfaces
+  /// render: refresh moves the title, the summary and the charter, and recap
+  /// writes the paragraph the storyline header leads with.
   static const Set<String> _kinds = {
     'storyline',
     'storyline_sweep',
+    'storyline_refresh',
     'storyline_recruit',
+    'storyline_recap',
   };
 
   static const String _source = 'email';
@@ -173,6 +179,21 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     await _service.setCharter(id, charter);
     await load();
     unawaited(_worker?.pump());
+  }
+
+  /// Takes the charter the refresh pass parked. Deliberately [setCharter] and
+  /// not a write of its own: accepting the model's sentence is the user saying
+  /// this is what the storyline is about, which is the same act as typing it —
+  /// so it locks the charter, clears the suggestion and recruits, and it gets
+  /// the same pump.
+  Future<void> acceptCharterSuggestion(String id, String text) =>
+      setCharter(id, text);
+
+  /// Throws the parked charter away. No pump: nothing was queued, and the
+  /// user's own charter has not moved.
+  Future<void> dismissCharterSuggestion(String id) async {
+    await _service.dismissCharterSuggestion(id);
+    await load();
   }
 
   Future<void> addThread(String id, String source, String conversationKey) async {

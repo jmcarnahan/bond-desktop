@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+
 // `show`: drift generates row classes named Message/Conversation/Storyline
 // from the tables, and this file means the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
@@ -10,6 +13,7 @@ import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/quick_replies.dart';
@@ -32,14 +36,41 @@ import 'fixtures/test_db.dart';
 /// strip showing the membership from before the user's last action.
 
 class _FakeSync implements MailSync {
+  /// How many times the screen has asked for a pull. The launch sync is one
+  /// of them, so the button tests read this before and after their tap.
+  int syncs = 0;
+
+  /// Set to hold a pull open, so a test can look at the screen while a sync
+  /// is genuinely in flight. Completed by the test before it ends.
+  Completer<void>? gate;
+
   @override
-  Future<void> syncNow() async {}
+  Future<void> syncNow() async {
+    syncs++;
+    await gate?.future;
+  }
 
   @override
   Future<void> ensureBodies(String conversationKey) async {}
 
   @override
   Future<void> ensureMessageBody(String sourceMessageId) async {}
+}
+
+/// A Teams connector that answers instantly.
+///
+/// The real one asks the auth session whether `Chat.Read` was granted, and in
+/// a widget test that question reaches an MCP stack nothing started — so the
+/// pull never comes back at all. Every other test in this file survives that
+/// because nothing awaits the launch refresh; a Sync button whose label is
+/// held up until the whole pass lands does not, so the tests that press it
+/// hand the screen a connector with nothing behind it.
+class _FakeTeamsSync implements TeamsSync {
+  @override
+  Future<void> syncNow() async {}
+
+  @override
+  Future<String?> get lastSyncedAt async => null;
 }
 
 void main() {
@@ -103,7 +134,17 @@ void main() {
   }
 
   /// The screen itself, over the seeded store, settled enough to click.
-  Future<void> pumpInbox(WidgetTester tester) async {
+  ///
+  /// [section] is the pane it lands on; [sync] and [teamsSync] are the
+  /// connectors it lands on it with. The storylines overview needs the first,
+  /// and the Sync button needs fakes it can still see afterwards — see
+  /// [_FakeTeamsSync] for why the second one is not left to the real thing.
+  Future<void> pumpInbox(
+    WidgetTester tester, {
+    RailSection section = RailSection.needsYou,
+    MailSync? sync,
+    TeamsSync? teamsSync,
+  }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -112,9 +153,11 @@ void main() {
       dbProvider.overrideWithValue(db),
       // Predates Home: this file asserts on a pane the rail's old landing
       // section opened.
-      initialSectionProvider.overrideWithValue(RailSection.needsYou),
+      initialSectionProvider.overrideWithValue(section),
       initialAppPrefsProvider.overrideWithValue(prefs),
-      syncServiceProvider.overrideWithValue(_FakeSync()),
+      syncServiceProvider.overrideWithValue(sync ?? _FakeSync()),
+      if (teamsSync != null)
+        teamsSyncProvider.overrideWithValue(teamsSync),
       // Unstarted, so it owns no sweep timer. This file's container outlives
       // the widget tree — it is disposed in a tearDown, after flutter_test has
       // already checked for leaked timers — and nothing here is about
@@ -135,9 +178,16 @@ void main() {
     await tester.pump();
   }
 
-  /// Opens the storyline named [title] in the main pane.
-  Future<void> openStoryline(WidgetTester tester, String title) async {
-    await pumpInbox(tester);
+  /// Opens the storyline named [title] in the main pane. [sync] and
+  /// [teamsSync] are handed straight to [pumpInbox], for the tests that press
+  /// this screen's own Sync.
+  Future<void> openStoryline(
+    WidgetTester tester,
+    String title, {
+    MailSync? sync,
+    TeamsSync? teamsSync,
+  }) async {
+    await pumpInbox(tester, sync: sync, teamsSync: teamsSync);
 
     // The rail's storylines section is expanded by default, so the row is
     // already on screen.
@@ -193,6 +243,65 @@ void main() {
 
     expect(find.text('2 threads'), findsOneWidget);
     await settleQueues(tester);
+  });
+
+  group('the parked charter', () {
+    /// A storyline whose charter is the user's, with the sentence the refresh
+    /// pass would have written waiting under it.
+    Future<void> seedSuggestion() async {
+      await seedThread('c1', 'Homepage copy');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.updateStoryline(
+        'sl-1',
+        charter: 'Threads about the new homepage.',
+        charterLocked: true,
+        charterSuggestion: 'Threads about the homepage and the press briefing.',
+      );
+    }
+
+    testWidgets('accepting it from the screen writes the charter through',
+        (tester) async {
+      await seedSuggestion();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('About'));
+      await tester.pump();
+      await tester.tap(find.text('Use this'));
+      await tester.pump();
+      await tester.tap(find.text('Replace the charter'));
+      await tester.pump();
+      await tester.pump();
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(
+        storyline.charter,
+        'Threads about the homepage and the press briefing.',
+      );
+      expect(storyline.charterSuggestion, isNull);
+      await settleQueues(tester);
+    });
+
+    testWidgets('discarding it leaves the charter alone', (tester) async {
+      await seedSuggestion();
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(find.text('About'));
+      await tester.pump();
+      await tester.tap(find.text('Discard'));
+      await tester.pump();
+      await tester.pump();
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charterSuggestion, isNull);
+      expect(storyline.charter, 'Threads about the new homepage.');
+      await settleQueues(tester);
+    });
   });
 
   testWidgets('Add thread opens a pane over the storyline, and back returns',
@@ -653,6 +762,161 @@ void main() {
       expect(pills['Homepage copy'], isTrue);
       expect(pills['Launch date'], isFalse);
       await settleQueues(tester);
+    });
+  });
+
+  group('the storylines overview', () {
+    /// One live storyline with a thread in it, which is all a card needs.
+    Future<void> seedCard({String? summary}) async {
+      await seedThread('c1', 'Homepage copy');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        summary: summary,
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+    }
+
+    /// The overview pane, landed on directly — the rail's own storyline rows
+    /// carry titles only, so anything else found on screen is the card.
+    Future<void> pumpOverview(
+      WidgetTester tester, {
+      MailSync? sync,
+      TeamsSync? teamsSync,
+    }) =>
+        pumpInbox(
+          tester,
+          section: RailSection.storylines,
+          sync: sync,
+          teamsSync: teamsSync,
+        );
+
+    testWidgets('an overview card leads with the recap when there is one',
+        (tester) async {
+      await seedCard(summary: 'Redesigning the site.');
+      await store.updateStoryline(
+        'sl-1',
+        recapText: 'The copy is signed off and the launch date is the '
+            'only thing still open.',
+      );
+
+      await pumpOverview(tester);
+
+      expect(
+        find.text('The copy is signed off and the launch date is the '
+            'only thing still open.'),
+        findsOneWidget,
+      );
+      // The recap REPLACES the summary here, exactly as it does on the
+      // storyline's own header — two answers to one question is one too many.
+      expect(find.text('Redesigning the site.'), findsNothing);
+      expect(find.text('1 threads · 0 open'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a card with no recap falls back to the summary',
+        (tester) async {
+      await seedCard(summary: 'Redesigning the site.');
+
+      await pumpOverview(tester);
+
+      expect(find.text('Redesigning the site.'), findsOneWidget);
+      await settleQueues(tester);
+    });
+
+    testWidgets('the card never grows the lists', (tester) async {
+      await seedCard(summary: 'Redesigning the site.');
+      await store.updateStoryline(
+        'sl-1',
+        recapText: 'Copy is signed off.',
+        recapOpenJson: jsonEncode(['Pick a launch date']),
+        recapDecisionsJson: jsonEncode(['Homepage copy approved']),
+        recapThrough: '2026-08-28T09:00:00Z',
+      );
+
+      await pumpOverview(tester);
+
+      expect(find.text('Copy is signed off.'), findsOneWidget);
+      // A card is a way in, not the screen itself: what is open and what was
+      // decided are on the storyline, where there is room to read them.
+      // Not even the counted heading the storyline screen folds them to.
+      expect(find.textContaining('OPEN'), findsNothing);
+      expect(find.textContaining('DECIDED'), findsNothing);
+      expect(find.text('Pick a launch date'), findsNothing);
+      expect(find.text('Homepage copy approved'), findsNothing);
+      expect(find.textContaining('as of'), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('Sync asks the sync service once', (tester) async {
+      await seedCard();
+      final sync = _FakeSync();
+
+      await pumpOverview(tester, sync: sync, teamsSync: _FakeTeamsSync());
+      // The launch sync has already run by here; the button's pull is the
+      // next one.
+      final before = sync.syncs;
+
+      await tester.tap(find.text('Sync'));
+      await tester.pump();
+
+      expect(sync.syncs, before + 1);
+
+      // And the label is its own again once the pull has landed.
+      await settleQueues(tester);
+      expect(find.text('Sync'), findsOneWidget);
+    });
+
+    testWidgets('a second tap while syncing asks nothing', (tester) async {
+      await seedCard();
+      final sync = _FakeSync();
+
+      await pumpOverview(tester, sync: sync, teamsSync: _FakeTeamsSync());
+      final before = sync.syncs;
+
+      // Held open, so the second tap lands while the first pull is genuinely
+      // still in flight.
+      final gate = Completer<void>();
+      sync.gate = gate;
+
+      await tester.tap(find.text('Sync'));
+      await tester.pump();
+
+      expect(find.text('Syncing…'), findsOneWidget);
+      expect(find.text('Sync'), findsNothing);
+
+      await tester.tap(find.text('Syncing…'));
+      await tester.pump();
+      expect(sync.syncs, before + 1);
+
+      gate.complete();
+      await settleQueues(tester);
+      expect(find.text('Sync'), findsOneWidget);
+    });
+
+    testWidgets('the storyline screen syncs too', (tester) async {
+      await seedCard();
+      final sync = _FakeSync();
+
+      // Not the overview: opening a card leaves that pane behind, and the
+      // button found here is the storyline header's own.
+      await openStoryline(
+        tester,
+        'Website redesign',
+        sync: sync,
+        teamsSync: _FakeTeamsSync(),
+      );
+      final before = sync.syncs;
+
+      await tester.tap(find.text('Sync'));
+      await tester.pump();
+
+      expect(sync.syncs, before + 1);
+
+      await settleQueues(tester);
+      expect(find.text('Sync'), findsOneWidget);
     });
   });
 }

@@ -636,6 +636,65 @@ void main() {
     }
   });
 
+  test('a storyline that already reads well is not marked for a refresh',
+      () async {
+    final schema = await verifier.schemaAt(9);
+    schema.rawDatabase.execute("""
+      INSERT INTO storylines (id, title, summary, charter, status, created_by,
+        title_locked, charter_locked, pinned, member_hash, created_at,
+        updated_at)
+      VALUES
+        ('sl-described', 'Website redesign', 'The homepage rewrite is landing.',
+          'Threads about the homepage rewrite.', 'active', 'auto', 0, 0, 0,
+          'h-described', 't', 't'),
+        ('sl-uncharted', 'Tahoe trip', 'Six of us, first weekend in March.',
+          NULL, 'active', 'auto', 0, 0, 0, 'h-uncharted', 't', 't');
+    """);
+    schema.rawDatabase.execute("""
+      INSERT INTO storyline_members (storyline_id, source, conversation_key,
+        added_by, added_at)
+      VALUES
+        ('sl-described', 'email', 'c-copy', 'auto', 't'),
+        ('sl-described', 'teams', 'c-standup', 'auto', 't'),
+        ('sl-uncharted', 'email', 'c-cabin', 'auto', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 10);
+    addTearDown(db.close);
+
+    Future<Map<String, List<Object?>>> refreshedOf() async {
+      final rows = await db
+          .customSelect('SELECT id, member_hash, refreshed_member_hash, '
+              'refreshed_member_count FROM storylines')
+          .get();
+      return {
+        for (final row in rows)
+          row.data['id'] as String: [
+            row.data['refreshed_member_hash'],
+            row.data['refreshed_member_count'],
+          ],
+      };
+    }
+
+    // A storyline carrying both a summary and a charter is described as it
+    // stands, so the refresh gate — an equality test against `member_hash` —
+    // already matches and the upgrade itself asks the model nothing. The one
+    // missing its charter stays NULL so it still gets its one first draft.
+    // `null` rather than `isNull`, which drift exports into this file under the
+    // same name.
+    expect(await refreshedOf(), {
+      'sl-described': ['h-described', 2],
+      'sl-uncharted': [null, null],
+    });
+
+    // And both columns take a write, which a STRICT table would reject if the
+    // step had declared either as the wrong type.
+    await db.customStatement("UPDATE storylines SET refreshed_member_hash = "
+        "'h-later', refreshed_member_count = 3 WHERE id = 'sl-uncharted'");
+    expect((await refreshedOf())['sl-uncharted'], ['h-later', 3]);
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

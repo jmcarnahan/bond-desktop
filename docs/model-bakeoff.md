@@ -1,8 +1,8 @@
 # The model bakeoff
 
 The app runs two model slots: a **bulk** slot that does triage, extraction and
-storyline membership, and a **prose** slot that names storylines and drafts
-replies. Both are served locally, and both are choices rather than
+storyline membership, and a **prose** slot that names storylines, recaps them,
+and drafts replies. Both are served locally, and both are choices rather than
 conclusions — a different model or a different runtime could be faster, more
 accurate, or cheaper in RAM, and until it is measured nobody knows which. The
 bakeoff is the apparatus for measuring it: accuracy, throughput (tokens/sec)
@@ -19,7 +19,7 @@ depends on a server being up, and each `make` target below runs it with
 | Target | What it measures |
 | --- | --- |
 | `make bench` | The bulk slot: the fixture corpus through triage and extraction, with a latency and throughput table. |
-| `make bench-prose` | The prose slot: five storylines named and five replies drafted, printed verbatim. No scorecard — a title and a draft are judged by reading them. |
+| `make bench-prose` | The prose slot: five storylines named, three recapped and five replies drafted, printed verbatim. No scorecard — a title, a recap and a draft are judged by reading them. |
 | `make ab` | The same corpus through triage and extraction on **both** slots, printing where they disagree and what each cost. |
 | `make ab-membership` | The membership eval set through the confirm task on both slots, against the answer a person would give. |
 | `make drain` | The drain concurrency race: one round per concurrency in `BENCH_K` over the same backlog. The only bench that can see batching. |

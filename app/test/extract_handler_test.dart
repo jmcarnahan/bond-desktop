@@ -378,6 +378,116 @@ void main() {
     });
   });
 
+  group('the storyline recap trigger', () {
+    Future<void> fileInStoryline({String key = 'conv-1'}) async {
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', key, addedBy: 'auto');
+    }
+
+    test('a message landing in a member thread queues its storyline\'s recap',
+        () async {
+      await seedConversation();
+      await seedMessage();
+      await fileInStoryline();
+
+      await runOne(ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client));
+
+      // The one storyline trigger that is not about membership: a message
+      // landing in a thread that is ALREADY filed changes where that storyline
+      // stands, which is what the user opens it to read.
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+      // The `source` on a storyline work row is a LABEL, not a scope — its
+      // entity id is a storyline id, and a storyline spans both connectors.
+      expect(work?['source'], 'email');
+    });
+
+    test('a thread in no storyline queues nothing', () async {
+      await seedConversation();
+      await seedMessage();
+
+      await runOne(ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client));
+
+      expect(await store.nextPendingWork('storyline_recap'), isNull);
+    });
+
+    test('an embedding server that is down still queues the recap', () async {
+      await seedConversation();
+      await seedMessage();
+      await fileInStoryline();
+
+      await runOne(
+        ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings(vector: null).client),
+      );
+
+      // The recap has nothing to do with the vector. Hanging it off a
+      // successful embed would mean an afternoon of a down embedding server
+      // was an afternoon of storylines silently going stale.
+      expect((await store.nextPendingWork('storyline_recap'))?['entity_id'],
+          'sl-1');
+    });
+
+    test('a chat queues its storyline under the same label mail does',
+        () async {
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 't1',
+        'conversation_key': 'chat-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'from_address': 'teams:u-1',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'Legal wants a look at the DPA.',
+        'triage_status': 'skipped',
+        'gate_reason': 'teams_source',
+      });
+      await store.upsertConversation({
+        'source': 'teams',
+        'conversation_key': 'chat-1',
+        'subject': 'Acme renewal',
+        'state': 'needs_reply',
+      });
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Acme renewal',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'teams', 'chat-1',
+          addedBy: 'auto');
+
+      await ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client)
+          .run({'task_kind': 'extract', 'source': 'teams', 'entity_id': 't1'});
+
+      final work = await store.nextPendingWork('storyline_recap');
+      expect(work?['entity_id'], 'sl-1');
+      expect(work?['source'], 'email');
+    });
+
+    test('a thread in two storylines wakes both', () async {
+      await seedConversation();
+      await seedMessage();
+      await fileInStoryline();
+      await store.insertStoryline(
+        id: 'sl-2',
+        title: 'Launch party',
+        status: 'suggested',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-2', 'email', 'conv-1',
+          addedBy: 'auto');
+
+      await runOne(ExtractHandler(store, FakeLlm([answer()]), FakeEmbeddings().client));
+
+      expect(await store.workCounts('storyline_recap'), {'pending': 2});
+    });
+  });
+
   group('message vector at extraction time', () {
     Future<Map<String, Object?>?> vectorRow(String id) async {
       final rows = await db

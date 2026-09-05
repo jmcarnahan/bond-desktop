@@ -135,8 +135,11 @@ void main() {
         'storyline_membership': [confirmAnswer()],
       });
 
-      await StorylineService(store, primary, confirmClient: fast)
-          .assignConversation('email', 'c1');
+      final service = StorylineService(store, primary, confirmClient: fast);
+      await service.assignConversation('email', 'c1');
+      // The description is queued rather than written inline, so the flow has
+      // two halves now — the drain is where the naming call lives.
+      await service.refresh('sl-1');
 
       // One flow, two servers: the membership question never touched the 27B
       // and the naming never touched the small model.
@@ -182,7 +185,9 @@ void main() {
         'storyline_name': [nameAnswer()],
       });
 
-      await StorylineService(store, only).assignConversation('email', 'c1');
+      final service = StorylineService(store, only);
+      await service.assignConversation('email', 'c1');
+      await service.refresh('sl-1');
 
       // The pre-phase-3 behaviour, and what every other caller in the tests
       // still relies on: one client answers both jobs.
@@ -228,9 +233,9 @@ void main() {
       );
       addTearDown(container.dispose);
 
-      await container
-          .read(storylineServiceProvider)
-          .assignConversation('email', 'c1');
+      final service = container.read(storylineServiceProvider);
+      await service.assignConversation('email', 'c1');
+      await service.refresh('sl-1');
 
       // The service tests above prove the service honours a confirm client;
       // this one proves the wiring actually passes it.

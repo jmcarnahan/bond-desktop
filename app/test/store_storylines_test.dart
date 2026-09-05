@@ -37,14 +37,19 @@ void main() {
     String id, {
     required String receivedAt,
     String? subject,
+    String direction = 'inbound',
+    String triageStatus = 'pending',
+    String? gateReason,
   }) async {
     await store.upsertMessage({
       'source_message_id': id,
       'conversation_key': key,
-      'direction': 'inbound',
+      'direction': direction,
       'received_at': receivedAt,
       'subject': subject ?? key,
       'body_text': 'body of $id',
+      'triage_status': triageStatus,
+      'gate_reason': gateReason,
     });
   }
 
@@ -178,6 +183,43 @@ void main() {
       expect((await store.getStoryline('sl-1'))!.titleLocked, isFalse);
       expect((await store.getStoryline('sl-1'))!.pinned, isTrue);
     });
+
+    test('the refresh and recap columns round-trip through the row', () async {
+      await seedStoryline('sl-1');
+
+      await store.updateStoryline(
+        'sl-1',
+        refreshedMemberHash: 'h-1',
+        refreshedMemberCount: 2,
+        charterSuggestion: 'Also the pricing page.',
+        recapText: 'The copy is signed off; the build is waiting on art.',
+        recapOpenJson: '["Who owns the hero image?"]',
+        recapDecisionsJson: '["Ship without the video."]',
+        recapThrough: '2026-09-01T10:00:00Z',
+      );
+
+      final written = (await store.getStoryline('sl-1'))!;
+      expect(written.refreshedMemberHash, 'h-1');
+      expect(written.refreshedMemberCount, 2);
+      expect(written.charterSuggestion, 'Also the pricing page.');
+      expect(
+        written.recapText,
+        'The copy is signed off; the build is waiting on art.',
+      );
+      expect(written.recapOpenJson, '["Who owns the hero image?"]');
+      expect(written.recapDecisionsJson, '["Ship without the video."]');
+      expect(written.recapThrough, '2026-09-01T10:00:00Z');
+
+      // Dismissing a suggestion is an explicit null; everything else was
+      // omitted, and the sentinel is what keeps the recap from going with it.
+      await store.updateStoryline('sl-1', charterSuggestion: null);
+
+      final cleared = (await store.getStoryline('sl-1'))!;
+      expect(cleared.charterSuggestion, isNull);
+      expect(cleared.refreshedMemberHash, 'h-1');
+      expect(cleared.refreshedMemberCount, 2);
+      expect(cleared.recapThrough, '2026-09-01T10:00:00Z');
+    });
   });
 
   group('members', () {
@@ -267,6 +309,99 @@ void main() {
     });
   });
 
+  /// The pointer a hand-filed thread leaves on every one of its messages. The
+  /// column the home feed and the hot strip join on — and the reason this
+  /// write exists at all is that it must move it without touching anything the
+  /// settle machine reads.
+  group('stampStorylineId', () {
+    /// One message, its `message_progress` row finished the way the pipeline
+    /// leaves a settled one: every stage terminal, a verdict, a chip.
+    Future<void> seedSettled(
+      String key,
+      String id, {
+      String receivedAt = '2026-08-28T10:00:00Z',
+      String? storylineId,
+    }) async {
+      await seedConversation(key);
+      await seedMessage(key, id, receivedAt: receivedAt);
+      await db.customUpdate(
+        "UPDATE message_progress SET triage_state = 'done', "
+        "extract_state = 'done', storyline_state = 'done', "
+        "draft_state = 'done', settle_state = 'done', outcome = 'done', "
+        "needs_you = 1, urgency = 'high', storyline_id = ? "
+        'WHERE source = ? AND source_message_id = ?',
+        variables: [
+          Variable(storylineId),
+          const Variable('email'),
+          Variable(id),
+        ],
+      );
+    }
+
+    Future<Map<String, Object?>> progressOf(String id) async => (await db
+            .customSelect(
+              'SELECT * FROM message_progress '
+              'WHERE source = ? AND source_message_id = ?',
+              variables: [const Variable('email'), Variable(id)],
+            )
+            .getSingle())
+        .data;
+
+    test('stamping a link touches a settled row, and only the id column',
+        () async {
+      await seedSettled('c1', 'm1');
+      final before = await progressOf('m1');
+
+      final touched =
+          await store.stampStorylineId('email', 'c1', storylineId: 'sl-1');
+
+      final after = await progressOf('m1');
+      expect(after['storyline_id'], 'sl-1');
+      // The whole point of the narrow write: a row the coordinator already
+      // closed keeps every verdict it reached.
+      expect(after['settle_state'], before['settle_state']);
+      expect(after['storyline_state'], before['storyline_state']);
+      expect(after['storyline_at'], before['storyline_at']);
+      expect(after['outcome'], before['outcome']);
+      expect(after['needs_you'], before['needs_you']);
+      expect(after['draft_state'], before['draft_state']);
+      // And the caller gets what it needs to tick a live screen.
+      expect(touched.single.sourceMessageId, 'm1');
+      expect(touched.single.receivedAt, '2026-08-28T10:00:00Z');
+    });
+
+    test('stamping reaches every message of the thread and no other', () async {
+      await seedSettled('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await seedSettled('c1', 'm2', receivedAt: '2026-08-29T10:00:00Z');
+      await seedSettled('c2', 'm9');
+
+      final touched =
+          await store.stampStorylineId('email', 'c1', storylineId: 'sl-1');
+
+      expect(
+        touched.map((r) => r.sourceMessageId).toSet(),
+        {'m1', 'm2'},
+      );
+      expect((await progressOf('m9'))['storyline_id'], isNull);
+    });
+
+    test("clearing a link leaves another storyline's stamp alone", () async {
+      await seedSettled('c1', 'm1', storylineId: 'sl-2');
+
+      // The thread sits in sl-2; a removal from sl-1 is about a membership
+      // this row was never pointing at.
+      final missed = await store
+          .stampStorylineId('email', 'c1', clearingStorylineId: 'sl-1');
+      expect(missed, isEmpty);
+      expect((await progressOf('m1'))['storyline_id'], 'sl-2');
+
+      final hit = await store
+          .stampStorylineId('email', 'c1', clearingStorylineId: 'sl-2');
+      expect(hit.single.sourceMessageId, 'm1');
+      expect((await progressOf('m1'))['storyline_id'], isNull);
+    });
+  });
+
   group('assignedOrBlockedKeys', () {
     test('unions members and blocks of live storylines only', () async {
       await seedStoryline('sl-live', status: 'active');
@@ -282,15 +417,154 @@ void main() {
     });
   });
 
-  group('dismissedHashExists', () {
+  group('staleRefreshStorylineIds', () {
+    test('names the live storylines whose description is behind', () async {
+      await seedStoryline('sl-stale', status: 'active', memberHash: 'h-now');
+      await store.updateStoryline('sl-stale',
+          refreshedMemberHash: 'h-then');
+      // Never described at all: a real member set and no record of describing
+      // it. `!=` would answer NULL here — which is not true — and this is
+      // exactly the row that most needs finding.
+      await seedStoryline('sl-never', status: 'suggested',
+          memberHash: 'h-now');
+
+      expect(await store.staleRefreshStorylineIds(), ['sl-never', 'sl-stale']);
+    });
+
+    test('leaves alone a storyline described exactly as it stands', () async {
+      await seedStoryline('sl-1', status: 'active', memberHash: 'h-now');
+      await store.updateStoryline('sl-1', refreshedMemberHash: 'h-now');
+
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+    });
+
+    test('a dismissed storyline is never asked to describe itself', () async {
+      await seedStoryline('sl-dead', status: 'dismissed', memberHash: 'h-now');
+
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+    });
+
+    test('a row with no member set at all stays out', () async {
+      // The tombstone shape: a cluster thrown out below the minimum size has
+      // no member rows, so both columns are null and there is nothing to
+      // describe. Null on both sides is not a difference.
+      await seedStoryline('sl-tomb', status: 'active');
+
+      expect(await store.staleRefreshStorylineIds(), isEmpty);
+    });
+  });
+
+  group('staleRecapStorylineIds', () {
+    // One live storyline with one member thread, which is the shape every
+    // test in this group varies from.
+    Future<void> seedMember(String id, String key) async {
+      await seedConversation(key);
+      await store.addStorylineMember(id, 'email', key, addedBy: 'auto');
+    }
+
+    test('a storyline that never recapped is stale', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+
+      expect(await store.staleRecapStorylineIds(), ['sl-1']);
+    });
+
+    test('a recap that has read everything is not', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+
+      expect(await store.staleRecapStorylineIds(), isEmpty);
+    });
+
+    test('a newer message makes it stale again', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      await seedMessage('c1', 'm2', receivedAt: '2026-08-29T09:00:00Z');
+
+      expect(await store.staleRecapStorylineIds(), ['sl-1']);
+    });
+
+    test('a gated newer message does not', () async {
+      // The recap window cannot see this message, so waking the pass for it
+      // would queue a storyline that reads nothing, stamps nothing, and is
+      // queued again by the very next sweep.
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      await seedMessage('c1', 'm2',
+          receivedAt: '2026-08-29T09:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'newsletter');
+
+      expect(await store.staleRecapStorylineIds(), isEmpty);
+    });
+
+    test('a chat skipped only for being a chat still counts', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1',
+          receivedAt: '2026-08-29T09:00:00Z',
+          triageStatus: 'skipped',
+          gateReason: 'teams_source');
+
+      expect(await store.staleRecapStorylineIds(), ['sl-1']);
+    });
+
+    test('a reply the user sent makes the recap stale', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+      await store.updateStoryline('sl-1',
+          recapThrough: '2026-08-28T10:00:00Z');
+      await seedMessage('c1', 'm2',
+          receivedAt: '2026-08-29T09:00:00Z',
+          direction: 'outbound',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+
+      // The user answering is the biggest change there is to who-owes-whom.
+      // A recap that slept through it goes on saying they owe a reply they
+      // have already sent.
+      expect(await store.staleRecapStorylineIds(), ['sl-1']);
+    });
+
+    test('a storyline with nothing to read is left alone', () async {
+      // Never recapped, and it must stay that way: `recap` would open an
+      // empty window and return without a watermark, so queueing this is a
+      // wakeup that repeats on every sweep forever.
+      await seedStoryline('sl-1', status: 'active');
+      await seedMember('sl-1', 'c1');
+
+      expect(await store.staleRecapStorylineIds(), isEmpty);
+    });
+
+    test("a dismissed storyline is nobody's business", () async {
+      await seedStoryline('sl-dead', status: 'dismissed');
+      await seedMember('sl-dead', 'c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-28T10:00:00Z');
+
+      expect(await store.staleRecapStorylineIds(), isEmpty);
+    });
+  });
+
+  group('dismissedHashExistsAny', () {
     test('finds a dismissed storyline by its member hash', () async {
       await seedStoryline('sl-1', status: 'dismissed', memberHash: 'h1');
       await seedStoryline('sl-2', status: 'suggested', memberHash: 'h2');
 
-      expect(await store.dismissedHashExists('h1'), isTrue);
+      expect(await store.dismissedHashExistsAny(['h1']), isTrue);
       // Still on screen, so not something to skip re-proposing.
-      expect(await store.dismissedHashExists('h2'), isFalse);
-      expect(await store.dismissedHashExists('h3'), isFalse);
+      expect(await store.dismissedHashExistsAny(['h2']), isFalse);
+      expect(await store.dismissedHashExistsAny(['h3']), isFalse);
     });
 
     test('finds a dismissed storyline by its cluster hash alone', () async {
@@ -298,8 +572,8 @@ void main() {
       // cluster hash and no members at all.
       await seedStoryline('sl-1', status: 'dismissed', clusterHash: 'c1');
 
-      expect(await store.dismissedHashExists('c1'), isTrue);
-      expect(await store.dismissedHashExists('h1'), isFalse);
+      expect(await store.dismissedHashExistsAny(['c1']), isTrue);
+      expect(await store.dismissedHashExistsAny(['h1']), isFalse);
     });
 
     test('finds a dismissed storyline by its member hash alone', () async {
@@ -313,8 +587,8 @@ void main() {
         clusterHash: 'c1',
       );
 
-      expect(await store.dismissedHashExists('h1'), isTrue);
-      expect(await store.dismissedHashExists('c1'), isTrue);
+      expect(await store.dismissedHashExistsAny(['h1']), isTrue);
+      expect(await store.dismissedHashExistsAny(['c1']), isTrue);
     });
 
     test('a live storyline answers for neither hash', () async {
@@ -332,9 +606,140 @@ void main() {
       );
 
       for (final hash in ['h1', 'c1', 'h2', 'c2']) {
-        expect(await store.dismissedHashExists(hash), isFalse,
+        expect(await store.dismissedHashExistsAny([hash]), isFalse,
             reason: '$hash belongs to a storyline still on screen');
       }
+    });
+
+    test('any one of the hashes offered is enough', () async {
+      // How the caller asks about a candidate set under both hash recipes at
+      // once: the current one, which folds the connector into every member,
+      // and the one older tombstones were written under and can never be
+      // rewritten to.
+      await seedStoryline('sl-1', status: 'dismissed', clusterHash: 'old');
+
+      expect(await store.dismissedHashExistsAny(['new', 'old']), isTrue);
+      expect(await store.dismissedHashExistsAny(['old', 'new']), isTrue);
+      expect(await store.dismissedHashExistsAny(['new', 'newer']), isFalse);
+    });
+
+    test('nothing asked about is nothing dismissed', () async {
+      await seedStoryline('sl-1', status: 'dismissed', clusterHash: 'c1');
+
+      expect(await store.dismissedHashExistsAny(const []), isFalse);
+    });
+  });
+
+  group('blockedStorylineIdsFor', () {
+    test('names only the storylines that block this thread', () async {
+      await seedStoryline('sl-1');
+      await seedStoryline('sl-2');
+      await seedStoryline('sl-3');
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      await store.removeStorylineMember('sl-3', 'email', 'c1', block: true);
+      await store.removeStorylineMember('sl-2', 'email', 'c2', block: true);
+
+      expect(await store.blockedStorylineIdsFor('email', 'c1'),
+          {'sl-1', 'sl-3'});
+      expect(await store.blockedStorylineIdsFor('email', 'c2'), {'sl-2'});
+      expect(await store.blockedStorylineIdsFor('email', 'c9'), isEmpty);
+    });
+
+    test('a block is about one connector', () async {
+      await seedStoryline('sl-1');
+      // One key, two connectors — which is normal: the mail and chat
+      // connectors mint their keys with no knowledge of each other. The user's
+      // "no" was about the chat.
+      await store.removeStorylineMember('sl-1', 'teams', 'shared', block: true);
+
+      expect(await store.blockedStorylineIdsFor('teams', 'shared'), {'sl-1'});
+      expect(await store.blockedStorylineIdsFor('email', 'shared'), isEmpty);
+    });
+  });
+
+  group('memberContextRows', () {
+    test('reads every storyline asked about in one call', () async {
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await seedConversation('c3');
+      for (final id in ['sl-1', 'sl-2', 'sl-3']) {
+        await seedStoryline(id, status: 'active');
+      }
+      await seedStoryline('sl-other', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-2', 'email', 'c2', addedBy: 'auto');
+      await store.addStorylineMember('sl-3', 'teams', 'c3', addedBy: 'auto');
+      await store.addStorylineMember('sl-other', 'email', 'c1',
+          addedBy: 'auto');
+
+      final rows = await store.memberContextRows(
+        const ['sl-1', 'sl-2', 'sl-3'],
+        embedModel: 'model-a',
+      );
+
+      expect(
+        {
+          for (final row in rows)
+            row['storyline_id']: '${row['source']}\n${row['conversation_key']}',
+        },
+        {'sl-1': 'email\nc1', 'sl-2': 'email\nc2', 'sl-3': 'teams\nc3'},
+      );
+      expect(await store.memberContextRows(const [], embedModel: 'model-a'),
+          isEmpty);
+    });
+
+    test('carries the participants and the vector of each member', () async {
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'subject': 'Homepage copy',
+        'participants_json': '[{"name":"Sarah Chen"}]',
+      });
+      await store.upsertConversationAi('email', 'c1',
+          embedding: Uint8List.fromList(const [1, 2, 3, 4]),
+          embedModel: 'model-a');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final row = (await store.memberContextRows(
+        const ['sl-1'],
+        embedModel: 'model-a',
+      ))
+          .single;
+
+      expect(row['participants_json'], '[{"name":"Sarah Chen"}]');
+      expect(row['embedding'], Uint8List.fromList(const [1, 2, 3, 4]));
+    });
+
+    test('a member with no comparable vector is still a member', () async {
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await store.upsertConversationAi('email', 'c1',
+          embedding: Uint8List.fromList(const [1, 2, 3, 4]),
+          embedModel: 'model-a');
+      // A vector from a different generation, and a member whose conversation
+      // row is gone entirely. Neither can be compared against anything, and
+      // both are still filed here — a caller that lost them would offer the
+      // user a thread the storyline already holds.
+      await store.upsertConversationAi('email', 'c2',
+          embedding: Uint8List.fromList(const [1, 2, 3, 4]),
+          embedModel: 'model-b');
+      await seedStoryline('sl-1', status: 'active');
+      for (final key in ['c1', 'c2', 'gone']) {
+        await store.addStorylineMember('sl-1', 'email', key, addedBy: 'auto');
+      }
+
+      final rows = await store.memberContextRows(
+        const ['sl-1'],
+        embedModel: 'model-a',
+      );
+
+      expect(rows.map((r) => r['conversation_key']), ['c1', 'c2', 'gone']);
+      expect(rows[0]['embedding'], isNotNull);
+      expect(rows[1]['embedding'], isNull);
+      expect(rows[2]['embedding'], isNull);
+      // No conversation row, so nobody is on it — and no row of its own to
+      // drop the membership from the answer.
+      expect(rows[2]['participants_json'], isNull);
     });
   });
 
@@ -434,6 +839,127 @@ void main() {
       await seedStoryline('sl-1', status: 'active');
       expect(await store.storylineTimeline('sl-1'), isEmpty);
       expect(await store.storylineTimeline('sl-1', sources: const []), isEmpty);
+    });
+  });
+
+  group('recentStorylineMessages', () {
+    test('takes the newest few across every member thread, newest first',
+        () async {
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedMessage('c2', 'm2', receivedAt: '2026-08-01T10:00:00Z');
+      await seedMessage('c1', 'm3', receivedAt: '2026-08-01T11:00:00Z');
+      // Not a member — a recap must not read it.
+      await seedConversation('c9');
+      await seedMessage('c9', 'm9', receivedAt: '2026-08-01T12:00:00Z');
+
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1');
+      // Newest first, and the two threads interleaved rather than one after
+      // the other: a storyline is one story told in several places.
+      expect(rows.map((r) => r['source_message_id']), ['m3', 'm2', 'm1']);
+      expect(rows.map((r) => r['received_at']), [
+        '2026-08-01T11:00:00Z',
+        '2026-08-01T10:00:00Z',
+        '2026-08-01T09:00:00Z',
+      ]);
+      expect(rows.map((r) => r['conversation_key']), ['c1', 'c2', 'c1']);
+    });
+
+    test('the limit takes the newest, not the first found', () async {
+      await seedConversation('c1');
+      for (var i = 0; i < 5; i++) {
+        await seedMessage('c1', 'm$i', receivedAt: '2026-08-0${i + 1}T09:00:00Z');
+      }
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1', limit: 2);
+
+      expect(rows.map((r) => r['received_at']),
+          ['2026-08-05T09:00:00Z', '2026-08-04T09:00:00Z']);
+    });
+
+    test('a gated message is left out of the window', () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedMessage('c1', 'm2', receivedAt: '2026-08-01T10:00:00Z');
+      await store.writeTriage('email', 'm2',
+          status: 'skipped', gateReason: 'newsletter');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1');
+
+      // Triage threw it out as a newsletter, and a recap narrating the
+      // vendor's marketing mail would be describing the wrong storyline.
+      expect(rows.map((r) => r['source_message_id']), ['m1']);
+    });
+
+    test("the user's own reply is in the window", () async {
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      // Exactly what the ingest writes for a sent message: skipped, with
+      // `outbound` as the reason. That gate is about not spending model calls
+      // on the user's own mail — it was never a statement about the story.
+      await seedMessage('c1', 'm2',
+          receivedAt: '2026-08-01T10:00:00Z',
+          direction: 'outbound',
+          triageStatus: 'skipped',
+          gateReason: 'outbound');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1');
+
+      // Newest first, so the reply leads the window the service reverses —
+      // which puts it last in the chronology the model reads, where an answer
+      // belongs. Without it the recap sees every question ever put to the user
+      // and none of their answers.
+      expect(rows.map((r) => r['source_message_id']), ['m2', 'm1']);
+      expect(rows.first['direction'], 'outbound');
+    });
+
+    test('a chat skipped only for being a chat still counts', () async {
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 't1',
+        'conversation_key': 'chat-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'received_at': '2026-08-01T09:00:00Z',
+        'body_text': 'legal wants a look',
+        'triage_status': 'skipped',
+        'gate_reason': 'teams_source',
+      });
+      await store.upsertConversation({
+        'source': 'teams',
+        'conversation_key': 'chat-1',
+        'subject': 'Acme renewal',
+        'state': 'waiting',
+      });
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'teams', 'chat-1', addedBy: 'auto');
+
+      final rows = await store.recentStorylineMessages('sl-1');
+
+      // Legacy tolerance, exactly as the embed queue applies it: a chat row
+      // stored before chats were triaged is `skipped` for no judgement anyone
+      // made, and dropping it would empty a chat-only storyline's recap.
+      expect(rows, hasLength(1));
+      // A chat message carries no subject of its own — the conversation's
+      // topic is what names the thread.
+      expect(rows.single['subject'], 'Acme renewal');
+      expect(rows.single['from_name'], 'Dana');
+    });
+
+    test('a storyline with nothing in it has an empty window', () async {
+      await seedStoryline('sl-1', status: 'active');
+      expect(await store.recentStorylineMessages('sl-1'), isEmpty);
     });
   });
 

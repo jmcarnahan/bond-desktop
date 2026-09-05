@@ -104,11 +104,19 @@ class ActivityLog {
     'sync_teams',
     'storyline',
     'storyline_sweep',
+    // Quiet for the reason the recruit is: the pass runs on every membership
+    // change and most of them end with the description unchanged, which is a
+    // nothing the panel should not narrate.
+    'storyline_refresh',
     // Quiet even though a user's charter save is what queues it: every pass
     // that actually ran notes its counts, so the only recordings suppressed
     // here are the genuine nothings — a recruit that arrived after its
     // storyline was dismissed.
     'storyline_recruit',
+    // Quiet for the reason the refresh is, and more so: the recap runs on
+    // every message that lands in a member thread, and most of those calls end
+    // with the watermark already ahead of them and no model dialled at all.
+    'storyline_recap',
   };
 
   /// Detail keys that describe how much a pass LOOKED AT, not what it
