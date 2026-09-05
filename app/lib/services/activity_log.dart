@@ -201,6 +201,13 @@ class ActivityLog {
     slot.promptTokens += call.promptTokens ?? 0;
     slot.completionTokens += call.completionTokens ?? 0;
     slot.llmLabel = call.label;
+    // Last writer wins, exactly as [_PendingSlot.llmLabel] does — and for one
+    // row it is the same answer, because a row's calls are one unit of work on
+    // one slot. The storyline sweep is the exception (membership on the fast
+    // client, naming on the prose one), and there this reports the last model
+    // dialled.
+    final model = call.model;
+    if (model != null && model.isNotEmpty) slot.llmModel = model;
     if (call.outcome != 'ok') slot.llmError = call.error ?? call.outcome;
   }
 
@@ -331,6 +338,7 @@ class _PendingSlot {
   int promptTokens = 0;
   int completionTokens = 0;
   String? llmLabel;
+  String? llmModel;
   String? llmError;
   DateTime? since;
 
@@ -353,6 +361,8 @@ class _PendingSlot {
       if (completionTokens > 0) drained['completion_tokens'] = completionTokens;
       final label = llmLabel;
       if (label != null) drained['llm_label'] = label;
+      final model = llmModel;
+      if (model != null) drained['llm_model'] = model;
     }
     final error = llmError;
     if (error != null) drained['llm_error'] = error;
@@ -368,6 +378,7 @@ class _PendingSlot {
     promptTokens = 0;
     completionTokens = 0;
     llmLabel = null;
+    llmModel = null;
     llmError = null;
     since = null;
   }

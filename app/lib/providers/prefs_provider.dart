@@ -3,9 +3,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
 import '../services/attention.dart';
+import '../services/llm/model_slots.dart';
 import 'app_providers.dart';
 
 export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
+
+/// So the settings screen reaches a slot's value and its name through one
+/// import — the prefs are where both are composed.
+export '../services/llm/model_slots.dart' show LlmTarget, ModelSlot;
 
 /// Which Microsoft backend the app talks through.
 ///
@@ -102,6 +107,20 @@ class AppPrefs {
   /// is what makes it auditable rather than hidden.
   final bool homeShowDropped;
 
+  /// The bulk slot's server and model, or EMPTY for "whatever this build was
+  /// compiled with".
+  ///
+  /// Empty is stored as empty, deliberately unlike [mcpServerUrl] — which
+  /// resolves its default at read time. A model default is a fact about the
+  /// machine's `local.mk`, and resolving it at read would freeze today's
+  /// default into the database: change `FAST_LLAMA_MODEL` and the app would
+  /// keep asking for the old name because a settings screen had once been
+  /// opened. Empty means "follow the build", and it keeps meaning that.
+  final String fastLlmUrl;
+  final String fastLlmModel;
+  final String proseLlmUrl;
+  final String proseLlmModel;
+
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
@@ -112,7 +131,38 @@ class AppPrefs {
     this.storylineNewestFirst = false,
     this.notifyStyle = NotifyStyle.native,
     this.homeShowDropped = false,
+    this.fastLlmUrl = '',
+    this.fastLlmModel = '',
+    this.proseLlmUrl = '',
+    this.proseLlmModel = '',
   });
+
+  /// What the bulk client will dial on its next request.
+  LlmTarget get fastTarget => LlmTarget(
+        baseUrl: fastLlmUrl.isEmpty ? fastUrlDefault : fastLlmUrl,
+        model: fastLlmModel.isEmpty ? fastModelDefault : fastLlmModel,
+      );
+
+  LlmTarget get proseTarget => LlmTarget(
+        baseUrl: proseLlmUrl.isEmpty ? proseUrlDefault : proseLlmUrl,
+        model: proseLlmModel.isEmpty ? proseModelDefault : proseLlmModel,
+      );
+
+  /// One slot's target, for the settings screen's table. [ModelSlot.embed] is
+  /// display only — it always answers the compiled default.
+  LlmTarget targetFor(ModelSlot slot) => switch (slot) {
+        ModelSlot.fast => fastTarget,
+        ModelSlot.prose => proseTarget,
+        ModelSlot.embed => embedSlotDefault,
+      };
+
+  /// Whether this slot is on the build's own default — what the screen renders
+  /// as "Default" rather than as an override.
+  bool isSlotDefault(ModelSlot slot) => switch (slot) {
+        ModelSlot.fast => fastLlmUrl.isEmpty && fastLlmModel.isEmpty,
+        ModelSlot.prose => proseLlmUrl.isEmpty && proseLlmModel.isEmpty,
+        ModelSlot.embed => true,
+      };
 
   /// Whether the in-app ribbon runs. It does in BOTH remaining modes — it is
   /// the whole of in-app mode and the frontmost fallback of native mode — so
@@ -130,6 +180,10 @@ class AppPrefs {
     bool? storylineNewestFirst,
     NotifyStyle? notifyStyle,
     bool? homeShowDropped,
+    String? fastLlmUrl,
+    String? fastLlmModel,
+    String? proseLlmUrl,
+    String? proseLlmModel,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -142,6 +196,10 @@ class AppPrefs {
             storylineNewestFirst ?? this.storylineNewestFirst,
         notifyStyle: notifyStyle ?? this.notifyStyle,
         homeShowDropped: homeShowDropped ?? this.homeShowDropped,
+        fastLlmUrl: fastLlmUrl ?? this.fastLlmUrl,
+        fastLlmModel: fastLlmModel ?? this.fastLlmModel,
+        proseLlmUrl: proseLlmUrl ?? this.proseLlmUrl,
+        proseLlmModel: proseLlmModel ?? this.proseLlmModel,
       );
 }
 
@@ -157,6 +215,10 @@ const String showActivityLogKey = 'show_activity_log';
 const String storylineNewestFirstKey = 'storyline_newest_first';
 const String notifyStyleKey = 'notify_style';
 const String homeShowDroppedKey = 'home_show_dropped';
+const String fastLlmUrlKey = 'fast_llm_url';
+const String fastLlmModelKey = 'fast_llm_model';
+const String proseLlmUrlKey = 'prose_llm_url';
+const String proseLlmModelKey = 'prose_llm_model';
 
 /// The switch [notifyStyleKey] replaced. Still read — and only read — so an
 /// install that had turned the ribbon off stays quiet across the upgrade
@@ -213,8 +275,17 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
         await store.getPref(notifyRibbonKey),
       ),
       homeShowDropped: await store.getPref(homeShowDroppedKey) == 'true',
+      fastLlmUrl: _slotValue(await store.getPref(fastLlmUrlKey)),
+      fastLlmModel: _slotValue(await store.getPref(fastLlmModelKey)),
+      proseLlmUrl: _slotValue(await store.getPref(proseLlmUrlKey)),
+      proseLlmModel: _slotValue(await store.getPref(proseLlmModelKey)),
     );
   }
+
+  /// Absent, blank, or whitespace all mean the same thing — follow the build.
+  /// Trimmed on the way in as well as on the way out, because a URL with a
+  /// trailing newline is a `SocketException` nobody can read.
+  static String _slotValue(String? raw) => raw?.trim() ?? '';
 
   /// The stored style, or what the switch it replaced said, or on.
   ///
@@ -316,6 +387,39 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     state = state.copyWith(homeShowDropped: value);
     await _store.setPref(homeShowDroppedKey, value.toString());
   }
+
+  /// Points the bulk slot somewhere. Empty for either field means the compiled
+  /// default; the pair is set together so no request can ever see half a move.
+  ///
+  /// State first, then the writes — the order every setter here uses.
+  Future<void> setFastLlmTarget({
+    required String url,
+    required String model,
+  }) async {
+    final cleanUrl = url.trim();
+    final cleanModel = model.trim();
+    state = state.copyWith(fastLlmUrl: cleanUrl, fastLlmModel: cleanModel);
+    await _store.setPref(fastLlmUrlKey, cleanUrl);
+    await _store.setPref(fastLlmModelKey, cleanModel);
+  }
+
+  Future<void> setProseLlmTarget({
+    required String url,
+    required String model,
+  }) async {
+    final cleanUrl = url.trim();
+    final cleanModel = model.trim();
+    state = state.copyWith(proseLlmUrl: cleanUrl, proseLlmModel: cleanModel);
+    await _store.setPref(proseLlmUrlKey, cleanUrl);
+    await _store.setPref(proseLlmModelKey, cleanModel);
+  }
+
+  /// Back to the build's defaults for one slot.
+  Future<void> clearSlotTarget(ModelSlot slot) => switch (slot) {
+        ModelSlot.fast => setFastLlmTarget(url: '', model: ''),
+        ModelSlot.prose => setProseLlmTarget(url: '', model: ''),
+        ModelSlot.embed => Future<void>.value(),
+      };
 }
 
 /// What `main()` read from the database before the first frame, or null where

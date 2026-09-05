@@ -504,6 +504,9 @@ void main() {
         syncServiceProvider.overrideWithValue(sync),
       ]);
       addTearDown(container.dispose);
+      // The prefs load is fire-and-forget by design; waiting for it here is
+      // what keeps its last read off a database this test has already closed.
+      await container.read(appPrefsProvider.notifier).ready;
 
       await container.read(conversationsProvider.notifier).load();
       final state = container.read(conversationsProvider) as ConversationsLoaded;

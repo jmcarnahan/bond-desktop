@@ -295,8 +295,22 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
 /// tally until the queue that made the calls records the item they were for —
 /// so the panel shows "three model calls, nine seconds" on one extraction row
 /// rather than three rows nobody can attribute.
+///
+/// It still watches ONLY the activity log. The user's choice of model reaches
+/// it through [LlmClient]'s resolver, which is read at call time: a model
+/// change must not rebuild this provider, because everything downstream —
+/// [aiWorkerProvider], [storylineServiceProvider], [triageQueueProvider] —
+/// watches it, and rebuilding those mid-drain would abort work in flight to
+/// change which server the NEXT request goes to.
+///
+/// `ref.read` inside the closure, not `watch`, on the precedent
+/// [embeddingsClientProvider] set: the callback outlives this body, and the
+/// client guards the read itself.
 final llmClientProvider = Provider<LlmClient>(
-  (ref) => LlmClient(onCall: ref.watch(activityLogProvider).noteLlmCall),
+  (ref) => LlmClient(
+    resolveTarget: () => ref.read(appPrefsProvider).proseTarget,
+    onCall: ref.watch(activityLogProvider).noteLlmCall,
+  ),
 );
 
 /// The second chat model, on its own server (`make fast`), and the reason
@@ -321,11 +335,17 @@ final llmClientProvider = Provider<LlmClient>(
 /// the 27B would show a mailbox that apparently triaged itself for free.
 final fastLlmClientProvider = Provider<LlmClient>(
   (ref) => LlmClient(
+    // Still the constructed fallback, and it still matters: it is what the
+    // client answers with if the resolver ever throws, and what
+    // `llm_routing_test.dart` pins the compiled default against.
     baseUrl: LlmClient.fastBaseUrl,
     // Its own name as well as its own URL: a runtime that serves more than one
     // model routes on this field, so the bulk server's client must say which
     // of them it is asking for rather than inherit the big server's answer.
     model: LlmClient.fastModel,
+    // Read at call time, exactly as [llmClientProvider] explains: the stored
+    // slot moves the next request without rebuilding this client.
+    resolveTarget: () => ref.read(appPrefsProvider).fastTarget,
     onCall: ref.watch(activityLogProvider).noteLlmCall,
   ),
 );

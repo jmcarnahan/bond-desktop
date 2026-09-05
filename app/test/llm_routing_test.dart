@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
@@ -196,13 +197,17 @@ void main() {
   });
 
   group('providers', () {
-    test('the two clients point at different servers', () {
+    test('the two clients point at different servers', () async {
       // Both client providers now watch the activity log, which watches the
       // store — so even this read-only test needs a real database under it.
       final container = ProviderContainer(
         overrides: [dbProvider.overrideWithValue(db)],
       );
       addTearDown(container.dispose);
+      // And reading `baseUrl` now resolves the stored slot, so the settings
+      // have to be in before the assertion rather than landing on a database
+      // this test's tearDown has already closed.
+      await container.read(appPrefsProvider.notifier).ready;
 
       expect(container.read(llmClientProvider).baseUrl, LlmClient.defaultBaseUrl);
       expect(container.read(fastLlmClientProvider).baseUrl,
@@ -241,6 +246,81 @@ void main() {
       // this one proves the wiring actually passes it.
       expect(fast.schemas, ['storyline_membership']);
       expect(primary.schemas, ['storyline_name']);
+    });
+
+    test('a stored target moves the fast client without rebuilding it',
+        () async {
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      final client = container.read(fastLlmClientProvider);
+      expect(client.baseUrl, LlmClient.fastBaseUrl);
+
+      await container.read(appPrefsProvider.notifier).setFastLlmTarget(
+            url: 'http://127.0.0.1:9/v1/chat/completions',
+            model: 'mlx-4b',
+          );
+
+      // The SAME instance follows the setting — that is the whole design. A
+      // rebuild here would abort a drain to change the next request's server.
+      expect(identical(container.read(fastLlmClientProvider), client), isTrue);
+      expect(client.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
+      expect(client.model, 'mlx-4b');
+    });
+
+    test('the prose client reads its own slot', () async {
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      final prose = container.read(llmClientProvider);
+      final fast = container.read(fastLlmClientProvider);
+
+      await container.read(appPrefsProvider.notifier).setProseLlmTarget(
+            url: 'http://127.0.0.1:9/v1/chat/completions',
+            model: 'mlx-27b',
+          );
+
+      expect(identical(container.read(llmClientProvider), prose), isTrue);
+      expect(prose.baseUrl, 'http://127.0.0.1:9/v1/chat/completions');
+      expect(prose.model, 'mlx-27b');
+      // Two slots, not one setting: moving prose must not move the bulk work.
+      expect(fast.baseUrl, LlmClient.fastBaseUrl);
+      expect(fast.model, LlmClient.fastModel);
+    });
+
+    test('the queues keep the clients they were built with', () async {
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      final triage = container.read(triageQueueProvider);
+      final worker = container.read(aiWorkerProvider);
+      final gate = container.read(drainGateProvider);
+      final activity = container.read(activityLogProvider);
+      final progress = container.read(progressBusProvider);
+
+      await container.read(appPrefsProvider.notifier).setFastLlmTarget(
+            url: 'http://127.0.0.1:9/v1/chat/completions',
+            model: 'mlx-4b',
+          );
+
+      // The no-rebuild requirement, which nothing else enforces: the resolver
+      // is a `ref.read` inside a closure, and the day someone makes it a
+      // `ref.watch` every one of these becomes a new object — a drain in
+      // flight would be disposed to change where the NEXT request goes.
+      expect(identical(container.read(triageQueueProvider), triage), isTrue);
+      expect(identical(container.read(aiWorkerProvider), worker), isTrue);
+      expect(identical(container.read(drainGateProvider), gate), isTrue);
+      expect(identical(container.read(activityLogProvider), activity), isTrue);
+      expect(identical(container.read(progressBusProvider), progress), isTrue);
     });
   });
 }

@@ -26,6 +26,10 @@ class FakeLlamaServer {
   /// this; everything else leaves it at zero and runs in milliseconds.
   Duration delay = Duration.zero;
 
+  /// What `/v1/models` lists. One entry is llama-server's answer; several is
+  /// an MLX-style runtime's, which is the case the settings screen exists for.
+  List<String> modelIds = ['qwen3.8'];
+
   FakeLlamaServer._(this._server) {
     _server.listen(_handle);
   }
@@ -35,6 +39,10 @@ class FakeLlamaServer {
 
   /// What an `LlmClient` should be pointed at.
   String get chatUrl => 'http://127.0.0.1:${_server.port}/v1/chat/completions';
+
+  /// What a `ModelServerProbe` should derive from [chatUrl], spelled out so a
+  /// test can assert the derivation landed here rather than guessing.
+  String get modelsUrl => 'http://127.0.0.1:${_server.port}/v1/models';
 
   /// Scripts the answers for one schema name.
   ///
@@ -58,6 +66,25 @@ class FakeLlamaServer {
 
   Future<void> _handle(HttpRequest request) async {
     final body = await utf8.decoder.bind(request).join();
+
+    // BEFORE the non-POST guard below, which would otherwise swallow it. Same
+    // header shape as [_respond]: `application/json` with no charset, because
+    // that absence is what this fixture exists to reproduce.
+    if (request.method == 'GET' && request.uri.path == '/v1/models') {
+      final bytes = utf8.encode(jsonEncode(<String, dynamic>{
+        'object': 'list',
+        'data': [
+          for (final id in modelIds) {'id': id, 'object': 'model'},
+        ],
+      }));
+      request.response.statusCode = HttpStatus.ok;
+      request.response.headers
+          .set(HttpHeaders.contentTypeHeader, 'application/json');
+      request.response.headers.contentLength = bytes.length;
+      request.response.add(bytes);
+      await request.response.close();
+      return;
+    }
 
     if (request.method != 'POST' ||
         request.uri.path != '/v1/chat/completions') {
