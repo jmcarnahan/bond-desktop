@@ -14,10 +14,10 @@ import 'fixtures/prose_cases.dart';
 ///
 /// `llm_bench_live_test.dart` times triage and extraction on the bulk slot,
 /// which is most of the app's model calls and none of its visible output. This
-/// times the two tasks a person actually reads — the storyline title on a card
-/// and the reply waiting in a composer — because a candidate runtime that
-/// halves latency and writes worse drafts has not won anything, and a table of
-/// milliseconds cannot say so.
+/// times the three tasks a person actually reads — the storyline title on a
+/// card, the recap the storyline screen leads with, and the reply waiting in a
+/// composer — because a candidate runtime that halves latency and writes worse
+/// drafts has not won anything, and a table of milliseconds cannot say so.
 ///
 /// It runs against [BenchTarget.prose], by default the 27B on :8080. Point it
 /// elsewhere with `make bench-prose PROSE_URL=… PROSE_LABEL=…`.
@@ -29,12 +29,18 @@ import 'fixtures/prose_cases.dart';
 /// against whatever phrasing happened to be typed into a fixture. So every
 /// answer is PRINTED VERBATIM and a human reads them. What is asserted is
 /// shape: an empty title is a broken call, the fallback title is the task's own
-/// admission that it could not name the group, and an empty reply body is the
-/// exact failure `DraftHandler` retries on.
+/// admission that it could not name the group, an empty recap is what the
+/// service reads as "the model had nothing to say" and refuses to store, and an
+/// empty reply body is the exact failure `DraftHandler` retries on.
+///
+/// The recap's two LISTS are printed and not asserted at all, empty included:
+/// the prompt says an empty `open_items` is an honest answer, and a test that
+/// wanted one item would be asking the model to invent an open question for a
+/// storyline where nothing is outstanding.
 
 void main() {
   test(
-    'the prose slot names storylines and drafts replies, timed',
+    'the prose slot names, recaps and drafts, timed',
     () async {
       // Every number below comes from the client's own call records rather
       // than a stopwatch at the call site: the same clock the token counts are
@@ -103,6 +109,50 @@ void main() {
           expect(result.title, isNot(NameStorylineTask.fallbackTitle),
               reason: nameCase.id);
           expect(result.evidence, isNotEmpty, reason: nameCase.id);
+        }
+
+        for (final recapCase in recapCases) {
+          current = recapCase.id;
+
+          final result = await runTask(
+            client,
+            const StorylineRecapTask(),
+            RecapInput(
+              title: recapCase.title,
+              charter: recapCase.charter,
+              previousRecap: recapCase.previousRecap,
+              messageLines: recapCase.messageLines,
+            ),
+            // As the service runs it. Zero matters more here than anywhere
+            // else in this file: the same window recapped twice is what the
+            // staleness gate lets happen after a park, and a block that
+            // re-words itself under a reader who did not touch it is the one
+            // thing this pass must not do.
+            temperature: 0,
+            think: BenchTarget.allowReasoning,
+          );
+
+          final ms = collector.lastFor('storyline_recap')!.durationMs;
+
+          // The lists are printed one per line rather than joined, because
+          // reading whether an item was carried forward, settled, or invented
+          // means reading them against the previous recap above.
+          lines.add(
+            '\n${recapCase.id.padRight(24)} ${ms.toString().padLeft(6)}ms  '
+            '(${recapCase.messageLines.length} messages, '
+            '${recapCase.previousRecap.isEmpty ? 'first recap' : 'has a previous recap'})\n'
+            '  evidence: ${result.evidence}\n'
+            '  recap:    ${result.recap}\n'
+            '${result.openItems.isEmpty ? '  open:     (none)\n' : result.openItems.map((item) => '  open:     $item\n').join()}'
+            '${result.decisions.isEmpty ? '  decided:  (none)' : result.decisions.map((item) => '  decided:  $item\n').join().trimRight()}',
+          );
+
+          // Shape, and only the two fields that have one. An empty recap is
+          // not a thin catch-up to argue about — it is the exact answer
+          // `StorylineService.recap` throws away without writing, so a run
+          // that produced one wrote nothing to the screen it was benched for.
+          expect(result.evidence, isNotEmpty, reason: recapCase.id);
+          expect(result.recap, isNotEmpty, reason: recapCase.id);
         }
 
         for (final draftCase in draftCases) {

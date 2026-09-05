@@ -24,7 +24,7 @@ is always the authority when they disagree.
 | 6 | **Extraction** — evidence, topics, people, intent, importance | **yes** | [04-extraction.md](04-extraction.md) |
 | 7 | Bucket filing — low-value mail to Later | no | [04-extraction.md](04-extraction.md) |
 | 8 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
-| 9 | **Storylines** — assign, name, sweep, recruit | **yes** | [06-storylines.md](06-storylines.md) |
+| 9 | **Storylines** — assign, sweep, refresh, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
 | 10 | **Reply decision** — does this message need an answer | **yes** | [07-replies.md](07-replies.md) |
 | 11 | **Draft generation** — the suggested reply itself | **yes** | [07-replies.md](07-replies.md) |
 | 12 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
@@ -44,6 +44,8 @@ live in [10-model-routing.md](10-model-routing.md).
 | Extraction | fast / bulk | `:8082` |
 | Storyline membership confirm | fast / bulk | `:8082` |
 | Storyline naming | prose / 27B | `:8080` Qwen3.8-27B (`make model`) |
+| Storyline refresh | prose / 27B | `:8080` |
+| Storyline recap | prose / 27B | `:8080` |
 | Reply decision | prose / 27B | `:8080` |
 | Draft generation | prose / 27B | `:8080` |
 | Embeddings | embed | `:8081` embeddinggemma-300M (`make embed`) |

@@ -95,11 +95,11 @@ one are different questions:
 a user who renamed the storyline while the model was thinking still wins. A
 locked title is returned verbatim; the summary is refreshed either way — it
 says where things stand, which no rename claimed. A locked charter is **never**
-overwritten: the model's version is parked in `charter_suggestion` for the
-About block to offer, and a suggestion that matches the stored charter
-(compared with whitespace flattened and case folded) clears rather than
-parking. Both arms of `setCharter` clear a parked suggestion — the user has
-just answered the question it was asking.
+overwritten: the model's version is parked in `charter_suggestion`, and a
+suggestion that matches the stored charter (compared with whitespace flattened
+and case folded) clears rather than parking. What the About block then does
+with a parked suggestion — and what happens when the user answers it — is
+under *What the user sees*.
 
 **The stamp is the pre-call hash and count**, never the current ones. A thread
 filed by hand while the model was thinking is a thread this description never
@@ -163,6 +163,16 @@ would leave the gate reading fresh and that message would never be recapped.
 | `addThread` | always — a hand-filed thread brings its own messages, and the user is looking |
 | `refresh` tail | always, once it gets past its own gate — a membership change is a change to the story |
 
+`removeThread` is absent where the refresh table has it, and the watermark is
+why. Removing a thread adds no messages, so the newest `received_at` left in
+the storyline is older than the recap has already read: the refresh a removal
+queues does re-queue the recap, and that recap returns at the gate. A recap can
+therefore go on describing a thread that has just been filed out of the
+storyline until something new is said in one of the threads that remain. That
+is the one place the watermark's cheapness shows, and it is a known edge rather
+than a design: the pass is keyed to *messages arriving*, and a removal is the
+only event that changes the story without one.
+
 Bursts coalesce for free: `requeueWork` is keyed on
 `(kind, source, entity_id)`, so ten messages landing in one drain leave one
 row, and the one pass that runs reads the whole burst because it reads current
@@ -195,9 +205,12 @@ two-step, as removing a thread is, because it overwrites a sentence the user
 wrote: the second tap reads *Replace the charter*. Accepting routes through
 `setCharter`, so it does everything a hand-typed save does — trims, locks,
 clears the suggestion, and queues the recruit that hunts for threads matching
-the new criteria. *Discard* is one tap and clears the column alone. Neither
-offer appears while the charter field is open: the field is where the user
-would be answering the suggestion anyway.
+the new criteria. *Discard* is one tap and clears the column alone. Typing a
+charter by hand clears it too — both arms of `setCharter` do, including the
+empty one that unlocks and queues a redraft — because the user has just
+answered the question the suggestion was asking. Neither offer appears while
+the charter field is open: the field is where the user would be answering the
+suggestion anyway.
 
 Refresh and recap both report progress under their own kinds, and
 `StorylinesNotifier` listens for both, so a pass that rewrites a title or a
