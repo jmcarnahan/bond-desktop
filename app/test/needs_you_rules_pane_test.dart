@@ -3,20 +3,23 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// What this pane guards is the exact text the model reads: the owner's rules
-/// are fenced straight into every below-the-floor needs-you judgement, so an
-/// editor that saved something the user did not mean to save — a half-typed
-/// thought abandoned with Back, a stray trailing newline — would change how
-/// every message is judged.
+/// ARE the body of the needs-you system prompt, so an editor that saved
+/// something the user did not mean to save — a half-typed thought abandoned
+/// with Back, a stray trailing newline — would change how every message is
+/// judged.
 ///
-/// Hence the two contracts pinned hardest here: **Save is the only thing that
-/// commits** (Cancel, the back arrow, and dispose all discard), and the trim
-/// happens HERE, because the store keeps whatever it is handed verbatim.
+/// Hence the contracts pinned hardest here: **Save is the only thing that
+/// commits** (Cancel, the back arrow, and dispose all discard), the trim
+/// happens HERE because the store keeps whatever it is handed verbatim, and a
+/// body identical to the defaults is stored as the EMPTY preference so the
+/// default path keeps serving its one const prompt.
 ///
-/// The defaults disclosure is pinned too. It must show the rules VERBATIM —
-/// they are what the owner's text refines, and a paraphrase would make the
-/// pane lie about the prompt.
+/// The field is prefilled with the defaults, because they are the text in
+/// force. The fixed tail is disclosed verbatim: the owner may replace every
+/// word above it and not one word of it.
 void main() {
   const defaults = 'Line one of the defaults.\nLine two of the defaults.';
+  const tail = '\n\nBond answers in a fixed form.';
 
   /// The pane over plain closures — it reaches for no providers, so nothing
   /// else has to exist for it to be driven.
@@ -24,7 +27,8 @@ void main() {
     WidgetTester tester, {
     String value = '',
     String defaultRules = defaults,
-    int maxLength = 800,
+    String fixedTail = tail,
+    int maxLength = 4000,
     required void Function(String) onSave,
     required VoidCallback onBack,
   }) async {
@@ -35,6 +39,7 @@ void main() {
         body: NeedsYouRulesPane(
           value: value,
           defaultRules: defaultRules,
+          fixedTail: fixedTail,
           maxLength: maxLength,
           onSave: onSave,
           onBack: onBack,
@@ -47,15 +52,18 @@ void main() {
   bool saveEnabled(WidgetTester tester) =>
       tester.widget<FilledButton>(find.byType(FilledButton)).onPressed != null;
 
-  bool clearEnabled(WidgetTester tester) => tester
+  bool resetEnabled(WidgetTester tester) => tester
           .widget<TextButton>(
             find.ancestor(
-              of: find.text('Clear my rules'),
+              of: find.text('Reset to default'),
               matching: find.byType(TextButton),
             ),
           )
           .onPressed !=
       null;
+
+  String fieldText(WidgetTester tester) =>
+      tester.widget<TextField>(find.byType(TextField)).controller!.text;
 
   testWidgets('renders the title, the stored rules, and the controls',
       (tester) async {
@@ -70,16 +78,27 @@ void main() {
     expect(find.text('Anything about the budget needs me.'), findsOneWidget);
     expect(find.text('Save'), findsOneWidget);
     expect(find.text('Cancel'), findsOneWidget);
-    expect(find.text('Clear my rules'), findsOneWidget);
+    expect(find.text('Reset to default'), findsOneWidget);
     expect(find.byIcon(Icons.arrow_back), findsOneWidget);
-    expect(find.text('What Bond already asks'), findsOneWidget);
-    // Collapsed to start: the defaults are reference material, not the point
-    // of the screen.
-    expect(find.text(defaults), findsNothing);
+    expect(find.text('What Bond adds after your rules'), findsOneWidget);
+    // Collapsed to start: the tail is reference material, not the point of the
+    // screen.
+    expect(find.text(tail.trimLeft()), findsNothing);
   });
 
-  testWidgets('Save stays disabled until the field differs from what is stored',
+  testWidgets('prefills the default body when nothing is stored',
       (tester) async {
+    // An empty preference means the defaults are what the model reads, so the
+    // defaults are what the editor opens on — and opening on them is not an
+    // edit.
+    await pump(tester, value: '', onSave: (_) {}, onBack: () {});
+
+    expect(fieldText(tester), defaults);
+    expect(saveEnabled(tester), isFalse);
+  });
+
+  testWidgets('Save stays disabled until the field differs from what it opened '
+      'on', (tester) async {
     await pump(
       tester,
       value: 'Original rules.',
@@ -178,8 +197,7 @@ void main() {
     expect(saved, isEmpty);
   });
 
-  testWidgets('Clear empties the field only; Save is what commits it',
-      (tester) async {
+  testWidgets('Reset to default is local, and Save commits it', (tester) async {
     final saved = <String>[];
     await pump(
       tester,
@@ -188,39 +206,58 @@ void main() {
       onBack: () {},
     );
 
-    await tester.tap(find.text('Clear my rules'));
+    await tester.tap(find.text('Reset to default'));
     await tester.pump();
 
-    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
-        isEmpty);
+    expect(fieldText(tester), defaults);
     expect(saved, isEmpty);
     expect(saveEnabled(tester), isTrue);
 
     await tester.tap(find.text('Save'));
     await tester.pump();
+    // The empty string, not the defaults themselves: an empty preference is how
+    // the app says "the default body is in force", and it is what keeps the
+    // const prompt serving.
     expect(saved, ['']);
   });
 
-  testWidgets('Clear is disabled when there is nothing to clear',
+  testWidgets('Reset to default is disabled when the field already shows it',
       (tester) async {
     await pump(tester, value: '', onSave: (_) {}, onBack: () {});
 
-    expect(clearEnabled(tester), isFalse);
+    expect(resetEnabled(tester), isFalse);
 
     await tester.enterText(find.byType(TextField), 'a rule');
     await tester.pump();
-    expect(clearEnabled(tester), isTrue);
+    expect(resetEnabled(tester), isTrue);
   });
 
-  testWidgets('the disclosure shows the defaults verbatim', (tester) async {
+  testWidgets('a save that retypes the defaults stores the empty pref',
+      (tester) async {
+    // However the field arrived at the default text — the button, or typing it
+    // out — the same normalization applies.
+    final saved = <String>[];
+    await pump(tester, value: 'custom', onSave: saved.add, onBack: () {});
+
+    await tester.enterText(find.byType(TextField), defaults);
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+
+    expect(saved, ['']);
+  });
+
+  testWidgets('the disclosure shows the fixed tail verbatim', (tester) async {
     await pump(tester, value: '', onSave: (_) {}, onBack: () {});
 
-    expect(find.text(defaults), findsNothing);
-    await tester.tap(find.text('What Bond already asks'));
+    expect(find.text(tail.trimLeft()), findsNothing);
+    await tester.tap(find.text('What Bond adds after your rules'));
     await tester.pumpAndSettle();
 
-    // Verbatim, not a summary: this is the text the model actually reads.
-    expect(find.text(defaults), findsOneWidget);
+    // Verbatim, not a summary: this is the text the model actually reads after
+    // whatever the owner wrote. Left-trimmed only — the leading blank line is
+    // a concatenation separator rather than prose.
+    expect(find.text(tail.trimLeft()), findsOneWidget);
     expect(find.byType(SelectableText), findsOneWidget);
   });
 
@@ -229,6 +266,7 @@ void main() {
     await pump(
       tester,
       value: '',
+      defaultRules: 'short defaults',
       maxLength: 20,
       onSave: (_) {},
       onBack: () {},
@@ -237,9 +275,6 @@ void main() {
     await tester.enterText(find.byType(TextField), 'x' * 30);
     await tester.pump();
 
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text.length,
-      20,
-    );
+    expect(fieldText(tester).length, 20);
   });
 }

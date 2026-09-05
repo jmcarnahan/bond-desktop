@@ -3,6 +3,8 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/services/llm/needs_you_task.dart'
+    show needsYouDefaultRules;
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/needs_you_rules_pane.dart';
@@ -99,5 +101,18 @@ void main() {
     expect(await store.getPref(needsYouRulesKey), 'Invoices always.');
     // Back on the mail, not left in the editor.
     expect(find.byType(NeedsYouRulesPane), findsNothing);
+  });
+
+  testWidgets('a fresh install shows the default body in the field',
+      (tester) async {
+    // Nothing stored means the app's own rules are what the model reads, so
+    // they are what the editor opens on — and the screen has to hand the pane
+    // the real ones for that to be true.
+    await openPane(tester);
+
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      needsYouDefaultRules,
+    );
   });
 }

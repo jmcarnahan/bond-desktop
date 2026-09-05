@@ -28,6 +28,11 @@ typedef OwnerLookup = Future<({String? name, String? address})?> Function();
 /// the floor is silent about is read by [NeedsYouTask], which is the only
 /// thing here that can write a 0.
 ///
+/// The owner's `needs_you_rules` pref REPLACES the default body of the system
+/// prompt outright — an empty pref is the default body. It is read per item,
+/// so an edit mid-drain reaches the rest of the drain, and memoized on its own
+/// text, so an unchanged pref costs no rebuilt prompt.
+///
 /// It reads the message, never triage's verdicts. The queue in front of this
 /// handler takes rows whose `triage_status` is still `pending`, so
 /// `reply_expected` and `needs_action` may not have been written yet — and
@@ -62,6 +67,13 @@ class NeedsYouHandler extends WorkHandler {
   /// the provider that built this handler and so builds a new one. Only a
   /// lookup that ANSWERED is kept — see [_ownerIdentity].
   Future<({String? name, String? address})?>? _ownerFuture;
+
+  /// The task, memoized on the rules text it was built from. The pref is read
+  /// per item so a mid-drain edit takes effect on the next message, but an
+  /// UNCHANGED pref must reuse the same task — same string object, same KV
+  /// prefix — rather than rebuild the prompt per item.
+  String? _rulesText;
+  NeedsYouTask _task = const NeedsYouTask();
 
   NeedsYouHandler(
     this._store,
@@ -150,11 +162,10 @@ class NeedsYouHandler extends WorkHandler {
 
     final result = await runTask(
       _client,
-      const NeedsYouTask(),
+      _taskFor(rules),
       NeedsYouInput(
         message: message,
         thread: context,
-        userRules: rules,
         ownerName: owner?.name,
         ownerAddress: owner?.address,
         now: DateTime.now(),
@@ -181,6 +192,32 @@ class NeedsYouHandler extends WorkHandler {
       reason: result.evidence,
     );
     _log.note({'verdict': verdict, 'confidence': result.confidence});
+  }
+
+  /// The task for one pref reading, built at most once per distinct text.
+  ///
+  /// Empty and default-equal both take the const default path. The pane
+  /// normalizes a default-equal save back to '', but a pref written by hand
+  /// must not silently fork the prompt into a non-const copy of the same
+  /// words — that would cost a cache re-prime for no change in what is asked.
+  ///
+  /// The clamp mirrors the editor's `maxLength`, for the same case: a pref
+  /// that reached the store through something other than the pane.
+  NeedsYouTask _taskFor(String? rules) {
+    var body = rules?.trim() ?? '';
+    if (body.length > needsYouRulesCap) body = body.substring(0, needsYouRulesCap);
+    if (body.isEmpty || body == needsYouDefaultRules.trim()) {
+      if (_rulesText != null) {
+        _rulesText = null;
+        _task = const NeedsYouTask();
+      }
+      return _task;
+    }
+    if (body != _rulesText) {
+      _rulesText = body;
+      _task = NeedsYouTask.withRules(body);
+    }
+    return _task;
   }
 
   /// The memoized lookup, degraded rather than trusted. A keychain read that

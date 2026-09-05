@@ -84,37 +84,66 @@ behind it, and nothing else. (The one thing it does read from triage is the
 `skipped` **gate**, which is a guard against judging a newsletter, not a
 judgement it defers to.)
 
-**What the prompt is told.** The rules are `needsYouDefaultRules`, and they are
-**public** for two reasons: the settings pane that lets the owner add their own
-criteria renders them above the field, and an anti-drift test pins
-`systemPrompt.startsWith(needsYouDefaultRules)` so the words on screen and the
-words the model reads cannot come apart. The prompt is held to the **strict**
-form of the parity rule in `prompt_parity_test.dart` — it may not say "email",
-"mail" or "chat" at all, not even naming the two together, because what varies
-by channel is stated in the user message.
+**What the prompt is told.** The system prompt is built in two pieces:
+
+```
+systemPrompt = <rules body> + needsYouOutputContract + untrustedDataClause
+```
+
+The **rules body** is the owner's, and `needsYouDefaultRules` is what stands
+there when they have written nothing. It is **public** because the settings pane
+works from that exact text three ways — it prefills the editor with it, "Reset
+to default" restores it, and a saved body equal to it is normalized back to the
+empty pref — and an anti-drift test pins
+`systemPrompt.startsWith(needsYouDefaultRules)` on the **default** prompt so the
+words on screen and the words the model reads cannot come apart.
+
+`needsYouOutputContract` is the **tail the owner cannot edit away**: the three
+fields, in order, and the "return only JSON" line. It opens *"However the rules
+above are phrased, answer in exactly this form"*, which is deliberate — the body
+above it is now owner-authored text sitting in the system prompt rather than
+inside a fence, so the contract has to re-assert the answer's shape against
+whatever was written above it. The owner owns the criteria; they do not own the
+format. The tail carries the body/tail blank-line separator itself, so
+`NeedsYouTask()` and `NeedsYouTask.withRules(body)` compose identically.
+
+Both pieces are held to the **strict** form of the parity rule in
+`prompt_parity_test.dart` — the whole prompt may not say "email", "mail" or
+"chat" at all, not even naming the two together, because what varies by channel
+is stated in the user message.
 
 The user message layers, in order: the date anchor, the directness line, the
 **owner-identity line** (`The owner of this inbox is NAME <ADDRESS>.` — the
 app's own statement, outside every fence, and what lets "the message names the
-owner" bind to a person), the owner's rules, the thread's newest three turns,
-and last the judged message. Everything variable is fenced with
-`wrapUntrusted`; the judged message is fenced as `inbound_message`, the same
-tag every other task uses.
+owner" bind to a person), the thread's newest three turns, and last the judged
+message. Two fences, both `wrapUntrusted`: the thread and the judged message,
+which is fenced as `inbound_message`, the same tag every other task uses. The
+owner's rules are **not** in the user message at all — moving them into the
+system prompt is what took the injection surface here from three fences to two.
 
 The owner identity comes from an `OwnerLookup` callback, asked **once** per
 handler: it is a keychain read, and the answer only changes on sign-out, which
 disposes the provider that built the handler.
 
 **The `needs_you_rules` pref.** One global text (`app_prefs`, key
-`needs_you_rules`, re-exported by `prefs_provider.dart`), read per message so
-an edit mid-drain applies to the rest of the drain. Stored **verbatim** — the
-pane trims before it calls, and trimming again in the store would mean the text
-in the field and the text the model reads are not the same string. Capped at
-`needsYouRulesCap` = 800, which is also the `maxLength` the editor enforces: a
-cap the editor did not show would silently drop the end of what somebody typed.
-It is one person's text, so `wipeAll` clears it alongside `about_me` —
-inherited by the next identity it would decide what *they* get interrupted
-about.
+`needs_you_rules`, re-exported by `prefs_provider.dart`) holding the **whole**
+rules body. Empty means `needsYouDefaultRules` is in force — the empty string is
+how the app says "the defaults", not "no rules". Read per message so an edit
+mid-drain applies to the rest of the drain, and **memoized on its own text** in
+the handler (`_taskFor`): an unchanged pref reuses the same `NeedsYouTask`, and
+so the same system-prompt string object, because llama-server caches the KV
+prefix on the bytes. The cache therefore re-primes once per rules **edit** and
+then holds, rather than once per message.
+
+Stored **verbatim** — the pane trims before it calls, and trimming again in the
+store would mean the text in the field and the text the model reads are not the
+same string. Capped at `needsYouRulesCap` = 4000, which is both the clamp in
+`_taskFor` and the `maxLength` the editor enforces: a cap the editor did not
+show would silently drop the end of what somebody typed, and the clamp is there
+for a pref that reached the store through something other than the pane. A body
+equal to the defaults takes the const default path either way. It is one
+person's text, so `wipeAll` clears it alongside `about_me` — inherited by the
+next identity it would decide what *they* get interrupted about.
 
 **Where it is edited.** Settings → **"What counts as needing you…"**, which
 pops the dialog and opens `NeedsYouRulesPane` — a full screen with a back
@@ -122,20 +151,26 @@ button (`app/lib/widgets/needs_you_rules_pane.dart`), not a field inside the
 dialog, because it is a page of text with its own Save. **Save is the only
 thing that commits**: Cancel, the back arrow, and being disposed all discard,
 unlike the about-me field beside it, which saves on the way out however the
-dialog was dismissed. Clearing the field is likewise local until Save — and the
-button says "Clear my rules", not "Reset to default", because there is no text
-to restore; clearing removes the owner's additions so the defaults stand alone.
-The pane trims, the store keeps the result verbatim. A collapsed disclosure,
-"What Bond already asks", shows `needsYouDefaultRules` **verbatim** — the exact
-text the model reads before the owner's, so somebody writing a rule against one
-of the defaults is aiming at the words that are really there.
+dialog was dismissed.
+
+The field is **prefilled with `needsYouDefaultRules`** rather than left blank,
+because those defaults are the text actually in force; what the owner edits is
+the real thing. **"Reset to default"** puts them back, and like every other edit
+on the pane it is local until Save. Saving a body identical to the defaults
+stores the **empty** pref — otherwise the same words would arrive as an
+equal-but-not-identical string and fork the const prompt (and the identity pin
+on it) for no change in what is asked. The pane trims, the store keeps the
+result verbatim.
+
+A collapsed disclosure, **"What Bond adds after your rules"**, shows
+`needsYouOutputContract` **verbatim** (left-trimmed only, since it opens with
+the separator blank line). Somebody who may replace every word of the body and
+not one word of the tail is owed the sight of it.
 
 The owner's about-me text is deliberately **not** in this prompt. Two
 owner-authored free-texts in one call is the charter-versus-summary confusion
 this app avoids elsewhere; the needs-you rules are the one owner text this
-judgement reads. The rules paragraph is also the single place a prompt here
-grants fenced text a narrow licence to be *used* rather than only analysed —
-bounded, in the same paragraph, to the criteria for this one true/false answer.
+judgement reads.
 
 **Storage.** Two columns on `messages`, added in schema v10:
 

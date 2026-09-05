@@ -20,7 +20,7 @@ import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
 import '../services/llm/needs_you_task.dart'
-    show needsYouDefaultRules, needsYouRulesCap;
+    show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
@@ -2001,6 +2001,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return NeedsYouRulesPane(
       value: prefs.needsYouRules,
       defaultRules: needsYouDefaultRules,
+      fixedTail: needsYouOutputContract,
       maxLength: needsYouRulesCap,
       onSave: (text) =>
           unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouRules(text)),

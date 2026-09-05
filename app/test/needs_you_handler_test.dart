@@ -6,6 +6,8 @@ import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
+import 'package:bond_inbox/services/llm/needs_you_task.dart'
+    show NeedsYouTask, needsYouDefaultRules, needsYouOutputContract;
 import 'package:bond_inbox/services/needs_you_handler.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -361,24 +363,77 @@ void main() {
   });
 
   group('what the model is told', () {
-    test("the owner's own rules reach the prompt, fenced", () async {
+    test("the owner's rules replace the system prompt's body", () async {
       await seedAmbiguousMail();
       await store.setPref(needsYouRulesKey, 'Invoices always need me.');
       final llm = FakeLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.user, contains('<untrusted_data source="needs_you_rules">'));
-      expect(llm.user, contains('Invoices always need me.'));
+      expect(llm.system, contains('Invoices always need me.'));
+      // The body is theirs; the answer's shape never is.
+      expect(llm.system, contains(needsYouOutputContract));
+      expect(llm.system, isNot(contains(needsYouDefaultRules)));
+      // And nothing about the rules is in the user message any more.
+      expect(llm.user, isNot(contains('needs_you_rules')));
     });
 
-    test('and there is no rules fence when nobody wrote any', () async {
+    test('and an empty pref means the default prompt', () async {
       await seedAmbiguousMail();
       final llm = FakeLlm(needsYouYes);
 
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
-      expect(llm.user, isNot(contains('needs_you_rules')));
+      expect(llm.system, const NeedsYouTask().systemPrompt);
+    });
+
+    test('an unchanged pref reuses the very same prompt string', () async {
+      // Identity, not equality: llama-server caches the KV prefix on the bytes,
+      // so a prompt rebuilt per item would pay to re-prime it every message
+      // even though nobody edited anything.
+      await seedAmbiguousMail();
+      await seedAmbiguousMail(id: 'm2');
+      await store.setPref(needsYouRulesKey, 'Invoices always need me.');
+      final llm = FakeLlm(needsYouYes);
+      final handler = NeedsYouHandler(store, llm);
+
+      await runOne(handler, source: 'email', id: 'm1');
+      final first = llm.system;
+      await runOne(handler, source: 'email', id: 'm2');
+      final second = llm.system;
+
+      expect(identical(first, second), isTrue);
+    });
+
+    test('a pref edited mid-drain reaches the next item', () async {
+      // Read per item for exactly this: someone who rewrites their rules while
+      // the drain is running wants the rest of the drain to use them.
+      await seedAmbiguousMail();
+      await seedAmbiguousMail(id: 'm2');
+      await store.setPref(needsYouRulesKey, 'Invoices always need me.');
+      final llm = FakeLlm(needsYouYes);
+      final handler = NeedsYouHandler(store, llm);
+
+      await runOne(handler, source: 'email', id: 'm1');
+      await store.setPref(needsYouRulesKey, 'Only the studio lease needs me.');
+      await runOne(handler, source: 'email', id: 'm2');
+
+      expect(llm.system, contains('Only the studio lease needs me.'));
+      expect(llm.system, isNot(contains('Invoices always need me.')));
+    });
+
+    test('a pref that just retypes the defaults stays on the default prompt',
+        () async {
+      // The pane normalizes a default-equal save back to the empty pref, but a
+      // pref written any other way must not fork the prompt into a
+      // non-const copy of the same words.
+      await seedAmbiguousMail();
+      await store.setPref(needsYouRulesKey, needsYouDefaultRules);
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(identical(llm.system, const NeedsYouTask().systemPrompt), isTrue);
     });
 
     test('the owner is named, from the lookup', () async {

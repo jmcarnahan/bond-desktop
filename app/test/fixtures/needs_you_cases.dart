@@ -31,7 +31,8 @@ class NeedsYouCase {
   /// [message].
   final List<Message> thread;
 
-  /// The owner's own criteria, where the case is about them.
+  /// The owner's full replacement rules body, where the case is about them.
+  /// Replaces the default rules wholesale — see `NeedsYouTask.withRules`.
   final String? userRules;
 
   /// What a good model should answer.
@@ -343,13 +344,19 @@ final List<NeedsYouCase> needsYouCases = [
           'already paid.',
       addressedMe: true,
     ),
-    userRules: 'Invoices and anything about money always need me, even when '
-        'they say no action is required. I am the only one who pays them.',
+    userRules: 'The owner runs a small design practice and pays every bill '
+        'personally.\n\n'
+        'Answer true when the message is an invoice, a bill, or anything about '
+        'money — even when it says no action is required — or when it asks the '
+        'owner a question or hands them a task.\n\n'
+        'Answer false when it is a newsletter, an automated notice with no '
+        'money in it, or other people arranging work between themselves.',
     expectNeedsYou: true,
     floorSaysYes: false,
     mustPass: false,
     note: 'False under the default rules — an automated notice asking for '
-        'nothing — and true under the owner\'s. The one case that exists to '
-        'show the rules field changing an answer.',
+        'nothing — and true under the replacement body the owner wrote, which '
+        'stands in place of the defaults rather than beside them. The one case '
+        'that exists to show the rules pref changing an answer.',
   ),
 ];
