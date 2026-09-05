@@ -216,13 +216,13 @@ Where the Microsoft data comes from is a choice, made under Settings →
 Microsoft connection, and nothing above it changes: the same inbox, the same
 triage, the same storylines and drafts either way.
 
-**Bond server**, the default. The app talks to the bond-mcps platform over MCP,
+**MCP**, the default. The app talks to the bond-mcps platform over MCP,
 and the platform holds the Microsoft grant server-side. Nothing Microsoft-shaped
 has to exist on this machine — no app registration, no secret, no consent
 prompt of its own.
 
-**This Mac.** The app holds the grant itself and calls Microsoft Graph directly
-from the machine.
+**This device.** The app holds the grant itself and calls Microsoft Graph
+directly from the machine.
 
 **The zero-config path.** `make app-run` with nothing configured talks to a
 local bond-mcps server (`http://localhost:18001/mcp`) and signs in with no
@@ -236,7 +236,7 @@ platform's own consent page, and the app picks the connection up when you come
 back — on its own when the window regains focus, or on
 **I've connected — continue**.
 
-**Which server.** The **Bond server** dropdown offers **Deployed** (the
+**Which server.** The **MCP server** dropdown offers **Deployed** (the
 `BOND_MCP_SERVER_URL` endpoint, when the build carries one), **Local** —
 `http://localhost:18001/mcp` — and **Custom…** for anything else. The deployed
 hostname deliberately never appears in this repository: which cluster a
@@ -244,26 +244,27 @@ company runs is environment configuration, and it rides the same git-ignored
 `MS_ENV` file as the Azure ids.
 
 **Switching servers.** Every backend and server keeps its own session, so
-switching never costs a sign-out. Pick the target in Settings and the dialog
+switching never costs a sign-out. Pick the target in Settings and the section
 says whether you are signed in to it; **Sign in…** and **Sign out of this
 server** act right there, in place, and the permission rows re-answer for
-whatever is selected. Nothing changes behind the dialog until you act — the
+whatever is selected. Nothing changes behind the pane until you act — the
 app's own sign-in screen appears only at launch, when the current target has
 no session yet.
 
 **Working against a local server.** Start bond-mcps with its own `make dev`,
-then Settings → Bond server → **Local**, and sign in. The local server asks for
+then Settings → Microsoft connection → **MCP server** → **Local**, and sign
+in. The local server asks for
 no token at all, so that sign-in is instant — no browser round trip.
 
-**An Azure app registration is needed only by "This Mac".** The client id,
+**An Azure app registration is needed only by "This device".** The client id,
 tenant id and (for a registration without a public-client platform) client
 secret are never committed; `make app-run` / `make app-build` read them from a
 dotenv-style file and pass them as `--dart-define`s. Point `MS_ENV` at any file
 carrying `MICROSOFT_CLIENT_ID`, `MICROSOFT_TENANT_ID` and
 `MICROSOFT_CLIENT_SECRET` lines — the default is a git-ignored `.env` next to
 the `Makefile`, and a git-ignored `local.mk` can pin `MS_ENV` somewhere else
-permanently. A build made without them runs fine and is unaffected in Bond
-server mode; it is the **This Mac** sign-in that refuses, with a message naming
+permanently. A build made without them runs fine and is unaffected in MCP
+mode; it is the **This device** sign-in that refuses, with a message naming
 exactly these defines. A build made **with** the secret carries it in the
 binary — do not distribute one.
 

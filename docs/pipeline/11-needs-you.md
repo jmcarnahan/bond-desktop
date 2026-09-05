@@ -135,31 +135,34 @@ so the same system-prompt string object, because llama-server caches the KV
 prefix on the bytes. The cache therefore re-primes once per rules **edit** and
 then holds, rather than once per message.
 
-Stored **verbatim** — the pane trims before it calls, and trimming again in the
-store would mean the text in the field and the text the model reads are not the
-same string. Capped at `needsYouRulesCap` = 4000, which is both the clamp in
+Stored **verbatim** — the editor trims before it calls, and trimming again in
+the store would mean the text in the field and the text the model reads are not
+the same string. Capped at `needsYouRulesCap` = 4000, which is both the clamp in
 `_taskFor` and the `maxLength` the editor enforces: a cap the editor did not
 show would silently drop the end of what somebody typed, and the clamp is there
-for a pref that reached the store through something other than the pane. A body
+for a pref that reached the store through something other than the editor. A body
 equal to the defaults takes the const default path either way. It is one
 person's text, so `wipeAll` clears it alongside `about_me` — inherited by the
 next identity it would decide what *they* get interrupted about.
 
-**Where it is edited.** Settings → **"What counts as needing you…"**, which
-pops the dialog and opens `NeedsYouRulesPane` — a full screen with a back
-button (`app/lib/widgets/needs_you_rules_pane.dart`), not a field inside the
-dialog, because it is a page of text with its own Save. **Save is the only
-thing that commits**: Cancel, the back arrow, and being disposed all discard,
-unlike the about-me field beside it, which saves on the way out however the
-dialog was dismissed.
+**Where it is edited.** Settings → the **Needs You** section, whose body is the
+threshold slider above `NeedsYouRulesEditor`
+(`app/lib/widgets/needs_you_rules_editor.dart`). The two belong together: the
+slider says how much gets through, the rules say what "needs you" means in the
+first place. There is no separate pane to open and no dialog to pop — Settings
+is itself a full screen with a back arrow (see [../settings.md](../settings.md)).
+
+**Save is the only thing that commits**: Cancel puts the last saved text back in
+the field and stays, and being disposed discards. The about-me field beside it
+keeps the same contract now — neither text is written on the way out.
 
 The field is **prefilled with `needsYouDefaultRules`** rather than left blank,
 because those defaults are the text actually in force; what the owner edits is
 the real thing. **"Reset to default"** puts them back, and like every other edit
-on the pane it is local until Save. Saving a body identical to the defaults
+in the section it is local until Save. Saving a body identical to the defaults
 stores the **empty** pref — otherwise the same words would arrive as an
 equal-but-not-identical string and fork the const prompt (and the identity pin
-on it) for no change in what is asked. The pane trims, the store keeps the
+on it) for no change in what is asked. The editor trims, the store keeps the
 result verbatim.
 
 A collapsed disclosure, **"What Bond adds after your rules"**, shows

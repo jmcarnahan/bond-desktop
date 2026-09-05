@@ -1,18 +1,18 @@
-import 'package:bond_inbox/widgets/needs_you_rules_pane.dart';
+import 'package:bond_inbox/widgets/needs_you_rules_editor.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// What this pane guards is the exact text the model reads: the owner's rules
-/// ARE the body of the needs-you system prompt, so an editor that saved
-/// something the user did not mean to save — a half-typed thought abandoned
-/// with Back, a stray trailing newline — would change how every message is
-/// judged.
+/// What this editor guards is the exact text the model reads: the owner's
+/// rules ARE the body of the needs-you system prompt, so an editor that saved
+/// something the user did not mean to save — a half-typed thought abandoned by
+/// closing the section, a stray trailing newline — would change how every
+/// message is judged.
 ///
 /// Hence the contracts pinned hardest here: **Save is the only thing that
-/// commits** (Cancel, the back arrow, and dispose all discard), the trim
-/// happens HERE because the store keeps whatever it is handed verbatim, and a
-/// body identical to the defaults is stored as the EMPTY preference so the
-/// default path keeps serving its one const prompt.
+/// commits** (Cancel reverts and dispose discards), the trim happens HERE
+/// because the store keeps whatever it is handed verbatim, and a body
+/// identical to the defaults is stored as the EMPTY preference so the default
+/// path keeps serving its one const prompt.
 ///
 /// The field is prefilled with the defaults, because they are the text in
 /// force. The fixed tail is disclosed verbatim: the owner may replace every
@@ -21,8 +21,9 @@ void main() {
   const defaults = 'Line one of the defaults.\nLine two of the defaults.';
   const tail = '\n\nBond answers in a fixed form.';
 
-  /// The pane over plain closures — it reaches for no providers, so nothing
-  /// else has to exist for it to be driven.
+  /// The editor over plain closures — it reaches for no providers, so nothing
+  /// else has to exist for it to be driven. Pumping a second time at the same
+  /// tree position is how the tests drive [State.didUpdateWidget].
   Future<void> pump(
     WidgetTester tester, {
     String value = '',
@@ -30,19 +31,17 @@ void main() {
     String fixedTail = tail,
     int maxLength = 4000,
     required void Function(String) onSave,
-    required VoidCallback onBack,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: NeedsYouRulesPane(
+        body: NeedsYouRulesEditor(
           value: value,
           defaultRules: defaultRules,
           fixedTail: fixedTail,
           maxLength: maxLength,
           onSave: onSave,
-          onBack: onBack,
         ),
       ),
     ));
@@ -65,24 +64,30 @@ void main() {
   String fieldText(WidgetTester tester) =>
       tester.widget<TextField>(find.byType(TextField)).controller!.text;
 
-  testWidgets('renders the title, the stored rules, and the controls',
+  testWidgets('renders the blurb, the stored rules, and the controls',
       (tester) async {
     await pump(
       tester,
       value: 'Anything about the budget needs me.',
       onSave: (_) {},
-      onBack: () {},
     );
 
-    expect(find.text('Needs You rules'), findsOneWidget);
+    expect(
+      find.textContaining('These are the rules the model reads'),
+      findsOneWidget,
+    );
     expect(find.text('Anything about the budget needs me.'), findsOneWidget);
     expect(find.text('Save'), findsOneWidget);
     expect(find.text('Cancel'), findsOneWidget);
     expect(find.text('Reset to default'), findsOneWidget);
-    expect(find.byIcon(Icons.arrow_back), findsOneWidget);
     expect(find.text('What Bond adds after your rules'), findsOneWidget);
+    // No header of its own: this is the body of a settings section, and the
+    // section's own title already names it. A back arrow here would offer a
+    // way out of something that is not a pane.
+    expect(find.byIcon(Icons.arrow_back), findsNothing);
+    expect(find.text('Needs You rules'), findsNothing);
     // Collapsed to start: the tail is reference material, not the point of the
-    // screen.
+    // editor.
     expect(find.text(tail.trimLeft()), findsNothing);
   });
 
@@ -91,7 +96,7 @@ void main() {
     // An empty preference means the defaults are what the model reads, so the
     // defaults are what the editor opens on — and opening on them is not an
     // edit.
-    await pump(tester, value: '', onSave: (_) {}, onBack: () {});
+    await pump(tester, value: '', onSave: (_) {});
 
     expect(fieldText(tester), defaults);
     expect(saveEnabled(tester), isFalse);
@@ -99,12 +104,7 @@ void main() {
 
   testWidgets('Save stays disabled until the field differs from what it opened '
       'on', (tester) async {
-    await pump(
-      tester,
-      value: 'Original rules.',
-      onSave: (_) {},
-      onBack: () {},
-    );
+    await pump(tester, value: 'Original rules.', onSave: (_) {});
 
     expect(saveEnabled(tester), isFalse);
 
@@ -118,16 +118,9 @@ void main() {
     expect(saveEnabled(tester), isFalse);
   });
 
-  testWidgets('Save trims, fires once, and then leaves the pane',
-      (tester) async {
+  testWidgets('Save trims, fires once, and stays put', (tester) async {
     final saved = <String>[];
-    var backs = 0;
-    await pump(
-      tester,
-      value: 'old',
-      onSave: saved.add,
-      onBack: () => backs++,
-    );
+    await pump(tester, value: 'old', onSave: saved.add);
 
     await tester.enterText(find.byType(TextField), '  rules text \n');
     await tester.pump();
@@ -135,60 +128,101 @@ void main() {
     await tester.pump();
 
     expect(saved, ['rules text']);
-    expect(backs, 1);
+    // Saving is not leaving: the editor lives inside an open settings section,
+    // which stays open, and Save disables again because the field now shows
+    // what was saved.
+    expect(find.byType(NeedsYouRulesEditor), findsOneWidget);
+    expect(saveEnabled(tester), isFalse);
   });
 
-  testWidgets('Cancel discards the edit', (tester) async {
+  testWidgets('Cancel reverts the field to the last saved text',
+      (tester) async {
     final saved = <String>[];
-    var backs = 0;
-    await pump(
-      tester,
-      value: 'old',
-      onSave: saved.add,
-      onBack: () => backs++,
-    );
+    await pump(tester, value: 'old', onSave: saved.add);
 
     await tester.enterText(find.byType(TextField), 'something new');
     await tester.pump();
     await tester.tap(find.text('Cancel'));
     await tester.pump();
 
+    expect(fieldText(tester), 'old');
     expect(saved, isEmpty);
-    expect(backs, 1);
+    expect(find.byType(NeedsYouRulesEditor), findsOneWidget);
   });
 
-  testWidgets('the back arrow discards the edit too', (tester) async {
+  testWidgets('a second Save after a second edit fires again', (tester) async {
+    // The baseline moves with each Save, so the editor stays usable for a
+    // second thought without being closed and reopened.
     final saved = <String>[];
-    var backs = 0;
-    await pump(
-      tester,
-      value: 'old',
-      onSave: saved.add,
-      onBack: () => backs++,
-    );
+    await pump(tester, value: 'old', onSave: saved.add);
 
-    await tester.enterText(find.byType(TextField), 'something new');
+    await tester.enterText(find.byType(TextField), 'first edit');
     await tester.pump();
-    await tester.tap(find.byIcon(Icons.arrow_back));
+    await tester.tap(find.text('Save'));
     await tester.pump();
 
-    expect(saved, isEmpty);
-    expect(backs, 1);
+    await tester.enterText(find.byType(TextField), 'second edit');
+    await tester.pump();
+    expect(saveEnabled(tester), isTrue);
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+
+    expect(saved, ['first edit', 'second edit']);
+  });
+
+  testWidgets('Cancel after a Save reverts to the saved text, not the original',
+      (tester) async {
+    final saved = <String>[];
+    await pump(tester, value: 'old', onSave: saved.add);
+
+    await tester.enterText(find.byType(TextField), 'kept edit');
+    await tester.pump();
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextField), 'abandoned edit');
+    await tester.pump();
+    await tester.tap(find.text('Cancel'));
+    await tester.pump();
+
+    expect(fieldText(tester), 'kept edit');
+    expect(saved, ['kept edit']);
+  });
+
+  testWidgets('a clean field adopts a value changed underneath it',
+      (tester) async {
+    // A sign-in from inside Settings wipes the previous person's rules to the
+    // empty preference. Nobody was typing, so the field must follow rather
+    // than keep showing text that is no longer stored.
+    await pump(tester, value: 'the previous person rules', onSave: (_) {});
+    expect(fieldText(tester), 'the previous person rules');
+
+    await pump(tester, value: '', onSave: (_) {});
+
+    expect(fieldText(tester), defaults);
+    expect(saveEnabled(tester), isFalse);
+  });
+
+  testWidgets('a dirty field keeps its edit when the value changes underneath '
+      'it', (tester) async {
+    await pump(tester, value: 'old', onSave: (_) {});
+
+    await tester.enterText(find.byType(TextField), 'half-typed thought');
+    await tester.pump();
+    await pump(tester, value: 'something the host now stores', onSave: (_) {});
+
+    // An unsaved edit is the user's. Nothing gets to overwrite it.
+    expect(fieldText(tester), 'half-typed thought');
   });
 
   testWidgets('nothing is saved on dispose', (tester) async {
     final saved = <String>[];
-    await pump(
-      tester,
-      value: 'old',
-      onSave: saved.add,
-      onBack: () {},
-    );
+    await pump(tester, value: 'old', onSave: saved.add);
 
     await tester.enterText(find.byType(TextField), 'abandoned half-thought');
     await tester.pump();
-    // The pane goes away without anyone pressing anything — the host swapping
-    // the main pane, which is exactly what the rail does.
+    // The editor goes away without anyone pressing anything — the host
+    // swapping the main pane, which is exactly what the rail does.
     await tester.pumpWidget(
       const MaterialApp(home: Scaffold(body: Text('somewhere else'))),
     );
@@ -203,7 +237,6 @@ void main() {
       tester,
       value: 'Anything about the budget needs me.',
       onSave: saved.add,
-      onBack: () {},
     );
 
     await tester.tap(find.text('Reset to default'));
@@ -223,7 +256,7 @@ void main() {
 
   testWidgets('Reset to default is disabled when the field already shows it',
       (tester) async {
-    await pump(tester, value: '', onSave: (_) {}, onBack: () {});
+    await pump(tester, value: '', onSave: (_) {});
 
     expect(resetEnabled(tester), isFalse);
 
@@ -237,7 +270,7 @@ void main() {
     // However the field arrived at the default text — the button, or typing it
     // out — the same normalization applies.
     final saved = <String>[];
-    await pump(tester, value: 'custom', onSave: saved.add, onBack: () {});
+    await pump(tester, value: 'custom', onSave: saved.add);
 
     await tester.enterText(find.byType(TextField), defaults);
     await tester.pump();
@@ -248,7 +281,7 @@ void main() {
   });
 
   testWidgets('the disclosure shows the fixed tail verbatim', (tester) async {
-    await pump(tester, value: '', onSave: (_) {}, onBack: () {});
+    await pump(tester, value: '', onSave: (_) {});
 
     expect(find.text(tail.trimLeft()), findsNothing);
     await tester.tap(find.text('What Bond adds after your rules'));
@@ -269,7 +302,6 @@ void main() {
       defaultRules: 'short defaults',
       maxLength: 20,
       onSave: (_) {},
-      onBack: () {},
     );
 
     await tester.enterText(find.byType(TextField), 'x' * 30);

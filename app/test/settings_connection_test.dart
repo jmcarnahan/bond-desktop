@@ -1,16 +1,21 @@
+import 'dart:async';
+
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
-import 'package:bond_inbox/widgets/settings_dialog.dart';
+import 'package:bond_inbox/widgets/inline_alert.dart';
+import 'package:bond_inbox/widgets/settings_screen.dart';
+import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The settings dialog's backend half: which server the app talks through, and
-/// what that server says the workspace may do.
+/// The settings screen's connection section: which server the app talks
+/// through, who is signed in to it, and what that server says the workspace
+/// may do.
 ///
-/// The dialog stays a plain [StatefulWidget] over callbacks — no provider reads
+/// The screen stays a plain [StatefulWidget] over callbacks — no provider reads
 /// inside — so everything here is driven with closures, and what is pinned is
-/// which callback fires and what the connection status renders as.
+/// which callback fires, what the collapsed summary claims, and what the body
+/// renders.
 
 /// A stand-in for the compiled `BOND_MCP_SERVER_URL` define. The test binary
 /// carries no define (backend_switch_test pins that), so exercising the
@@ -23,6 +28,8 @@ void main() {
     String backendMode = backendModeMcp,
     String mcpServerUrl = _deployed,
     String deployedUrl = _deployed,
+    String aboutMe = '',
+    void Function(String value)? onAboutMeChanged,
     void Function(String mode)? onBackendModeChanged,
     void Function(String url)? onMcpServerUrlChanged,
     Future<Map<String, Object?>?> Function()? connectionStatus,
@@ -33,72 +40,93 @@ void main() {
     Future<String?> Function()? targetAccountLabel,
     Future<void> Function()? onSignIn,
     Future<void> Function()? onSignOutOfServer,
+    VoidCallback? onBack,
+    VoidCallback? onHome,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: Builder(
-          builder: (context) => TextButton(
-            onPressed: () => showDialog<void>(
-              context: context,
-              builder: (_) => SettingsDialog(
-                threshold: 0.5,
-                aboutMe: '',
-                onThresholdChanged: (_) {},
-                onAboutMeChanged: (_) {},
-                backendMode: backendMode,
-                mcpServerUrl: mcpServerUrl,
-                deployedUrl: deployedUrl,
-                onBackendModeChanged: onBackendModeChanged,
-                onMcpServerUrlChanged: onMcpServerUrlChanged,
-                connectionStatus: connectionStatus,
-                onConnectMicrosoft: onConnectMicrosoft,
-                hasScope: hasScope,
-                onSignInAgain: onSignInAgain,
-                isTargetSignedIn: isTargetSignedIn,
-                targetAccountLabel: targetAccountLabel,
-                onSignIn: onSignIn,
-                onSignOutOfServer: onSignOutOfServer,
-              ),
-            ),
-            child: const Text('open'),
-          ),
+        body: SettingsScreen(
+          threshold: 0.5,
+          aboutMe: aboutMe,
+          onThresholdChanged: (_) {},
+          onAboutMeChanged: onAboutMeChanged ?? (_) {},
+          onBack: onBack ?? () {},
+          onHome: onHome,
+          backendMode: backendMode,
+          mcpServerUrl: mcpServerUrl,
+          deployedUrl: deployedUrl,
+          onBackendModeChanged: onBackendModeChanged,
+          onMcpServerUrlChanged: onMcpServerUrlChanged,
+          connectionStatus: connectionStatus,
+          onConnectMicrosoft: onConnectMicrosoft,
+          hasScope: hasScope,
+          onSignInAgain: onSignInAgain,
+          isTargetSignedIn: isTargetSignedIn,
+          targetAccountLabel: targetAccountLabel,
+          onSignIn: onSignIn,
+          onSignOutOfServer: onSignOutOfServer,
         ),
       ),
     ));
-    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+  }
+
+  /// Opens one named section, scrolling to it first — the connection body is
+  /// the tallest on the screen and its controls run off a 1000pt window.
+  Future<void> expand(WidgetTester tester, String title) async {
+    final toggle = find.byKey(SettingsSection.toggleKey(title));
+    await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
+    await tester.tap(toggle);
     await tester.pumpAndSettle();
   }
 
   group('the backend switch', () {
     testWidgets('is absent when the host wires none', (tester) async {
-      // The same discipline hasScope follows: a host with nothing to switch
-      // gets no section rather than a dead control.
+      // The same discipline hasScope follows: a host with nothing to connect,
+      // report or switch gets no section rather than a dead control.
       await open(tester);
 
       expect(find.text('Microsoft connection'), findsNothing);
     });
 
+    testWidgets('a host wiring only the scopes still gets the section',
+        (tester) async {
+      // The permissions live INSIDE the connection section now, so the section
+      // has to render for the three wirings that can answer it, not for the
+      // mode switch alone.
+      await open(tester, hasScope: (_) async => true);
+
+      expect(find.text('Microsoft connection'), findsOneWidget);
+
+      await expand(tester, 'Microsoft connection');
+
+      expect(find.text('Microsoft permissions'), findsOneWidget);
+      expect(find.byType(SegmentedButton<String>), findsNothing,
+          reason: 'no mode callback means no mode control');
+    });
+
     testWidgets('offers both backends and fires on a pick', (tester) async {
       final picked = <String>[];
       await open(tester, onBackendModeChanged: picked.add);
+      await expand(tester, 'Microsoft connection');
 
-      expect(find.text('Microsoft connection'), findsOneWidget);
-      expect(find.text('Bond server'), findsWidgets);
+      expect(find.text('MCP'), findsWidgets);
 
-      await tester.tap(find.text('This Mac'));
+      await tester.tap(find.text('This device'));
       await tester.pumpAndSettle();
 
       expect(picked, [backendModeSdk]);
     });
 
-    testWidgets('the toggle swaps the permissions in place, without closing',
-        (tester) async {
+    testWidgets('the toggle swaps the permissions in place, without leaving '
+        'the screen', (tester) async {
       // The UX bug this pins: the dialog used to be closed on a switch (and
       // kept a stale answer on reopen-before-the-fix), so a user never saw
       // what their own click did. Now the switch re-asks the OTHER source
-      // and renders its answer in the still-open dialog.
+      // and renders its answer in the still-open section.
       var statusAsks = 0;
       var scopeAsks = 0;
       await open(
@@ -113,6 +141,7 @@ void main() {
           return true;
         },
       );
+      await expand(tester, 'Microsoft connection');
 
       // Opened in MCP mode: the platform answered, the keychain was not
       // asked at all.
@@ -120,15 +149,15 @@ void main() {
       expect(scopeAsks, 0);
       expect(find.byIcon(Icons.check), findsWidgets);
 
-      await tester.tap(find.text('This Mac'));
+      await tester.tap(find.text('This device'));
       await tester.pumpAndSettle();
 
-      // Still open, and the static table answered from the keychain.
+      // Still here, and the static table answered from the keychain.
       expect(find.text('Settings'), findsOneWidget);
-      expect(scopeAsks, SettingsDialog.permissions.length);
+      expect(scopeAsks, SettingsScreen.permissions.length);
       expect(find.byIcon(Icons.check), findsWidgets);
 
-      await tester.tap(find.text('Bond server').first);
+      await tester.tap(find.text('MCP'));
       await tester.pumpAndSettle();
 
       // And back: the platform is asked FRESH, not remembered.
@@ -148,6 +177,7 @@ void main() {
           return {'connected': false};
         },
       );
+      await expand(tester, 'Microsoft connection');
       expect(statusAsks, 1);
 
       await tester.tap(find.text('Deployed'));
@@ -164,6 +194,7 @@ void main() {
         backendMode: backendModeSdk,
         onBackendModeChanged: (_) {},
       );
+      await expand(tester, 'Microsoft connection');
 
       expect(find.text('Deployed'), findsNothing);
     });
@@ -178,6 +209,7 @@ void main() {
         mcpServerUrl: mcpLocalUrl,
         onBackendModeChanged: (_) {},
       );
+      await expand(tester, 'Microsoft connection');
 
       await tester.tap(find.text('Local'));
       await tester.pumpAndSettle();
@@ -192,6 +224,7 @@ void main() {
         onBackendModeChanged: (_) {},
         onMcpServerUrlChanged: urls.add,
       );
+      await expand(tester, 'Microsoft connection');
 
       await tester.tap(find.text('Deployed'));
       await tester.pumpAndSettle();
@@ -208,6 +241,7 @@ void main() {
         onBackendModeChanged: (_) {},
         onMcpServerUrlChanged: urls.add,
       );
+      await expand(tester, 'Microsoft connection');
 
       await tester.tap(find.text('Deployed'));
       await tester.pumpAndSettle();
@@ -226,7 +260,10 @@ void main() {
     });
 
     testWidgets('a server typed and then left commits too', (tester) async {
-      // Most people click away rather than pressing Enter.
+      // Most people click away rather than pressing Enter. There is no Done
+      // button on a screen, so what moves focus here is the section's own
+      // Collapse — which is exactly what a user reaching for the next thing
+      // would tap.
       final urls = <String>[];
       await open(
         tester,
@@ -234,16 +271,132 @@ void main() {
         onBackendModeChanged: (_) {},
         onMcpServerUrlChanged: urls.add,
       );
+      await expand(tester, 'Microsoft connection');
 
       final field = find.widgetWithText(TextField, 'http://elsewhere/mcp');
       expect(field, findsOneWidget,
           reason: 'a stored server that is neither preset opens on Custom');
 
       await tester.enterText(field, 'http://typed/mcp');
-      await tester.tap(find.text('Done'));
+      await tester.tap(
+        find.byKey(SettingsSection.toggleKey('Microsoft connection')),
+      );
       await tester.pumpAndSettle();
 
       expect(urls, ['http://typed/mcp']);
+    });
+
+    testWidgets('a server typed and then left by the back arrow commits too',
+        (tester) async {
+      // The hole a Focus node does NOT cover: leaving removes the field from
+      // the tree, and Flutter fires no unfocus on dispose, so Back has to
+      // commit for itself. Without that a typed URL would vanish on the way
+      // out — silently, since the pane it vanished from is gone.
+      final urls = <String>[];
+      var backs = 0;
+      await open(
+        tester,
+        mcpServerUrl: 'http://elsewhere/mcp',
+        onBackendModeChanged: (_) {},
+        onMcpServerUrlChanged: urls.add,
+        onBack: () => backs++,
+      );
+      await expand(tester, 'Microsoft connection');
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'http://elsewhere/mcp'),
+        'http://typed/mcp',
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Back'));
+      await tester.pumpAndSettle();
+
+      expect(urls, ['http://typed/mcp']);
+      expect(backs, 1, reason: 'the commit does not swallow the click');
+    });
+
+    testWidgets('and so does the Home link', (tester) async {
+      // Home is the other one-click way off this pane, and it takes the field
+      // with it just as Back does.
+      final urls = <String>[];
+      await open(
+        tester,
+        mcpServerUrl: 'http://elsewhere/mcp',
+        onBackendModeChanged: (_) {},
+        onMcpServerUrlChanged: urls.add,
+        onHome: () {},
+      );
+      await expand(tester, 'Microsoft connection');
+
+      await tester.enterText(
+        find.widgetWithText(TextField, 'http://elsewhere/mcp'),
+        'http://typed/mcp',
+      );
+      await tester.pump();
+      await tester.tap(find.byTooltip('Home'));
+      await tester.pumpAndSettle();
+
+      expect(urls, ['http://typed/mcp']);
+    });
+  });
+
+  group('the collapsed summary', () {
+    testWidgets('names the mode, the server and the account', (tester) async {
+      await open(
+        tester,
+        onBackendModeChanged: (_) {},
+        isTargetSignedIn: () async => true,
+        targetAccountLabel: () async => 'lo@bank.test',
+        onSignIn: () async {},
+      );
+
+      expect(
+        find.text('MCP · Deployed · Signed in as lo@bank.test'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('names a session with no name to give', (tester) async {
+      await open(
+        tester,
+        mcpServerUrl: mcpLocalUrl,
+        onBackendModeChanged: (_) {},
+        isTargetSignedIn: () async => true,
+        onSignIn: () async {},
+      );
+
+      expect(find.text('MCP · Local · Signed in'), findsOneWidget);
+    });
+
+    testWidgets('says so when there is no session, and drops the server on '
+        'the other backend', (tester) async {
+      await open(
+        tester,
+        backendMode: backendModeSdk,
+        onBackendModeChanged: (_) {},
+        isTargetSignedIn: () async => false,
+        onSignIn: () async {},
+      );
+
+      expect(find.text('This device · Not signed in'), findsOneWidget);
+    });
+
+    testWidgets('says Checking… until the session answers', (tester) async {
+      final gate = Completer<bool>();
+      addTearDown(() => gate.isCompleted ? null : gate.complete(false));
+      await open(
+        tester,
+        onBackendModeChanged: (_) {},
+        isTargetSignedIn: () => gate.future,
+        onSignIn: () async {},
+      );
+
+      expect(find.text('MCP · Deployed · Checking…'), findsOneWidget);
+
+      gate.complete(true);
+      await tester.pumpAndSettle();
+
+      expect(find.text('MCP · Deployed · Signed in'), findsOneWidget);
     });
   });
 
@@ -267,13 +420,13 @@ void main() {
         }),
         onConnectMicrosoft: () {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
       expect(find.text('Teams chats'), findsOneWidget);
       expect(find.byIcon(Icons.check), findsNWidgets(2));
-      // Chat.Read was not granted; there is nothing in this dialog that can
+      // Chat.Read was not granted; there is nothing on this screen that can
       // change that, so there is no offer beside it either.
       expect(find.byIcon(Icons.close), findsOneWidget);
       expect(find.text('Sign in again to enable'), findsNothing);
@@ -282,7 +435,7 @@ void main() {
     testWidgets('the wider grant satisfies the read-only question',
         (tester) async {
       // The platform's admin grant is Chat.ReadWrite / Mail.ReadWrite; the
-      // rows ask chat.read / mail.readwrite. The dialog's matcher must agree
+      // rows ask chat.read / mail.readwrite. The screen's matcher must agree
       // with McpAuthSession.hasScope, or it contradicts the Teams pill that
       // is enabled right behind it.
       await open(
@@ -294,7 +447,7 @@ void main() {
         }),
         onConnectMicrosoft: () {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(find.byIcon(Icons.check), findsNWidgets(3));
       expect(find.byIcon(Icons.close), findsNothing);
@@ -309,7 +462,7 @@ void main() {
         onBackendModeChanged: (_) {},
         connectionStatus: status({'connected': true, 'scopes': const []}),
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(find.byIcon(Icons.check), findsNWidgets(2));
       expect(find.byIcon(Icons.close), findsOneWidget);
@@ -323,7 +476,7 @@ void main() {
         connectionStatus: status({'error': 'not_connected', 'connect_url': 'x'}),
         onConnectMicrosoft: () => asked++,
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(
         find.text('No Microsoft account is connected to this workspace.'),
@@ -348,7 +501,7 @@ void main() {
         connectionStatus: status(null),
         onConnectMicrosoft: () {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(find.text('Connect Microsoft'), findsNothing);
       expect(find.textContaining('it may be unreachable'), findsOneWidget);
@@ -362,7 +515,8 @@ void main() {
         onBackendModeChanged: (_) {},
         connectionStatus: status({'connected': true}, counter: counter),
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
+      await expand(tester, 'Needs You');
       await tester.drag(find.byType(Slider), const Offset(-100, 0));
       await tester.pumpAndSettle();
 
@@ -381,7 +535,7 @@ void main() {
         },
         onSignInAgain: () {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(asked, ['mail.send', 'mail.readwrite', 'chat.read']);
       expect(find.byIcon(Icons.check), findsNWidgets(3));
@@ -390,10 +544,9 @@ void main() {
   });
 
   group('the session for the selected target', () {
-    // The dialog is where sessions live now: the gate in front of the app
+    // Settings is where sessions live now: the gate in front of the app
     // decides at launch only, so a target with no session has to be a thing
-    // this dialog states and fixes, in place, without the screen underneath
-    // changing.
+    // this screen states and fixes, in place, without the pane changing.
 
     testWidgets('an unsigned target is named, and the server is not probed',
         (tester) async {
@@ -410,6 +563,7 @@ void main() {
         isTargetSignedIn: () async => false,
         onSignIn: () async {},
       );
+      await expand(tester, 'Microsoft connection');
 
       expect(find.text('Not signed in to this server.'), findsOneWidget);
       expect(find.text('Sign in…'), findsOneWidget);
@@ -444,6 +598,7 @@ void main() {
           signedIn = true;
         },
       );
+      await expand(tester, 'Microsoft connection');
       expect(sessionAsks, 1);
       expect(statusAsks, 0);
 
@@ -457,7 +612,7 @@ void main() {
       expect(find.text('Send mail'), findsOneWidget);
     });
 
-    testWidgets('a sign-in that fails says why, inline, and stays open',
+    testWidgets('a sign-in that fails says why, inline, and stays put',
         (tester) async {
       // AuthException messages are already written for a person, and this one
       // belongs beside the button that produced it — the user is about to
@@ -472,12 +627,13 @@ void main() {
           if (attempts == 1) throw const AuthException('no browser');
         },
       );
+      await expand(tester, 'Microsoft connection');
 
       await tester.tap(find.text('Sign in…'));
       await tester.pumpAndSettle();
 
       expect(find.text('no browser'), findsOneWidget);
-      expect(find.byType(SettingsDialog), findsOneWidget);
+      expect(find.byType(SettingsScreen), findsOneWidget);
       expect(tester.takeException(), isNull);
       expect(
         tester
@@ -496,6 +652,27 @@ void main() {
         findsNothing,
         reason: 'the second attempt owns the slot, not the first',
       );
+    });
+
+    testWidgets('a sign-in error renders as an InlineAlert', (tester) async {
+      // The house shape for a failure that belongs to the control beside it —
+      // not a red line of text, and not a snack bar that times out.
+      await open(
+        tester,
+        onBackendModeChanged: (_) {},
+        isTargetSignedIn: () async => false,
+        onSignIn: () async => throw const AuthException('consent declined'),
+      );
+      await expand(tester, 'Microsoft connection');
+
+      expect(find.byType(InlineAlert), findsNothing);
+
+      await tester.tap(find.text('Sign in…'));
+      await tester.pumpAndSettle();
+
+      final alert = tester.widget<InlineAlert>(find.byType(InlineAlert));
+      expect(alert.severity, InlineAlertSeverity.error);
+      expect(alert.text, 'consent declined');
     });
 
     testWidgets('a signed-in target names the account and can leave it',
@@ -518,6 +695,7 @@ void main() {
           signedIn = false;
         },
       );
+      await expand(tester, 'Microsoft connection');
 
       expect(find.text('Signed in as lo@bank.test.'), findsOneWidget);
 
@@ -527,8 +705,8 @@ void main() {
       expect(signOuts, 1);
       expect(sessionAsks, 2);
       expect(find.text('Not signed in to this server.'), findsOneWidget);
-      expect(find.byType(SettingsDialog), findsOneWidget,
-          reason: 'leaving one server does not close the dialog');
+      expect(find.byType(SettingsScreen), findsOneWidget,
+          reason: 'leaving one server does not leave Settings');
     });
 
     testWidgets('a signed-in server that does not answer says it is unreachable',
@@ -540,7 +718,7 @@ void main() {
         isTargetSignedIn: () async => true,
         onSignIn: () async {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(find.text('Signed in.'), findsOneWidget,
           reason: 'a session with no name to give still reports the state');
@@ -549,7 +727,7 @@ void main() {
 
     testWidgets('the session block replaces the old sign-in-again offer',
         (tester) async {
-      // Two sign-in buttons in one dialog is one too many, and the one in the
+      // Two sign-in buttons in one section is one too many, and the one in the
       // session block is the same action beside the state it fixes.
       await open(
         tester,
@@ -561,7 +739,7 @@ void main() {
         onSignIn: () async {},
         onSignOutOfServer: () async {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(find.byIcon(Icons.close), findsNWidgets(3));
       expect(find.text('Sign in again to enable'), findsNothing);
@@ -569,86 +747,34 @@ void main() {
     });
   });
 
-  group('the dialog being unmounted by its own callback', () {
-    testWidgets('a backend switch does not throw from the dispose-time save',
-        (tester) async {
-      // The crash this pins: the mode callback pops the dialog and mutates the
-      // prefs; the mutation rebuilds the watching host, which unmounts the
-      // dialog INSIDE that frame; the dialog's dispose then saved the about-me
-      // text straight into the notifier — a provider write in a locked tree,
-      // an exception on every switch. The save must land, just not inline.
-      await tester.binding.setSurfaceSize(const Size(900, 1000));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
-      await tester.pumpWidget(ProviderScope(
-        child: MaterialApp(
-          home: Consumer(builder: (context, ref, _) {
-            final mode = ref.watch(_prefsProvider);
-            return Scaffold(
-              body: Column(children: [
-                Text('mode:$mode'),
-                Builder(
-                  builder: (context) => TextButton(
-                    onPressed: () => showDialog<void>(
-                      context: context,
-                      builder: (dialogContext) => SettingsDialog(
-                        threshold: 0.5,
-                        aboutMe: 'who I am',
-                        onThresholdChanged: (_) {},
-                        onAboutMeChanged: (text) => ref
-                            .read(_prefsProvider.notifier)
-                            .saveAboutMe(text),
-                        backendMode: ref.read(_prefsProvider),
-                        onBackendModeChanged: (picked) {
-                          Navigator.of(dialogContext).pop();
-                          ref.read(_prefsProvider.notifier).setMode(picked);
-                        },
-                        connectionStatus: () async => null,
-                      ),
-                    ),
-                    child: const Text('open'),
-                  ),
-                ),
-              ]),
-            );
-          }),
-        ),
-      ));
-
-      await tester.tap(find.text('open'));
-      await tester.pumpAndSettle();
-      // Edited, not just present: an untouched text is no longer saved at all
-      // (see the settings_dialog tests), and this test needs the save to
-      // actually FIRE through the unmount-inside-callback path it guards.
+  group('a backend switch under an open About me', () {
+    testWidgets('does not lose an unsaved about-me edit', (tester) async {
+      // What replaced the dispose-time save: the switch used to unmount the
+      // dialog, whose dispose then wrote the about-me text into a locked
+      // provider tree. Nothing is written on the way out any more, and the
+      // typed text simply stays in the field.
+      final saved = <String>[];
+      await open(
+        tester,
+        aboutMe: 'who I am',
+        onAboutMeChanged: saved.add,
+        onBackendModeChanged: (_) {},
+        connectionStatus: () async => null,
+      );
+      await expand(tester, 'About me');
       await tester.enterText(find.byType(TextField), 'who I am, edited');
-      await tester.tap(find.text('This Mac'));
+      await tester.pump();
+
+      await expand(tester, 'Microsoft connection');
+      await tester.tap(find.text('This device'));
       await tester.pumpAndSettle();
 
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'who I am, edited',
+      );
+      expect(saved, isEmpty, reason: 'Save is the only thing that commits');
       expect(tester.takeException(), isNull);
-      expect(find.text('mode:$backendModeSdk'), findsOneWidget);
-      final prefs = ProviderScope.containerOf(
-        tester.element(find.text('mode:$backendModeSdk')),
-      ).read(_prefsProvider.notifier);
-      expect(prefs.aboutMeSaves, ['who I am, edited']);
     });
   });
 }
-
-/// The regression shape behind the backend-switch crash: the host WATCHES a
-/// notifier, the mode callback pops the dialog and then mutates that notifier
-/// — which rebuilds the host and unmounts the dialog inside the same frame —
-/// and the dialog's dispose-time about-me save writes to the notifier too.
-/// Duplicated minimal rather than wired through the real prefs provider, so
-/// this file needs no database.
-class _RecordingPrefs extends StateNotifier<String> {
-  final List<String> aboutMeSaves = [];
-
-  _RecordingPrefs() : super(backendModeMcp);
-
-  void setMode(String mode) => state = mode;
-
-  void saveAboutMe(String text) => aboutMeSaves.add(text);
-}
-
-final _prefsProvider =
-    StateNotifierProvider<_RecordingPrefs, String>((ref) => _RecordingPrefs());
-

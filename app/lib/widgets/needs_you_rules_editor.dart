@@ -16,12 +16,13 @@ import '../theme/tokens.dart';
 /// the same words would fork it into an equal-but-not-identical string for no
 /// change in what is asked.
 ///
-/// **Save is the only thing that commits.** Cancel, the back arrow, and being
-/// disposed all discard — unlike the settings dialog, which saves its about-me
-/// text on the way out however the dialog was dismissed. The difference is
-/// deliberate: about-me is a description of a person that costs nothing to
-/// keep, while these rules change how every message is judged, so a half-typed
-/// thought abandoned by clicking Back must not quietly become the rule.
+/// **Save is the only thing that commits.** This is the body of a settings
+/// section rather than a pane of its own, so there is nowhere to go back to:
+/// Cancel puts the last saved text back in the field and stays, and Save
+/// writes and stays. Being disposed still discards. The strictness is
+/// deliberate — these rules change how every message is judged, so a
+/// half-typed thought abandoned by scrolling away or closing the section must
+/// not quietly become the rule.
 ///
 /// The trim on Save is the one place stray whitespace is dropped. The store
 /// keeps whatever it is handed, verbatim, so the editor is where "text with a
@@ -34,14 +35,14 @@ import '../theme/tokens.dart';
 /// A plain [StatefulWidget] over values and callbacks, reaching for no
 /// providers itself — the screen owns the wiring, and a test can drive this
 /// with nothing but closures.
-class NeedsYouRulesPane extends StatefulWidget {
+class NeedsYouRulesEditor extends StatefulWidget {
   /// The stored rules, verbatim. Empty means the defaults are in force, which
   /// is what the field is prefilled with.
   final String value;
 
   /// The app's own needs-you rules: the prefill, and what Reset restores. A
-  /// prop rather than an import so the pane has no opinion about which prompt
-  /// it is editing for, and a test can pass a string it can recognise.
+  /// prop rather than an import so the editor has no opinion about which
+  /// prompt it is editing for, and a test can pass a string it can recognise.
   final String defaultRules;
 
   /// The output contract appended after whatever body is in force, shown in
@@ -57,38 +58,32 @@ class NeedsYouRulesPane extends StatefulWidget {
   /// text, or the empty string where that text is the defaults.
   final void Function(String value) onSave;
 
-  /// Leaves the pane. Called by Cancel, by the back arrow, and by Save once it
-  /// has saved.
-  final VoidCallback onBack;
-
-  const NeedsYouRulesPane({
+  const NeedsYouRulesEditor({
     super.key,
     required this.value,
     required this.defaultRules,
     required this.fixedTail,
     required this.maxLength,
     required this.onSave,
-    required this.onBack,
   });
 
   @override
-  State<NeedsYouRulesPane> createState() => _NeedsYouRulesPaneState();
+  State<NeedsYouRulesEditor> createState() => _NeedsYouRulesEditorState();
 }
 
-class _NeedsYouRulesPaneState extends State<NeedsYouRulesPane> {
-  /// What the field showed when the pane opened. Held rather than recomputed
-  /// because it is what "dirty" is measured against, and an empty stored value
-  /// opens on the defaults rather than on nothing.
-  late final String _initial =
-      widget.value.isEmpty ? widget.defaultRules : widget.value;
+class _NeedsYouRulesEditorState extends State<NeedsYouRulesEditor> {
+  /// The last text this editor either opened on or saved. Held rather than
+  /// recomputed because it is what "dirty" is measured against and what Cancel
+  /// restores, and an empty stored value opens on the defaults rather than on
+  /// nothing. It moves on every Save, so a second edit is dirty against the
+  /// first save rather than against the original.
+  late String _initial;
 
-  late final TextEditingController _rules = TextEditingController(
-    text: _initial,
-  );
+  late final TextEditingController _rules;
 
   /// Collapsed to start: the tail is reference material for the minority of
   /// visits that are checking what survives an edit, and expanded by default it
-  /// would push the field the pane exists for off the screen.
+  /// would push the field the editor exists for off the screen.
   bool _showTail = false;
 
   /// Roughly eight lines at a time. Tall enough to read the contract in
@@ -98,9 +93,24 @@ class _NeedsYouRulesPaneState extends State<NeedsYouRulesPane> {
   @override
   void initState() {
     super.initState();
+    _initial = widget.value.isEmpty ? widget.defaultRules : widget.value;
+    _rules = TextEditingController(text: _initial);
     // Save and Reset are both enabled by what is in the field, so the buttons
-    // have to hear every keystroke — nothing else on the pane redraws.
+    // have to hear every keystroke — nothing else here redraws.
     _rules.addListener(_onChanged);
+  }
+
+  @override
+  void didUpdateWidget(NeedsYouRulesEditor old) {
+    super.didUpdateWidget(old);
+    // The stored rules changing underneath us — a sign-in inside Settings
+    // wipes the previous person's rules to '' — is not an edit of ours. An
+    // unsaved edit is the user's and is never overwritten; a clean field
+    // adopts what the host now says.
+    if (old.value != widget.value && _rules.text == _initial) {
+      _initial = widget.value.isEmpty ? widget.defaultRules : widget.value;
+      _rules.text = _initial;
+    }
   }
 
   void _onChanged() => setState(() {});
@@ -114,8 +124,8 @@ class _NeedsYouRulesPaneState extends State<NeedsYouRulesPane> {
     super.dispose();
   }
 
-  /// Whether the field says something other than what it opened on. The
-  /// comparison is against the raw opening text rather than a trimmed one so
+  /// Whether the field says something other than what it last opened on or
+  /// saved. The comparison is against the raw text rather than a trimmed one so
   /// that Save lights up for a change the user can see themselves having made.
   bool get _dirty => _rules.text != _initial;
 
@@ -126,89 +136,71 @@ class _NeedsYouRulesPaneState extends State<NeedsYouRulesPane> {
     // The trim happens here and nowhere else — the store keeps what it is
     // handed, verbatim.
     widget.onSave(text == widget.defaultRules.trim() ? '' : text);
-    widget.onBack();
+    // The saved text becomes the new baseline: Save disables again, and a
+    // later Cancel reverts to what was actually saved rather than to whatever
+    // the section opened on.
+    setState(() => _initial = _rules.text);
   }
+
+  /// Puts the last saved text back and stays. There is no pane to leave — the
+  /// section around this is still open, and the summary above it still says
+  /// what is in force.
+  void _cancel() => setState(() => _rules.text = _initial);
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(BondSpacing.s24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              IconButton(
-                onPressed: widget.onBack,
-                icon: const Icon(Icons.arrow_back),
-                iconSize: 20,
-                tooltip: 'Back',
-              ),
-              const SizedBox(width: BondSpacing.s4),
-              Expanded(
-                child: Text(
-                  'Needs You rules',
-                  style: BondType.titleSm,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
+    // A plain Column, deliberately unbounded: this sits inside the settings
+    // screen's SingleChildScrollView, where an Expanded would be an
+    // unbounded-height error rather than a scroll region.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'These are the rules the model reads for every message Bond cannot '
+          'settle on its own. Edit them freely — they replace the defaults '
+          'entirely. Bond adds the answer format automatically.',
+          style: BondType.small,
+        ),
+        const SizedBox(height: BondSpacing.s16),
+        TextField(
+          controller: _rules,
+          minLines: 6,
+          maxLines: 12,
+          maxLength: widget.maxLength,
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          // Local until Save, like every other edit here: the button puts the
+          // defaults back in the field and nothing more, and Cancel still
+          // reverts.
+          child: TextButton(
+            onPressed: _rules.text == widget.defaultRules
+                ? null
+                : () => _rules.text = widget.defaultRules,
+            child: const Text('Reset to default'),
           ),
-          const SizedBox(height: BondSpacing.s8),
-          Text(
-            'These are the rules the model reads for every message Bond cannot '
-            'settle on its own. Edit them freely — they replace the defaults '
-            'entirely. Bond adds the answer format automatically.',
-            style: BondType.small,
-          ),
-          const SizedBox(height: BondSpacing.s16),
-          Expanded(
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  TextField(
-                    controller: _rules,
-                    minLines: 6,
-                    maxLines: 12,
-                    maxLength: widget.maxLength,
-                  ),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    // Local until Save, like every other edit on this pane: the
-                    // button puts the defaults back in the field and nothing
-                    // more, and Cancel still discards.
-                    child: TextButton(
-                      onPressed: _rules.text == widget.defaultRules
-                          ? null
-                          : () => _rules.text = widget.defaultRules,
-                      child: const Text('Reset to default'),
-                    ),
-                  ),
-                  const SizedBox(height: BondSpacing.s16),
-                  ..._tailDisclosure(),
-                ],
-              ),
+        ),
+        const SizedBox(height: BondSpacing.s16),
+        ..._tailDisclosure(),
+        const SizedBox(height: BondSpacing.s16),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            // Greyed when there is nothing to revert, the same rule Save
+            // follows — and the same rule the about-me section beside this
+            // one uses, so the two footers read as one control.
+            TextButton(
+              onPressed: _dirty ? _cancel : null,
+              child: const Text('Cancel'),
             ),
-          ),
-          const SizedBox(height: BondSpacing.s16),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              TextButton(
-                onPressed: widget.onBack,
-                child: const Text('Cancel'),
-              ),
-              const SizedBox(width: BondSpacing.s8),
-              FilledButton(
-                onPressed: _dirty ? _save : null,
-                child: const Text('Save'),
-              ),
-            ],
-          ),
-        ],
-      ),
+            const SizedBox(width: BondSpacing.s8),
+            FilledButton(
+              onPressed: _dirty ? _save : null,
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
