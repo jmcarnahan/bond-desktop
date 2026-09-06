@@ -14,6 +14,17 @@ import 'pipeline_progress.dart';
 /// dragging in a year of archive.
 const int syncFloorDays = 14;
 
+/// The range a user may choose that floor from. A day is the shortest window
+/// that still means "recent mail" on a machine that syncs once a morning; a
+/// year is where a mailbox stops being an inbox and starts being an archive,
+/// and where a first drain stops finishing in a sitting. Clamped rather than
+/// rejected: a stored value from outside the range — hand-edited, or written
+/// by a build that meant something else — must land somewhere usable, never
+/// throw and never leave the window at nothing.
+const int minLookbackDays = 1;
+const int maxLookbackDays = 365;
+int clampLookbackDays(int days) => days.clamp(minLookbackDays, maxLookbackDays);
+
 /// Inbound mail older than this arrives already `skipped`. It still renders;
 /// it just never reaches the triage model, which exists to answer "does this
 /// need me today?".
@@ -71,12 +82,22 @@ class SyncService implements MailSync {
   /// was addressed to the user, so nothing does.
   String? _userAddress;
 
+  /// How many days back the user asked this mailbox to reach. A closure rather
+  /// than a value, for the reason [_userAddressReader] is one: this service is
+  /// built once and the preference changes under it, and a sync must use the
+  /// setting as it stands when the pass starts rather than as it stood when
+  /// the provider was first read. Null means nobody wired one — every test
+  /// that does not care, and every caller from before the setting existed —
+  /// and answers [syncFloorDays].
+  final int Function()? _lookbackDays;
+
   SyncService(
     this._mail,
     this._store, {
     ActivityLog? activityLog,
     PipelineProgress? progress,
     Future<String?> Function()? userAddress,
+    this._lookbackDays,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _progress = progress ?? const PipelineProgress.disabled(),
         _userAddressReader = userAddress;
@@ -86,8 +107,17 @@ class SyncService implements MailSync {
     _userAddress ??= await _resolveUserAddress();
     final sw = Stopwatch()..start();
     try {
-      final (inbox, inboxResync) = await _syncFolder('inbox', 'inbound');
-      final (sent, sentResync) = await _syncFolder('sentitems', 'outbound');
+      // Computed exactly ONCE per pass, here, before anything drains — and
+      // then carried down as a parameter rather than recomputed where it is
+      // used. [MessageStore.setDeltaLink] stamps `synced_at` on EVERY call,
+      // including the `setDeltaLink(folder, null)` the 410 handler makes, so a
+      // floor read after any drain would find `synced_at = now` and quietly
+      // collapse the vacation rule below into the rolling window.
+      final floor = await _effectiveFloor();
+      final (inbox, inboxResync) =
+          await _syncFolder('inbox', 'inbound', floor: floor);
+      final (sent, sentResync) =
+          await _syncFolder('sentitems', 'outbound', floor: floor);
 
       // A transient failure — the model server mid-load, two timeouts in a row
       // — must not remove mail from the AI pipeline forever. Errored rows get
@@ -253,10 +283,63 @@ class SyncService implements MailSync {
     }
   }
 
+  /// The user's lookback setting, or the default when there is not one to be
+  /// had.
+  ///
+  /// Every failure answers [syncFloorDays]. The closure reads a Riverpod
+  /// container this service does not own, and a container disposed mid-drain
+  /// must cost the pass its preference, never the mail — the same rule
+  /// [LlmClient]'s target resolver follows for the same reason.
+  int _resolveLookbackDays() {
+    try {
+      return clampLookbackDays(_lookbackDays?.call() ?? syncFloorDays);
+    } catch (_) {
+      return syncFloorDays;
+    }
+  }
+
+  /// When each of this source's folders last finished, as one stamp: the OLDER
+  /// of the two, or whichever exists, or null when neither does.
+  ///
+  /// The older one is the honest answer. A pass that reached back only as far
+  /// as the more recent stamp would leave the folder behind it with a gap
+  /// nothing ever fetches again. String comparison stands in for date
+  /// comparison because every stamp in this table is written by [_nowIso] in
+  /// the same UTC ISO shape.
+  Future<String?> _lastSyncedAt() async {
+    final inbox = await _store.getSyncedAt('inbox', source: _source);
+    final sent = await _store.getSyncedAt('sentitems', source: _source);
+    if (inbox == null) return sent;
+    if (sent == null) return inbox;
+    return inbox.compareTo(sent) < 0 ? inbox : sent;
+  }
+
+  /// The oldest point this pass will reach.
+  ///
+  /// The OLDER of the rolling window and the last sync that finished — the
+  /// vacation rule. Mail that arrived while the app was closed is unreachable
+  /// through any shorter floor, and no cursor is coming to fetch it: the
+  /// lookback is a preference about how much history to hold, never a licence
+  /// to skip mail that was delivered while nobody was draining.
+  Future<String> _effectiveFloor() async {
+    final rolling = _isoDaysAgo(_resolveLookbackDays());
+    final last = await _lastSyncedAt();
+    if (last == null || last.isEmpty) return rolling;
+    return last.compareTo(rolling) < 0 ? last : rolling;
+  }
+
   /// One folder, including the single permitted recovery from an expired
   /// cursor. Returns `(messages seen for the first time, whether the 410
   /// recovery fired)`.
-  Future<(int, bool)> _syncFolder(String folder, String direction) async {
+  ///
+  /// [floor] is handed in rather than computed here, and both uses below are
+  /// that same string — see the computation site in [syncNow] for why asking
+  /// again inside this method would be wrong.
+  Future<(int, bool)> _syncFolder(
+    String folder,
+    String direction, {
+    required String floor,
+  }) async {
     final storedLink = await _store.getDeltaLink(folder, source: _source);
     final firstRun = storedLink == null;
     var newMessages = 0;
@@ -267,7 +350,7 @@ class SyncService implements MailSync {
         folder,
         direction,
         startLink: storedLink,
-        minReceivedIso: firstRun ? _isoAgo(const Duration(days: syncFloorDays)) : null,
+        minReceivedIso: firstRun ? floor : null,
       );
     } on DeltaResyncRequired {
       // The cursor is older than Graph's change history — which means an
@@ -286,7 +369,7 @@ class SyncService implements MailSync {
           folder,
           direction,
           startLink: null,
-          minReceivedIso: _isoAgo(const Duration(days: syncFloorDays)),
+          minReceivedIso: floor,
         );
       } on DeltaResyncRequired {
         // Twice in one drain is not an expired token, it is a loop.
@@ -722,4 +805,19 @@ String _isoAgo(Duration ago) {
   final truncated =
       DateTime.utc(t.year, t.month, t.day, t.hour, t.minute, t.second);
   return truncated.toIso8601String().replaceFirst('.000Z', 'Z');
+}
+
+/// [days] before now, at UTC midnight — [_isoAgo]'s shape, cut back to the
+/// start of the day.
+///
+/// The settings screen promises mail since a named day, and midnight is what
+/// makes that sentence exactly true rather than true to within the hour
+/// someone happened to press refresh. It can only ever WIDEN the window, by
+/// less than a day, which is the safe direction: a floor that moves earlier
+/// cannot lose mail.
+String _isoDaysAgo(int days) {
+  final t = DateTime.now().toUtc().subtract(Duration(days: days));
+  return DateTime.utc(t.year, t.month, t.day)
+      .toIso8601String()
+      .replaceFirst('.000Z', 'Z');
 }

@@ -358,19 +358,28 @@ void main() {
             deltaLink: deltaCursor('inbox', 'fresh'))),
       ]);
 
+      /// UTC midnight, fourteen days back — the floor's shape since the
+      /// lookback became a setting the screen names a day for.
+      String midnightFloor() {
+        final t = DateTime.now().toUtc().subtract(const Duration(days: 14));
+        return DateTime.utc(t.year, t.month, t.day)
+            .toIso8601String()
+            .replaceFirst('.000Z', 'Z');
+      }
+
+      // Asked on both sides of the sync, and either accepted: the only way the
+      // two differ is a run that straddled midnight.
+      final before = midnightFloor();
       await sync.syncNow();
+      final after = midnightFloor();
 
       final inboxRequests = graph.requestsFor('inbox');
       expect(inboxRequests.length, 2);
 
       final filter = inboxRequests[1].queryParameters[r'$filter']!;
-      final floor = DateTime.parse(
-          filter.replaceFirst('receivedDateTime ge ', ''));
-      final expected =
-          DateTime.now().toUtc().subtract(const Duration(days: 14));
       expect(
-        floor.difference(expected).abs(),
-        lessThan(const Duration(minutes: 5)),
+        filter.replaceFirst('receivedDateTime ge ', ''),
+        anyOf(before, after),
         reason: 'an expired cursor loses an UNKNOWN stretch of changes, so '
             'the only safe restart is the full first-run floor — a shorter '
             'window silently drops whatever fell between the dead cursor and '

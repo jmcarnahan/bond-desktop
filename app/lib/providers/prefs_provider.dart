@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../data/message_store.dart';
 import '../services/attention.dart';
 import '../services/llm/model_slots.dart';
+import '../services/sync_service.dart';
 import 'app_providers.dart';
 
 export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
@@ -121,6 +122,16 @@ class AppPrefs {
   final String proseLlmUrl;
   final String proseLlmModel;
 
+  /// How many days of mail history a sync reaches back for. One per connector,
+  /// because the two mailboxes are different sizes and a person who wants a
+  /// quarter of email rarely wants a quarter of chat.
+  ///
+  /// Both default to [syncFloorDays] — Teams' own floor is the same fourteen
+  /// days, and its constant is class-static on `TeamsSync`, so naming it here
+  /// would drag in that import to say a number this file already has.
+  final int mailLookbackDays;
+  final int teamsLookbackDays;
+
   const AppPrefs({
     this.attentionThreshold = AttentionTuning.defaultThreshold,
     this.aboutMe = '',
@@ -135,6 +146,8 @@ class AppPrefs {
     this.fastLlmModel = '',
     this.proseLlmUrl = '',
     this.proseLlmModel = '',
+    this.mailLookbackDays = syncFloorDays,
+    this.teamsLookbackDays = syncFloorDays,
   });
 
   /// What the bulk client will dial on its next request.
@@ -184,6 +197,8 @@ class AppPrefs {
     String? fastLlmModel,
     String? proseLlmUrl,
     String? proseLlmModel,
+    int? mailLookbackDays,
+    int? teamsLookbackDays,
   }) =>
       AppPrefs(
         attentionThreshold: attentionThreshold ?? this.attentionThreshold,
@@ -200,6 +215,8 @@ class AppPrefs {
         fastLlmModel: fastLlmModel ?? this.fastLlmModel,
         proseLlmUrl: proseLlmUrl ?? this.proseLlmUrl,
         proseLlmModel: proseLlmModel ?? this.proseLlmModel,
+        mailLookbackDays: mailLookbackDays ?? this.mailLookbackDays,
+        teamsLookbackDays: teamsLookbackDays ?? this.teamsLookbackDays,
       );
 }
 
@@ -219,6 +236,8 @@ const String fastLlmUrlKey = 'fast_llm_url';
 const String fastLlmModelKey = 'fast_llm_model';
 const String proseLlmUrlKey = 'prose_llm_url';
 const String proseLlmModelKey = 'prose_llm_model';
+const String mailLookbackDaysKey = 'mail_lookback_days';
+const String teamsLookbackDaysKey = 'teams_lookback_days';
 
 /// The switch [notifyStyleKey] replaced. Still read — and only read — so an
 /// install that had turned the ribbon off stays quiet across the upgrade
@@ -279,8 +298,17 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       fastLlmModel: _slotValue(await store.getPref(fastLlmModelKey)),
       proseLlmUrl: _slotValue(await store.getPref(proseLlmUrlKey)),
       proseLlmModel: _slotValue(await store.getPref(proseLlmModelKey)),
+      mailLookbackDays: _lookback(await store.getPref(mailLookbackDaysKey)),
+      teamsLookbackDays: _lookback(await store.getPref(teamsLookbackDaysKey)),
     );
   }
+
+  /// A stored lookback, or the default. Unparseable is the default and
+  /// out-of-range is the nearest end of the range: this number decides how far
+  /// a sync reaches, and neither a blank window nor a thrown exception is a
+  /// state the sync can do anything with.
+  static int _lookback(String? raw) =>
+      clampLookbackDays(int.tryParse(raw ?? '') ?? syncFloorDays);
 
   /// Absent, blank, or whitespace all mean the same thing — follow the build.
   /// Trimmed on the way in as well as on the way out, because a URL with a
@@ -412,6 +440,23 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     state = state.copyWith(proseLlmUrl: cleanUrl, proseLlmModel: cleanModel);
     await _store.setPref(proseLlmUrlKey, cleanUrl);
     await _store.setPref(proseLlmModelKey, cleanModel);
+  }
+
+  /// How far back each connector reaches. Clamped on the way in as well as on
+  /// the way out — [_lookback] guards the read, and this guards a caller that
+  /// hands over a number no control on screen could have produced.
+  ///
+  /// State first, then the write, like every setter above.
+  Future<void> setMailLookbackDays(int value) async {
+    final clamped = clampLookbackDays(value);
+    state = state.copyWith(mailLookbackDays: clamped);
+    await _store.setPref(mailLookbackDaysKey, clamped.toString());
+  }
+
+  Future<void> setTeamsLookbackDays(int value) async {
+    final clamped = clampLookbackDays(value);
+    state = state.copyWith(teamsLookbackDays: clamped);
+    await _store.setPref(teamsLookbackDaysKey, clamped.toString());
   }
 
   /// Back to the build's defaults for one slot.

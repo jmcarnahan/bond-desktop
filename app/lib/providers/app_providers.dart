@@ -259,6 +259,10 @@ final syncServiceProvider = Provider<MailSync>(
     userAddress: () => ref.read(authSessionProvider).storedAccount.then(
           (account) => account?.mail ?? account?.userPrincipalName,
         ),
+    // `ref.read` inside the closure, never `watch`: watching would rebuild
+    // this provider — and abort the drain running on it — the moment someone
+    // moved the setting, the same hazard [llmClientProvider] documents below.
+    lookbackDays: () => ref.read(appPrefsProvider).mailLookbackDays,
   ),
 );
 
