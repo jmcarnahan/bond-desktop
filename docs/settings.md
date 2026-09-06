@@ -36,6 +36,16 @@ where the disclosures were left is a scroll position, not a preference. The
 summary stays visible while the body is open, because it is the answer and
 hiding it would make Collapse the only way to check what the controls did.
 
+The Microsoft connection row is not one of those `_section(...)` calls: it is
+its own widget, `MicrosoftConnectionSection`
+(`app/lib/widgets/settings_connection_section.dart`), which builds its own
+`SettingsSection`. It owns the most state on the screen — the backend mode, the
+server preset and field, three held futures, the session snapshot, a sign-in
+flag and its error — and its collapsed summary is built from that state, so the
+state lives with the summary rather than a screen away from it. The screen stays
+prop-only and passes the thirteen connection props straight through. The Models
+body has the same shape in `settings_models_body.dart`.
+
 ## The sections, in order
 
 | Section | Renders when | Collapsed summary |
@@ -105,9 +115,12 @@ It commits on Enter, on focus leaving the field, and on the three clicks that
 take the field off the screen without moving focus: Back, Home, and collapsing
 the section. Flutter fires no unfocus when a subtree is disposed — measured, not
 assumed — so `Focus.onFocusChange` alone would lose a typed URL on the way out.
-`_commitPendingServerUrl` runs in those three event handlers rather than in
-`dispose`, so the provider write it causes happens outside the frame that is
-unmounting the tree.
+`MicrosoftConnectionSectionState.commitPendingServerUrl` runs in those three
+event handlers rather than in `dispose`, so the provider write it causes happens
+outside the frame that is unmounting the tree. The section calls it itself on
+Collapse; Back and Home are the screen's, which reaches it through a `GlobalKey`
+on the section — the state is the only thing that knows whether the field is
+showing and what is in it.
 
 ## About me
 
@@ -125,7 +138,9 @@ typed.
 
 ## Microsoft connection
 
-The mode segments are **MCP** and **This device**. They were renamed from
+The whole section — state, asks and body — is
+`app/lib/widgets/settings_connection_section.dart`. The mode segments are
+**MCP** and **This device**. They were renamed from
 'Bond server' and 'This Mac': the first collided with the dropdown label
 directly under it, and the second named the wrong thing on a machine that is not
 a Mac. The server dropdown is labelled **MCP server** and offers:
