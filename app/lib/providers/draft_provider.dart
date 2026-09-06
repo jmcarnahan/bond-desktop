@@ -7,7 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart';
-import '../models/message_models.dart' show ConversationState;
+import '../models/message_models.dart' show ConversationState, Message;
 import '../services/ai_worker.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/backend_types.dart';
@@ -16,6 +16,7 @@ import '../services/backend/teams_backend.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
 import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/mail_echo.dart' show firstLine, mailEchoRow, nowSecondsZ;
 import '../services/pipeline_progress.dart';
 import '../services/teams_sync.dart' show TeamsSync;
 import '../widgets/composer.dart' show SendCapability;
@@ -39,6 +40,13 @@ import 'conversations_provider.dart';
 /// and it takes the body as an argument rather than reading the stored draft —
 /// so a send can only ever carry text that was on screen in front of whoever
 /// pressed the button.
+///
+/// Both arms write the reply into the transcript before returning. A chat
+/// stores the message Graph handed back, id and all. Mail stores a `local:`
+/// echo built from what `sendDraft` reported, which the Sent Items copy
+/// replaces on the next drain, matched on the internet message id — the whole
+/// contract is in `mail_echo.dart`. The user watched the reply leave; it is on
+/// screen from that moment, and it survives a restart.
 
 /// Which conversation a draft belongs to.
 ///
@@ -155,6 +163,15 @@ class DraftState {
   /// for that has not left yet.
   final PendingSend? pending;
 
+  /// The text of a send that has left the undo window but has not finished
+  /// landing — set when the timer fires, cleared once the send returns.
+  ///
+  /// It exists so the bubble the undo window was showing OUTLIVES the network
+  /// call. Without it the reply blinks out at the moment [pending] clears and
+  /// blinks back when the stored row arrives, which reads as a send that
+  /// failed. Read through [bubbleBody], never directly.
+  final String? inFlightBody;
+
   const DraftState({
     this.draft,
     this.threadDrafts = const {},
@@ -164,7 +181,32 @@ class DraftState {
     this.error,
     this.sendEpoch = 0,
     this.pending,
+    this.inFlightBody,
   });
+
+  /// The optimistic bubble to draw under [messages], or null for none.
+  ///
+  /// One unbroken bubble from the click to the stored row, and — this is the
+  /// half a bare `pending ?? inFlightBody` gets wrong — exactly ONE copy of
+  /// the reply on screen at a time. Both send arms store their row BEFORE
+  /// `onSent`, and the screen re-reads the transcript on the epoch bump, so
+  /// the row can arrive while the send is still finishing its list sync.
+  /// Without this check the user would see their reply twice for the length of
+  /// that sync, which can be seconds.
+  ///
+  /// Matched on the body rather than on an id, because the id is the one thing
+  /// the two do not share: the bubble never had one, and the row's is either a
+  /// `local:` echo or, once the drain has been through, the server's.
+  String? bubbleBody(List<Message> messages) {
+    final queued = pending?.body;
+    if (queued != null) return queued;
+    final body = inFlightBody;
+    if (body == null) return null;
+    for (final message in messages) {
+      if (message.outbound && message.bodyText == body) return null;
+    }
+    return body;
+  }
 
   /// The draft's body, or null when there is none. A dismissed draft reads as
   /// no draft: the row survives so the enqueue does not immediately write
@@ -224,6 +266,7 @@ class DraftState {
     Object? error = _unset,
     int? sendEpoch,
     Object? pending = _unset,
+    Object? inFlightBody = _unset,
   }) =>
       DraftState(
         draft: identical(draft, _unset)
@@ -238,6 +281,9 @@ class DraftState {
         pending: identical(pending, _unset)
             ? this.pending
             : pending as PendingSend?,
+        inFlightBody: identical(inFlightBody, _unset)
+            ? this.inFlightBody
+            : inFlightBody as String?,
       );
 
   /// Separates "not passed" from "passed as null" on [copyWith], where the two
@@ -592,8 +638,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
       if (!mounted) return;
       // Cleared FIRST, so [cancelQueuedSend] arriving a millisecond late is a
       // no-op against a send already on the wire rather than a cancel that
-      // appears to have worked.
-      state = state.copyWith(pending: null);
+      // appears to have worked. The text moves across to [inFlightBody] in the
+      // same write: the two together are what keep one unbroken bubble on
+      // screen from the click to the stored row.
+      state = state.copyWith(pending: null, inFlightBody: text);
       unawaited(send(text, replyTo: replyTo));
     });
   }
@@ -626,6 +674,10 @@ class DraftNotifier extends StateNotifier<DraftState> {
 
     if (state.capability == SendCapability.copyOnly) {
       await Clipboard.setData(ClipboardData(text: text));
+      // Nothing left the machine, so nothing is in flight. Cleared explicitly
+      // because a queued send that lands on this rung set the bubble on its
+      // way here, and a clipboard copy must not leave one hanging.
+      if (mounted) state = state.copyWith(inFlightBody: null);
       return SendOutcome.copied;
     }
 
@@ -666,7 +718,42 @@ class DraftNotifier extends StateNotifier<DraftState> {
         return await _handOffToOutlook(target, draftId, webLink, text);
       }
 
-      await _mail.sendDraft(draftId);
+      final sent = await _mail.sendDraft(draftId);
+      // Read AFTER the send, and never allowed to fail it: the reply has gone,
+      // and a keychain that will not open is no reason to report a sent reply
+      // as failed. An echo with no owner renders as `You` like every other
+      // outbound row, so the only thing a null costs is the sender column.
+      AccountInfo? owner;
+      try {
+        owner = await _auth.storedAccount;
+      } catch (_) {
+        owner = null;
+      }
+      // On screen NOW, from what the server said went out. The reply is real
+      // mail the moment `sendDraft` returns; waiting a minute for `sentitems`
+      // to confirm it reads as a send that failed, and gets sent again.
+      //
+      // The write is refused when the Sent Items copy has already landed — a
+      // poll that started before this send can beat it — and is replaced by
+      // that copy when it does land, matched on the internet message id. See
+      // `mail_echo.dart` for the whole contract.
+      await _store.insertLocalEcho(mailEchoRow(
+        sent: sent,
+        text: text,
+        conversationKey: conversationKey,
+        owner: owner,
+      ));
+      // Counts alone would leave the thread where it was in the rail, still
+      // previewing the message it just answered — and it would never heal,
+      // because the fold below is the only one this row will ever get.
+      await _store.foldOutboundSend(
+        _source,
+        conversationKey,
+        receivedAt: sent.sentAt ?? nowSecondsZ(),
+        preview: firstLine(text),
+        subject: sent.subject,
+      );
+      await _queueRecap();
       // Keyed on the message just replied to — which is the message the stored
       // draft answers whenever there is one, and the newest inbound message
       // when there is not. A thread with no suggestion has no row to update
@@ -700,9 +787,9 @@ class DraftNotifier extends StateNotifier<DraftState> {
         sending: false,
         sendEpoch: state.sendEpoch + 1,
       );
-      // The sent message lands in `sentitems` and folds in normally, which is
-      // what flips the thread out of "needs reply" — no optimistic row is
-      // written here, so nothing can be left behind if the sync disagrees.
+      // The list, last: everything this thread needed has already been
+      // written, and the echo above is what the transcript shows until the
+      // Sent Items copy folds in and takes its place.
       await _onSent?.call();
       return SendOutcome.sent;
     } on AuthException catch (e) {
@@ -714,20 +801,28 @@ class DraftNotifier extends StateNotifier<DraftState> {
     } catch (e) {
       state = state.copyWith(sending: false, error: 'Could not send: $e');
       return SendOutcome.failed;
+    } finally {
+      // The stored row is already in place by here, so [DraftState.bubbleBody]
+      // takes over the moment the transcript re-reads. On a failure it clears
+      // too: the error is on the inline alert, and a bubble beside it would
+      // say the opposite.
+      if (mounted) state = state.copyWith(inFlightBody: null);
     }
   }
 
   /// Posts [text] to a chat and writes the reply into the transcript.
   ///
-  /// **The one send in this app that writes its own outbound row**, and the
-  /// only one that can: a chat post answers with the message Graph stored, id
-  /// and all, so the row written here is byte for byte the row the next pull
-  /// would have folded — [TeamsSync.messageRow] builds both. That shared id is
-  /// what makes the fold happen exactly once: `TeamsSync` asks
-  /// [MessageStore.hasMessage] before folding, sees this row, and counts the
-  /// reply as history rather than as news that reopens the thread. Mail cannot
-  /// do any of this — `sendDraft` answers 202 with no body — which is why it
-  /// still waits for `sentitems`.
+  /// A chat post answers with the message Graph stored, id and all, so the row
+  /// written here is byte for byte the row the next pull would have folded —
+  /// [TeamsSync.messageRow] builds both. That shared id is what makes the fold
+  /// happen exactly once: `TeamsSync` asks [MessageStore.hasMessage] before
+  /// folding, sees this row, and counts the reply as history rather than as
+  /// news that reopens the thread.
+  ///
+  /// Mail writes its own row too now, but a PROVISIONAL one: `sendDraft`
+  /// answers with the ids of a draft that no longer exists, so the mail arm
+  /// stores a `local:` echo that the Sent Items copy replaces on the next
+  /// drain. A chat reply never needs replacing — see `mail_echo.dart`.
   Future<SendOutcome> _sendChat(String text, {String? replyTo}) async {
     final teams = _teams;
     if (teams == null) {
@@ -745,7 +840,17 @@ class DraftNotifier extends StateNotifier<DraftState> {
       // pull writes the transcript entry that this one could not.
       if (row != null) {
         await _store.upsertMessage(row);
-        await _store.recomputeConversationCounts(_source, conversationKey);
+        // The fold, not just the counts: the rail orders by `last_message_at`
+        // and shows `last_message_preview`, so recounting alone left a chat
+        // the user had just answered sitting where it was, previewing the
+        // question. Nothing would ever have corrected it — the next pull skips
+        // this row as already seen.
+        await _store.foldOutboundSend(
+          _source,
+          conversationKey,
+          receivedAt: row['received_at'] as String?,
+          preview: firstLine(text),
+        );
         await _queueRecap();
       }
       // A chat send never marked a draft row before. That was fine while only
@@ -793,26 +898,29 @@ class DraftNotifier extends StateNotifier<DraftState> {
     } catch (e) {
       state = state.copyWith(sending: false, error: 'Could not send: $e');
       return SendOutcome.failed;
+    } finally {
+      // Same rule as the mail arm: the row is stored by here, so
+      // [DraftState.bubbleBody] hands the bubble over rather than dropping it.
+      if (mounted) state = state.copyWith(inFlightBody: null);
     }
   }
 
   /// Wakes the recap of every storyline this chat is filed in, because the
   /// user just changed the answer to the question a recap exists to ask.
   ///
-  /// Called from the chat send and from nowhere else, and the asymmetry is the
-  /// same one the `clearNeedsYou` above explains. Every OTHER outbound row in
-  /// this app lands at ingest — the sent copy folding in from `sentitems`, or a
-  /// chat reply sent from Teams itself arriving on a pull — and every sync ends
-  /// by requeueing `storyline_sweep`, whose recap catch-up
-  /// ([MessageStore.staleRecapStorylineIds]) finds those storylines and whose
-  /// recap handler drains later in the same pass. Wiring a per-message requeue
-  /// into the mail ingest would buy nothing and would cost a query per message
-  /// inside the page transaction, on first syncs that can run to six figures.
+  /// Called from BOTH send arms, because both now write a row no ingest will
+  /// announce. The chat reply is written with the id Graph assigned and the
+  /// next pull deliberately skips it as already-known; the mail echo is
+  /// written under a `local:` id the drain has never heard of and then quietly
+  /// deleted when the real copy lands. Neither ever reaches
+  /// [MessageStore.staleRecapStorylineIds] on its own.
   ///
-  /// The chat send is the one outbound row no ingest will ever see: it is
-  /// written here with the id Graph assigned, and the next pull deliberately
-  /// skips it as already-known. Without this line a chat reply would wait for
-  /// the next sync's catch-up to notice it.
+  /// That catch-up is what covers every OTHER outbound row: a reply sent from
+  /// Outlook or from Teams itself arrives on a pull, and every sync ends by
+  /// requeueing `storyline_sweep`, whose recap handler drains later in the
+  /// same pass. Wiring a per-message requeue into the mail ingest would buy
+  /// nothing and would cost a query per message inside the page transaction,
+  /// on first syncs that can run to six figures.
   ///
   /// Mirrors `ExtractHandler._queueRecap`, label included — `requeueWork` is
   /// keyed on `(kind, source, entity_id)`, and 'email' is the label

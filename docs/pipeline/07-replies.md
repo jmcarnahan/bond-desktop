@@ -56,3 +56,30 @@ prompt would silently destroy that cache hit.
 An empty drafted body throws `LlmFormatException`, which earns the worker's
 one retry. Nothing sends on its own: a draft is text in a box until somebody
 presses Send.
+
+## What a send writes
+
+`DraftNotifier.send` (`app/lib/providers/draft_provider.dart`) is the only
+path to the network, and both of its arms put the reply in the transcript
+before returning — the user watched it leave, and a minute of invisibility
+reads as a send that failed.
+
+- **Teams.** Graph answers a chat post with the message it stored, so the row
+  is written from that answer through `TeamsSync.messageRow`, id and all. The
+  next pull recognises the id and folds nothing twice.
+- **Mail.** `sendDraft` answers with `SentDraft` — the ids read off the draft
+  just before it went. The row is a `local:<draftId>` echo built by
+  `mailEchoRow`, which the Sent Items copy replaces on the next drain, matched
+  on `internet_message_id`. See [01-sync-ingest.md](01-sync-ingest.md) for the
+  reconciliation and its race guard.
+
+Both arms then call `MessageStore.foldOutboundSend`, which applies
+`foldMessage` to the stored conversation row and recomputes its counts.
+Counts alone are not enough: the rail orders by `last_message_at` and shows
+`last_message_preview`, so recounting left an answered thread sitting where it
+was, previewing the question — and nothing would ever have corrected it, since
+the row these sends write is one no ingest will announce.
+
+Until the stored row is on screen, `DraftState.inFlightBody` keeps the
+optimistic bubble up; the screen's `_reloadOpenThread` is what swaps it for the
+row, on the send path and after each poll's sync.

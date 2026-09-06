@@ -259,25 +259,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// bug that reads as "the app is broken": the row updates, the transcript
   /// beside it does not, and the two disagree on screen.
   ///
-  /// Returns the mail sync's own future — awaited by nothing on the timer or
-  /// button paths, and by [_syncNow] alone, which has a label to hold up for
-  /// as long as the pull is actually running.
+  /// The ordering is load bearing. The list load starts FIRST, so the rail is
+  /// never a tick behind. Everything the open thread shows is reloaded AFTER
+  /// that sync has finished, because the rows this tick pulled in — a reply
+  /// the user sent from Outlook, the Sent Items copy that takes an echo's
+  /// place — must be on screen on THIS tick, not the next one. Reading the
+  /// transcript beside the sync, as this did, meant a message could sit
+  /// stored-but-unshown for a full minute.
+  ///
+  /// The returned future covers the whole pass — the sync and the reads behind
+  /// it. Nothing on the timer path awaits it; [_syncNow] does, because it has
+  /// a "Syncing…" label to hold up until the screen is actually showing what
+  /// the pull brought in.
   Future<void> _refresh() async {
     if (!mounted) return;
     final mail = ref.read(conversationsProvider.notifier).load();
     ref.read(storylinesProvider.notifier).load();
+    await mail;
+    if (!mounted) return;
     final selected = _selectedId;
     if (selected != null) {
-      ref
-          .read(
-            threadProvider(
-              (
-                source: _selectedSource ?? 'email',
-                conversationKey: selected,
-              ),
-            ).notifier,
-          )
-          .load();
       // The sync deletes a draft whose thread just received new mail. The
       // composer must find that out NOW, not on the next AI progress event —
       // a stale suggestion left on screen gets sent as a reply to a message
@@ -293,13 +294,37 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           )
           .load();
     }
+    await _reloadOpenThread();
+  }
+
+  /// Re-reads whatever transcript is open: the selected thread, or the
+  /// selected storyline's timeline.
+  ///
+  /// Called after a send and after every pull, and it is the ONLY thing that
+  /// puts a newly stored message on screen — the thread providers are one-shot
+  /// reads, not watches. Bodies are not fetched: everything this reload is for
+  /// is already stored, and a fetch here would put a network call on the timer
+  /// path.
+  Future<void> _reloadOpenThread() async {
+    if (!mounted) return;
+    final selected = _selectedId;
+    if (selected != null) {
+      await ref
+          .read(
+            threadProvider(
+              (
+                source: _selectedSource ?? 'email',
+                conversationKey: selected,
+              ),
+            ).notifier,
+          )
+          .load(fetchBodies: false);
+    }
+    if (!mounted) return;
     final storyline = _selectedStorylineId;
     if (storyline != null) {
-      ref.read(storylineTimelineProvider(storyline).notifier).load();
+      await ref.read(storylineTimelineProvider(storyline).notifier).load();
     }
-    // Last, so every load above is already started: they run beside the sync,
-    // not behind it.
-    await mail;
   }
 
   /// What the refresh button does: the mail refresh the timer also runs, plus
@@ -351,6 +376,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     await ref.read(conversationsProvider.notifier).refreshTeams();
     if (!mounted) return;
     setState(() => _teamsSyncedAt = null);
+    // The chat the user is looking at is the one they most want a pull they
+    // asked for to have refreshed, and the list reload above does not touch
+    // the transcript. No network: everything the pull found is already stored.
+    await _reloadOpenThread();
   }
 
   Future<void> _signOut() async {
@@ -548,6 +577,29 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _signOut();
       }
     });
+
+    // The open thread's own sends, whoever started them. Both arms store the
+    // reply BEFORE the epoch moves and before `onSent`'s list sync, which can
+    // take seconds — so the row is sitting in sqlite, unread, for as long as
+    // that sync runs. This is what reads it.
+    //
+    // Registered in `build` rather than in `initState` because the target is
+    // the SELECTION: `ref.listen` re-registers on every build, so it follows
+    // the user from thread to thread with no bookkeeping.
+    final open = _selectedId;
+    if (open != null) {
+      ref.listen<DraftState>(
+        draftProvider(
+          (source: _selectedSource ?? 'email', conversationKey: open),
+        ),
+        (previous, next) {
+          if (previous == null || !mounted) return;
+          if (next.sendEpoch > previous.sendEpoch) {
+            unawaited(_reloadOpenThread());
+          }
+        },
+      );
+    }
 
     // A queued reply leaves on a timer, so nothing is awaiting its outcome the
     // way the composer's own send is. Listening from HERE rather than from the
@@ -1786,7 +1838,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     };
 
     final draft = ref.watch(draftProvider(target));
-    final pending = draft.pending;
+    // The undo window's text, or the text of a send that has left it and whose
+    // row is not in this transcript yet. One unbroken bubble from the click to
+    // the stored row, and never both at once — see [DraftState.bubbleBody].
+    final pendingBody = draft.bubbleBody(messages);
 
     // Whether this pane offers to reply at all. Mail always does — the ladder
     // bottoms out at the clipboard, which needs no grant. A chat does only on
@@ -1801,7 +1856,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // it back.
     final answersSomebody = messages.isNotEmpty && messages.last.inbound;
 
-    final shown = pending == null
+    final shown = pendingBody == null
         ? messages
         : [
             ...messages,
@@ -1809,7 +1864,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               id: 'pending-send',
               outbound: true,
               source: selected.source,
-              bodyText: pending.body,
+              bodyText: pendingBody,
               // UTC, like every stored timestamp: the open-ask comparison is
               // lexicographic over these strings, and a local-time stamp sorts
               // before the mail it answers for every zone west of UTC.
@@ -1889,7 +1944,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The reply affordance rides at the end of the transcript so it reads as
       // attached to the message it answers. After the user's OWN last message
       // there is nothing to answer, and it renders nothing.
-      afterTranscript: canReply && (answersSomebody || pending != null)
+      afterTranscript: canReply && (answersSomebody || pendingBody != null)
           ? _quickReplies(selected, target, draft)
           : null,
       // Every ask on the pane is a call to action, so every one of them opens
@@ -2137,6 +2192,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (!mounted) return;
     switch (outcome) {
       case SendOutcome.sent:
+        // A second read, after the sync `send` runs on its way out. The epoch
+        // listener already put the echo on screen; by now the Sent Items copy
+        // may have replaced it, and this is what shows that swap.
+        await _reloadOpenThread();
+        if (!mounted) return;
         _toast('Reply sent.');
       case SendOutcome.savedToOutlook:
         _toast('Saved to your Outlook drafts.');

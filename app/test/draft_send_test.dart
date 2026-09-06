@@ -54,7 +54,21 @@ class RecordingMail extends GraphMail {
   Map<String, dynamic> reply = const {
     'id': 'graph-draft-1',
     'webLink': 'https://outlook.example/draft-1',
+    'conversationId': 'conv-1',
+    'internetMessageId': '<reply-1@bond.local>',
   };
+
+  /// What `sendDraft` reports went out. Fixed rather than clock-derived: the
+  /// echo row's `received_at` is asserted verbatim, and a stamp that moved
+  /// between the send and the read would be untestable.
+  SentDraft sent = const SentDraft(
+    draftId: 'graph-draft-1',
+    conversationId: 'conv-1',
+    internetMessageId: '<reply-1@bond.local>',
+    subject: 'Re: Contract review',
+    to: [Recipient(name: 'Sarah', address: 'sarah@x.com')],
+    sentAt: '2026-08-30T12:00:00Z',
+  );
 
   RecordingMail(super.auth, {required super.httpClient});
 
@@ -75,10 +89,11 @@ class RecordingMail extends GraphMail {
   }
 
   @override
-  Future<void> sendDraft(String draftId) async {
+  Future<SentDraft> sendDraft(String draftId) async {
     calls.add('send:$draftId');
     final error = failure;
     if (error != null) throw error;
+    return sent;
   }
 }
 
@@ -158,6 +173,19 @@ void main() {
       body: body,
       evidence: 'Sarah wants the lock extended.',
     );
+  }
+
+  /// Every outbound mail row, oldest first. The echo the send writes is one of
+  /// these, and so is the Sent Items copy that eventually replaces it — which
+  /// is the point of asserting on the whole set rather than on one id.
+  Future<List<Map<String, Object?>>> outboundRows() async {
+    final rows = await db
+        .customSelect(
+          "SELECT * FROM messages WHERE direction = 'outbound' "
+          'ORDER BY received_at, source_message_id',
+        )
+        .get();
+    return [for (final row in rows) row.data];
   }
 
   group('capability', () {
@@ -310,22 +338,111 @@ void main() {
       expect(ticks.map((tick) => tick.sourceMessageId), contains('inbound-1'));
     });
 
-    test('refreshes the inbox afterwards rather than faking a row', () async {
-      // No optimistic message is written: the sent mail lands in sentitems and
-      // folds in normally, so nothing can be left behind if the sync disagrees.
+    test('writes exactly one echo row carrying the internet message id and '
+        'the sent body', () async {
+      // The reply is on screen the moment the send returns, and stays there:
+      // the row is durable, and the Sent Items copy replaces it later by
+      // matching the internet message id — not by arriving beside it.
       await seedDraft();
       final notifier = notifierFor();
       await notifier.load();
 
       await notifier.send('Friday works.');
 
-      expect(syncsAfterSend, 1);
-      expect(
-        await db
-            .customSelect("SELECT * FROM messages WHERE direction = 'outbound'")
-            .get(),
-        isEmpty,
-      );
+      expect(syncsAfterSend, 1, reason: 'the list still reloads afterwards');
+      final echo = await outboundRows();
+      expect(echo, hasLength(1));
+      expect(echo.single['source_message_id'], 'local:graph-draft-1');
+      expect(echo.single['internet_message_id'], '<reply-1@bond.local>');
+      expect(echo.single['conversation_key'], 'conv-1');
+      expect(echo.single['direction'], 'outbound');
+      expect(echo.single['received_at'], '2026-08-30T12:00:00Z');
+      expect(echo.single['is_read'], 1, reason: 'the user wrote it');
+      expect(echo.single['body_text'], 'Friday works.');
+      expect(echo.single['body_preview'], 'Friday works.');
+      expect(echo.single['subject'], 'Re: Contract review');
+      // Gated exactly as the drain gates a Sent Items copy: the user's own
+      // mail never reaches the model and never shows in the home feed.
+      expect(echo.single['triage_status'], 'skipped');
+      expect(echo.single['gate_reason'], 'outbound');
+      expect(echo.single['addressed_me'], 0);
+      final progress = await db
+          .customSelect(
+            'SELECT dropped FROM message_progress '
+            "WHERE source_message_id = 'local:graph-draft-1'",
+          )
+          .get();
+      expect(progress.single.data['dropped'], 1);
+    });
+
+    test('a failed send writes no echo', () async {
+      await seedDraft();
+      mail.failure = const GraphMailException('Mailbox is over quota.');
+      final notifier = notifierFor();
+      await notifier.load();
+
+      expect(await notifier.send('Friday works.'), SendOutcome.failed);
+
+      expect(await outboundRows(), isEmpty);
+    });
+
+    test('the echo moves the thread: last_message_at and preview follow the '
+        'send', () async {
+      // Recounting alone would leave the thread where it was in the rail,
+      // previewing the message it just answered — and nothing would ever
+      // correct it, since no ingest will announce this row.
+      await seedDraft();
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'conv-1',
+        'subject': 'Contract review',
+        'state': 'needs_reply',
+        'participants_json': '[{"name":"Sarah","email":"sarah@x.com"}]',
+        'last_message_at': '2026-08-29T10:00:00Z',
+        'last_inbound_at': '2026-08-29T10:00:00Z',
+        'last_message_preview': 'Any word on the contract?',
+      });
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('Friday works.');
+
+      final row = (await store.getConversationRow('email', 'conv-1'))!;
+      expect(row['last_message_at'], '2026-08-30T12:00:00Z');
+      expect(row['last_outbound_at'], '2026-08-30T12:00:00Z');
+      expect(row['last_message_preview'], 'Friday works.');
+      expect(row['state'], 'waiting');
+      // Counts come off the messages table, and the echo is one of them.
+      expect(row['message_count'], 2);
+      expect(row['inbound_count'], 1);
+      // Not reset by the fold: the send passes the stored roster back through.
+      expect(row['participants_json'],
+          '[{"name":"Sarah","email":"sarah@x.com"}]');
+    });
+
+    test('an echo is not written when the sent copy already landed', () async {
+      // The poll has no re-entrancy guard, so a sync in flight during the send
+      // can ingest the real copy first. Writing the echo after it would leave
+      // a duplicate nothing is ever going to reconcile.
+      await seedDraft();
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'sent-items-1',
+        'internet_message_id': '<reply-1@bond.local>',
+        'conversation_key': 'conv-1',
+        'direction': 'outbound',
+        'received_at': '2026-08-30T12:00:00Z',
+        'triage_status': 'skipped',
+        'gate_reason': 'outbound',
+      });
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.send('Friday works.');
+
+      final rows = await outboundRows();
+      expect(rows, hasLength(1));
+      expect(rows.single['source_message_id'], 'sent-items-1');
     });
 
     test('a Graph failure leaves the draft unsent, with a readable reason',

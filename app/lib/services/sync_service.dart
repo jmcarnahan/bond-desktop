@@ -347,6 +347,58 @@ class SyncService implements MailSync {
     }
   }
 
+  /// One mail message as a `messages` row.
+  ///
+  /// **The one place a mail message becomes a row**, called both by this sync
+  /// and by the echo writer in `mail_echo.dart` — which is the point. A reply
+  /// the app sends is written locally before Sent Items has it, and if that
+  /// row disagreed with the one the next drain would build, the disagreement
+  /// would live in the database until somebody noticed a thread behaving
+  /// unlike every other thread. Teams has held this shape since its first
+  /// send; [TeamsSync.messageRow] is the twin.
+  ///
+  /// Nothing is derived here: the gate verdict, the direction and the
+  /// addressed-me flag are all decided by the caller, because the two callers
+  /// know them differently. The sync reads them off a delta page; the echo
+  /// writer knows it wrote the message itself.
+  static Map<String, Object?> mailRow({
+    required String id,
+    String? internetMessageId,
+    required String conversationKey,
+    required String direction,
+    String? subject,
+    String? fromName,
+    String? fromAddress,
+    required List<String> to,
+    String? receivedAt,
+    required bool isRead,
+    String? bodyPreview,
+    String? bodyText,
+    bool hasAttachments = false,
+    required String triageStatus,
+    String? gateReason,
+    bool addressedMe = false,
+  }) =>
+      {
+        'source': _source,
+        'source_message_id': id,
+        'internet_message_id': internetMessageId,
+        'conversation_key': conversationKey,
+        'direction': direction,
+        'subject': subject,
+        'from_name': fromName,
+        'from_address': fromAddress,
+        'to_json': jsonEncode(to),
+        'received_at': receivedAt,
+        'is_read': isRead ? 1 : 0,
+        'body_preview': bodyPreview,
+        'body_text': bodyText,
+        'has_attachments': hasAttachments ? 1 : 0,
+        'triage_status': triageStatus,
+        'gate_reason': gateReason,
+        'addressed_me': addressedMe ? 1 : 0,
+      };
+
   /// Stores one page's messages and folds their conversations, all or
   /// nothing. Returns how many were seen for the first time.
   ///
@@ -413,29 +465,38 @@ class SyncService implements MailSync {
         // forces — and folding one a second time would reopen every thread
         // the user had marked done. The upsert itself still runs: a replay can
         // carry a newer read state.
+        final internetMessageId = message['internetMessageId'] as String?;
+
+        // The real copy of a reply this app sent replaces the local echo the
+        // send wrote — same `internet_message_id`, different id. Done HERE,
+        // before the sighting question, for two reasons: the real row must
+        // read as a true first sighting so it folds like any other Sent Items
+        // copy, and the delete must be in the same transaction as the insert
+        // so no reader can ever see both rows at once.
+        if (outbound && internetMessageId != null) {
+          await _store.deleteLocalEcho(_source, internetMessageId);
+        }
+
         final firstSighting = !await _store.hasMessage(_source, id);
 
-        final ingested = await _store.upsertMessage({
-          'source': _source,
-          'source_message_id': id,
-          'internet_message_id': message['internetMessageId'] as String?,
-          'conversation_key': key,
-          'direction': direction,
-          'subject': subject,
-          'from_name': fromName,
-          'from_address': fromAddress,
-          'to_json': jsonEncode(recipients),
-          'received_at': receivedAt,
-          'is_read': message['isRead'] == true ? 1 : 0,
-          'body_preview': preview,
+        final ingested = await _store.upsertMessage(mailRow(
+          id: id,
+          internetMessageId: internetMessageId,
+          conversationKey: key,
+          direction: direction,
+          subject: subject,
+          fromName: fromName,
+          fromAddress: fromAddress,
+          to: recipients,
+          receivedAt: receivedAt,
+          isRead: message['isRead'] == true,
+          bodyPreview: preview,
           // Delta pages carry no body and no attachment flag; the detail
           // fetch fills both in later and the upsert will not blank either.
-          'body_text': null,
-          'has_attachments': 0,
-          'triage_status': triageStatus,
-          'gate_reason': gateReason,
-          'addressed_me': direction == 'inbound' && soleRecipient ? 1 : 0,
-        });
+          triageStatus: triageStatus,
+          gateReason: gateReason,
+          addressedMe: direction == 'inbound' && soleRecipient,
+        ));
 
         // Non-null only when the pipeline had never heard of this message, so
         // a delta page replaying itself announces nothing. Not awaited because

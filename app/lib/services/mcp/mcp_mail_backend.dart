@@ -117,13 +117,22 @@ class McpMailBackend implements MailBackend {
   /// The time zone rides along as an argument rather than a `Prefer` header:
   /// the server owns the Graph call, and the zone it should render the quoted
   /// timestamps in is this machine's, not the server's.
+  ///
+  /// `conversationId` and `internetMessageId` are renamed off the wire for the
+  /// same reason `webLink` is: the callers read Graph's own key names, and a
+  /// snake_case key would simply be absent to them.
   @override
   Future<Map<String, dynamic>> createReplyDraft(String messageId) async {
     final result = await _call('create_reply_draft_json', {
       'message_id': messageId,
       'timezone': DateTime.now().timeZoneName,
     });
-    return {'id': result['id'], 'webLink': result['web_link']};
+    return {
+      'id': result['id'],
+      'webLink': result['web_link'],
+      'conversationId': result['conversation_id'],
+      'internetMessageId': result['internet_message_id'],
+    };
   }
 
   @override
@@ -131,9 +140,49 @@ class McpMailBackend implements MailBackend {
     await _call('update_draft_body', {'draft_id': draftId, 'text': text});
   }
 
+  /// Sends the draft and reshapes what the server says went out.
+  ///
+  /// `ok` is checked rather than trusted, and its absence is a failure: the
+  /// caller writes a local row from this answer, and a row built out of an
+  /// empty result would claim a message was sent that never left. The server
+  /// reports a refusal as a normal result with an `error` key, so there is no
+  /// exception to catch — only this test.
   @override
-  Future<void> sendDraft(String draftId) async {
-    await _call('send_draft', {'draft_id': draftId});
+  Future<SentDraft> sendDraft(String draftId) async {
+    final result = await _call('send_draft', {'draft_id': draftId});
+    if (result['ok'] != true) {
+      throw GraphMailException(
+        'Microsoft Graph did not confirm the send: '
+        '${result['error'] ?? 'unknown'}',
+      );
+    }
+    return SentDraft(
+      // The server echoes the id back; falling through to the argument keeps
+      // the echo row keyed on something either way.
+      draftId: result['id'] as String? ?? draftId,
+      conversationId: result['conversation_id'] as String?,
+      internetMessageId: result['internet_message_id'] as String?,
+      subject: result['subject'] as String?,
+      to: _recipients(result['to']),
+      cc: _recipients(result['cc']),
+      sentAt: result['sent_at'] as String?,
+    );
+  }
+
+  /// `[{name, address}]` off the wire, with anything unreadable DROPPED.
+  ///
+  /// An entry with no address names nobody: it cannot be stored, cannot be
+  /// replied to, and would show in a thread header as an empty chip. Skipping
+  /// it loses nothing a caller could have used.
+  static List<Recipient> _recipients(Object? raw) {
+    final people = <Recipient>[];
+    for (final entry in raw is List ? raw : const []) {
+      if (entry is! Map) continue;
+      final address = entry['address'] as String? ?? '';
+      if (address.isEmpty) continue;
+      people.add(Recipient(name: entry['name'] as String?, address: address));
+    }
+    return people;
   }
 
   /// Marks messages read (or unread) and returns the ids worth trying again.

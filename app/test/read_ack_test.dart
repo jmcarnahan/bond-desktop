@@ -72,7 +72,7 @@ class _FakeMail implements MailBackend {
       throw UnimplementedError();
 
   @override
-  Future<void> sendDraft(String draftId) => throw UnimplementedError();
+  Future<SentDraft> sendDraft(String draftId) => throw UnimplementedError();
 }
 
 /// A [TeamsBackend] that records every chat it was told to mark read.

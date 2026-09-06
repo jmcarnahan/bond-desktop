@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart' show Message;
 import 'package:bond_inbox/providers/draft_provider.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/token_store.dart';
@@ -42,6 +46,11 @@ class RecordingMail extends GraphMail {
   final List<String> calls = [];
   final List<String> bodies = [];
 
+  /// Held open by a test that needs to look at the state MID-SEND — the send
+  /// waits on this instead of returning, which is the only way to observe the
+  /// window between the undo timer firing and the reply landing.
+  Completer<void>? holdSend;
+
   RecordingMail(super.auth, {required super.httpClient});
 
   @override
@@ -50,6 +59,8 @@ class RecordingMail extends GraphMail {
     return const {
       'id': 'graph-draft-1',
       'webLink': 'https://outlook.example/draft-1',
+      'conversationId': 'conv-1',
+      'internetMessageId': '<reply-1@bond.local>',
     };
   }
 
@@ -60,7 +71,18 @@ class RecordingMail extends GraphMail {
   }
 
   @override
-  Future<void> sendDraft(String draftId) async => calls.add('send:$draftId');
+  Future<SentDraft> sendDraft(String draftId) async {
+    calls.add('send:$draftId');
+    await holdSend?.future;
+    return const SentDraft(
+      draftId: 'graph-draft-1',
+      conversationId: 'conv-1',
+      internetMessageId: '<reply-1@bond.local>',
+      subject: 'Re: Launch date',
+      to: [Recipient(address: 'sarah@x.com')],
+      sentAt: '2026-08-30T12:00:00Z',
+    );
+  }
 }
 
 const String _sendGrant =
@@ -229,6 +251,117 @@ void main() {
 
       expect(notifier.state.pending, isNull);
       expect(mail.calls, isEmpty);
+    });
+
+    test('the bubble outlives the undo window until the send completes',
+        () async {
+      // `pending` clears the instant the timer fires — it has to, or a late
+      // undo would half-cancel a reply already on the wire. Without
+      // `inFlightBody` picking the text up in the same write, the bubble would
+      // blink out for the length of the network call and blink back when the
+      // stored row arrived, which reads as a send that failed.
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      mail.holdSend = Completer<void>();
+
+      await notifier.queueSend('Friday works.');
+      expect(notifier.state.pending?.body, 'Friday works.');
+      expect(notifier.state.inFlightBody, isNull,
+          reason: 'nothing is in flight while the window is open');
+
+      await elapse();
+
+      expect(notifier.state.pending, isNull, reason: 'the window closed');
+      expect(notifier.state.inFlightBody, 'Friday works.');
+      expect(mail.calls, contains('send:graph-draft-1'));
+
+      mail.holdSend!.complete();
+      await elapse();
+
+      // Cleared only once the row it hands over to is stored.
+      expect(notifier.state.inFlightBody, isNull);
+      expect(
+        await db
+            .customSelect(
+              "SELECT source_message_id FROM messages "
+              "WHERE direction = 'outbound'",
+            )
+            .getSingle()
+            .then((r) => r.data['source_message_id']),
+        'local:graph-draft-1',
+      );
+    });
+
+    test('a cancelled send never puts one up at all', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.queueSend('Friday works.');
+      notifier.cancelQueuedSend();
+      await elapse();
+
+      expect(notifier.state.inFlightBody, isNull);
+    });
+  });
+
+  /// Which text the transcript draws under the thread, and — the half that is
+  /// easy to get wrong — when it must draw none.
+  ///
+  /// Pure state: no store, no notifier. The rule it encodes is that the bubble
+  /// and the stored row are the same reply, so they may never be on screen
+  /// together.
+  group('bubbleBody', () {
+    Message outbound(String body) =>
+        Message(id: 'm1', outbound: true, source: 'email', bodyText: body);
+
+    Message inbound(String body) =>
+        Message(id: 'm0', outbound: false, source: 'email', bodyText: body);
+
+    test('the undo window\'s text wins while it is open', () {
+      // Whatever else is in the transcript. The user can still take this back,
+      // so it is the thing to show.
+      final state = DraftState(
+        pending: (body: 'Friday works.', sendsAt: DateTime(2026, 8, 30)),
+        inFlightBody: 'an older send',
+      );
+
+      expect(state.bubbleBody([outbound('Friday works.')]), 'Friday works.');
+    });
+
+    test('the in-flight text shows until its row is stored', () {
+      const state = DraftState(inFlightBody: 'Friday works.');
+
+      expect(state.bubbleBody(const []), 'Friday works.');
+      // The message being answered says the same words back — a quote, or a
+      // one-word "Thanks". It is not the reply.
+      expect(
+        state.bubbleBody([inbound('Friday works.')]),
+        'Friday works.',
+      );
+      // And an earlier reply of the user's own is a different message.
+      expect(
+        state.bubbleBody([outbound('Monday, actually.')]),
+        'Friday works.',
+      );
+    });
+
+    test('and steps aside the moment that row arrives', () {
+      // Both send arms store the row before `onSent`, and the transcript
+      // re-reads on the epoch bump — so without this the reply would be on
+      // screen twice for the length of the post-send sync.
+      const state = DraftState(inFlightBody: 'Friday works.');
+
+      expect(
+        state.bubbleBody([inbound('Any word?'), outbound('Friday works.')]),
+        isNull,
+      );
+    });
+
+    test('nothing in flight draws nothing', () {
+      expect(const DraftState().bubbleBody(const []), isNull);
+      expect(const DraftState().bubbleBody([outbound('Friday works.')]), isNull);
     });
   });
 

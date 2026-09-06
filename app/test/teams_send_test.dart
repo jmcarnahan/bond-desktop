@@ -288,6 +288,36 @@ void main() {
       expect(reply['addressed_me'], 0);
     });
 
+    test('a chat reply moves the thread to the top of the rail with its '
+        'preview', () async {
+      // Recounting alone left the chat sitting where it was, previewing the
+      // question the user had just answered — and it never healed, because the
+      // next pull skips this row as already seen.
+      await seedChat();
+      await store.upsertConversation({
+        'source': 'teams',
+        'conversation_key': 'chat-1',
+        'participants_json': '[{"name":"Sarah Whitfield","email":"teams:u1"}]',
+        'state': 'needs_reply',
+        'last_message_at': '2026-08-28T21:00:00Z',
+        'last_message_preview': 'Any word on the CD?',
+      });
+
+      await (await loaded()).send('Sending it over now.');
+
+      final row = await conversation();
+      expect(row['last_message_at'], '2026-08-28T22:00:00Z');
+      expect(row['last_outbound_at'], '2026-08-28T22:00:00Z');
+      expect(row['last_message_preview'], 'Sending it over now.');
+      expect(row['state'], 'waiting');
+      // `upsertConversation` overwrites the roster unconditionally, so a fold
+      // that failed to pass it back would wipe the chat's members on a send.
+      expect(
+        row['participants_json'],
+        '[{"name":"Sarah Whitfield","email":"teams:u1"}]',
+      );
+    });
+
     test('a sent reply recaps the storyline it belongs to', () async {
       await seedChat();
       await store.insertStoryline(

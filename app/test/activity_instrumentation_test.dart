@@ -71,7 +71,8 @@ class FakeMail implements MailBackend {
   Future<void> updateDraftBody(String draftId, String text) async {}
 
   @override
-  Future<void> sendDraft(String draftId) async {}
+  Future<SentDraft> sendDraft(String draftId) async =>
+      SentDraft(draftId: draftId);
 
   @override
   Future<List<String>> markRead(

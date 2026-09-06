@@ -117,6 +117,26 @@ void main() {
       expect(request.headers['authorization'], 'Bearer at-1');
     });
 
+    test('carries the ids the draft will keep once it is sent', () async {
+      // Graph answers `/createReply` with the whole message resource, so these
+      // arrive under their own names. Pinned because the MCP twin has to
+      // rename `conversation_id` and `internet_message_id` to match, and the
+      // callers can only read one spelling.
+      final mail = mailWith(
+        (_) => jsonOk({
+          'id': 'draft-1',
+          'webLink': 'https://outlook/draft-1',
+          'conversationId': 'conv-1',
+          'internetMessageId': '<abc@bond.local>',
+        }),
+      );
+
+      final draft = await mail.createReplyDraft('msg-1');
+
+      expect(draft['conversationId'], 'conv-1');
+      expect(draft['internetMessageId'], '<abc@bond.local>');
+    });
+
     test('encodes a message id that is not URL-safe', () async {
       // Graph ids are base64url-ish but not guaranteed to be; an unencoded one
       // would silently address a different message.
@@ -208,22 +228,88 @@ void main() {
   });
 
   group('sendDraft', () {
-    test('POSTs to /send and accepts the 202', () async {
-      final mail = mailWith((_) => http.Response('', 202));
+    /// The draft as Graph describes it, and the 202 the send answers with.
+    /// The GET has to come first, so the stub answers on method rather than on
+    /// call count — a stub that assumed the order would pass whatever order
+    /// the code used.
+    http.Response sendable(SeenRequest request) => request.method == 'GET'
+        ? jsonOk({
+            'id': 'draft-1',
+            'conversationId': 'conv-1',
+            'internetMessageId': '<abc@bond.local>',
+            'subject': 'Re: Contract review',
+            'toRecipients': [
+              {
+                'emailAddress': {'name': 'Sarah', 'address': 'sarah@x.com'},
+              },
+            ],
+            'ccRecipients': [
+              {
+                'emailAddress': {'address': 'legal@x.com'},
+              },
+            ],
+          })
+        : http.Response('', 202);
+
+    test('reads the draft, THEN POSTs to /send', () async {
+      // A sent draft is gone: these ids can only be learned while it exists,
+      // and without them the reply is invisible until the next sync.
+      final mail = mailWith(sendable);
 
       await mail.sendDraft('draft-1');
 
-      final request = seen.single;
-      expect(request.method, 'POST');
+      expect(seen, hasLength(2));
+      expect(seen.first.method, 'GET');
       expect(
-        request.url.toString(),
+        seen.first.url.toString(),
+        'https://graph.microsoft.com/v1.0/me/messages/draft-1'
+        '?\$select=id,conversationId,internetMessageId,subject,'
+        'toRecipients,ccRecipients',
+      );
+      expect(seen.last.method, 'POST');
+      expect(
+        seen.last.url.toString(),
         'https://graph.microsoft.com/v1.0/me/messages/draft-1/send',
       );
-      expect(request.body, isEmpty, reason: '/send takes no body');
+      expect(seen.last.body, isEmpty, reason: '/send takes no body');
+    });
+
+    test('and answers with what the read found', () async {
+      final sent = await mailWith(sendable).sendDraft('draft-1');
+
+      expect(sent.draftId, 'draft-1');
+      expect(sent.conversationId, 'conv-1');
+      expect(sent.internetMessageId, '<abc@bond.local>');
+      expect(sent.subject, 'Re: Contract review');
+      expect(sent.to.single.address, 'sarah@x.com');
+      expect(sent.to.single.name, 'Sarah');
+      expect(sent.cc.single.address, 'legal@x.com');
+      // No clock in `/send`'s answer, so this one is local — seconds and a Z,
+      // the shape `received_at` is compared in.
+      expect(
+        sent.sentAt,
+        matches(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$'),
+      );
+    });
+
+    test('a failing read sends NOTHING', () async {
+      // A send whose record could not be written is worse than a send that did
+      // not happen: the user would see neither the reply nor a reason.
+      final mail = mailWith((request) => request.method == 'GET'
+          ? jsonOk({'error': 'gone'}, 404)
+          : http.Response('', 202));
+
+      await expectLater(
+        mail.sendDraft('draft-1'),
+        throwsA(isA<GraphMailException>()),
+      );
+      expect(seen.single.method, 'GET');
     });
 
     test('anything but a 202 is a failure the caller must see', () async {
-      final mail = mailWith((_) => jsonOk({'error': 'quota'}, 429));
+      final mail = mailWith((request) => request.method == 'GET'
+          ? jsonOk({'id': 'draft-1'})
+          : jsonOk({'error': 'quota'}, 429));
 
       await expectLater(
         mail.sendDraft('draft-1'),
@@ -235,7 +321,7 @@ void main() {
       // The UI routes NotSignedIn and ReconsentRequired to sign-in; wrapping
       // them in a GraphMailException here would erase that.
       tokens.values.remove('refresh_token');
-      final mail = mailWith((_) => http.Response('', 202));
+      final mail = mailWith(sendable);
 
       await expectLater(mail.sendDraft('draft-1'), throwsA(isA<NotSignedIn>()));
       expect(seen, isEmpty);

@@ -6,6 +6,12 @@ import 'package:drift/drift.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
+// The one thing this layer reads out of `services/`, and it is not a service:
+// `conversation_state.dart` is the fold's arithmetic with no I/O in it and no
+// imports of its own. [foldOutboundSend] needs the fold rules, and a second
+// copy of the "an outbound may go quiet, but never off `done`" asymmetry is
+// exactly how a send would start disagreeing with the sync about a thread.
+import '../services/conversation_state.dart';
 import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
 import 'progress_sql.dart';
@@ -316,6 +322,140 @@ INSERT OR IGNORE INTO message_progress (
       );
     });
     return created > 0 ? receivedAt : null;
+  }
+
+  /// Writes a `local:` echo of a message this app just sent, unless the real
+  /// copy has already landed. True when the row was written.
+  ///
+  /// The check is the whole method. The mail poll has no re-entrancy guard and
+  /// the Sent Items copy can turn up on the very first poll after a send, so a
+  /// sync already in flight can ingest the real row BEFORE this call runs.
+  /// [deleteLocalEcho] would then have nothing to remove, and the echo written
+  /// after it would sit in the thread forever as a duplicate that nothing is
+  /// ever going to reconcile. One transaction, so the check and the write
+  /// cannot straddle that ingest.
+  ///
+  /// A row with no `internet_message_id` skips the check: there is nothing to
+  /// match the real copy on, so there is nothing to be second to either.
+  Future<bool> insertLocalEcho(Map<String, Object?> row) async {
+    final source = row['source'] ?? 'email';
+    final internetMessageId = row['internet_message_id'];
+    return db.transaction(() async {
+      if (internetMessageId != null) {
+        final landed = await db
+            .customSelect(
+              'SELECT 1 FROM messages '
+              'WHERE source = ? AND internet_message_id = ? '
+              "AND source_message_id NOT LIKE '$localEchoPrefix%' LIMIT 1",
+              variables: _args([source, internetMessageId]),
+            )
+            .get();
+        if (landed.isNotEmpty) return false;
+      }
+      await upsertMessage(row);
+      return true;
+    });
+  }
+
+  /// Removes the local echo of the message [internetMessageId] names, and its
+  /// progress row with it. Returns how many message rows went.
+  ///
+  /// **The only DELETE on `messages` in this app**, and it may only ever reach
+  /// a `local:` row — hence the LIKE on both statements rather than on the
+  /// first alone. Everything else in the pipeline treats a stored message as
+  /// permanent, so a widening of this predicate would be a widening of what
+  /// the app can destroy.
+  ///
+  /// Called from inside the Sent Items page transaction, immediately before
+  /// the real row is written: the echo and the copy that replaces it are never
+  /// both visible to a reader.
+  Future<int> deleteLocalEcho(String source, String internetMessageId) async {
+    return db.transaction(() async {
+      await db.customUpdate(
+        'DELETE FROM message_progress '
+        'WHERE source = ? AND source_message_id IN ('
+        '  SELECT source_message_id FROM messages '
+        "  WHERE source = ? AND source_message_id LIKE '$localEchoPrefix%' "
+        '    AND internet_message_id = ?'
+        ')',
+        variables: _args([source, source, internetMessageId]),
+      );
+      return db.customUpdate(
+        'DELETE FROM messages '
+        "WHERE source = ? AND source_message_id LIKE '$localEchoPrefix%' "
+        'AND internet_message_id = ?',
+        variables: _args([source, internetMessageId]),
+      );
+    });
+  }
+
+  /// Folds a message this app just sent into its conversation row.
+  ///
+  /// [recomputeConversationCounts] rewrites counts and nothing else, but the
+  /// rail orders threads by `last_message_at` and shows
+  /// `last_message_preview` — so a send that only recounted would leave the
+  /// thread sitting where it was, previewing the message it just answered.
+  /// And it would never heal: the next pull skips a row it has already seen.
+  ///
+  /// The fold rules are [foldMessage]'s, not this method's. Reimplementing the
+  /// "an outbound may go quiet, but never off `done`" asymmetry here is how
+  /// the two paths would drift.
+  ///
+  /// All of it in ONE transaction, because it is a read-modify-write against a
+  /// row the sync's own page transaction rewrites — and a send can land in the
+  /// middle of a poll. Drift serialises transactions, so wrapping the read is
+  /// what stops this method folding onto a snapshot the ingest has already
+  /// replaced and writing the ingest's work back out.
+  ///
+  /// A thread with no stored row is left alone. Composing a new message writes
+  /// its own conversation; this is for replying into one that exists.
+  Future<void> foldOutboundSend(
+    String source,
+    String conversationKey, {
+    required String? receivedAt,
+    String? preview,
+    String? subject,
+  }) async {
+    await db.transaction(() async {
+      final row = await getConversationRow(source, conversationKey);
+      if (row == null) return;
+
+      final folded = foldMessage(
+        ConvSnapshot(
+          state: row['state'] as String? ?? stateWaiting,
+          lastInboundAt: row['last_inbound_at'] as String?,
+          lastOutboundAt: row['last_outbound_at'] as String?,
+          lastMessageAt: row['last_message_at'] as String?,
+          lastMessagePreview: row['last_message_preview'] as String?,
+          subject: row['subject'] as String?,
+        ),
+        outbound: true,
+        receivedAt: receivedAt,
+        subject: subject,
+        preview: preview,
+      );
+
+      await upsertConversation({
+        'source': source,
+        'conversation_key': conversationKey,
+        'subject': folded.subject,
+        // Read back and passed through, every one of them: the conflict clause
+        // overwrites participants, state, counts and preview unconditionally,
+        // so a field this call did not carry would be erased by a send.
+        'participants_json': row['participants_json'],
+        'state': folded.state,
+        'category': row['category'],
+        'cta_text': row['cta_text'],
+        'cta_urgency': row['cta_urgency'],
+        'message_count': row['message_count'],
+        'inbound_count': row['inbound_count'],
+        'last_inbound_at': folded.lastInboundAt,
+        'last_outbound_at': folded.lastOutboundAt,
+        'last_message_at': folded.lastMessageAt,
+        'last_message_preview': folded.lastMessagePreview,
+      });
+      await recomputeConversationCounts(source, conversationKey);
+    });
   }
 
   /// Whether this `(source, id)` is already stored.
