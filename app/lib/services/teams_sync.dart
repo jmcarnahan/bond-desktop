@@ -5,6 +5,13 @@ import 'activity_log.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'pipeline_progress.dart';
+// One symbol only, and deliberately: `sync_service.dart` also declares a
+// top-level `syncFloorDays`, and hauling it into this library beside
+// [TeamsSync.syncFloorDays] would leave two names that read alike and mean
+// different connectors. The clamp is the one rule both windows must agree on —
+// a lookback out of range lands somewhere usable rather than throwing, whether
+// it came from the mail setting or this one.
+import 'sync_service.dart' show clampLookbackDays;
 import 'backend/teams_backend.dart';
 
 /// LEGACY. Nothing writes this any more.
@@ -63,9 +70,14 @@ class TeamsSync {
   /// is what the rail's "Teams updated 4m ago" caption reads.
   static const String folder = 'chats';
 
-  /// How far back a chat list that has never synced reaches. The same two
-  /// weeks the mail drain uses, and for the same reason: enough context to see
-  /// what is live without dragging in a year of archive.
+  /// How far back a chat list reaches when nobody has said otherwise. The same
+  /// two weeks the mail drain defaults to, and for the same reason: enough
+  /// context to see what is live without dragging in a year of archive.
+  ///
+  /// A DEFAULT, not a limit. The user's Teams lookback overrides it through the
+  /// resolver this class is built with, and this constant is what a caller that
+  /// wired no resolver — every test that does not care, every caller from
+  /// before the setting existed — falls back to.
   static const int syncFloorDays = 14;
 
   /// How many chat messages one refresh may queue for extraction. Lower than
@@ -94,12 +106,21 @@ class TeamsSync {
   final ActivityLog _log;
   final PipelineProgress _progress;
 
+  /// How many days back the user asked their chats to reach. A closure rather
+  /// than a value, for the reason [SyncService]'s twin is one: this service is
+  /// built once and the preference changes under it, so a pass must use the
+  /// setting as it stands when the pass starts rather than as it stood when the
+  /// provider was first read. Null means nobody wired one, and answers
+  /// [syncFloorDays].
+  final int Function()? _lookbackDays;
+
   TeamsSync(
     this._teams,
     this._store, {
     Future<bool> Function()? canSync,
     ActivityLog? activityLog,
     PipelineProgress? progress,
+    this._lookbackDays,
   })  : _canSync = canSync ?? _alwaysAllowed,
         _log = activityLog ?? ActivityLog.disabled(),
         _progress = progress ?? const PipelineProgress.disabled();
@@ -129,7 +150,29 @@ class TeamsSync {
 
     final sw = Stopwatch()..start();
     try {
-      final floor = _isoAgo(const Duration(days: syncFloorDays));
+      // Computed exactly ONCE per pass, here, before a single chat is read —
+      // and before the `synced_at` stamp this pass writes after the loop. The
+      // floor leans on that stamp (the vacation rule in [_effectiveFloor]), so
+      // a floor read any later in the pass would find `synced_at = now` and
+      // quietly collapse into the rolling window.
+      final floor = await _effectiveFloor();
+      // The marker is read on the same line of sight, one statement later, for
+      // the same reason: what it detects is answered by re-fetching chats
+      // during the loop, and a marker read after any of that would be racing a
+      // write this pass made itself.
+      //
+      // An empty string reads as no marker at all. A pref is TEXT, and an empty
+      // one left comparable would sort below every real floor: widening would
+      // never fire again and nothing would ever overwrite it. (The same rule
+      // the mail sync applies to its own marker.)
+      final storedMarker = await _store.getPref(teamsBootstrapFloorKey);
+      final marker =
+          (storedMarker == null || storedMarker.isEmpty) ? null : storedMarker;
+      // A vacation cannot false-positive as a widen: the marker names the
+      // oldest floor ever deliberately drained from, and a `synced_at` stamp is
+      // always newer than the floor of the bootstrap that wrote it.
+      final widen = marker != null && floor.compareTo(marker) < 0;
+
       // Once per sync, held in memory. It is the one fact that decides whether
       // a chat message is the user's own, and the account record
       // graph_auth.dart persists is not this file's to extend.
@@ -150,7 +193,13 @@ class TeamsSync {
 
         // The whole reason the chat list expands its preview: a chat whose
         // newest message is one the store already has costs nothing at all.
-        if (_alreadyCurrent(previewAt, stored)) continue;
+        //
+        // Bypassed on a widen pass, and it has to be: the store being current
+        // about a chat's NEWEST message says nothing about the history behind
+        // it, and the quiet chats are exactly the ones a wider window was asked
+        // for. Skipping here would leave every one of them unbackfilled
+        // forever, because the shortcut would fire again on every later pass.
+        if (!widen && _alreadyCurrent(previewAt, stored)) continue;
         // A chat that has been quiet since before the floor and that this app
         // has never seen is history, not backlog.
         if (stored == null &&
@@ -160,9 +209,18 @@ class TeamsSync {
         }
 
         final firstSight = stored == null;
+        // A chat nobody has stored reaches back to the FLOOR rather than taking
+        // one undated page of whatever Graph hands over newest-first: the
+        // setting says how far back this app looks, and a first sight that
+        // stopped at fifty messages would make that sentence false for exactly
+        // the chats a wide window was set for. On a widen pass every chat
+        // re-reads from the new floor for the same reason — and the
+        // `hasMessage` guard inside the ingest is what keeps the replay of
+        // everything in between out of the fold and out of the counts.
+        final lastAt = stored?['last_message_at'] as String?;
         final messages = await _teams.chatMessagesSince(
           key,
-          stored?['last_message_at'] as String?,
+          widen || lastAt == null || lastAt.isEmpty ? floor : lastAt,
         );
         // Once per chat, ever. Members are what name an unnamed group chat and
         // who the thread header lists, and re-reading them on every refresh
@@ -180,7 +238,25 @@ class TeamsSync {
           myId: myId,
           firstSight: firstSight,
           lastReadAt: _viewpointReadAt(chat['viewpoint']),
+          backlogCutoff: floor,
+          quietBeforeIso: widen ? marker : null,
         );
+      }
+
+      // How far back these chats have now been read, written only once every
+      // chat in the list has returned. A chat that threw took the whole pass
+      // with it before reaching this line, which is the design: the marker
+      // still names the old floor, so the next pass detects the same widen and
+      // finishes the chats that did not land.
+      //
+      // A null marker is ADOPTED rather than acted on. A database from before
+      // this bookkeeping existed has no record of what it drained, and reading
+      // that silence as "never drained anything" would make the first sync
+      // after every upgrade re-read every chat for nothing. And the marker only
+      // ever moves OLDER — a narrower setting is a preference about what to
+      // keep, never a reason to forget history already fetched.
+      if (marker == null || floor.compareTo(marker) < 0) {
+        await _store.setPref(teamsBootstrapFloorKey, floor);
       }
 
       await _store.setSyncedAt(folder, _nowIso(), source: source);
@@ -320,6 +396,34 @@ class TeamsSync {
     }
   }
 
+  /// The user's Teams lookback, or the default when there is not one to be had.
+  ///
+  /// Every failure answers [syncFloorDays]. The closure reads a Riverpod
+  /// container this service does not own, and a container disposed mid-pass
+  /// must cost the pass its preference, never the chats — the same rule the
+  /// mail sync's resolver follows for the same reason.
+  int _resolveLookbackDays() {
+    try {
+      return clampLookbackDays(_lookbackDays?.call() ?? syncFloorDays);
+    } catch (_) {
+      return syncFloorDays;
+    }
+  }
+
+  /// The oldest point this pass will reach.
+  ///
+  /// The OLDER of the rolling window and the last sync that finished — the
+  /// vacation rule. Chat messages that arrived while the app was closed are
+  /// unreachable through any shorter floor, and nothing is coming back for
+  /// them: the lookback is a preference about how much history to hold, never a
+  /// licence to skip what was said while nobody was syncing.
+  Future<String> _effectiveFloor() async {
+    final rolling = _isoDaysAgo(_resolveLookbackDays());
+    final last = await lastSyncedAt;
+    if (last == null || last.isEmpty) return rolling;
+    return last.compareTo(rolling) < 0 ? last : rolling;
+  }
+
   /// Whether the chat list says this chat has nothing the store lacks.
   ///
   /// Both halves must be known. A chat with no preview timestamp, or one this
@@ -353,6 +457,13 @@ class TeamsSync {
   /// The count is RETURNED rather than recorded here, for the same reason the
   /// mail drain returns its own: an activity row written inside this
   /// transaction would roll back with the chat.
+  ///
+  /// [backlogCutoff] is the pass's floor, handed down so a message from behind
+  /// it is stored `skipped` instead of costing the model seventeen seconds.
+  /// [quietBeforeIso] is set only on a widen pass and names the floor the
+  /// LAST one reached: everything older than it is history being backfilled
+  /// rather than news arriving, and is folded without being allowed to move a
+  /// chat's state.
   Future<int> _ingestChat(
     Map<String, dynamic> chat,
     String key,
@@ -361,6 +472,8 @@ class TeamsSync {
     required String myId,
     required bool firstSight,
     required String? lastReadAt,
+    required String backlogCutoff,
+    String? quietBeforeIso,
   }) {
     return _store.db.transaction(() async {
       var newMessages = 0;
@@ -395,7 +508,7 @@ class TeamsSync {
 
       for (final message in raw) {
         final row = _messageRow(message, key, myId, lastReadAt,
-            oneOnOne: oneOnOne);
+            oneOnOne: oneOnOne, backlogCutoff: backlogCutoff);
         if (row == null) continue;
 
         final id = row['source_message_id'] as String;
@@ -416,17 +529,32 @@ class TeamsSync {
         newMessages++;
 
         final outbound = row['direction'] == 'outbound';
+        final receivedAt = row['received_at'] as String?;
+
+        // A message older than the floor the LAST pass reached is history being
+        // backfilled, not a chat waking up: it was already said before every
+        // decision the user has made about this thread, so it must not remake
+        // any of them. Watermarks and counts still move — the chat's record
+        // gets more complete, its state does not change.
+        final historical = quietBeforeIso != null &&
+            receivedAt != null &&
+            receivedAt.compareTo(quietBeforeIso) < 0;
 
         // Asked BEFORE the fold advances the inbound watermark — a reply the
         // user sent from any Teams client resolves the standing ask, exactly
-        // as the composer's send path does for a reply sent from here.
-        final resolvesAsk = outbound &&
-            outboundResolves(work.snapshot, row['received_at'] as String?);
+        // as the composer's send path does for a reply sent from here. A
+        // historical one answers nothing, whatever its timestamp says: the ask
+        // it would be clearing has been on screen since before this window
+        // reached back far enough to see it, and a reply from behind that floor
+        // is not the one the user is still owed.
+        final resolvesAsk =
+            !historical && outbound && outboundResolves(work.snapshot, receivedAt);
         work.snapshot = foldMessage(
           work.snapshot,
           outbound: outbound,
-          receivedAt: row['received_at'] as String?,
+          receivedAt: receivedAt,
           preview: row['body_preview'] as String?,
+          historical: historical,
         );
         if (resolvesAsk) {
           work.clearCta();
@@ -467,6 +595,7 @@ class TeamsSync {
     String myId,
     String? lastReadAt, {
     required bool oneOnOne,
+    String? backlogCutoff,
   }) {
     final (_, senderId, _) = _sender(message['from']);
     return messageRow(
@@ -477,6 +606,7 @@ class TeamsSync {
       oneOnOne: oneOnOne,
       mentions: mentionedUserIds(message['mentions']),
       myId: myId,
+      backlogCutoff: backlogCutoff,
     );
   }
 
@@ -499,6 +629,9 @@ class TeamsSync {
   /// [oneOnOne], [mentions] and [myId] are what decide `addressed_me`, and all
   /// three default to "nothing known": the composer's send path passes none of
   /// them, and an outbound row is not addressed to its own author anyway.
+  /// [backlogCutoff] defaults the same way and for the same reason — the
+  /// composer's message is its own, outbound and now, and is `skipped` as such
+  /// whatever window it lands in.
   static Map<String, Object?>? messageRow(
     Map<String, dynamic> message,
     String key, {
@@ -507,6 +640,7 @@ class TeamsSync {
     bool oneOnOne = false,
     List<String> mentions = const [],
     String? myId,
+    String? backlogCutoff,
   }) {
     if (message['messageType'] != 'message') return null;
     final id = message['id'] as String?;
@@ -518,15 +652,20 @@ class TeamsSync {
     // and asks the reader for nothing — and everything else takes exactly the
     // rule mail takes.
     //
-    // No backlog cutoff, unlike mail: [syncFloorDays] already bounds how far
-    // back a chat message can arrive from, so nothing older than the window
-    // reaches here. Mail needs its own cap because a first sync of a real
-    // mailbox can hand over a hundred thousand messages at once.
+    // The cutoff the sync hands down IS its floor, so in the ordinary case it
+    // decides nothing: a bounded fetch asks the server for messages newer than
+    // that floor and everything it returns is inside it. It is what keeps that
+    // invariant true when something hands over a message from outside — a wire
+    // replay, a tenant whose filter came back unapplied, or a widen pass
+    // deliberately reading history back in. Such a message is stored, and
+    // stored `skipped`: the chat's record gets more complete without costing
+    // the local model seventeen seconds per line of it.
     final (triageStatus, gateReason) = fromApplication
         ? ('skipped', teamsBotGate)
         : triageStatusOnInsert(
             outbound: outbound,
             receivedAt: message['createdDateTime'] as String?,
+            backlogCutoff: backlogCutoff,
           );
 
     // A chat message singles the reader out two ways: it was sent to them and
@@ -884,4 +1023,19 @@ String _isoAgo(Duration ago) {
   final truncated =
       DateTime.utc(t.year, t.month, t.day, t.hour, t.minute, t.second);
   return truncated.toIso8601String().replaceFirst('.000Z', 'Z');
+}
+
+/// [days] before now, at UTC midnight — [_isoAgo]'s shape, cut back to the
+/// start of the day.
+///
+/// The settings screen promises chats since a named day, and midnight is what
+/// makes that sentence exactly true rather than true to within the hour someone
+/// happened to press refresh. It can only ever WIDEN the window, by less than a
+/// day, which is the safe direction: a floor that moves earlier cannot lose a
+/// message.
+String _isoDaysAgo(int days) {
+  final t = DateTime.now().toUtc().subtract(Duration(days: days));
+  return DateTime.utc(t.year, t.month, t.day)
+      .toIso8601String()
+      .replaceFirst('.000Z', 'Z');
 }

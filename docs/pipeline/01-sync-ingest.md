@@ -26,7 +26,12 @@ with no separate 7-day AI window behind it. The backlog enqueue files at most
 `backlogEnqueueCap` (150) rows per queue per pass, but skips messages that
 already have a work row, so a deep window drains across passes rather than
 being truncated to its newest 150. Work in flight is re-queued at the next
-launch, so a restart loses nothing.
+launch, so a restart loses nothing. Teams carries its own lookback in the same
+Settings section, defaulting to the same 14 days: a chat's first fetch reaches
+back to that floor through a server-side date filter rather than taking one
+page of its newest messages. Two limits bound that walk and both are logged
+when hit — the chat list stops at 200 chats (4 pages of 50), and one chat's
+message walk stops at 40 pages.
 
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never

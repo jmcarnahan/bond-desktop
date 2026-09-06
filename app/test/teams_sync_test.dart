@@ -60,6 +60,30 @@ String _iso(Duration ago) {
       .replaceFirst('.000Z', 'Z');
 }
 
+/// What the sync's own floor computation produces for a lookback of [days] —
+/// midnight UTC, not the hour the test happens to run at. Mirrored here rather
+/// than exported, because the point of these tests is that the two agree.
+String _isoDaysAgo(int days) {
+  final t = DateTime.now().toUtc().subtract(Duration(days: days));
+  return DateTime.utc(t.year, t.month, t.day)
+      .toIso8601String()
+      .replaceFirst('.000Z', 'Z');
+}
+
+/// A midnight floor [days] back, allowing for the run having straddled UTC
+/// midnight between [before] — read on the near side of the sync — and now.
+/// Two answers rather than a fake clock: the rest of this file dates its
+/// fixtures relatively too.
+Matcher _midnightDaysAgo(int days, String before) =>
+    anyOf(before, _isoDaysAgo(days));
+
+/// The `$filter` Graph is asked for by a pass reaching back [days]. Called
+/// AFTER the sync, so the second answer is the floor as it stands now.
+Matcher _filterReaching(int days, String before) => anyOf(
+      'lastModifiedDateTime gt $before',
+      'lastModifiedDateTime gt ${_isoDaysAgo(days)}',
+    );
+
 Map<String, dynamic> _chat({
   required String id,
   String? topic,
@@ -219,6 +243,7 @@ void main() {
   TeamsSync build({
     MessageStore? override,
     Future<bool> Function()? canSync,
+    int Function()? lookbackDays,
   }) {
     final tokens = _Tokens();
     tokens.values['refresh_token'] = 'rt-initial';
@@ -232,6 +257,7 @@ void main() {
       ),
       override ?? store,
       canSync: canSync,
+      lookbackDays: lookbackDays,
     );
   }
 
@@ -984,6 +1010,290 @@ void main() {
           reason: 'not even the token POST — the check is before the first '
               'call, so a tenant that said no sees nothing at all');
       expect(await store.loadConversations(sources: const ['teams']), isEmpty);
+    });
+  });
+
+  group('the floor is a setting', () {
+    /// The date filter Graph was asked for on one message request.
+    String? filterOf(Uri uri) => uri.queryParameters[r'$filter'];
+
+    test('a wider setting admits a chat the default floor calls history',
+        () async {
+      // The fixture the skip test above uses, and the same 30-day silence: a
+      // quarter of history is a different answer about the same chat.
+      graph.chats.add(
+        _chat(id: 'old', previewAt: _iso(const Duration(days: 30))),
+      );
+      graph.chats.add(
+        _chat(id: 'live', previewAt: _iso(const Duration(hours: 1))),
+      );
+      graph.messages['old'] = [
+        _message(id: 'm0', chatId: 'old', at: _iso(const Duration(days: 30))),
+      ];
+      graph.messages['live'] = [_message(id: 'm1', chatId: 'live')];
+
+      await build(lookbackDays: () => 90).syncNow();
+
+      expect(
+        graph.messageRequests.map(graph.chatIdOf).toList(),
+        ['old', 'live'],
+        reason: 'the setting is what decides where history starts',
+      );
+      expect((await row('m0'))['triage_status'], 'pending',
+          reason: 'inside the wider window means inside the AI window too — '
+              'admitted to the store but not to the models would be the old '
+              'truncation wearing a new floor');
+    });
+
+    test('a chat nobody has stored is fetched from the floor, not from its '
+        'newest page', () async {
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+
+      final before = _isoDaysAgo(14);
+      await build().syncNow();
+
+      expect(
+        filterOf(graph.messageRequests.single),
+        _filterReaching(14, before),
+        reason: 'a first sight that stopped at one page would make the '
+            'lookback setting a promise the app does not keep',
+      );
+    });
+
+    test('a sync that has not run since before the floor reaches back to '
+        'where it stopped', () async {
+      // The vacation rule: the app was closed for two months, and no cursor is
+      // coming back for what was said while it was.
+      final stamp = _iso(const Duration(days: 60));
+      await store.setSyncedAt('chats', stamp, source: 'teams');
+      graph.chats.add(
+        _chat(id: 'stale', previewAt: _iso(const Duration(days: 40))),
+      );
+      graph.messages['stale'] = [
+        _message(id: 'm1', chatId: 'stale', at: _iso(const Duration(days: 40))),
+      ];
+
+      await build().syncNow();
+
+      final request = graph.messageRequests.single;
+      expect(graph.chatIdOf(request), 'stale',
+          reason: 'a chat quiet for forty days is inside a floor that reaches '
+              'back sixty');
+      expect(filterOf(request), 'lastModifiedDateTime gt $stamp',
+          reason: 'the older of the two floors wins — the fortnight would '
+              'leave six weeks nothing ever fetches again');
+    });
+
+    test('a message from before the floor is stored, and stored skipped',
+        () async {
+      // The server would have filtered it out; the cutoff is what holds the
+      // line when something hands one over anyway.
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: _iso(const Duration(days: 30))),
+      ];
+
+      await build().syncNow();
+
+      final m = await row('m1');
+      expect(m['triage_status'], 'skipped');
+      expect(m['gate_reason'], 'backlog',
+          reason: 'history costs the local model nothing, because it never '
+              'reaches it');
+    });
+
+    test('the resolver failing costs the preference, not the sync', () async {
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+
+      final before = _isoDaysAgo(14);
+      await build(lookbackDays: () => throw StateError('gone')).syncNow();
+
+      expect(await store.getMessageRow('teams', 'm1'), isNotNull);
+      expect(
+        filterOf(graph.messageRequests.single),
+        _filterReaching(14, before),
+        reason: 'a disposed container is worth one default window, never a '
+            'refresh that throws',
+      );
+    });
+  });
+
+  group('detecting a widened window', () {
+    test('a wider setting re-reads a chat the store is already current about',
+        () async {
+      final at = _iso(const Duration(hours: 2));
+      graph.chats.add(_chat(id: 'chat-1', previewAt: at));
+      graph.messages['chat-1'] = [_message(id: 'm1', at: at)];
+
+      final fortnightBefore = _isoDaysAgo(14);
+      await build().syncNow();
+      expect(await store.getPref(teamsBootstrapFloorKey),
+          _midnightDaysAgo(14, fortnightBefore),
+          reason: 'an absent marker is adopted silently, so the pass after an '
+              'upgrade is not a re-read for nothing');
+      graph.requests.clear();
+
+      final wideBefore = _isoDaysAgo(90);
+      await build(lookbackDays: () => 90).syncNow();
+
+      // The preview shortcut says this chat has nothing new, and it is right —
+      // about the newest message. It says nothing about the history behind it,
+      // which is exactly what was just asked for.
+      expect(
+        graph.messageRequests.single.queryParameters[r'$filter'],
+        _filterReaching(90, wideBefore),
+      );
+      expect(await store.getPref(teamsBootstrapFloorKey),
+          _midnightDaysAgo(90, wideBefore),
+          reason: 'the marker records how far back these chats have been read, '
+              'so the pass after this one is quiet again');
+      graph.requests.clear();
+
+      await build(lookbackDays: () => 90).syncNow();
+
+      expect(graph.messageRequests, isEmpty,
+          reason: 'the marker has caught up: a widen is owed once, not on '
+              'every pass at the wider setting');
+      expect(await store.getPref(teamsBootstrapFloorKey),
+          _midnightDaysAgo(90, wideBefore),
+          reason: 'and the marker only ever moves older');
+    });
+
+    test('a narrower setting re-reads nothing', () async {
+      final at = _iso(const Duration(hours: 2));
+      graph.chats.add(_chat(id: 'chat-1', previewAt: at));
+      graph.messages['chat-1'] = [_message(id: 'm1', at: at)];
+      final before = _isoDaysAgo(14);
+      await build().syncNow();
+      graph.requests.clear();
+
+      await build(lookbackDays: () => 7).syncNow();
+
+      expect(graph.messageRequests, isEmpty,
+          reason: 'a narrower window is a preference about what to keep, not '
+              'a reason to fetch anything');
+      expect(await store.getPref(teamsBootstrapFloorKey),
+          _midnightDaysAgo(14, before));
+    });
+
+    test('a widen that fails mid-list leaves the marker where it was',
+        () async {
+      final at = _iso(const Duration(hours: 2));
+      graph.chats.add(_chat(id: 'chat-1', previewAt: at));
+      graph.messages['chat-1'] = [_message(id: 'm1', at: at)];
+      final before = _isoDaysAgo(14);
+      await build().syncNow();
+      final adopted = await store.getPref(teamsBootstrapFloorKey);
+      expect(adopted, _midnightDaysAgo(14, before));
+      graph.requests.clear();
+
+      graph.failingChats.add('chat-1');
+      await expectLater(
+        build(lookbackDays: () => 90).syncNow(),
+        throwsA(anything),
+      );
+
+      expect(await store.getPref(teamsBootstrapFloorKey), adopted,
+          reason: 'the marker moves only once every chat has returned — a '
+              'half-finished widen must be detected again next pass, not '
+              'recorded as done');
+    });
+
+    test('an empty marker reads as no marker, and is written over', () async {
+      // A pref is TEXT and this one is compared as a string: left in place, an
+      // empty marker would sort below every real floor and disable widening
+      // forever.
+      await store.setPref(teamsBootstrapFloorKey, '');
+      graph.chats.add(_chat(id: 'chat-1', previewAt: _iso(Duration.zero)));
+      graph.messages['chat-1'] = [_message(id: 'm1')];
+
+      final before = _isoDaysAgo(14);
+      await build().syncNow();
+
+      expect(await store.getPref(teamsBootstrapFloorKey),
+          _midnightDaysAgo(14, before));
+    });
+  });
+
+  group('what the backfill is allowed to change', () {
+    test('a message from behind the old floor leaves a done chat done',
+        () async {
+      final recent = _iso(const Duration(hours: 2));
+      graph.chats.add(_chat(id: 'chat-1', previewAt: recent));
+      graph.messages['chat-1'] = [_message(id: 'm1', at: recent)];
+      await build().syncNow();
+
+      // The human decisions the backfill must not undo.
+      await store.setConversationState(
+          'teams', 'chat-1', ConversationState.done);
+      await store.updateConversationTriage(
+        'teams',
+        'chat-1',
+        ctaText: 'Send Sarah the CD terms',
+        ctaUrgency: 'high',
+      );
+      graph.requests.clear();
+
+      // What the wider window reaches back and finds: a message from three
+      // weeks ago, said before every one of those decisions.
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: recent),
+        _message(id: 'm0', at: _iso(const Duration(days: 20))),
+      ];
+      await build(lookbackDays: () => 90).syncNow();
+
+      final conversation = (await store.getConversationRow('teams', 'chat-1'))!;
+      expect(conversation['state'], 'done',
+          reason: 'something said three weeks ago cannot reopen a chat the '
+              'user closed yesterday');
+      expect(conversation['cta_text'], 'Send Sarah the CD terms');
+      expect(conversation['cta_urgency'], 'high');
+      // The record of the chat is genuinely more complete, and says so.
+      expect(await store.getMessageRow('teams', 'm0'), isNotNull);
+      expect(conversation['message_count'], 2);
+      expect(conversation['last_inbound_at'], recent,
+          reason: 'the watermark only moves forward, and the backfilled '
+              'message is older');
+    });
+
+    test('a reply from behind the old floor answers nothing', () async {
+      // An ask that has been standing since before the window moved, with the
+      // user's own reply sitting further back still — sent from Teams itself,
+      // months ago, to something else entirely.
+      final ask = _iso(const Duration(hours: 3));
+      graph.chats.add(_chat(id: 'chat-1', previewAt: ask));
+      graph.messages['chat-1'] = [_message(id: 'm1', at: ask)];
+      await build().syncNow();
+      await store.updateConversationTriage(
+        'teams',
+        'chat-1',
+        ctaText: 'Reply to Sarah',
+        ctaUrgency: 'normal',
+      );
+      final stateBefore =
+          (await store.getConversationRow('teams', 'chat-1'))!['state'];
+      graph.requests.clear();
+
+      graph.messages['chat-1'] = [
+        _message(id: 'm1', at: ask),
+        _message(
+          id: 'm0',
+          userId: _myId,
+          displayName: 'Jordan Bond',
+          at: _iso(const Duration(days: 20)),
+        ),
+      ];
+      await build(lookbackDays: () => 90).syncNow();
+
+      final conversation = (await store.getConversationRow('teams', 'chat-1'))!;
+      expect(conversation['cta_text'], 'Reply to Sarah',
+          reason: 'the ask on screen is newer than the reply just backfilled, '
+              'so nothing about it has been answered');
+      expect(conversation['state'], stateBefore,
+          reason: 'an old outbound must not settle the chat either — the '
+              'guard holds in both directions');
     });
   });
 
