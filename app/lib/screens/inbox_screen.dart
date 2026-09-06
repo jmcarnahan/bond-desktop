@@ -1178,6 +1178,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // Handed over as the future it is, so the section's button can hold
       // 'Refreshing…' until both pulls are back.
       onRefreshNow: _refreshAll,
+      mailLookbackDays: prefs.mailLookbackDays,
+      teamsLookbackDays: prefs.teamsLookbackDays,
+      // No sync is kicked here: the next sync — the sixty-second poll at the
+      // latest — is what applies the new window.
+      onMailLookbackChanged: (days) =>
+          unawaited(notifier.setMailLookbackDays(days)),
+      onTeamsLookbackChanged: (days) =>
+          unawaited(notifier.setTeamsLookbackDays(days)),
       // The rail's Sign out, the whole wipe — deliberately NOT
       // [onSignOutOfServer] above, which leaves one server's session and
       // keeps the mail on this device.

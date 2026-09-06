@@ -31,7 +31,10 @@ Settings section, defaulting to the same 14 days: a chat's first fetch reaches
 back to that floor through a server-side date filter rather than taking one
 page of its newest messages. Two limits bound that walk and both are logged
 when hit — the chat list stops at 200 chats (4 pages of 50), and one chat's
-message walk stops at 40 pages.
+message walk stops at 40 pages. Both windows are set by the **How far back to
+sync** pair at the top of Settings → Sync & data — a preset per source or a
+custom `YYYY-MM-DD` date, with the calendar day the window reaches spelled out
+under it (see [../settings.md](../settings.md)).
 
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never
