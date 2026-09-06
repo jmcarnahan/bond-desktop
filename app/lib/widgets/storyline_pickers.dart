@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
+import 'pane_surface.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
@@ -10,8 +11,9 @@ import 'time_format.dart';
 ///
 /// The house rule is screens with a way back, never popups: a choice made out
 /// of a whole mailbox needs room, a filter and somewhere to look, and none of
-/// that fits in a menu. Both panes borrow the timeline panel's surface so they
-/// read as the main pane changing rather than as something laid over it.
+/// that fits in a menu. Both panes wear [PaneSurface], the header every full
+/// pane shares, so they read as the main pane changing rather than as
+/// something laid over it.
 ///
 /// Pure widgets: everything they show and everything they do arrives through
 /// the constructor, so the screen stays the only layer that knows what a
@@ -70,7 +72,9 @@ class _AddThreadToStorylinePaneState extends State<AddThreadToStorylinePane> {
   Widget build(BuildContext context) {
     final matches = _matches();
 
-    return _PaneSurface(
+    // No Home link: this pane is one click deep from the storyline it serves,
+    // and Back is the whole way out. See [PaneSurface.onHome].
+    return PaneSurface(
       title: 'Add a thread to ${widget.storylineTitle}',
       onBack: widget.onBack,
       child: Column(
@@ -205,7 +209,7 @@ class _AddToStorylinePaneState extends State<AddToStorylinePane> {
   Widget build(BuildContext context) {
     final trimmed = _typed.trim();
 
-    return _PaneSurface(
+    return PaneSurface(
       title: 'Add to storyline',
       onBack: widget.onBack,
       child: ListView(
@@ -286,60 +290,3 @@ class _AddToStorylinePaneState extends State<AddToStorylinePane> {
   }
 }
 
-/// The bordered surface and titled header both panes share with the timeline
-/// panel, so a pane reads as the main pane changing rather than as an overlay.
-class _PaneSurface extends StatelessWidget {
-  final String title;
-  final VoidCallback onBack;
-  final Widget child;
-
-  const _PaneSurface({
-    required this.title,
-    required this.onBack,
-    required this.child,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: BondColors.surface,
-        borderRadius: BondRadii.mdAll,
-        border: Border.all(color: BondColors.border),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: BondSpacing.s16,
-              vertical: BondSpacing.s12,
-            ),
-            child: Row(
-              children: [
-                IconButton(
-                  onPressed: onBack,
-                  icon: const Icon(Icons.arrow_back),
-                  iconSize: 20,
-                  tooltip: 'Back',
-                ),
-                const SizedBox(width: BondSpacing.s4),
-                Expanded(
-                  child: Text(
-                    title,
-                    style: BondType.titleSm,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const Divider(height: 1, color: BondColors.border),
-          Expanded(child: child),
-        ],
-      ),
-    );
-  }
-}

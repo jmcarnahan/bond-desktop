@@ -20,6 +20,9 @@ import '../providers/prefs_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
+import '../services/llm/model_probe.dart';
+// [ModelSlot] arrives with `prefs_provider.dart`, which re-exports it — a
+// second import of `model_slots.dart` for the same declaration is redundant.
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
 import '../services/triage_queue.dart';
@@ -32,10 +35,9 @@ import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/home_pane.dart';
 import '../widgets/inline_alert.dart';
-import '../widgets/needs_you_rules_pane.dart';
 import '../widgets/notification_ribbon.dart';
 import '../widgets/quick_replies.dart';
-import '../widgets/settings_dialog.dart';
+import '../widgets/settings_screen.dart';
 import '../widgets/source_filter.dart';
 import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
@@ -120,10 +122,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// rather than racing to be rendered.
   bool _showingActivityLog = false;
 
-  /// Whether the main pane is showing the Needs You rules editor. It joins the
-  /// same exclusive set as [_showingActivityLog] and the three selections
-  /// above: one thing in the pane, and every setter clears the rest.
-  bool _showingNeedsYouRules = false;
+  /// Whether the main pane is showing Settings. It joins the same exclusive
+  /// set as [_showingActivityLog] and the three selections above: one thing
+  /// in the pane, and every setter clears the rest.
+  bool _showingSettings = false;
+
+  /// One HTTP client for every server check the settings screen makes, closed
+  /// with the screen. Held here rather than built per check because a client
+  /// per button press leaks a connection pool per press, and the probe is
+  /// diagnostics that a user can hammer.
+  final ModelServerProbe _probe = ModelServerProbe();
 
   /// The storyline the add-thread pane is picking a conversation for. An
   /// overlay on the storyline selection rather than a peer of it: back returns
@@ -230,6 +238,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void dispose() {
     _poll?.cancel();
     WidgetsBinding.instance.removeObserver(this);
+    _probe.close();
     super.dispose();
   }
 
@@ -393,7 +402,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
-      _showingNeedsYouRules = false;
+      _showingSettings = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -433,7 +442,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
-      _showingNeedsYouRules = false;
+      _showingSettings = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -461,7 +470,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _selectedLaterDay = null;
       _showingActivityLog = false;
-      _showingNeedsYouRules = false;
+      _showingSettings = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -481,7 +490,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedStorylineId = null;
       _showingActivityLog = false;
-      _showingNeedsYouRules = false;
+      _showingSettings = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -495,24 +504,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _openActivityLog() {
     setState(() {
       _showingActivityLog = true;
-      _showingNeedsYouRules = false;
-      _selectedId = null;
-      _selectedSource = null;
-      _selectedStorylineId = null;
-      _selectedLaterDay = null;
-      _addingToStorylineId = null;
-      _pickingStorylineForThread = null;
-      _railOpen = false;
-      _replyOpenFor = null;
-    });
-  }
-
-  /// Opens the Needs You rules editor — a pane like the activity log, reached
-  /// from Settings, clearing whatever the user was reading.
-  void _openNeedsYouRules() {
-    setState(() {
-      _showingNeedsYouRules = true;
-      _showingActivityLog = false;
+      _showingSettings = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -858,7 +850,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       selectedSection: (_selectedId == null &&
               _selectedStorylineId == null &&
               _selectedLaterDay == null &&
-              !_showingActivityLog)
+              !_showingActivityLog &&
+              !_showingSettings)
           ? _section
           : null,
       onSelectConversation: (source, id) => _select(id, source: source),
@@ -984,11 +977,34 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// The tuning controls, plus what Microsoft granted. The threshold reloads
-  /// the list as it changes — the whole point of the slider is watching Needs
-  /// You grow and shrink under it — while the "about me" text is only saved.
+  /// Opens Settings, which is a pane and not a section — it belongs to the
+  /// app rather than to the mail, so it is reached from the rail's footer and
+  /// clears whatever the user was reading, exactly as the activity log does.
+  void _openSettings() {
+    setState(() {
+      _showingSettings = true;
+      _showingActivityLog = false;
+      _selectedId = null;
+      _selectedSource = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
+      // At narrow widths the rail is an overlay: leaving it open would put the
+      // pane the gear just opened behind a scrim.
+      _railOpen = false;
+      _replyOpenFor = null;
+    });
+  }
+
+  void _closeSettings() => setState(() => _showingSettings = false);
+
+  /// The tuning controls, the two owner texts, and what Microsoft granted. The
+  /// threshold reloads the list as it changes — the whole point of the slider
+  /// is watching Needs You grow and shrink under it — while about me and the
+  /// Needs You rules are each saved by their own Save.
   ///
-  /// It is also where SESSIONS are managed. The dialog shows whether the
+  /// It is also where SESSIONS are managed. The screen shows whether the
   /// backend it is currently pointing at is signed in, and signs in and out of
   /// it in place — the gate above never swaps the screen for a settings change,
   /// so this is the only place that work can happen.
@@ -997,115 +1013,179 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// signs OUT and lets the gate take over. It is not rendered while the
   /// session block is on screen — that block's Sign in… is the same action,
   /// beside the state it fixes.
-  Future<void> _openSettings() async {
-    final prefs = ref.read(appPrefsProvider);
+  ///
+  /// `ref.watch` rather than the `ref.read` the dialog used: this is a build
+  /// method now, and the Needs You summary reads the STORED rules to say
+  /// whether they are custom — a Save from inside the screen only moves that
+  /// line because this host rebuilds. Do not "optimise" it to `ref.read`.
+  Widget _settings() {
+    final prefs = ref.watch(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
-    await showDialog<void>(
-      context: context,
-      builder: (context) => SettingsDialog(
-        threshold: prefs.attentionThreshold,
-        aboutMe: prefs.aboutMe,
-        // The prefs setters update state first and persist behind the
-        // caller's back on purpose (see AppPrefsNotifier) — `unawaited` says
-        // the discard is that contract, not an oversight.
-        onThresholdChanged: (value) {
-          unawaited(notifier.setAttentionThreshold(value));
-          if (!mounted) return;
-          ref.read(conversationsProvider.notifier).load(syncFirst: false);
-        },
-        onAboutMeChanged: (text) => unawaited(notifier.setAboutMe(text)),
-        showActivityLog: prefs.showActivityLog,
-        onShowActivityLogChanged: (on) =>
-            unawaited(notifier.setShowActivityLog(on)),
-        notifyStyle: prefs.notifyStyle,
-        onNotifyStyleChanged: (style) =>
-            unawaited(notifier.setNotifyStyle(style)),
-        // BOTH sources are wired, and deliberately not bound to the mode the
-        // dialog OPENED in: the toggle now switches backends without closing
-        // the dialog, so which one answers is the dialog's live choice. Each
-        // closure reads the providers at CALL time — after a switch, the
-        // dialog's re-ask lands on the session the switch just built.
-        //
-        // Every closure that touches `ref` starts with a mounted check. The
-        // dialog lives in the ROOT overlay and can outlive this screen — a
-        // sign-out from the rail behind it, for one — and a dead host must
-        // answer with nothing, never with "ref after dispose".
-        hasScope: (scope) async {
-          if (!mounted) return false;
-          return ref.read(authSessionProvider).hasScope(scope);
-        },
-        connectionStatus: _connectionStatus,
-        onConnectMicrosoft: () => unawaited(_connectMicrosoft()),
-        backendMode: prefs.backendMode,
-        mcpServerUrl: prefs.mcpServerUrl,
-        onBackendModeChanged: (mode) {
-          unawaited(notifier.setBackendMode(mode));
-          _reloadAfterBackendChange();
-        },
-        onMcpServerUrlChanged: (url) {
-          unawaited(notifier.setMcpServerUrl(url));
-          _reloadAfterBackendChange();
-        },
-        onSignInAgain: () {
-          Navigator.of(context).pop();
-          _signOut();
-        },
-        onEditNeedsYouRules: () {
-          Navigator.of(context).pop();
-          _openNeedsYouRules();
-        },
-        isTargetSignedIn: () async {
-          if (!mounted) return false;
-          return ref.read(authSessionProvider).isSignedIn;
-        },
-        targetAccountLabel: () async {
-          if (!mounted) return null;
-          final account = await ref.read(authSessionProvider).storedAccount;
-          return account?.mail ?? account?.displayName;
-        },
-        onSignIn: () async {
-          if (!mounted) return;
-          final account = await ref.read(authSessionProvider).signIn();
-          if (!mounted) return;
-          // Before anything syncs: if the rows in this file belong to a
-          // different person, the sign-in that just succeeded is the moment
-          // they stop being reachable. Two mailboxes must never be in the
-          // database at once, and after the first sync is too late.
-          final wiped = await ref.read(identityGuardProvider).adopt(account);
-          if (!mounted) return;
-          if (wiped) {
-            // The same list `SignInScreen._invalidateAfterWipe` drops, and
-            // duplicated for the same reason it is duplicated there: it is
-            // "everything holding mail rows in memory", and a shared helper
-            // would hide that from whichever screen gains a provider next.
-            // Keep them in step.
-            ref.invalidate(conversationsProvider);
-            ref.invalidate(storylinesProvider);
-            ref.invalidate(threadProvider);
-            ref.invalidate(draftProvider);
-            ref.invalidate(storylineTimelineProvider);
-            // And the previous person's about-me text and needs-you rules,
-            // which the notifier still holds in memory — same reason
-            // SignInScreen clears them.
-            unawaited(ref.read(appPrefsProvider.notifier).setAboutMe(''));
-            unawaited(
-              ref.read(appPrefsProvider.notifier).setNeedsYouRules(''),
-            );
-          }
-          _reloadAfterBackendChange();
-        },
-        onSignOutOfServer: () async {
-          if (!mounted) return;
-          await ref.read(authSessionProvider).signOut();
-          if (!mounted) return;
-          // NO database wipe here, deliberately. Leaving one server is not
-          // "remove this account from this machine" — the rail's Sign out is,
-          // and it keeps its explicit wipe. If a different identity signs in
-          // next, the IdentityGuard wipes then, which is the moment the rows
-          // actually stop being this user's.
-          _reloadAfterBackendChange();
-        },
-      ),
+    // `watch` is legal here because this runs inside `build`, and it is what
+    // keeps the three sync stamps live while the pane is open: the stamps
+    // re-read on every recorded event, so a sync that lands behind Settings
+    // moves the numbers in it. The stamps alone, not the activity snapshot —
+    // that one re-reads the whole pane's table per event, and this pane wants
+    // three preferences. The two below answer null in a widget test, where
+    // there is no platform on the other end of the channel — the About
+    // section then says 'Version unknown' rather than throwing.
+    final stamps = ref.watch(syncStampsProvider).valueOrNull;
+    final appInfo = ref.watch(appInfoProvider).valueOrNull;
+    final databasePath = ref.watch(databasePathProvider).valueOrNull;
+    return SettingsScreen(
+      onBack: _closeSettings,
+      onHome: () => _selectSection(RailSection.home),
+      threshold: prefs.attentionThreshold,
+      aboutMe: prefs.aboutMe,
+      // The prefs setters update state first and persist behind the caller's
+      // back on purpose (see AppPrefsNotifier) — `unawaited` says the discard
+      // is that contract, not an oversight.
+      onThresholdChanged: (value) {
+        unawaited(notifier.setAttentionThreshold(value));
+        if (!mounted) return;
+        ref.read(conversationsProvider.notifier).load(syncFirst: false);
+      },
+      onAboutMeChanged: (text) => unawaited(notifier.setAboutMe(text)),
+      needsYouRules: prefs.needsYouRules,
+      needsYouDefaultRules: needsYouDefaultRules,
+      needsYouFixedTail: needsYouOutputContract,
+      needsYouRulesMaxLength: needsYouRulesCap,
+      onNeedsYouRulesSaved: (text) => unawaited(notifier.setNeedsYouRules(text)),
+      showActivityLog: prefs.showActivityLog,
+      onShowActivityLogChanged: (on) =>
+          unawaited(notifier.setShowActivityLog(on)),
+      onOpenActivityLog: _openActivityLog,
+      notifyStyle: prefs.notifyStyle,
+      onNotifyStyleChanged: (style) => unawaited(notifier.setNotifyStyle(style)),
+      homeShowDropped: prefs.homeShowDropped,
+      onHomeShowDroppedChanged: (on) {
+        unawaited(notifier.setHomeShowDropped(on));
+        if (!mounted) return;
+        // The feed reads this preference ONCE, when its notifier is built, so
+        // the pref alone would not move the list until the next launch. This is
+        // the same call HomePane's own toggle makes — the preference is what
+        // the next launch reads, this is what the user sees now.
+        ref.read(homeFeedProvider.notifier).setIncludeDropped(on);
+      },
+      storylineNewestFirst: prefs.storylineNewestFirst,
+      onStorylineNewestFirstChanged: (on) =>
+          unawaited(notifier.setStorylineNewestFirst(on)),
+      // BOTH sources are wired, and deliberately not bound to the mode the
+      // screen OPENED in: the toggle switches backends in place, so which one
+      // answers is the screen's live choice. Each closure reads the providers
+      // at CALL time — after a switch, the re-ask lands on the session the
+      // switch just built.
+      //
+      // Every closure that touches `ref` starts with a mounted check. The work
+      // behind them outlives the pane — a sign-in still out in the browser, a
+      // sign-out from the rail — and a dead host must answer with nothing,
+      // never with "ref after dispose".
+      hasScope: (scope) async {
+        if (!mounted) return false;
+        return ref.read(authSessionProvider).hasScope(scope);
+      },
+      connectionStatus: _connectionStatus,
+      onConnectMicrosoft: () => unawaited(_connectMicrosoft()),
+      backendMode: prefs.backendMode,
+      mcpServerUrl: prefs.mcpServerUrl,
+      onBackendModeChanged: (mode) {
+        unawaited(notifier.setBackendMode(mode));
+        _reloadAfterBackendChange();
+      },
+      onMcpServerUrlChanged: (url) {
+        unawaited(notifier.setMcpServerUrl(url));
+        _reloadAfterBackendChange();
+      },
+      onSignInAgain: () {
+        _closeSettings();
+        _signOut();
+      },
+      isTargetSignedIn: () async {
+        if (!mounted) return false;
+        return ref.read(authSessionProvider).isSignedIn;
+      },
+      targetAccountLabel: () async {
+        if (!mounted) return null;
+        final account = await ref.read(authSessionProvider).storedAccount;
+        return account?.mail ?? account?.displayName;
+      },
+      onSignIn: () async {
+        if (!mounted) return;
+        final account = await ref.read(authSessionProvider).signIn();
+        if (!mounted) return;
+        // Before anything syncs: if the rows in this file belong to a
+        // different person, the sign-in that just succeeded is the moment
+        // they stop being reachable. Two mailboxes must never be in the
+        // database at once, and after the first sync is too late.
+        final wiped = await ref.read(identityGuardProvider).adopt(account);
+        if (!mounted) return;
+        if (wiped) {
+          // The same list `SignInScreen._invalidateAfterWipe` drops, and
+          // duplicated for the same reason it is duplicated there: it is
+          // "everything holding mail rows in memory", and a shared helper
+          // would hide that from whichever screen gains a provider next.
+          // Keep them in step.
+          ref.invalidate(conversationsProvider);
+          ref.invalidate(storylinesProvider);
+          ref.invalidate(threadProvider);
+          ref.invalidate(draftProvider);
+          ref.invalidate(storylineTimelineProvider);
+          // And the previous person's about-me text and needs-you rules,
+          // which the notifier still holds in memory — same reason
+          // SignInScreen clears them. Both editors adopt the wipe only if
+          // their own field is clean, so an unsaved edit survives it.
+          unawaited(ref.read(appPrefsProvider.notifier).setAboutMe(''));
+          unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouRules(''));
+        }
+        _reloadAfterBackendChange();
+      },
+      onSignOutOfServer: () async {
+        if (!mounted) return;
+        await ref.read(authSessionProvider).signOut();
+        if (!mounted) return;
+        // NO database wipe here, deliberately. Leaving one server is not
+        // "remove this account from this machine" — the rail's Sign out is,
+        // and it keeps its explicit wipe. If a different identity signs in
+        // next, the IdentityGuard wipes then, which is the moment the rows
+        // actually stop being this user's.
+        _reloadAfterBackendChange();
+      },
+      // The effective targets, defaults already resolved: the editors open on
+      // real values rather than on the empty strings that mean "follow the
+      // build" in the database.
+      slotTargets: {
+        for (final slot in ModelSlot.values) slot: prefs.targetFor(slot),
+      },
+      slotIsDefault: {
+        for (final slot in ModelSlot.values) slot: prefs.isSlotDefault(slot),
+      },
+      probeServer: _probe.probe,
+      onSlotTargetChanged: (slot, {required url, required model}) =>
+          unawaited(switch (slot) {
+            ModelSlot.fast => notifier.setFastLlmTarget(url: url, model: model),
+            ModelSlot.prose => notifier.setProseLlmTarget(
+              url: url,
+              model: model,
+            ),
+            // Display only — the screen offers no editor for it, and a write
+            // that arrived here anyway must not invent one.
+            ModelSlot.embed => Future<void>.value(),
+          }),
+      onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
+      lastMailSyncIso: stamps?.mailIso,
+      lastTeamsSyncIso: stamps?.teamsIso,
+      lastSweepIso: stamps?.sweepIso,
+      // Handed over as the future it is, so the section's button can hold
+      // 'Refreshing…' until both pulls are back.
+      onRefreshNow: _refreshAll,
+      // The rail's Sign out, the whole wipe — deliberately NOT
+      // [onSignOutOfServer] above, which leaves one server's session and
+      // keeps the mail on this device.
+      onSignOutAndClear: _signOut,
+      appVersion: appInfo == null
+          ? null
+          : '${appInfo.version} (${appInfo.build})',
+      databasePath: databasePath,
     );
   }
 
@@ -1119,13 +1199,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// A target with no session is NOT a reason to take anything off screen: the
   /// gate above decides at launch only, this screen stays where it is, and the
-  /// settings dialog reports "not signed in to this server" with a Sign in…
+  /// settings screen reports "not signed in to this server" with a Sign in…
   /// beside it. The list underneath is simply empty until that happens, which
   /// is the truth about a server nobody has signed in to.
   void _reloadAfterBackendChange() {
-    // The dialog outlives nothing here any more, but it can still be closed
-    // and reopened around an in-flight change; a dead host must answer with
-    // nothing rather than with "ref after dispose".
+    // Settings can be left, and the whole screen torn down, around an
+    // in-flight change; a dead host must answer with nothing rather than with
+    // "ref after dispose".
     if (!mounted) return;
     ref.read(conversationsProvider.notifier).load(syncFirst: false);
   }
@@ -1218,17 +1298,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
-  /// Exactly one view, never two: the activity log, then the two picker panes,
-  /// then the thread transcript, then the storyline timeline, then the section
-  /// overview. The order is the priority — the log is first because it is the
-  /// only one that is not about the mail at all, and a pane outranks what it
-  /// was opened from because it is the newer thing the user asked for.
+  /// Exactly one view, never two: Settings, then the activity log, then the two
+  /// picker panes, then the thread transcript, then the storyline timeline,
+  /// then the section overview. The order is the priority — Settings and the
+  /// log come first because they are the two that are not about the mail at
+  /// all, and a pane outranks what it was opened from because it is the newer
+  /// thing the user asked for.
   ///
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
+    if (_showingSettings) return _settings();
     if (_showingActivityLog) return _activityLog();
-    if (_showingNeedsYouRules) return _needsYouRules();
 
     final addingTo = _addingToStorylineId;
     if (addingTo != null) {
@@ -2066,22 +2147,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // it stays put rather than timing out under the user.
         break;
     }
-  }
-
-  /// The editor for the owner's own needs-you criteria. It commits on Save
-  /// only — the pane owns that contract, so there is nothing to write here on
-  /// the way out.
-  Widget _needsYouRules() {
-    final prefs = ref.watch(appPrefsProvider);
-    return NeedsYouRulesPane(
-      value: prefs.needsYouRules,
-      defaultRules: needsYouDefaultRules,
-      fixedTail: needsYouOutputContract,
-      maxLength: needsYouRulesCap,
-      onSave: (text) =>
-          unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouRules(text)),
-      onBack: () => setState(() => _showingNeedsYouRules = false),
-    );
   }
 
   /// What the sync and the local model have been doing, over the last week.

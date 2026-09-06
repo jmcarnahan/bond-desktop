@@ -18,7 +18,8 @@ import 'package:bond_inbox/services/mcp/mcp_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
-import 'package:bond_inbox/widgets/settings_dialog.dart';
+import 'package:bond_inbox/widgets/settings_screen.dart';
+import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -87,7 +88,7 @@ class _FakeBondMcpClient implements BondMcpClient {
 
 /// An [AuthSession] that answers from a constant, and records what it was
 /// asked to do. Enough for the gate, which only asks [isSignedIn], and for the
-/// settings dialog's session block, which also asks [storedAccount] — a
+/// settings screen's session block, which also asks [storedAccount] — a
 /// session with no account to name reports the state without a name.
 class _FakeSession implements AuthSession {
   _FakeSession({required this.signedIn});
@@ -394,9 +395,9 @@ void main() {
         (tester) async {
       // The gate used to listen to the session provider and re-decide on every
       // preference change, which meant a click in Settings could replace the
-      // whole screen under the open dialog. Sessions are managed IN the dialog
-      // now; the screen behind it stays put, and the list under it is simply
-      // empty until the new server is signed in to.
+      // whole screen while it was open. Sessions are managed IN Settings now;
+      // the pane stays put, and the list under it is simply empty until the
+      // new server is signed in to.
       await tester.binding.setSurfaceSize(const Size(1400, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await store.setPref(mcpServerUrlKey, _serverA);
@@ -423,34 +424,38 @@ void main() {
 
     testWidgets('a switch to an unsigned backend leaves the settings open',
         (tester) async {
-      // The dialog is a route above the inbox, and it used to be popped from
-      // under the user because the gate was about to replace the screen it sat
-      // on. Nothing replaces anything now: the switch lands, the dialog says
-      // the new target has no session, and the Sign in… beside that is the way
-      // out.
+      // Settings used to be a route above the inbox, popped from under the user
+      // because the gate was about to replace the screen it sat on. Nothing
+      // replaces anything now: the switch lands, the pane says the new target
+      // has no session, and the Sign in… beside that is the way out.
       await tester.binding.setSurfaceSize(const Size(1400, 1000));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await store.setPref(mcpServerUrlKey, _serverA);
 
       await pumpGate(tester, signedInAt: {'$backendModeMcp:$_serverA'});
+      // Bounded pumps rather than a settle: Settings is INSIDE InboxScreen
+      // now, which owns a sixty-second periodic timer, and an unbounded settle
+      // would never come back.
       await tester.tap(find.byTooltip('Settings'));
-      await tester.pumpAndSettle();
-      expect(find.byType(SettingsDialog), findsOneWidget);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(SettingsScreen), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(SettingsSection.toggleKey('Microsoft connection')),
+      );
+      await tester.pump();
+      await tester.pump();
 
       // The direct-Graph backend, which this run has never signed in to.
-      await tester.tap(find.text('This Mac'));
-      await tester.pumpAndSettle();
+      await tester.tap(find.text('This device'));
+      await tester.pump();
+      await tester.pump();
 
-      expect(find.byType(SettingsDialog), findsOneWidget);
+      expect(find.byType(SettingsScreen), findsOneWidget);
       expect(find.text('Not signed in to this server.'), findsOneWidget);
       expect(find.byType(InboxScreen), findsOneWidget);
       expect(find.byType(SignInScreen), findsNothing);
-
-      // Closed by hand before the tree comes down: the dialog defers its
-      // about-me save out of the frame, and a tear-down that disposes the
-      // provider scope first would have that save land on a dead notifier.
-      await tester.tap(find.text('Done'));
-      await tester.pumpAndSettle();
 
       expect(tester.takeException(), isNull);
     });

@@ -20,6 +20,8 @@ LlmCallRecord call({
   int? promptTokens,
   int? completionTokens,
   String? error,
+  String? model,
+  String? baseUrl,
 }) =>
     LlmCallRecord(
       label: label,
@@ -28,6 +30,8 @@ LlmCallRecord call({
       promptTokens: promptTokens,
       completionTokens: completionTokens,
       error: error,
+      model: model,
+      baseUrl: baseUrl,
     );
 
 void main() {
@@ -327,6 +331,54 @@ void main() {
       final rows = await store.recentActivity();
       expect(detailOf(rows.last)['llm_calls'], 1);
       expect(detailOf(rows.first), isEmpty);
+    });
+
+    test('a model call records which model answered', () async {
+      log.noteLlmCall(call(
+        label: 'triage',
+        durationMs: 10,
+        completionTokens: 5,
+        model: 'qwen3-4b',
+        baseUrl: 'http://h/v1/chat/completions',
+      ));
+
+      await log.record('triage', entityId: 'm1');
+
+      final detail = detailOf(await only());
+      expect(detail['llm_model'], 'qwen3-4b');
+      // The rest of the block is unchanged in shape — the model rides beside
+      // the tally rather than replacing any part of it.
+      expect(detail['llm_label'], 'triage');
+      expect(detail['llm_calls'], 1);
+      expect(detail['llm_ms'], 10);
+      // The URL deliberately stays off the row: it is the same fact as the
+      // model for a reader of the panel, and the longer half of it.
+      expect(detail.containsKey('llm_base_url'), isFalse);
+    });
+
+    test('a record with no model carries no llm_model key', () async {
+      // Every row written before this phase is this shape, and old rows and
+      // new code have to agree about it.
+      log.noteLlmCall(call(completionTokens: 5));
+
+      await log.record('triage', entityId: 'm1');
+
+      expect(detailOf(await only()).containsKey('llm_model'), isFalse);
+    });
+
+    test('the last model dialled is the one recorded', () async {
+      // The storyline sweep's case: membership on the fast client, naming on
+      // the prose one, both inside one span. Last writer wins, exactly as
+      // `llm_label` already does — this documents it rather than pretending
+      // one row can only ever have seen one model.
+      log.noteLlmCall(call(label: 'storyline_membership', model: 'qwen3-4b'));
+      log.noteLlmCall(call(label: 'storyline_name', model: 'qwen3-27b'));
+
+      await log.record('storyline_sweep', entityId: 'sweep');
+
+      final detail = detailOf(await only());
+      expect(detail['llm_model'], 'qwen3-27b');
+      expect(detail['llm_label'], 'storyline_name');
     });
   });
 }

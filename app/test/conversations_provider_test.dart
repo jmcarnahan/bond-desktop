@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
+import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/sync_service.dart';
@@ -569,6 +570,9 @@ void main() {
         syncServiceProvider.overrideWithValue(sync),
       ]);
       addTearDown(container.dispose);
+      // The prefs load is fire-and-forget by design; waiting for it here is
+      // what keeps its last read off a database this test has already closed.
+      await container.read(appPrefsProvider.notifier).ready;
 
       await container.read(conversationsProvider.notifier).load();
       final state = container.read(conversationsProvider);

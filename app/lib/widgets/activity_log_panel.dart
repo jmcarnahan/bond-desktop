@@ -248,6 +248,12 @@ class ActivityLogPanel extends StatefulWidget {
     return tokens / (ms / 1000);
   }
 
+  /// Which model produced this row's numbers, or null where nothing said.
+  static String? modelOf(Map<String, Object?> detail) {
+    final model = detail['llm_model'];
+    return model is String && model.isNotEmpty ? model : null;
+  }
+
   /// Tokens per second at the precision the number deserves: a decimal below
   /// ten, where the difference between 5.5 and 6 is the difference between
   /// usable and not, and none above it, where it is noise in a column.
@@ -529,10 +535,10 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
                 width: _speedWidth,
                 child: speed == null
                     ? const SizedBox.shrink()
-                    : Text(
-                        ActivityLogPanel.formatSpeed(speed),
-                        style: mono,
-                        textAlign: TextAlign.right,
+                    : _speed(
+                        speed,
+                        ActivityLogPanel.modelOf(event.detail),
+                        mono,
                       ),
               ),
               const SizedBox(width: BondSpacing.s8),
@@ -578,6 +584,22 @@ class _ActivityLogPanelState extends State<ActivityLogPanel> {
   /// them. The raw detail map is rendered whole and unfiltered — this is the
   /// bottom of the panel, and a key nobody has taught it to name is exactly
   /// what someone digging is here for.
+  /// The rate, naming the model that produced it when the row knows.
+  ///
+  /// The one question a rate raises once the model is switchable: fast at
+  /// WHAT. The column has no room for the name and the detail block is a tap
+  /// away, so it rides on a tooltip. No wrapper at all where nothing said —
+  /// this Flutter pops an empty bubble for an empty message, and a row written
+  /// before the model was recorded has to look exactly as it did.
+  Widget _speed(double speed, String? model, TextStyle mono) {
+    final text = Text(
+      ActivityLogPanel.formatSpeed(speed),
+      style: mono,
+      textAlign: TextAlign.right,
+    );
+    return model == null ? text : Tooltip(message: model, child: text);
+  }
+
   Widget _detail(ActivityEvent event) {
     final label = widget.entityLabel?.call(event);
     final entityId = event.entityId;

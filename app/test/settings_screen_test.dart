@@ -1,16 +1,21 @@
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
-import 'package:bond_inbox/widgets/settings_dialog.dart';
+import 'package:bond_inbox/widgets/settings_screen.dart';
+import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
 
+/// The settings screen driven directly, with nothing but closures behind it.
+///
+/// It is a plain widget over props — no provider reads inside — so this file
+/// pumps it alone, with no `InboxScreen` and therefore no sixty-second timer,
+/// which is what makes `pumpAndSettle` safe here and nowhere near
+/// `settings_screen_nav_test.dart`.
 void main() {
-  /// Opens the dialog over a host that can pop it, which is what the "saved on
-  /// close" path needs.
   Future<void> open(
     WidgetTester tester, {
     double threshold = 0.5,
@@ -19,82 +24,81 @@ void main() {
     required void Function(String) onAboutMeChanged,
     Future<bool> Function(String)? hasScope,
     VoidCallback? onSignInAgain,
-    VoidCallback? onEditNeedsYouRules,
     bool showActivityLog = false,
     void Function(bool)? onShowActivityLogChanged,
     NotifyStyle notifyStyle = NotifyStyle.native,
     void Function(NotifyStyle)? onNotifyStyleChanged,
+    VoidCallback? onBack,
+    VoidCallback? onHome,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: Builder(
-          builder: (context) => TextButton(
-            onPressed: () => showDialog<void>(
-              context: context,
-              builder: (_) => SettingsDialog(
-                threshold: threshold,
-                aboutMe: aboutMe,
-                onThresholdChanged: onThresholdChanged,
-                onAboutMeChanged: onAboutMeChanged,
-                onEditNeedsYouRules: onEditNeedsYouRules,
-                showActivityLog: showActivityLog,
-                onShowActivityLogChanged: onShowActivityLogChanged,
-                notifyStyle: notifyStyle,
-                onNotifyStyleChanged: onNotifyStyleChanged,
-                hasScope: hasScope,
-                onSignInAgain: onSignInAgain,
-              ),
-            ),
-            child: const Text('open'),
-          ),
+        body: SettingsScreen(
+          threshold: threshold,
+          aboutMe: aboutMe,
+          onThresholdChanged: onThresholdChanged,
+          onAboutMeChanged: onAboutMeChanged,
+          onBack: onBack ?? () {},
+          onHome: onHome,
+          showActivityLog: showActivityLog,
+          onShowActivityLogChanged: onShowActivityLogChanged,
+          notifyStyle: notifyStyle,
+          onNotifyStyleChanged: onNotifyStyleChanged,
+          hasScope: hasScope,
+          onSignInAgain: onSignInAgain,
         ),
       ),
     ));
-    await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
   }
 
-  testWidgets('renders both controls and both end labels', (tester) async {
+  /// Opens one named section. Everything starts collapsed, so most tests begin
+  /// with one of these.
+  ///
+  /// Scrolled to first: eight sections do not fit a 900pt window once a couple
+  /// of them are open, and they certainly do not at a doubled text scale.
+  Future<void> expand(WidgetTester tester, String title) async {
+    final toggle = find.byKey(SettingsSection.toggleKey(title));
+    await tester.ensureVisible(toggle);
+    await tester.pumpAndSettle();
+    await tester.tap(toggle);
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('renders every section collapsed, and the threshold controls '
+      'when opened', (tester) async {
     await open(
       tester,
       onThresholdChanged: (_) {},
       onAboutMeChanged: (_) {},
     );
 
+    expect(find.text('About me'), findsOneWidget);
+    expect(find.text('Needs You'), findsOneWidget);
+    // Collapsed means the controls are not built at all.
+    expect(find.byType(Slider), findsNothing);
+
+    await expand(tester, 'Needs You');
+
     expect(find.text('How much lands in Needs You'), findsOneWidget);
-    expect(find.text('Only the critical'), findsOneWidget);
-    expect(find.text('Anything plausible'), findsOneWidget);
-    expect(find.text('About me & my role'), findsOneWidget);
+    expect(find.text('Only the critical'), findsWidgets);
+    expect(find.text('Anything plausible'), findsWidgets);
     expect(find.byType(Slider), findsOneWidget);
   });
 
-  testWidgets('no rules row without a host wired to open the pane',
+  testWidgets('the rules editor is absent when no save is wired',
       (tester) async {
     await open(
       tester,
       onThresholdChanged: (_) {},
       onAboutMeChanged: (_) {},
     );
+    await expand(tester, 'Needs You');
 
-    expect(find.text('What counts as needing you…'), findsNothing);
-  });
-
-  testWidgets('the rules row hands the host the pane to open', (tester) async {
-    var opened = 0;
-    await open(
-      tester,
-      onThresholdChanged: (_) {},
-      onAboutMeChanged: (_) {},
-      onEditNeedsYouRules: () => opened++,
-    );
-
-    expect(find.text('What counts as needing you…'), findsOneWidget);
-    await tester.tap(find.text('What counts as needing you…'));
-    await tester.pump();
-
-    expect(opened, 1);
+    expect(find.byType(Slider), findsOneWidget);
+    expect(find.text('Save'), findsNothing);
   });
 
   testWidgets('the slider reads right-is-more, so it renders inverted',
@@ -106,6 +110,7 @@ void main() {
       onThresholdChanged: (_) {},
       onAboutMeChanged: (_) {},
     );
+    await expand(tester, 'Needs You');
 
     expect(tester.widget<Slider>(find.byType(Slider)).value, closeTo(0.2, 1e-9));
   });
@@ -119,6 +124,7 @@ void main() {
       onThresholdChanged: written.add,
       onAboutMeChanged: (_) {},
     );
+    await expand(tester, 'Needs You');
 
     await tester.drag(find.byType(Slider), const Offset(500, 0));
     await tester.pumpAndSettle();
@@ -128,46 +134,55 @@ void main() {
     expect(written.single, lessThan(1));
   });
 
-  testWidgets('the about-me text is saved when the dialog closes',
-      (tester) async {
+  testWidgets('Save commits the text', (tester) async {
     final saved = <String>[];
     await open(
       tester,
       onThresholdChanged: (_) {},
       onAboutMeChanged: saved.add,
     );
+    await expand(tester, 'About me');
 
-    await tester.enterText(find.byType(TextField), 'I own the website redesign.');
+    await tester.enterText(
+      find.byType(TextField),
+      'I own the website redesign.',
+    );
+    await tester.pump();
     expect(saved, isEmpty, reason: 'not saved per keystroke');
 
-    await tester.tap(find.text('Done'));
+    await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
 
     expect(saved, ['I own the website redesign.']);
   });
 
-  testWidgets('and saved when it is dismissed rather than confirmed',
+  testWidgets('Cancel reverts the field to the last saved text',
       (tester) async {
-    // Most people click outside. Wiring the save to the button alone would
-    // quietly lose their text.
     final saved = <String>[];
     await open(
       tester,
+      aboutMe: 'the original',
       onThresholdChanged: (_) {},
       onAboutMeChanged: saved.add,
     );
+    await expand(tester, 'About me');
 
-    await tester.enterText(find.byType(TextField), 'typed then dismissed');
-    await tester.tapAt(const Offset(10, 10));
+    await tester.enterText(find.byType(TextField), 'typed then cancelled');
+    await tester.pump();
+    await tester.tap(find.text('Cancel'));
     await tester.pumpAndSettle();
 
-    expect(saved, ['typed then dismissed']);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'the original',
+    );
+    expect(saved, isEmpty);
   });
 
-  testWidgets('but a text nobody touched is not saved at all', (tester) async {
-    // Not just an economy: a sign-in from this dialog that changes the
-    // identity wipes the previous person's about-me, and an unconditional
-    // save on close would write it right back.
+  testWidgets('nothing is saved on dispose', (tester) async {
+    // Not just an economy: a sign-in from this screen that changes the
+    // identity wipes the previous person's about-me, and a save on the way out
+    // would write it right back. Save is the whole contract now.
     final saved = <String>[];
     await open(
       tester,
@@ -175,11 +190,68 @@ void main() {
       onThresholdChanged: (_) {},
       onAboutMeChanged: saved.add,
     );
+    await expand(tester, 'About me');
 
-    await tester.tap(find.text('Done'));
+    await tester.enterText(find.byType(TextField), 'typed and abandoned');
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox());
     await tester.pumpAndSettle();
 
     expect(saved, isEmpty);
+  });
+
+  testWidgets('a clean about-me adopts a value changed underneath it',
+      (tester) async {
+    // A sign-in from inside Settings that changes the identity wipes the
+    // previous person's about-me to '' under an open screen. A field nobody
+    // has touched must follow, or the old text sits there looking saved.
+    await open(
+      tester,
+      aboutMe: 'the previous person',
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+    await expand(tester, 'About me');
+
+    // The same tree pumped again with a new prop is the host rebuilding.
+    await open(
+      tester,
+      aboutMe: '',
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      '',
+    );
+    expect(find.text('Not written yet'), findsOneWidget);
+  });
+
+  testWidgets('a dirty about-me keeps its edit when the value changes '
+      'underneath it', (tester) async {
+    // An unsaved edit is the user's, whatever the host now says.
+    await open(
+      tester,
+      aboutMe: 'the previous person',
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+    await expand(tester, 'About me');
+    await tester.enterText(find.byType(TextField), 'my own words');
+    await tester.pump();
+
+    await open(
+      tester,
+      aboutMe: '',
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'my own words',
+    );
   });
 
   testWidgets('it opens on what is already stored', (tester) async {
@@ -189,11 +261,45 @@ void main() {
       onThresholdChanged: (_) {},
       onAboutMeChanged: (_) {},
     );
+    await expand(tester, 'About me');
 
-    expect(find.text('stored text'), findsOneWidget);
+    // Scoped to the field: a short about-me is also its own summary, one line
+    // above, so a bare text finder would match twice.
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'stored text',
+    );
   });
 
-  testWidgets('what the dialog writes lands in app_prefs', (tester) async {
+  testWidgets('the collapsed summary shows the stored text', (tester) async {
+    // Long enough to be cut, and folded onto one line: the summary is a
+    // one-line answer, not a preview of the paragraph.
+    const long =
+        'I run marketing at a small company.\nI own the website redesign, the '
+        'event calendar, and the newsletter nobody reads.';
+    await open(
+      tester,
+      aboutMe: long,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+
+    final oneLine = long.replaceAll(RegExp(r'\s+'), ' ');
+    expect(find.text('${oneLine.substring(0, 80)}…'), findsOneWidget);
+  });
+
+  testWidgets('an empty about-me says so rather than showing nothing',
+      (tester) async {
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+
+    expect(find.text('Not written yet'), findsOneWidget);
+  });
+
+  testWidgets('what the screen writes lands in app_prefs', (tester) async {
     final db = testDb();
     addTearDown(db.close);
     final store = MessageStore(db);
@@ -212,15 +318,109 @@ void main() {
       onAboutMeChanged: prefs.setAboutMe,
     );
 
-    await tester.enterText(find.byType(TextField), 'I run a small design studio.');
-    await tester.drag(find.byType(Slider), const Offset(-500, 0));
+    await expand(tester, 'About me');
+    await tester.enterText(
+      find.byType(TextField),
+      'I run a small design studio.',
+    );
+    await tester.pump();
+    await tester.tap(find.text('Save'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Done'));
+
+    await expand(tester, 'Needs You');
+    await tester.drag(find.byType(Slider), const Offset(-500, 0));
     await tester.pumpAndSettle();
 
     expect(await store.getPref(aboutMeKey), 'I run a small design studio.');
     expect(double.parse((await store.getPref(attentionThresholdKey))!), 1.0);
     expect(container.read(appPrefsProvider).attentionThreshold, 1.0);
+  });
+
+  testWidgets('the home link is absent unless the host wires one',
+      (tester) async {
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+
+    expect(find.byTooltip('Home'), findsNothing);
+
+    var home = 0;
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+      onHome: () => home++,
+    );
+
+    expect(find.byTooltip('Home'), findsOneWidget);
+    await tester.tap(find.byTooltip('Home'));
+    await tester.pumpAndSettle();
+    expect(home, 1);
+  });
+
+  testWidgets("Back fires the host's callback", (tester) async {
+    var backs = 0;
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+      onBack: () => backs++,
+    );
+
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+
+    expect(backs, 1);
+  });
+
+  testWidgets('two sections can be open at once', (tester) async {
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+      onNotifyStyleChanged: (_) {},
+    );
+
+    await expand(tester, 'About me');
+    await expand(tester, 'Notifications');
+
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.byType(SegmentedButton<NotifyStyle>), findsOneWidget);
+    // Both toggles say Collapse, so neither closed the other.
+    expect(find.text('Collapse'), findsNWidgets(2));
+  });
+
+  testWidgets('every section survives a doubled text scale', (tester) async {
+    // The three places that overflow first: the section header row, the pane
+    // header with the Home button, and the threshold's two end labels.
+    tester.platformDispatcher.textScaleFactorTestValue = 2.0;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+
+    await open(
+      tester,
+      aboutMe: 'a paragraph about the person using this',
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+      onShowActivityLogChanged: (_) {},
+      onNotifyStyleChanged: (_) {},
+      hasScope: (_) async => true,
+      onSignInAgain: () {},
+      onHome: () {},
+    );
+
+    for (final title in const [
+      'About me',
+      'Microsoft connection',
+      'Needs You',
+      'Notifications',
+      'Activity log',
+    ]) {
+      await expand(tester, title);
+    }
+
+    expect(tester.takeException(), isNull);
   });
 
   group('the activity log switch', () {
@@ -231,7 +431,7 @@ void main() {
         onAboutMeChanged: (_) {},
       );
 
-      expect(find.text('Show activity log'), findsNothing);
+      expect(find.text('Activity log'), findsNothing);
       expect(find.byType(SwitchListTile), findsNothing);
     });
 
@@ -243,6 +443,9 @@ void main() {
         showActivityLog: true,
         onShowActivityLogChanged: (_) {},
       );
+      expect(find.text('Shown in the sidebar'), findsOneWidget);
+
+      await expand(tester, 'Activity log');
 
       expect(find.text('Show activity log'), findsOneWidget);
       expect(tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
@@ -251,9 +454,9 @@ void main() {
 
     testWidgets('reports the flip immediately, not on the way out',
         (tester) async {
-      // The icon this switch controls is on screen behind the dialog. A
-      // toggle whose effect only lands at dispose cannot be checked by the
-      // person who just flipped it.
+      // The icon this switch controls is on the rail behind this pane. A
+      // toggle whose effect only lands on Back cannot be checked by the person
+      // who just flipped it.
       final written = <bool>[];
       await open(
         tester,
@@ -261,6 +464,7 @@ void main() {
         onAboutMeChanged: (_) {},
         onShowActivityLogChanged: written.add,
       );
+      await expand(tester, 'Activity log');
 
       await tester.tap(find.byType(SwitchListTile));
       await tester.pumpAndSettle();
@@ -299,7 +503,10 @@ void main() {
       );
 
       expect(find.text('Notifications'), findsOneWidget);
-      expect(find.text('Off'), findsOneWidget);
+
+      await expand(tester, 'Notifications');
+
+      expect(find.text('Off'), findsWidgets);
       expect(find.text('In-app'), findsOneWidget);
       expect(find.text('Native'), findsOneWidget);
       expect(
@@ -325,6 +532,7 @@ void main() {
         onAboutMeChanged: (_) {},
         onNotifyStyleChanged: written.add,
       );
+      await expand(tester, 'Notifications');
 
       await tester.tap(find.text('Off'));
       await tester.pumpAndSettle();
@@ -355,11 +563,17 @@ void main() {
         onNotifyStyleChanged: (_) {},
       );
 
+      // Two sections, in the one scrolling pane. That there is no popup
+      // anywhere in lib/ is `no_dialogs_test.dart`'s job to pin.
+      expect(find.text('Activity log'), findsOneWidget);
+      expect(find.text('Notifications'), findsOneWidget);
+
+      await expand(tester, 'Activity log');
+      await expand(tester, 'Notifications');
+
       expect(find.byType(SwitchListTile), findsOneWidget);
       expect(find.text('Show activity log'), findsOneWidget);
       expect(find.byType(SegmentedButton<NotifyStyle>), findsOneWidget);
-      // Rows in the legacy dialog, never a dialog of their own.
-      expect(find.byType(AlertDialog), findsOneWidget);
     });
   });
 
@@ -371,6 +585,7 @@ void main() {
         onAboutMeChanged: (_) {},
       );
 
+      expect(find.text('Microsoft connection'), findsNothing);
       expect(find.text('Microsoft permissions'), findsNothing);
     });
 
@@ -383,14 +598,11 @@ void main() {
         hasScope: (_) async => true,
         onSignInAgain: () {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(find.text('Send mail'), findsOneWidget);
       expect(find.text('Save drafts'), findsOneWidget);
-      expect(
-        find.text('Teams chats'),
-        findsOneWidget,
-      );
+      expect(find.text('Teams chats'), findsOneWidget);
       expect(find.byIcon(Icons.check), findsNWidgets(3));
       expect(find.byIcon(Icons.close), findsNothing);
       // A tenant that granted everything has nothing to be nagged about.
@@ -410,7 +622,7 @@ void main() {
         },
         onSignInAgain: () {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(asked, ['mail.send', 'mail.readwrite', 'chat.read']);
       expect(find.byIcon(Icons.check), findsOneWidget);
@@ -430,7 +642,7 @@ void main() {
         hasScope: (scope) async => scope != 'chat.read',
         onSignInAgain: () {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       expect(find.byIcon(Icons.close), findsOneWidget);
       expect(find.text('Sign in again to enable'), findsNothing);
@@ -445,7 +657,7 @@ void main() {
         hasScope: (_) async => false,
         onSignInAgain: () => asked++,
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
 
       await tester.tap(find.text('Sign in again to enable'));
       await tester.pumpAndSettle();
@@ -468,7 +680,8 @@ void main() {
         },
         onSignInAgain: () {},
       );
-      await tester.pumpAndSettle();
+      await expand(tester, 'Microsoft connection');
+      await expand(tester, 'Needs You');
       await tester.drag(find.byType(Slider), const Offset(-100, 0));
       await tester.pumpAndSettle();
 

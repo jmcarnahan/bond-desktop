@@ -23,6 +23,18 @@ beyond-cap rows are never queued for the pass at all. `needs_you` also joins
 the debounce's wake set, so a drain that finishes verdicts sweeps in 750 ms
 rather than waiting out the 30-second timer.
 
+**Stamps.** `_isComplete` also holds a row open while `ai_updated_at` sorts
+before `message_updated_at` — a score older than the message is a verdict
+about an older version of it. Those are compared as **strings**, which only
+works when every stamp has the same width: Dart's `toIso8601String` prints
+three fractional digits when the microseconds happen to be zero and six
+otherwise, and `Z` sorts after any digit, so a stamp on the millisecond used
+to sort *after* one a few hundred microseconds later and the row never
+settled. Every stamp the store writes now goes through `MessageStore.isoStamp`
+(UTC, six fractional digits, padded), and the coordinator's deadline and
+stale-claim cutoffs use the same helper. Six digits and not three, because
+two writes in the same millisecond still have to say which came second.
+
 **Timing.** Six-minute settle deadline, 30-second sweep, 750 ms event
 debounce. The header comment in `notification_coordinator.dart` documents the
 settle budget and — importantly — why `deadline` and `read` are *not* drop

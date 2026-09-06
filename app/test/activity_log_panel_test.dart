@@ -283,6 +283,56 @@ void main() {
       expect(find.text('33 t/s'), findsOneWidget);
     });
 
+    testWidgets('the speed cell names the model', (tester) async {
+      await pump(
+        tester,
+        events: [
+          _event(
+            kind: 'triage',
+            detail: const {
+              'completion_tokens': 60,
+              'llm_ms': 4000,
+              'llm_model': 'qwen3-4b',
+            },
+          ),
+        ],
+      );
+
+      // The one question a rate raises once the model is switchable: fast at
+      // WHAT. The column has no room for the name, so it rides the tooltip.
+      final tooltip = tester.widget<Tooltip>(
+        find.ancestor(
+          of: find.text('15 t/s'),
+          matching: find.byType(Tooltip),
+        ),
+      );
+      expect(tooltip.message, 'qwen3-4b');
+    });
+
+    testWidgets('a row with no model has no tooltip at all', (tester) async {
+      await pump(
+        tester,
+        events: [
+          _event(
+            kind: 'triage',
+            detail: const {'completion_tokens': 60, 'llm_ms': 4000},
+          ),
+        ],
+      );
+
+      // Not an empty tooltip — none. This Flutter pops a bubble for an empty
+      // message, and every row written before the model was recorded has to
+      // look exactly as it did. (The header's speed tile reads the same
+      // figure; neither it nor the row may carry a tooltip here.)
+      expect(
+        find.ancestor(
+          of: find.text('15 t/s'),
+          matching: find.byType(Tooltip),
+        ),
+        findsNothing,
+      );
+    });
+
     testWidgets('rows keep the order they were handed over', (tester) async {
       final now = DateTime(2026, 3, 12, 9);
       await pump(

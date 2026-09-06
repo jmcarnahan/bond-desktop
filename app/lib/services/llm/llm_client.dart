@@ -5,6 +5,8 @@ import 'dart:io' show SocketException;
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 
+import 'model_slots.dart';
+
 /// The one HTTP call this app makes to the local model.
 ///
 /// llama-server speaks the OpenAI chat-completions shape, so this is a plain
@@ -82,6 +84,17 @@ class LlmCallRecord {
   final int? serverPromptMs;
   final int? serverPredictedMs;
 
+  /// The model name this request actually carried, and the URL it actually
+  /// went to — resolved once per call, so a record from before a settings
+  /// change reports the server it really used rather than the one now
+  /// configured.
+  ///
+  /// Nullable for the same reason every other field here is: a record built by
+  /// something that is not this client should not have to invent them. Every
+  /// record [LlmClient] emits sets both.
+  final String? model;
+  final String? baseUrl;
+
   /// `ok`, `unavailable`, `error`, or `format`.
   final String outcome;
 
@@ -96,6 +109,8 @@ class LlmCallRecord {
     this.completionTokens,
     this.serverPromptMs,
     this.serverPredictedMs,
+    this.model,
+    this.baseUrl,
     this.statusCode,
     this.error,
   });
@@ -108,50 +123,54 @@ typedef LlmCallObserver = void Function(LlmCallRecord record);
 class LlmClient {
   /// Overridable at build time (`--dart-define=LLAMA_URL=…`) for a model
   /// server on another port or another machine.
-  static const String defaultBaseUrl = String.fromEnvironment(
-    'LLAMA_URL',
-    defaultValue: 'http://localhost:8080/v1/chat/completions',
-  );
+  ///
+  /// Kept as the name every existing caller uses — `bench_target.dart` and
+  /// `llm_routing_test.dart` both read these. The values live in
+  /// `model_slots.dart` now so the slot defaults there can be const, and a
+  /// `const` alias of a const variable is the only shape that avoids a library
+  /// cycle between the two files.
+  static const String defaultBaseUrl = proseUrlDefault;
 
   /// The small model that does the bulk work — triage, extraction, storyline
   /// membership. Same wire protocol, its own server: see `make fast`.
-  static const String fastBaseUrl = String.fromEnvironment(
-    'FAST_LLAMA_URL',
-    defaultValue: 'http://localhost:8082/v1/chat/completions',
-  );
+  static const String fastBaseUrl = fastUrlDefault;
 
-  /// The model name every request carries, and the reason it is a field on the
-  /// instance rather than the one constant it used to be.
+  /// The model name every request carries, and the reason it is per instance
+  /// rather than the one constant it used to be.
   ///
   /// llama-server ignores it — it serves whatever was loaded at launch — but
   /// the OpenAI request schema requires the field, and an MLX-based server
   /// HONOURS it: one runtime can hold several models and picks by this name.
   /// A single constant would make the app unable to say which of them it meant.
-  static const String defaultModel = String.fromEnvironment(
-    'LLAMA_MODEL',
-    defaultValue: 'qwen3.8',
-  );
+  static const String defaultModel = proseModelDefault;
 
   /// The same, for the bulk-work server — the two may be different models on
   /// different runtimes, so they get separate defines.
-  static const String fastModel = String.fromEnvironment(
-    'FAST_LLAMA_MODEL',
-    defaultValue: 'qwen3.8',
-  );
+  static const String fastModel = fastModelDefault;
 
   /// The model generates at roughly 12 tokens a second, so a full 512-token
   /// answer can legitimately take most of a minute. This ceiling is here to
   /// catch a wedged server, not a slow one.
   static const Duration _defaultTimeout = Duration(seconds: 120);
 
-  static const String _unreachable =
-      'The local model server is not reachable — run: make model';
+  /// Names the server that did not answer. The old constant said
+  /// "run: make model" for BOTH clients, which was wrong for the fast slot
+  /// and wronger now that either can point anywhere.
+  static String _unreachable(String url) =>
+      'The local model server at $url is not reachable — start it, or change '
+      'it in Settings → Models';
 
-  final String baseUrl;
+  /// Where this client points when nothing resolves for it — the constructor's
+  /// arguments, which is what every test that subclasses this passes.
+  final String _baseUrl;
+  final String _model;
 
-  /// What this client calls the model it is talking to. Per instance, because
-  /// the two servers may be two different models — see [defaultModel].
-  final String model;
+  /// Late binding: consulted at the top of every request rather than at
+  /// construction, so a settings change applies to the NEXT call without
+  /// rebuilding this client or the provider graph under it. Null in every
+  /// test and in every bench — those pass a fixed [baseUrl]/[model] and
+  /// behave exactly as before.
+  final LlmTarget Function()? _resolveTarget;
 
   /// Per instance for a plainer reason than [model]: a candidate runtime being
   /// benched may be slower than the ceiling that suits the shipping one, and a
@@ -170,11 +189,35 @@ class LlmClient {
     Duration? timeout,
     http.Client? httpClient,
     LlmCallObserver? onCall,
-  })  : baseUrl = baseUrl ?? defaultBaseUrl,
-        model = model ?? defaultModel,
+    LlmTarget Function()? resolveTarget,
+  })  : _baseUrl = baseUrl ?? defaultBaseUrl,
+        _model = model ?? defaultModel,
         timeout = timeout ?? _defaultTimeout,
         _http = httpClient ?? http.Client(),
-        _onCall = onCall;
+        _onCall = onCall,
+        _resolveTarget = resolveTarget;
+
+  /// Where the next request will go.
+  ///
+  /// A resolver that throws falls back to the constructed target rather than
+  /// failing the call: it reads a Riverpod container it does not own, and a
+  /// container torn down mid-drain must degrade to the compiled default, not
+  /// turn into an exception on the queue's hot path. Same guard, same reason,
+  /// as `embeddingsClientProvider`'s `onFail`.
+  LlmTarget get target {
+    final resolve = _resolveTarget;
+    if (resolve == null) return LlmTarget(baseUrl: _baseUrl, model: _model);
+    try {
+      return resolve();
+    } catch (_) {
+      return LlmTarget(baseUrl: _baseUrl, model: _model);
+    }
+  }
+
+  /// Preserved as readable properties — `llm_routing_test.dart` asserts on
+  /// [baseUrl], and the settings screen reads both.
+  String get baseUrl => target.baseUrl;
+  String get model => target.model;
 
   /// Free-text completion. Nothing in this app uses it yet; it is the seam a
   /// draft-reply task lands on.
@@ -262,7 +305,8 @@ class LlmClient {
     required bool think,
   }) =>
       {
-        'model': model,
+        // 'model' is NOT set here — see [_post], which resolves the target
+        // once and stamps both the name and the URL from that one answer.
         'messages': [
           {'role': 'system', 'content': system},
           {'role': 'user', 'content': user},
@@ -282,16 +326,26 @@ class LlmClient {
     required bool think,
     required String label,
   }) async {
+    // ONE resolution per request. Reading `baseUrl` and `model` separately
+    // would let a save between the two stamp a name from the new target onto
+    // the old target's URL.
+    final target = this.target;
+    body['model'] = target.model;
+
     final observer = _onCall;
-    if (observer == null) return (await _postInner(body, think: think)).message;
+    if (observer == null) {
+      return (await _postInner(body, think: think, target: target)).message;
+    }
 
     final sw = Stopwatch()..start();
     try {
-      final result = await _postInner(body, think: think);
+      final result = await _postInner(body, think: think, target: target);
       observer(LlmCallRecord(
         label: label,
         durationMs: sw.elapsedMilliseconds,
         outcome: 'ok',
+        model: target.model,
+        baseUrl: target.baseUrl,
         promptTokens: result.promptTokens,
         completionTokens: result.completionTokens,
         serverPromptMs: result.serverPromptMs,
@@ -303,6 +357,8 @@ class LlmClient {
         label: label,
         durationMs: sw.elapsedMilliseconds,
         outcome: 'unavailable',
+        model: target.model,
+        baseUrl: target.baseUrl,
         error: e.message,
       ));
       rethrow;
@@ -311,6 +367,8 @@ class LlmClient {
         label: label,
         durationMs: sw.elapsedMilliseconds,
         outcome: 'format',
+        model: target.model,
+        baseUrl: target.baseUrl,
         error: e.message,
       ));
       rethrow;
@@ -319,6 +377,8 @@ class LlmClient {
         label: label,
         durationMs: sw.elapsedMilliseconds,
         outcome: 'error',
+        model: target.model,
+        baseUrl: target.baseUrl,
         statusCode: e.statusCode,
         error: e.message,
       ));
@@ -336,20 +396,21 @@ class LlmClient {
       })> _postInner(
     Map<String, dynamic> body, {
     required bool think,
+    required LlmTarget target,
   }) async {
     final http.Response response;
     try {
       response = await _http
           .post(
-            Uri.parse(baseUrl),
+            Uri.parse(target.baseUrl),
             headers: const {'Content-Type': 'application/json'},
             body: jsonEncode(body),
           )
           .timeout(timeout);
     } on SocketException {
-      throw const LlmUnavailableException(_unreachable);
+      throw LlmUnavailableException(_unreachable(target.baseUrl));
     } on http.ClientException {
-      throw const LlmUnavailableException(_unreachable);
+      throw LlmUnavailableException(_unreachable(target.baseUrl));
     } on TimeoutException {
       // NOT [LlmUnavailableException]: the server accepted the connection, so
       // this is one request going wrong rather than a server that is down.

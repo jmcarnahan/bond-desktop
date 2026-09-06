@@ -56,6 +56,35 @@ final activityEventsProvider = StreamProvider.autoDispose<ActivityEvent>(
   (ref) => ref.watch(activityLogProvider).events,
 );
 
+/// When each pass last completed, and nothing else.
+@immutable
+class SyncStamps {
+  final String? mailIso;
+  final String? teamsIso;
+  final String? sweepIso;
+
+  const SyncStamps({this.mailIso, this.teamsIso, this.sweepIso});
+}
+
+/// The three freshness stamps alone, for anything that only wants to say
+/// "when did this last run".
+///
+/// Split from [activitySnapshotProvider] because that one pays for the whole
+/// pane — three hundred events and every conversation subject — on every
+/// recorded event, and the settings screen's Sync & data section needs three
+/// preference reads. Kept live the same way: watching [activityEventsProvider]
+/// re-reads it after every event, and the sync passes stamp their preference
+/// before they record, so the re-read always sees the new time.
+final syncStampsProvider = FutureProvider.autoDispose<SyncStamps>((ref) async {
+  ref.watch(activityEventsProvider);
+  final store = ref.watch(messageStoreProvider);
+  return SyncStamps(
+    mailIso: await store.getPref(activityLastSyncMailKey),
+    teamsIso: await store.getPref(activityLastSyncTeamsKey),
+    sweepIso: await store.getPref(activityLastSweepKey),
+  );
+});
+
 /// The activity pane's read model, re-read on every recorded event.
 ///
 /// Watching [activityEventsProvider] is what keeps it live: each event is a new

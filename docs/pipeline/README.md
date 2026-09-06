@@ -43,7 +43,7 @@ live in [10-model-routing.md](10-model-routing.md).
 
 ## The two-model split at a glance
 
-| Task | Slot | Default server |
+| Task | Slot | Default server (compile-time) |
 |------|------|----------------|
 | Triage | fast / bulk | `:8082` Qwen3-4B-Instruct (`make fast`) |
 | Needs-you verdict | fast / bulk | `:8082` |
@@ -55,6 +55,10 @@ live in [10-model-routing.md](10-model-routing.md).
 | Reply decision | prose / 27B | `:8080` |
 | Draft generation | prose / 27B | `:8080` |
 | Embeddings | embed | `:8081` embeddinggemma-300M (`make embed`) |
+
+Both chat slots can be re-pointed at runtime in Settings → Models; the mapping
+above does not change. See
+[10-model-routing.md](10-model-routing.md#runtime-overrides).
 
 The home screen's five-segment stage bar (triage · extract · storyline ·
 draft · settle) is this pipeline rendered per row; `pipeline_progress.dart`
