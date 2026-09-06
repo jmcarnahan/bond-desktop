@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:intl/intl.dart';
 
 import '../../models/message_models.dart';
+import '../attachments/attachment_markers.dart';
 import 'json_task.dart';
 import 'message_block.dart';
 import 'prompt_guard.dart';
@@ -287,9 +288,12 @@ class DraftTask implements JsonTask<DraftResult> {
   }
 
   static String _formatMessage(Message message) {
-    final body = message.bodyText?.isNotEmpty == true
-        ? message.bodyText!
-        : (message.bodyPreview ?? '');
+    // Markers out, for [buildMessageBlock]'s reason.
+    final body = stripAttachmentMarkers(
+      message.bodyText?.isNotEmpty == true
+          ? message.bodyText!
+          : message.bodyPreview,
+    );
     final from = message.outbound ? 'From: you' : senderLine(message);
     return '$from\n'
         'Sent: ${message.receivedAt ?? ''}\n'

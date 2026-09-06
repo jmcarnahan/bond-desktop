@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 12;
+  int get schemaVersion => 13;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -469,6 +469,52 @@ UPDATE storylines
                     schema.messages.gateOverride,
                   );
                 }
+              },
+              // v13 — the attachments round. Three tables: the metadata a row
+              // draws and the text policy judges on, the extracted words, and
+              // the embedded passages.
+              //
+              // No backfill, and that is deliberate rather than lazy: an
+              // attachment is discovered by the detail fetch, so every stored
+              // message re-learns what came with it the next time its body is
+              // fetched, and nothing here has to guess at history.
+              //
+              // The indexes are hand-written with IF NOT EXISTS for the v6
+              // reason (the generated `Index` entities carry a bare CREATE
+              // INDEX, which throws on a replay over a torn state); names and
+              // columns match the generated entities exactly, which is what
+              // the fresh-vs-migrated parity test compares. The vec0 index
+              // over `attachment_chunks` is NOT created here — a virtual
+              // table needs an extension that may not be loaded, and it is
+              // derived anyway.
+              from12To13: (m, schema) async {
+                if (!await _tableExists('attachments')) {
+                  await m.createTable(schema.attachments);
+                }
+                if (!await _tableExists('attachment_text')) {
+                  await m.createTable(schema.attachmentText);
+                }
+                if (!await _tableExists('attachment_chunks')) {
+                  await m.createTable(schema.attachmentChunks);
+                }
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_attachments_message '
+                  'ON attachments(source, source_message_id, ordinal)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_attachments_pinned '
+                  'ON attachments(pinned_storyline_id)',
+                );
+                await customStatement(
+                  'CREATE UNIQUE INDEX IF NOT EXISTS '
+                  'ix_attachment_chunks_seq ON attachment_chunks('
+                  'source, source_message_id, attachment_id, seq)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS '
+                  'ix_attachment_chunks_unindexed '
+                  'ON attachment_chunks(indexed_at)',
+                );
               },
             ),
           ),

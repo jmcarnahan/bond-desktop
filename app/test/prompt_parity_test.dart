@@ -1,3 +1,4 @@
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
@@ -321,6 +322,77 @@ void main() {
       expect(chat, isNot(contains('under 150 words')));
       expect(mail, isNot(contains('This is an instant-message chat.')));
       expect(mail, isNot(contains('under 50 words')));
+    });
+  });
+
+  group('attachments do not reach a system prompt', () {
+    // A Teams body records where a shared file sat as `[[att:<id>]]`. Every
+    // user message strips those (attachment_markers_test is the exhaustive
+    // pass); the point HERE is that adding an attachment to a message cannot
+    // move a system prompt, because that is the byte the prefix cache is
+    // keyed on.
+    final withAttachment = Message(
+      id: 'c2',
+      source: 'teams',
+      outbound: false,
+      fromName: 'Dana Kessler',
+      fromAddress: 'teams:8f2c-…',
+      bodyText: 'Signed copy [[att:file-1]].',
+      receivedAt: '2026-08-29T16:05:00Z',
+      attachments: const [
+        AttachmentRef(
+          source: 'teams',
+          messageId: 'c2',
+          attachmentId: 'file-1',
+          name: 'lease-addendum.pdf',
+        ),
+      ],
+    );
+
+    test('the triage system prompt is identical with and without them', () {
+      final before = triage.systemPrompt;
+      triage.buildUserMessage(TriageInput(
+        withAttachment,
+        now,
+        attachments: const [
+          {'attachment_id': 'file-1', 'name': 'lease-addendum.pdf',
+            'size': 184320, 'is_inline': 0},
+        ],
+      ));
+
+      expect(identical(triage.systemPrompt, before), isTrue);
+    });
+
+    test('and so is every other one', () {
+      final before = [
+        extract.systemPrompt,
+        draft.systemPrompt,
+        replyDecision.systemPrompt,
+        needsYou.systemPrompt,
+      ];
+
+      extract.buildUserMessage(ExtractionInput(withAttachment, now));
+      draft.buildUserMessage(draftInput(withAttachment));
+      replyDecision.buildUserMessage(replyDecisionInput(withAttachment));
+      needsYou.buildUserMessage(needsYouInput(withAttachment));
+
+      expect(identical(extract.systemPrompt, before[0]), isTrue);
+      expect(identical(draft.systemPrompt, before[1]), isTrue);
+      expect(identical(replyDecision.systemPrompt, before[2]), isTrue);
+      expect(identical(needsYou.systemPrompt, before[3]), isTrue);
+    });
+
+    test('no system prompt names an attachment marker', () {
+      for (final prompt in [
+        triage.systemPrompt,
+        extract.systemPrompt,
+        draft.systemPrompt,
+        replyDecision.systemPrompt,
+        needsYou.systemPrompt,
+      ]) {
+        expect(prompt, isNot(contains('[[att:')));
+        expect(prompt, isNot(contains('[[img:')));
+      }
     });
   });
 }

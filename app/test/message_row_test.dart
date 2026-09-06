@@ -1,9 +1,15 @@
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/attachment_chip_row.dart';
 import 'package:bond_inbox/widgets/chips.dart';
+import 'package:bond_inbox/widgets/inline_image_thumb.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/time_format.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/attachment_refs.dart';
 
 /// A local, timezone-free ISO string — parsed as local time, so the day-key
 /// and day-label assertions below do not move with the runner's TZ.
@@ -28,6 +34,7 @@ Message _msg({
   bool? needsAction,
   List<String> actionItems = const [],
   String? deadline,
+  List<AttachmentRef> attachments = const [],
 }) {
   return Message(
     id: id,
@@ -43,6 +50,7 @@ Message _msg({
     needsAction: needsAction,
     actionItems: actionItems,
     deadline: deadline,
+    attachments: attachments,
   );
 }
 
@@ -378,6 +386,295 @@ void main() {
       final avatar = tester.getTopLeft(find.text('EN'));
       final body = tester.getTopLeft(find.text('Hello there.'));
       expect(avatar.dx, lessThan(body.dx));
+    });
+  });
+
+  group('layOutBody', () {
+    test('a marker puts the file where the sender put it', () {
+      final file = ref(attachmentId: 'a1', name: 'Terms.pdf');
+      final layout = layOutBody('Here it is [[att:a1]] have a look', [file]);
+
+      expect(layout.segments.length, 3);
+      expect((layout.segments[0] as BodyTextSegment).text, 'Here it is');
+      final placed = layout.segments[1] as BodyAttachmentSegment;
+      expect(placed.attachment.attachmentId, 'a1');
+      expect(placed.asImage, isFalse);
+      expect((layout.segments[2] as BodyTextSegment).text, 'have a look');
+      expect(layout.chips, isEmpty);
+      expect(layout.plainText, 'Here it is have a look');
+    });
+
+    test('a marker naming nothing leaves nothing behind', () {
+      final layout = layOutBody('Sent it over [[att:gone]]', const []);
+
+      expect(layout.plainText, 'Sent it over');
+      expect(layout.segments.single, isA<BodyTextSegment>());
+    });
+
+    test('a marker-only chat message is the file and no words', () {
+      final file = ref(source: 'teams', attachmentId: 'a1');
+      final layout = layOutBody('[[att:a1]]', [file]);
+
+      expect(layout.plainText, '');
+      expect(layout.segments.single, isA<BodyAttachmentSegment>());
+    });
+
+    test('a pasted picture is drawn in place', () {
+      final shot = imageRef(
+        attachmentId: 'i1',
+        contentId: 'shot@example',
+        size: 90 * 1024,
+      );
+      final layout = layOutBody('Look at this [cid:shot@example] — see?', [shot]);
+
+      final placed =
+          layout.segments.whereType<BodyAttachmentSegment>().single;
+      expect(placed.attachment.attachmentId, 'i1');
+      expect(placed.asImage, isTrue);
+      expect(layout.plainText, 'Look at this — see?');
+      expect(layout.trailingImages, isEmpty);
+    });
+
+    test('a signature logo is stripped and is not a file anybody sent', () {
+      final logo = imageRef(
+        attachmentId: 'i1',
+        name: 'logo.png',
+        contentId: 'logo@example',
+        size: 4 * 1024,
+      );
+      final layout = layOutBody('Thanks,\nDana [cid:logo@example]', [logo]);
+
+      expect(layout.plainText, 'Thanks,\nDana');
+      expect(layout.segments.whereType<BodyAttachmentSegment>(), isEmpty);
+      expect(layout.chips, isEmpty);
+      expect(layout.trailingImages, isEmpty);
+    });
+
+    test('what the body never mentioned falls to the bottom, in order', () {
+      final files = [
+        imageRef(attachmentId: 'i1', ordinal: 2, isInline: false),
+        ref(attachmentId: 'a1', ordinal: 1, name: 'Second.pdf'),
+        ref(attachmentId: 'a0', ordinal: 0, name: 'First.pdf'),
+      ];
+      final layout = layOutBody('See attached.', files);
+
+      expect(layout.chips.map((a) => a.name), ['First.pdf', 'Second.pdf']);
+      expect(layout.trailingImages.map((a) => a.attachmentId), ['i1']);
+    });
+
+    test('plain text is what the clamp measures, pictures and all', () {
+      final shot = imageRef(
+        attachmentId: 'i1',
+        contentId: 'shot@example',
+        size: 90 * 1024,
+      );
+      final long = List.filled(40, 'line').join('\n');
+      final layout = layOutBody('$long\n[cid:shot@example]', [shot]);
+
+      expect(layout.plainText.split('\n').length, 40);
+    });
+
+    test('a body with no tokens is returned exactly as it was', () {
+      const body = 'Two  spaces and\n\n\n\nfour newlines.  ';
+      final layout = layOutBody(body, const []);
+
+      expect(layout.plainText, body);
+    });
+
+    test('the same file named twice is drawn once', () {
+      final file = ref(attachmentId: 'a1');
+      final layout = layOutBody('[[att:a1]] and again [[att:a1]]', [file]);
+
+      expect(layout.segments.whereType<BodyAttachmentSegment>().length, 1);
+      expect(layout.chips, isEmpty);
+      expect(layout.plainText, 'and again');
+    });
+  });
+
+  group('displayableAttachmentCount', () {
+    test('counts what a reader would call a file', () {
+      final message = _msg(
+        bodyText: 'Thanks, Dana [cid:logo@example]',
+        attachments: [
+          ref(attachmentId: 'a1'),
+          imageRef(
+            attachmentId: 'i1',
+            contentId: 'logo@example',
+            size: 4 * 1024,
+          ),
+        ],
+      );
+
+      expect(displayableAttachmentCount(message), 1);
+    });
+
+    test('a message with nothing on it counts nothing', () {
+      expect(displayableAttachmentCount(_msg()), 0);
+    });
+
+    test('an inline logo nothing pointed at is furniture too', () {
+      final message = _msg(attachments: [
+        imageRef(attachmentId: 'i1', name: 'logo.png', size: 3 * 1024),
+      ]);
+
+      expect(displayableAttachmentCount(message), 0);
+    });
+
+    test('an image whose size nobody stated is a picture, not furniture', () {
+      final message = _msg(attachments: [
+        imageRef(attachmentId: 'i1', size: 0, isInline: true),
+      ]);
+
+      expect(displayableAttachmentCount(message), 1);
+    });
+  });
+
+  group('MessageRow attachments', () {
+    testWidgets('the files a message carried are named under it',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [
+          ref(attachmentId: 'a1', name: 'Terms.pdf'),
+          ref(attachmentId: 'a2', name: 'Schedule.xlsx', size: 12 * 1024),
+        ]),
+      )));
+
+      expect(find.byKey(AttachmentChipRow.rowKey), findsOneWidget);
+      expect(find.byType(AttachmentChip), findsNWidgets(2));
+      expect(find.text('Terms.pdf'), findsOneWidget);
+      expect(find.text('Schedule.xlsx'), findsOneWidget);
+    });
+
+    testWidgets('a marker draws the file inside the sentence, not below it',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          bodyText: 'Signed copy [[att:a1]] let me know',
+          attachments: [ref(attachmentId: 'a1', name: 'Terms.pdf')],
+        ),
+      )));
+
+      expect(find.byKey(AttachmentChipRow.rowKey), findsNothing);
+      expect(find.byType(AttachmentChip), findsOneWidget);
+      expect(find.text('Signed copy'), findsOneWidget);
+      expect(find.text('let me know'), findsOneWidget);
+      expect(find.textContaining('[[att:'), findsNothing);
+    });
+
+    testWidgets('a clamped body draws no pictures in it but still names them',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final long = List.filled(40, 'line').join('\n');
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          bodyText: '$long\n[[att:a1]]',
+          attachments: [ref(attachmentId: 'a1', name: 'Terms.pdf')],
+        ),
+      )));
+
+      expect(find.text('Show more'), findsOneWidget);
+      expect(find.byType(AttachmentChip), findsNothing);
+
+      await tester.tap(find.text('Show more'));
+      await tester.pump();
+      expect(find.byType(AttachmentChip), findsOneWidget);
+    });
+
+    testWidgets('a picture is drawn with whatever the host could give it',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final shot = imageRef(attachmentId: 'i1', name: 'Board.png');
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [shot]),
+      )));
+
+      expect(find.byKey(InlineImageThumb.keyFor(shot)), findsOneWidget);
+      // No bytes yet, so the frame stands in — and it is not a chip.
+      expect(
+        find.byKey(InlineImageThumb.placeholderKeyFor(shot)),
+        findsOneWidget,
+      );
+      expect(find.byType(AttachmentChip), findsNothing);
+    });
+
+    testWidgets('a folded row keeps the paperclip and nothing else',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [
+          ref(attachmentId: 'a1', name: 'Terms.pdf'),
+          ref(attachmentId: 'a2', name: 'Schedule.xlsx'),
+        ]),
+        collapsible: true,
+        initiallyCollapsed: true,
+      )));
+
+      expect(find.byKey(MessageRow.collapsedAttachmentHintKey), findsOneWidget);
+      expect(find.text('📎 2 files'), findsOneWidget);
+      expect(find.byType(AttachmentChip), findsNothing);
+
+      await tester.tap(find.text('Eric Nolan'));
+      await tester.pump();
+      expect(find.byKey(MessageRow.collapsedAttachmentHintKey), findsNothing);
+      expect(find.byType(AttachmentChip), findsNWidgets(2));
+    });
+
+    testWidgets('one file says one file', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [ref(attachmentId: 'a1')]),
+        collapsible: true,
+        initiallyCollapsed: true,
+      )));
+
+      expect(find.text('📎 1 file'), findsOneWidget);
+    });
+
+    testWidgets('a row with nowhere to open a file offers no tap',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [ref(attachmentId: 'a1')]),
+      )));
+
+      expect(find.byType(InkWell), findsNothing);
+    });
+
+    testWidgets('and one that does hands the host the file it was asked for',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      AttachmentRef? opened;
+      final file = ref(attachmentId: 'a1', name: 'Terms.pdf');
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [file]),
+        onOpenAttachment: (attachment) => opened = attachment,
+        selectedAttachment: file,
+      )));
+
+      expect(
+        tester.widget<AttachmentChip>(find.byType(AttachmentChip)).selected,
+        isTrue,
+      );
+      await tester.tap(find.text('Terms.pdf'));
+      expect(opened?.attachmentId, 'a1');
     });
   });
 

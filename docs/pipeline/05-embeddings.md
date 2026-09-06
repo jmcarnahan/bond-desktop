@@ -12,6 +12,16 @@ are never mixed:
    in `EmbedHandler` (`app/lib/services/embed_handler.dart`) for anything the
    fast path missed.
 
+**Attachment markers and the card hash.** `embedMessageRow` strips
+`[[att:…]]` / `[[img:…]]` markers out of the body before building the card, and
+it is the ONE place that happens on this path — `ExtractHandler` and
+`EmbedHandler` both come through it, and a strip in either alone would give
+them different cards and different hashes for the same message. Adding that
+strip changes `cardHash` for every marker-bearing Teams message, which costs
+one slow re-embed drain and nothing else. A chat message that was nothing but a
+shared file embeds as `Shared a file: <name>` rather than as a subject and a
+sender. See [12-attachments.md](12-attachments.md).
+
 **Each corpus has its own sqlite-vec index, and the separation above holds
 through them.** `MessageVectorIndex` (`vec_messages`, over `message_vectors`)
 answers search; `ConversationVectorIndex` (`vec_conversations`, over

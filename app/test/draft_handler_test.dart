@@ -115,9 +115,11 @@ void main() {
     String key = 'chat-1',
     String receivedAt = '2026-08-29T10:00:00Z',
     String body = 'Any word on the CD?',
+    int hasAttachments = 0,
   }) async {
     await store.upsertMessage({
       'source': 'teams',
+      'has_attachments': hasAttachments,
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'inbound',
@@ -357,9 +359,51 @@ void main() {
       expect(llm.userMessages.last, contains('This is an email thread.'));
       expect(llm.userMessages.last, contains('style_examples'));
     });
+
+    test('a tone sample carries no attachment marker', () async {
+      // A style example is a sample the model imitates, so a `[[att:…]]` in
+      // one is a token it would learn to write.
+      await seedOutbound(
+        body: 'Signed copy [[att:file-1]] attached — Jo',
+      );
+      await seedInbound();
+
+      final llm = FakeLlm([decision(), answer()]);
+      await runOne(DraftHandler(store, llm, progress: progress));
+
+      expect(llm.userMessages.last, isNot(contains('[[att:')));
+      expect(llm.userMessages.last, contains('Signed copy attached'));
+    });
   });
 
   group('a chat drafts through the same handler', () {
+    test('a file-only chat message reaches the model as what was shared',
+        () async {
+      // The reply-decision call is the one that matters: it is asked whether a
+      // message needs an answer, and a body that is nothing but a marker looks
+      // to it like a message that said nothing at all.
+      await seedChat(body: '[[att:a1]]', hasAttachments: 1);
+      await store.upsertAttachments('teams', 'chat-1-m1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Contract-v2.docx',
+          'size': 0,
+        },
+      ]);
+      final llm = FakeLlm([decision(), answer()]);
+
+      await runOne(
+        DraftHandler(store, llm, progress: progress),
+        id: 'chat-1-m1',
+        source: 'teams',
+      );
+
+      expect(llm.userMessages.first, contains('Shared a file: Contract-v2.docx'));
+      expect(llm.userMessages.first, isNot(contains('[[att:')));
+    });
+
     test('and gets the chat channel note, not the email one', () async {
       await seedChat();
       final llm = FakeLlm([

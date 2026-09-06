@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:intl/intl.dart';
 
 import '../../models/message_models.dart';
+import '../attachments/attachment_markers.dart';
 import 'json_task.dart';
 import 'message_block.dart';
 import 'prompt_guard.dart';
@@ -317,9 +318,12 @@ class NeedsYouTask implements JsonTask<NeedsYouResult> {
     ].join('\n---\n');
   }
 
-  static String _body(Message message) => message.bodyText?.isNotEmpty == true
-      ? message.bodyText!
-      : (message.bodyPreview ?? '');
+  /// Markers out, for [buildMessageBlock]'s reason.
+  static String _body(Message message) => stripAttachmentMarkers(
+        message.bodyText?.isNotEmpty == true
+            ? message.bodyText!
+            : message.bodyPreview,
+      );
 
   /// Nothing here throws: a grammar guarantees the shape of what comes back
   /// and nothing about its sense.

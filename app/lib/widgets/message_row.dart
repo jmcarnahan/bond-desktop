@@ -1,8 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../theme/tokens.dart';
+import 'attachment_chip.dart';
+import 'attachment_chip_row.dart';
+import 'attachment_format.dart';
 import 'chips.dart';
+import 'inline_image_thumb.dart';
 import 'time_format.dart';
 
 /// How long a gap can be before a message stops reading as part of the same
@@ -13,10 +18,47 @@ const Duration _runWindow = Duration(minutes: 5);
 const int _maxLines = 12;
 const int _maxChars = 600;
 
-/// Graph's HTML→text conversion renders inline images (a signature logo,
-/// typically) as literal "[cid:…]" tokens — presentational noise, stripped for
-/// display only. The stored body stays as ingested.
-final RegExp _cidToken = RegExp(r'[ \t]*\[cid:[^\]]+\][ \t]*');
+/// Where a chat message's file or pasted picture sat in the sentence.
+/// `teams_sync` writes these in place of the `<attachment>` and hosted-content
+/// `<img>` tags it used to delete outright, so the stored body records the
+/// position and this row can draw the file there rather than in a block at the
+/// bottom. See `services/attachments/attachment_markers.dart`, which is what
+/// every prompt and every embedding uses to take them back out.
+final RegExp _teamsMarker = RegExp(r'\[\[(att|img):([^\]]+)\]\]');
+
+/// Graph's HTML→text conversion renders an inline image — a signature logo,
+/// typically — as a literal `[cid:…]` token. It was stripped as presentational
+/// noise and the id thrown away; the id is in fact the join key onto
+/// `attachments.content_id`, which is how a pasted screenshot gets drawn in
+/// place and a logo gets left out. The stored body stays as ingested either
+/// way; this is a display-time read of it.
+final RegExp _cidCapture = RegExp(r'\[cid:([^\]]+)\]');
+
+/// Every token the layout walks, in one pass so that markers and cid tokens
+/// keep their order relative to each other. Built from the two regexes above
+/// rather than written a third time.
+///
+/// A token takes the horizontal space AFTER it with it and leaves the space
+/// before it alone. That is what turns "see [[att:x]] for the numbers" into
+/// "see for the numbers" rather than "seefor" or "see  for" — the space before
+/// a token is the one that was holding the sentence together.
+final RegExp _bodyToken = RegExp(
+  '${_teamsMarker.pattern}[ \\t]*|${_cidCapture.pattern}[ \\t]*',
+);
+
+/// Runs of blank lines, which is what taking a token out of its own paragraph
+/// leaves behind.
+final RegExp _blankRun = RegExp(r'\n{3,}');
+
+/// Under this an inline image is furniture — a signature logo, a social icon,
+/// a tracking pixel — and is stripped from the body and left out of the chips
+/// entirely. Over it, somebody meant to show you something.
+///
+/// Bytes, not pixels: the size is what both connectors state, and a logo that
+/// wants twenty kilobytes to say a company name is a picture worth drawing.
+/// A size of 0 means "the connector did not say" (every Teams attachment) and
+/// is never treated as small.
+const int inlineImageMinBytes = 20 * 1024;
 
 /// Inbound avatar fills, picked from the existing token set rather than a new
 /// one. Five is enough that adjacent senders rarely collide and few enough
@@ -76,6 +118,206 @@ bool sameRun(Message a, Message b) {
 /// timestamp does not parse, which reads as "no day divider" upstream.
 String? dayKeyOf(Message m) => dayKeyOfIso(m.receivedAt);
 
+/// One piece of a message body: either words, or a file that sat between them.
+sealed class BodySegment {
+  const BodySegment();
+}
+
+final class BodyTextSegment extends BodySegment {
+  final String text;
+
+  const BodyTextSegment(this.text);
+}
+
+final class BodyAttachmentSegment extends BodySegment {
+  final AttachmentRef attachment;
+
+  /// Whether to draw it or name it. Decided once here so the row does not ask
+  /// the question again while building.
+  final bool asImage;
+
+  const BodyAttachmentSegment({
+    required this.attachment,
+    required this.asImage,
+  });
+}
+
+/// What a body is once its attachments have been placed in it.
+///
+/// [plainText] is deliberately the WHOLE body as words — every text run joined
+/// — because that is what the `Show more` clamp measures and what a folded row
+/// shows one line of. Splitting the body into segments must not change either
+/// of those, or a message would fold differently for having a picture in it.
+typedef BodyLayout = ({
+  List<BodySegment> segments,
+  String plainText,
+  List<AttachmentRef> chips,
+  List<AttachmentRef> trailingImages,
+});
+
+/// The body a row reads.
+///
+/// The preview stands in until the body arrives: bodies are fetched per thread
+/// on open, and a row with nothing in it reads as an empty message rather than
+/// as one still loading.
+String rawBodyOf(Message message) {
+  final bodyText = message.bodyText;
+  return (bodyText == null || bodyText.isEmpty)
+      ? (message.bodyPreview ?? '')
+      : bodyText;
+}
+
+/// Places [attachments] into [body] where the sender put them, and says what is
+/// left over.
+///
+/// The rules, all of which exist because a message is one thing and not a body
+/// with an appendix:
+///
+/// - `[[att:id]]` / `[[img:id]]` naming an attachment on this message puts it
+///   at that point in the text and takes the marker out. A marker naming
+///   nothing — an edit removed the file, the id is from another message — has
+///   its marker taken out anyway, because a reader must never see the app's
+///   own bookkeeping.
+/// - `[cid:x]` matching an INLINE attachment of at least [inlineImageMinBytes]
+///   draws it there. A smaller one is stripped exactly as it always was, and is
+///   dropped from the chips too: a signature logo is not a file somebody sent.
+/// - Everything unplaced falls to the bottom in `ordinal` order — pictures as
+///   pictures, the rest as chips.
+///
+/// Pure and top-level so it is tested like `initialsFor` and `sameRun`, without
+/// pumping a widget.
+BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
+  final byId = <String, AttachmentRef>{};
+  final byContentId = <String, AttachmentRef>{};
+  for (final attachment in attachments) {
+    byId.putIfAbsent(attachment.attachmentId, () => attachment);
+    final contentId = attachment.contentId;
+    if (contentId != null && contentId.isNotEmpty) {
+      byContentId.putIfAbsent(contentId, () => attachment);
+    }
+  }
+
+  final segments = <BodySegment>[];
+  final plain = StringBuffer();
+  final pending = StringBuffer();
+  final placed = <String>{};
+  final dropped = <String>{};
+  var sawToken = false;
+
+  void flushText() {
+    final run = pending.toString().trim();
+    pending.clear();
+    if (run.isNotEmpty) segments.add(BodyTextSegment(run));
+  }
+
+  var cursor = 0;
+  for (final match in _bodyToken.allMatches(body)) {
+    sawToken = true;
+    final run = body.substring(cursor, match.start);
+    pending.write(run);
+    plain.write(run);
+    cursor = match.end;
+
+    final markerId = match[2];
+    final contentId = match[3];
+    AttachmentRef? target;
+    if (markerId != null) {
+      target = byId[markerId];
+    } else if (contentId != null) {
+      final referenced = byContentId[contentId];
+      if (referenced != null && referenced.isInline) {
+        if (referenced.size >= inlineImageMinBytes) {
+          target = referenced;
+        } else {
+          dropped.add(referenced.attachmentId);
+        }
+      }
+    }
+    if (target == null) continue;
+    // A body that names the same file twice draws it once, where it was first
+    // mentioned; the second mention just loses its marker.
+    if (!placed.add(target.attachmentId)) continue;
+    flushText();
+    segments.add(BodyAttachmentSegment(
+      attachment: target,
+      asImage: isImageAttachment(target),
+    ));
+  }
+  final tail = body.substring(cursor);
+  pending.write(tail);
+  plain.write(tail);
+  flushText();
+
+  // The tidy-up applies only to a body that actually lost a token — the same
+  // early-out `stripAttachmentMarkers` makes, and for the same reason: an
+  // ordinary mail body's blank lines are its paragraphs.
+  var plainText = plain.toString();
+  if (sawToken) {
+    plainText = plainText.replaceAll(_blankRun, '\n\n').trimRight();
+  }
+
+  final placedAnything = segments.any((s) => s is BodyAttachmentSegment);
+  final resolved = placedAnything
+      ? segments
+      // Nothing was placed, so the body is one run of words and must render
+      // byte for byte the way it always has.
+      : <BodySegment>[if (plainText.isNotEmpty) BodyTextSegment(plainText)];
+
+  final leftovers = [
+    for (final attachment in attachments)
+      if (!placed.contains(attachment.attachmentId) &&
+          !dropped.contains(attachment.attachmentId) &&
+          !_isSubThresholdInlineImage(attachment))
+        attachment,
+  ]..sort((a, b) => a.ordinal.compareTo(b.ordinal));
+
+  final chips = <AttachmentRef>[];
+  final trailingImages = <AttachmentRef>[];
+  for (final attachment in leftovers) {
+    if (isImageAttachment(attachment)) {
+      trailingImages.add(attachment);
+    } else {
+      chips.add(attachment);
+    }
+  }
+
+  return (
+    segments: resolved,
+    plainText: plainText,
+    chips: chips,
+    trailingImages: trailingImages,
+  );
+}
+
+/// How many attachments a reader would say this message has.
+///
+/// Not `message.attachments.length`: the sub-threshold inline logos a mail
+/// client staples to every signature are not files anybody sent, and a folded
+/// row claiming `📎 3 files` for a message with one contract and two logos is
+/// worse than saying nothing.
+///
+/// Answered through [layOutBody] rather than by a second rule, so the count and
+/// what the open row draws can never disagree.
+int displayableAttachmentCount(Message message) {
+  if (message.attachments.isEmpty) return 0;
+  return displayableCountOf(layOutBody(rawBodyOf(message), message.attachments));
+}
+
+/// The same count from a layout the caller already has — the row builds one per
+/// frame and must not walk the body twice to label its own fold.
+int displayableCountOf(BodyLayout layout) =>
+    layout.chips.length +
+    layout.trailingImages.length +
+    layout.segments.whereType<BodyAttachmentSegment>().length;
+
+/// An inline picture small enough to be furniture. A stated size of 0 means the
+/// connector never said, which is not the same as small.
+bool _isSubThresholdInlineImage(AttachmentRef attachment) =>
+    attachment.isInline &&
+    isImageAttachment(attachment) &&
+    attachment.size > 0 &&
+    attachment.size < inlineImageMinBytes;
+
 /// One message in a thread, flat and left-aligned whichever way it went.
 ///
 /// There are no bubbles and no right-hand column: a transcript reads top to
@@ -123,6 +365,25 @@ class MessageRow extends StatefulWidget {
   /// Whether it starts folded. Read once, at construction — see [_collapsed].
   final bool initiallyCollapsed;
 
+  /// What opening one of this message's files does. Null leaves every chip and
+  /// picture a statement — a row whose host has nowhere to show a file must not
+  /// offer to show it.
+  final void Function(AttachmentRef attachment)? onOpenAttachment;
+
+  /// The file the host is currently previewing, if it is one of this message's.
+  /// Compared with `sameAttachment`: [AttachmentRef] has no value equality, and
+  /// a digest landing mid-frame must not deselect what the reader is looking
+  /// at.
+  final AttachmentRef? selectedAttachment;
+
+  /// The picture for an attachment, or null while there is none.
+  ///
+  /// An [ImageProvider] rather than bytes or a path: the bytes arrive
+  /// asynchronously from a cache this row knows nothing about, and under
+  /// `flutter test` the host hands over a `MemoryImage` so no widget here ever
+  /// reads a disk.
+  final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
+
   const MessageRow({
     super.key,
     required this.message,
@@ -132,7 +393,14 @@ class MessageRow extends StatefulWidget {
     this.suggestion,
     this.collapsible = false,
     this.initiallyCollapsed = false,
+    this.onOpenAttachment,
+    this.selectedAttachment,
+    this.thumbnailFor,
   });
+
+  /// The one line a folded row keeps about its files.
+  static const Key collapsedAttachmentHintKey =
+      ValueKey('message-row-attachment-hint');
 
   @override
   State<MessageRow> createState() => _MessageRowState();
@@ -160,32 +428,24 @@ class _MessageRowState extends State<MessageRow> {
     _collapsed = widget.initiallyCollapsed && widget.collapsible;
   }
 
-  String get _body {
-    // The preview stands in until the body arrives: bodies are fetched per
-    // thread on open, and a row with nothing in it reads as an empty message
-    // rather than as one still loading.
-    final bodyText = widget.message.bodyText;
-    final raw = (bodyText == null || bodyText.isEmpty)
-        ? (widget.message.bodyPreview ?? '')
-        : bodyText;
-    if (!raw.contains('[cid:')) return raw;
-    return raw
-        .replaceAll(_cidToken, '')
-        .replaceAll(RegExp(r'\n{3,}'), '\n\n')
-        .trimRight();
-  }
+  String get _raw => rawBodyOf(widget.message);
+
+  /// The body with its attachments placed in it. Computed ONCE per build and
+  /// handed down — a transcript rebuilds on every sync, and this walks the
+  /// whole body.
+  BodyLayout _layout() => layOutBody(_raw, widget.message.attachments);
 
   /// Whether the body is long enough to earn the `Show more` clamp. Unrelated
   /// to [_collapsed], which folds the whole message rather than trimming it.
-  bool get _bodyOverflows {
-    final body = _body;
+  bool _bodyOverflows(BodyLayout layout) {
+    final body = layout.plainText;
     return body.length > _maxChars ||
         '\n'.allMatches(body).length + 1 > _maxLines;
   }
 
-  String get _visibleBody {
-    final body = _body;
-    if (_expanded || !_bodyOverflows) return body;
+  String _visibleBody(BodyLayout layout) {
+    final body = layout.plainText;
+    if (_expanded || !_bodyOverflows(layout)) return body;
     // Clamp to the first N lines, then the char cap, whichever hits first.
     final lines = body.split('\n');
     var clamped =
@@ -231,6 +491,9 @@ class _MessageRowState extends State<MessageRow> {
     final collapsed = folds && _collapsed;
     final suggestion = widget.suggestion;
 
+    final layout = _layout();
+    final overflows = _bodyOverflows(layout);
+
     final row = Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -247,32 +510,43 @@ class _MessageRowState extends State<MessageRow> {
                 _header(meta, folds: folds),
                 const SizedBox(height: 2),
               ],
-              if (collapsed)
+              if (collapsed) ...[
                 // One line of what was said, and then only what still wants
                 // something: the fold hides reading, never answering.
                 Text(
-                  _body.split('\n').firstWhere(
+                  layout.plainText.split('\n').firstWhere(
                         (line) => line.trim().isNotEmpty,
                         orElse: () => '',
                       ),
                   style: BondType.caption.copyWith(color: BondColors.inkMuted),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                )
-              else ...[
-                SelectableText(
-                  _visibleBody,
-                  style: BondType.body.copyWith(
-                    color: BondColors.ink,
-                    height: 1.4,
-                  ),
                 ),
-                if (_bodyOverflows) ...[
+                // A folded message says it carried files, and nothing more —
+                // the fold must not be the reason a contract went unseen, and
+                // an arriving attachment must not unfold a row under the
+                // reader's cursor.
+                if (displayableCountOf(layout) > 0)
+                  Text(
+                    _attachmentHint(displayableCountOf(layout)),
+                    key: MessageRow.collapsedAttachmentHintKey,
+                    style:
+                        BondType.caption.copyWith(color: BondColors.inkMuted),
+                  ),
+              ] else ...[
+                ..._bodySegments(layout, overflows),
+                if (overflows) ...[
                   const SizedBox(height: BondSpacing.s4),
                   _ShowToggle(
                     expanded: _expanded,
                     onTap: () => setState(() => _expanded = !_expanded),
                   ),
+                ],
+                // Pictures the body never pointed at, under the words they came
+                // with rather than in a strip of their own.
+                for (final image in layout.trailingImages) ...[
+                  const SizedBox(height: BondSpacing.s8),
+                  _thumb(image),
                 ],
                 if (pending) ...[
                   const SizedBox(height: BondSpacing.s4),
@@ -287,6 +561,16 @@ class _MessageRowState extends State<MessageRow> {
                     'AI: $summary',
                     style:
                         BondType.caption.copyWith(color: BondColors.inkMuted),
+                  ),
+                ],
+                // The files, last: under everything that was said about them,
+                // and above the ask that is probably about them too.
+                if (layout.chips.isNotEmpty) ...[
+                  const SizedBox(height: BondSpacing.s8),
+                  AttachmentChipRow(
+                    attachments: layout.chips,
+                    selected: widget.selectedAttachment,
+                    onOpen: widget.onOpenAttachment,
                   ),
                 ],
               ],
@@ -324,6 +608,73 @@ class _MessageRowState extends State<MessageRow> {
       ),
       child: Opacity(opacity: pending ? 0.6 : 1, child: row),
     );
+  }
+
+  static String _attachmentHint(int count) =>
+      count == 1 ? '📎 1 file' : '📎 $count files';
+
+  /// The body, with the files the sender put in it drawn where they sat.
+  ///
+  /// A CLAMPED body renders as one block of text and nothing else. Splicing a
+  /// picture into a sentence that has been cut mid-word reads as a bug, and the
+  /// files are not lost by it — every one of them is still named in the chip
+  /// row below.
+  List<Widget> _bodySegments(BodyLayout layout, bool overflows) {
+    final clamped = overflows && !_expanded;
+    final placed = layout.segments.any((s) => s is BodyAttachmentSegment);
+    if (clamped || !placed) {
+      return [_text(_visibleBody(layout))];
+    }
+
+    final widgets = <Widget>[];
+    for (final segment in layout.segments) {
+      if (widgets.isNotEmpty) {
+        widgets.add(const SizedBox(height: BondSpacing.s8));
+      }
+      switch (segment) {
+        case BodyTextSegment(:final text):
+          widgets.add(_text(text));
+        case BodyAttachmentSegment(:final attachment, :final asImage):
+          widgets.add(asImage
+              ? _thumb(attachment)
+              : Align(
+                  alignment: Alignment.centerLeft,
+                  child: AttachmentChip(
+                    key: AttachmentChip.keyFor(attachment),
+                    attachment: attachment,
+                    selected: sameAttachment(
+                      widget.selectedAttachment,
+                      attachment,
+                    ),
+                    onTap: _openAttachment(attachment),
+                  ),
+                ));
+      }
+    }
+    return widgets;
+  }
+
+  Widget _text(String text) => SelectableText(
+        text,
+        style: BondType.body.copyWith(color: BondColors.ink, height: 1.4),
+      );
+
+  /// A picture, left-aligned in the body column and bounded on both axes — the
+  /// transcript is a `ListView`, where an unbounded child is an assertion
+  /// rather than a wrong-looking frame.
+  Widget _thumb(AttachmentRef attachment) => Align(
+        alignment: Alignment.centerLeft,
+        child: InlineImageThumb(
+          key: InlineImageThumb.keyFor(attachment),
+          attachment: attachment,
+          image: widget.thumbnailFor?.call(attachment),
+          onTap: _openAttachment(attachment),
+        ),
+      );
+
+  VoidCallback? _openAttachment(AttachmentRef attachment) {
+    final open = widget.onOpenAttachment;
+    return open == null ? null : () => open(attachment);
   }
 
   /// Who said it and when — and, where the row folds, the whole affordance for

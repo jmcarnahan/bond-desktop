@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import '../data/message_store.dart';
 import 'activity_log.dart';
+import 'attachments/attachment_policy.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
@@ -428,10 +429,12 @@ class SyncService implements MailSync {
           'received_at': receivedAt,
           'is_read': message['isRead'] == true ? 1 : 0,
           'body_preview': preview,
-          // Delta pages carry no body and no attachment flag; the detail
-          // fetch fills both in later and the upsert will not blank either.
+          // Delta pages carry no body; the detail fetch fills it in later and
+          // the upsert will not blank it. The attachment flag DOES ride the
+          // delta page — it is in the select — so the paperclip is on the list
+          // card before any body has been fetched.
           'body_text': null,
-          'has_attachments': 0,
+          'has_attachments': message['hasAttachments'] == true ? 1 : 0,
           'triage_status': triageStatus,
           'gate_reason': gateReason,
           'addressed_me': direction == 'inbound' && soleRecipient ? 1 : 0,
@@ -582,6 +585,76 @@ class SyncService implements MailSync {
       // it.
       sourceMetaJson: headers.isEmpty ? null : jsonEncode({'headers': headers}),
     );
+
+    await _storeAttachments(sourceMessageId, detail['attachments']);
+  }
+
+  /// Writes what came with one message and queues the eligible ones for text.
+  ///
+  /// Here rather than in the delta loop because this is where an attachment
+  /// LIST first exists: a delta page carries the flag and nothing else. Triage
+  /// runs this fetch itself before it judges (`TriageQueue` calls
+  /// [ensureMessageBody] inside the claim), so the rows are in place by the
+  /// time the model is asked about the message.
+  ///
+  /// Only `attachment_text` is queued. The digest is enqueued by the text
+  /// handler once there are words to digest — asking a model to read a document
+  /// nobody has extracted yet is a call that can only fail.
+  ///
+  /// The handler for that kind does not exist yet, and the rows waiting
+  /// `pending` are harmless: the worker drains only kinds it has a handler for,
+  /// and `enqueueWork` is INSERT OR IGNORE, so the same message fetched twice
+  /// queues one item.
+  Future<void> _storeAttachments(
+    String sourceMessageId,
+    Object? rawAttachments,
+  ) async {
+    if (rawAttachments is! List || rawAttachments.isEmpty) return;
+
+    final rows = <Map<String, Object?>>[];
+    for (var i = 0; i < rawAttachments.length; i++) {
+      final entry = rawAttachments[i];
+      if (entry is! Map) continue;
+      final id = entry['id'] as String? ?? '';
+      if (id.isEmpty) continue;
+      rows.add({
+        'attachment_id': id,
+        // The connector's own order, not this loop's index into the entries it
+        // could parse — a malformed entry must not renumber the ones after it.
+        'ordinal': i,
+        'kind': entry['kind'] as String? ?? 'unknown',
+        'name': entry['name'] as String?,
+        'content_type': entry['content_type'] as String?,
+        'size': (entry['size'] as num?)?.toInt() ?? 0,
+        'is_inline': entry['is_inline'] == true || entry['is_inline'] == 1,
+        'content_id': entry['content_id'] as String?,
+        'source_url': entry['source_url'] as String?,
+      });
+    }
+    if (rows.isEmpty) return;
+
+    await _store.upsertAttachments(_source, sourceMessageId, rows);
+
+    // Read back rather than judged from the maps above, because the policy asks
+    // about the MESSAGE too — a gated message queues nothing — and because the
+    // upsert's MAX() may have raised a size this listing did not state.
+    final message = await _store.getMessageRow(_source, sourceMessageId);
+    if (message == null) return;
+    for (final row in await _store.attachmentsForMessage(
+      _source,
+      sourceMessageId,
+    )) {
+      final (eligible, _) = attachmentTextPolicy(message, row);
+      if (!eligible) continue;
+      await _store.enqueueWork(
+        'attachment_text',
+        _source,
+        attachmentEntityId(
+          sourceMessageId,
+          row['attachment_id'] as String? ?? '',
+        ),
+      );
+    }
   }
 
   /// `internetMessageHeaders` as a lowercase-keyed map. Header names are

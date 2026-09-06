@@ -126,8 +126,10 @@ void main() {
     String? gateReason,
     String body = 'Legal wants a look at the DPA.',
     String receivedAt = '2026-08-29T10:00:00Z',
+    int hasAttachments = 0,
   }) async {
     await store.upsertMessage({
+      'has_attachments': hasAttachments,
       'source': source,
       'source_message_id': id,
       'conversation_key': 'chat-1',
@@ -176,6 +178,32 @@ void main() {
       'reason': row['needs_you_reason'],
     };
   }
+
+  group('what the model is shown', () {
+    test('a file-only chat message reaches the model as what was shared',
+        () async {
+      // Below the floor, so the model is actually asked — and what it is asked
+      // about is a body that is nothing but a marker. `loadThread` hydrates a
+      // thread's attachments; the row this handler judges came from
+      // `getMessageRow` and has to ask for its own.
+      await seed(addressedMe: 0, body: '[[att:a1]]', hasAttachments: 1);
+      await store.upsertAttachments('teams', 't1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Contract-v2.docx',
+          'size': 0,
+        },
+      ]);
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm));
+
+      expect(llm.user, contains('Shared a file: Contract-v2.docx'));
+      expect(llm.user, isNot(contains('[[att:')));
+    });
+  });
 
   group('the deterministic floor', () {
     test('a direct chat is written down as a yes, with its reason', () async {

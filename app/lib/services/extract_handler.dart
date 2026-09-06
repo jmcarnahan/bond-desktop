@@ -115,10 +115,21 @@ class ExtractHandler extends WorkHandler {
       return;
     }
 
+    var message = Message.fromRow(row);
+    // Hydrated only when the row says there is something to hydrate —
+    // `loadThread` does this for a whole thread; a single-row read has to ask.
+    if (row['has_attachments'] == 1) {
+      message = message.withAttachments(await _store.attachmentRefsFor(
+        source,
+        id,
+        conversationKey: row['conversation_key'] as String?,
+      ));
+    }
+
     final result = await runTask(
       _client,
       const ExtractTask(),
-      ExtractionInput(Message.fromRow(row), DateTime.now()),
+      ExtractionInput(message, DateTime.now()),
       // Zero, not the default: the same email must yield the same facts twice,
       // or a re-extraction would move a conversation between clusters for no
       // reason a human could see.

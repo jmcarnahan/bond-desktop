@@ -66,9 +66,19 @@ class FakeDetailFetch {
   /// Thrown instead of storing anything — a Graph call that failed.
   final Object? error;
 
+  /// What the real fetch also writes: the attachment rows, before the model is
+  /// asked anything. Empty for every test that is not about them.
+  final List<Map<String, Object?>> attachments;
+
   final List<String> fetched = [];
 
-  FakeDetailFetch(this.store, {this.bodyText, this.headers, this.error});
+  FakeDetailFetch(
+    this.store, {
+    this.bodyText,
+    this.headers,
+    this.error,
+    this.attachments = const [],
+  });
 
   Future<void> call(String sourceMessageId) async {
     fetched.add(sourceMessageId);
@@ -84,6 +94,9 @@ class FakeDetailFetch {
       sourceMetaJson:
           headers == null ? null : jsonEncode({'headers': headers}),
     );
+    if (attachments.isNotEmpty) {
+      await store.upsertAttachments('email', sourceMessageId, attachments);
+    }
   }
 }
 
@@ -613,6 +626,30 @@ void main() {
       expect(event['entity_id'], 'c1');
     });
 
+    test('a file-only chat message reaches the model as what was shared',
+        () async {
+      // Somebody dropped a contract into a thread and typed nothing with it.
+      // The body IS the marker, so a handler that builds its message from a
+      // bare row sends the model a blank message about a file it never hears
+      // of.
+      await seedChat(id: 'c1', bodyText: '[[att:a1]]');
+      await store.upsertAttachments('teams', 'c1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Contract-v2.docx',
+          'size': 0,
+        },
+      ]);
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages.single, contains('Shared a file: Contract-v2.docx'));
+      expect(llm.userMessages.single, isNot(contains('[[att:')));
+    });
+
     test('a chat never asks for a mail detail fetch', () async {
       // Body stored, headers absent — which for a chat is not "detail is
       // missing" but "this source has no such thing": `source_meta_json` is
@@ -789,6 +826,77 @@ void main() {
       final judgingC2 = llm.userMessages.first;
       expect(judgingC2, contains('Did the CD go out?'));
       expect(judgingC2, isNot(contains('A mail that merely shares the key.')));
+    });
+  });
+
+  group('attachments', () {
+    test('the names and sizes reach the model beside the message', () async {
+      await seedMessage(id: 'm1');
+      await store.upsertAttachments('email', 'm1', [
+        {
+          'attachment_id': 'att-1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'lease-addendum.pdf',
+          'content_type': 'application/pdf',
+          'size': 184320,
+          'is_inline': false,
+        },
+      ]);
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages.single, contains('Attachments: '));
+      expect(llm.userMessages.single, contains('lease-addendum.pdf (180 KB)'));
+    });
+
+    test('the detail fetch writes them before the model is asked', () async {
+      // The ordering the whole line depends on: `_triageClaimed` calls
+      // `ensureBody` inside the claim, so a mail attachment is on the row by
+      // the time the prompt is built.
+      await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short');
+      final llm = FakeLlm([answer()]);
+      final fetch = FakeDetailFetch(
+        store,
+        bodyText: 'Signed copy attached.',
+        attachments: const [
+          {
+            'attachment_id': 'att-1',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'lease-addendum.pdf',
+            'content_type': 'application/pdf',
+            'size': 184320,
+            'is_inline': false,
+          },
+        ],
+      );
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      expect(fetch.fetched, ['m1']);
+      expect(llm.userMessages.single, contains('lease-addendum.pdf'));
+    });
+
+    test('a failed fetch costs the line, never the triage', () async {
+      await seedMessage(id: 'm1', withBody: false, bodyPreview: 'Short preview');
+      final llm = FakeLlm([answer()]);
+      final fetch = FakeDetailFetch(store, error: StateError('graph is down'));
+
+      await TriageQueue(store, llm, ensureBody: fetch.call).pump();
+
+      expect(llm.userMessages.single, isNot(contains('Attachments:')));
+      expect((await messageRow('m1'))['triage_status'], 'triaged');
+    });
+
+    test('a message with nothing attached says nothing', () async {
+      await seedMessage(id: 'm1');
+      final llm = FakeLlm([answer()]);
+
+      await TriageQueue(store, llm).pump();
+
+      expect(llm.userMessages.single, isNot(contains('Attachments:')));
     });
   });
 

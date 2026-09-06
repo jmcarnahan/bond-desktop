@@ -9,6 +9,7 @@ import '../data/message_store.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import 'activity_log.dart';
+import 'attachments/attachment_markers.dart';
 import 'conversation_state.dart';
 import 'extract_handler.dart';
 import 'llm/embeddings_client.dart';
@@ -675,7 +676,9 @@ class StorylineService {
     final body = (preview != null && preview.isNotEmpty)
         ? preview
         : (row['body_text'] as String? ?? '');
-    final text = body.trim();
+    // Markers out, for [buildMessageBlock]'s reason: a recap window is quoted
+    // text, and a `[[att:…]]` in it is a token nobody typed.
+    final text = stripAttachmentMarkers(body);
     return '${subject.isEmpty ? '' : '[$subject] '}$sender: '
         '${text.length > _recapLineCap ? text.substring(0, _recapLineCap) : text}';
   }

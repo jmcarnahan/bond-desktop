@@ -30,8 +30,15 @@ is always the authority when they disagree.
 | 12 | **Draft generation** — the suggested reply itself | **yes** | [07-replies.md](07-replies.md) |
 | 13 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
 | 14 | Notification settle — one verdict per message | no | [09-notifications.md](09-notifications.md) |
+| 15 | Attachments — what came with a message: metadata now, text and digest planned‡ | no‡ | [12-attachments.md](12-attachments.md) |
 
 \* embeddings call the embedding server, but no chat model.
+
+‡ The METADATA stage is live and runs inside stage 1: both syncs write
+`attachments` rows and queue `attachment_text` work, and triage reads the names
+and sizes. The two stages that consume those rows — text extraction and
+embedding (no chat model), then one fast-slot digest per document — are
+planned, and their work rows wait `pending` until their handlers exist.
 
 † a deterministic floor (an inbound Teams @mention or 1:1) answers without any
 model call; everything below the floor gets the fast-slot judgment. See
@@ -55,6 +62,7 @@ live in [10-model-routing.md](10-model-routing.md).
 | Reply decision | prose / 27B | `:8080` |
 | Draft generation | prose / 27B | `:8080` |
 | Embeddings | embed | `:8081` embeddinggemma-300M (`make embed`) |
+| Attachment digest (planned) | fast / bulk | `:8082` |
 
 Both chat slots can be re-pointed at runtime in Settings → Models; the mapping
 above does not change. See

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:drift/drift.dart';
 
+import '../models/attachment_models.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
@@ -408,7 +409,36 @@ INSERT OR IGNORE INTO message_progress (
           variables: _args([conversationKey, ...sources, ?untilIso]),
         )
         .get();
-    return [for (final row in result) Message.fromRow(row.data)];
+    final messages = [for (final row in result) Message.fromRow(row.data)];
+    if (messages.isEmpty) return messages;
+
+    // ONE query for the whole thread, never one per message. A thread is the
+    // only place a message's attachments are rendered, and a hundred-message
+    // thread that asked per message would be a hundred round trips to draw a
+    // handful of chips.
+    //
+    // Per source, because the key is (source, message id) and a joined thread
+    // legitimately holds both. Two sources on one thread is two queries, which
+    // is still not per message.
+    for (final source in sources) {
+      final ids = [
+        for (final message in messages)
+          if (message.source == source) message.id,
+      ];
+      if (ids.isEmpty) continue;
+      final rows = await attachmentsForMessages(source, ids);
+      if (rows.isEmpty) continue;
+      for (var i = 0; i < messages.length; i++) {
+        if (messages[i].source != source) continue;
+        final own = rows[messages[i].id];
+        if (own == null || own.isEmpty) continue;
+        messages[i] = messages[i].withAttachments([
+          for (final row in own)
+            AttachmentRef.fromRow(row, conversationKey: conversationKey),
+        ]);
+      }
+    }
+    return messages;
   }
 
   // ── conversations ────────────────────────────────────────────────────
@@ -569,7 +599,16 @@ WHERE source = ? AND conversation_key = ?
           '  (SELECT COUNT(*) FROM work_items w '
           '   WHERE w.source = c.source AND w.entity_id = c.conversation_key '
           "     AND w.task_kind IN ('storyline','draft') "
-          "     AND w.status IN ('pending','processing')) AS ai_busy_thread "
+          "     AND w.status IN ('pending','processing')) AS ai_busy_thread, "
+          // Non-inline only: a paperclip on a list card means "somebody sent
+          // something with this", and counting the signature logos on ten
+          // replies would put a 12 on a thread carrying no files at all.
+          '  (SELECT COUNT(*) FROM attachments a '
+          '   JOIN messages m2 ON m2.source = a.source '
+          '     AND m2.source_message_id = a.source_message_id '
+          '   WHERE a.source = c.source '
+          '     AND m2.conversation_key = c.conversation_key '
+          '     AND a.is_inline = 0) AS attachment_count '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
@@ -1769,6 +1808,9 @@ RETURNING *
       'message_notify',
       'message_progress',
       'message_vectors',
+      'attachments',
+      'attachment_text',
+      'attachment_chunks',
     ];
     await db.transaction(() async {
       for (final table in tables) {
@@ -2188,6 +2230,10 @@ SELECT conversation_key FROM (
     'storyline',
     'storyline_sweep',
     'draft',
+    // The digest, and not `attachment_text`: this list is the model-call kinds
+    // the header's median is about, and text extraction is a fetch and an
+    // embed, the same shape as `embed_message`, which is already left out.
+    'attachment_digest',
   ];
 
   /// Appends one thing the app did. INSERT only, like [recordFeedback] — the
@@ -4532,5 +4578,411 @@ LIMIT ?
         )
         .get();
     return [for (final row in result) HotStoryline.fromRow(row.data)];
+  }
+
+  // ── attachments ──────────────────────────────────────────────────────
+
+  /// How many message ids one `IN` clause carries. sqlite's default parameter
+  /// limit is 999 and the hydration below binds a handful besides.
+  static const int _attachmentIdChunk = 400;
+
+  /// Writes what came with one message, and leaves everything the pipeline and
+  /// the owner wrote alone.
+  ///
+  /// A re-sync sees the same attachments again — a delta replay, a chat message
+  /// read a second time, an edit that added a file — so this is an upsert. What
+  /// it updates is exactly the connector's own metadata. It never touches
+  /// `text_*`, `digest_*`, `blob_*`, `thumb_path` or `pinned_storyline_id`:
+  /// those are what the handlers extracted, what the cache fetched, and what the
+  /// user pinned, and none of them get thrown away because a delta page came
+  /// round again.
+  ///
+  /// Two of the metadata rules are worth stating. `name`, `content_type` and
+  /// the rest COALESCE, so a later listing that omits a field cannot blank one
+  /// already learned. `size` takes `MAX`, because the Teams wire never states a
+  /// size and writes 0 for unknown — a plain overwrite would erase a real
+  /// number the mail path or a byte fetch had already established.
+  ///
+  /// [rows] carry the connector's own keys: `attachment_id`, `ordinal`, `kind`,
+  /// `name`, `content_type`, `size`, `is_inline`, `content_id`, `source_url`,
+  /// `thumbnail_url`, `card_text`, `item_subject`, `item_from`, `item_received`.
+  /// A row with no `attachment_id` is skipped rather than written under an
+  /// empty key.
+  Future<void> upsertAttachments(
+    String source,
+    String sourceMessageId,
+    List<Map<String, Object?>> rows,
+  ) async {
+    if (rows.isEmpty) return;
+    final now = _nowIso();
+    await db.transaction(() async {
+      for (final row in rows) {
+        final attachmentId = row['attachment_id'] as String? ?? '';
+        if (attachmentId.isEmpty) continue;
+        await db.customUpdate(
+          'INSERT INTO attachments '
+          '(source, source_message_id, attachment_id, ordinal, kind, name, '
+          ' content_type, size, is_inline, content_id, source_url, '
+          ' thumbnail_url, card_text, item_subject, item_from, item_received, '
+          ' text_status, text_reason, text_truncated, text_chars, '
+          ' digest_status, digest_json, blob_path, blob_sha256, '
+          ' blob_fetched_at, thumb_path, pinned_storyline_id, '
+          ' created_at, updated_at) '
+          'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '
+          " 'pending', NULL, 0, 0, 'pending', NULL, NULL, NULL, NULL, NULL, "
+          ' NULL, ?, ?) '
+          'ON CONFLICT(source, source_message_id, attachment_id) DO UPDATE SET '
+          '  ordinal = excluded.ordinal, '
+          '  kind = excluded.kind, '
+          '  name = COALESCE(excluded.name, attachments.name), '
+          '  content_type = COALESCE(excluded.content_type, '
+          '                          attachments.content_type), '
+          '  size = MAX(excluded.size, attachments.size), '
+          '  is_inline = excluded.is_inline, '
+          '  content_id = COALESCE(excluded.content_id, attachments.content_id), '
+          '  source_url = COALESCE(excluded.source_url, attachments.source_url), '
+          '  thumbnail_url = COALESCE(excluded.thumbnail_url, '
+          '                           attachments.thumbnail_url), '
+          '  card_text = COALESCE(excluded.card_text, attachments.card_text), '
+          '  item_subject = COALESCE(excluded.item_subject, '
+          '                          attachments.item_subject), '
+          '  item_from = COALESCE(excluded.item_from, attachments.item_from), '
+          '  item_received = COALESCE(excluded.item_received, '
+          '                           attachments.item_received), '
+          '  updated_at = excluded.updated_at',
+          variables: _args([
+            source,
+            sourceMessageId,
+            attachmentId,
+            (row['ordinal'] as num?)?.toInt() ?? 0,
+            row['kind'] as String? ?? 'file',
+            row['name'],
+            row['content_type'],
+            (row['size'] as num?)?.toInt() ?? 0,
+            // Both spellings, for the reason `attachmentTextPolicy` gives: a
+            // connector map carries a bool and a row carries 0/1, and STRICT
+            // rejects the bool.
+            row['is_inline'] == true || row['is_inline'] == 1 ? 1 : 0,
+            row['content_id'],
+            row['source_url'],
+            row['thumbnail_url'],
+            row['card_text'],
+            row['item_subject'],
+            row['item_from'],
+            row['item_received'],
+            now,
+            now,
+          ]),
+        );
+      }
+    });
+  }
+
+  /// One message's attachments, in the order the connector listed them.
+  Future<List<Map<String, Object?>>> attachmentsForMessage(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM attachments '
+          'WHERE source = ? AND source_message_id = ? '
+          'ORDER BY ordinal ASC, attachment_id ASC',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// One message's attachments as the model [Message] carries, which is the
+  /// shape every prompt builder reads.
+  ///
+  /// [loadThread] hydrates a whole thread in one query; a handler that read a
+  /// single row with [getMessageRow] has no such hydration and has to ask.
+  /// Callers guard on the row's own `has_attachments`, so the ordinary message
+  /// costs no query at all.
+  Future<List<AttachmentRef>> attachmentRefsFor(
+    String source,
+    String sourceMessageId, {
+    String? conversationKey,
+  }) async =>
+      [
+        for (final row in await attachmentsForMessage(source, sourceMessageId))
+          AttachmentRef.fromRow(row, conversationKey: conversationKey),
+      ];
+
+  /// Many messages' attachments at once, keyed by message id.
+  ///
+  /// The whole point is that a thread costs ONE query rather than one per
+  /// message: [loadThread] hydrates a hundred-message thread through a single
+  /// call here. Ids are chunked so a long thread cannot blow sqlite's
+  /// parameter limit.
+  ///
+  /// [digestedOnly] narrows to attachments the model has actually read, which
+  /// is what the recap and the needs-you re-verdict want — an attachment with
+  /// no digest has nothing to say to either.
+  Future<Map<String, List<Map<String, Object?>>>> attachmentsForMessages(
+    String source,
+    List<String> ids, {
+    bool digestedOnly = false,
+  }) async {
+    if (ids.isEmpty) return const {};
+    final byMessage = <String, List<Map<String, Object?>>>{};
+    for (var start = 0; start < ids.length; start += _attachmentIdChunk) {
+      final slice = ids.sublist(
+        start,
+        math.min(start + _attachmentIdChunk, ids.length),
+      );
+      final result = await db
+          .customSelect(
+            'SELECT * FROM attachments '
+            'WHERE source = ? '
+            '  AND source_message_id IN (${_placeholders(slice.length)}) '
+            '${digestedOnly ? "AND digest_status = 'done' "
+                'AND digest_json IS NOT NULL ' : ''}'
+            'ORDER BY source_message_id, ordinal ASC, attachment_id ASC',
+            variables: _args([source, ...slice]),
+          )
+          .get();
+      for (final row in result) {
+        final id = row.data['source_message_id'] as String? ?? '';
+        (byMessage[id] ??= []).add(Map<String, Object?>.from(row.data));
+      }
+    }
+    return byMessage;
+  }
+
+  /// Everything attached anywhere on one thread, oldest message first.
+  ///
+  /// The join carries `conversation_key` out with each row, so an
+  /// [AttachmentRef] built from one already knows which chat to fetch its bytes
+  /// from without a second lookup.
+  Future<List<Map<String, Object?>>> attachmentsForThread(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT a.*, m.conversation_key AS conversation_key, '
+          '       m.received_at AS message_received_at '
+          'FROM attachments a '
+          'JOIN messages m ON m.source = a.source '
+          '  AND m.source_message_id = a.source_message_id '
+          'WHERE a.source = ? AND m.conversation_key = ? '
+          'ORDER BY m.received_at ASC, a.ordinal ASC, a.attachment_id ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// The digested attachments for a set of messages.
+  ///
+  /// A SECOND query rather than a join onto whatever produced [ids]. The recap
+  /// window is `recentStorylineMessages`, which is a `LIMIT 12` — joining
+  /// attachments onto it would spend that limit on attachments and hand the
+  /// recap four messages.
+  Future<Map<String, List<Map<String, Object?>>>> digestsForMessages(
+    String source,
+    List<String> ids,
+  ) =>
+      attachmentsForMessages(source, ids, digestedOnly: true);
+
+  /// One attachment's row, or null.
+  Future<Map<String, Object?>?> attachmentRow(
+    String source,
+    String sourceMessageId,
+    String attachmentId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM attachments '
+          'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+          variables: _args([source, sourceMessageId, attachmentId]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.data);
+  }
+
+  /// The extracted words for one attachment, or null when none were stored.
+  Future<String?> attachmentTextOf(
+    String source,
+    String sourceMessageId,
+    String attachmentId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT extracted_text FROM attachment_text '
+          'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+          variables: _args([source, sourceMessageId, attachmentId]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return result.first.data['extracted_text'] as String?;
+  }
+
+  /// Records the outcome of trying to read one attachment.
+  ///
+  /// One transaction over two tables, because a `done` status with no words
+  /// behind it would send the chunker looking for text that is not there.
+  /// [text] is written only when it is non-empty; a skip leaves whatever an
+  /// earlier successful pass stored, which is what makes a re-run of finished
+  /// work free rather than destructive.
+  ///
+  /// [reason] is stored as NULL when empty, the rule `label` takes: the column
+  /// means "there is a reason and it is this", never "the reason is nothing".
+  Future<void> setAttachmentText(
+    String source,
+    String sourceMessageId,
+    String attachmentId, {
+    required String status,
+    String? reason,
+    String? text,
+    bool truncated = false,
+  }) async {
+    final now = _nowIso();
+    final words = text ?? '';
+    await db.transaction(() async {
+      if (words.isNotEmpty) {
+        await db.customUpdate(
+          'INSERT INTO attachment_text '
+          '(source, source_message_id, attachment_id, extracted_text, chars, '
+          ' fetched_at) VALUES (?, ?, ?, ?, ?, ?) '
+          'ON CONFLICT(source, source_message_id, attachment_id) DO UPDATE SET '
+          '  extracted_text = excluded.extracted_text, '
+          '  chars = excluded.chars, fetched_at = excluded.fetched_at',
+          variables: _args([
+            source,
+            sourceMessageId,
+            attachmentId,
+            words,
+            words.length,
+            now,
+          ]),
+        );
+      }
+      await db.customUpdate(
+        'UPDATE attachments SET text_status = ?, text_reason = ?, '
+        '  text_truncated = ?, text_chars = ?, updated_at = ? '
+        'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+        variables: _args([
+          status,
+          (reason ?? '').isEmpty ? null : reason,
+          truncated ? 1 : 0,
+          words.length,
+          now,
+          source,
+          sourceMessageId,
+          attachmentId,
+        ]),
+      );
+    });
+  }
+
+  /// What the model made of one document, as encoded JSON.
+  Future<void> setAttachmentDigest(
+    String source,
+    String sourceMessageId,
+    String attachmentId, {
+    required String status,
+    String? digestJson,
+  }) async {
+    await db.customUpdate(
+      'UPDATE attachments SET digest_status = ?, digest_json = ?, '
+      '  updated_at = ? '
+      'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+      variables: _args([
+        status,
+        digestJson,
+        _nowIso(),
+        source,
+        sourceMessageId,
+        attachmentId,
+      ]),
+    );
+  }
+
+  /// Where the cache put this attachment's bytes and its thumbnail.
+  ///
+  /// COALESCE per column, so a thumbnail write does not blank the blob path a
+  /// separate fetch established. `blob_fetched_at` is stamped only when a blob
+  /// path is being written — a thumbnail is not the file.
+  Future<void> setAttachmentBlob(
+    String source,
+    String sourceMessageId,
+    String attachmentId, {
+    String? blobPath,
+    String? blobSha256,
+    String? thumbPath,
+  }) async {
+    final now = _nowIso();
+    await db.customUpdate(
+      'UPDATE attachments SET '
+      '  blob_path = COALESCE(?, blob_path), '
+      '  blob_sha256 = COALESCE(?, blob_sha256), '
+      '  blob_fetched_at = COALESCE(?, blob_fetched_at), '
+      '  thumb_path = COALESCE(?, thumb_path), '
+      '  updated_at = ? '
+      'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+      variables: _args([
+        blobPath,
+        blobSha256,
+        blobPath == null ? null : now,
+        thumbPath,
+        now,
+        source,
+        sourceMessageId,
+        attachmentId,
+      ]),
+    );
+  }
+
+  /// Pins one document to a storyline, or unpins it with a null [storylineId].
+  ///
+  /// The one column on an attachment row a person sets by hand, which is why
+  /// [upsertAttachments] never writes it: a re-sync must not un-pin what
+  /// somebody chose.
+  Future<void> setAttachmentPinned(
+    String source,
+    String sourceMessageId,
+    String attachmentId,
+    String? storylineId,
+  ) async {
+    await db.customUpdate(
+      'UPDATE attachments SET pinned_storyline_id = ?, updated_at = ? '
+      'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+      variables: _args([
+        storylineId,
+        _nowIso(),
+        source,
+        sourceMessageId,
+        attachmentId,
+      ]),
+    );
+  }
+
+  /// The documents pinned to one storyline, newest message first.
+  ///
+  /// A LEFT JOIN rather than an inner one: a pin outlives the message it hangs
+  /// off — a wipe of one source, a message dropped from the store — and a
+  /// document the user deliberately pinned must not vanish from the pane
+  /// because its message did.
+  Future<List<Map<String, Object?>>> pinnedAttachmentsForStoryline(
+    String storylineId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT a.*, m.conversation_key AS conversation_key, '
+          '       m.received_at AS message_received_at '
+          'FROM attachments a '
+          'LEFT JOIN messages m ON m.source = a.source '
+          '  AND m.source_message_id = a.source_message_id '
+          'WHERE a.pinned_storyline_id = ? '
+          'ORDER BY m.received_at DESC, a.ordinal ASC, a.attachment_id ASC',
+          variables: _args([storylineId]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 }

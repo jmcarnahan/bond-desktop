@@ -11477,6 +11477,2842 @@ class MessageVectorsCompanion extends UpdateCompanion<MessageVector> {
   }
 }
 
+class Attachments extends Table with TableInfo<Attachments, Attachment> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  Attachments(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'email\'',
+    defaultValue: const CustomExpression('\'email\''),
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _attachmentIdMeta = const VerificationMeta(
+    'attachmentId',
+  );
+  late final GeneratedColumn<String> attachmentId = GeneratedColumn<String>(
+    'attachment_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _ordinalMeta = const VerificationMeta(
+    'ordinal',
+  );
+  late final GeneratedColumn<int> ordinal = GeneratedColumn<int>(
+    'ordinal',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _kindMeta = const VerificationMeta('kind');
+  late final GeneratedColumn<String> kind = GeneratedColumn<String>(
+    'kind',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'file\'',
+    defaultValue: const CustomExpression('\'file\''),
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _contentTypeMeta = const VerificationMeta(
+    'contentType',
+  );
+  late final GeneratedColumn<String> contentType = GeneratedColumn<String>(
+    'content_type',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _sizeMeta = const VerificationMeta('size');
+  late final GeneratedColumn<int> size = GeneratedColumn<int>(
+    'size',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _isInlineMeta = const VerificationMeta(
+    'isInline',
+  );
+  late final GeneratedColumn<int> isInline = GeneratedColumn<int>(
+    'is_inline',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _contentIdMeta = const VerificationMeta(
+    'contentId',
+  );
+  late final GeneratedColumn<String> contentId = GeneratedColumn<String>(
+    'content_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _sourceUrlMeta = const VerificationMeta(
+    'sourceUrl',
+  );
+  late final GeneratedColumn<String> sourceUrl = GeneratedColumn<String>(
+    'source_url',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _thumbnailUrlMeta = const VerificationMeta(
+    'thumbnailUrl',
+  );
+  late final GeneratedColumn<String> thumbnailUrl = GeneratedColumn<String>(
+    'thumbnail_url',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _cardTextMeta = const VerificationMeta(
+    'cardText',
+  );
+  late final GeneratedColumn<String> cardText = GeneratedColumn<String>(
+    'card_text',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _itemSubjectMeta = const VerificationMeta(
+    'itemSubject',
+  );
+  late final GeneratedColumn<String> itemSubject = GeneratedColumn<String>(
+    'item_subject',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _itemFromMeta = const VerificationMeta(
+    'itemFrom',
+  );
+  late final GeneratedColumn<String> itemFrom = GeneratedColumn<String>(
+    'item_from',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _itemReceivedMeta = const VerificationMeta(
+    'itemReceived',
+  );
+  late final GeneratedColumn<String> itemReceived = GeneratedColumn<String>(
+    'item_received',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _textStatusMeta = const VerificationMeta(
+    'textStatus',
+  );
+  late final GeneratedColumn<String> textStatus = GeneratedColumn<String>(
+    'text_status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _textReasonMeta = const VerificationMeta(
+    'textReason',
+  );
+  late final GeneratedColumn<String> textReason = GeneratedColumn<String>(
+    'text_reason',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _textTruncatedMeta = const VerificationMeta(
+    'textTruncated',
+  );
+  late final GeneratedColumn<int> textTruncated = GeneratedColumn<int>(
+    'text_truncated',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _textCharsMeta = const VerificationMeta(
+    'textChars',
+  );
+  late final GeneratedColumn<int> textChars = GeneratedColumn<int>(
+    'text_chars',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _digestStatusMeta = const VerificationMeta(
+    'digestStatus',
+  );
+  late final GeneratedColumn<String> digestStatus = GeneratedColumn<String>(
+    'digest_status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _digestJsonMeta = const VerificationMeta(
+    'digestJson',
+  );
+  late final GeneratedColumn<String> digestJson = GeneratedColumn<String>(
+    'digest_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _blobPathMeta = const VerificationMeta(
+    'blobPath',
+  );
+  late final GeneratedColumn<String> blobPath = GeneratedColumn<String>(
+    'blob_path',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _blobSha256Meta = const VerificationMeta(
+    'blobSha256',
+  );
+  late final GeneratedColumn<String> blobSha256 = GeneratedColumn<String>(
+    'blob_sha256',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _blobFetchedAtMeta = const VerificationMeta(
+    'blobFetchedAt',
+  );
+  late final GeneratedColumn<String> blobFetchedAt = GeneratedColumn<String>(
+    'blob_fetched_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _thumbPathMeta = const VerificationMeta(
+    'thumbPath',
+  );
+  late final GeneratedColumn<String> thumbPath = GeneratedColumn<String>(
+    'thumb_path',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _pinnedStorylineIdMeta = const VerificationMeta(
+    'pinnedStorylineId',
+  );
+  late final GeneratedColumn<String> pinnedStorylineId =
+      GeneratedColumn<String>(
+        'pinned_storyline_id',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+        $customConstraints: '',
+      );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    source,
+    sourceMessageId,
+    attachmentId,
+    ordinal,
+    kind,
+    name,
+    contentType,
+    size,
+    isInline,
+    contentId,
+    sourceUrl,
+    thumbnailUrl,
+    cardText,
+    itemSubject,
+    itemFrom,
+    itemReceived,
+    textStatus,
+    textReason,
+    textTruncated,
+    textChars,
+    digestStatus,
+    digestJson,
+    blobPath,
+    blobSha256,
+    blobFetchedAt,
+    thumbPath,
+    pinnedStorylineId,
+    createdAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'attachments';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<Attachment> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('attachment_id')) {
+      context.handle(
+        _attachmentIdMeta,
+        attachmentId.isAcceptableOrUnknown(
+          data['attachment_id']!,
+          _attachmentIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_attachmentIdMeta);
+    }
+    if (data.containsKey('ordinal')) {
+      context.handle(
+        _ordinalMeta,
+        ordinal.isAcceptableOrUnknown(data['ordinal']!, _ordinalMeta),
+      );
+    }
+    if (data.containsKey('kind')) {
+      context.handle(
+        _kindMeta,
+        kind.isAcceptableOrUnknown(data['kind']!, _kindMeta),
+      );
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    }
+    if (data.containsKey('content_type')) {
+      context.handle(
+        _contentTypeMeta,
+        contentType.isAcceptableOrUnknown(
+          data['content_type']!,
+          _contentTypeMeta,
+        ),
+      );
+    }
+    if (data.containsKey('size')) {
+      context.handle(
+        _sizeMeta,
+        size.isAcceptableOrUnknown(data['size']!, _sizeMeta),
+      );
+    }
+    if (data.containsKey('is_inline')) {
+      context.handle(
+        _isInlineMeta,
+        isInline.isAcceptableOrUnknown(data['is_inline']!, _isInlineMeta),
+      );
+    }
+    if (data.containsKey('content_id')) {
+      context.handle(
+        _contentIdMeta,
+        contentId.isAcceptableOrUnknown(data['content_id']!, _contentIdMeta),
+      );
+    }
+    if (data.containsKey('source_url')) {
+      context.handle(
+        _sourceUrlMeta,
+        sourceUrl.isAcceptableOrUnknown(data['source_url']!, _sourceUrlMeta),
+      );
+    }
+    if (data.containsKey('thumbnail_url')) {
+      context.handle(
+        _thumbnailUrlMeta,
+        thumbnailUrl.isAcceptableOrUnknown(
+          data['thumbnail_url']!,
+          _thumbnailUrlMeta,
+        ),
+      );
+    }
+    if (data.containsKey('card_text')) {
+      context.handle(
+        _cardTextMeta,
+        cardText.isAcceptableOrUnknown(data['card_text']!, _cardTextMeta),
+      );
+    }
+    if (data.containsKey('item_subject')) {
+      context.handle(
+        _itemSubjectMeta,
+        itemSubject.isAcceptableOrUnknown(
+          data['item_subject']!,
+          _itemSubjectMeta,
+        ),
+      );
+    }
+    if (data.containsKey('item_from')) {
+      context.handle(
+        _itemFromMeta,
+        itemFrom.isAcceptableOrUnknown(data['item_from']!, _itemFromMeta),
+      );
+    }
+    if (data.containsKey('item_received')) {
+      context.handle(
+        _itemReceivedMeta,
+        itemReceived.isAcceptableOrUnknown(
+          data['item_received']!,
+          _itemReceivedMeta,
+        ),
+      );
+    }
+    if (data.containsKey('text_status')) {
+      context.handle(
+        _textStatusMeta,
+        textStatus.isAcceptableOrUnknown(data['text_status']!, _textStatusMeta),
+      );
+    }
+    if (data.containsKey('text_reason')) {
+      context.handle(
+        _textReasonMeta,
+        textReason.isAcceptableOrUnknown(data['text_reason']!, _textReasonMeta),
+      );
+    }
+    if (data.containsKey('text_truncated')) {
+      context.handle(
+        _textTruncatedMeta,
+        textTruncated.isAcceptableOrUnknown(
+          data['text_truncated']!,
+          _textTruncatedMeta,
+        ),
+      );
+    }
+    if (data.containsKey('text_chars')) {
+      context.handle(
+        _textCharsMeta,
+        textChars.isAcceptableOrUnknown(data['text_chars']!, _textCharsMeta),
+      );
+    }
+    if (data.containsKey('digest_status')) {
+      context.handle(
+        _digestStatusMeta,
+        digestStatus.isAcceptableOrUnknown(
+          data['digest_status']!,
+          _digestStatusMeta,
+        ),
+      );
+    }
+    if (data.containsKey('digest_json')) {
+      context.handle(
+        _digestJsonMeta,
+        digestJson.isAcceptableOrUnknown(data['digest_json']!, _digestJsonMeta),
+      );
+    }
+    if (data.containsKey('blob_path')) {
+      context.handle(
+        _blobPathMeta,
+        blobPath.isAcceptableOrUnknown(data['blob_path']!, _blobPathMeta),
+      );
+    }
+    if (data.containsKey('blob_sha256')) {
+      context.handle(
+        _blobSha256Meta,
+        blobSha256.isAcceptableOrUnknown(data['blob_sha256']!, _blobSha256Meta),
+      );
+    }
+    if (data.containsKey('blob_fetched_at')) {
+      context.handle(
+        _blobFetchedAtMeta,
+        blobFetchedAt.isAcceptableOrUnknown(
+          data['blob_fetched_at']!,
+          _blobFetchedAtMeta,
+        ),
+      );
+    }
+    if (data.containsKey('thumb_path')) {
+      context.handle(
+        _thumbPathMeta,
+        thumbPath.isAcceptableOrUnknown(data['thumb_path']!, _thumbPathMeta),
+      );
+    }
+    if (data.containsKey('pinned_storyline_id')) {
+      context.handle(
+        _pinnedStorylineIdMeta,
+        pinnedStorylineId.isAcceptableOrUnknown(
+          data['pinned_storyline_id']!,
+          _pinnedStorylineIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {
+    source,
+    sourceMessageId,
+    attachmentId,
+  };
+  @override
+  Attachment map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Attachment(
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      attachmentId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}attachment_id'],
+      )!,
+      ordinal: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}ordinal'],
+      )!,
+      kind: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}kind'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      ),
+      contentType: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}content_type'],
+      ),
+      size: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}size'],
+      )!,
+      isInline: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}is_inline'],
+      )!,
+      contentId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}content_id'],
+      ),
+      sourceUrl: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_url'],
+      ),
+      thumbnailUrl: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}thumbnail_url'],
+      ),
+      cardText: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}card_text'],
+      ),
+      itemSubject: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}item_subject'],
+      ),
+      itemFrom: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}item_from'],
+      ),
+      itemReceived: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}item_received'],
+      ),
+      textStatus: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}text_status'],
+      )!,
+      textReason: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}text_reason'],
+      ),
+      textTruncated: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}text_truncated'],
+      )!,
+      textChars: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}text_chars'],
+      )!,
+      digestStatus: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}digest_status'],
+      )!,
+      digestJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}digest_json'],
+      ),
+      blobPath: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}blob_path'],
+      ),
+      blobSha256: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}blob_sha256'],
+      ),
+      blobFetchedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}blob_fetched_at'],
+      ),
+      thumbPath: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}thumb_path'],
+      ),
+      pinnedStorylineId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}pinned_storyline_id'],
+      ),
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  Attachments createAlias(String alias) {
+    return Attachments(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(source, source_message_id, attachment_id)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class Attachment extends DataClass implements Insertable<Attachment> {
+  final String source;
+  final String sourceMessageId;
+  final String attachmentId;
+  final int ordinal;
+  final String kind;
+  final String? name;
+  final String? contentType;
+  final int size;
+  final int isInline;
+  final String? contentId;
+  final String? sourceUrl;
+  final String? thumbnailUrl;
+  final String? cardText;
+  final String? itemSubject;
+  final String? itemFrom;
+  final String? itemReceived;
+  final String textStatus;
+  final String? textReason;
+  final int textTruncated;
+  final int textChars;
+  final String digestStatus;
+  final String? digestJson;
+  final String? blobPath;
+  final String? blobSha256;
+  final String? blobFetchedAt;
+  final String? thumbPath;
+  final String? pinnedStorylineId;
+  final String createdAt;
+  final String updatedAt;
+  const Attachment({
+    required this.source,
+    required this.sourceMessageId,
+    required this.attachmentId,
+    required this.ordinal,
+    required this.kind,
+    this.name,
+    this.contentType,
+    required this.size,
+    required this.isInline,
+    this.contentId,
+    this.sourceUrl,
+    this.thumbnailUrl,
+    this.cardText,
+    this.itemSubject,
+    this.itemFrom,
+    this.itemReceived,
+    required this.textStatus,
+    this.textReason,
+    required this.textTruncated,
+    required this.textChars,
+    required this.digestStatus,
+    this.digestJson,
+    this.blobPath,
+    this.blobSha256,
+    this.blobFetchedAt,
+    this.thumbPath,
+    this.pinnedStorylineId,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['attachment_id'] = Variable<String>(attachmentId);
+    map['ordinal'] = Variable<int>(ordinal);
+    map['kind'] = Variable<String>(kind);
+    if (!nullToAbsent || name != null) {
+      map['name'] = Variable<String>(name);
+    }
+    if (!nullToAbsent || contentType != null) {
+      map['content_type'] = Variable<String>(contentType);
+    }
+    map['size'] = Variable<int>(size);
+    map['is_inline'] = Variable<int>(isInline);
+    if (!nullToAbsent || contentId != null) {
+      map['content_id'] = Variable<String>(contentId);
+    }
+    if (!nullToAbsent || sourceUrl != null) {
+      map['source_url'] = Variable<String>(sourceUrl);
+    }
+    if (!nullToAbsent || thumbnailUrl != null) {
+      map['thumbnail_url'] = Variable<String>(thumbnailUrl);
+    }
+    if (!nullToAbsent || cardText != null) {
+      map['card_text'] = Variable<String>(cardText);
+    }
+    if (!nullToAbsent || itemSubject != null) {
+      map['item_subject'] = Variable<String>(itemSubject);
+    }
+    if (!nullToAbsent || itemFrom != null) {
+      map['item_from'] = Variable<String>(itemFrom);
+    }
+    if (!nullToAbsent || itemReceived != null) {
+      map['item_received'] = Variable<String>(itemReceived);
+    }
+    map['text_status'] = Variable<String>(textStatus);
+    if (!nullToAbsent || textReason != null) {
+      map['text_reason'] = Variable<String>(textReason);
+    }
+    map['text_truncated'] = Variable<int>(textTruncated);
+    map['text_chars'] = Variable<int>(textChars);
+    map['digest_status'] = Variable<String>(digestStatus);
+    if (!nullToAbsent || digestJson != null) {
+      map['digest_json'] = Variable<String>(digestJson);
+    }
+    if (!nullToAbsent || blobPath != null) {
+      map['blob_path'] = Variable<String>(blobPath);
+    }
+    if (!nullToAbsent || blobSha256 != null) {
+      map['blob_sha256'] = Variable<String>(blobSha256);
+    }
+    if (!nullToAbsent || blobFetchedAt != null) {
+      map['blob_fetched_at'] = Variable<String>(blobFetchedAt);
+    }
+    if (!nullToAbsent || thumbPath != null) {
+      map['thumb_path'] = Variable<String>(thumbPath);
+    }
+    if (!nullToAbsent || pinnedStorylineId != null) {
+      map['pinned_storyline_id'] = Variable<String>(pinnedStorylineId);
+    }
+    map['created_at'] = Variable<String>(createdAt);
+    map['updated_at'] = Variable<String>(updatedAt);
+    return map;
+  }
+
+  AttachmentsCompanion toCompanion(bool nullToAbsent) {
+    return AttachmentsCompanion(
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      attachmentId: Value(attachmentId),
+      ordinal: Value(ordinal),
+      kind: Value(kind),
+      name: name == null && nullToAbsent ? const Value.absent() : Value(name),
+      contentType: contentType == null && nullToAbsent
+          ? const Value.absent()
+          : Value(contentType),
+      size: Value(size),
+      isInline: Value(isInline),
+      contentId: contentId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(contentId),
+      sourceUrl: sourceUrl == null && nullToAbsent
+          ? const Value.absent()
+          : Value(sourceUrl),
+      thumbnailUrl: thumbnailUrl == null && nullToAbsent
+          ? const Value.absent()
+          : Value(thumbnailUrl),
+      cardText: cardText == null && nullToAbsent
+          ? const Value.absent()
+          : Value(cardText),
+      itemSubject: itemSubject == null && nullToAbsent
+          ? const Value.absent()
+          : Value(itemSubject),
+      itemFrom: itemFrom == null && nullToAbsent
+          ? const Value.absent()
+          : Value(itemFrom),
+      itemReceived: itemReceived == null && nullToAbsent
+          ? const Value.absent()
+          : Value(itemReceived),
+      textStatus: Value(textStatus),
+      textReason: textReason == null && nullToAbsent
+          ? const Value.absent()
+          : Value(textReason),
+      textTruncated: Value(textTruncated),
+      textChars: Value(textChars),
+      digestStatus: Value(digestStatus),
+      digestJson: digestJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(digestJson),
+      blobPath: blobPath == null && nullToAbsent
+          ? const Value.absent()
+          : Value(blobPath),
+      blobSha256: blobSha256 == null && nullToAbsent
+          ? const Value.absent()
+          : Value(blobSha256),
+      blobFetchedAt: blobFetchedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(blobFetchedAt),
+      thumbPath: thumbPath == null && nullToAbsent
+          ? const Value.absent()
+          : Value(thumbPath),
+      pinnedStorylineId: pinnedStorylineId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(pinnedStorylineId),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory Attachment.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Attachment(
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      attachmentId: serializer.fromJson<String>(json['attachment_id']),
+      ordinal: serializer.fromJson<int>(json['ordinal']),
+      kind: serializer.fromJson<String>(json['kind']),
+      name: serializer.fromJson<String?>(json['name']),
+      contentType: serializer.fromJson<String?>(json['content_type']),
+      size: serializer.fromJson<int>(json['size']),
+      isInline: serializer.fromJson<int>(json['is_inline']),
+      contentId: serializer.fromJson<String?>(json['content_id']),
+      sourceUrl: serializer.fromJson<String?>(json['source_url']),
+      thumbnailUrl: serializer.fromJson<String?>(json['thumbnail_url']),
+      cardText: serializer.fromJson<String?>(json['card_text']),
+      itemSubject: serializer.fromJson<String?>(json['item_subject']),
+      itemFrom: serializer.fromJson<String?>(json['item_from']),
+      itemReceived: serializer.fromJson<String?>(json['item_received']),
+      textStatus: serializer.fromJson<String>(json['text_status']),
+      textReason: serializer.fromJson<String?>(json['text_reason']),
+      textTruncated: serializer.fromJson<int>(json['text_truncated']),
+      textChars: serializer.fromJson<int>(json['text_chars']),
+      digestStatus: serializer.fromJson<String>(json['digest_status']),
+      digestJson: serializer.fromJson<String?>(json['digest_json']),
+      blobPath: serializer.fromJson<String?>(json['blob_path']),
+      blobSha256: serializer.fromJson<String?>(json['blob_sha256']),
+      blobFetchedAt: serializer.fromJson<String?>(json['blob_fetched_at']),
+      thumbPath: serializer.fromJson<String?>(json['thumb_path']),
+      pinnedStorylineId: serializer.fromJson<String?>(
+        json['pinned_storyline_id'],
+      ),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'attachment_id': serializer.toJson<String>(attachmentId),
+      'ordinal': serializer.toJson<int>(ordinal),
+      'kind': serializer.toJson<String>(kind),
+      'name': serializer.toJson<String?>(name),
+      'content_type': serializer.toJson<String?>(contentType),
+      'size': serializer.toJson<int>(size),
+      'is_inline': serializer.toJson<int>(isInline),
+      'content_id': serializer.toJson<String?>(contentId),
+      'source_url': serializer.toJson<String?>(sourceUrl),
+      'thumbnail_url': serializer.toJson<String?>(thumbnailUrl),
+      'card_text': serializer.toJson<String?>(cardText),
+      'item_subject': serializer.toJson<String?>(itemSubject),
+      'item_from': serializer.toJson<String?>(itemFrom),
+      'item_received': serializer.toJson<String?>(itemReceived),
+      'text_status': serializer.toJson<String>(textStatus),
+      'text_reason': serializer.toJson<String?>(textReason),
+      'text_truncated': serializer.toJson<int>(textTruncated),
+      'text_chars': serializer.toJson<int>(textChars),
+      'digest_status': serializer.toJson<String>(digestStatus),
+      'digest_json': serializer.toJson<String?>(digestJson),
+      'blob_path': serializer.toJson<String?>(blobPath),
+      'blob_sha256': serializer.toJson<String?>(blobSha256),
+      'blob_fetched_at': serializer.toJson<String?>(blobFetchedAt),
+      'thumb_path': serializer.toJson<String?>(thumbPath),
+      'pinned_storyline_id': serializer.toJson<String?>(pinnedStorylineId),
+      'created_at': serializer.toJson<String>(createdAt),
+      'updated_at': serializer.toJson<String>(updatedAt),
+    };
+  }
+
+  Attachment copyWith({
+    String? source,
+    String? sourceMessageId,
+    String? attachmentId,
+    int? ordinal,
+    String? kind,
+    Value<String?> name = const Value.absent(),
+    Value<String?> contentType = const Value.absent(),
+    int? size,
+    int? isInline,
+    Value<String?> contentId = const Value.absent(),
+    Value<String?> sourceUrl = const Value.absent(),
+    Value<String?> thumbnailUrl = const Value.absent(),
+    Value<String?> cardText = const Value.absent(),
+    Value<String?> itemSubject = const Value.absent(),
+    Value<String?> itemFrom = const Value.absent(),
+    Value<String?> itemReceived = const Value.absent(),
+    String? textStatus,
+    Value<String?> textReason = const Value.absent(),
+    int? textTruncated,
+    int? textChars,
+    String? digestStatus,
+    Value<String?> digestJson = const Value.absent(),
+    Value<String?> blobPath = const Value.absent(),
+    Value<String?> blobSha256 = const Value.absent(),
+    Value<String?> blobFetchedAt = const Value.absent(),
+    Value<String?> thumbPath = const Value.absent(),
+    Value<String?> pinnedStorylineId = const Value.absent(),
+    String? createdAt,
+    String? updatedAt,
+  }) => Attachment(
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    attachmentId: attachmentId ?? this.attachmentId,
+    ordinal: ordinal ?? this.ordinal,
+    kind: kind ?? this.kind,
+    name: name.present ? name.value : this.name,
+    contentType: contentType.present ? contentType.value : this.contentType,
+    size: size ?? this.size,
+    isInline: isInline ?? this.isInline,
+    contentId: contentId.present ? contentId.value : this.contentId,
+    sourceUrl: sourceUrl.present ? sourceUrl.value : this.sourceUrl,
+    thumbnailUrl: thumbnailUrl.present ? thumbnailUrl.value : this.thumbnailUrl,
+    cardText: cardText.present ? cardText.value : this.cardText,
+    itemSubject: itemSubject.present ? itemSubject.value : this.itemSubject,
+    itemFrom: itemFrom.present ? itemFrom.value : this.itemFrom,
+    itemReceived: itemReceived.present ? itemReceived.value : this.itemReceived,
+    textStatus: textStatus ?? this.textStatus,
+    textReason: textReason.present ? textReason.value : this.textReason,
+    textTruncated: textTruncated ?? this.textTruncated,
+    textChars: textChars ?? this.textChars,
+    digestStatus: digestStatus ?? this.digestStatus,
+    digestJson: digestJson.present ? digestJson.value : this.digestJson,
+    blobPath: blobPath.present ? blobPath.value : this.blobPath,
+    blobSha256: blobSha256.present ? blobSha256.value : this.blobSha256,
+    blobFetchedAt: blobFetchedAt.present
+        ? blobFetchedAt.value
+        : this.blobFetchedAt,
+    thumbPath: thumbPath.present ? thumbPath.value : this.thumbPath,
+    pinnedStorylineId: pinnedStorylineId.present
+        ? pinnedStorylineId.value
+        : this.pinnedStorylineId,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  Attachment copyWithCompanion(AttachmentsCompanion data) {
+    return Attachment(
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      attachmentId: data.attachmentId.present
+          ? data.attachmentId.value
+          : this.attachmentId,
+      ordinal: data.ordinal.present ? data.ordinal.value : this.ordinal,
+      kind: data.kind.present ? data.kind.value : this.kind,
+      name: data.name.present ? data.name.value : this.name,
+      contentType: data.contentType.present
+          ? data.contentType.value
+          : this.contentType,
+      size: data.size.present ? data.size.value : this.size,
+      isInline: data.isInline.present ? data.isInline.value : this.isInline,
+      contentId: data.contentId.present ? data.contentId.value : this.contentId,
+      sourceUrl: data.sourceUrl.present ? data.sourceUrl.value : this.sourceUrl,
+      thumbnailUrl: data.thumbnailUrl.present
+          ? data.thumbnailUrl.value
+          : this.thumbnailUrl,
+      cardText: data.cardText.present ? data.cardText.value : this.cardText,
+      itemSubject: data.itemSubject.present
+          ? data.itemSubject.value
+          : this.itemSubject,
+      itemFrom: data.itemFrom.present ? data.itemFrom.value : this.itemFrom,
+      itemReceived: data.itemReceived.present
+          ? data.itemReceived.value
+          : this.itemReceived,
+      textStatus: data.textStatus.present
+          ? data.textStatus.value
+          : this.textStatus,
+      textReason: data.textReason.present
+          ? data.textReason.value
+          : this.textReason,
+      textTruncated: data.textTruncated.present
+          ? data.textTruncated.value
+          : this.textTruncated,
+      textChars: data.textChars.present ? data.textChars.value : this.textChars,
+      digestStatus: data.digestStatus.present
+          ? data.digestStatus.value
+          : this.digestStatus,
+      digestJson: data.digestJson.present
+          ? data.digestJson.value
+          : this.digestJson,
+      blobPath: data.blobPath.present ? data.blobPath.value : this.blobPath,
+      blobSha256: data.blobSha256.present
+          ? data.blobSha256.value
+          : this.blobSha256,
+      blobFetchedAt: data.blobFetchedAt.present
+          ? data.blobFetchedAt.value
+          : this.blobFetchedAt,
+      thumbPath: data.thumbPath.present ? data.thumbPath.value : this.thumbPath,
+      pinnedStorylineId: data.pinnedStorylineId.present
+          ? data.pinnedStorylineId.value
+          : this.pinnedStorylineId,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Attachment(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('attachmentId: $attachmentId, ')
+          ..write('ordinal: $ordinal, ')
+          ..write('kind: $kind, ')
+          ..write('name: $name, ')
+          ..write('contentType: $contentType, ')
+          ..write('size: $size, ')
+          ..write('isInline: $isInline, ')
+          ..write('contentId: $contentId, ')
+          ..write('sourceUrl: $sourceUrl, ')
+          ..write('thumbnailUrl: $thumbnailUrl, ')
+          ..write('cardText: $cardText, ')
+          ..write('itemSubject: $itemSubject, ')
+          ..write('itemFrom: $itemFrom, ')
+          ..write('itemReceived: $itemReceived, ')
+          ..write('textStatus: $textStatus, ')
+          ..write('textReason: $textReason, ')
+          ..write('textTruncated: $textTruncated, ')
+          ..write('textChars: $textChars, ')
+          ..write('digestStatus: $digestStatus, ')
+          ..write('digestJson: $digestJson, ')
+          ..write('blobPath: $blobPath, ')
+          ..write('blobSha256: $blobSha256, ')
+          ..write('blobFetchedAt: $blobFetchedAt, ')
+          ..write('thumbPath: $thumbPath, ')
+          ..write('pinnedStorylineId: $pinnedStorylineId, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hashAll([
+    source,
+    sourceMessageId,
+    attachmentId,
+    ordinal,
+    kind,
+    name,
+    contentType,
+    size,
+    isInline,
+    contentId,
+    sourceUrl,
+    thumbnailUrl,
+    cardText,
+    itemSubject,
+    itemFrom,
+    itemReceived,
+    textStatus,
+    textReason,
+    textTruncated,
+    textChars,
+    digestStatus,
+    digestJson,
+    blobPath,
+    blobSha256,
+    blobFetchedAt,
+    thumbPath,
+    pinnedStorylineId,
+    createdAt,
+    updatedAt,
+  ]);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Attachment &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          other.attachmentId == this.attachmentId &&
+          other.ordinal == this.ordinal &&
+          other.kind == this.kind &&
+          other.name == this.name &&
+          other.contentType == this.contentType &&
+          other.size == this.size &&
+          other.isInline == this.isInline &&
+          other.contentId == this.contentId &&
+          other.sourceUrl == this.sourceUrl &&
+          other.thumbnailUrl == this.thumbnailUrl &&
+          other.cardText == this.cardText &&
+          other.itemSubject == this.itemSubject &&
+          other.itemFrom == this.itemFrom &&
+          other.itemReceived == this.itemReceived &&
+          other.textStatus == this.textStatus &&
+          other.textReason == this.textReason &&
+          other.textTruncated == this.textTruncated &&
+          other.textChars == this.textChars &&
+          other.digestStatus == this.digestStatus &&
+          other.digestJson == this.digestJson &&
+          other.blobPath == this.blobPath &&
+          other.blobSha256 == this.blobSha256 &&
+          other.blobFetchedAt == this.blobFetchedAt &&
+          other.thumbPath == this.thumbPath &&
+          other.pinnedStorylineId == this.pinnedStorylineId &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class AttachmentsCompanion extends UpdateCompanion<Attachment> {
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<String> attachmentId;
+  final Value<int> ordinal;
+  final Value<String> kind;
+  final Value<String?> name;
+  final Value<String?> contentType;
+  final Value<int> size;
+  final Value<int> isInline;
+  final Value<String?> contentId;
+  final Value<String?> sourceUrl;
+  final Value<String?> thumbnailUrl;
+  final Value<String?> cardText;
+  final Value<String?> itemSubject;
+  final Value<String?> itemFrom;
+  final Value<String?> itemReceived;
+  final Value<String> textStatus;
+  final Value<String?> textReason;
+  final Value<int> textTruncated;
+  final Value<int> textChars;
+  final Value<String> digestStatus;
+  final Value<String?> digestJson;
+  final Value<String?> blobPath;
+  final Value<String?> blobSha256;
+  final Value<String?> blobFetchedAt;
+  final Value<String?> thumbPath;
+  final Value<String?> pinnedStorylineId;
+  final Value<String> createdAt;
+  final Value<String> updatedAt;
+  final Value<int> rowid;
+  const AttachmentsCompanion({
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.attachmentId = const Value.absent(),
+    this.ordinal = const Value.absent(),
+    this.kind = const Value.absent(),
+    this.name = const Value.absent(),
+    this.contentType = const Value.absent(),
+    this.size = const Value.absent(),
+    this.isInline = const Value.absent(),
+    this.contentId = const Value.absent(),
+    this.sourceUrl = const Value.absent(),
+    this.thumbnailUrl = const Value.absent(),
+    this.cardText = const Value.absent(),
+    this.itemSubject = const Value.absent(),
+    this.itemFrom = const Value.absent(),
+    this.itemReceived = const Value.absent(),
+    this.textStatus = const Value.absent(),
+    this.textReason = const Value.absent(),
+    this.textTruncated = const Value.absent(),
+    this.textChars = const Value.absent(),
+    this.digestStatus = const Value.absent(),
+    this.digestJson = const Value.absent(),
+    this.blobPath = const Value.absent(),
+    this.blobSha256 = const Value.absent(),
+    this.blobFetchedAt = const Value.absent(),
+    this.thumbPath = const Value.absent(),
+    this.pinnedStorylineId = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  AttachmentsCompanion.insert({
+    this.source = const Value.absent(),
+    required String sourceMessageId,
+    required String attachmentId,
+    this.ordinal = const Value.absent(),
+    this.kind = const Value.absent(),
+    this.name = const Value.absent(),
+    this.contentType = const Value.absent(),
+    this.size = const Value.absent(),
+    this.isInline = const Value.absent(),
+    this.contentId = const Value.absent(),
+    this.sourceUrl = const Value.absent(),
+    this.thumbnailUrl = const Value.absent(),
+    this.cardText = const Value.absent(),
+    this.itemSubject = const Value.absent(),
+    this.itemFrom = const Value.absent(),
+    this.itemReceived = const Value.absent(),
+    this.textStatus = const Value.absent(),
+    this.textReason = const Value.absent(),
+    this.textTruncated = const Value.absent(),
+    this.textChars = const Value.absent(),
+    this.digestStatus = const Value.absent(),
+    this.digestJson = const Value.absent(),
+    this.blobPath = const Value.absent(),
+    this.blobSha256 = const Value.absent(),
+    this.blobFetchedAt = const Value.absent(),
+    this.thumbPath = const Value.absent(),
+    this.pinnedStorylineId = const Value.absent(),
+    required String createdAt,
+    required String updatedAt,
+    this.rowid = const Value.absent(),
+  }) : sourceMessageId = Value(sourceMessageId),
+       attachmentId = Value(attachmentId),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<Attachment> custom({
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<String>? attachmentId,
+    Expression<int>? ordinal,
+    Expression<String>? kind,
+    Expression<String>? name,
+    Expression<String>? contentType,
+    Expression<int>? size,
+    Expression<int>? isInline,
+    Expression<String>? contentId,
+    Expression<String>? sourceUrl,
+    Expression<String>? thumbnailUrl,
+    Expression<String>? cardText,
+    Expression<String>? itemSubject,
+    Expression<String>? itemFrom,
+    Expression<String>? itemReceived,
+    Expression<String>? textStatus,
+    Expression<String>? textReason,
+    Expression<int>? textTruncated,
+    Expression<int>? textChars,
+    Expression<String>? digestStatus,
+    Expression<String>? digestJson,
+    Expression<String>? blobPath,
+    Expression<String>? blobSha256,
+    Expression<String>? blobFetchedAt,
+    Expression<String>? thumbPath,
+    Expression<String>? pinnedStorylineId,
+    Expression<String>? createdAt,
+    Expression<String>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (attachmentId != null) 'attachment_id': attachmentId,
+      if (ordinal != null) 'ordinal': ordinal,
+      if (kind != null) 'kind': kind,
+      if (name != null) 'name': name,
+      if (contentType != null) 'content_type': contentType,
+      if (size != null) 'size': size,
+      if (isInline != null) 'is_inline': isInline,
+      if (contentId != null) 'content_id': contentId,
+      if (sourceUrl != null) 'source_url': sourceUrl,
+      if (thumbnailUrl != null) 'thumbnail_url': thumbnailUrl,
+      if (cardText != null) 'card_text': cardText,
+      if (itemSubject != null) 'item_subject': itemSubject,
+      if (itemFrom != null) 'item_from': itemFrom,
+      if (itemReceived != null) 'item_received': itemReceived,
+      if (textStatus != null) 'text_status': textStatus,
+      if (textReason != null) 'text_reason': textReason,
+      if (textTruncated != null) 'text_truncated': textTruncated,
+      if (textChars != null) 'text_chars': textChars,
+      if (digestStatus != null) 'digest_status': digestStatus,
+      if (digestJson != null) 'digest_json': digestJson,
+      if (blobPath != null) 'blob_path': blobPath,
+      if (blobSha256 != null) 'blob_sha256': blobSha256,
+      if (blobFetchedAt != null) 'blob_fetched_at': blobFetchedAt,
+      if (thumbPath != null) 'thumb_path': thumbPath,
+      if (pinnedStorylineId != null) 'pinned_storyline_id': pinnedStorylineId,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  AttachmentsCompanion copyWith({
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<String>? attachmentId,
+    Value<int>? ordinal,
+    Value<String>? kind,
+    Value<String?>? name,
+    Value<String?>? contentType,
+    Value<int>? size,
+    Value<int>? isInline,
+    Value<String?>? contentId,
+    Value<String?>? sourceUrl,
+    Value<String?>? thumbnailUrl,
+    Value<String?>? cardText,
+    Value<String?>? itemSubject,
+    Value<String?>? itemFrom,
+    Value<String?>? itemReceived,
+    Value<String>? textStatus,
+    Value<String?>? textReason,
+    Value<int>? textTruncated,
+    Value<int>? textChars,
+    Value<String>? digestStatus,
+    Value<String?>? digestJson,
+    Value<String?>? blobPath,
+    Value<String?>? blobSha256,
+    Value<String?>? blobFetchedAt,
+    Value<String?>? thumbPath,
+    Value<String?>? pinnedStorylineId,
+    Value<String>? createdAt,
+    Value<String>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return AttachmentsCompanion(
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      attachmentId: attachmentId ?? this.attachmentId,
+      ordinal: ordinal ?? this.ordinal,
+      kind: kind ?? this.kind,
+      name: name ?? this.name,
+      contentType: contentType ?? this.contentType,
+      size: size ?? this.size,
+      isInline: isInline ?? this.isInline,
+      contentId: contentId ?? this.contentId,
+      sourceUrl: sourceUrl ?? this.sourceUrl,
+      thumbnailUrl: thumbnailUrl ?? this.thumbnailUrl,
+      cardText: cardText ?? this.cardText,
+      itemSubject: itemSubject ?? this.itemSubject,
+      itemFrom: itemFrom ?? this.itemFrom,
+      itemReceived: itemReceived ?? this.itemReceived,
+      textStatus: textStatus ?? this.textStatus,
+      textReason: textReason ?? this.textReason,
+      textTruncated: textTruncated ?? this.textTruncated,
+      textChars: textChars ?? this.textChars,
+      digestStatus: digestStatus ?? this.digestStatus,
+      digestJson: digestJson ?? this.digestJson,
+      blobPath: blobPath ?? this.blobPath,
+      blobSha256: blobSha256 ?? this.blobSha256,
+      blobFetchedAt: blobFetchedAt ?? this.blobFetchedAt,
+      thumbPath: thumbPath ?? this.thumbPath,
+      pinnedStorylineId: pinnedStorylineId ?? this.pinnedStorylineId,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (attachmentId.present) {
+      map['attachment_id'] = Variable<String>(attachmentId.value);
+    }
+    if (ordinal.present) {
+      map['ordinal'] = Variable<int>(ordinal.value);
+    }
+    if (kind.present) {
+      map['kind'] = Variable<String>(kind.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (contentType.present) {
+      map['content_type'] = Variable<String>(contentType.value);
+    }
+    if (size.present) {
+      map['size'] = Variable<int>(size.value);
+    }
+    if (isInline.present) {
+      map['is_inline'] = Variable<int>(isInline.value);
+    }
+    if (contentId.present) {
+      map['content_id'] = Variable<String>(contentId.value);
+    }
+    if (sourceUrl.present) {
+      map['source_url'] = Variable<String>(sourceUrl.value);
+    }
+    if (thumbnailUrl.present) {
+      map['thumbnail_url'] = Variable<String>(thumbnailUrl.value);
+    }
+    if (cardText.present) {
+      map['card_text'] = Variable<String>(cardText.value);
+    }
+    if (itemSubject.present) {
+      map['item_subject'] = Variable<String>(itemSubject.value);
+    }
+    if (itemFrom.present) {
+      map['item_from'] = Variable<String>(itemFrom.value);
+    }
+    if (itemReceived.present) {
+      map['item_received'] = Variable<String>(itemReceived.value);
+    }
+    if (textStatus.present) {
+      map['text_status'] = Variable<String>(textStatus.value);
+    }
+    if (textReason.present) {
+      map['text_reason'] = Variable<String>(textReason.value);
+    }
+    if (textTruncated.present) {
+      map['text_truncated'] = Variable<int>(textTruncated.value);
+    }
+    if (textChars.present) {
+      map['text_chars'] = Variable<int>(textChars.value);
+    }
+    if (digestStatus.present) {
+      map['digest_status'] = Variable<String>(digestStatus.value);
+    }
+    if (digestJson.present) {
+      map['digest_json'] = Variable<String>(digestJson.value);
+    }
+    if (blobPath.present) {
+      map['blob_path'] = Variable<String>(blobPath.value);
+    }
+    if (blobSha256.present) {
+      map['blob_sha256'] = Variable<String>(blobSha256.value);
+    }
+    if (blobFetchedAt.present) {
+      map['blob_fetched_at'] = Variable<String>(blobFetchedAt.value);
+    }
+    if (thumbPath.present) {
+      map['thumb_path'] = Variable<String>(thumbPath.value);
+    }
+    if (pinnedStorylineId.present) {
+      map['pinned_storyline_id'] = Variable<String>(pinnedStorylineId.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AttachmentsCompanion(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('attachmentId: $attachmentId, ')
+          ..write('ordinal: $ordinal, ')
+          ..write('kind: $kind, ')
+          ..write('name: $name, ')
+          ..write('contentType: $contentType, ')
+          ..write('size: $size, ')
+          ..write('isInline: $isInline, ')
+          ..write('contentId: $contentId, ')
+          ..write('sourceUrl: $sourceUrl, ')
+          ..write('thumbnailUrl: $thumbnailUrl, ')
+          ..write('cardText: $cardText, ')
+          ..write('itemSubject: $itemSubject, ')
+          ..write('itemFrom: $itemFrom, ')
+          ..write('itemReceived: $itemReceived, ')
+          ..write('textStatus: $textStatus, ')
+          ..write('textReason: $textReason, ')
+          ..write('textTruncated: $textTruncated, ')
+          ..write('textChars: $textChars, ')
+          ..write('digestStatus: $digestStatus, ')
+          ..write('digestJson: $digestJson, ')
+          ..write('blobPath: $blobPath, ')
+          ..write('blobSha256: $blobSha256, ')
+          ..write('blobFetchedAt: $blobFetchedAt, ')
+          ..write('thumbPath: $thumbPath, ')
+          ..write('pinnedStorylineId: $pinnedStorylineId, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class AttachmentText extends Table
+    with TableInfo<AttachmentText, AttachmentTextData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  AttachmentText(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'email\'',
+    defaultValue: const CustomExpression('\'email\''),
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _attachmentIdMeta = const VerificationMeta(
+    'attachmentId',
+  );
+  late final GeneratedColumn<String> attachmentId = GeneratedColumn<String>(
+    'attachment_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _extractedTextMeta = const VerificationMeta(
+    'extractedText',
+  );
+  late final GeneratedColumn<String> extractedText = GeneratedColumn<String>(
+    'extracted_text',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _charsMeta = const VerificationMeta('chars');
+  late final GeneratedColumn<int> chars = GeneratedColumn<int>(
+    'chars',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _fetchedAtMeta = const VerificationMeta(
+    'fetchedAt',
+  );
+  late final GeneratedColumn<String> fetchedAt = GeneratedColumn<String>(
+    'fetched_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    source,
+    sourceMessageId,
+    attachmentId,
+    extractedText,
+    chars,
+    fetchedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'attachment_text';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<AttachmentTextData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('attachment_id')) {
+      context.handle(
+        _attachmentIdMeta,
+        attachmentId.isAcceptableOrUnknown(
+          data['attachment_id']!,
+          _attachmentIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_attachmentIdMeta);
+    }
+    if (data.containsKey('extracted_text')) {
+      context.handle(
+        _extractedTextMeta,
+        extractedText.isAcceptableOrUnknown(
+          data['extracted_text']!,
+          _extractedTextMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_extractedTextMeta);
+    }
+    if (data.containsKey('chars')) {
+      context.handle(
+        _charsMeta,
+        chars.isAcceptableOrUnknown(data['chars']!, _charsMeta),
+      );
+    }
+    if (data.containsKey('fetched_at')) {
+      context.handle(
+        _fetchedAtMeta,
+        fetchedAt.isAcceptableOrUnknown(data['fetched_at']!, _fetchedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_fetchedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {
+    source,
+    sourceMessageId,
+    attachmentId,
+  };
+  @override
+  AttachmentTextData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return AttachmentTextData(
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      attachmentId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}attachment_id'],
+      )!,
+      extractedText: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}extracted_text'],
+      )!,
+      chars: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}chars'],
+      )!,
+      fetchedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}fetched_at'],
+      )!,
+    );
+  }
+
+  @override
+  AttachmentText createAlias(String alias) {
+    return AttachmentText(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(source, source_message_id, attachment_id)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class AttachmentTextData extends DataClass
+    implements Insertable<AttachmentTextData> {
+  final String source;
+  final String sourceMessageId;
+  final String attachmentId;
+
+  /// `extracted_text` rather than the obvious `text`, and not fixable with an
+  /// `AS` alias the way `to_json` is: the migration-snapshot generator names
+  /// its columns from the SQL name and ignores the alias, so a column called
+  /// `text` produces a `text` getter that collides with the
+  /// `ColumnBuilder<String> text()` every drift table inherits, in a file
+  /// nothing in this repo edits by hand.
+  final String extractedText;
+  final int chars;
+  final String fetchedAt;
+  const AttachmentTextData({
+    required this.source,
+    required this.sourceMessageId,
+    required this.attachmentId,
+    required this.extractedText,
+    required this.chars,
+    required this.fetchedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['attachment_id'] = Variable<String>(attachmentId);
+    map['extracted_text'] = Variable<String>(extractedText);
+    map['chars'] = Variable<int>(chars);
+    map['fetched_at'] = Variable<String>(fetchedAt);
+    return map;
+  }
+
+  AttachmentTextCompanion toCompanion(bool nullToAbsent) {
+    return AttachmentTextCompanion(
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      attachmentId: Value(attachmentId),
+      extractedText: Value(extractedText),
+      chars: Value(chars),
+      fetchedAt: Value(fetchedAt),
+    );
+  }
+
+  factory AttachmentTextData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return AttachmentTextData(
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      attachmentId: serializer.fromJson<String>(json['attachment_id']),
+      extractedText: serializer.fromJson<String>(json['extracted_text']),
+      chars: serializer.fromJson<int>(json['chars']),
+      fetchedAt: serializer.fromJson<String>(json['fetched_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'attachment_id': serializer.toJson<String>(attachmentId),
+      'extracted_text': serializer.toJson<String>(extractedText),
+      'chars': serializer.toJson<int>(chars),
+      'fetched_at': serializer.toJson<String>(fetchedAt),
+    };
+  }
+
+  AttachmentTextData copyWith({
+    String? source,
+    String? sourceMessageId,
+    String? attachmentId,
+    String? extractedText,
+    int? chars,
+    String? fetchedAt,
+  }) => AttachmentTextData(
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    attachmentId: attachmentId ?? this.attachmentId,
+    extractedText: extractedText ?? this.extractedText,
+    chars: chars ?? this.chars,
+    fetchedAt: fetchedAt ?? this.fetchedAt,
+  );
+  AttachmentTextData copyWithCompanion(AttachmentTextCompanion data) {
+    return AttachmentTextData(
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      attachmentId: data.attachmentId.present
+          ? data.attachmentId.value
+          : this.attachmentId,
+      extractedText: data.extractedText.present
+          ? data.extractedText.value
+          : this.extractedText,
+      chars: data.chars.present ? data.chars.value : this.chars,
+      fetchedAt: data.fetchedAt.present ? data.fetchedAt.value : this.fetchedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AttachmentTextData(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('attachmentId: $attachmentId, ')
+          ..write('extractedText: $extractedText, ')
+          ..write('chars: $chars, ')
+          ..write('fetchedAt: $fetchedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    source,
+    sourceMessageId,
+    attachmentId,
+    extractedText,
+    chars,
+    fetchedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is AttachmentTextData &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          other.attachmentId == this.attachmentId &&
+          other.extractedText == this.extractedText &&
+          other.chars == this.chars &&
+          other.fetchedAt == this.fetchedAt);
+}
+
+class AttachmentTextCompanion extends UpdateCompanion<AttachmentTextData> {
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<String> attachmentId;
+  final Value<String> extractedText;
+  final Value<int> chars;
+  final Value<String> fetchedAt;
+  final Value<int> rowid;
+  const AttachmentTextCompanion({
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.attachmentId = const Value.absent(),
+    this.extractedText = const Value.absent(),
+    this.chars = const Value.absent(),
+    this.fetchedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  AttachmentTextCompanion.insert({
+    this.source = const Value.absent(),
+    required String sourceMessageId,
+    required String attachmentId,
+    required String extractedText,
+    this.chars = const Value.absent(),
+    required String fetchedAt,
+    this.rowid = const Value.absent(),
+  }) : sourceMessageId = Value(sourceMessageId),
+       attachmentId = Value(attachmentId),
+       extractedText = Value(extractedText),
+       fetchedAt = Value(fetchedAt);
+  static Insertable<AttachmentTextData> custom({
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<String>? attachmentId,
+    Expression<String>? extractedText,
+    Expression<int>? chars,
+    Expression<String>? fetchedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (attachmentId != null) 'attachment_id': attachmentId,
+      if (extractedText != null) 'extracted_text': extractedText,
+      if (chars != null) 'chars': chars,
+      if (fetchedAt != null) 'fetched_at': fetchedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  AttachmentTextCompanion copyWith({
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<String>? attachmentId,
+    Value<String>? extractedText,
+    Value<int>? chars,
+    Value<String>? fetchedAt,
+    Value<int>? rowid,
+  }) {
+    return AttachmentTextCompanion(
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      attachmentId: attachmentId ?? this.attachmentId,
+      extractedText: extractedText ?? this.extractedText,
+      chars: chars ?? this.chars,
+      fetchedAt: fetchedAt ?? this.fetchedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (attachmentId.present) {
+      map['attachment_id'] = Variable<String>(attachmentId.value);
+    }
+    if (extractedText.present) {
+      map['extracted_text'] = Variable<String>(extractedText.value);
+    }
+    if (chars.present) {
+      map['chars'] = Variable<int>(chars.value);
+    }
+    if (fetchedAt.present) {
+      map['fetched_at'] = Variable<String>(fetchedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AttachmentTextCompanion(')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('attachmentId: $attachmentId, ')
+          ..write('extractedText: $extractedText, ')
+          ..write('chars: $chars, ')
+          ..write('fetchedAt: $fetchedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class AttachmentChunks extends Table
+    with TableInfo<AttachmentChunks, AttachmentChunk> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  AttachmentChunks(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'PRIMARY KEY',
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMessageIdMeta = const VerificationMeta(
+    'sourceMessageId',
+  );
+  late final GeneratedColumn<String> sourceMessageId = GeneratedColumn<String>(
+    'source_message_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _attachmentIdMeta = const VerificationMeta(
+    'attachmentId',
+  );
+  late final GeneratedColumn<String> attachmentId = GeneratedColumn<String>(
+    'attachment_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _seqMeta = const VerificationMeta('seq');
+  late final GeneratedColumn<int> seq = GeneratedColumn<int>(
+    'seq',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _locatorMeta = const VerificationMeta(
+    'locator',
+  );
+  late final GeneratedColumn<String> locator = GeneratedColumn<String>(
+    'locator',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _chunkTextMeta = const VerificationMeta(
+    'chunkText',
+  );
+  late final GeneratedColumn<String> chunkText = GeneratedColumn<String>(
+    'chunk_text',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _charsMeta = const VerificationMeta('chars');
+  late final GeneratedColumn<int> chars = GeneratedColumn<int>(
+    'chars',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _embeddingMeta = const VerificationMeta(
+    'embedding',
+  );
+  late final GeneratedColumn<Uint8List> embedding = GeneratedColumn<Uint8List>(
+    'embedding',
+    aliasedName,
+    true,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _dimsMeta = const VerificationMeta('dims');
+  late final GeneratedColumn<int> dims = GeneratedColumn<int>(
+    'dims',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _embedModelMeta = const VerificationMeta(
+    'embedModel',
+  );
+  late final GeneratedColumn<String> embedModel = GeneratedColumn<String>(
+    'embed_model',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _embeddedAtMeta = const VerificationMeta(
+    'embeddedAt',
+  );
+  late final GeneratedColumn<String> embeddedAt = GeneratedColumn<String>(
+    'embedded_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _indexedAtMeta = const VerificationMeta(
+    'indexedAt',
+  );
+  late final GeneratedColumn<String> indexedAt = GeneratedColumn<String>(
+    'indexed_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    source,
+    sourceMessageId,
+    attachmentId,
+    seq,
+    locator,
+    chunkText,
+    chars,
+    embedding,
+    dims,
+    embedModel,
+    embeddedAt,
+    indexedAt,
+    createdAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'attachment_chunks';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<AttachmentChunk> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMeta);
+    }
+    if (data.containsKey('source_message_id')) {
+      context.handle(
+        _sourceMessageIdMeta,
+        sourceMessageId.isAcceptableOrUnknown(
+          data['source_message_id']!,
+          _sourceMessageIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_sourceMessageIdMeta);
+    }
+    if (data.containsKey('attachment_id')) {
+      context.handle(
+        _attachmentIdMeta,
+        attachmentId.isAcceptableOrUnknown(
+          data['attachment_id']!,
+          _attachmentIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_attachmentIdMeta);
+    }
+    if (data.containsKey('seq')) {
+      context.handle(
+        _seqMeta,
+        seq.isAcceptableOrUnknown(data['seq']!, _seqMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_seqMeta);
+    }
+    if (data.containsKey('locator')) {
+      context.handle(
+        _locatorMeta,
+        locator.isAcceptableOrUnknown(data['locator']!, _locatorMeta),
+      );
+    }
+    if (data.containsKey('chunk_text')) {
+      context.handle(
+        _chunkTextMeta,
+        chunkText.isAcceptableOrUnknown(data['chunk_text']!, _chunkTextMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_chunkTextMeta);
+    }
+    if (data.containsKey('chars')) {
+      context.handle(
+        _charsMeta,
+        chars.isAcceptableOrUnknown(data['chars']!, _charsMeta),
+      );
+    }
+    if (data.containsKey('embedding')) {
+      context.handle(
+        _embeddingMeta,
+        embedding.isAcceptableOrUnknown(data['embedding']!, _embeddingMeta),
+      );
+    }
+    if (data.containsKey('dims')) {
+      context.handle(
+        _dimsMeta,
+        dims.isAcceptableOrUnknown(data['dims']!, _dimsMeta),
+      );
+    }
+    if (data.containsKey('embed_model')) {
+      context.handle(
+        _embedModelMeta,
+        embedModel.isAcceptableOrUnknown(data['embed_model']!, _embedModelMeta),
+      );
+    }
+    if (data.containsKey('embedded_at')) {
+      context.handle(
+        _embeddedAtMeta,
+        embeddedAt.isAcceptableOrUnknown(data['embedded_at']!, _embeddedAtMeta),
+      );
+    }
+    if (data.containsKey('indexed_at')) {
+      context.handle(
+        _indexedAtMeta,
+        indexedAt.isAcceptableOrUnknown(data['indexed_at']!, _indexedAtMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  AttachmentChunk map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return AttachmentChunk(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      sourceMessageId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source_message_id'],
+      )!,
+      attachmentId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}attachment_id'],
+      )!,
+      seq: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}seq'],
+      )!,
+      locator: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}locator'],
+      )!,
+      chunkText: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}chunk_text'],
+      )!,
+      chars: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}chars'],
+      )!,
+      embedding: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}embedding'],
+      ),
+      dims: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}dims'],
+      )!,
+      embedModel: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}embed_model'],
+      ),
+      embeddedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}embedded_at'],
+      ),
+      indexedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}indexed_at'],
+      ),
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+    );
+  }
+
+  @override
+  AttachmentChunks createAlias(String alias) {
+    return AttachmentChunks(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class AttachmentChunk extends DataClass implements Insertable<AttachmentChunk> {
+  final int id;
+  final String source;
+  final String sourceMessageId;
+  final String attachmentId;
+  final int seq;
+  final String locator;
+
+  /// Renamed for `attachment_text.extracted_text`'s reason.
+  final String chunkText;
+  final int chars;
+  final Uint8List? embedding;
+  final int dims;
+  final String? embedModel;
+  final String? embeddedAt;
+  final String? indexedAt;
+  final String createdAt;
+  const AttachmentChunk({
+    required this.id,
+    required this.source,
+    required this.sourceMessageId,
+    required this.attachmentId,
+    required this.seq,
+    required this.locator,
+    required this.chunkText,
+    required this.chars,
+    this.embedding,
+    required this.dims,
+    this.embedModel,
+    this.embeddedAt,
+    this.indexedAt,
+    required this.createdAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['source'] = Variable<String>(source);
+    map['source_message_id'] = Variable<String>(sourceMessageId);
+    map['attachment_id'] = Variable<String>(attachmentId);
+    map['seq'] = Variable<int>(seq);
+    map['locator'] = Variable<String>(locator);
+    map['chunk_text'] = Variable<String>(chunkText);
+    map['chars'] = Variable<int>(chars);
+    if (!nullToAbsent || embedding != null) {
+      map['embedding'] = Variable<Uint8List>(embedding);
+    }
+    map['dims'] = Variable<int>(dims);
+    if (!nullToAbsent || embedModel != null) {
+      map['embed_model'] = Variable<String>(embedModel);
+    }
+    if (!nullToAbsent || embeddedAt != null) {
+      map['embedded_at'] = Variable<String>(embeddedAt);
+    }
+    if (!nullToAbsent || indexedAt != null) {
+      map['indexed_at'] = Variable<String>(indexedAt);
+    }
+    map['created_at'] = Variable<String>(createdAt);
+    return map;
+  }
+
+  AttachmentChunksCompanion toCompanion(bool nullToAbsent) {
+    return AttachmentChunksCompanion(
+      id: Value(id),
+      source: Value(source),
+      sourceMessageId: Value(sourceMessageId),
+      attachmentId: Value(attachmentId),
+      seq: Value(seq),
+      locator: Value(locator),
+      chunkText: Value(chunkText),
+      chars: Value(chars),
+      embedding: embedding == null && nullToAbsent
+          ? const Value.absent()
+          : Value(embedding),
+      dims: Value(dims),
+      embedModel: embedModel == null && nullToAbsent
+          ? const Value.absent()
+          : Value(embedModel),
+      embeddedAt: embeddedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(embeddedAt),
+      indexedAt: indexedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(indexedAt),
+      createdAt: Value(createdAt),
+    );
+  }
+
+  factory AttachmentChunk.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return AttachmentChunk(
+      id: serializer.fromJson<int>(json['id']),
+      source: serializer.fromJson<String>(json['source']),
+      sourceMessageId: serializer.fromJson<String>(json['source_message_id']),
+      attachmentId: serializer.fromJson<String>(json['attachment_id']),
+      seq: serializer.fromJson<int>(json['seq']),
+      locator: serializer.fromJson<String>(json['locator']),
+      chunkText: serializer.fromJson<String>(json['chunk_text']),
+      chars: serializer.fromJson<int>(json['chars']),
+      embedding: serializer.fromJson<Uint8List?>(json['embedding']),
+      dims: serializer.fromJson<int>(json['dims']),
+      embedModel: serializer.fromJson<String?>(json['embed_model']),
+      embeddedAt: serializer.fromJson<String?>(json['embedded_at']),
+      indexedAt: serializer.fromJson<String?>(json['indexed_at']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'source': serializer.toJson<String>(source),
+      'source_message_id': serializer.toJson<String>(sourceMessageId),
+      'attachment_id': serializer.toJson<String>(attachmentId),
+      'seq': serializer.toJson<int>(seq),
+      'locator': serializer.toJson<String>(locator),
+      'chunk_text': serializer.toJson<String>(chunkText),
+      'chars': serializer.toJson<int>(chars),
+      'embedding': serializer.toJson<Uint8List?>(embedding),
+      'dims': serializer.toJson<int>(dims),
+      'embed_model': serializer.toJson<String?>(embedModel),
+      'embedded_at': serializer.toJson<String?>(embeddedAt),
+      'indexed_at': serializer.toJson<String?>(indexedAt),
+      'created_at': serializer.toJson<String>(createdAt),
+    };
+  }
+
+  AttachmentChunk copyWith({
+    int? id,
+    String? source,
+    String? sourceMessageId,
+    String? attachmentId,
+    int? seq,
+    String? locator,
+    String? chunkText,
+    int? chars,
+    Value<Uint8List?> embedding = const Value.absent(),
+    int? dims,
+    Value<String?> embedModel = const Value.absent(),
+    Value<String?> embeddedAt = const Value.absent(),
+    Value<String?> indexedAt = const Value.absent(),
+    String? createdAt,
+  }) => AttachmentChunk(
+    id: id ?? this.id,
+    source: source ?? this.source,
+    sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+    attachmentId: attachmentId ?? this.attachmentId,
+    seq: seq ?? this.seq,
+    locator: locator ?? this.locator,
+    chunkText: chunkText ?? this.chunkText,
+    chars: chars ?? this.chars,
+    embedding: embedding.present ? embedding.value : this.embedding,
+    dims: dims ?? this.dims,
+    embedModel: embedModel.present ? embedModel.value : this.embedModel,
+    embeddedAt: embeddedAt.present ? embeddedAt.value : this.embeddedAt,
+    indexedAt: indexedAt.present ? indexedAt.value : this.indexedAt,
+    createdAt: createdAt ?? this.createdAt,
+  );
+  AttachmentChunk copyWithCompanion(AttachmentChunksCompanion data) {
+    return AttachmentChunk(
+      id: data.id.present ? data.id.value : this.id,
+      source: data.source.present ? data.source.value : this.source,
+      sourceMessageId: data.sourceMessageId.present
+          ? data.sourceMessageId.value
+          : this.sourceMessageId,
+      attachmentId: data.attachmentId.present
+          ? data.attachmentId.value
+          : this.attachmentId,
+      seq: data.seq.present ? data.seq.value : this.seq,
+      locator: data.locator.present ? data.locator.value : this.locator,
+      chunkText: data.chunkText.present ? data.chunkText.value : this.chunkText,
+      chars: data.chars.present ? data.chars.value : this.chars,
+      embedding: data.embedding.present ? data.embedding.value : this.embedding,
+      dims: data.dims.present ? data.dims.value : this.dims,
+      embedModel: data.embedModel.present
+          ? data.embedModel.value
+          : this.embedModel,
+      embeddedAt: data.embeddedAt.present
+          ? data.embeddedAt.value
+          : this.embeddedAt,
+      indexedAt: data.indexedAt.present ? data.indexedAt.value : this.indexedAt,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AttachmentChunk(')
+          ..write('id: $id, ')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('attachmentId: $attachmentId, ')
+          ..write('seq: $seq, ')
+          ..write('locator: $locator, ')
+          ..write('chunkText: $chunkText, ')
+          ..write('chars: $chars, ')
+          ..write('embedding: $embedding, ')
+          ..write('dims: $dims, ')
+          ..write('embedModel: $embedModel, ')
+          ..write('embeddedAt: $embeddedAt, ')
+          ..write('indexedAt: $indexedAt, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    source,
+    sourceMessageId,
+    attachmentId,
+    seq,
+    locator,
+    chunkText,
+    chars,
+    $driftBlobEquality.hash(embedding),
+    dims,
+    embedModel,
+    embeddedAt,
+    indexedAt,
+    createdAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is AttachmentChunk &&
+          other.id == this.id &&
+          other.source == this.source &&
+          other.sourceMessageId == this.sourceMessageId &&
+          other.attachmentId == this.attachmentId &&
+          other.seq == this.seq &&
+          other.locator == this.locator &&
+          other.chunkText == this.chunkText &&
+          other.chars == this.chars &&
+          $driftBlobEquality.equals(other.embedding, this.embedding) &&
+          other.dims == this.dims &&
+          other.embedModel == this.embedModel &&
+          other.embeddedAt == this.embeddedAt &&
+          other.indexedAt == this.indexedAt &&
+          other.createdAt == this.createdAt);
+}
+
+class AttachmentChunksCompanion extends UpdateCompanion<AttachmentChunk> {
+  final Value<int> id;
+  final Value<String> source;
+  final Value<String> sourceMessageId;
+  final Value<String> attachmentId;
+  final Value<int> seq;
+  final Value<String> locator;
+  final Value<String> chunkText;
+  final Value<int> chars;
+  final Value<Uint8List?> embedding;
+  final Value<int> dims;
+  final Value<String?> embedModel;
+  final Value<String?> embeddedAt;
+  final Value<String?> indexedAt;
+  final Value<String> createdAt;
+  const AttachmentChunksCompanion({
+    this.id = const Value.absent(),
+    this.source = const Value.absent(),
+    this.sourceMessageId = const Value.absent(),
+    this.attachmentId = const Value.absent(),
+    this.seq = const Value.absent(),
+    this.locator = const Value.absent(),
+    this.chunkText = const Value.absent(),
+    this.chars = const Value.absent(),
+    this.embedding = const Value.absent(),
+    this.dims = const Value.absent(),
+    this.embedModel = const Value.absent(),
+    this.embeddedAt = const Value.absent(),
+    this.indexedAt = const Value.absent(),
+    this.createdAt = const Value.absent(),
+  });
+  AttachmentChunksCompanion.insert({
+    this.id = const Value.absent(),
+    required String source,
+    required String sourceMessageId,
+    required String attachmentId,
+    required int seq,
+    this.locator = const Value.absent(),
+    required String chunkText,
+    this.chars = const Value.absent(),
+    this.embedding = const Value.absent(),
+    this.dims = const Value.absent(),
+    this.embedModel = const Value.absent(),
+    this.embeddedAt = const Value.absent(),
+    this.indexedAt = const Value.absent(),
+    required String createdAt,
+  }) : source = Value(source),
+       sourceMessageId = Value(sourceMessageId),
+       attachmentId = Value(attachmentId),
+       seq = Value(seq),
+       chunkText = Value(chunkText),
+       createdAt = Value(createdAt);
+  static Insertable<AttachmentChunk> custom({
+    Expression<int>? id,
+    Expression<String>? source,
+    Expression<String>? sourceMessageId,
+    Expression<String>? attachmentId,
+    Expression<int>? seq,
+    Expression<String>? locator,
+    Expression<String>? chunkText,
+    Expression<int>? chars,
+    Expression<Uint8List>? embedding,
+    Expression<int>? dims,
+    Expression<String>? embedModel,
+    Expression<String>? embeddedAt,
+    Expression<String>? indexedAt,
+    Expression<String>? createdAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (source != null) 'source': source,
+      if (sourceMessageId != null) 'source_message_id': sourceMessageId,
+      if (attachmentId != null) 'attachment_id': attachmentId,
+      if (seq != null) 'seq': seq,
+      if (locator != null) 'locator': locator,
+      if (chunkText != null) 'chunk_text': chunkText,
+      if (chars != null) 'chars': chars,
+      if (embedding != null) 'embedding': embedding,
+      if (dims != null) 'dims': dims,
+      if (embedModel != null) 'embed_model': embedModel,
+      if (embeddedAt != null) 'embedded_at': embeddedAt,
+      if (indexedAt != null) 'indexed_at': indexedAt,
+      if (createdAt != null) 'created_at': createdAt,
+    });
+  }
+
+  AttachmentChunksCompanion copyWith({
+    Value<int>? id,
+    Value<String>? source,
+    Value<String>? sourceMessageId,
+    Value<String>? attachmentId,
+    Value<int>? seq,
+    Value<String>? locator,
+    Value<String>? chunkText,
+    Value<int>? chars,
+    Value<Uint8List?>? embedding,
+    Value<int>? dims,
+    Value<String?>? embedModel,
+    Value<String?>? embeddedAt,
+    Value<String?>? indexedAt,
+    Value<String>? createdAt,
+  }) {
+    return AttachmentChunksCompanion(
+      id: id ?? this.id,
+      source: source ?? this.source,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      attachmentId: attachmentId ?? this.attachmentId,
+      seq: seq ?? this.seq,
+      locator: locator ?? this.locator,
+      chunkText: chunkText ?? this.chunkText,
+      chars: chars ?? this.chars,
+      embedding: embedding ?? this.embedding,
+      dims: dims ?? this.dims,
+      embedModel: embedModel ?? this.embedModel,
+      embeddedAt: embeddedAt ?? this.embeddedAt,
+      indexedAt: indexedAt ?? this.indexedAt,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (sourceMessageId.present) {
+      map['source_message_id'] = Variable<String>(sourceMessageId.value);
+    }
+    if (attachmentId.present) {
+      map['attachment_id'] = Variable<String>(attachmentId.value);
+    }
+    if (seq.present) {
+      map['seq'] = Variable<int>(seq.value);
+    }
+    if (locator.present) {
+      map['locator'] = Variable<String>(locator.value);
+    }
+    if (chunkText.present) {
+      map['chunk_text'] = Variable<String>(chunkText.value);
+    }
+    if (chars.present) {
+      map['chars'] = Variable<int>(chars.value);
+    }
+    if (embedding.present) {
+      map['embedding'] = Variable<Uint8List>(embedding.value);
+    }
+    if (dims.present) {
+      map['dims'] = Variable<int>(dims.value);
+    }
+    if (embedModel.present) {
+      map['embed_model'] = Variable<String>(embedModel.value);
+    }
+    if (embeddedAt.present) {
+      map['embedded_at'] = Variable<String>(embeddedAt.value);
+    }
+    if (indexedAt.present) {
+      map['indexed_at'] = Variable<String>(indexedAt.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('AttachmentChunksCompanion(')
+          ..write('id: $id, ')
+          ..write('source: $source, ')
+          ..write('sourceMessageId: $sourceMessageId, ')
+          ..write('attachmentId: $attachmentId, ')
+          ..write('seq: $seq, ')
+          ..write('locator: $locator, ')
+          ..write('chunkText: $chunkText, ')
+          ..write('chars: $chars, ')
+          ..write('embedding: $embedding, ')
+          ..write('dims: $dims, ')
+          ..write('embedModel: $embedModel, ')
+          ..write('embeddedAt: $embeddedAt, ')
+          ..write('indexedAt: $indexedAt, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -11566,6 +14402,25 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'ix_message_vectors_unindexed',
     'CREATE INDEX ix_message_vectors_unindexed ON message_vectors (indexed_at)',
   );
+  late final Attachments attachments = Attachments(this);
+  late final Index ixAttachmentsMessage = Index(
+    'ix_attachments_message',
+    'CREATE INDEX ix_attachments_message ON attachments (source, source_message_id, ordinal)',
+  );
+  late final Index ixAttachmentsPinned = Index(
+    'ix_attachments_pinned',
+    'CREATE INDEX ix_attachments_pinned ON attachments (pinned_storyline_id)',
+  );
+  late final AttachmentText attachmentText = AttachmentText(this);
+  late final AttachmentChunks attachmentChunks = AttachmentChunks(this);
+  late final Index ixAttachmentChunksSeq = Index(
+    'ix_attachment_chunks_seq',
+    'CREATE UNIQUE INDEX ix_attachment_chunks_seq ON attachment_chunks (source, source_message_id, attachment_id, seq)',
+  );
+  late final Index ixAttachmentChunksUnindexed = Index(
+    'ix_attachment_chunks_unindexed',
+    'CREATE INDEX ix_attachment_chunks_unindexed ON attachment_chunks (indexed_at)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -11605,6 +14460,13 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     messageVectors,
     ixMessageVectorsMessage,
     ixMessageVectorsUnindexed,
+    attachments,
+    ixAttachmentsMessage,
+    ixAttachmentsPinned,
+    attachmentText,
+    attachmentChunks,
+    ixAttachmentChunksSeq,
+    ixAttachmentChunksUnindexed,
   ];
 }
 
@@ -16946,6 +19808,1281 @@ typedef $MessageVectorsProcessedTableManager =
       MessageVector,
       PrefetchHooks Function()
     >;
+typedef $AttachmentsCreateCompanionBuilder =
+    AttachmentsCompanion Function({
+      Value<String> source,
+      required String sourceMessageId,
+      required String attachmentId,
+      Value<int> ordinal,
+      Value<String> kind,
+      Value<String?> name,
+      Value<String?> contentType,
+      Value<int> size,
+      Value<int> isInline,
+      Value<String?> contentId,
+      Value<String?> sourceUrl,
+      Value<String?> thumbnailUrl,
+      Value<String?> cardText,
+      Value<String?> itemSubject,
+      Value<String?> itemFrom,
+      Value<String?> itemReceived,
+      Value<String> textStatus,
+      Value<String?> textReason,
+      Value<int> textTruncated,
+      Value<int> textChars,
+      Value<String> digestStatus,
+      Value<String?> digestJson,
+      Value<String?> blobPath,
+      Value<String?> blobSha256,
+      Value<String?> blobFetchedAt,
+      Value<String?> thumbPath,
+      Value<String?> pinnedStorylineId,
+      required String createdAt,
+      required String updatedAt,
+      Value<int> rowid,
+    });
+typedef $AttachmentsUpdateCompanionBuilder =
+    AttachmentsCompanion Function({
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<String> attachmentId,
+      Value<int> ordinal,
+      Value<String> kind,
+      Value<String?> name,
+      Value<String?> contentType,
+      Value<int> size,
+      Value<int> isInline,
+      Value<String?> contentId,
+      Value<String?> sourceUrl,
+      Value<String?> thumbnailUrl,
+      Value<String?> cardText,
+      Value<String?> itemSubject,
+      Value<String?> itemFrom,
+      Value<String?> itemReceived,
+      Value<String> textStatus,
+      Value<String?> textReason,
+      Value<int> textTruncated,
+      Value<int> textChars,
+      Value<String> digestStatus,
+      Value<String?> digestJson,
+      Value<String?> blobPath,
+      Value<String?> blobSha256,
+      Value<String?> blobFetchedAt,
+      Value<String?> thumbPath,
+      Value<String?> pinnedStorylineId,
+      Value<String> createdAt,
+      Value<String> updatedAt,
+      Value<int> rowid,
+    });
+
+class $AttachmentsFilterComposer extends Composer<_$BondDatabase, Attachments> {
+  $AttachmentsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get ordinal => $composableBuilder(
+    column: $table.ordinal,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get kind => $composableBuilder(
+    column: $table.kind,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get contentType => $composableBuilder(
+    column: $table.contentType,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get size => $composableBuilder(
+    column: $table.size,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get isInline => $composableBuilder(
+    column: $table.isInline,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get contentId => $composableBuilder(
+    column: $table.contentId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceUrl => $composableBuilder(
+    column: $table.sourceUrl,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get thumbnailUrl => $composableBuilder(
+    column: $table.thumbnailUrl,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get cardText => $composableBuilder(
+    column: $table.cardText,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get itemSubject => $composableBuilder(
+    column: $table.itemSubject,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get itemFrom => $composableBuilder(
+    column: $table.itemFrom,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get itemReceived => $composableBuilder(
+    column: $table.itemReceived,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get textStatus => $composableBuilder(
+    column: $table.textStatus,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get textReason => $composableBuilder(
+    column: $table.textReason,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get textTruncated => $composableBuilder(
+    column: $table.textTruncated,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get textChars => $composableBuilder(
+    column: $table.textChars,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get digestStatus => $composableBuilder(
+    column: $table.digestStatus,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get digestJson => $composableBuilder(
+    column: $table.digestJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get blobPath => $composableBuilder(
+    column: $table.blobPath,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get blobSha256 => $composableBuilder(
+    column: $table.blobSha256,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get blobFetchedAt => $composableBuilder(
+    column: $table.blobFetchedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get thumbPath => $composableBuilder(
+    column: $table.thumbPath,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get pinnedStorylineId => $composableBuilder(
+    column: $table.pinnedStorylineId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $AttachmentsOrderingComposer
+    extends Composer<_$BondDatabase, Attachments> {
+  $AttachmentsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get ordinal => $composableBuilder(
+    column: $table.ordinal,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get kind => $composableBuilder(
+    column: $table.kind,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get contentType => $composableBuilder(
+    column: $table.contentType,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get size => $composableBuilder(
+    column: $table.size,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get isInline => $composableBuilder(
+    column: $table.isInline,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get contentId => $composableBuilder(
+    column: $table.contentId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceUrl => $composableBuilder(
+    column: $table.sourceUrl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get thumbnailUrl => $composableBuilder(
+    column: $table.thumbnailUrl,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get cardText => $composableBuilder(
+    column: $table.cardText,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get itemSubject => $composableBuilder(
+    column: $table.itemSubject,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get itemFrom => $composableBuilder(
+    column: $table.itemFrom,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get itemReceived => $composableBuilder(
+    column: $table.itemReceived,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get textStatus => $composableBuilder(
+    column: $table.textStatus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get textReason => $composableBuilder(
+    column: $table.textReason,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get textTruncated => $composableBuilder(
+    column: $table.textTruncated,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get textChars => $composableBuilder(
+    column: $table.textChars,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get digestStatus => $composableBuilder(
+    column: $table.digestStatus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get digestJson => $composableBuilder(
+    column: $table.digestJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get blobPath => $composableBuilder(
+    column: $table.blobPath,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get blobSha256 => $composableBuilder(
+    column: $table.blobSha256,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get blobFetchedAt => $composableBuilder(
+    column: $table.blobFetchedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get thumbPath => $composableBuilder(
+    column: $table.thumbPath,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get pinnedStorylineId => $composableBuilder(
+    column: $table.pinnedStorylineId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $AttachmentsAnnotationComposer
+    extends Composer<_$BondDatabase, Attachments> {
+  $AttachmentsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get ordinal =>
+      $composableBuilder(column: $table.ordinal, builder: (column) => column);
+
+  GeneratedColumn<String> get kind =>
+      $composableBuilder(column: $table.kind, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<String> get contentType => $composableBuilder(
+    column: $table.contentType,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get size =>
+      $composableBuilder(column: $table.size, builder: (column) => column);
+
+  GeneratedColumn<int> get isInline =>
+      $composableBuilder(column: $table.isInline, builder: (column) => column);
+
+  GeneratedColumn<String> get contentId =>
+      $composableBuilder(column: $table.contentId, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceUrl =>
+      $composableBuilder(column: $table.sourceUrl, builder: (column) => column);
+
+  GeneratedColumn<String> get thumbnailUrl => $composableBuilder(
+    column: $table.thumbnailUrl,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get cardText =>
+      $composableBuilder(column: $table.cardText, builder: (column) => column);
+
+  GeneratedColumn<String> get itemSubject => $composableBuilder(
+    column: $table.itemSubject,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get itemFrom =>
+      $composableBuilder(column: $table.itemFrom, builder: (column) => column);
+
+  GeneratedColumn<String> get itemReceived => $composableBuilder(
+    column: $table.itemReceived,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get textStatus => $composableBuilder(
+    column: $table.textStatus,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get textReason => $composableBuilder(
+    column: $table.textReason,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get textTruncated => $composableBuilder(
+    column: $table.textTruncated,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get textChars =>
+      $composableBuilder(column: $table.textChars, builder: (column) => column);
+
+  GeneratedColumn<String> get digestStatus => $composableBuilder(
+    column: $table.digestStatus,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get digestJson => $composableBuilder(
+    column: $table.digestJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get blobPath =>
+      $composableBuilder(column: $table.blobPath, builder: (column) => column);
+
+  GeneratedColumn<String> get blobSha256 => $composableBuilder(
+    column: $table.blobSha256,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get blobFetchedAt => $composableBuilder(
+    column: $table.blobFetchedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get thumbPath =>
+      $composableBuilder(column: $table.thumbPath, builder: (column) => column);
+
+  GeneratedColumn<String> get pinnedStorylineId => $composableBuilder(
+    column: $table.pinnedStorylineId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $AttachmentsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          Attachments,
+          Attachment,
+          $AttachmentsFilterComposer,
+          $AttachmentsOrderingComposer,
+          $AttachmentsAnnotationComposer,
+          $AttachmentsCreateCompanionBuilder,
+          $AttachmentsUpdateCompanionBuilder,
+          (Attachment, BaseReferences<_$BondDatabase, Attachments, Attachment>),
+          Attachment,
+          PrefetchHooks Function()
+        > {
+  $AttachmentsTableManager(_$BondDatabase db, Attachments table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $AttachmentsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $AttachmentsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $AttachmentsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<String> attachmentId = const Value.absent(),
+                Value<int> ordinal = const Value.absent(),
+                Value<String> kind = const Value.absent(),
+                Value<String?> name = const Value.absent(),
+                Value<String?> contentType = const Value.absent(),
+                Value<int> size = const Value.absent(),
+                Value<int> isInline = const Value.absent(),
+                Value<String?> contentId = const Value.absent(),
+                Value<String?> sourceUrl = const Value.absent(),
+                Value<String?> thumbnailUrl = const Value.absent(),
+                Value<String?> cardText = const Value.absent(),
+                Value<String?> itemSubject = const Value.absent(),
+                Value<String?> itemFrom = const Value.absent(),
+                Value<String?> itemReceived = const Value.absent(),
+                Value<String> textStatus = const Value.absent(),
+                Value<String?> textReason = const Value.absent(),
+                Value<int> textTruncated = const Value.absent(),
+                Value<int> textChars = const Value.absent(),
+                Value<String> digestStatus = const Value.absent(),
+                Value<String?> digestJson = const Value.absent(),
+                Value<String?> blobPath = const Value.absent(),
+                Value<String?> blobSha256 = const Value.absent(),
+                Value<String?> blobFetchedAt = const Value.absent(),
+                Value<String?> thumbPath = const Value.absent(),
+                Value<String?> pinnedStorylineId = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AttachmentsCompanion(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                attachmentId: attachmentId,
+                ordinal: ordinal,
+                kind: kind,
+                name: name,
+                contentType: contentType,
+                size: size,
+                isInline: isInline,
+                contentId: contentId,
+                sourceUrl: sourceUrl,
+                thumbnailUrl: thumbnailUrl,
+                cardText: cardText,
+                itemSubject: itemSubject,
+                itemFrom: itemFrom,
+                itemReceived: itemReceived,
+                textStatus: textStatus,
+                textReason: textReason,
+                textTruncated: textTruncated,
+                textChars: textChars,
+                digestStatus: digestStatus,
+                digestJson: digestJson,
+                blobPath: blobPath,
+                blobSha256: blobSha256,
+                blobFetchedAt: blobFetchedAt,
+                thumbPath: thumbPath,
+                pinnedStorylineId: pinnedStorylineId,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                required String sourceMessageId,
+                required String attachmentId,
+                Value<int> ordinal = const Value.absent(),
+                Value<String> kind = const Value.absent(),
+                Value<String?> name = const Value.absent(),
+                Value<String?> contentType = const Value.absent(),
+                Value<int> size = const Value.absent(),
+                Value<int> isInline = const Value.absent(),
+                Value<String?> contentId = const Value.absent(),
+                Value<String?> sourceUrl = const Value.absent(),
+                Value<String?> thumbnailUrl = const Value.absent(),
+                Value<String?> cardText = const Value.absent(),
+                Value<String?> itemSubject = const Value.absent(),
+                Value<String?> itemFrom = const Value.absent(),
+                Value<String?> itemReceived = const Value.absent(),
+                Value<String> textStatus = const Value.absent(),
+                Value<String?> textReason = const Value.absent(),
+                Value<int> textTruncated = const Value.absent(),
+                Value<int> textChars = const Value.absent(),
+                Value<String> digestStatus = const Value.absent(),
+                Value<String?> digestJson = const Value.absent(),
+                Value<String?> blobPath = const Value.absent(),
+                Value<String?> blobSha256 = const Value.absent(),
+                Value<String?> blobFetchedAt = const Value.absent(),
+                Value<String?> thumbPath = const Value.absent(),
+                Value<String?> pinnedStorylineId = const Value.absent(),
+                required String createdAt,
+                required String updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => AttachmentsCompanion.insert(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                attachmentId: attachmentId,
+                ordinal: ordinal,
+                kind: kind,
+                name: name,
+                contentType: contentType,
+                size: size,
+                isInline: isInline,
+                contentId: contentId,
+                sourceUrl: sourceUrl,
+                thumbnailUrl: thumbnailUrl,
+                cardText: cardText,
+                itemSubject: itemSubject,
+                itemFrom: itemFrom,
+                itemReceived: itemReceived,
+                textStatus: textStatus,
+                textReason: textReason,
+                textTruncated: textTruncated,
+                textChars: textChars,
+                digestStatus: digestStatus,
+                digestJson: digestJson,
+                blobPath: blobPath,
+                blobSha256: blobSha256,
+                blobFetchedAt: blobFetchedAt,
+                thumbPath: thumbPath,
+                pinnedStorylineId: pinnedStorylineId,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $AttachmentsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      Attachments,
+      Attachment,
+      $AttachmentsFilterComposer,
+      $AttachmentsOrderingComposer,
+      $AttachmentsAnnotationComposer,
+      $AttachmentsCreateCompanionBuilder,
+      $AttachmentsUpdateCompanionBuilder,
+      (Attachment, BaseReferences<_$BondDatabase, Attachments, Attachment>),
+      Attachment,
+      PrefetchHooks Function()
+    >;
+typedef $AttachmentTextCreateCompanionBuilder =
+    AttachmentTextCompanion Function({
+      Value<String> source,
+      required String sourceMessageId,
+      required String attachmentId,
+      required String extractedText,
+      Value<int> chars,
+      required String fetchedAt,
+      Value<int> rowid,
+    });
+typedef $AttachmentTextUpdateCompanionBuilder =
+    AttachmentTextCompanion Function({
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<String> attachmentId,
+      Value<String> extractedText,
+      Value<int> chars,
+      Value<String> fetchedAt,
+      Value<int> rowid,
+    });
+
+class $AttachmentTextFilterComposer
+    extends Composer<_$BondDatabase, AttachmentText> {
+  $AttachmentTextFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get extractedText => $composableBuilder(
+    column: $table.extractedText,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get chars => $composableBuilder(
+    column: $table.chars,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get fetchedAt => $composableBuilder(
+    column: $table.fetchedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $AttachmentTextOrderingComposer
+    extends Composer<_$BondDatabase, AttachmentText> {
+  $AttachmentTextOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get extractedText => $composableBuilder(
+    column: $table.extractedText,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get chars => $composableBuilder(
+    column: $table.chars,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get fetchedAt => $composableBuilder(
+    column: $table.fetchedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $AttachmentTextAnnotationComposer
+    extends Composer<_$BondDatabase, AttachmentText> {
+  $AttachmentTextAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get extractedText => $composableBuilder(
+    column: $table.extractedText,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get chars =>
+      $composableBuilder(column: $table.chars, builder: (column) => column);
+
+  GeneratedColumn<String> get fetchedAt =>
+      $composableBuilder(column: $table.fetchedAt, builder: (column) => column);
+}
+
+class $AttachmentTextTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          AttachmentText,
+          AttachmentTextData,
+          $AttachmentTextFilterComposer,
+          $AttachmentTextOrderingComposer,
+          $AttachmentTextAnnotationComposer,
+          $AttachmentTextCreateCompanionBuilder,
+          $AttachmentTextUpdateCompanionBuilder,
+          (
+            AttachmentTextData,
+            BaseReferences<_$BondDatabase, AttachmentText, AttachmentTextData>,
+          ),
+          AttachmentTextData,
+          PrefetchHooks Function()
+        > {
+  $AttachmentTextTableManager(_$BondDatabase db, AttachmentText table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $AttachmentTextFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $AttachmentTextOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $AttachmentTextAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<String> attachmentId = const Value.absent(),
+                Value<String> extractedText = const Value.absent(),
+                Value<int> chars = const Value.absent(),
+                Value<String> fetchedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => AttachmentTextCompanion(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                attachmentId: attachmentId,
+                extractedText: extractedText,
+                chars: chars,
+                fetchedAt: fetchedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                Value<String> source = const Value.absent(),
+                required String sourceMessageId,
+                required String attachmentId,
+                required String extractedText,
+                Value<int> chars = const Value.absent(),
+                required String fetchedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => AttachmentTextCompanion.insert(
+                source: source,
+                sourceMessageId: sourceMessageId,
+                attachmentId: attachmentId,
+                extractedText: extractedText,
+                chars: chars,
+                fetchedAt: fetchedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $AttachmentTextProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      AttachmentText,
+      AttachmentTextData,
+      $AttachmentTextFilterComposer,
+      $AttachmentTextOrderingComposer,
+      $AttachmentTextAnnotationComposer,
+      $AttachmentTextCreateCompanionBuilder,
+      $AttachmentTextUpdateCompanionBuilder,
+      (
+        AttachmentTextData,
+        BaseReferences<_$BondDatabase, AttachmentText, AttachmentTextData>,
+      ),
+      AttachmentTextData,
+      PrefetchHooks Function()
+    >;
+typedef $AttachmentChunksCreateCompanionBuilder =
+    AttachmentChunksCompanion Function({
+      Value<int> id,
+      required String source,
+      required String sourceMessageId,
+      required String attachmentId,
+      required int seq,
+      Value<String> locator,
+      required String chunkText,
+      Value<int> chars,
+      Value<Uint8List?> embedding,
+      Value<int> dims,
+      Value<String?> embedModel,
+      Value<String?> embeddedAt,
+      Value<String?> indexedAt,
+      required String createdAt,
+    });
+typedef $AttachmentChunksUpdateCompanionBuilder =
+    AttachmentChunksCompanion Function({
+      Value<int> id,
+      Value<String> source,
+      Value<String> sourceMessageId,
+      Value<String> attachmentId,
+      Value<int> seq,
+      Value<String> locator,
+      Value<String> chunkText,
+      Value<int> chars,
+      Value<Uint8List?> embedding,
+      Value<int> dims,
+      Value<String?> embedModel,
+      Value<String?> embeddedAt,
+      Value<String?> indexedAt,
+      Value<String> createdAt,
+    });
+
+class $AttachmentChunksFilterComposer
+    extends Composer<_$BondDatabase, AttachmentChunks> {
+  $AttachmentChunksFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get seq => $composableBuilder(
+    column: $table.seq,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get locator => $composableBuilder(
+    column: $table.locator,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get chunkText => $composableBuilder(
+    column: $table.chunkText,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get chars => $composableBuilder(
+    column: $table.chars,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get embedding => $composableBuilder(
+    column: $table.embedding,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get dims => $composableBuilder(
+    column: $table.dims,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get indexedAt => $composableBuilder(
+    column: $table.indexedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $AttachmentChunksOrderingComposer
+    extends Composer<_$BondDatabase, AttachmentChunks> {
+  $AttachmentChunksOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get seq => $composableBuilder(
+    column: $table.seq,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get locator => $composableBuilder(
+    column: $table.locator,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get chunkText => $composableBuilder(
+    column: $table.chunkText,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get chars => $composableBuilder(
+    column: $table.chars,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get embedding => $composableBuilder(
+    column: $table.embedding,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get dims => $composableBuilder(
+    column: $table.dims,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get indexedAt => $composableBuilder(
+    column: $table.indexedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $AttachmentChunksAnnotationComposer
+    extends Composer<_$BondDatabase, AttachmentChunks> {
+  $AttachmentChunksAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceMessageId => $composableBuilder(
+    column: $table.sourceMessageId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get attachmentId => $composableBuilder(
+    column: $table.attachmentId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get seq =>
+      $composableBuilder(column: $table.seq, builder: (column) => column);
+
+  GeneratedColumn<String> get locator =>
+      $composableBuilder(column: $table.locator, builder: (column) => column);
+
+  GeneratedColumn<String> get chunkText =>
+      $composableBuilder(column: $table.chunkText, builder: (column) => column);
+
+  GeneratedColumn<int> get chars =>
+      $composableBuilder(column: $table.chars, builder: (column) => column);
+
+  GeneratedColumn<Uint8List> get embedding =>
+      $composableBuilder(column: $table.embedding, builder: (column) => column);
+
+  GeneratedColumn<int> get dims =>
+      $composableBuilder(column: $table.dims, builder: (column) => column);
+
+  GeneratedColumn<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get indexedAt =>
+      $composableBuilder(column: $table.indexedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+}
+
+class $AttachmentChunksTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          AttachmentChunks,
+          AttachmentChunk,
+          $AttachmentChunksFilterComposer,
+          $AttachmentChunksOrderingComposer,
+          $AttachmentChunksAnnotationComposer,
+          $AttachmentChunksCreateCompanionBuilder,
+          $AttachmentChunksUpdateCompanionBuilder,
+          (
+            AttachmentChunk,
+            BaseReferences<_$BondDatabase, AttachmentChunks, AttachmentChunk>,
+          ),
+          AttachmentChunk,
+          PrefetchHooks Function()
+        > {
+  $AttachmentChunksTableManager(_$BondDatabase db, AttachmentChunks table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $AttachmentChunksFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $AttachmentChunksOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $AttachmentChunksAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> source = const Value.absent(),
+                Value<String> sourceMessageId = const Value.absent(),
+                Value<String> attachmentId = const Value.absent(),
+                Value<int> seq = const Value.absent(),
+                Value<String> locator = const Value.absent(),
+                Value<String> chunkText = const Value.absent(),
+                Value<int> chars = const Value.absent(),
+                Value<Uint8List?> embedding = const Value.absent(),
+                Value<int> dims = const Value.absent(),
+                Value<String?> embedModel = const Value.absent(),
+                Value<String?> embeddedAt = const Value.absent(),
+                Value<String?> indexedAt = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+              }) => AttachmentChunksCompanion(
+                id: id,
+                source: source,
+                sourceMessageId: sourceMessageId,
+                attachmentId: attachmentId,
+                seq: seq,
+                locator: locator,
+                chunkText: chunkText,
+                chars: chars,
+                embedding: embedding,
+                dims: dims,
+                embedModel: embedModel,
+                embeddedAt: embeddedAt,
+                indexedAt: indexedAt,
+                createdAt: createdAt,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String source,
+                required String sourceMessageId,
+                required String attachmentId,
+                required int seq,
+                Value<String> locator = const Value.absent(),
+                required String chunkText,
+                Value<int> chars = const Value.absent(),
+                Value<Uint8List?> embedding = const Value.absent(),
+                Value<int> dims = const Value.absent(),
+                Value<String?> embedModel = const Value.absent(),
+                Value<String?> embeddedAt = const Value.absent(),
+                Value<String?> indexedAt = const Value.absent(),
+                required String createdAt,
+              }) => AttachmentChunksCompanion.insert(
+                id: id,
+                source: source,
+                sourceMessageId: sourceMessageId,
+                attachmentId: attachmentId,
+                seq: seq,
+                locator: locator,
+                chunkText: chunkText,
+                chars: chars,
+                embedding: embedding,
+                dims: dims,
+                embedModel: embedModel,
+                embeddedAt: embeddedAt,
+                indexedAt: indexedAt,
+                createdAt: createdAt,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $AttachmentChunksProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      AttachmentChunks,
+      AttachmentChunk,
+      $AttachmentChunksFilterComposer,
+      $AttachmentChunksOrderingComposer,
+      $AttachmentChunksAnnotationComposer,
+      $AttachmentChunksCreateCompanionBuilder,
+      $AttachmentChunksUpdateCompanionBuilder,
+      (
+        AttachmentChunk,
+        BaseReferences<_$BondDatabase, AttachmentChunks, AttachmentChunk>,
+      ),
+      AttachmentChunk,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -16983,4 +21120,10 @@ class $BondDatabaseManager {
       $MessageProgressTableManager(_db, _db.messageProgress);
   $MessageVectorsTableManager get messageVectors =>
       $MessageVectorsTableManager(_db, _db.messageVectors);
+  $AttachmentsTableManager get attachments =>
+      $AttachmentsTableManager(_db, _db.attachments);
+  $AttachmentTextTableManager get attachmentText =>
+      $AttachmentTextTableManager(_db, _db.attachmentText);
+  $AttachmentChunksTableManager get attachmentChunks =>
+      $AttachmentChunksTableManager(_db, _db.attachmentChunks);
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../data/message_store.dart';
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'drain_gate.dart';
@@ -375,8 +376,25 @@ class TriageQueue {
     // messages back still expects an answer, and this message on its own does
     // not say so. Only what came BEFORE it — a later message is not context
     // for a judgement about this one. TriageTask takes the last few.
-    var thread = const <Message>[];
+    // Names and sizes, never contents: the line this feeds is metadata the
+    // connector already wrote, so it costs a local query and no network at all.
+    // The rows are here by now for mail because the detail fetch above wrote
+    // them, and for chat because the ingest loop did; a failed fetch simply
+    // leaves the list empty and the line absent.
+    final attachments = await _store.attachmentsForMessage(source, id);
     final key = current['conversation_key'] as String?;
+    // Hydrated from the rows just read — `loadThread` does this for a whole
+    // thread; a single-row read has to ask. The block the model sees
+    // synthesises "Shared a file: …" from these, so a chat message that is
+    // nothing but a dropped contract stops arriving with an empty body.
+    if (attachments.isNotEmpty) {
+      message = message.withAttachments([
+        for (final row in attachments)
+          AttachmentRef.fromRow(row, conversationKey: key),
+      ]);
+    }
+
+    var thread = const <Message>[];
     if (key != null && key.isNotEmpty) {
       final loaded = await _store.loadThread(key, sources: [source]);
       final receivedAt = message.receivedAt ?? '';
@@ -392,7 +410,12 @@ class TriageQueue {
       final result = await runTask(
         _client,
         const TriageTask(),
-        TriageInput(message, DateTime.now(), thread: thread),
+        TriageInput(
+          message,
+          DateTime.now(),
+          thread: thread,
+          attachments: attachments,
+        ),
       );
       await _writeTriage(source, id, status: 'triaged', result: result);
       await _foldUp(source, current, message, result);

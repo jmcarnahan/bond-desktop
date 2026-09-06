@@ -4,6 +4,7 @@ import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
+import 'attachments/attachment_markers.dart';
 import 'llm/draft_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
@@ -120,8 +121,15 @@ class DraftHandler extends WorkHandler {
       return;
     }
 
-    final replyTo = Message.fromRow(row);
+    var replyTo = Message.fromRow(row);
     final key = row['conversation_key'] as String? ?? '';
+    // Hydrated only when the row says there is something to hydrate —
+    // `loadThread` does this for a whole thread; a single-row read has to ask.
+    if (row['has_attachments'] == 1) {
+      replyTo = replyTo.withAttachments(
+        await _store.attachmentRefsFor(source, id, conversationKey: key),
+      );
+    }
     // The thread AS IT WAS when this message landed. Cutting it off here is
     // what makes the answer to a message the same answer however far behind
     // the queue was when it got here — and it keeps the model from replying to
@@ -226,9 +234,13 @@ class DraftHandler extends WorkHandler {
     );
     final examples = <String>[];
     for (final row in rows) {
-      final body = (row['body_text'] as String?)?.trim();
-      final preview = (row['body_preview'] as String?)?.trim();
-      final text = (body != null && body.isNotEmpty) ? body : (preview ?? '');
+      // Markers out, for [buildMessageBlock]'s reason and one of its own: a
+      // style example is a sample the model imitates, and `[[att:…]]` in one
+      // is a token it would learn to write.
+      final body = stripAttachmentMarkers(row['body_text'] as String?).trim();
+      final preview =
+          stripAttachmentMarkers(row['body_preview'] as String?).trim();
+      final text = body.isNotEmpty ? body : preview;
       if (text.isEmpty) continue;
       examples.add(
         text.length > _styleExampleCap

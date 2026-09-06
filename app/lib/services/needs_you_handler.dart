@@ -142,8 +142,15 @@ class NeedsYouHandler extends WorkHandler {
     }
 
     // Below the floor, which settles nothing: the model reads the text.
-    final message = Message.fromRow(row);
+    var message = Message.fromRow(row);
     final key = row['conversation_key'] as String? ?? '';
+    // Hydrated only when the row says there is something to hydrate —
+    // `loadThread` does this for a whole thread; a single-row read has to ask.
+    if (row['has_attachments'] == 1) {
+      message = message.withAttachments(
+        await _store.attachmentRefsFor(source, id, conversationKey: key),
+      );
+    }
     // The thread AS IT WAS when this message landed, so the verdict on a
     // message does not change with how far behind the queue was.
     final thread = await _store.loadThread(
