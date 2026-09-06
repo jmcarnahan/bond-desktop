@@ -58,9 +58,8 @@ class DraftHandler extends WorkHandler {
     this._store,
     this._client, {
     ActivityLog? activityLog,
-    PipelineProgress progress = const PipelineProgress.disabled(),
-  })  : _log = activityLog ?? ActivityLog.disabled(),
-        _progress = progress;
+    this._progress = const PipelineProgress.disabled(),
+  })  : _log = activityLog ?? ActivityLog.disabled();
 
   @override
   String get kind => 'draft';

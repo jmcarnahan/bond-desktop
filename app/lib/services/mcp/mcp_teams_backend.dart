@@ -60,10 +60,9 @@ class McpTeamsBackend implements TeamsBackend {
 
   McpTeamsBackend(
     this._mcp, {
-    Duration chatListGap = GraphTeams.defaultChatListGap,
-    Duration sameChatGap = GraphTeams.defaultSameChatGap,
-  })  : _chatListGap = chatListGap,
-        _sameChatGap = sameChatGap;
+    this._chatListGap = GraphTeams.defaultChatListGap,
+    this._sameChatGap = GraphTeams.defaultSameChatGap,
+  });
 
   @override
   Future<String> myUserId() async {

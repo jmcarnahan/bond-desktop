@@ -187,13 +187,11 @@ class StorylineService {
     LlmClient client, {
     LlmClient? confirmClient,
     ActivityLog? activityLog,
-    EmbeddingsClient? embeddings,
-    PipelineProgress progress = const PipelineProgress.disabled(),
+    this._embeddings,
+    this._progress = const PipelineProgress.disabled(),
   })  : _client = client,
         _confirmClient = confirmClient ?? client,
-        _log = activityLog ?? ActivityLog.disabled(),
-        _embeddings = embeddings,
-        _progress = progress;
+        _log = activityLog ?? ActivityLog.disabled();
 
   // ── automatic: one thread ──────────────────────────────────────────────
 

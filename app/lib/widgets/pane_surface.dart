@@ -38,11 +38,14 @@ class PaneSurface extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final home = onHome;
-    return Container(
-      decoration: BoxDecoration(
-        color: BondColors.surface,
+    // A Material, not a decorated Container: ListTiles inside the pane paint
+    // their ink on the nearest Material, and a decoration over that ancestor
+    // would swallow it (Flutter 3.47 asserts on exactly this shape).
+    return Material(
+      color: BondColors.surface,
+      shape: const RoundedRectangleBorder(
         borderRadius: BondRadii.mdAll,
-        border: Border.all(color: BondColors.border),
+        side: BorderSide(color: BondColors.border),
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(

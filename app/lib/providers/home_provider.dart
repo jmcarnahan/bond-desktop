@@ -267,10 +267,9 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     this._store, {
     bool includeDropped = false,
     Future<void> Function(bool value)? persistIncludeDropped,
-    HomeSearchRunner? searchRunner,
+    this._searchRunner,
     ProgressBus? bus,
   })  : _persistIncludeDropped = persistIncludeDropped ?? _forget,
-        _searchRunner = searchRunner,
         super(HomeFeedState(includeDropped: includeDropped)) {
     if (bus != null) _ticks = bus.ticks.listen(_onTick);
   }

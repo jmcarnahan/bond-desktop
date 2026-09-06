@@ -135,16 +135,13 @@ class TriageQueue {
   TriageQueue(
     this._store,
     this._client, {
-    String? userAddress,
-    Future<void> Function(String sourceMessageId)? ensureBody,
+    this._userAddress,
+    this._ensureBody,
     DrainGate? gate,
-    int concurrency = 3,
+    this._concurrency = 3,
     ActivityLog? activityLog,
     PipelineProgress progress = const PipelineProgress.disabled(),
-  })  : _userAddress = userAddress,
-        _ensureBody = ensureBody,
-        _gate = gate ?? DrainGate(),
-        _concurrency = concurrency,
+  })  : _gate = gate ?? DrainGate(),
         _log = activityLog ?? ActivityLog.disabled(),
         _pipeline = progress;
 
