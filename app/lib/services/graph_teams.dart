@@ -79,11 +79,9 @@ class GraphTeams implements TeamsBackend {
   GraphTeams(
     this._auth, {
     http.Client? httpClient,
-    Duration chatListGap = defaultChatListGap,
-    Duration sameChatGap = defaultSameChatGap,
-  })  : _http = httpClient ?? http.Client(),
-        _chatListGap = chatListGap,
-        _sameChatGap = sameChatGap;
+    this._chatListGap = defaultChatListGap,
+    this._sameChatGap = defaultSameChatGap,
+  })  : _http = httpClient ?? http.Client();
 
   /// The signed-in user's Graph id.
   ///

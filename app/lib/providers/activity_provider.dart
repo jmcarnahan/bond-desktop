@@ -37,11 +37,11 @@ class ActivitySnapshot {
   const ActivitySnapshot({
     required this.stats,
     required this.events,
-    required Map<String, String> subjects,
+    required this._subjects,
     this.lastMailSyncIso,
     this.lastTeamsSyncIso,
     this.lastSweepIso,
-  }) : _subjects = subjects;
+  });
 
   String? labelFor(ActivityEvent event) {
     final entityId = event.entityId;

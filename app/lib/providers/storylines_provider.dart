@@ -97,9 +97,8 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     this._store,
     this._service, {
     AiWorker? aiWorker,
-    void Function()? onMembersChanged,
+    this._onMembersChanged,
   })  : _worker = aiWorker,
-        _onMembersChanged = onMembersChanged,
         super(const StorylinesInitial()) {
     final worker = aiWorker;
     if (worker == null) return;

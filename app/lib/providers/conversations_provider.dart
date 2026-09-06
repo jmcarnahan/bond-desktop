@@ -149,20 +149,16 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
   ConversationsNotifier(
     this._store,
     this._sync, {
-    TeamsSync? teamsSync,
+    this._teamsSync,
     TriageQueue? triage,
     AiWorker? aiWorker,
-    AttentionService? attention,
-    ReadAckQueue? readAcks,
-    NotificationCoordinator? notify,
+    this._attention,
+    this._readAcks,
+    this._notify,
     PipelineProgress progress = const PipelineProgress.disabled(),
     Future<String?>? userAddress,
-  })  : _teamsSync = teamsSync,
-        _triage = triage,
+  })  : _triage = triage,
         _aiWorker = aiWorker,
-        _attention = attention,
-        _readAcks = readAcks,
-        _notify = notify,
         _pipeline = progress,
         super(const ConversationsInitial()) {
     // Subscribed before the triage early-return below, because a notifier can

@@ -48,12 +48,10 @@ class DesktopNotificationService {
 
   DesktopNotificationService({
     required Stream<MessageSettled> events,
-    required DesktopNotifier notifier,
-    required bool Function() enabled,
-    Duration coalesceWindow = defaultCoalesceWindow,
-  })  : _notifier = notifier,
-        _enabled = enabled,
-        _coalesceWindow = coalesceWindow {
+    required this._notifier,
+    required this._enabled,
+    this._coalesceWindow = defaultCoalesceWindow,
+  }) {
     _events = events.listen(_add);
   }
 

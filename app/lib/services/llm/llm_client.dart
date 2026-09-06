@@ -188,14 +188,12 @@ class LlmClient {
     String? model,
     Duration? timeout,
     http.Client? httpClient,
-    LlmCallObserver? onCall,
-    LlmTarget Function()? resolveTarget,
+    this._onCall,
+    this._resolveTarget,
   })  : _baseUrl = baseUrl ?? defaultBaseUrl,
         _model = model ?? defaultModel,
         timeout = timeout ?? _defaultTimeout,
-        _http = httpClient ?? http.Client(),
-        _onCall = onCall,
-        _resolveTarget = resolveTarget;
+        _http = httpClient ?? http.Client();
 
   /// Where the next request will go.
   ///

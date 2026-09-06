@@ -36,16 +36,12 @@ class RestoreService {
 
   RestoreService(
     this._store, {
-    PipelineProgress progress = const PipelineProgress.disabled(),
-    Future<void> Function(String sourceMessageId)? ensureBody,
-    Future<void> Function()? pumpTriage,
-    Future<void> Function()? pumpWork,
+    this._progress = const PipelineProgress.disabled(),
+    this._ensureBody,
+    this._pumpTriage,
+    this._pumpWork,
     ActivityLog? activityLog,
-  })  : _progress = progress,
-        _ensureBody = ensureBody,
-        _pumpTriage = pumpTriage,
-        _pumpWork = pumpWork,
-        _log = activityLog ?? ActivityLog.disabled();
+  })  : _log = activityLog ?? ActivityLog.disabled();
 
   /// Puts one dropped message back through the pipeline.
   ///

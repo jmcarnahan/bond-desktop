@@ -245,10 +245,9 @@ class BondMcpHttpClient implements BondMcpClient {
 
   BondMcpHttpClient(
     Uri baseUrl, {
-    Future<String?> Function()? getBearer,
+    this._getBearer,
     @visibleForTesting McpSessionFactory? sessionFactory,
   })  : baseUrl = _stripTrailingSlash(baseUrl),
-        _getBearer = getBearer,
         _sessionFactory = sessionFactory ?? _openStreamableHttpSession {
     _installMcpLogHandler();
   }

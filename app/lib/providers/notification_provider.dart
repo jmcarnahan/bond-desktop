@@ -158,13 +158,10 @@ class NotificationRibbonNotifier extends StateNotifier<RibbonState> {
 
   NotificationRibbonNotifier({
     required Stream<MessageSettled> events,
-    required bool Function() enabled,
-    Duration dwell = defaultDwell,
-    Duration maxDwell = defaultMaxDwell,
-  })  : _enabled = enabled,
-        _dwell = dwell,
-        _maxDwell = maxDwell,
-        super(RibbonState.empty) {
+    required this._enabled,
+    this._dwell = defaultDwell,
+    this._maxDwell = defaultMaxDwell,
+  })  : super(RibbonState.empty) {
     _events = events.listen(_add);
   }
 

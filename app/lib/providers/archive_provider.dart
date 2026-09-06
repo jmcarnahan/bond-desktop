@@ -134,9 +134,8 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
   /// and a query are different questions and neither invalidates the other.
   int _searchSeq = 0;
 
-  ArchiveNotifier(this._store, {ArchiveSearchRunner? searchRunner})
-      : _searchRunner = searchRunner,
-        super(const ArchiveState());
+  ArchiveNotifier(this._store, {this._searchRunner})
+      : super(const ArchiveState());
 
   /// The newest page, read fresh.
   ///
