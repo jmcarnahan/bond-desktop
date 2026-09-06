@@ -217,6 +217,38 @@ void main() {
       expect(await store.getPref(needsYouRulesKey), isNull);
     });
 
+    test('a wipe also clears what the guard was told to clear', () async {
+      // The rows are not the whole of what belongs to the departing identity.
+      // The attachment cache is a tree of somebody's documents under
+      // Application Support, and a wipe that left it standing would hand the
+      // next person to sign in the files whose rows it had just deleted.
+      var cleared = 0;
+      final guarded = IdentityGuard(store, onWipe: () async => cleared++);
+      await store.setPref(dbOwnerKey, 'ada@example.test');
+      await seedMail('m1');
+
+      final wiped = await guarded.adopt(const AccountInfo(
+        displayName: 'Grace Hopper',
+        mail: 'grace@example.test',
+      ));
+
+      expect(wiped, isTrue);
+      expect(cleared, 1);
+    });
+
+    test('a sign-in that changes nothing clears nothing', () async {
+      var cleared = 0;
+      final guarded = IdentityGuard(store, onWipe: () async => cleared++);
+      await store.setPref(dbOwnerKey, 'ada@example.test');
+
+      await guarded.adopt(const AccountInfo(
+        displayName: 'Ada Lovelace',
+        mail: 'ada@example.test',
+      ));
+
+      expect(cleared, 0);
+    });
+
     test('an unclaimed database after a sign-out wipe is claimed, not wiped',
         () async {
       // The sign-out path clears db_owner along with the rows (see the wipeAll

@@ -51,7 +51,7 @@ dependencies:
     path: packages/sqlite_vec_ffi
   path_provider: ^2.1.4
   path: ^1.9.0
-  intl: ^0.19.0
+  intl: ^0.20.2
   flutter_riverpod: ^2.6.1
   http: ^1.2.2
   url_launcher: ^6.3.2
@@ -68,7 +68,25 @@ dependencies:
   # a one-file review.
   flutter_local_notifications: ^22.3.0
   package_info_plus: ^10.2.1
-
+  # Pinned exactly. pdfium rides along as an XCFramework on macOS, so a bump
+  # changes what the Runner links; 2.6 is why the toolchain floor is Flutter
+  # 3.47 and macOS 12, and why `intl` is ^0.20 (pdfrx 2.5+ requires it).
+  # `lib/widgets/preview/pdf_preview.dart` is the only file allowed to import
+  # it — everything else talks to the `PdfRenderer` interface beside it, which
+  # is also what keeps pdfium out of `flutter test`.
+  pdfrx: 2.6.1
+  # Pinned exactly: the save dialog is a platform channel, and
+  # `lib/services/attachments/file_dialogs.dart` is the only file allowed to
+  # import it — everything above takes the `FileDialogs` interface.
+  file_selector: 1.1.0
+  # Pinned exactly, the pair behind the XLSX preview. The `excel` package was
+  # the plan, and it cannot be used: its newest release (4.0.6, Aug 2024)
+  # requires archive ^3 and xml <7 while pdfrx 2.6 requires archive ^4, and
+  # pdfrx is the one that decides the toolchain. A workbook is a zip of XML,
+  # so `lib/services/attachments/xlsx_reader.dart` reads the few parts a
+  # preview needs with these two, and is the only file allowed to import them.
+  archive: 4.2.0
+  xml: 7.0.1
 dev_dependencies:
   flutter_test:
     sdk: flutter

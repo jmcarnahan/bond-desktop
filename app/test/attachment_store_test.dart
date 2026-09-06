@@ -411,6 +411,44 @@ void main() {
       expect((await store.loadConversations()).single.attachmentCount, 0);
     });
 
+    test('clearing the blobs forgets the paths and keeps the metadata',
+        () async {
+      // What Settings' "Clear attachment cache" costs: the files, and nothing
+      // else. The name, the words and the pin all outlive the bytes, because
+      // none of them is a copy of the file.
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a', name: 'Q.pdf')]);
+      await store.setAttachmentBlob(
+        'email',
+        'm1',
+        'att-a',
+        blobPath: '/tmp/cache/ab/abcd.pdf',
+        blobSha256: 'abcd',
+        thumbPath: '/tmp/cache/ab/abcd.thumb',
+      );
+      await store.setAttachmentText(
+        'email',
+        'm1',
+        'att-a',
+        status: 'done',
+        text: 'Two pages of terms.',
+      );
+      await store.setAttachmentPinned('email', 'm1', 'att-a', 'story-1');
+
+      await store.clearAttachmentBlobs();
+
+      final after = (await store.attachmentRow('email', 'm1', 'att-a'))!;
+      expect(after['blob_path'], isNull);
+      expect(after['blob_sha256'], isNull);
+      expect(after['blob_fetched_at'], isNull);
+      expect(after['thumb_path'], isNull);
+      expect(after['name'], 'Q.pdf');
+      expect(after['text_status'], 'done');
+      expect(after['pinned_storyline_id'], 'story-1');
+      expect(await store.attachmentTextOf('email', 'm1', 'att-a'),
+          'Two pages of terms.');
+    });
+
     test('wiping the mailbox empties all three attachment tables', () async {
       await seedMessage('m1');
       await store.upsertAttachments('email', 'm1', [row('att-a')]);

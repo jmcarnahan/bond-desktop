@@ -27,6 +27,8 @@ void main() {
     String? sweep,
     Future<void> Function()? onRefreshNow,
     Future<void> Function()? onSignOutAndClear,
+    Future<int> Function()? attachmentCacheBytes,
+    Future<void> Function()? onClearAttachmentCache,
     String? appVersion,
     String? databasePath,
     bool wireRefresh = true,
@@ -47,6 +49,8 @@ void main() {
           lastSweepIso: sweep,
           onRefreshNow: wireRefresh ? (onRefreshNow ?? () async {}) : null,
           onSignOutAndClear: onSignOutAndClear,
+          attachmentCacheBytes: attachmentCacheBytes,
+          onClearAttachmentCache: onClearAttachmentCache,
           appVersion: appVersion,
           databasePath: databasePath,
         ),
@@ -166,6 +170,107 @@ void main() {
           .onPressed,
       isNotNull,
     );
+  });
+
+  group('the attachment cache, cleared in two clicks', () {
+    testWidgets('the block is absent when the host wires no clear',
+        (tester) async {
+      await open(tester, attachmentCacheBytes: () async => 4096);
+      await expand(tester, 'Sync & data');
+
+      expect(find.text('Attachment cache'), findsNothing);
+      expect(find.byKey(SettingsScreen.clearCacheKey), findsNothing);
+    });
+
+    testWidgets('it says how much of this disk the files are using',
+        (tester) async {
+      await open(
+        tester,
+        attachmentCacheBytes: () async => 120 * 1024 * 1024,
+        onClearAttachmentCache: () async {},
+      );
+      await expand(tester, 'Sync & data');
+
+      expect(find.textContaining('Using 120 MB.'), findsOneWidget);
+    });
+
+    testWidgets('an empty cache says so rather than reporting 0 B',
+        (tester) async {
+      // `formatBytes` renders zero as nothing at all — it is written for a chip
+      // — so the word has to come from this screen.
+      await open(
+        tester,
+        attachmentCacheBytes: () async => 0,
+        onClearAttachmentCache: () async {},
+      );
+      await expand(tester, 'Sync & data');
+
+      expect(find.textContaining('Empty.'), findsOneWidget);
+    });
+
+    testWidgets('the first tap swaps the button for a confirm pair, and Keep '
+        'puts it back', (tester) async {
+      var clears = 0;
+      await open(
+        tester,
+        attachmentCacheBytes: () async => 4096,
+        onClearAttachmentCache: () async => clears++,
+      );
+      await expand(tester, 'Sync & data');
+
+      await tapKey(tester, SettingsScreen.clearCacheKey);
+
+      expect(find.byKey(SettingsScreen.clearCacheKey), findsNothing);
+      expect(find.text('Yes, clear the cache'), findsOneWidget);
+      expect(clears, 0);
+
+      await tapKey(tester, SettingsScreen.clearCacheKeepKey);
+
+      expect(find.byKey(SettingsScreen.clearCacheKey), findsOneWidget);
+      expect(clears, 0);
+    });
+
+    testWidgets('the confirm clears once and the size is read again',
+        (tester) async {
+      var clears = 0;
+      var reads = 0;
+      await open(
+        tester,
+        attachmentCacheBytes: () async {
+          reads++;
+          return clears == 0 ? 120 * 1024 * 1024 : 0;
+        },
+        onClearAttachmentCache: () async => clears++,
+      );
+      await expand(tester, 'Sync & data');
+      expect(reads, 1);
+
+      await tapKey(tester, SettingsScreen.clearCacheKey);
+      await tapKey(tester, SettingsScreen.clearCacheConfirmKey);
+
+      expect(clears, 1);
+      expect(reads, 2, reason: 'the line has to agree with what just happened');
+      expect(find.byKey(SettingsScreen.clearCacheKey), findsOneWidget);
+      expect(find.textContaining('Empty.'), findsOneWidget);
+    });
+
+    testWidgets('a failed clear says so and leaves the pair up', (tester) async {
+      await open(
+        tester,
+        attachmentCacheBytes: () async => 4096,
+        onClearAttachmentCache: () async => throw StateError('busy'),
+      );
+      await expand(tester, 'Sync & data');
+      await tapKey(tester, SettingsScreen.clearCacheKey);
+      await tapKey(tester, SettingsScreen.clearCacheConfirmKey);
+
+      expect(find.byType(InlineAlert), findsOneWidget);
+      expect(find.text('The cache could not be cleared.'), findsOneWidget);
+      expect(find.byKey(SettingsScreen.clearCacheConfirmKey), findsOneWidget);
+
+      await tapKey(tester, SettingsScreen.clearCacheKeepKey);
+      expect(find.byType(InlineAlert), findsNothing);
+    });
   });
 
   group('the wipe is two clicks, not one', () {

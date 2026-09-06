@@ -8,6 +8,7 @@ import 'attachment_chip_row.dart';
 import 'attachment_format.dart';
 import 'chips.dart';
 import 'inline_image_thumb.dart';
+import 'preview/preview_kind.dart';
 import 'time_format.dart';
 
 /// How long a gap can be before a message stops reading as part of the same
@@ -148,11 +149,17 @@ final class BodyAttachmentSegment extends BodySegment {
 /// — because that is what the `Show more` clamp measures and what a folded row
 /// shows one line of. Splitting the body into segments must not change either
 /// of those, or a message would fold differently for having a picture in it.
+/// [thumbnailable] is a SUBSET of [chips] and not a fourth bucket: a PDF or a
+/// shared Word file may have a picture of its first page, and if it does the
+/// row draws it — but the file is still named in the chip row underneath,
+/// which is what carries its size and its tap target. Counting it twice would
+/// make a folded row claim two files where there is one.
 typedef BodyLayout = ({
   List<BodySegment> segments,
   String plainText,
   List<AttachmentRef> chips,
   List<AttachmentRef> trailingImages,
+  List<AttachmentRef> thumbnailable,
 });
 
 /// The body a row reads.
@@ -273,11 +280,21 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
 
   final chips = <AttachmentRef>[];
   final trailingImages = <AttachmentRef>[];
+  final thumbnailable = <AttachmentRef>[];
   for (final attachment in leftovers) {
     if (isImageAttachment(attachment)) {
       trailingImages.add(attachment);
-    } else {
-      chips.add(attachment);
+      continue;
+    }
+    chips.add(attachment);
+    // A document that something in this build might be able to draw: a PDF
+    // (its own first page) or a chat's shared file (OneDrive's rendering).
+    // Whether one actually arrives is the host's answer, not this function's —
+    // it says only which files are worth asking about.
+    if (!attachment.isInline &&
+        const {PreviewKind.pdf, PreviewKind.document}
+            .contains(previewKindFor(attachment))) {
+      thumbnailable.add(attachment);
     }
   }
 
@@ -286,6 +303,7 @@ BodyLayout layOutBody(String body, List<AttachmentRef> attachments) {
     plainText: plainText,
     chips: chips,
     trailingImages: trailingImages,
+    thumbnailable: thumbnailable,
   );
 }
 
@@ -548,6 +566,12 @@ class _MessageRowState extends State<MessageRow> {
                   const SizedBox(height: BondSpacing.s8),
                   _thumb(image),
                 ],
+                // A document the host has a picture of shows it. No picture,
+                // NOTHING — never the dashed frame an image gets: the chip
+                // below is already the file, and a frame per attachment would
+                // put an empty box under every mail with a spreadsheet on it.
+                for (final document in layout.thumbnailable)
+                  ..._documentThumb(document),
                 if (pending) ...[
                   const SizedBox(height: BondSpacing.s4),
                   Text('Sending…', style: BondType.caption),
@@ -671,6 +695,27 @@ class _MessageRowState extends State<MessageRow> {
           onTap: _openAttachment(attachment),
         ),
       );
+
+  /// A document's own picture, when the host has one, at a size that keeps two
+  /// of them from filling a screen. Empty when it has none — see the call site.
+  List<Widget> _documentThumb(AttachmentRef attachment) {
+    final image = widget.thumbnailFor?.call(attachment);
+    if (image == null) return const [];
+    return [
+      const SizedBox(height: BondSpacing.s8),
+      Align(
+        alignment: Alignment.centerLeft,
+        child: InlineImageThumb(
+          key: InlineImageThumb.keyFor(attachment),
+          attachment: attachment,
+          image: image,
+          maxWidth: 200,
+          maxHeight: 200,
+          onTap: _openAttachment(attachment),
+        ),
+      ),
+    ];
+  }
 
   VoidCallback? _openAttachment(AttachmentRef attachment) {
     final open = widget.onOpenAttachment;

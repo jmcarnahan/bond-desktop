@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
@@ -390,6 +392,39 @@ void main() {
   });
 
   group('layOutBody', () {
+    test('the documents worth a picture are a subset of the chips', () {
+      final layout = layOutBody('', [
+        ref(attachmentId: 'a1', name: 'Terms.pdf'),
+        ref(attachmentId: 'a2', name: 'Letter.docx', contentType: null),
+        ref(attachmentId: 'a3', name: 'Quote.xlsx', contentType: null),
+        ref(attachmentId: 'a4', kind: 'reference', name: 'Budget.xlsx'),
+      ]);
+
+      expect(
+        layout.chips.map((a) => a.attachmentId),
+        ['a1', 'a2', 'a3', 'a4'],
+      );
+      expect(layout.thumbnailable.map((a) => a.attachmentId), ['a1', 'a2']);
+      // Four files, counted four times — never five.
+      expect(displayableCountOf(layout), 4);
+    });
+
+    test('an inline document is never a candidate', () {
+      final layout = layOutBody('', [
+        ref(attachmentId: 'a1', name: 'Terms.pdf', isInline: true),
+      ]);
+
+      expect(layout.thumbnailable, isEmpty);
+      expect(layout.chips, hasLength(1));
+    });
+
+    test('a picture is a picture, not a document with a picture', () {
+      final layout = layOutBody('', [imageRef(isInline: false)]);
+
+      expect(layout.thumbnailable, isEmpty);
+      expect(layout.trailingImages, hasLength(1));
+    });
+
     test('a marker puts the file where the sender put it', () {
       final file = ref(attachmentId: 'a1', name: 'Terms.pdf');
       final layout = layOutBody('Here it is [[att:a1]] have a look', [file]);
@@ -675,6 +710,86 @@ void main() {
       );
       await tester.tap(find.text('Terms.pdf'));
       expect(opened?.attachmentId, 'a1');
+    });
+  });
+
+  group('a document with a picture', () {
+    testWidgets('a document with a picture shows it above its chip',
+        (tester) async {
+      final document = ref(name: 'Terms.pdf');
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: 'The terms.', attachments: [document]),
+        thumbnailFor: (a) => MemoryImage(Uint8List.fromList(onePixelPng)),
+        onOpenAttachment: (_) {},
+      )));
+
+      expect(find.byKey(InlineImageThumb.keyFor(document)), findsOneWidget);
+      // The chip is still what names it: the picture carries no size and no
+      // file name.
+      expect(find.byType(AttachmentChip), findsOneWidget);
+      expect(find.text('Terms.pdf'), findsOneWidget);
+    });
+
+    testWidgets('a document with no picture is just its chip', (tester) async {
+      final document = ref(name: 'Terms.pdf');
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(bodyText: 'The terms.', attachments: [document]),
+        thumbnailFor: (a) => null,
+      )));
+
+      // No frame, no dashed placeholder — the chip below IS the file.
+      expect(find.byType(InlineImageThumb), findsNothing);
+      expect(find.byType(AttachmentChip), findsOneWidget);
+    });
+
+    testWidgets('a link never asks for a picture', (tester) async {
+      final asked = <String>[];
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          bodyText: 'The budget.',
+          attachments: [
+            ref(kind: 'reference', name: 'Budget.xlsx', sourceUrl: 'https://x'),
+          ],
+        ),
+        thumbnailFor: (a) {
+          asked.add(a.attachmentId);
+          return null;
+        },
+      )));
+
+      expect(asked, isEmpty);
+      expect(find.byType(AttachmentChip), findsOneWidget);
+    });
+
+    testWidgets('a spreadsheet is a chip and nothing more', (tester) async {
+      final asked = <String>[];
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          bodyText: 'The quote.',
+          attachments: [ref(name: 'Quote.xlsx', contentType: null)],
+        ),
+        thumbnailFor: (a) {
+          asked.add(a.attachmentId);
+          return MemoryImage(Uint8List.fromList(onePixelPng));
+        },
+      )));
+
+      expect(asked, isEmpty);
+      expect(find.byType(InlineImageThumb), findsNothing);
+    });
+
+    testWidgets('a folded row still counts it once', (tester) async {
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(
+          bodyText: 'The terms.',
+          attachments: [ref(name: 'Terms.pdf')],
+        ),
+        collapsible: true,
+        initiallyCollapsed: true,
+        thumbnailFor: (a) => MemoryImage(Uint8List.fromList(onePixelPng)),
+      )));
+
+      expect(find.text('📎 1 file'), findsOneWidget);
     });
   });
 

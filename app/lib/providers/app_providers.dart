@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:io' show Directory;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
 // Storyline, …) whose names collide with the app's models.
@@ -10,8 +14,11 @@ import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
+import '../services/attachments/attachment_bytes.dart';
+import '../services/attachments/attachment_cache.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
+import '../services/backend/attachment_backend.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/teams_backend.dart';
@@ -19,6 +26,7 @@ import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
+import '../services/graph_attachment_backend.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
 import '../services/graph_teams.dart';
@@ -26,6 +34,7 @@ import '../services/identity_guard.dart';
 import '../services/llm/embeddings_client.dart';
 import '../services/llm/llm_client.dart';
 import '../services/mcp/bond_mcp_client.dart';
+import '../services/mcp/mcp_attachment_backend.dart';
 import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
@@ -140,8 +149,29 @@ final messageStoreProvider =
 
 /// Enforces the one-identity-per-database rule at every completed sign-in.
 /// See [IdentityGuard] for why it is a guard rather than a convention.
+///
+/// The attachment cache is cleared alongside the rows, and has to be: it is a
+/// tree of somebody's documents under Application Support, and a wipe that left
+/// it standing would hand the next person to sign in the files whose rows it had
+/// just deleted.
 final identityGuardProvider = Provider<IdentityGuard>(
-  (ref) => IdentityGuard(ref.watch(messageStoreProvider)),
+  (ref) => IdentityGuard(
+    ref.watch(messageStoreProvider),
+    onWipe: () async {
+      // STARTED here, not awaited here. Emptying the cache is a recursive
+      // delete of up to two gigabytes, and the sign-in handover must not sit
+      // behind a disk. It is safe to let it run on: `wipeAll` has already
+      // deleted every row that pointed at those files, so nothing in the app
+      // can reach one — this is hygiene on disk rather than part of the
+      // one-identity invariant, and it reports its own failure.
+      unawaited(
+        ref.read(attachmentCacheProvider).clear().catchError(
+              (Object e) =>
+                  debugPrint('attachment cache not cleared on wipe: $e'),
+            ),
+      );
+    },
+  ),
 );
 
 /// One recorder for the app. It watches ONLY the store, so a backend switch —
@@ -200,6 +230,55 @@ final mailBackendProvider = Provider<MailBackend>((ref) {
       ? GraphMail(ref.watch(graphAuthProvider))
       : McpMailBackend(ref.watch(mcpStackProvider).client);
 });
+
+/// Attachment words and bytes, from whichever connector the app is on.
+///
+/// The third arm of the backend switch, and the one where the two
+/// implementations are genuinely different: the MCP server carries the document
+/// extractors, so a Word file comes back as text from it and as
+/// `skipped/no_extractor` from Graph. Bytes, inline images and OneDrive
+/// thumbnails are identical on both.
+final attachmentBackendProvider = Provider<AttachmentBackend>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? GraphAttachmentBackend(ref.watch(graphAuthProvider))
+      : McpAttachmentBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// Where fetched attachments live on this disk.
+///
+/// The root is a CLOSURE rather than a resolved path because
+/// `getApplicationSupportDirectory` is a platform channel with nobody on the
+/// other end in a widget test: resolved lazily, a screen that never opens an
+/// attachment never calls it. It watches nothing, so a backend switch leaves the
+/// cache — and every file already in it — exactly where it was.
+final attachmentCacheProvider = Provider<AttachmentCache>(
+  (ref) => AttachmentCache(
+    () async => Directory(
+      p.join((await getApplicationSupportDirectory()).path, 'attachments'),
+    ),
+  ),
+);
+
+/// How a PDF's first page becomes a picture — **null by default, deliberately**.
+///
+/// The only engine that can draw one is pdfrx, and pdfium must not be reachable
+/// from a provider build or from any test: `flutter test` has no native library
+/// behind it, and a default that reached for one would make every screen test
+/// that renders an attachment depend on a binary. `main.dart` overrides this at
+/// startup with the real implementation; everything else gets null and simply
+/// has no PDF thumbnail.
+final pdfThumbnailerProvider = Provider<PdfThumbnailer?>((_) => null);
+
+/// What the UI asks for a file: cache first, connector second, row updated.
+final attachmentBytesProvider = Provider<AttachmentBytes>(
+  (ref) => StoreAttachmentBytes(
+    store: ref.watch(messageStoreProvider),
+    backend: ref.watch(attachmentBackendProvider),
+    cache: ref.watch(attachmentCacheProvider),
+    pdfThumbnailer: ref.watch(pdfThumbnailerProvider),
+  ),
+);
 
 /// The operating system's notification centre, as this app reaches it.
 ///

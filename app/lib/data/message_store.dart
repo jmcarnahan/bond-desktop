@@ -4938,6 +4938,21 @@ LIMIT ?
     );
   }
 
+  /// Forgets where every cached file went, and keeps everything else.
+  ///
+  /// What Settings' "Clear attachment cache" leaves behind: the metadata a chip
+  /// draws, the extracted words, the digests and the pins all survive, because
+  /// none of them is a copy of the file — only the four columns naming a path on
+  /// this disk are cleared, and the next time somebody opens the attachment it
+  /// is fetched again. Distinct from [wipeAll], which deletes the rows outright
+  /// because the mailbox they belong to is going.
+  Future<void> clearAttachmentBlobs() async {
+    await db.customUpdate(
+      'UPDATE attachments SET blob_path = NULL, blob_sha256 = NULL, '
+      '  blob_fetched_at = NULL, thumb_path = NULL',
+    );
+  }
+
   /// Pins one document to a storyline, or unpins it with a null [storylineId].
   ///
   /// The one column on an attachment row a person sets by hand, which is why
