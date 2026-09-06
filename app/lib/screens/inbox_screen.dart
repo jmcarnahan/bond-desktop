@@ -1022,12 +1022,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final prefs = ref.watch(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
     // `watch` is legal here because this runs inside `build`, and it is what
-    // keeps the three sync stamps live while the pane is open: the activity
-    // snapshot re-reads on every recorded event, so a sync that lands behind
-    // Settings moves the numbers in it. The two below answer null in a widget
-    // test, where there is no platform on the other end of the channel — the
-    // About section then says 'Version unknown' rather than throwing.
-    final activity = ref.watch(activitySnapshotProvider).valueOrNull;
+    // keeps the three sync stamps live while the pane is open: the stamps
+    // re-read on every recorded event, so a sync that lands behind Settings
+    // moves the numbers in it. The stamps alone, not the activity snapshot —
+    // that one re-reads the whole pane's table per event, and this pane wants
+    // three preferences. The two below answer null in a widget test, where
+    // there is no platform on the other end of the channel — the About
+    // section then says 'Version unknown' rather than throwing.
+    final stamps = ref.watch(syncStampsProvider).valueOrNull;
     final appInfo = ref.watch(appInfoProvider).valueOrNull;
     final databasePath = ref.watch(databasePathProvider).valueOrNull;
     return SettingsScreen(
@@ -1170,10 +1172,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ModelSlot.embed => Future<void>.value(),
           }),
       onSlotReset: (slot) => unawaited(notifier.clearSlotTarget(slot)),
-      lastMailSyncIso: activity?.lastMailSyncIso,
-      lastTeamsSyncIso: activity?.lastTeamsSyncIso,
-      lastSweepIso: activity?.lastSweepIso,
-      onRefreshNow: () => unawaited(_refreshAll()),
+      lastMailSyncIso: stamps?.mailIso,
+      lastTeamsSyncIso: stamps?.teamsIso,
+      lastSweepIso: stamps?.sweepIso,
+      // Handed over as the future it is, so the section's button can hold
+      // 'Refreshing…' until both pulls are back.
+      onRefreshNow: _refreshAll,
       // The rail's Sign out, the whole wipe — deliberately NOT
       // [onSignOutOfServer] above, which leaves one server's session and
       // keeps the mail on this device.

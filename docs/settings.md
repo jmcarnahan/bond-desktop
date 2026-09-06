@@ -48,7 +48,7 @@ hiding it would make Collapse the only way to check what the controls did.
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
 | Home & feed | `onHomeShowDroppedChanged` wired | `Dropped messages shown` / `Dropped messages hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
-| Sync & data | `onRefreshNow` wired | `Not synced yet`, or `Mail synced <rel> · Teams <rel>` |
+| Sync & data | `onRefreshNow` wired | `Not synced yet`; `Mail synced <rel> · Teams <rel>`; a side that never ran says `not synced yet` in words (`Mail synced 4m ago · Teams not synced yet`, `Mail not synced yet · Teams synced 2h ago`) |
 | About | `appVersion` or `databasePath` is known | `Bond <version>` / `Version unknown` |
 
 **A section whose wiring is absent is absent** — the same discipline every
@@ -238,15 +238,22 @@ leak a connection pool per press, and this is a button a user can hammer.
 
 ## Sync & data
 
-The three stamps come from `activitySnapshotProvider`, which `_settings()`
-**watches** — that provider re-reads on every recorded event, so a sync landing
-behind an open Settings pane moves the numbers in it. Times are relative and in
-one unit (`relativeTime` in `app/lib/widgets/time_format.dart`), and `null`
-reads as `never`. The clock is a `now` parameter rather than a call to
-`DateTime.now`, so a test can pin it and assert an exact string.
+The three stamps come from `syncStampsProvider`
+(`app/lib/providers/activity_provider.dart`), which `_settings()` **watches** —
+it re-reads on every recorded event, so a sync landing behind an open Settings
+pane moves the numbers in it. It is split from `activitySnapshotProvider` on
+purpose: the snapshot pays for the whole activity pane (three hundred events
+and every conversation subject) per event, and this section needs three
+preference reads. `sync_stamps_provider_test.dart` pins it. Times are relative
+and in one unit (`relativeTime` in `app/lib/widgets/time_format.dart`), and
+`null` reads as `never` in the rows. The clock is a `now` parameter rather than
+a call to `DateTime.now`, so a test can pin it and assert an exact string.
 
 **Refresh now** is `_refreshAll` — mail, Teams and the parked read-acks, the
-same pull the rail's Refresh makes.
+same pull the rail's Refresh makes. It is handed over as the future it is, so
+the button reads **Refreshing…** and goes inert until both pulls are back, the
+way the Storylines pane's Sync does; a pull that throws still lets go of the
+button (every leg reports its own failure through the inbox banner).
 
 **Sign out and clear local data** is an inline two-step, because the house rule
 forbids a confirmation dialog. The first tap *replaces* the button with a red
@@ -275,14 +282,8 @@ the call throws `MissingPluginException`, the provider turns that into an
 says `Version unknown` rather than throwing. A test that wants real values
 overrides the two providers — `settings_models_host_test.dart` does.
 
-
 ## Deliberate deferrals
 
-- **The storyline pickers keep their private `_PaneSurface`.**
-  `app/lib/widgets/storyline_pickers.dart` still has its own copy of the header
-  `PaneSurface` was generalised from. Retrofitting its two call sites is a
-  follow-up; keeping them separate here means the picker tests cannot break on a
-  settings change.
 - **`SegmentedButton` stays.** Both segmented controls could be
   `BondFilterPillRow`, but the existing tests read `.selected` off the
   `SegmentedButton` directly, and this round is about the container rather than

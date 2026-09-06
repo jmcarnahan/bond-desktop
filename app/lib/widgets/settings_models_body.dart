@@ -216,7 +216,15 @@ class _SettingsModelsBodyState extends State<SettingsModelsBody> {
             ),
           ),
           const SizedBox(width: BondSpacing.s8),
-          BondChip.semantic('Default', BondTone.neutral),
+          // Read from the same map as the editors' chips, not hard-coded:
+          // the slot is not switchable today, and the chip must say what the
+          // host says rather than what this file assumes.
+          BondChip.semantic(
+            (widget.isDefault[ModelSlot.embed] ?? true) ? 'Default' : 'Custom',
+            (widget.isDefault[ModelSlot.embed] ?? true)
+                ? BondTone.neutral
+                : BondTone.primary,
+          ),
         ],
       ),
       const SizedBox(height: BondSpacing.s4),

@@ -25,7 +25,7 @@ void main() {
     String? mail,
     String? teams,
     String? sweep,
-    VoidCallback? onRefreshNow,
+    Future<void> Function()? onRefreshNow,
     Future<void> Function()? onSignOutAndClear,
     String? appVersion,
     String? databasePath,
@@ -45,7 +45,7 @@ void main() {
           lastMailSyncIso: mail,
           lastTeamsSyncIso: teams,
           lastSweepIso: sweep,
-          onRefreshNow: wireRefresh ? (onRefreshNow ?? () {}) : null,
+          onRefreshNow: wireRefresh ? (onRefreshNow ?? () async {}) : null,
           onSignOutAndClear: onSignOutAndClear,
           appVersion: appVersion,
           databasePath: databasePath,
@@ -96,14 +96,76 @@ void main() {
     expect(find.text('2h ago'), findsOneWidget);
   });
 
+  testWidgets('a side that has never run is said in words, not as "synced '
+      'never"', (tester) async {
+    await open(tester, mail: _ago(const Duration(minutes: 4)));
+    expect(
+      find.text('Mail synced 4m ago · Teams not synced yet'),
+      findsOneWidget,
+    );
+
+    await open(tester, teams: _ago(const Duration(hours: 2)));
+    expect(
+      find.text('Mail not synced yet · Teams synced 2h ago'),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('Refresh now asks the host to pull', (tester) async {
     var pulls = 0;
-    await open(tester, onRefreshNow: () => pulls++);
+    await open(tester, onRefreshNow: () async => pulls++);
     await expand(tester, 'Sync & data');
 
     await tapKey(tester, SettingsScreen.refreshNowKey);
 
     expect(pulls, 1);
+  });
+
+  testWidgets('Refresh now says it is refreshing until the pull is back, and '
+      'cannot be pressed twice', (tester) async {
+    final pending = Completer<void>();
+    var pulls = 0;
+    await open(tester, onRefreshNow: () {
+      pulls++;
+      return pending.future;
+    });
+    await expand(tester, 'Sync & data');
+
+    await tapKey(tester, SettingsScreen.refreshNowKey);
+
+    expect(find.text('Refreshing…'), findsOneWidget);
+    expect(find.text('Refresh now'), findsNothing);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(SettingsScreen.refreshNowKey))
+          .onPressed,
+      isNull,
+      reason: 'a second click while the pull is out would double it',
+    );
+
+    pending.complete();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Refresh now'), findsOneWidget);
+    expect(find.text('Refreshing…'), findsNothing);
+    expect(pulls, 1);
+  });
+
+  testWidgets('a pull that throws still lets go of the button',
+      (tester) async {
+    await open(tester, onRefreshNow: () async => throw StateError('graph'));
+    await expand(tester, 'Sync & data');
+
+    await tapKey(tester, SettingsScreen.refreshNowKey);
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Refresh now'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(SettingsScreen.refreshNowKey))
+          .onPressed,
+      isNotNull,
+    );
   });
 
   group('the wipe is two clicks, not one', () {

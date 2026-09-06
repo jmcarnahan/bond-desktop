@@ -213,7 +213,12 @@ class SettingsScreen extends StatefulWidget {
   final DateTime Function() now;
 
   /// Pulls mail, chats and acks now. Null hides the whole Sync & data section.
-  final VoidCallback? onRefreshNow;
+  ///
+  /// A future, not a callback, because the button has to know when the pull
+  /// is over: it reads 'Refreshing…' and goes inert until then, the same way
+  /// the Storylines pane's Sync does. A pull that gave no sign it was running
+  /// was the one thing on this section a user could not tell had worked.
+  final Future<void> Function()? onRefreshNow;
 
   /// Signs out AND wipes this device's copy of the mailbox — the rail's Sign
   /// out, in other words, and deliberately not [onSignOutOfServer], which
@@ -1205,12 +1210,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   // ── Sync & data ───────────────────────────────────────────────────────────
 
+  /// Where the two pulls stand, in one line.
+  ///
+  /// A side that has never run says 'not synced yet' in words rather than
+  /// 'never' after a verb it does not fit: "Mail synced never" is the sentence
+  /// the obvious formatter writes, and nobody would say it. When both have run
+  /// the verb is said once — 'Mail synced 4m ago · Teams 2h ago' — because the
+  /// second half is read against the first.
   String _syncSummary(DateTime now) {
-    final mail = widget.lastMailSyncIso;
-    final teams = widget.lastTeamsSyncIso;
+    final mail = relativeTime(widget.lastMailSyncIso, now);
+    final teams = relativeTime(widget.lastTeamsSyncIso, now);
     if (mail == null && teams == null) return 'Not synced yet';
-    return 'Mail synced ${relativeTime(mail, now) ?? 'never'} · '
-        'Teams ${relativeTime(teams, now) ?? 'never'}';
+    final mailPart = mail == null ? 'Mail not synced yet' : 'Mail synced $mail';
+    final teamsPart = teams == null
+        ? 'Teams not synced yet'
+        : mail == null
+        ? 'Teams synced $teams'
+        : 'Teams $teams';
+    return '$mailPart · $teamsPart';
+  }
+
+  /// True while a pull started from this section is running. The button is
+  /// the only thing that can start one, so it is the only thing that has to
+  /// go inert — and the host's own Sync label, on the Storylines pane, is not
+  /// visible from here.
+  bool _refreshing = false;
+
+  /// Runs the host's pull and holds the button until it is over.
+  ///
+  /// Nothing escapes: every leg of the pull already turns its own failure
+  /// into the banner the inbox shows, so a throw arriving here is a bug worth
+  /// a trace and never worth leaving the button saying 'Refreshing…' for the
+  /// rest of the session — the same contract the Storylines pane's Sync keeps.
+  Future<void> _refreshNow() async {
+    final refresh = widget.onRefreshNow;
+    if (refresh == null) return;
+    setState(() => _refreshing = true);
+    try {
+      await refresh();
+    } on Object catch (e) {
+      debugPrint('refresh from settings failed: $e');
+    } finally {
+      if (mounted) setState(() => _refreshing = false);
+    }
   }
 
   /// The width the three stamp labels share. A column, not a padding: the
@@ -1232,8 +1274,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           alignment: Alignment.centerLeft,
           child: FilledButton.tonal(
             key: SettingsScreen.refreshNowKey,
-            onPressed: widget.onRefreshNow,
-            child: const Text('Refresh now'),
+            onPressed: _refreshing ? null : () => unawaited(_refreshNow()),
+            child: Text(_refreshing ? 'Refreshing…' : 'Refresh now'),
           ),
         ),
         if (widget.onSignOutAndClear != null) ..._signOutBlock(),
