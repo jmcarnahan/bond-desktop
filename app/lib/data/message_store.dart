@@ -143,7 +143,32 @@ class MessageStore {
   late final ConversationVectorIndex _conversationIndex =
       ConversationVectorIndex(db);
 
-  static String _nowIso() => DateTime.now().toUtc().toIso8601String();
+  static String _nowIso() => isoStamp(DateTime.now());
+
+  /// Every timestamp this store writes, and the one shape they all have:
+  /// UTC, `Z`-suffixed, and exactly SIX fractional digits.
+  ///
+  /// The store and the notification coordinator compare these stamps as
+  /// strings — `ai_updated_at` against `message_updated_at`, a deadline
+  /// against now, `ORDER BY updated_at` — on the promise that ISO-8601 UTC
+  /// sorts lexicographically. It does, at one precision. `toIso8601String`
+  /// prints three fractional digits when the microsecond part happens to be
+  /// zero and six otherwise, so two stamps a few hundred microseconds apart
+  /// can come out as `…01.123Z` and `…01.123456Z` — and `Z` sorts after `4`,
+  /// which puts the EARLIER stamp later. That is a settle that never
+  /// completes, one time in a thousand, with no error anywhere.
+  ///
+  /// Six digits rather than three, because the precision is real and the
+  /// stage depends on it: two writes in the same millisecond — a score and
+  /// then the message it scores, two rows notified back to back — must still
+  /// say which came second. Rounding them into a tie would settle the first
+  /// and reorder the second.
+  static String isoStamp(DateTime t) {
+    final iso = t.toUtc().toIso8601String();
+    // 'yyyy-MM-ddTHH:mm:ss.mmmZ' is 24 characters; pad the microseconds Dart
+    // left off because they were zero. Anything else is already full width.
+    return iso.length == 24 ? '${iso.substring(0, 23)}000Z' : iso;
+  }
 
   /// `?, ?, ?` for an IN clause of [n] values.
   static String _placeholders(int n) => List.filled(n, '?').join(', ');

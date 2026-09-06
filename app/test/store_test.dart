@@ -77,6 +77,56 @@ void main() {
 
   tearDown(() => db.close());
 
+  group('isoStamp', () {
+    // The coordinator compares these as strings. Dart prints three fractional
+    // digits when the microsecond part is zero and six otherwise, and `Z`
+    // sorts after any digit — so without one fixed precision an EARLIER
+    // stamp can sort later, and a settle waits forever for a restamp that
+    // already happened.
+    test('always writes exactly six fractional digits', () {
+      final withMicros = DateTime.utc(2026, 9, 5, 12, 0, 1, 123, 456);
+      final onTheMilli = DateTime.utc(2026, 9, 5, 12, 0, 1, 123);
+      final onTheSecond = DateTime.utc(2026, 9, 5, 12, 0, 1);
+
+      expect(MessageStore.isoStamp(withMicros), '2026-09-05T12:00:01.123456Z');
+      expect(MessageStore.isoStamp(onTheMilli), '2026-09-05T12:00:01.123000Z');
+      expect(MessageStore.isoStamp(onTheSecond), '2026-09-05T12:00:01.000000Z');
+    });
+
+    test('a later instant never sorts earlier, and never ties', () {
+      // The exact pair that used to invert: a stamp on the millisecond and
+      // one a few hundred microseconds after it.
+      final earlier = DateTime.utc(2026, 9, 5, 12, 0, 1, 123);
+      final later = DateTime.utc(2026, 9, 5, 12, 0, 1, 123, 456);
+
+      expect(
+        MessageStore.isoStamp(later).compareTo(MessageStore.isoStamp(earlier)),
+        greaterThan(0),
+      );
+      // The raw form is the bug, pinned so nobody "simplifies" back to it.
+      expect(
+        later.toIso8601String().compareTo(earlier.toIso8601String()),
+        lessThan(0),
+      );
+      // And rounding to milliseconds would be the other bug: two writes in
+      // the same millisecond must still say which came second.
+      final next = DateTime.utc(2026, 9, 5, 12, 0, 1, 123, 457);
+      expect(
+        MessageStore.isoStamp(next).compareTo(MessageStore.isoStamp(later)),
+        greaterThan(0),
+      );
+    });
+
+    test('is UTC whatever zone it is handed', () {
+      final local = DateTime(2026, 9, 5, 12, 0, 1, 123);
+      expect(MessageStore.isoStamp(local), endsWith('Z'));
+      expect(
+        MessageStore.isoStamp(local),
+        MessageStore.isoStamp(local.toUtc()),
+      );
+    });
+  });
+
   group('schema', () {
     test('creates every table', () async {
       final tables = (await db

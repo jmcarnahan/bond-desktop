@@ -386,9 +386,11 @@ class NotificationCoordinator {
     if (row['attention_score'] == null) return false;
     final aiAt = row['ai_updated_at'] as String?;
     final msgAt = row['message_updated_at'] as String? ?? '';
-    // Both are ISO-8601 UTC, which sorts lexicographically. A score stamped
-    // before the message last changed is a verdict about an older version of
-    // it, and waiting for the restamp is the whole point of the deadline.
+    // Both are ISO-8601 UTC at the store's one precision, which sorts
+    // lexicographically — see [MessageStore.isoStamp] for the mixed-precision
+    // trap this used to fall into. A score stamped before the message last
+    // changed is a verdict about an older version of it, and waiting for the
+    // restamp is the whole point of the deadline.
     if (aiAt == null || aiAt.compareTo(msgAt) < 0) return false;
     return true;
   }
@@ -462,8 +464,11 @@ class NotificationCoordinator {
     await _controller.close();
   }
 
-  /// The clock already yields UTC, so this is the store's timestamp format.
-  static String _iso(DateTime t) => t.toIso8601String();
+  /// The store's own stamp shape, because everything this writes is compared
+  /// as a string against something the store wrote — a deadline against a
+  /// message's `updated_at`, a stale-claim cutoff against a claim's. See
+  /// [MessageStore.isoStamp] for why the precision has to match.
+  static String _iso(DateTime t) => MessageStore.isoStamp(t);
 }
 
 /// What a sweep decided about one candidate.
