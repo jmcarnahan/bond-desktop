@@ -898,11 +898,12 @@ RETURNING *
   /// Demotes every pending inbound message except the newest [cap] to
   /// `skipped` / `backlog`.
   ///
-  /// A first sync of a real mailbox lands thousands of messages at once.
-  /// Triaging all of them would burn hours of model time on mail the user
-  /// stopped caring about weeks ago, so only the freshest slice stays in the
-  /// queue. Nothing is deleted — a skipped message still renders, it just
-  /// never reaches the model.
+  /// No sync calls this any more: with the lookback configurable, the window
+  /// the user chose is the window the models read, and the enqueue paces the
+  /// model work instead of demoting mail out of reach of it. What keeps the
+  /// method is the exemption below, which is a rule about restored messages
+  /// rather than about first runs. Nothing is deleted either way — a skipped
+  /// message still renders, it just never reaches the model.
   ///
   /// A restored message is exempt: the stamp is the user's explicit ask for
   /// this one row, so it is never demoted back to backlog even when it sits
@@ -1355,6 +1356,15 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// work is not re-queued — so calling it after every sync both picks up new
   /// mail and self-heals a queue that a crash or an old build left short.
   ///
+  /// A message that already has a work row is excluded by the statement rather
+  /// than dropped by the insert, and that is what makes [cap] a pace: it means
+  /// "the next [cap] not-yet-queued messages, newest first", so a deep window
+  /// drains over successive passes. Counting queued rows against the LIMIT
+  /// instead — which is what this did — let the newest [cap] messages hold
+  /// every slot forever, and older mail inside the window was never queued at
+  /// all. `OR IGNORE` stays as the belt to that suspender: it is what makes a
+  /// concurrent second call harmless.
+  ///
   /// Messages that triage skipped (outbound, bulk senders, backlog) are
   /// deliberately absent: extraction costs the same model time triage does,
   /// and mail not worth classifying is not worth extracting facts from.
@@ -1442,6 +1452,9 @@ WHERE source = ? AND direction = 'inbound'
   AND triage_status IN (${_placeholders(triageStatuses.length)})
   ${gateReasons == null ? '' : 'AND gate_reason IN (${_placeholders(gateReasons.length)})'}
   AND received_at >= ?
+  AND NOT EXISTS (SELECT 1 FROM work_items w
+    WHERE w.task_kind = ? AND w.source = messages.source
+      AND w.entity_id = messages.source_message_id)
 ORDER BY received_at DESC
 LIMIT ?
 ''',
@@ -1453,6 +1466,7 @@ LIMIT ?
         ...triageStatuses,
         ...?gateReasons,
         sinceIso,
+        kind,
         cap,
       ]),
     );
@@ -4331,6 +4345,10 @@ RETURNING id
   /// IGNORE` against the work table's primary key means finished work stays
   /// finished and in-flight work is not re-queued, so running it after every
   /// sync both picks up new mail and self-heals a queue a crash left short.
+  /// Already-queued messages are excluded by the statement too, for the reason
+  /// given there: it is what makes [cap] "the next [cap] not-yet-queued
+  /// messages, newest first" rather than a ceiling the newest [cap] rows hold
+  /// forever.
   ///
   /// The triage filter is fixed here rather than passed in, because unlike
   /// extraction there is no caller who wants it any other way. Gated mail is
@@ -4359,6 +4377,9 @@ FROM messages
 WHERE source = ? AND direction = 'inbound'
   AND triage_status IN ('pending', 'processing', 'triaged')
   AND received_at >= ?
+  AND NOT EXISTS (SELECT 1 FROM work_items w
+    WHERE w.task_kind = 'embed_message' AND w.source = messages.source
+      AND w.entity_id = messages.source_message_id)
 ORDER BY received_at DESC
 LIMIT ?
 ''',

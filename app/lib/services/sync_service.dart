@@ -25,14 +25,12 @@ const int minLookbackDays = 1;
 const int maxLookbackDays = 365;
 int clampLookbackDays(int days) => days.clamp(minLookbackDays, maxLookbackDays);
 
-/// Inbound mail older than this arrives already `skipped`. It still renders;
-/// it just never reaches the triage model, which exists to answer "does this
-/// need me today?".
-const int triageWindowDays = 7;
-
-/// Even inside the triage window, a first sync can land more than a model can
-/// chew through. Only the newest this many messages stay queued.
-const int firstRunTriageCap = 150;
+/// How many backlog rows one enqueue pass files per queue. A pace rather than
+/// a truncation: the enqueue skips messages that already have a work row, so
+/// each sync files the next batch of not-yet-queued mail, newest first, and a
+/// deep window drains over several passes instead of being cut down to its
+/// newest this-many forever.
+const int backlogEnqueueCap = 150;
 
 /// Bodies fetched per [MailSync.ensureBodies] call. A thread longer than this
 /// fills in from the newest end down over subsequent opens.
@@ -196,7 +194,7 @@ class SyncService implements MailSync {
       // Self-exhausting — see [MessageStore.rejudgeStaleTriage].
       final rejudged = await _store.rejudgeStaleTriage(
         source: _source,
-        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        sinceIso: floor,
       );
 
       // The one-time catch-up for mail stored before ingest wrote
@@ -211,7 +209,7 @@ class SyncService implements MailSync {
       if (!backfillDone && _userAddress != null) {
         backfilled = await _store.backfillEmailAddressedMe(
           userAddress: _userAddress!,
-          sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+          sinceIso: floor,
         );
         await _store.setPref('backfill_addressed_me_email', '1');
       }
@@ -222,8 +220,8 @@ class SyncService implements MailSync {
       // is queued, finished work stays finished, and a queue that a crash left
       // short refills itself without anyone tracking that it did.
       final queued = await _store.enqueueExtractBacklog(
-        cap: firstRunTriageCap,
-        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        cap: backlogEnqueueCap,
+        sinceIso: floor,
         source: _source,
       );
 
@@ -232,8 +230,8 @@ class SyncService implements MailSync {
       // queues covering one set of messages is what lets a reader tell "judged
       // no" from "never judged" without a second column to say which.
       final queuedNeedsYou = await _store.enqueueNeedsYouBacklog(
-        cap: firstRunTriageCap,
-        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        cap: backlogEnqueueCap,
+        sinceIso: floor,
         source: _source,
       );
 
@@ -253,8 +251,8 @@ class SyncService implements MailSync {
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
       await _store.enqueueEmbedBacklog(
-        cap: firstRunTriageCap,
-        sinceIso: _isoAgo(const Duration(days: triageWindowDays)),
+        cap: backlogEnqueueCap,
+        sinceIso: floor,
         source: _source,
       );
 
@@ -387,8 +385,9 @@ class SyncService implements MailSync {
   }) async {
     final storedLink = await _store.getDeltaLink(folder, source: _source);
     // Whether a cursor existed BEFORE this pass — not whether one is used.
-    // A widen drains from the floor like a first run does, but the mailbox has
-    // been synced before, and the first-run cap below must not fire again.
+    // A widen drains from the floor exactly like a first run does, but through
+    // `startLink: null` on a mailbox that has been synced before; this flag is
+    // the record of which of the two it was.
     final firstRun = storedLink == null;
     var newMessages = 0;
     var resynced = false;
@@ -412,6 +411,7 @@ class SyncService implements MailSync {
         startLink: widen ? null : storedLink,
         minReceivedIso: (firstRun || widen) ? floor : null,
         quietBeforeIso: quietBeforeIso,
+        backlogCutoff: floor,
       );
     } on DeltaResyncRequired {
       // The cursor is older than Graph's change history — which means an
@@ -436,6 +436,7 @@ class SyncService implements MailSync {
           // reaches here at all: its cursor was already cleared above, and a
           // drain with no cursor has nothing for Graph to expire.
           quietBeforeIso: quietBeforeIso,
+          backlogCutoff: floor,
         );
       } on DeltaResyncRequired {
         // Twice in one drain is not an expired token, it is a loop.
@@ -447,11 +448,6 @@ class SyncService implements MailSync {
       }
     }
 
-    // Only the inbox: outbound mail is never queued for triage in the first
-    // place, so there is nothing there to cap.
-    if (firstRun && folder == 'inbox') {
-      await _store.capPendingTriage(firstRunTriageCap, source: _source);
-    }
     return (newMessages, resynced);
   }
 
@@ -463,6 +459,7 @@ class SyncService implements MailSync {
     required String? startLink,
     required String? minReceivedIso,
     required String? quietBeforeIso,
+    required String backlogCutoff,
   }) async {
     var link = startLink;
     var firstRequest = true;
@@ -482,6 +479,7 @@ class SyncService implements MailSync {
         page.messages,
         direction,
         quietBeforeIso: quietBeforeIso,
+        backlogCutoff: backlogCutoff,
       );
 
       final next = page.nextLink;
@@ -515,14 +513,22 @@ class SyncService implements MailSync {
   /// [quietBeforeIso] is set only on a widen pass, and names the floor the
   /// last bootstrap reached — see the `historical` flag in the loop below for
   /// what that buys.
+  ///
+  /// [backlogCutoff] is the pass's effective floor, handed down from [syncNow]
+  /// rather than computed here. Mail older than it lands already
+  /// `skipped`/`backlog` — a delta update can replay or introduce a message
+  /// from before the window, and such a message renders but never reaches a
+  /// model. Because it IS the sync floor, everything a bootstrap fetches is
+  /// inside the AI window: the lookback the user chose is the depth the models
+  /// read.
   Future<int> _ingestPage(
     List<Map<String, dynamic>> raw,
     String direction, {
     String? quietBeforeIso,
+    required String backlogCutoff,
   }) async {
     if (raw.isEmpty) return 0;
     final outbound = direction == 'outbound';
-    final backlogCutoff = _isoAgo(const Duration(days: triageWindowDays));
 
     return _store.db.transaction(() async {
       var newMessages = 0;

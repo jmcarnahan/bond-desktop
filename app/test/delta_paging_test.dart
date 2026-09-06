@@ -57,10 +57,10 @@ http.Response jsonOk(Object body) => http.Response(
       headers: const {'content-type': 'application/json'},
     );
 
-/// Yesterday, so a defaulted message is always inside the triage window.
-/// An absolute date here rots: it sat still while `triageWindowDays` walked
-/// past it, and the backlog gate started skipping fixtures that were fresh
-/// the day they were written.
+/// Yesterday, so a defaulted message is always inside the sync window.
+/// An absolute date here rots: it sat still while the window walked past it,
+/// and the backlog gate started skipping fixtures that were fresh the day they
+/// were written.
 final String _freshReceivedAt = DateTime.now()
     .toUtc()
     .subtract(const Duration(days: 1))
@@ -461,15 +461,14 @@ void main() {
       expect(jsonDecode(row['to_json'] as String), ['sarah@example.com']);
     });
 
-    test('mail older than the triage window arrives already skipped',
-        () async {
+    test('mail older than the sync window arrives already skipped', () async {
       final fresh = DateTime.now()
           .toUtc()
           .subtract(const Duration(days: 1))
           .toIso8601String();
       final stale = DateTime.now()
           .toUtc()
-          .subtract(const Duration(days: triageWindowDays + 1))
+          .subtract(const Duration(days: syncFloorDays + 1))
           .toIso8601String();
 
       graph.queue('inbox', [
@@ -490,8 +489,8 @@ void main() {
       expect((await messageRow('stale'))['gate_reason'], 'backlog');
     });
 
-    test('a first run caps the triage queue, demoting the oldest', () async {
-      // 160 messages, all inside the triage window, one minute apart.
+    test('a first run leaves the whole window queued', () async {
+      // 160 messages, all inside the sync window, one minute apart.
       final base = DateTime.now().toUtc().subtract(const Duration(days: 1));
       final messages = [
         for (var i = 0; i < 160; i++)
@@ -509,28 +508,14 @@ void main() {
 
       await sync.syncNow();
 
-      expect(await store.triageCounts(sources: const ['email']),
-          {'pending': firstRunTriageCap, 'skipped': 160 - firstRunTriageCap});
-
-      // The ten demoted are the ten oldest, not an arbitrary ten.
-      final demoted = (await db
-              .customSelect("SELECT source_message_id FROM messages "
-                  "WHERE triage_status = 'skipped' ORDER BY source_message_id")
-              .get())
-          .map((r) => r.data['source_message_id'] as String)
-          .toList();
-      expect(demoted, [for (var i = 0; i < 10; i++) 'm${i.toString().padLeft(3, '0')}']);
+      // The cap that used to demote the oldest ten here went with the
+      // configurable lookback: the enqueue paces the model work at
+      // [backlogEnqueueCap] rows a pass instead, and pacing is not truncation.
       expect(
-        (await db
-                .customSelect("SELECT DISTINCT gate_reason FROM messages "
-                    "WHERE triage_status = 'skipped'")
-                .getSingle())
-            .data['gate_reason'],
-        'backlog',
-      );
+          await store.triageCounts(sources: const ['email']), {'pending': 160});
     });
 
-    test('the cap runs only on a first run', () async {
+    test('and later syncs leave it queued', () async {
       graph.queue('inbox', [
         () => jsonOk(deltaBody([graphMessage(id: 'm1')],
             deltaLink: deltaCursor('inbox', 'c1'))),
@@ -538,7 +523,9 @@ void main() {
       await sync.syncNow();
       expect((await messageRow('m1'))['triage_status'], 'pending');
 
-      // A later sync must not demote what the first one queued.
+      // No pass — first, incremental, or otherwise — demotes what an earlier
+      // one queued. The pin outlived the cap it was written against, and it
+      // stays: any future path that skips pending mail must answer to it.
       graph.queue('inbox', [
         () => jsonOk(deltaBody([graphMessage(id: 'm2')],
             deltaLink: deltaCursor('inbox', 'c2'))),

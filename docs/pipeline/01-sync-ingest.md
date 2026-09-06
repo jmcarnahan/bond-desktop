@@ -19,9 +19,14 @@ Microsoft data; everything after it runs against local rows.
   `requeueWork` and the doc comments distinguishing them (why storylines need
   the revive path rather than a plain enqueue).
 
-**Windows and caps.** First run syncs 14 days of mail and queues the newest
-7 days for triage, capped at 150 messages. Work in flight is re-queued at the
-next launch, so a restart loses nothing.
+**Windows and caps.** How far back a sync reaches is a preference — 14 days by
+default, set in Settings → Sync & data — and the AI pipeline reads that same
+window: mail inside the lookback is triaged, extracted, judged and embedded,
+with no separate 7-day AI window behind it. The backlog enqueue files at most
+`backlogEnqueueCap` (150) rows per queue per pass, but skips messages that
+already have a work row, so a deep window drains across passes rather than
+being truncated to its newest 150. Work in flight is re-queued at the next
+launch, so a restart loses nothing.
 
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never
