@@ -5,7 +5,14 @@ import 'package:drift/drift.dart';
 
 import '../models/home_models.dart';
 import '../models/message_models.dart';
+import '../models/person.dart';
 import '../models/storyline_models.dart';
+// The second thing this layer reads out of `services/`, on the same licence as
+// `conversation_state.dart` below: `chat_roster.dart` is arithmetic over rows
+// with no I/O and no imports above `models/`. [recentPeople] needs the query
+// match, and a second copy of it here would be the compose field and the
+// recipients list disagreeing about who a typed word names.
+import '../services/chat_roster.dart';
 // The one thing this layer reads out of `services/`, and it is not a service:
 // `conversation_state.dart` is the fold's arithmetic with no I/O in it and no
 // imports of its own. [foldOutboundSend] needs the fold rules, and a second
@@ -718,6 +725,150 @@ WHERE source = ? AND conversation_key = ?
         )
         .get();
     return [for (final row in result) Conversation.fromRow(row.data)];
+  }
+
+  /// How many rows each half of [recentPeople] reads before merging.
+  ///
+  /// A bound rather than a page: what the caller wants is the handful of
+  /// people it will actually show, and the query cannot know which rows those
+  /// are until the two halves are merged and filtered. Four hundred of each is
+  /// months of correspondence at any volume a desktop mailbox sees, and both
+  /// queries are indexed reads of two columns.
+  static const int _recentScanRows = 400;
+
+  /// People the user has corresponded with, most recent first.
+  ///
+  /// Two sources, because neither is enough on its own: inbound messages know
+  /// who WROTE, and conversation rosters know who was on the thread — the
+  /// second is the only place a Teams member or a mail recipient the user
+  /// never heard back from appears at all. Merged on the lowercased address,
+  /// keeping the newest sighting of each, so somebody who wrote yesterday
+  /// outranks somebody on a thread from March.
+  ///
+  /// A `teams:` address becomes a person carrying the GRAPH ID and no mail,
+  /// which is what makes them chat-able; one with no display name beside it is
+  /// dropped, because an id alone renders as an empty chip and cannot be
+  /// searched for by name.
+  ///
+  /// [source] restricts BOTH halves — `'email'` or `'teams'`; null means both.
+  /// The compose screen passes one, because only a Graph id can open a chat
+  /// and only an address can be mailed.
+  Future<List<Person>> recentPeople({
+    String query = '',
+    int limit = 8,
+    String? source,
+  }) async {
+    // Address key → the person and when they were last seen. The key is the
+    // lowercased address exactly as stored, so a `teams:` id and a mail
+    // address can never collide.
+    final seen = <String, ({Person person, String at})>{};
+
+    void offer(String? name, String? address, String? at) {
+      if (address == null || address.isEmpty) return;
+      final stamp = at ?? '';
+      final key = address.toLowerCase();
+      final existing = seen[key];
+      if (existing != null && stamp.compareTo(existing.at) <= 0) return;
+
+      // A newer sighting with no name keeps the name an older one had: the
+      // roster stores a mail RECIPIENT as a bare address, so the user's own
+      // reply being the newest thing on a thread must not turn "Sarah
+      // Whitfield" back into "sarah@x.com".
+      final known = name == null || name.isEmpty
+          ? existing?.person.displayName
+          : name;
+
+      final Person person;
+      if (key.startsWith('teams:')) {
+        final id = address.substring('teams:'.length);
+        // An id with no name is unshowable and unsearchable: there is nothing
+        // to render in a chip and nothing for a query to match.
+        if (id.isEmpty || known == null || known.isEmpty) return;
+        person =
+            Person(id: id, displayName: known, source: PersonSource.recent);
+      } else {
+        person = Person(
+          id: 'mail:$key',
+          displayName: known == null || known.isEmpty ? address : known,
+          mail: address,
+          source: PersonSource.recent,
+        );
+      }
+      seen[key] = (person: person, at: stamp);
+    }
+
+    // Bare `from_name` beside `MAX(received_at)`: SQLite takes the bare
+    // columns from the row the max came from, so the name is the one on the
+    // newest message rather than an arbitrary one.
+    final senders = await db
+        .customSelect(
+          'SELECT from_name, from_address, MAX(received_at) AS last_at '
+          'FROM messages '
+          "WHERE direction = 'inbound' AND from_address IS NOT NULL "
+          "  AND from_address <> '' "
+          '${source == null ? '' : 'AND source = ? '}'
+          'GROUP BY LOWER(from_address) '
+          'ORDER BY last_at DESC LIMIT $_recentScanRows',
+          variables: _args([?source]),
+        )
+        .get();
+    for (final row in senders) {
+      offer(
+        row.data['from_name'] as String?,
+        row.data['from_address'] as String?,
+        row.data['last_at'] as String?,
+      );
+    }
+
+    final threads = await db
+        .customSelect(
+          'SELECT participants_json, last_message_at FROM conversations '
+          '${source == null ? '' : 'WHERE source = ? '}'
+          'ORDER BY last_message_at DESC LIMIT $_recentScanRows',
+          variables: _args([?source]),
+        )
+        .get();
+    for (final row in threads) {
+      final at = row.data['last_message_at'] as String?;
+      for (final entry in _decodeJsonList(row.data['participants_json'])) {
+        if (entry is! Map) continue;
+        offer(entry['name'] as String?, entry['email'] as String?, at);
+      }
+    }
+
+    final matched = [
+      for (final entry in seen.values)
+        if (matchesPersonQuery(entry.person, query)) entry,
+    ]..sort((a, b) => b.at.compareTo(a.at));
+
+    return [
+      for (final entry in matched.take(limit)) entry.person,
+    ];
+  }
+
+  /// Teams chats, newest activity first, whose subject or participant names
+  /// contain [query]. A blank query lists them all.
+  ///
+  /// Filtered in Dart rather than in SQL because the names live inside
+  /// `participants_json`, and a LIKE against that column would match the
+  /// address half of an entry as readily as the name half — searching for
+  /// `sam` would turn up every chat with `sam` inside a Graph id.
+  ///
+  /// A CONTAINS rather than the prefix match [recentPeople] uses: a chat is
+  /// recognised by any word of a topic somebody else wrote, not by how it
+  /// starts.
+  Future<List<Conversation>> teamsChats({String query = ''}) async {
+    final chats = await loadConversations(sources: const ['teams']);
+    final needle = query.trim().toLowerCase();
+    if (needle.isEmpty) return chats;
+    return [
+      for (final chat in chats)
+        if ((chat.subject ?? '').toLowerCase().contains(needle) ||
+            chat.participants.any(
+              (p) => (p.name ?? '').toLowerCase().contains(needle),
+            ))
+          chat,
+    ];
   }
 
   /// Flips a thread's state and stamps when it happened — "done 3 days ago"

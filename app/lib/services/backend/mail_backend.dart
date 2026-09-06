@@ -40,6 +40,23 @@ abstract class MailBackend {
   /// thread and reconcile the reply without waiting for Sent Items.
   Future<Map<String, dynamic>> createReplyDraft(String messageId);
 
+  /// Creates a NEW draft — no message being replied to — and answers with the
+  /// same keys [createReplyDraft] does: `id`, `webLink`, `conversationId`,
+  /// `internetMessageId`.
+  ///
+  /// A draft rather than a one-shot send, and the shared key set is why: the
+  /// composer's whole capability ladder already runs on these fields, so an
+  /// account that may save drafts but not send them hands this `webLink` to
+  /// Outlook exactly as a reply does, and the local echo row a send writes is
+  /// built from the same ids. [body] is plain text; the composer holds what
+  /// somebody typed and sending it as HTML would turn a typed `<` into markup.
+  Future<Map<String, dynamic>> createDraft({
+    required List<String> to,
+    List<String> cc = const [],
+    required String subject,
+    required String body,
+  });
+
   /// Replaces a draft's body with [text].
   ///
   /// Plain text, always: the composer is a plain-text field, and sending its

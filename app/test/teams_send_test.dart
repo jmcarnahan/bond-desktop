@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart' show ConversationState;
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
@@ -99,6 +100,10 @@ class _FakeTeams implements TeamsBackend {
     stored.add(message);
     return message;
   }
+
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) =>
+      throw UnimplementedError();
 }
 
 /// A mail backend that would throw if a chat send ever reached it. It must not:

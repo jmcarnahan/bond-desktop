@@ -196,6 +196,87 @@ void main() {
     });
   });
 
+  group('createDraft', () {
+    test('POSTs the whole message to /me/messages as plain text', () async {
+      final mail = mailWith((_) => jsonOk({'id': 'draft-9'}));
+
+      await mail.createDraft(
+        to: ['sarah@x.com', 'ravi@x.com'],
+        cc: ['legal@x.com'],
+        subject: 'Contract review',
+        body: 'Friday works.',
+      );
+
+      final request = seen.single;
+      expect(request.method, 'POST');
+      expect(request.url.toString(),
+          'https://graph.microsoft.com/v1.0/me/messages');
+      expect(request.json, {
+        'subject': 'Contract review',
+        // Text, always: the composer holds what somebody typed, and a `<` in
+        // it is a character rather than markup.
+        'body': {'contentType': 'text', 'content': 'Friday works.'},
+        'toRecipients': [
+          {
+            'emailAddress': {'address': 'sarah@x.com'},
+          },
+          {
+            'emailAddress': {'address': 'ravi@x.com'},
+          },
+        ],
+        'ccRecipients': [
+          {
+            'emailAddress': {'address': 'legal@x.com'},
+          },
+        ],
+      });
+    });
+
+    test('leaves ccRecipients out entirely when there is no Cc', () async {
+      // An empty array is an instruction to clear the line, which on a create
+      // says something the user did not.
+      final mail = mailWith((_) => jsonOk({'id': 'draft-9'}));
+
+      await mail.createDraft(to: ['sarah@x.com'], subject: '', body: 'Hi.');
+
+      expect(seen.single.json.containsKey('ccRecipients'), isFalse);
+    });
+
+    test('answers with the same keys createReplyDraft does', () async {
+      // The composer's capability ladder and the local echo row both read
+      // these, and neither knows which of the two calls made the draft.
+      final mail = mailWith(
+        (_) => jsonOk({
+          'id': 'draft-9',
+          'webLink': 'https://outlook/draft-9',
+          'conversationId': 'conv-9',
+          'internetMessageId': '<new@bond.local>',
+          'somethingElse': 'ignored',
+        }, 201),
+      );
+
+      final draft =
+          await mail.createDraft(to: ['sarah@x.com'], subject: 'Hi', body: 'Y');
+
+      expect(draft, {
+        'id': 'draft-9',
+        'webLink': 'https://outlook/draft-9',
+        'conversationId': 'conv-9',
+        'internetMessageId': '<new@bond.local>',
+      });
+    });
+
+    test('a refused create surfaces as a GraphMailException', () async {
+      final mail = mailWith((_) => jsonOk({'error': 'bad recipient'}, 400));
+
+      await expectLater(
+        mail.createDraft(to: ['nope'], subject: '', body: ''),
+        throwsA(isA<GraphMailException>()
+            .having((e) => e.statusCode, 'statusCode', 400)),
+      );
+    });
+  });
+
   group('updateDraftBody', () {
     test('PATCHes a plain-text body onto the draft', () async {
       final mail = mailWith((_) => jsonOk({'id': 'draft-1'}));

@@ -14,6 +14,7 @@ import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
+import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
@@ -21,6 +22,7 @@ import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
+import '../services/graph_people.dart';
 import '../services/graph_teams.dart';
 import '../services/identity_guard.dart';
 import '../services/llm/embeddings_client.dart';
@@ -28,6 +30,7 @@ import '../services/llm/llm_client.dart';
 import '../services/mcp/bond_mcp_client.dart';
 import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
+import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
 import '../services/needs_you_handler.dart';
@@ -199,6 +202,18 @@ final mailBackendProvider = Provider<MailBackend>((ref) {
   return mode == backendModeSdk
       ? GraphMail(ref.watch(graphAuthProvider))
       : McpMailBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// The organization's directory, behind whichever backend is selected.
+///
+/// The same switch as the two above it, and it follows the mode for the same
+/// reason: a session pointed at the Bond server must not be searching Graph
+/// directly with a token it does not hold.
+final peopleBackendProvider = Provider<PeopleBackend>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? GraphPeople(ref.watch(graphAuthProvider))
+      : McpPeopleBackend(ref.watch(mcpStackProvider).client);
 });
 
 /// The operating system's notification centre, as this app reaches it.

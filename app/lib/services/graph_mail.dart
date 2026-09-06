@@ -147,6 +147,59 @@ class GraphMail implements MailBackend {
     return _decodeObject(response);
   }
 
+  /// Creates a new draft in the user's Drafts folder.
+  ///
+  /// Unlike `/createReply` there is no message to build from, so the whole
+  /// draft is stated here — and stated as plain text, for [updateDraftBody]'s
+  /// reason. `ccRecipients` is OMITTED when there is no Cc rather than sent
+  /// empty: Graph treats an empty array as an instruction to clear the line,
+  /// which on a create is the same thing but says something different, and a
+  /// draft the user later edits in Outlook should read as one nobody Cc'd.
+  ///
+  /// The response is Graph's whole message resource, so `conversationId` and
+  /// `internetMessageId` arrive under their own names — the ids the draft
+  /// keeps once it is sent, which is what lets the caller thread and reconcile
+  /// the message without waiting for Sent Items.
+  @override
+  Future<Map<String, dynamic>> createDraft({
+    required List<String> to,
+    List<String> cc = const [],
+    required String subject,
+    required String body,
+  }) async {
+    final response = await _request(
+      'POST',
+      Uri.parse('$_base/me/messages'),
+      jsonBody: {
+        'subject': subject,
+        'body': {'contentType': 'text', 'content': body},
+        'toRecipients': [
+          for (final address in to)
+            {
+              'emailAddress': {'address': address},
+            },
+        ],
+        if (cc.isNotEmpty)
+          'ccRecipients': [
+            for (final address in cc)
+              {
+                'emailAddress': {'address': address},
+              },
+          ],
+      },
+    );
+    if (response.statusCode != 200 && response.statusCode != 201) {
+      throw _describe(response, 'Could not start a message in Microsoft Graph');
+    }
+    final draft = _decodeObject(response);
+    return {
+      'id': draft['id'],
+      'webLink': draft['webLink'],
+      'conversationId': draft['conversationId'],
+      'internetMessageId': draft['internetMessageId'],
+    };
+  }
+
   /// Replaces a draft's body with [text].
   ///
   /// Plain text, always: the composer is a plain-text field, and sending its

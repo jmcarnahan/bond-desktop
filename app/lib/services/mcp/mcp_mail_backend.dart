@@ -135,6 +135,44 @@ class McpMailBackend implements MailBackend {
     };
   }
 
+  /// Creates a new draft, and answers with the keys [createReplyDraft] does.
+  ///
+  /// The recipients travel as ONE comma-separated string per line, which is
+  /// this server's convention for every list-shaped argument it takes. The
+  /// reshape back to Graph's key names is the same one the reply draft gets,
+  /// and for the same reason: the callers read one spelling.
+  ///
+  /// A result carrying an `error`, or one with no `id` in it, is thrown rather
+  /// than returned. The caller is about to fill in a body and send it, and
+  /// there is nothing worse to hand it than a draft id that is null.
+  @override
+  Future<Map<String, dynamic>> createDraft({
+    required List<String> to,
+    List<String> cc = const [],
+    required String subject,
+    required String body,
+  }) async {
+    final result = await _call('create_draft_json', {
+      'to': to.join(','),
+      'cc': cc.join(','),
+      'subject': subject,
+      'body': body,
+    });
+    final id = result['id'] as String?;
+    if (result['error'] != null || id == null || id.isEmpty) {
+      throw GraphMailException(
+        'Microsoft Graph did not create the draft: '
+        '${result['error'] ?? 'unknown'}',
+      );
+    }
+    return {
+      'id': id,
+      'webLink': result['web_link'],
+      'conversationId': result['conversation_id'],
+      'internetMessageId': result['internet_message_id'],
+    };
+  }
+
   @override
   Future<void> updateDraftBody(String draftId, String text) async {
     await _call('update_draft_body', {'draft_id': draftId, 'text': text});
