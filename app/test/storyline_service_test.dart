@@ -3357,6 +3357,160 @@ void main() {
       expect(user, contains('You: sending it on to the studio'));
     });
 
+    /// Gives one message a digested document, as the digest handler would.
+    Future<void> seedDigested(
+      String messageId,
+      String attachmentId, {
+      String name = 'Quote.pdf',
+      String summary = 'The venue quote for the launch evening.',
+      List<String> facts = const ['48,200 total', 'valid 30 days'],
+      String? pinnedTo,
+    }) async {
+      await store.upsertAttachments('email', messageId, [
+        {
+          'attachment_id': attachmentId,
+          'ordinal': 0,
+          'kind': 'file',
+          'name': name,
+          'content_type': 'application/pdf',
+          'size': 4096,
+        },
+      ]);
+      await store.setAttachmentDigest(
+        'email',
+        messageId,
+        attachmentId,
+        status: 'done',
+        digestJson: jsonEncode({
+          'evidence': 'A quote sent for approval.',
+          'kind': 'quote',
+          'summary': summary,
+          'facts': facts,
+          'asks': const <String>[],
+        }),
+      );
+      if (pinnedTo != null) {
+        await store.setAttachmentPinned(
+          'email',
+          messageId,
+          attachmentId,
+          pinnedTo,
+        );
+      }
+    }
+
+    test('a digested attachment adds its facts to its message line', () async {
+      await seedTwoThreads();
+      await seedDigested('m2', 'a1');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      // The facts and not the summary: "the quote came in" is what the message
+      // line already says, and the figures are what it cannot.
+      expect(
+        llm.userMessages.single,
+        contains('the venue is booked ⟨attached Quote.pdf: 48,200 total; '
+            'valid 30 days⟩'),
+      );
+    });
+
+    test("the owner's own attachment is never filtered out", () async {
+      await seedTwoThreads();
+      // m3 is outbound, and it is in the window on purpose.
+      await seedDigested('m3', 'a1', name: 'Signed.pdf',
+          facts: const ['countersigned 1 August']);
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.userMessages.single,
+          contains('⟨attached Signed.pdf: countersigned 1 August⟩'));
+    });
+
+    test('a document with no facts contributes no aside', () async {
+      await seedTwoThreads();
+      await seedDigested('m2', 'a1', facts: const []);
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      // The message line already says a file arrived.
+      expect(llm.userMessages.single, isNot(contains('⟨attached')));
+    });
+
+    test('three documents cannot outgrow the window', () async {
+      await seedTwoThreads();
+      for (final id in ['m1', 'm2', 'm3']) {
+        await seedDigested(id, 'a-$id',
+            name: 'D-$id.pdf', facts: [for (var i = 0; i < 8; i++) 'F' * 90]);
+      }
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      final user = llm.userMessages.single;
+      final start = user.indexOf('source="messages"');
+      final end = user.indexOf('</untrusted_data>', start);
+      expect(end - start, lessThan(6200));
+      // Each aside is clamped on its own, so no one document eats the window.
+      for (final match in RegExp(r'⟨attached[^⟩]*⟩').allMatches(user)) {
+        expect(match.group(0)!.length, lessThanOrEqualTo(162));
+      }
+    });
+
+    test('a pinned document whose message aged out gets a line', () async {
+      await seedTwoThreads();
+      // A thread that is NOT a member, so its message is nowhere in the window.
+      await seed(store, 'c9');
+      await seedMessage(store, 'c9', 'old-1',
+          receivedAt: '2026-07-01T09:00:00Z');
+      await seedDigested('old-1', 'a9',
+          name: 'Survey.pdf',
+          summary: 'The site survey for the Riverside lot.',
+          pinnedTo: 'sl-1');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      // The summary here rather than the facts: a pinned document is named for
+      // what it IS.
+      expect(
+        llm.userMessages.single,
+        contains('⟨pinned Survey.pdf: The site survey for the Riverside '
+            'lot.⟩'),
+      );
+    });
+
+    test('a pinned document still in the window is not said twice', () async {
+      await seedTwoThreads();
+      await seedDigested('m2', 'a1', pinnedTo: 'sl-1');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      // Its own message line already carries it.
+      expect(llm.userMessages.single, contains('⟨attached Quote.pdf'));
+      expect(llm.userMessages.single, isNot(contains('⟨pinned')));
+    });
+
+    test('a pinned document nobody has read is still named', () async {
+      await seedTwoThreads();
+      await seed(store, 'c9');
+      await seedMessage(store, 'c9', 'old-1',
+          receivedAt: '2026-07-01T09:00:00Z');
+      await store.upsertAttachments('email', 'old-1', const [
+        {'attachment_id': 'a9', 'ordinal': 0, 'kind': 'file',
+            'name': 'Survey.pdf'},
+      ]);
+      await store.setAttachmentPinned('email', 'old-1', 'a9', 'sl-1');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm).recap('sl-1');
+
+      expect(llm.userMessages.single, contains('⟨pinned Survey.pdf⟩'));
+    });
+
     test('runs at temperature zero — the same window must read the same twice',
         () async {
       await seedTwoThreads();

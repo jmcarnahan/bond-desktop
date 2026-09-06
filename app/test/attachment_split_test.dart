@@ -398,6 +398,85 @@ void main() {
     expect(bytes.bytesCalls, before);
     await settleQueues(tester);
   });
+
+  group('use in reply', () {
+    testWidgets('opens the box and asks for a draft naming the file',
+        (tester) async {
+      await seedThread(needsReply: true);
+      await pumpInbox(tester);
+      await openThread(tester);
+      await openAttachment(tester, 'Terms.pdf');
+
+      expect(find.byType(Composer), findsNothing);
+
+      await tester.tap(find.byKey(AttachmentPreviewPanel.useInReplyKey));
+      await tester.pump();
+      await tester.pump();
+
+      // Opening the box is what makes the new draft visible — a regenerate
+      // nobody can see is a spinner in an empty pane.
+      expect(find.byType(Composer), findsOneWidget);
+
+      final rows = await db
+          .customSelect("SELECT * FROM work_items WHERE task_kind = 'draft'")
+          .get();
+      expect(rows, hasLength(1));
+      expect(rows.single.data['payload_json'], contains('a1'));
+      await settleQueues(tester);
+    });
+  });
+
+  group('pin to storyline', () {
+    /// The storyline this thread is filed under, and the membership that puts
+    /// it there. Seeded the way `inbox_storylines_test.dart` seeds one.
+    Future<void> seedStoryline({String key = 'c1'}) async {
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Survey window',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', key, addedBy: 'auto');
+    }
+
+    testWidgets('a thread in no storyline is offered no pin', (tester) async {
+      await seedThread();
+      await pumpInbox(tester);
+      await openThread(tester);
+      await openAttachment(tester, 'Terms.pdf');
+
+      // Nowhere to pin is no button at all, not a disabled one: there is
+      // nothing here the user could do to make it work.
+      expect(find.byKey(AttachmentPreviewPanel.pinKey), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a thread in one pins to it and says which', (tester) async {
+      await seedThread();
+      await seedStoryline();
+      await pumpInbox(tester);
+      await openThread(tester);
+      await openAttachment(tester, 'Terms.pdf');
+
+      expect(find.byKey(AttachmentPreviewPanel.pinKey), findsOneWidget);
+      expect(find.text('Pin to storyline'), findsOneWidget);
+
+      await tester.tap(find.byKey(AttachmentPreviewPanel.pinKey));
+      await tester.pump();
+      await tester.pump();
+
+      final rows = await db
+          .customSelect('SELECT pinned_storyline_id FROM attachments')
+          .get();
+      expect(rows.single.data['pinned_storyline_id'], 'sl-1');
+
+      // The ref the panel holds is a snapshot, so the label following the
+      // write is the whole point of the session-scoped key set.
+      expect(find.text('Pinned'), findsOneWidget);
+      expect(find.text('Pinned Terms.pdf to Survey window.'), findsOneWidget);
+      await settleQueues(tester);
+    });
+  });
 }
 
 /// A workbook nothing in this file opens — the screen needs a decoder, and

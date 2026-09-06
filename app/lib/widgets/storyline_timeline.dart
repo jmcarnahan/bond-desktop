@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
 import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
+import 'attachment_documents_strip.dart';
 import 'inline_alert.dart';
 import 'message_row.dart';
 import 'source_glyph.dart';
@@ -88,6 +90,29 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// is the same sync the overview's button is already holding a label up for.
   final bool syncing;
 
+  /// The files pinned to this storyline, for the shelf behind the Documents
+  /// button. Empty is the ordinary state and renders an explanation, not a
+  /// gap — a storyline nobody has pinned to yet has to say so.
+  final List<AttachmentRef> documents;
+
+  /// A document on the shelf was tapped. Null leaves the entries inert.
+  final void Function(AttachmentRef attachment)? onOpenDocument;
+
+  /// Null renders a read-only shelf: the entries are there, the two-step
+  /// Remove is not.
+  final void Function(AttachmentRef attachment)? onUnpinDocument;
+
+  /// A chip or a thumbnail inside one of the spine's messages was tapped.
+  /// Forwarded to every row, exactly as the thread panel forwards it.
+  final void Function(AttachmentRef attachment)? onOpenAttachment;
+
+  /// Which file the host is showing, so the row that carries it can say so.
+  final AttachmentRef? selectedAttachment;
+
+  /// The picture for one attachment, or null while there is not one yet. The
+  /// host owns the cache; the rows only ask.
+  final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
+
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -108,7 +133,16 @@ class StorylineTimelinePanel extends StatefulWidget {
     required this.syncing,
     this.episodeFooter,
     this.onAskTap,
+    this.documents = const [],
+    this.onOpenDocument,
+    this.onUnpinDocument,
+    this.onOpenAttachment,
+    this.selectedAttachment,
+    this.thumbnailFor,
   });
+
+  static const Key documentsButtonKey = ValueKey('storyline-documents-button');
+  static const Key documentsStripKey = ValueKey('storyline-documents-strip');
 
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
   /// that an ultrawide window does not turn every message into one line.
@@ -130,6 +164,12 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
 
   bool _showMembers = false;
   bool _showAbout = false;
+
+  /// Whether the documents shelf is unfolded. Folded by default like the other
+  /// two: the button's own count is the signal that there is anything there,
+  /// and a storyline with six files should not push its spine off the screen
+  /// to say so.
+  bool _showDocuments = false;
 
   /// Whether each of the recap's two lists is unfolded. Both start folded, and
   /// they fold independently: a storyline can carry half a dozen open items
@@ -240,6 +280,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
           _header(),
           if (_showAbout) _aboutBlock(),
           if (_showMembers) _memberStrip(),
+          if (_showDocuments) _documentsStrip(),
           const Divider(height: 1, color: BondColors.border),
           Expanded(
             child: widget.episodes.isEmpty
@@ -543,6 +584,12 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         message: message,
         showHeader: previous == null || !sameRun(previous, message),
         openAsk: open,
+        // The same three props the thread panel forwards. A file is read
+        // against the message that carried it wherever that message is drawn,
+        // and the spine draws the same rows.
+        onOpenAttachment: widget.onOpenAttachment,
+        selectedAttachment: widget.selectedAttachment,
+        thumbnailFor: widget.thumbnailFor,
         // Only a line that is actually on screen gets a tap, and it carries
         // the episode with it: the answer goes to the thread the ask is in.
         onAskTap: open && onAskTap != null ? () => onAskTap(episode) : null,
@@ -608,6 +655,18 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                     _quietButton(
                       'About',
                       () => setState(() => _showAbout = !_showAbout),
+                    ),
+                    const SizedBox(width: BondSpacing.s4),
+                    // The count is the label, the way the threads button
+                    // reads: a storyline with nothing pinned should not need
+                    // a tap to find that out.
+                    _quietButton(
+                      widget.documents.isEmpty
+                          ? 'Documents'
+                          : '${widget.documents.length} '
+                              '${widget.documents.length == 1 ? 'document' : 'documents'}',
+                      () => setState(() => _showDocuments = !_showDocuments),
+                      key: StorylineTimelinePanel.documentsButtonKey,
                     ),
                     const SizedBox(width: BondSpacing.s4),
                     _quietButton('Add thread', widget.onAddThread),
@@ -1002,10 +1061,34 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
+  /// The pinned files, on a shelf shaped like the member strip above it.
+  ///
+  /// A strip and not a column down the spine for the same reason the members
+  /// are one: this is a shelf you reach for, not part of the reading. It sits
+  /// under the header where the other two folds sit, so a storyline never has
+  /// more than one thing unfolded above its divider that you did not ask for.
+  Widget _documentsStrip() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s16,
+        0,
+        BondSpacing.s16,
+        BondSpacing.s12,
+      ),
+      child: AttachmentDocumentsStrip(
+        key: StorylineTimelinePanel.documentsStripKey,
+        documents: widget.documents,
+        onOpen: (attachment) => widget.onOpenDocument?.call(attachment),
+        onUnpin: widget.onUnpinDocument,
+      ),
+    );
+  }
+
   /// A null [onPressed] is the row's inert state — the button stays where it
   /// is and stops answering, which is what a label like 'Syncing…' needs.
-  Widget _quietButton(String label, VoidCallback? onPressed) {
+  Widget _quietButton(String label, VoidCallback? onPressed, {Key? key}) {
     return TextButton(
+      key: key,
       onPressed: onPressed,
       style: TextButton.styleFrom(
         padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s4),

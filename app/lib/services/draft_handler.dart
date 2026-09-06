@@ -5,6 +5,7 @@ import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attachments/attachment_markers.dart';
+import 'attachments/attachment_retriever.dart';
 import 'llm/draft_task.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
@@ -51,6 +52,14 @@ class DraftHandler extends WorkHandler {
   final LlmClient _client;
   final ActivityLog _log;
 
+  /// Finds the passages of this thread's documents worth quoting, or null in a
+  /// build that has none.
+  ///
+  /// Nullable rather than defaulted so a handler built without one drafts
+  /// exactly as it did before this existed — which is what every test that
+  /// predates retrieval, and any future caller with no embedder, gets.
+  final AttachmentRetriever? _attachments;
+
   /// Where this stage lands for the home screen. Defaulted to the disabled
   /// recorder, so a test that builds this handler writes nothing extra.
   final PipelineProgress _progress;
@@ -59,8 +68,9 @@ class DraftHandler extends WorkHandler {
     this._store,
     this._client, {
     ActivityLog? activityLog,
+    this._attachments,
     this._progress = const PipelineProgress.disabled(),
-  })  : _log = activityLog ?? ActivityLog.disabled();
+  }) : _log = activityLog ?? ActivityLog.disabled();
 
   @override
   String get kind => 'draft';
@@ -145,6 +155,22 @@ class DraftHandler extends WorkHandler {
     ];
     final aboutMe = await _store.getPref(aboutMeKey);
 
+    // ONE retrieval, read by both model calls below. The decision and the
+    // draft are asking about the same message on the same thread, so a second
+    // pass would be a second embedding call for an answer that cannot come
+    // back different.
+    //
+    // The thread's ids are passed rather than left to be read: this thread is
+    // the thread AS IT WAS when the message landed, and a document attached
+    // after it must not be quoted in the answer to it.
+    final excerpts = await _excerptsFor(
+      source,
+      key,
+      id,
+      threadMessageIds: [for (final message in thread) message.id],
+      pinnedFirst: _pinnedIdsFrom(item['payload_json']),
+    );
+
     final decision = await runTask(
       _client,
       const ReplyDecisionTask(),
@@ -152,6 +178,7 @@ class DraftHandler extends WorkHandler {
         context: context,
         message: replyTo,
         aboutMe: aboutMe,
+        attachmentExcerpts: excerpts,
         now: DateTime.now(),
       ),
       // Zero, like every judgement in this app: the same message must get the
@@ -187,6 +214,7 @@ class DraftHandler extends WorkHandler {
             : const [],
         storylineSummary: await _storylineSummaryFor(source, key),
         aboutMe: aboutMe,
+        attachmentExcerpts: excerpts,
         now: DateTime.now(),
       ),
       // Zero, like extraction: pressing Regenerate should change the draft
@@ -221,7 +249,72 @@ class DraftHandler extends WorkHandler {
       status: 'suggested',
     );
     await _progress.noteDraft(source, id, state: 'done');
-    _log.note({'chars': result.replyBody.length});
+    // The documents this reply was written from. The `drafts` table stores no
+    // inventory of them, so the activity row is where a person can go back and
+    // see which files the model was reading — distinct names, because three
+    // passages of one contract are one document to a reader.
+    final documents = <String>{
+      for (final excerpt in excerpts)
+        excerpt.name.isEmpty ? 'a file' : excerpt.name,
+    };
+    _log.note({
+      'chars': result.replyBody.length,
+      if (documents.isNotEmpty) 'documents': documents.toList(),
+    });
+  }
+
+  /// The passages the two prompts read, or none.
+  ///
+  /// Every failure here is swallowed on purpose. Retrieval is what makes a
+  /// draft better; it is not what makes one possible, and an embedding server
+  /// that fell over between the thread load and this call must cost the
+  /// citations rather than the reply. The reason is noted so the activity row
+  /// says why a draft that should have quoted a file did not.
+  Future<List<AttachmentExcerpt>> _excerptsFor(
+    String source,
+    String key,
+    String id, {
+    required List<String> threadMessageIds,
+    required List<String> pinnedFirst,
+  }) async {
+    final retriever = _attachments;
+    if (retriever == null) return const [];
+    try {
+      return await retriever.excerptsFor(
+        source: source,
+        conversationKey: key,
+        replyToId: id,
+        threadMessageIds: threadMessageIds,
+        storylineIds: await _store.storylineIdsFor(source, key),
+        pinnedFirst: pinnedFirst,
+      );
+    } catch (e) {
+      _log.note({'excerpts_error': '$e'});
+      return const [];
+    }
+  }
+
+  /// The documents the user named with "Use in reply", off the work item.
+  ///
+  /// Defensive to the point of paranoia because the payload is the one part of
+  /// a work row that is free-form: anything that is not a JSON object with a
+  /// list of strings under `pinned_attachment_ids` reads as "none named",
+  /// which is the ordinary case anyway. A malformed payload must cost the
+  /// pinning, never the draft.
+  static List<String> _pinnedIdsFrom(Object? payloadJson) {
+    if (payloadJson is! String || payloadJson.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(payloadJson);
+      if (decoded is! Map) return const [];
+      final ids = decoded['pinned_attachment_ids'];
+      if (ids is! List) return const [];
+      return [
+        for (final id in ids)
+          if (id is String && id.isNotEmpty) id,
+      ];
+    } on FormatException {
+      return const [];
+    }
   }
 
   /// The user's own recent replies to this sender, as writing samples.

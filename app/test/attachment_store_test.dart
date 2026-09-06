@@ -4,6 +4,7 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -752,6 +753,102 @@ void main() {
       await digest('att-a', asks: const ['Sign page four']);
 
       expect(await store.attachmentsWithAsks('email', 'm2'), 0);
+    });
+  });
+
+  group('the vector a retrieval is searched with', () {
+    const tag = EmbeddingsClient.documentModelTag;
+
+    Future<void> seedVector(String id, {String model = tag}) async {
+      await store.upsertMessageVector(
+        source: 'email',
+        sourceMessageId: id,
+        embedding: encodeEmbedding(List.filled(768, 0.1)),
+        dims: 768,
+        embeddedHash: 'h-$id',
+        embedModel: model,
+      );
+    }
+
+    test('answers the blob a message was embedded into', () async {
+      await seedMessage('m1');
+      await seedVector('m1');
+
+      final blob = await store.messageVectorBlob('email', 'm1',
+          embedModel: tag);
+
+      expect(decodeEmbedding(blob!).length, 768);
+    });
+
+    test('and nothing at all under any other model tag', () async {
+      await seedMessage('m1');
+      await seedVector('m1', model: 'an-older-prefix');
+
+      // Two vectors under two tags sit in different spaces, and a
+      // nearest-neighbour search across both answers whatever the geometry
+      // happens to say — which is worse than no answer, because it looks like
+      // one. Null sends the caller to re-embed.
+      expect(
+        await store.messageVectorBlob('email', 'm1', embedModel: tag),
+        isNull,
+      );
+    });
+
+    test('a message that was never embedded has none', () async {
+      await seedMessage('m1');
+
+      expect(
+        await store.messageVectorBlob('email', 'm1', embedModel: tag),
+        isNull,
+      );
+    });
+  });
+
+  group('what a requeue carries', () {
+    Future<Map<String, Object?>?> workRow(String entityId) async {
+      final rows = await db.customSelect(
+        "SELECT * FROM work_items WHERE task_kind = 'draft' AND entity_id = ?",
+        variables: [Variable(entityId)],
+      ).get();
+      return rows.isEmpty ? null : rows.first.data;
+    }
+
+    test('a payload rides onto the row it queues', () async {
+      await store.requeueWork(
+        'draft',
+        'email',
+        'm1',
+        payloadJson: '{"pinned_attachment_ids":["att-a"]}',
+      );
+
+      expect((await workRow('m1'))!['payload_json'],
+          '{"pinned_attachment_ids":["att-a"]}');
+    });
+
+    test('and a later plain requeue clears the last one\'s', () async {
+      await store.requeueWork('draft', 'email', 'm1',
+          payloadJson: '{"pinned_attachment_ids":["att-a"]}');
+      await store.writeWork('draft', 'email', 'm1', status: 'done');
+
+      await store.requeueWork('draft', 'email', 'm1');
+
+      // Asking again without naming a file has to mean the last file is no
+      // longer named — a payload that survived would go on pinning it forever.
+      final row = (await workRow('m1'))!;
+      expect(row['payload_json'], isNull);
+      expect(row['status'], 'pending');
+    });
+
+    test('a row a worker is holding keeps its payload and its claim', () async {
+      await store.requeueWork('draft', 'email', 'm1',
+          payloadJson: '{"pinned_attachment_ids":["att-a"]}');
+
+      await store.requeueWork('draft', 'email', 'm1');
+
+      // Still `pending` and never claimed, so the WHERE clause refused it —
+      // and the payload it was queued with is untouched.
+      expect((await workRow('m1'))!['payload_json'],
+          '{"pinned_attachment_ids":["att-a"]}');
     });
   });
 }

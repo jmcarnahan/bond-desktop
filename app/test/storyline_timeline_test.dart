@@ -1,11 +1,16 @@
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
+import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/attachment_documents_strip.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/inline_alert.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/attachment_refs.dart';
 
 Message _message({
   required String id,
@@ -18,6 +23,7 @@ Message _message({
   bool? needsAction,
   List<String> actionItems = const [],
   String? deadline,
+  List<AttachmentRef> attachments = const [],
 }) =>
     Message(
       id: id,
@@ -30,6 +36,7 @@ Message _message({
       needsAction: needsAction,
       actionItems: actionItems,
       deadline: deadline,
+      attachments: attachments,
     );
 
 StorylineEpisode _episode({
@@ -163,6 +170,12 @@ void main() {
     bool syncing = false,
     Widget Function(StorylineEpisode episode)? episodeFooter,
     void Function(StorylineEpisode episode)? onAskTap,
+    List<AttachmentRef> documents = const [],
+    void Function(AttachmentRef attachment)? onOpenDocument,
+    void Function(AttachmentRef attachment)? onUnpinDocument,
+    void Function(AttachmentRef attachment)? onOpenAttachment,
+    AttachmentRef? selectedAttachment,
+    ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -187,6 +200,12 @@ void main() {
           syncing: syncing,
           episodeFooter: episodeFooter,
           onAskTap: onAskTap,
+          documents: documents,
+          onOpenDocument: onOpenDocument,
+          onUnpinDocument: onUnpinDocument,
+          onOpenAttachment: onOpenAttachment,
+          selectedAttachment: selectedAttachment,
+          thumbnailFor: thumbnailFor,
         ),
       ),
     ));
@@ -1221,6 +1240,150 @@ void main() {
       expect(find.byType(TextField), findsOneWidget);
       expect(find.text('SUGGESTED UPDATE'), findsNothing);
       expect(find.text('Use this'), findsNothing);
+    });
+  });
+
+  group('the documents shelf', () {
+    final quote = ref(name: 'Quote.pdf', size: 240 * 1024);
+    final photo = imageRef(name: 'Site.png', attachmentId: 'i9');
+
+    testWidgets('the button counts what is pinned and unfolds the shelf',
+        (tester) async {
+      await pumpPanel(tester, documents: [quote, photo]);
+
+      expect(find.text('2 documents'), findsOneWidget);
+      expect(find.byType(AttachmentDocumentsStrip), findsNothing);
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+      await tester.pump();
+
+      expect(find.byKey(StorylineTimelinePanel.documentsStripKey),
+          findsOneWidget);
+      expect(find.textContaining('Quote.pdf'), findsOneWidget);
+    });
+
+    testWidgets('one document is counted in the singular', (tester) async {
+      await pumpPanel(tester, documents: [quote]);
+
+      expect(find.text('1 document'), findsOneWidget);
+    });
+
+    testWidgets('a storyline with nothing pinned still says so',
+        (tester) async {
+      await pumpPanel(tester);
+
+      // The bare label, because there is no count to give — and the shelf
+      // behind it explains itself rather than opening empty.
+      expect(find.text('Documents'), findsOneWidget);
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+      await tester.pump();
+
+      expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsOneWidget);
+    });
+
+    testWidgets('tapping a document reports it', (tester) async {
+      final opened = <String>[];
+      await pumpPanel(
+        tester,
+        documents: [quote],
+        onOpenDocument: (attachment) => opened.add(attachment.attachmentId),
+      );
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+      await tester.pump();
+      await tester.tap(find.byKey(AttachmentDocumentsStrip.entryKeyFor(quote)));
+      await tester.pump();
+
+      expect(opened, ['a1']);
+    });
+
+    testWidgets('removing one is two taps and reports the unpin',
+        (tester) async {
+      final removed = <String>[];
+      await pumpPanel(
+        tester,
+        documents: [quote],
+        onUnpinDocument: (attachment) => removed.add(attachment.attachmentId),
+      );
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+      await tester.pump();
+      await tester.tap(find.byKey(AttachmentDocumentsStrip.unpinKeyFor(quote)));
+      await tester.pump();
+
+      expect(removed, isEmpty);
+
+      await tester
+          .tap(find.byKey(AttachmentDocumentsStrip.confirmKeyFor(quote)));
+      await tester.pump();
+
+      expect(removed, ['a1']);
+    });
+
+    testWidgets('a shelf with no unpin offers no way to remove anything',
+        (tester) async {
+      await pumpPanel(tester, documents: [quote]);
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+      await tester.pump();
+
+      expect(find.byKey(AttachmentDocumentsStrip.unpinKeyFor(quote)),
+          findsNothing);
+    });
+  });
+
+  group('files in the spine', () {
+    final quote = ref(name: 'Quote.pdf');
+
+    StorylineEpisode withFile() => _episode(
+          key: 'c1',
+          subject: 'Homepage copy',
+          messages: [
+            _message(
+              id: 'm1',
+              receivedAt: '2026-08-01T09:00:00Z',
+              attachments: [quote],
+            ),
+          ],
+        );
+
+    testWidgets('a chip in a message opens through the panel', (tester) async {
+      final opened = <String>[];
+      await pumpPanel(
+        tester,
+        only: [withFile()],
+        onOpenAttachment: (attachment) => opened.add(attachment.attachmentId),
+      );
+
+      await tester.tap(find.byKey(AttachmentChip.keyFor(quote)));
+      await tester.pump();
+
+      expect(opened, ['a1']);
+    });
+
+    testWidgets('the file the host is showing is the one marked',
+        (tester) async {
+      await pumpPanel(
+        tester,
+        only: [withFile()],
+        onOpenAttachment: (_) {},
+        selectedAttachment: quote,
+      );
+
+      final chip = tester.widget<AttachmentChip>(
+        find.byKey(AttachmentChip.keyFor(quote)),
+      );
+      expect(chip.selected, isTrue);
+    });
+
+    testWidgets('no host to open into leaves the chips inert', (tester) async {
+      await pumpPanel(tester, only: [withFile()]);
+
+      final chip = tester.widget<AttachmentChip>(
+        find.byKey(AttachmentChip.keyFor(quote)),
+      );
+      expect(chip.onTap, isNull);
     });
   });
 }

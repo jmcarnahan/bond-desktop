@@ -199,6 +199,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// forever, for one that came back null.
   final Set<String> _thumbRequested = {};
 
+  /// The documents pinned in THIS session, by attachment key.
+  ///
+  /// The [AttachmentRef] a preview panel holds is a snapshot taken when the
+  /// row was read: its `pinnedStorylineId` does not change when the store row
+  /// does, so without this the button would still read 'Pin to storyline'
+  /// after the pin landed. The shelf's own refs come back fresh from the
+  /// store, so an unpin only has to drop the key.
+  final Set<String> _pinnedKeys = {};
+
   /// The real engines, built once, on the first file anybody opens.
   PreviewEngines get _previewEngines =>
       widget.previewEngines ??
@@ -435,6 +444,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // would have taken it.
     await ref.read(attachmentCacheProvider).clear();
     _forgetThumbnails();
+    _pinnedKeys.clear();
     if (!mounted) return;
     ref.invalidate(conversationsProvider);
     ref.invalidate(storylinesProvider);
@@ -1404,7 +1414,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// because it is the newer thing the user asked for.
   ///
   /// The viewer sits directly above the transcript because that is what it was
-  /// opened from and what Back returns to.
+  /// opened from and what Back returns to — and above the storyline too, since
+  /// a chip in the spine opens the same pane and Back lands back on it.
   ///
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
@@ -1426,7 +1437,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final viewing = _previewing;
     // A viewer whose thread vanished falls through — never setState in build;
     // the next selection clears it.
-    if (viewing != null && _viewerFull && _selected(conversations) != null) {
+    final viewerStorylineId = _selectedStorylineId;
+    if (viewing != null &&
+        _viewerFull &&
+        (_selected(conversations) != null ||
+            (viewerStorylineId != null &&
+                _storylineById(viewerStorylineId) != null))) {
       return _attachmentViewer(viewing);
     }
 
@@ -1685,6 +1701,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // any state of its own.
       onSync: _syncNow,
       syncing: _syncing,
+      // Empty for the frame before the read lands, like the members above.
+      documents: ref
+              .watch(storylinePinnedDocumentsProvider(storyline.id))
+              .valueOrNull ??
+          const [],
+      // There is no split on this pane, so a file opens the whole thing. Both
+      // routes in — the shelf and a chip in the spine — land on the same pane
+      // for the same reason.
+      onOpenDocument: (attachment) => setState(() {
+        _previewing = attachment;
+        _viewerFull = true;
+      }),
+      onOpenAttachment: (attachment) => setState(() {
+        _previewing = attachment;
+        _viewerFull = true;
+      }),
+      selectedAttachment: _previewing,
+      thumbnailFor: _thumbnailFor,
+      onUnpinDocument: (attachment) =>
+          unawaited(_unpinDocument(storyline.id, attachment)),
       // The suggestions ride on the episode they answer, not under the spine:
       // a storyline is several conversations, and a card offering to reply has
       // to say which one it would reply to.
@@ -2048,7 +2084,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
             const SizedBox(height: BondSpacing.s12),
           ],
-          Expanded(child: _threadBody(panel)),
+          Expanded(child: _threadBody(panel, target: target)),
           // Collapsed is the default: the box appears when the user says they
           // are writing, and until then the transcript has the pane to itself.
           if (canReply && _replyOpenFor == selected.id) ...[
@@ -2077,12 +2113,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   static const double _transcriptMinWidth = 420;
 
   /// The transcript, and the file beside it when one is open.
-  Widget _threadBody(Widget panel) {
+  Widget _threadBody(Widget panel, {required DraftTarget target}) {
     final previewing = _previewing;
     if (previewing == null) return panel;
     return LayoutBuilder(
       builder: (context, constraints) {
-        final preview = _previewPanel(previewing);
+        // The thread rides in so the preview can offer 'Use in reply': the
+        // draft is keyed by the conversation, not by the file.
+        final preview = _previewPanel(previewing, target: target);
         final available = constraints.maxWidth - BondSpacing.s16;
         // Narrow: one thing at a time. The composer below stays either way, so
         // a reply is still possible with the file on screen.
@@ -2110,40 +2148,149 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// Keyed by the file, so moving from one attachment to another builds a new
   /// panel — and its memoised fetches — rather than reusing the last one's.
-  Widget _previewPanel(AttachmentRef attachment) => AttachmentPreviewPanel(
-        key: attachmentKey('preview', attachment),
-        attachment: attachment,
-        bytes: _attachmentBytes,
-        engines: _previewEngines,
-        onExpand: () => setState(() => _viewerFull = true),
-        onClose: () => setState(() {
-          _previewing = null;
-          _viewerFull = false;
-        }),
-        onOpen: () => unawaited(_openAttachmentInOs(attachment)),
-        onSave: () => unawaited(_saveAttachment(attachment)),
-        // Phase 4 wires both; null renders neither control.
-        onUseInReply: null,
-        onPinToStoryline: null,
-        onOpenLink: (url) => unawaited(_launchExternal(url)),
-      );
+  Widget _previewPanel(AttachmentRef attachment, {DraftTarget? target}) {
+    // Read here rather than in the closure: this is the build path, and the
+    // control has to appear the frame the thread's membership lands.
+    final pinTo = _pinTargetFor(attachment);
+    return AttachmentPreviewPanel(
+      key: attachmentKey('preview', attachment),
+      attachment: attachment,
+      bytes: _attachmentBytes,
+      engines: _previewEngines,
+      onExpand: () => setState(() => _viewerFull = true),
+      onClose: () => setState(() {
+        _previewing = null;
+        _viewerFull = false;
+      }),
+      onOpen: () => unawaited(_openAttachmentInOs(attachment)),
+      onSave: () => unawaited(_saveAttachment(attachment)),
+      // Only where there is a composer to write into. Opening the box is what
+      // makes the new draft visible — the spinner in it is the notifier's own
+      // `generating`, so nothing here waits.
+      onUseInReply: target == null
+          ? null
+          : () {
+              setState(() => _replyOpenFor = target.conversationKey);
+              unawaited(ref.read(draftProvider(target).notifier).generate(
+                    pinnedAttachmentIds: [attachment.attachmentId],
+                  ));
+            },
+      // Nowhere to pin is not a disabled button, it is no button: a thread in
+      // no storyline has nothing to offer here.
+      onPinToStoryline:
+          pinTo == null ? null : () => unawaited(_pinAttachment(attachment, pinTo)),
+      pinned: _isPinned(attachment),
+      onOpenLink: (url) => unawaited(_launchExternal(url)),
+    );
+  }
 
   /// The same panel with the pane to itself. Back returns to the split — the
   /// thread is still selected underneath — and Home clears everything.
-  Widget _attachmentViewer(AttachmentRef attachment) => Padding(
-        padding: const EdgeInsets.all(BondSpacing.s24),
-        child: AttachmentViewerPane(
-          key: attachmentKey('viewer', attachment),
-          attachment: attachment,
-          bytes: _attachmentBytes,
-          engines: _previewEngines,
-          onBack: () => setState(() => _viewerFull = false),
-          onHome: () => _selectSection(RailSection.home),
-          onOpen: () => unawaited(_openAttachmentInOs(attachment)),
-          onSave: () => unawaited(_saveAttachment(attachment)),
-          onOpenLink: (url) => unawaited(_launchExternal(url)),
-        ),
-      );
+  Widget _attachmentViewer(AttachmentRef attachment) {
+    final pinTo = _pinTargetFor(attachment);
+    return Padding(
+      padding: const EdgeInsets.all(BondSpacing.s24),
+      child: AttachmentViewerPane(
+        key: attachmentKey('viewer', attachment),
+        attachment: attachment,
+        bytes: _attachmentBytes,
+        engines: _previewEngines,
+        // From a thread, Back drops to the split and the transcript is there
+        // again. From a storyline there is no split to drop to, so the preview
+        // goes with it and the pane underneath is the storyline.
+        onBack: () => setState(() {
+          _viewerFull = false;
+          if (_selectedId == null) _previewing = null;
+        }),
+        onHome: () => _selectSection(RailSection.home),
+        onOpen: () => unawaited(_openAttachmentInOs(attachment)),
+        onSave: () => unawaited(_saveAttachment(attachment)),
+        // No 'Use in reply' here: there is no composer on the full pane, and
+        // an action whose result is off screen is not an action.
+        onPinToStoryline:
+            pinTo == null ? null : () => unawaited(_pinAttachment(attachment, pinTo)),
+        pinned: _isPinned(attachment),
+        onOpenLink: (url) => unawaited(_launchExternal(url)),
+      ),
+    );
+  }
+
+  /// Whether this file is already on a storyline's shelf.
+  ///
+  /// Two sources because the ref is a snapshot: the column it was read with,
+  /// and [_pinnedKeys] for a pin this session made after that read.
+  bool _isPinned(AttachmentRef attachment) =>
+      attachment.pinnedStorylineId != null ||
+      _pinnedKeys.contains(attachmentKey('pin', attachment).value);
+
+  /// Which storyline a pin from this pane would go to, or null when there is
+  /// nowhere to pin — which is what hides the control.
+  ///
+  /// From a thread: the oldest storyline that thread is live in. The set comes
+  /// back in join order, so `.first` is the one it was filed under first,
+  /// which is the one a person means by "this storyline" when the thread is in
+  /// two. From the storyline pane there is no guessing: it is the storyline
+  /// on screen.
+  ///
+  /// Watched, not read: this runs from a build path, and a thread joining a
+  /// storyline has to make the control appear without a second selection.
+  String? _pinTargetFor(AttachmentRef attachment) {
+    final threadId = _selectedId;
+    if (threadId == null) return _selectedStorylineId;
+    final ids = ref
+        .watch(storylineThreadIdsProvider(
+          (source: attachment.source, conversationKey: threadId),
+        ))
+        .valueOrNull;
+    if (ids == null || ids.isEmpty) return null;
+    return ids.first;
+  }
+
+  /// Pins one file to a storyline and says which one it landed on.
+  ///
+  /// The title is read AFTER the write rather than carried in, because the
+  /// caller is a build-path closure and the panel only ever holds the id.
+  Future<void> _pinAttachment(
+    AttachmentRef attachment,
+    String storylineId,
+  ) async {
+    final store = ref.read(messageStoreProvider);
+    await store.setAttachmentPinned(
+      attachment.source,
+      attachment.messageId,
+      attachment.attachmentId,
+      storylineId,
+    );
+    if (!mounted) return;
+    setState(() =>
+        _pinnedKeys.add(attachmentKey('pin', attachment).value));
+    ref.invalidate(storylinePinnedDocumentsProvider(storylineId));
+    final title = (await store.getStoryline(storylineId))?.title;
+    if (!mounted) return;
+    _toast(
+      'Pinned ${attachment.name ?? 'the file'} to '
+      '${title ?? 'the storyline'}.',
+    );
+  }
+
+  /// Takes one file off a storyline's shelf. The row the shelf hands back was
+  /// read fresh from the store, so dropping the session key is enough to put
+  /// the panel's button back to 'Pin to storyline'.
+  Future<void> _unpinDocument(
+    String storylineId,
+    AttachmentRef attachment,
+  ) async {
+    await ref.read(messageStoreProvider).setAttachmentPinned(
+          attachment.source,
+          attachment.messageId,
+          attachment.attachmentId,
+          null,
+        );
+    if (!mounted) return;
+    setState(() => _pinnedKeys.remove(attachmentKey('pin', attachment).value));
+    ref.invalidate(storylinePinnedDocumentsProvider(storylineId));
+    _toast('Removed ${attachment.name ?? 'the file'} from the storyline.');
+  }
 
   /// The picture for one attachment, or null while there is not one yet.
   ///

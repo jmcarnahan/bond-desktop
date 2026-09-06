@@ -113,6 +113,19 @@ class NeedsYouInput {
   /// whose history is not stored.
   final List<Message> thread;
 
+  /// What the documents attached to THIS message say — one line each, as
+  /// `attachmentDigestLines` renders them. Empty is the ordinary case.
+  ///
+  /// The digests and not the documents. A judgement about whether the owner is
+  /// needed turns on what a file asks for, which is one sentence; the file's
+  /// own words are the retriever's business, and a contract in this prompt
+  /// would drown the message it is about.
+  ///
+  /// This is also why the digest handler requeues this kind: the first pass
+  /// judged a message whose attachments had not been read yet, and a document
+  /// saying "please sign by Thursday" changes the answer.
+  final List<String> attachmentDigests;
+
   /// The owner's display name and address, as the app knows them. Together
   /// they are what lets "the message names the owner" bind to a person rather
   /// than to nobody in particular.
@@ -126,6 +139,7 @@ class NeedsYouInput {
   const NeedsYouInput({
     required this.message,
     this.thread = const [],
+    this.attachmentDigests = const [],
     this.ownerName,
     this.ownerAddress,
     required this.now,
@@ -204,6 +218,13 @@ class NeedsYouTask implements JsonTask<NeedsYouResult> {
   /// this is a display name that is not helping.
   static const int _ownerLineCap = 120;
 
+  /// Every digest on one message, together, in characters. A digest summary is
+  /// a sentence and a message rarely carries more than a handful of files, so
+  /// this is a ceiling rather than a working limit — what it stops is a
+  /// forwarded thread with twenty attachments pushing the judged message out
+  /// of the model's attention.
+  static const int _digestsCap = 600;
+
   static const int _evidenceCap = 300;
 
   static final DateFormat _date = DateFormat('yyyy-MM-dd');
@@ -273,6 +294,18 @@ class NeedsYouTask implements JsonTask<NeedsYouResult> {
         ..writeln('The conversation before this message, oldest first, for '
             'context:')
         ..writeln(wrapUntrusted('thread', context));
+    }
+
+    // After the thread and before the message being judged, which stays LAST.
+    // These lines are about the message below them, so they read as its
+    // documents rather than as the thread's.
+    if (input.attachmentDigests.isNotEmpty) {
+      buffer
+        ..writeln('What the documents attached to this message say:')
+        ..writeln(wrapUntrusted(
+          'attachment_digests',
+          _clamp(input.attachmentDigests.join('\n'), _digestsCap),
+        ));
     }
 
     return (buffer

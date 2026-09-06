@@ -1,6 +1,7 @@
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
+import 'attachments/attachment_digest_lines.dart';
 import 'ai_worker.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
@@ -162,6 +163,17 @@ class NeedsYouHandler extends WorkHandler {
       for (final earlier in thread)
         if (earlier.id != message.id) earlier,
     ];
+    // What the files on this message say, when any of them have been read.
+    // Keyed on this message alone and not the thread: the judgement is about
+    // what THIS message asks of the owner, and a contract attached three turns
+    // ago is context the thread text already carries.
+    //
+    // The digest handler requeues this kind once a document lands an ask, so a
+    // message judged before its attachments were read is judged again with
+    // this block filled in.
+    final digests = (await _store.digestsForMessages(source, [id]))[id] ??
+        const <Map<String, Object?>>[];
+
     // Read per item rather than held, like [DraftHandler]'s about-me: someone
     // who edits their rules mid-drain wants the rest of the drain to use them.
     final rules = await _store.getPref(needsYouRulesKey);
@@ -173,6 +185,7 @@ class NeedsYouHandler extends WorkHandler {
       NeedsYouInput(
         message: message,
         thread: context,
+        attachmentDigests: attachmentDigestLines(digests),
         ownerName: owner?.name,
         ownerAddress: owner?.address,
         now: DateTime.now(),

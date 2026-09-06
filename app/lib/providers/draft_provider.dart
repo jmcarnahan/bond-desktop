@@ -451,7 +451,13 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// message that has already been drafted is `done`, and `enqueueWork` would
   /// ignore it forever. The existing draft is deleted first for the same
   /// reason — the handler returns early when one is already stored.
-  Future<void> generate() async {
+  ///
+  /// [pinnedAttachmentIds] is "Use in reply": the documents the user named,
+  /// carried to the handler on the work row's payload so the retriever floats
+  /// them to the front of what it quotes. A plain Regenerate passes none, and
+  /// the requeue OVERWRITES the payload with null — asking again without
+  /// naming a file has to mean the last file is no longer named.
+  Future<void> generate({List<String> pinnedAttachmentIds = const []}) async {
     if (state.generating) return;
     state = state.copyWith(generating: true, error: null);
     try {
@@ -469,7 +475,14 @@ class DraftNotifier extends StateNotifier<DraftState> {
         return;
       }
       await _store.deleteDraftForMessage(_source, messageId);
-      await _store.requeueWork('draft', _source, messageId);
+      await _store.requeueWork(
+        'draft',
+        _source,
+        messageId,
+        payloadJson: pinnedAttachmentIds.isEmpty
+            ? null
+            : jsonEncode({'pinned_attachment_ids': pinnedAttachmentIds}),
+      );
     } catch (e) {
       state = state.copyWith(
         generating: false,

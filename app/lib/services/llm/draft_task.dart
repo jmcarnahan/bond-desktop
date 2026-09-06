@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../../models/message_models.dart';
 import '../attachments/attachment_markers.dart';
+import '../attachments/attachment_retriever.dart';
 import 'json_task.dart';
 import 'message_block.dart';
 import 'prompt_guard.dart';
@@ -79,6 +80,17 @@ class DraftInput {
   /// What the owner says about themselves, from settings.
   final String? aboutMe;
 
+  /// Passages of the documents attached to this thread, nearest first, as
+  /// [AttachmentRetriever] ranked them. Empty is the ordinary case — most
+  /// threads carry no files, and a thread whose files have not been read yet
+  /// drafts exactly as it did before.
+  ///
+  /// They are here rather than folded into the thread text because they are a
+  /// different KIND of evidence: the thread is what people said, and these are
+  /// what the documents say. The prompt asks the model to cite the file it
+  /// used, which is the only provenance a reply can carry.
+  final List<AttachmentExcerpt> attachmentExcerpts;
+
   /// Injected for the same reason `TriageInput.now` is: so a test can pin the
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
@@ -89,6 +101,7 @@ class DraftInput {
     this.styleExamples = const [],
     this.storylineSummary,
     this.aboutMe,
+    this.attachmentExcerpts = const [],
     required this.now,
   });
 }
@@ -147,6 +160,12 @@ class DraftTask implements JsonTask<DraftResult> {
 
   static const int _summaryCap = 600;
   static const int _aboutMeCap = 600;
+
+  /// Documents, in characters. Roughly the thread's own budget: a reply that
+  /// quotes a figure needs the paragraph the figure is in, not the contract,
+  /// and past this the model is reading a second thread's worth of text with
+  /// no one having said any of it.
+  static const int _excerptsCap = 2500;
   static const int _evidenceCap = 300;
 
   /// A stance is a label on a card. Two to four words is what the prompt asks
@@ -231,6 +250,20 @@ class DraftTask implements JsonTask<DraftResult> {
       ..writeln('The thread you are replying to, oldest first. Reply to '
           'the LAST message in it:')
       ..writeln(wrapUntrusted('thread', _threadText(input)));
+
+    // After the thread and before the tone samples: the documents are evidence
+    // about what is being discussed, so they belong beside the discussion —
+    // and the style examples must stay adjacent to nothing in particular,
+    // since they are read for their shape rather than their content.
+    if (input.attachmentExcerpts.isNotEmpty) {
+      buffer
+        ..writeln('Excerpts from documents attached to this thread, for '
+            'facts. Cite the file when you use one:')
+        ..writeln(wrapUntrusted(
+          'attachment_excerpts',
+          renderAttachmentExcerpts(input.attachmentExcerpts, _excerptsCap),
+        ));
+    }
 
     final examples = [
       for (final example in input.styleExamples)

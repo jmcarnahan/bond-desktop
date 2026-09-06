@@ -42,6 +42,14 @@ model, so a park there is a park on `make embed`. `attachment_digest` is the
 one fast-slot call: one record per document, queued by the text handler and
 only once there are words.
 
+The arrow also runs backwards, once. A digest that records something the
+document ASKS for sends its message back to stage 6 — a file saying "sign by
+Thursday" can change whether the owner is needed, and the first verdict was
+written before anything had read it. One requeue per message, and the drain
+makes one more pass so it lands before the settle asks. Stages 11 and 12 read documents too: the passages nearest the message
+being answered, scoped to its own thread and its storyline's pinned files. See
+[12-attachments.md](12-attachments.md) and [07-replies.md](07-replies.md).
+
 † a deterministic floor (an inbound Teams @mention or 1:1) answers without any
 model call; everything below the floor gets the fast-slot judgment. See
 [11-needs-you.md](11-needs-you.md).

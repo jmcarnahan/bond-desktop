@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../services/ai_worker.dart';
@@ -251,6 +252,24 @@ final storylinesProvider =
 final storylineMembersProvider =
     FutureProvider.autoDispose.family<List<StorylineMember>, String>(
   (ref, id) => ref.watch(messageStoreProvider).membersOf(id),
+);
+
+/// The documents somebody pinned to this storyline, newest message first.
+///
+/// A provider for the same reason [storylineMembersProvider] is one: the shelf
+/// is a store read and a widget build cannot await. The rows arrive with the
+/// covering message's `conversation_key` joined on, which is what lets a
+/// document opened from the shelf still say which thread it came off.
+///
+/// Invalidated by hand after every pin and unpin the screen performs — nothing
+/// else writes that column, so nothing else has to drop this.
+final storylinePinnedDocumentsProvider =
+    FutureProvider.autoDispose.family<List<AttachmentRef>, String>(
+  (ref, id) async => [
+    for (final row
+        in await ref.watch(messageStoreProvider).pinnedAttachmentsForStoryline(id))
+      AttachmentRef.fromRow(row),
+  ],
 );
 
 /// The threads the user blocked from one storyline, as

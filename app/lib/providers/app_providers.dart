@@ -17,6 +17,7 @@ import '../services/ai_worker.dart';
 import '../services/attachments/attachment_bytes.dart';
 import '../services/attachments/attachment_cache.dart';
 import '../services/attachments/attachment_digest_handler.dart';
+import '../services/attachments/attachment_retriever.dart';
 import '../services/attachments/attachment_text_handler.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
@@ -505,6 +506,19 @@ final messageSearchProvider = Provider<MessageSearch>(
   ),
 );
 
+/// The passages of a thread's documents a reply may quote.
+///
+/// A plain `Provider` for [messageSearchProvider]'s reason and beside it on
+/// purpose: the two are the same pairing of store and embedding client, split
+/// only by scope — search asks the whole mailbox, this one asks a thread and
+/// can never be made to ask more.
+final attachmentRetrieverProvider = Provider<AttachmentRetriever>(
+  (ref) => AttachmentRetriever(
+    ref.watch(messageStoreProvider),
+    ref.watch(embeddingsClientProvider),
+  ),
+);
+
 /// Restoring one gate-dropped message.
 ///
 /// A plain `Provider` for [messageSearchProvider]'s reason: it holds nothing
@@ -531,7 +545,7 @@ final restoreServiceProvider = Provider<RestoreService>(
 ///
 /// Its handlers drain in list order, so the order here is the order the work
 /// happens in.
-final aiWorkerProvider = Provider<AiWorker>((ref) {
+final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
   final storylines = ref.watch(storylineServiceProvider);
   final worker = AiWorker(
     ref.watch(messageStoreProvider),
@@ -605,6 +619,13 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(fastLlmClientProvider),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        // The worker this handler runs inside, read at CALL time — the same
+        // shape as needs-you's owner lookup. A `watch` here would be a cycle
+        // through the provider being built; a `read` from inside a drain is a
+        // read of a worker that already exists. `pump` on a running drain only
+        // sets a flag and hands back that drain's future, which is why it is
+        // not awaited: see [AttachmentDigestHandler].
+        onRequeue: () => unawaited(ref.read(aiWorkerProvider).pump()),
       ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
@@ -646,6 +667,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        attachments: ref.watch(attachmentRetrieverProvider),
         progress: ref.watch(pipelineProgressProvider),
       ),
     ],

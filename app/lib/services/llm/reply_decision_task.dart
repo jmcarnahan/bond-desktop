@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 
 import '../../models/message_models.dart';
 import '../attachments/attachment_markers.dart';
+import '../attachments/attachment_retriever.dart';
 import 'json_task.dart';
 import 'message_block.dart';
 import 'prompt_guard.dart';
@@ -57,6 +58,16 @@ class ReplyDecisionInput {
   /// "somebody has to answer this" from "the owner has to answer this".
   final String? aboutMe;
 
+  /// Passages of the documents attached to this thread. The same list the
+  /// draft below this decision reads, retrieved ONCE by the handler — a second
+  /// retrieval would be a second embedding call for an answer that cannot come
+  /// back different.
+  ///
+  /// They matter here for one case in particular: a message whose whole
+  /// content is "see attached" is unanswerable on its own text, and what the
+  /// document asks for is the only thing that says whether an answer is owed.
+  final List<AttachmentExcerpt> attachmentExcerpts;
+
   /// Injected for the same reason `TriageInput.now` is: so a test can pin the
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
@@ -65,6 +76,7 @@ class ReplyDecisionInput {
     required this.context,
     required this.message,
     this.aboutMe,
+    this.attachmentExcerpts = const [],
     required this.now,
   });
 }
@@ -107,6 +119,12 @@ class ReplyDecisionTask implements JsonTask<ReplyDecisionResult> {
 
   static const int _aboutMeCap = 600;
   static const int _reasonCap = 300;
+
+  /// Documents, in characters, and a third of what the draft gets. This is a
+  /// yes/no about one message: the passages are here to say what the file
+  /// wants, and the draft that may follow is where the wording of it earns a
+  /// bigger budget.
+  static const int _excerptsCap = 800;
 
   static final DateFormat _date = DateFormat('yyyy-MM-dd');
   static final DateFormat _weekday = DateFormat('EEEE');
@@ -172,6 +190,20 @@ class ReplyDecisionTask implements JsonTask<ReplyDecisionResult> {
         ..writeln('The conversation before this message, oldest first, for '
             'context:')
         ..writeln(wrapUntrusted('thread', context));
+    }
+
+    // After the thread — or after about-me on a first message, which is the
+    // same position — and before the judged message, which stays LAST for the
+    // reason it always has: the last thing the model reads is the thing it is
+    // being asked about.
+    if (input.attachmentExcerpts.isNotEmpty) {
+      buffer
+        ..writeln('Excerpts from documents attached to this thread, for '
+            'context:')
+        ..writeln(wrapUntrusted(
+          'attachment_excerpts',
+          renderAttachmentExcerpts(input.attachmentExcerpts, _excerptsCap),
+        ));
     }
 
     return (buffer

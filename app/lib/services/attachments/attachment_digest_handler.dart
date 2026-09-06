@@ -30,12 +30,30 @@ class AttachmentDigestHandler extends WorkHandler {
   final EmbeddingsClient _embeddings;
   final ActivityLog _log;
 
+  /// Called after a needs-you requeue, so the pass that would judge it again
+  /// can run in THIS drain rather than the next one.
+  ///
+  /// Needs-you drains ahead of this kind, so by the time a digest lands its
+  /// ask the pass that reads the verdict has already gone by. Left to the next
+  /// sync, the requeued item would sit `pending` — and the notification settle
+  /// holds a message's candidate open while its needs-you item is pending, so
+  /// a document that asks for something would cost its message up to the
+  /// settle deadline. The worker's own `pump` schedules one more full pass on
+  /// the drain that is already running; wiring it here is what keeps
+  /// "attachment work never holds up a notification" true for this path.
+  ///
+  /// Never awaited: the drain this handler is running inside is the drain
+  /// that pump would hand back, and waiting on it here would wait on itself.
+  final void Function()? _wake;
+
   AttachmentDigestHandler(
     this._store,
     this._client,
     this._embeddings, {
     ActivityLog? activityLog,
-  }) : _log = activityLog ?? ActivityLog.disabled();
+    void Function()? onRequeue,
+  })  : _log = activityLog ?? ActivityLog.disabled(),
+        _wake = onRequeue;
 
   @override
   String get kind => 'attachment_digest';
@@ -136,11 +154,34 @@ class AttachmentDigestHandler extends WorkHandler {
 
     await _embedDigest(source, messageId, attachmentId, digest);
 
-    // The needs-you re-verdict — a document that asks for something can change
-    // whether its message wants the owner — lands in the next phase, together
-    // with the fence that puts these digests in front of the needs-you prompt.
-    // Requeuing before that fence exists would spend a model call on a
-    // re-judgement that cannot see what changed.
+    // The re-verdict. A document that asks for a signature can change whether
+    // its message wants the owner, and the first needs-you pass ran before
+    // anything had read it — so the message goes back on the queue and is
+    // judged again with `NeedsYouInput.attachmentDigests` filled in.
+    //
+    // `== 1` is the whole guard against doing that per file. This row's digest
+    // is already written by the time the count is taken, so the FIRST document
+    // on a message to carry an ask sees exactly 1 and every later one sees 2
+    // or more — one requeue per message, however many files it came with.
+    //
+    // The other three conditions are each their own refusal: an outbound
+    // message is the owner's own and is never judged; a message already
+    // judged `1` is at the top of the ladder and cannot be raised; and asks
+    // are the only part of a digest that can move the verdict at all.
+    //
+    // Needs-you drains ahead of this kind, so the pass that would pick this up
+    // has already gone by — which is what [_wake] is for: one more pass on the
+    // running drain, so the re-verdict lands before the settle asks about it.
+    // `requeueWork` revives only `done` and `error` rows, so a message still
+    // waiting for its first verdict keeps its place in the queue.
+    if (digest.asks.isNotEmpty &&
+        message['direction'] == 'inbound' &&
+        message['needs_you_verdict'] != 1 &&
+        await _store.attachmentsWithAsks(source, messageId) == 1) {
+      await _store.requeueWork('needs_you', source, messageId);
+      _log.note({'requeued': 'needs_you'});
+      _wake?.call();
+    }
 
     _log.note({
       'kind': digest.kind,

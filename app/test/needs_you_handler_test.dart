@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -202,6 +203,82 @@ void main() {
 
       expect(llm.user, contains('Shared a file: Contract-v2.docx'));
       expect(llm.user, isNot(contains('[[att:')));
+    });
+
+    test('a re-run reads the digests the first pass could not see', () async {
+      // The whole point of the digest handler's requeue. The first judgement
+      // ran while the file was still being read; this one is the same message
+      // with the record of it in front of the model.
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Lease Addendum.pdf',
+          'size': 4096,
+        },
+      ]);
+      await store.setAttachmentDigest(
+        'email',
+        'm1',
+        'a1',
+        status: 'done',
+        digestJson: jsonEncode(const AttachmentDigest(
+          evidence: 'A lease addendum sent for signature.',
+          kind: 'contract',
+          summary: 'The rent rises to 2,600 in January.',
+          asks: ['Sign and return by Thursday'],
+        ).toJson()),
+      );
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.user, contains('What the documents attached to this message '
+          'say:'));
+      expect(llm.user, contains('<untrusted_data source="attachment_digests">'));
+      expect(llm.user, contains('Lease Addendum.pdf: The rent rises to 2,600 '
+          'in January. Asks: Sign and return by Thursday'));
+    });
+
+    test('the digest fence sits before the message being judged', () async {
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {'attachment_id': 'a1', 'ordinal': 0, 'kind': 'file', 'name': 'A.pdf'},
+      ]);
+      await store.setAttachmentDigest(
+        'email',
+        'm1',
+        'a1',
+        status: 'done',
+        digestJson: jsonEncode(
+          const AttachmentDigest(summary: 'It rises.').toJson(),
+        ),
+      );
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      final sent = llm.user!;
+      expect(
+        sent.indexOf('source="attachment_digests"'),
+        lessThan(sent.indexOf('Judge ONLY this message:')),
+      );
+    });
+
+    test('a document nobody has read yet contributes no line', () async {
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {'attachment_id': 'a1', 'ordinal': 0, 'kind': 'file', 'name': 'A.pdf'},
+      ]);
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      // "Not read yet" and "says nothing" are different states, and only the
+      // second is worth putting in front of a judgement.
+      expect(llm.user, isNot(contains('attachment_digests')));
     });
   });
 

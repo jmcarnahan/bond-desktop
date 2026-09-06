@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
@@ -57,20 +58,42 @@ void main() {
 
   final now = DateTime(2026, 8, 29);
 
-  DraftInput draftInput(Message message) => DraftInput(
+  const excerpt = AttachmentExcerpt(
+    name: 'Lease Addendum.pdf',
+    locator: 'part 2',
+    sender: 'Jordan Feld',
+    date: '2026-08-28',
+    text: 'The rent rises to 2,600 on 1 January.',
+    ref: AttachmentRef(
+      source: 'email',
+      messageId: 'm1',
+      attachmentId: 'a1',
+    ),
+  );
+
+  DraftInput draftInput(Message message,
+          {List<AttachmentExcerpt> excerpts = const []}) =>
+      DraftInput(
         thread: [message],
         replyTo: message,
+        attachmentExcerpts: excerpts,
         now: now,
       );
 
-  ReplyDecisionInput replyDecisionInput(Message message) => ReplyDecisionInput(
+  ReplyDecisionInput replyDecisionInput(Message message,
+          {List<AttachmentExcerpt> excerpts = const []}) =>
+      ReplyDecisionInput(
         context: const [],
         message: message,
+        attachmentExcerpts: excerpts,
         now: now,
       );
 
-  NeedsYouInput needsYouInput(Message message) => NeedsYouInput(
+  NeedsYouInput needsYouInput(Message message,
+          {List<String> digests = const []}) =>
+      NeedsYouInput(
         message: message,
+        attachmentDigests: digests,
         now: now,
       );
 
@@ -126,6 +149,12 @@ void main() {
       expect(betweenTwo, before);
       expect(after, before);
       expect(identical(after, before), isTrue);
+
+      // And with documents retrieved into it, which is a whole block of text
+      // the prompt did not used to carry — and which lives in the USER message
+      // precisely so this stays true.
+      draft.buildUserMessage(draftInput(emailMessage, excerpts: [excerpt]));
+      expect(identical(draft.systemPrompt, before), isTrue);
     });
 
     test('the reply decision hands back the identical string across both', () {
@@ -138,6 +167,10 @@ void main() {
       expect(betweenTwo, before);
       expect(after, before);
       expect(identical(after, before), isTrue);
+
+      replyDecision
+          .buildUserMessage(replyDecisionInput(emailMessage, excerpts: [excerpt]));
+      expect(identical(replyDecision.systemPrompt, before), isTrue);
     });
 
     test('needs-you hands back the identical string across both channels', () {
@@ -150,6 +183,12 @@ void main() {
       expect(betweenTwo, before);
       expect(after, before);
       expect(identical(after, before), isTrue);
+
+      needsYou.buildUserMessage(needsYouInput(
+        emailMessage,
+        digests: const ['Lease Addendum.pdf: The rent rises in January.'],
+      ));
+      expect(identical(needsYou.systemPrompt, before), isTrue);
     });
 
     test('the attachment digest hands back the identical string across both',

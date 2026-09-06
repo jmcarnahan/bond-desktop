@@ -3107,17 +3107,30 @@ FROM storylines s''';
   /// are revived: resetting a `pending` row would lose its place in the drain
   /// order, and resetting a `processing` one would hand an item a worker is
   /// holding to a second drain.
-  Future<void> requeueWork(String kind, String source, String entityId) async {
+  ///
+  /// [payloadJson] is OVERWRITTEN on conflict, including with null, and that
+  /// is the point rather than an oversight: a Regenerate that names a document
+  /// has to carry it into the draft it is asking for, and the plain Regenerate
+  /// after it has to drop the last one's — a payload that survived would go on
+  /// pinning a file the user has stopped asking about, on every draft of that
+  /// message for the rest of the mailbox's life.
+  Future<void> requeueWork(
+    String kind,
+    String source,
+    String entityId, {
+    String? payloadJson,
+  }) async {
     final now = _nowIso();
     await db.customUpdate(
       'INSERT INTO work_items '
       '(task_kind, source, entity_id, status, attempts, error, payload_json, '
       'created_at, updated_at) '
-      "VALUES (?, ?, ?, 'pending', 0, NULL, NULL, ?, ?) "
+      "VALUES (?, ?, ?, 'pending', 0, NULL, ?, ?, ?) "
       'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
-      "status = 'pending', updated_at = excluded.updated_at "
+      "status = 'pending', updated_at = excluded.updated_at, "
+      'payload_json = excluded.payload_json '
       "WHERE work_items.status IN ('done', 'error')",
-      variables: _args([kind, source, entityId, now, now]),
+      variables: _args([kind, source, entityId, payloadJson, now, now]),
     );
   }
 
@@ -4342,6 +4355,42 @@ RETURNING id
         .get();
     if (rows.isEmpty) return null;
     return Map<String, Object?>.from(rows.first.data);
+  }
+
+  /// One message's stored vector, or null when it has none — or has one in a
+  /// space nothing else compares against.
+  ///
+  /// The retriever's first question: a message that has already been embedded
+  /// carries the vector its own attachments should be searched with, and
+  /// asking the embedding server again for a card it has already read is a
+  /// round trip that buys nothing.
+  ///
+  /// The tag guard is the whole reason this is not a bare `SELECT embedding`.
+  /// A blob written under an older prefix sits in a different space, and a
+  /// nearest-neighbour search across two spaces returns whatever the geometry
+  /// happens to say — which is worse than no excerpts at all, because it looks
+  /// like an answer. Null sends the caller to re-embed, which self-heals.
+  ///
+  /// [embedModel] is required rather than defaulted on [semanticSearch]'s
+  /// precedent and for its reason: this layer imports nothing above itself, so
+  /// the caller names the tag (`EmbeddingsClient.documentModelTag`).
+  Future<Uint8List?> messageVectorBlob(
+    String source,
+    String sourceMessageId, {
+    required String embedModel,
+  }) async {
+    final rows = await db
+        .customSelect(
+          'SELECT embedding, embed_model FROM message_vectors '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    if (rows.isEmpty) return null;
+    final row = rows.first.data;
+    if (row['embed_model'] != embedModel) return null;
+    final blob = row['embedding'];
+    return blob is Uint8List ? blob : null;
   }
 
   /// Files every durable vector the nearest-neighbour index has not seen yet,

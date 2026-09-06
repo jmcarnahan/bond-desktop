@@ -335,7 +335,161 @@ void main() {
     });
   });
 
-  group('what the needs-you re-verdict will read', () {
+  group('the needs-you re-verdict', () {
+    /// The work row for one message's re-judgement, or null when none was
+    /// written.
+    Future<Map<String, Object?>?> needsYouItem(String messageId) async {
+      final rows = await db.customSelect(
+        "SELECT * FROM work_items WHERE task_kind = 'needs_you' "
+        'AND entity_id = ?',
+        variables: [Variable(messageId)],
+      ).get();
+      return rows.isEmpty ? null : rows.first.data;
+    }
+
+    test('the first digest carrying an ask requeues needs-you', () async {
+      if (!available) return;
+      await seed();
+
+      await AttachmentDigestHandler(
+        store,
+        FakeLlm([answer(asks: const ['Sign page four'])]),
+        FakeEmbedServer().client,
+      ).run(item('m1', 'a1'));
+
+      expect((await needsYouItem('m1'))!['status'], 'pending');
+    });
+
+    test('the requeue wakes the worker for one more pass', () async {
+      if (!available) return;
+      await seed();
+      var woken = 0;
+
+      await AttachmentDigestHandler(
+        store,
+        FakeLlm([answer(asks: const ['Sign page four'])]),
+        FakeEmbedServer().client,
+        onRequeue: () => woken++,
+      ).run(item('m1', 'a1'));
+
+      // Once, and only when something was actually queued — the guard below
+      // this one is what keeps a second document from waking it again.
+      expect(woken, 1);
+    });
+
+    test('a digest that queues nothing wakes nothing', () async {
+      if (!available) return;
+      await seed();
+      var woken = 0;
+
+      await AttachmentDigestHandler(
+        store,
+        FakeLlm([answer(asks: const [])]),
+        FakeEmbedServer().client,
+        onRequeue: () => woken++,
+      ).run(item('m1', 'a1'));
+
+      expect(woken, 0);
+    });
+
+    test('the second on the same message does not', () async {
+      if (!available) return;
+      await seed();
+      await store.upsertAttachments('email', 'm1', const [
+        {
+          'attachment_id': 'a2',
+          'ordinal': 1,
+          'kind': 'file',
+          'name': 'Form W-9.pdf',
+          'content_type': 'application/pdf',
+          'size': 40960,
+        },
+      ]);
+      await store.setAttachmentText(
+        'email',
+        'm1',
+        'a2',
+        status: 'done',
+        text: 'Complete parts one and two and return signed.',
+      );
+
+      await AttachmentDigestHandler(
+        store,
+        FakeLlm([answer(asks: const ['Sign page four'])]),
+        FakeEmbedServer().client,
+      ).run(item('m1', 'a1'));
+      // The first requeue is drained and finished, exactly as the worker would
+      // leave it. A second requeue would revive it — which is the waste the
+      // `== 1` guard exists to prevent.
+      await store.writeWork('needs_you', 'email', 'm1', status: 'done');
+
+      await AttachmentDigestHandler(
+        store,
+        FakeLlm([answer(asks: const ['Return the W-9'])]),
+        FakeEmbedServer().client,
+      ).run(item('m1', 'a2'));
+
+      expect((await needsYouItem('m1'))!['status'], 'done');
+    });
+
+    test('an already-judged message is not requeued', () async {
+      if (!available) return;
+      await seed();
+      // The verdict is already at the top of the ladder: nothing a document
+      // asks for can raise it further.
+      await store.writeNeedsYouVerdict(
+        'email',
+        'm1',
+        verdict: true,
+        reason: 'Dana asked directly.',
+      );
+
+      await AttachmentDigestHandler(
+        store,
+        FakeLlm([answer(asks: const ['Sign page four'])]),
+        FakeEmbedServer().client,
+      ).run(item('m1', 'a1'));
+
+      expect(await needsYouItem('m1'), isNull);
+    });
+
+    test('an outbound ask requeues nothing', () async {
+      if (!available) return;
+      await seed();
+      // Straight onto the row: `upsertMessage` merges, and direction is one of
+      // the fields a partial upsert leaves standing.
+      await db.customUpdate(
+        "UPDATE messages SET direction = 'outbound' "
+        "WHERE source = 'email' AND source_message_id = ?",
+        variables: [Variable('m1')],
+      );
+
+      await AttachmentDigestHandler(
+        store,
+        FakeLlm([answer(asks: const ['Sign page four'])]),
+        FakeEmbedServer().client,
+      ).run(item('m1', 'a1'));
+
+      // The owner's own message is never judged, so a document on it has
+      // nothing to change.
+      expect(await needsYouItem('m1'), isNull);
+    });
+
+    test('a digest with no asks requeues nothing', () async {
+      if (!available) return;
+      await seed();
+
+      await AttachmentDigestHandler(
+        store,
+        FakeLlm([answer()]),
+        FakeEmbedServer().client,
+      ).run(item('m1', 'a1'));
+
+      expect(await needsYouItem('m1'), isNull);
+    });
+  });
+
+  group('what the needs-you re-verdict counts', () {
     test('a digest with an ask counts, and one without does not', () async {
       if (!available) return;
       await seed();

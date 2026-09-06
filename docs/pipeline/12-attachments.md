@@ -431,11 +431,8 @@ the index until something re-reads the document.
 one message whose digest asks for something, with a **LIKE over the encoded
 JSON** rather than a JSON1 extract: `AttachmentDigest.toJson` writes all five
 keys always and `jsonEncode` emits `"asks":[` with no spaces, so `"asks":["` is
-present exactly when the list has an entry. A test pins the encoding. The
-**needs-you re-verdict** that reads this count lands in the next phase,
-together with the fence that puts the digests in front of the needs-you prompt
-— requeuing before that fence exists would spend a model call on a
-re-judgement that cannot see what changed.
+present exactly when the list has an entry. A test pins the encoding. It is
+the guard behind the **needs-you re-verdict** below.
 
 ## Search
 
@@ -485,7 +482,8 @@ is `<message id>|<attachment id>`, and the name lives on a table the panel
 does not read, so each row says what it produced instead.
 
 `MessageStore.chunkKnn` is the other read — SCOPED to a thread's messages
-and/or a storyline's pinned documents, for the retrieval the next phase builds.
+and/or a storyline's pinned documents, and it is what `AttachmentRetriever`
+asks (see "Retrieval into replies" below).
 **Both scopes empty answers `const []` and never the corpus**: a caller that
 could not work out which thread it is on must get nothing, because a quote from
 a stranger's contract pasted into a reply is the one failure this path has to
@@ -598,6 +596,97 @@ path — the reason all four entitlement files carry
 `com.apple.security.files.user-selected.read-write`. Both report failure as a
 toast rather than a dead control.
 
+## Retrieval into replies
+
+`AttachmentRetriever`
+(`app/lib/services/attachments/attachment_retriever.dart`) is the read side of
+everything above: given a thread and the message being answered, it hands back
+the passages worth quoting, as `AttachmentExcerpt` — name, locator, sender,
+date, text, and the `AttachmentRef` behind them.
+
+- **Scope** is this thread's messages (the ids the caller already loaded
+  `untilIso`, so a later attachment cannot be quoted) plus every document
+  pinned to the thread's storylines plus anything named by "Use in reply".
+  Both scopes empty returns `const []` with **no embedding call and no store
+  read**.
+- **Query vector** is the reply-to message's stored vector under the current
+  model tag (`MessageStore.messageVectorBlob`), else the same card
+  `embedMessageRow` builds, re-embedded under `documentPrefix`. Never
+  `searchQueryPrefix`: this is document against documents.
+- **Filters**, in order: digest passages out (`locator == 'digest'` — that
+  passage is a model's summary, and the fence claims these are the document's
+  words), named documents to the front as a stable partition, at most three
+  passages per document, then the top six, then a character budget where a
+  passage that does not fit is skipped rather than ending the list.
+- **Rendering** is `[<name>, <locator>, attached by <sender> on <date>]` above
+  each passage, joined by `---`, with every stand-in spelled out (`a file`,
+  `whole document`, `unknown`, `an unknown date`). Over the cap, whole
+  passages are dropped from the far end before the remainder is hard-cut. The
+  bracket line goes **inside** the caller's fence, because the file name is the
+  sender's own text.
+- **Nothing here throws.** A store problem, an index that is off, an embedding
+  server that is down, a message that is gone — each returns no excerpts. The
+  draft is the product; the citations are what make it better.
+
+Where the excerpts land, what the payload carries and how provenance is
+recorded is in `07-replies.md`.
+
+## The needs-you re-verdict
+
+`AttachmentDigestHandler` requeues `needs_you` for a message once, when a
+digest lands asks on an inbound message that is not already judged `1` and
+`attachmentsWithAsks` returns exactly 1. The count is taken after this row's
+digest is written, so the first asking document sees 1 and every later one sees
+2 or more — one requeue per message, however many files it came with. The
+re-judgement runs in the same drain — the handler's `onRequeue` wakes the
+worker for one more pass, since needs-you drains ahead of this kind — and
+the activity row notes `requeued: needs_you`. The fence it reads is in
+`11-needs-you.md`.
+
+## Recap lines
+
+A digested document adds its facts to its message's line in a storyline recap,
+and a pinned document whose message has aged out of the window gets a line of
+its own. Both are in `06-storylines.md`; the store side is
+`digestsForMessages` (one query per source, never a join) and
+`pinnedAttachmentsForStoryline`.
+
+## Documents and pinning
+
+`pinned_storyline_id` is the one attachment column a person sets by hand,
+which is why `upsertAttachments` never writes it: a re-sync must not un-pin
+what somebody chose.
+
+**Pinning** happens from the preview panel and the full viewer, on the
+`Pin to storyline` action. Which storyline it goes to is the host's decision,
+not the panel's: from a thread it is the first id
+`storylineThreadIdsProvider` answers with, which is join order, so the one the
+thread was filed under first; from the storyline pane it is the storyline on
+screen. Nowhere to pin renders **no button** rather than a disabled one — a
+thread in no storyline has nothing here a user could act on. After the write
+the screen invalidates `storylinePinnedDocumentsProvider` and toasts the
+storyline's title, read back after the write because the panel only ever held
+the id.
+
+The panel's `pinned` flag reads two things: the ref's own
+`pinned_storyline_id`, and `_pinnedKeys` on the screen — the keys pinned in
+this session. The ref a panel holds is a **snapshot** taken when its row was
+read, so without the second the button would still say `Pin to storyline`
+after the pin landed. It is cleared on sign-out beside the thumbnails.
+
+**The shelf** is `AttachmentDocumentsStrip` behind the storyline pane's
+Documents button, fed by `storylinePinnedDocumentsProvider` — a store read,
+because a widget build cannot await one. Unpinning is two taps in place, never
+a dialog, and it drops the session key as well as the column. The rows the
+shelf hands back came fresh from the store, so that is enough.
+
+**Use in reply** is the panel's other Phase 4 action, and only where there is
+a composer to write into — the full viewer has none, so it offers none. It
+opens the reply box and asks the draft notifier to regenerate with this
+attachment's id in `pinned_attachment_ids`, which is what floats it to the
+front of what the retriever quotes. Opening the box is the point: a regenerate
+whose spinner is off screen is not visible feedback.
+
 ## Code
 
 - `app/lib/data/schema.drift`, `app/lib/data/database.dart` — schema v13 and
@@ -644,13 +733,18 @@ toast rather than a dead control.
   (fixed 160 px columns, never `IntrinsicColumnWidth`), `text_preview.dart`,
   `eml_preview.dart`, `unsupported_preview.dart`.
 - `app/lib/widgets/attachment_documents_strip.dart` — the pinned-documents
-  shelf, built here and wired to the storyline pane in a later round.
+  shelf; `app/lib/widgets/storyline_timeline.dart` — the Documents button that
+  unfolds it and the three attachment props the spine's rows forward.
+- `app/lib/providers/storylines_provider.dart` —
+  `storylinePinnedDocumentsProvider`, dropped by hand after every pin and
+  unpin.
 - `app/lib/widgets/message_row.dart` — `layOutBody`'s `thumbnailable` list and
   the document pictures it drives.
 - `app/lib/screens/inbox_screen.dart` — `_threadBody` (the split),
-  `_attachmentViewer` (the `_main` rung), `_thumbnailFor`/`_loadThumb`,
-  `_openAttachmentInOs`, `_saveAttachment`, `_launchExternal`, and the
-  clear-cache wiring.
+  `_attachmentViewer` (the `_main` rung, which a storyline reaches too),
+  `_thumbnailFor`/`_loadThumb`, `_openAttachmentInOs`, `_saveAttachment`,
+  `_launchExternal`, the clear-cache wiring, and the pinning trio
+  `_pinTargetFor`/`_pinAttachment`/`_unpinDocument` over `_pinnedKeys`.
 - `app/lib/main.dart` — `initPdfEngine()` and the `pdfThumbnailerProvider`
   override, the one place the app admits it has pdfium.
 - `app/lib/widgets/settings_screen.dart` — Sync & data's "Clear attachment
@@ -663,3 +757,23 @@ toast rather than a dead control.
 - `app/lib/widgets/message_row.dart` — the per-file `AI:` digest line under
   the chip row; `app/lib/widgets/activity_log_panel.dart` — the labels and
   sentences for `attachment_text` and `attachment_digest`.
+- `app/lib/services/attachments/attachment_retriever.dart` —
+  `AttachmentExcerpt`, `AttachmentRetriever.excerptsFor` and
+  `renderAttachmentExcerpts`;
+  `app/lib/services/attachments/attachment_digest_lines.dart` —
+  `attachmentDigestLines`, the one-line-per-document form the needs-you fence
+  reads.
+- `app/lib/data/message_store.dart` — `messageVectorBlob` (tag-guarded, so a
+  vector in an older space sends the caller to re-embed) and `requeueWork`'s
+  `payloadJson`, which is overwritten on conflict including with null.
+- `app/lib/services/llm/draft_task.dart`, `reply_decision_task.dart` —
+  `attachmentExcerpts` and their 2,500 / 800 caps;
+  `app/lib/services/llm/needs_you_task.dart` — `attachmentDigests` and its 600
+  cap. All three system prompts are unchanged and `const`.
+- `app/lib/services/draft_handler.dart` — the one retrieval both calls read,
+  the `pinned_attachment_ids` payload decode, and the `documents` note;
+  `app/lib/providers/draft_provider.dart` — `generate(pinnedAttachmentIds:)`;
+  `app/lib/providers/app_providers.dart` — `attachmentRetrieverProvider`.
+- `app/lib/services/storyline_service.dart` — `_recapLine`'s
+  `⟨attached …⟩` suffix, the `⟨pinned …⟩` footer and
+  `_recapAttachmentCap = 160`.
