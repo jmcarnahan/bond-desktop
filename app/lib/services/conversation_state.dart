@@ -76,12 +76,25 @@ const String stateDone = 'done';
 /// `done` is a human's decision and no outbound can undo it. A qualifying
 /// inbound can: new mail on a closed thread reopens it, which is why the
 /// inbound rule has no precondition on the current state.
+///
+/// [historical] says this message is older than everything the caller has
+/// shown the user before — a backfill from a widened sync window, not a
+/// delivery — and it suppresses BOTH transitions above while leaving every
+/// other field to work normally. Both, because either one alone would be a
+/// lie told in a different direction: an old inbound would reopen a thread the
+/// user closed months after that mail arrived, and an old outbound would fold
+/// a live `needs_reply` to `waiting` as though a question asked last week had
+/// been answered the week before. The high-water marks, the preview and the
+/// subject still update, because those describe what the thread CONTAINS,
+/// which the backfill genuinely changes; the state describes where the thread
+/// stands with the user, which it does not.
 ConvSnapshot foldMessage(
   ConvSnapshot? existing, {
   required bool outbound,
   required String? receivedAt,
   String? subject,
   String? preview,
+  bool historical = false,
 }) {
   final next = existing?.copy() ?? ConvSnapshot();
 
@@ -90,7 +103,7 @@ ConvSnapshot foldMessage(
   // counts as a message and may supply a subject or a first preview.
   final ordered = receivedAt != null && receivedAt.isNotEmpty;
 
-  if (ordered) {
+  if (ordered && !historical) {
     if (outbound) {
       final lastInbound = next.lastInboundAt;
       if (lastInbound == null || lastInbound.compareTo(receivedAt) <= 0) {

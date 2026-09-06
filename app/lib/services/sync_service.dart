@@ -113,11 +113,48 @@ class SyncService implements MailSync {
       // including the `setDeltaLink(folder, null)` the 410 handler makes, so a
       // floor read after any drain would find `synced_at = now` and quietly
       // collapse the vacation rule below into the rolling window.
+      //
+      // The marker is read on the same line of sight, one statement later, for
+      // the same reason: it is compared against that floor, and the widen it
+      // detects is answered by clearing cursors mid-pass — a marker read after
+      // any of that would be racing writes this pass made itself.
       final floor = await _effectiveFloor();
-      final (inbox, inboxResync) =
-          await _syncFolder('inbox', 'inbound', floor: floor);
-      final (sent, sentResync) =
-          await _syncFolder('sentitems', 'outbound', floor: floor);
+      // An empty string is treated as no marker at all — the same reading
+      // [_effectiveFloor] gives an empty `synced_at`. A pref is TEXT, and an
+      // empty one left comparable would sort below every real floor: widening
+      // would never fire again, and nothing would ever overwrite it.
+      final stored = await _store.getPref(mailBootstrapFloorKey);
+      final marker = (stored == null || stored.isEmpty) ? null : stored;
+      final widen = marker != null && floor.compareTo(marker) < 0;
+
+      final (inbox, inboxResync) = await _syncFolder(
+        'inbox',
+        'inbound',
+        floor: floor,
+        widen: widen,
+        quietBeforeIso: widen ? marker : null,
+      );
+      final (sent, sentResync) = await _syncFolder(
+        'sentitems',
+        'outbound',
+        floor: floor,
+        widen: widen,
+        quietBeforeIso: widen ? marker : null,
+      );
+
+      // How far back this mailbox has now been drained, written only once both
+      // folders have returned. A folder that threw took the whole pass with it
+      // before reaching this line, which is the design: the marker still names
+      // the old floor, so the next pass detects the same widen and finishes
+      // the half that did not land.
+      //
+      // A null marker is ADOPTED rather than acted on. A database from before
+      // this bookkeeping existed has no record of what it drained, and reading
+      // that silence as "never drained anything" would make the first sync
+      // after every upgrade re-drain the whole window for nothing.
+      if (marker == null || floor.compareTo(marker) < 0) {
+        await _store.setPref(mailBootstrapFloorKey, floor);
+      }
 
       // A transient failure — the model server mid-load, two timeouts in a row
       // — must not remove mail from the AI pipeline forever. Errored rows get
@@ -335,22 +372,46 @@ class SyncService implements MailSync {
   /// [floor] is handed in rather than computed here, and both uses below are
   /// that same string — see the computation site in [syncNow] for why asking
   /// again inside this method would be wrong.
+  ///
+  /// [widen] says the user asked for more history than any bootstrap has
+  /// fetched, so this folder abandons its cursor and drains from [floor]
+  /// again. [quietBeforeIso] is how far back that history reaches: everything
+  /// older than it is backfill rather than news, and the ingest folds it
+  /// without letting it move a thread's state.
   Future<(int, bool)> _syncFolder(
     String folder,
     String direction, {
     required String floor,
+    bool widen = false,
+    String? quietBeforeIso,
   }) async {
     final storedLink = await _store.getDeltaLink(folder, source: _source);
+    // Whether a cursor existed BEFORE this pass — not whether one is used.
+    // A widen drains from the floor like a first run does, but the mailbox has
+    // been synced before, and the first-run cap below must not fire again.
     final firstRun = storedLink == null;
     var newMessages = 0;
     var resynced = false;
+
+    // Each folder drops its OWN cursor, immediately before its own drain,
+    // rather than both being cleared up front: a failure in one folder then
+    // leaves the other's cursor intact and its next pass incremental. The
+    // marker only moves once both folders have returned, so a widen that got
+    // half way is detected again next pass and finishes there. Clearing a
+    // cursor and re-draining is the same move the 410 recovery below makes,
+    // and safe for the same reason — `upsertMessage` conflicts
+    // non-destructively and `firstSighting` keeps the replay out of the fold.
+    if (widen && !firstRun) {
+      await _store.setDeltaLink(folder, null, source: _source);
+    }
 
     try {
       newMessages += await _drain(
         folder,
         direction,
-        startLink: storedLink,
-        minReceivedIso: firstRun ? floor : null,
+        startLink: widen ? null : storedLink,
+        minReceivedIso: (firstRun || widen) ? floor : null,
+        quietBeforeIso: quietBeforeIso,
       );
     } on DeltaResyncRequired {
       // The cursor is older than Graph's change history — which means an
@@ -370,6 +431,11 @@ class SyncService implements MailSync {
           direction,
           startLink: null,
           minReceivedIso: floor,
+          // Null on every pass that is not a widen, so an ordinary 410
+          // recovery cannot quiet genuinely new mail. A widen pass never
+          // reaches here at all: its cursor was already cleared above, and a
+          // drain with no cursor has nothing for Graph to expire.
+          quietBeforeIso: quietBeforeIso,
         );
       } on DeltaResyncRequired {
         // Twice in one drain is not an expired token, it is a loop.
@@ -396,6 +462,7 @@ class SyncService implements MailSync {
     String direction, {
     required String? startLink,
     required String? minReceivedIso,
+    required String? quietBeforeIso,
   }) async {
     var link = startLink;
     var firstRequest = true;
@@ -411,7 +478,11 @@ class SyncService implements MailSync {
       );
       firstRequest = false;
 
-      newMessages += await _ingestPage(page.messages, direction);
+      newMessages += await _ingestPage(
+        page.messages,
+        direction,
+        quietBeforeIso: quietBeforeIso,
+      );
 
       final next = page.nextLink;
       if (next != null && next.isNotEmpty) {
@@ -440,10 +511,15 @@ class SyncService implements MailSync {
   /// activity row written inside the transaction would roll back with the
   /// page, and one that somehow survived would count messages that never
   /// landed.
+  ///
+  /// [quietBeforeIso] is set only on a widen pass, and names the floor the
+  /// last bootstrap reached — see the `historical` flag in the loop below for
+  /// what that buys.
   Future<int> _ingestPage(
     List<Map<String, dynamic>> raw,
-    String direction,
-  ) async {
+    String direction, {
+    String? quietBeforeIso,
+  }) async {
     if (raw.isEmpty) return 0;
     final outbound = direction == 'outbound';
     final backlogCutoff = _isoAgo(const Duration(days: triageWindowDays));
@@ -466,6 +542,16 @@ class SyncService implements MailSync {
         if (message['isDraft'] == true) continue;
 
         final receivedAt = message['receivedDateTime'] as String?;
+
+        // A message older than the floor the LAST bootstrap drained from is
+        // history being backfilled, not news arriving: it existed before every
+        // decision the user has made about these threads, so it must not remake
+        // any of them. Watermarks and counts still move — the thread's record
+        // gets more complete, its state does not change.
+        final historical = quietBeforeIso != null &&
+            receivedAt != null &&
+            receivedAt.compareTo(quietBeforeIso) < 0;
+
         final subject = message['subject'] as String?;
         final preview = message['bodyPreview'] as String?;
         final key = conversationKeyFor(
@@ -543,15 +629,20 @@ class SyncService implements MailSync {
         // user sent anywhere — Outlook, a phone — resolves the ask the CTA
         // was holding, exactly as the composer's own send path does. An
         // outbound older than the newest inbound answers nothing and clears
-        // nothing.
-        final resolvesAsk =
-            outbound && outboundResolves(entry.snapshot, receivedAt);
+        // nothing. Neither does a historical one, whatever its timestamp says:
+        // the ask it would be answering has been on screen since before this
+        // window reached back far enough to see it, and a reply from behind
+        // that floor is not what the user is still waiting to write.
+        final resolvesAsk = !historical &&
+            outbound &&
+            outboundResolves(entry.snapshot, receivedAt);
         entry.snapshot = foldMessage(
           entry.snapshot,
           outbound: outbound,
           receivedAt: receivedAt,
           subject: subject,
           preview: preview,
+          historical: historical,
         );
         if (resolvesAsk) {
           entry.clearCta();

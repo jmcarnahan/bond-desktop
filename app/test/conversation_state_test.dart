@@ -239,6 +239,57 @@ void main() {
     });
   });
 
+  group('foldMessage on a historical message', () {
+    test('an old inbound does not reopen a closed thread', () {
+      final result = foldMessage(
+        snap(state: stateDone),
+        outbound: false,
+        receivedAt: t1,
+        preview: 'from the archive',
+        historical: true,
+      );
+      expect(result.state, stateDone,
+          reason: 'a widened window reaching further back is not new mail '
+              'arriving on a thread the user finished with');
+      // What the thread CONTAINS still changes; where it stands does not.
+      expect(result.lastInboundAt, t1);
+      expect(result.lastMessageAt, t1);
+      expect(result.lastMessagePreview, 'from the archive');
+    });
+
+    test('an old outbound does not settle a live ask', () {
+      final result = foldMessage(
+        snap(state: stateNeedsReply, lastInboundAt: t3),
+        outbound: true,
+        receivedAt: t1,
+        historical: true,
+      );
+      expect(result.state, stateNeedsReply);
+      expect(result.lastOutboundAt, t1);
+    });
+
+    test('an old outbound cannot settle a thread it would otherwise settle',
+        () {
+      // The same fold WITHOUT the flag goes to `waiting` — the guard is doing
+      // the work here, not the timestamp arithmetic.
+      final plain = foldMessage(
+        snap(state: stateNeedsReply, lastInboundAt: t1),
+        outbound: true,
+        receivedAt: t3,
+      );
+      expect(plain.state, stateWaiting);
+
+      final quiet = foldMessage(
+        snap(state: stateNeedsReply, lastInboundAt: t1),
+        outbound: true,
+        receivedAt: t3,
+        historical: true,
+      );
+      expect(quiet.state, stateNeedsReply);
+      expect(quiet.lastOutboundAt, t3);
+    });
+  });
+
   group('subject', () {
     test('the first non-empty subject names the thread', () {
       var s = foldMessage(null, outbound: false, receivedAt: t1, subject: '');

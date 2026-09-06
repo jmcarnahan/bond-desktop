@@ -1095,6 +1095,8 @@ void main() {
       await store.setPref(aboutMeKey, 'An LO in Denver');
       await store.setPref(needsYouRulesKey, 'Invoices always need me');
       await store.setPref(dbOwnerKey, 'ada@example.test');
+      await store.setPref(mailBootstrapFloorKey, '2026-08-23T00:00:00Z');
+      await store.setPref(teamsBootstrapFloorKey, '2026-08-23T00:00:00Z');
 
       await store.wipeAll();
 
@@ -1104,6 +1106,10 @@ void main() {
       // would decide what the next identity gets interrupted about.
       expect(await store.getPref(needsYouRulesKey), isNull);
       expect(await store.getPref(dbOwnerKey), isNull);
+      // Inherited, these would tell the next account's first bootstrap that
+      // its window had already been drained, and suppress it.
+      expect(await store.getPref(mailBootstrapFloorKey), isNull);
+      expect(await store.getPref(teamsBootstrapFloorKey), isNull);
     });
   });
 

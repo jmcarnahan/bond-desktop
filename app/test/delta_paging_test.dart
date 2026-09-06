@@ -256,6 +256,9 @@ void main() {
       expect(second.toString(), deltaCursor('inbox', 'c1'));
       expect(second.queryParameters[r'$filter'], isNull,
           reason: 'the cursor already carries the window it was born with');
+      // And nothing widened between the two passes: the first one recorded the
+      // floor it drained from, the second one asks for the same window, so no
+      // re-drain is owed and the cursor is what the pass uses.
       expect(await store.getDeltaLink('inbox', source: 'email'),
           deltaCursor('inbox', 'c2'));
       expect((await messageRows()).length, 2);

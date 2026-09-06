@@ -35,6 +35,25 @@ const String aboutMeKey = 'about_me';
 /// `prefs_provider.dart` for everything that reads or writes the setting.
 const String needsYouRulesKey = 'needs_you_rules';
 
+/// The oldest floor a bootstrap ever deliberately drained this source back to,
+/// one key per connector, ISO-8601 UTC.
+///
+/// Monotone: it only ever moves OLDER. That is what makes a widened lookback
+/// detectable at all — a configured floor older than the marker is history
+/// nobody has fetched yet, and the sync answers by re-draining from it; a
+/// narrower one is a preference about how much to keep, and changes nothing
+/// that already happened.
+///
+/// Declared here beside [aboutMeKey] because [wipeAll] is what has to name
+/// them, and that is not incidental: a marker that survived a sign-out would
+/// make the next account's very first bootstrap look like a floor no older
+/// than one already drained, and its legitimate first drain would be read as
+/// "no widen needed" and suppressed. Written and read only by the sync
+/// services; `prefs_provider.dart` never learns them, because this is
+/// bookkeeping about a drain rather than anything a user chose.
+const String mailBootstrapFloorKey = 'mail_bootstrap_floor';
+const String teamsBootstrapFloorKey = 'teams_bootstrap_floor';
+
 /// When each background pass last completed, ISO-8601 UTC.
 ///
 /// They live in `app_prefs` rather than being derived from `activity_events`
@@ -1738,19 +1757,22 @@ RETURNING *
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` SURVIVES, with three exceptions. What this method isolates is
+  /// `app_prefs` SURVIVES, with five exceptions. What this method isolates is
   /// one person's presence: which backend the app talks through, which server
   /// it points at, and where the slider sits are the machine's configuration,
   /// not the previous account's data, and wiping them turned every account
   /// switch into a re-setup. The exceptions are [dbOwnerKey] — the identity
   /// claim on these rows, which must not outlive the rows it describes, or
-  /// the next sign-in would read the wiped mailbox as still owned — and the
-  /// two texts one person wrote about themselves and their inbox:
-  /// [aboutMeKey], which would otherwise be inherited by the next identity and
-  /// steer THEIR triage, and [needsYouRulesKey], which would decide what
-  /// interrupts them. Both callers depend on the first: sign-out leaves the
-  /// database unclaimed, and `IdentityGuard` writes the new owner immediately
-  /// after.
+  /// the next sign-in would read the wiped mailbox as still owned — the two
+  /// texts one person wrote about themselves and their inbox ([aboutMeKey],
+  /// which would otherwise be inherited by the next identity and steer THEIR
+  /// triage, and [needsYouRulesKey], which would decide what interrupts
+  /// them) — and the two bootstrap-floor markers, [mailBootstrapFloorKey] and
+  /// [teamsBootstrapFloorKey], which describe how far back THIS account's
+  /// mail was drained and would otherwise tell the next account's first
+  /// bootstrap that its window had already been covered. Both callers depend
+  /// on the first: sign-out leaves the database unclaimed, and `IdentityGuard`
+  /// writes the new owner immediately after.
   Future<void> wipeAll() async {
     const tables = [
       'messages',
@@ -1775,8 +1797,14 @@ RETURNING *
         await db.customUpdate('DELETE FROM $table');
       }
       await db.customUpdate(
-        'DELETE FROM app_prefs WHERE key IN (?, ?, ?)',
-        variables: _args([dbOwnerKey, aboutMeKey, needsYouRulesKey]),
+        'DELETE FROM app_prefs WHERE key IN (?, ?, ?, ?, ?)',
+        variables: _args([
+          dbOwnerKey,
+          aboutMeKey,
+          needsYouRulesKey,
+          mailBootstrapFloorKey,
+          teamsBootstrapFloorKey,
+        ]),
       );
     });
     // The vec0 index is derived from `message_vectors`, and the DELETE above
