@@ -3,6 +3,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -620,6 +621,12 @@ void main() {
         dbProvider.overrideWithValue(db),
       ]);
       addTearDown(container.dispose);
+
+      // The AI worker behind this provider reaches the attachment backend, and
+      // that one is chosen by a stored preference — so building it starts a
+      // fire-and-forget read of `app_prefs`. Awaiting it here is what keeps
+      // that read inside the life of the database this test closes.
+      await container.read(appPrefsProvider.notifier).ready;
 
       await container.read(storylinesProvider.notifier).load();
       final state = container.read(storylinesProvider) as StorylinesLoaded;

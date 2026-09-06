@@ -1,5 +1,7 @@
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/theme/tokens.dart';
+import 'package:bond_inbox/widgets/attachment_search_tile.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/home_metrics.dart';
@@ -32,6 +34,32 @@ HomeFeedRow _row(int index) => HomeFeedRow(
       subject: 'Subject $index',
       fromName: 'Sender $index',
     );
+
+AttachmentChunkHit _doc({
+  String name = 'Q3 forecast.xlsx',
+  String locator = 'Sheet Revenue rows 1-40',
+  String text = 'Renewal at 4.25% fixed for sixty months.',
+  String attachmentId = 'a1',
+  String? conversationKey = 'c7',
+}) {
+  return AttachmentChunkHit(
+    ref: AttachmentRef(
+      source: 'email',
+      messageId: 'm7',
+      attachmentId: attachmentId,
+      name: name,
+      conversationKey: conversationKey,
+    ),
+    chunkId: 1,
+    seq: 0,
+    locator: locator,
+    text: text,
+    senderName: 'Dana Whitfield',
+    outbound: false,
+    receivedAt: '2026-09-03T09:00:00Z',
+    distance: 0.2,
+  );
+}
 
 Future<void> _pump(
   WidgetTester tester, {
@@ -488,6 +516,71 @@ void main() {
       await tester.sendKeyEvent(LogicalKeyboardKey.escape);
 
       expect(left, 1);
+    });
+
+    testWidgets(
+        'documents come first, and the count still counts messages',
+        (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch(
+          'renewal',
+          [SemanticHit(_row(7), 0.1)],
+          documents: [_doc()],
+        ),
+      );
+      await swap(tester);
+
+      expect(find.text('In documents'), findsOneWidget);
+      expect(find.byType(AttachmentSearchTile), findsOneWidget);
+      expect(
+        find.text('1 result for “renewal”'),
+        findsOneWidget,
+        reason: 'the count labels the message list under it',
+      );
+
+      // Above the messages, not below them.
+      final documents = tester.getTopLeft(find.byType(AttachmentSearchTile));
+      final messages = tester.getTopLeft(find.text('Subject 7'));
+      expect(documents.dy, lessThan(messages.dy));
+    });
+
+    testWidgets('a document opens the thread it came with', (tester) async {
+      final opened = <(String, String)>[];
+      await _pump(
+        tester,
+        search: HomeSearch('renewal', const [], documents: [_doc()]),
+        onOpenThread: (source, key) => opened.add((source, key)),
+      );
+      await swap(tester);
+
+      await tester.tap(find.byType(AttachmentSearchTile));
+      expect(opened, [('email', 'c7')]);
+    });
+
+    testWidgets('no documents means no documents heading', (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+      );
+      await swap(tester);
+
+      expect(find.text('In documents'), findsNothing);
+      expect(find.byType(AttachmentSearchTile), findsNothing);
+    });
+
+    testWidgets(
+        'a document answering where no message did shows both the document '
+        'and the empty answer', (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch('renewal', const [], documents: [_doc()]),
+      );
+      await swap(tester);
+
+      expect(find.byType(AttachmentSearchTile), findsOneWidget);
+      expect(find.text('Nothing indexed matches that.'), findsOneWidget);
+      expect(find.text('0 results for “renewal”'), findsOneWidget);
     });
 
     testWidgets('the clear affordance leaves too', (tester) async {

@@ -1,4 +1,5 @@
 import '../data/message_store.dart';
+import '../models/attachment_models.dart';
 import '../models/home_models.dart';
 import 'llm/embeddings_client.dart';
 
@@ -20,7 +21,18 @@ class MessageSearchHits extends MessageSearchResult {
 
   final List<SemanticHit> hits;
 
-  const MessageSearchHits(this.query, this.hits);
+  /// The passages of attached documents that answer the same query, nearest
+  /// one per document.
+  ///
+  /// A separate list rather than more [hits], because a document hit is not a
+  /// message: it is a fragment of a file, and it has to be shown with the file
+  /// name and the place in it. Empty is the ordinary answer for a mailbox
+  /// nobody has attached anything to, and for one whose chunk index is not
+  /// built on this platform — neither is worth a third case here, because the
+  /// message hits are an answer either way.
+  final List<AttachmentChunkHit> documents;
+
+  const MessageSearchHits(this.query, this.hits, {this.documents = const []});
 }
 
 /// A search that could not run, and the sentence to show for it.
@@ -65,6 +77,11 @@ class MessageSearch {
 
   MessageSearch(this._store, this._embeddings);
 
+  /// How many documents a search names. Small on purpose: they sit under the
+  /// message hits, and a page of passages would bury the thing most people are
+  /// actually looking for.
+  static const int _documentLimit = 6;
+
   Future<MessageSearchResult> search(
     String query, {
     int limit = 50,
@@ -105,7 +122,16 @@ class MessageSearch {
         'the semantic index is unavailable',
       );
     }
-    return MessageSearchHits(text, hits);
+    // The same query vector against the second corpus. It runs only after the
+    // message search has an answer, so a document search can never be the
+    // reason a search reports itself unavailable.
+    final chunks = await _store.searchAttachmentChunks(
+      encodeEmbedding(vector),
+      embedModel: EmbeddingsClient.documentModelTag,
+      limit: _documentLimit,
+      includeDropped: includeDropped,
+    );
+    return MessageSearchHits(text, hits, documents: chunks ?? const []);
   }
 
   /// The same question asked of the whole history, both ways at once.

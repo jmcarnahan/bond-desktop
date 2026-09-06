@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
@@ -30,6 +31,7 @@ void main() {
   const draft = DraftTask();
   const replyDecision = ReplyDecisionTask();
   const needsYou = NeedsYouTask();
+  const attachmentDigest = AttachmentDigestTask();
 
   final emailMessage = Message(
     id: 'm1',
@@ -69,6 +71,15 @@ void main() {
 
   NeedsYouInput needsYouInput(Message message) => NeedsYouInput(
         message: message,
+        now: now,
+      );
+
+  AttachmentDigestInput digestInput(Message message) => AttachmentDigestInput(
+        message: message,
+        name: 'Lease Addendum.pdf',
+        contentType: 'application/pdf',
+        size: 240 * 1024,
+        text: 'The tenant pays 2,400 on the fourth of each month.',
         now: now,
       );
 
@@ -135,6 +146,22 @@ void main() {
       final betweenTwo = needsYou.systemPrompt;
       needsYou.buildUserMessage(needsYouInput(chatMessage));
       final after = needsYou.systemPrompt;
+
+      expect(betweenTwo, before);
+      expect(after, before);
+      expect(identical(after, before), isTrue);
+    });
+
+    test('the attachment digest hands back the identical string across both',
+        () {
+      // The task with the least reason to know its channel and the most to
+      // gain from not knowing: one KV prefix serves every document in the
+      // mailbox, whichever connector carried it.
+      final before = attachmentDigest.systemPrompt;
+      attachmentDigest.buildUserMessage(digestInput(emailMessage));
+      final betweenTwo = attachmentDigest.systemPrompt;
+      attachmentDigest.buildUserMessage(digestInput(chatMessage));
+      final after = attachmentDigest.systemPrompt;
 
       expect(betweenTwo, before);
       expect(after, before);
@@ -213,6 +240,16 @@ void main() {
       expect(prompt, isNot(contains('chat')));
     });
 
+    test('the attachment-digest prompt does not name a channel at all', () {
+      // The STRICT form, like needs-you's. It reads a DOCUMENT, and how the
+      // document arrived is exactly the thing the rules tell the model to say
+      // nothing about.
+      final prompt = attachmentDigest.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
     test('no prompt names a connector', () {
       // "teams" is not on this list on purpose: the extraction prompt asks for
       // "companies, schools, teams, or vendors", which is a kind of
@@ -223,6 +260,7 @@ void main() {
         draft.systemPrompt,
         replyDecision.systemPrompt,
         needsYou.systemPrompt,
+        attachmentDigest.systemPrompt,
       ]) {
         expect(prompt.toLowerCase(), isNot(contains('microsoft')));
         expect(prompt.toLowerCase(), isNot(contains('outlook')));
@@ -278,6 +316,25 @@ void main() {
         expect(
           needsYou.buildUserMessage(needsYouInput(message)),
           contains('<untrusted_data source="inbound_message">'),
+          reason: message.source,
+        );
+      }
+    });
+
+    test('the digest fences the covering message and the document apart', () {
+      for (final message in [emailMessage, chatMessage]) {
+        final built = attachmentDigest.buildUserMessage(digestInput(message));
+        // Two fences and not one, because they are two different things to the
+        // model: the message is why the document was sent, and the document is
+        // the only thing being read.
+        expect(
+          built,
+          contains('<untrusted_data source="message">'),
+          reason: message.source,
+        );
+        expect(
+          built,
+          contains('<untrusted_data source="document">'),
           reason: message.source,
         );
       }
@@ -369,17 +426,32 @@ void main() {
         draft.systemPrompt,
         replyDecision.systemPrompt,
         needsYou.systemPrompt,
+        attachmentDigest.systemPrompt,
       ];
 
       extract.buildUserMessage(ExtractionInput(withAttachment, now));
       draft.buildUserMessage(draftInput(withAttachment));
       replyDecision.buildUserMessage(replyDecisionInput(withAttachment));
       needsYou.buildUserMessage(needsYouInput(withAttachment));
+      attachmentDigest.buildUserMessage(digestInput(withAttachment));
 
       expect(identical(extract.systemPrompt, before[0]), isTrue);
       expect(identical(draft.systemPrompt, before[1]), isTrue);
       expect(identical(replyDecision.systemPrompt, before[2]), isTrue);
       expect(identical(needsYou.systemPrompt, before[3]), isTrue);
+      expect(identical(attachmentDigest.systemPrompt, before[4]), isTrue);
+    });
+
+    test('a marker in the covering message never reaches the digest prompt',
+        () {
+      // The digest renders its message through `buildMessageBlock`, which is
+      // the one place a marker is stripped for every prompt in the app.
+      final built = attachmentDigest.buildUserMessage(
+        digestInput(withAttachment),
+      );
+
+      expect(built, isNot(contains('[[att:')));
+      expect(built, contains('Signed copy'));
     });
 
     test('no system prompt names an attachment marker', () {
@@ -389,6 +461,7 @@ void main() {
         draft.systemPrompt,
         replyDecision.systemPrompt,
         needsYou.systemPrompt,
+        attachmentDigest.systemPrompt,
       ]) {
         expect(prompt, isNot(contains('[[att:')));
         expect(prompt, isNot(contains('[[img:')));

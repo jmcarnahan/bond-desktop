@@ -221,6 +221,70 @@ void main() {
       }
     });
 
+    test('a restored message queues its eligible attachment text', () async {
+      await seed();
+      await store.upsertAttachments('email', 'm1', const [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Renewal.pdf',
+          'content_type': 'application/pdf',
+          'size': 240 * 1024,
+        },
+        // Refused by the policy, so nothing is queued for it: a logo is not
+        // what the message is about, and the restore is not a reason to fetch
+        // one.
+        {
+          'attachment_id': 'logo',
+          'ordinal': 1,
+          'kind': 'image',
+          'name': 'logo.png',
+          'content_type': 'image/png',
+          'size': 4096,
+          'is_inline': true,
+        },
+      ]);
+
+      await RestoreService(store).restore('email', 'm1');
+
+      // ENQUEUED, not requeued: the sync refuses to queue a gated message's
+      // attachments at all, so there is no `done` row to revive — there is no
+      // row.
+      expect(await workStatus('attachment_text', 'm1|a1'), 'pending');
+      expect(await workStatus('attachment_text', 'm1|logo'), isNull);
+    });
+
+    test('restoring the same message twice queues each document once',
+        () async {
+      await seed();
+      await store.upsertAttachments('email', 'm1', const [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Renewal.pdf',
+          'content_type': 'application/pdf',
+          'size': 240 * 1024,
+        },
+      ]);
+      await RestoreService(store).restore('email', 'm1');
+      await db.customUpdate(
+        "UPDATE work_items SET status = 'done' "
+        "WHERE task_kind = 'attachment_text'",
+      );
+
+      await RestoreService(store).restore('email', 'm1');
+
+      // `INSERT OR IGNORE` is what makes it idempotent, and the finished row
+      // staying finished is the point: the words are already stored.
+      final rows = await db.customSelect(
+        "SELECT status FROM work_items WHERE task_kind = 'attachment_text'",
+      ).get();
+      expect(rows, hasLength(1));
+      expect(rows.single.data['status'], 'done');
+    });
+
     test('the draft is left to the extract handler to chain', () async {
       await seed();
 

@@ -1,5 +1,9 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -477,6 +481,277 @@ void main() {
         final rows = await db.customSelect('SELECT * FROM $table').get();
         expect(rows, isEmpty, reason: table);
       }
+    });
+  });
+
+  group('the passages a document becomes', () {
+    Future<List<Map<String, Object?>>> chunks() async {
+      final rows = await db
+          .customSelect('SELECT * FROM attachment_chunks ORDER BY seq')
+          .get();
+      return [for (final row in rows) row.data];
+    }
+
+    test('replacing them hands back the ids in the order they were given',
+        () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+
+      final ids = await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: 'part 1', text: 'The tenant pays on the fourth.'),
+        (seq: 1, locator: 'part 2', text: 'The term runs eighteen months.'),
+      ]);
+
+      // The embedder zips these against the chunks it split, so an id out of
+      // order would file one passage's vector under another's row.
+      expect(ids, hasLength(2));
+      final stored = await chunks();
+      expect(stored.map((c) => c['id']), ids);
+      expect(stored.map((c) => c['locator']), ['part 1', 'part 2']);
+      expect(stored.first['chars'], 'The tenant pays on the fourth.'.length);
+      // Written un-embedded: the vectors arrive one POST later, and the
+      // index's backfill deliberately cannot see a row until they do.
+      expect(stored.first['embedding'], isNull);
+      expect(stored.first['dims'], 0);
+      expect(stored.first['indexed_at'], isNull);
+    });
+
+    test('replacing them again is a replacement, not a second copy', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: 'part 1', text: 'The tenant pays on the fourth.'),
+        (seq: 1, locator: 'part 2', text: 'The term runs eighteen months.'),
+      ]);
+
+      // The chunker is deterministic, so a retry after a park re-derives
+      // exactly these passages — and they replace themselves.
+      final ids = await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: 'part 1', text: 'The tenant pays on the fourth.'),
+        (seq: 1, locator: 'part 2', text: 'The term runs eighteen months.'),
+      ]);
+
+      expect(await chunks(), hasLength(2));
+      expect((await chunks()).map((c) => c['id']), ids);
+    });
+
+    test('one document\'s passages are not another\'s', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [
+        row('att-a'),
+        row('att-b', ordinal: 1),
+      ]);
+      await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: '', text: 'The lease.'),
+      ]);
+
+      await store.replaceChunks('email', 'm1', 'att-b', const [
+        (seq: 0, locator: '', text: 'The floor plan.'),
+      ]);
+
+      expect(await chunks(), hasLength(2));
+    });
+
+    test('an appended passage continues the sequence', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: 'part 1', text: 'The tenant pays on the fourth.'),
+        (seq: 1, locator: 'part 2', text: 'The term runs eighteen months.'),
+      ]);
+
+      final id = await store.appendChunk(
+        'email',
+        'm1',
+        'att-a',
+        locator: 'digest',
+        text: 'A lease addendum. The rent rises in January.',
+      );
+
+      final stored = await chunks();
+      expect(stored.map((c) => c['seq']), [0, 1, 2]);
+      expect(stored.last['id'], id);
+      expect(stored.last['locator'], 'digest');
+    });
+
+    test('the first appended passage starts at zero', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+
+      await store.appendChunk(
+        'email',
+        'm1',
+        'att-a',
+        locator: 'digest',
+        text: 'A lease addendum.',
+      );
+
+      expect((await chunks()).single['seq'], 0);
+    });
+
+    test('an embedding lands and puts the row back on the index worklist',
+        () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      final ids = await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: '', text: 'The tenant pays on the fourth.'),
+      ]);
+
+      await store.setChunkEmbedding(
+        ids.single,
+        embedding: encodeEmbedding(List.filled(768, 0.1)),
+        dims: 768,
+        embedModel: EmbeddingsClient.documentModelTag,
+      );
+
+      final stored = (await chunks()).single;
+      expect(stored['embedding'], isNotNull);
+      expect(stored['dims'], 768);
+      expect(stored['embed_model'], EmbeddingsClient.documentModelTag);
+      expect(stored['embedded_at'], isNotNull);
+      // Cleared, not stamped: stamping here would write the float into the
+      // table and never into the index.
+      expect(stored['indexed_at'], isNull);
+    });
+
+    test('the unembedded ones come back in document order', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      final ids = await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: 'part 1', text: 'One.'),
+        (seq: 1, locator: 'part 2', text: 'Two.'),
+        (seq: 2, locator: 'part 3', text: 'Three.'),
+      ]);
+      await store.setChunkEmbedding(
+        ids.first,
+        embedding: encodeEmbedding(List.filled(768, 0.1)),
+        dims: 768,
+        embedModel: EmbeddingsClient.documentModelTag,
+      );
+
+      // The resume path's worklist: what a park on the embedding server left
+      // behind, and nothing else.
+      final pending = await store.unembeddedChunks('email', 'm1', 'att-a');
+      expect(pending.map((c) => c.text), ['Two.', 'Three.']);
+    });
+  });
+
+  group('a text status that closes the digest', () {
+    test('a skip marks the digest skipped too', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+
+      await store.setAttachmentText(
+        'email',
+        'm1',
+        'att-a',
+        status: 'skipped',
+        reason: 'no_extractor',
+      );
+
+      // No words means no digest, ever. Left `pending`, the chip would say
+      // "reading…" for the life of the mailbox.
+      final stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['digest_status'], 'skipped');
+    });
+
+    test('a done leaves the digest where the digest handler will find it',
+        () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+
+      await store.setAttachmentText(
+        'email',
+        'm1',
+        'att-a',
+        status: 'done',
+        text: 'Two pages of terms.',
+      );
+
+      expect(
+        (await store.attachmentsForMessage('email', 'm1')).single['digest_status'],
+        'pending',
+      );
+    });
+
+    test('a later text failure closes a digest that was already written',
+        () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      await store.setAttachmentDigest(
+        'email',
+        'm1',
+        'att-a',
+        status: 'done',
+        digestJson: '{"evidence":"","kind":"other","summary":"","facts":[],'
+            '"asks":[]}',
+      );
+
+      await store.setAttachmentText(
+        'email',
+        'm1',
+        'att-a',
+        status: 'error',
+        reason: 'unavailable',
+      );
+
+      // It IS overwritten, and deliberately: the words behind the digest are
+      // gone, so the record of them is stale. What matters is that the chip
+      // stops promising a digest that is never coming.
+      final stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['digest_status'], 'skipped');
+    });
+  });
+
+  group('counting the documents that ask for something', () {
+    Future<void> digest(String attachmentId, {List<String> asks = const []}) =>
+        store.setAttachmentDigest(
+          'email',
+          'm1',
+          attachmentId,
+          status: 'done',
+          digestJson: jsonEncode(
+            AttachmentDigest(
+              evidence: 'A lease addendum.',
+              kind: 'contract',
+              summary: 'The rent rises.',
+              facts: const ['2,600 from January'],
+              asks: asks,
+            ).toJson(),
+          ),
+        );
+
+    test('a digest with asks counts and one without does not', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [
+        row('att-a'),
+        row('att-b', ordinal: 1),
+      ]);
+
+      await digest('att-a', asks: const ['Sign page four']);
+      await digest('att-b');
+
+      // A LIKE over the encoded JSON rather than a JSON1 extract: `toJson`
+      // writes all five keys always, and `jsonEncode` emits `"asks":[` with no
+      // spaces.
+      expect(await store.attachmentsWithAsks('email', 'm1'), 1);
+    });
+
+    test('a digest that has not been written yet counts for nothing',
+        () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+
+      expect(await store.attachmentsWithAsks('email', 'm1'), 0);
+    });
+
+    test('another message\'s asks are not this one\'s', () async {
+      await seedMessage('m1');
+      await seedMessage('m2', key: 'conv-2');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      await digest('att-a', asks: const ['Sign page four']);
+
+      expect(await store.attachmentsWithAsks('email', 'm2'), 0);
     });
   });
 }

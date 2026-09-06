@@ -195,7 +195,7 @@ in `app_providers.dart` when the clients are constructed, and there is no
 per-call router anything can interrogate at runtime, so `pipelineStages` in
 `app/lib/services/llm/model_slots.dart` is the app telling the user what its own
 wiring is. `model_slots_test.dart` is what keeps that table honest against the
-handler list. Ten rows: four on the fast slot, five on prose, one on embeddings.
+handler list. Eleven rows: five on the fast slot, five on prose, one on embeddings.
 
 **Two editors, one per switchable slot.** `ModelSlotEditor`
 (`app/lib/widgets/model_slot_editor.dart`) is prop-only: it takes the effective

@@ -16,6 +16,8 @@ import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
 import '../services/attachments/attachment_bytes.dart';
 import '../services/attachments/attachment_cache.dart';
+import '../services/attachments/attachment_digest_handler.dart';
+import '../services/attachments/attachment_text_handler.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/attachment_backend.dart';
@@ -578,6 +580,29 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
       // never be allowed to sit in front of the storyline queue.
       EmbedHandler(
         ref.watch(messageStoreProvider),
+        ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
+      ),
+      // Reading the documents, then understanding them — in that order,
+      // because the digest below has nothing to read until the words are
+      // stored. Both sit here, after the message embeddings and ahead of the
+      // storylines, so a recap written later in this same drain can see a
+      // digest that landed at the top of it. Neither is in the notification
+      // settle set: an attachment must never hold up a verdict about the
+      // message it came with.
+      //
+      // The text handler talks to no chat model, so a park here is a park on
+      // the embedding server and it parks only its own kind.
+      AttachmentTextHandler(
+        ref.watch(messageStoreProvider),
+        ref.watch(attachmentBackendProvider),
+        ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
+      ),
+      AttachmentDigestHandler(
+        ref.watch(messageStoreProvider),
+        // Bulk work: the fast server. See [fastLlmClientProvider].
+        ref.watch(fastLlmClientProvider),
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
       ),

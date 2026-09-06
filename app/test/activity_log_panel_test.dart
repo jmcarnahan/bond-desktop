@@ -615,6 +615,55 @@ void main() {
       );
     });
 
+    test('a document read says how many passages it became', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'attachment_text',
+          detail: const {'chars': 4200, 'chunks': 8, 'embedded': 8},
+        )),
+        'Read attachment — 8 passages',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'attachment_text',
+          detail: const {'chunks': 1},
+        )),
+        'Read attachment — 1 passage',
+      );
+    });
+
+    test('a document read that counted nothing is still named', () {
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'attachment_text')),
+        'Read attachment',
+      );
+    });
+
+    test('a digest says what the model decided the document was', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'attachment_digest',
+          detail: const {'kind': 'invoice', 'facts': 4, 'asks': 1},
+        )),
+        'Attachment digest — invoice',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'attachment_digest')),
+        'Attachment digest',
+      );
+    });
+
+    test('a skipped attachment reads as a skip, not a failure', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'attachment_text',
+          status: 'skipped',
+          detail: const {'reason': 'no_extractor'},
+        )),
+        'Read attachment skipped — no extractor',
+      );
+    });
+
     test('a park with no reason is still a park', () {
       expect(
         ActivityLogPanel.describe(_event(kind: 'extract', status: 'parked')),

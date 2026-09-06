@@ -281,3 +281,59 @@ AttachmentDigest? decodeAttachmentDigest(String? json) {
     return null;
   }
 }
+
+/// One passage of one document, and how near it sits to what was asked.
+///
+/// The chunk search's unit, and deliberately NOT a [SemanticHit]: a message hit
+/// is a feed row a person already recognises, where this is a fragment of a
+/// file — it has to say WHICH file, WHERE in it, and who sent it, or the reader
+/// is shown three sentences with no idea what they are from.
+///
+/// [ref] carries the whole attachment row, `conversationKey` included, because
+/// every use of a hit is an action on the file behind it: opening the preview,
+/// pinning it to a storyline, quoting it into a reply.
+@immutable
+class AttachmentChunkHit {
+  /// The document this passage came out of.
+  final AttachmentRef ref;
+
+  /// `attachment_chunks.id` — also the passage's rowid in the vector index.
+  final int chunkId;
+
+  /// Where it sits in the document's own order, from zero.
+  final int seq;
+
+  /// Where a person would look to find it: `Sheet Q3 rows 42–81`, `slide 4`,
+  /// `part 2`, `digest`, or empty for a document that is one passage.
+  final String locator;
+
+  final String text;
+
+  /// Who attached it. Null when the message behind it is gone — the pin
+  /// outlives the message, so the hit has to too.
+  final String? senderName;
+
+  /// Whether the owner is the one who sent it.
+  final bool outbound;
+
+  final String? receivedAt;
+
+  /// Cosine distance: 0 is identical, 1 orthogonal, 2 opposed.
+  final double distance;
+
+  const AttachmentChunkHit({
+    required this.ref,
+    required this.chunkId,
+    required this.seq,
+    required this.locator,
+    required this.text,
+    this.senderName,
+    required this.outbound,
+    this.receivedAt,
+    required this.distance,
+  });
+
+  String? get name => ref.name;
+
+  String? get contentType => ref.contentType;
+}

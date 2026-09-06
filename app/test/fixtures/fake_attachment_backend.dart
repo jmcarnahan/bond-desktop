@@ -29,6 +29,12 @@ class FakeAttachmentBackend implements AttachmentBackend {
   /// a size word for a rendering.
   final List<String> thumbnailWords = [];
 
+  /// Thrown by the next [extractText], whatever it is. Set to a
+  /// `GraphMailException` for a transport failure or an `AttachmentUnavailable`
+  /// for a refusal that arrived as one; left null for the ordinary case, where
+  /// a refusal comes back as [AttachmentText.skipped].
+  Object? throwOnText;
+
   /// Thrown by the next [fetchBytes], whatever it is. Set to an
   /// `AttachmentUnavailable` for a refusal or a `GraphMailException` for a
   /// transport failure; left null for the ordinary case.
@@ -46,6 +52,8 @@ class FakeAttachmentBackend implements AttachmentBackend {
   @override
   Future<AttachmentText> extractText(AttachmentRef ref) async {
     textCalls++;
+    final failure = throwOnText;
+    if (failure != null) throw failure;
     return textByKey[keyOf(ref)] ?? const AttachmentText.skipped('empty');
   }
 

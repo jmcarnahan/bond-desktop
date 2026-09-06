@@ -32,6 +32,19 @@ whole of `sqlite_master`, so a virtual table appearing during a migration step
 fails every migration pair in the suite — and both are derived, so losing one
 costs a rebuild and not a single model call.
 
+**A THIRD table, and it is not one of those two.** `attachment_chunks`
+(`AttachmentChunkIndex`, `vec_attachment_chunks`) holds the passages of
+attached documents: same embedding server, same `documentPrefix`, same
+`documentModelTag`, so a query embedded for message search finds documents too.
+It is a separate corpus for the same reason the first two are separate from
+each other — a document is many passages, and the clustering corpus has to stay
+"what people said". Fifty chunks of one contract in `message_vectors` would be
+fifty near-identical neighbours crowding out the threads the sweep is about.
+Its backfill is the message index's, with one added clause: `embedding IS NOT
+NULL`. A chunk row is written when the document is split and its vector arrives
+one POST later, so an unembedded row must be neither filed nor stamped. See
+[12-attachments.md](12-attachments.md).
+
 Their *bookkeeping* differs, because their durable sides do.
 `message_vectors` has an `indexed_at` column, so the message index files the
 unstamped rows and stamps them. `conversation_ai` has no such column and does

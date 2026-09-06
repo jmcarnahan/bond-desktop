@@ -596,6 +596,29 @@ class _MessageRowState extends State<MessageRow> {
                     selected: widget.selectedAttachment,
                     onOpen: widget.onOpenAttachment,
                   ),
+                  // What the model made of each file, under the SAME `AI:`
+                  // label the message's own summary carries, and for the same
+                  // reason: this is the model's read of a document, never a
+                  // sentence the sender wrote, and the two must never be
+                  // mistakable for one another.
+                  //
+                  // A file still being read, skipped, or never digested adds
+                  // NOTHING here — the chip's own `reading…` hint is the whole
+                  // signal while a digest is pending, and a placeholder line
+                  // per attachment would grow the row for nothing.
+                  for (final attachment in layout.chips)
+                    if (attachment.digest?.summary.isNotEmpty == true) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        'AI: ${attachment.name ?? 'file'}: '
+                        '${attachment.digest!.summary}',
+                        key: attachmentKey('digest', attachment),
+                        style: BondType.caption
+                            .copyWith(color: BondColors.inkMuted),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                 ],
               ],
               // The ask this message is still waiting on. The thread banner

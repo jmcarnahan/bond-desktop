@@ -7,6 +7,7 @@ import '../models/attachment_models.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
+import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
 import 'progress_sql.dart';
@@ -143,6 +144,13 @@ class MessageStore {
   /// near this one", not search's "which messages are near this query".
   late final ConversationVectorIndex _conversationIndex =
       ConversationVectorIndex(db);
+
+  /// The nearest-neighbour index over document passages, owned here on the
+  /// same terms as the two above. A third corpus because it answers a third
+  /// question — "which passage of which attached file says this" — and mixing
+  /// a fifty-chunk contract into either of the others would crowd out the
+  /// messages they exist to rank.
+  late final AttachmentChunkIndex _chunkIndex = AttachmentChunkIndex(db);
 
   static String _nowIso() => isoStamp(DateTime.now());
 
@@ -1834,6 +1842,10 @@ RETURNING *
     // emptied, so there is nothing to refill from; the next sweep's diff is
     // what fills it again.
     await _conversationIndex.reset();
+    // The chunk index, for [_vecIndex]'s reason exactly: `attachment_chunks`
+    // has just been emptied, and the floats vec0 holds in its shadow tables do
+    // not go with a DELETE.
+    await _chunkIndex.rebuild();
   }
 
   // ── per-message AI output ────────────────────────────────────────────
@@ -4832,6 +4844,12 @@ LIMIT ?
   ///
   /// [reason] is stored as NULL when empty, the rule `label` takes: the column
   /// means "there is a reason and it is this", never "the reason is nothing".
+  ///
+  /// **Anything but `done` also closes the digest.** No words means no digest,
+  /// ever — and a refused attachment left at `digest_status = 'pending'` would
+  /// carry the chip's `reading…` hint for the life of the mailbox, because
+  /// nothing else would ever come along to answer it. A `done` leaves the
+  /// column alone: the digest handler owns it from there.
   Future<void> setAttachmentText(
     String source,
     String sourceMessageId,
@@ -4865,6 +4883,7 @@ LIMIT ?
       await db.customUpdate(
         'UPDATE attachments SET text_status = ?, text_reason = ?, '
         '  text_truncated = ?, text_chars = ?, updated_at = ? '
+        "${status == 'done' ? '' : ", digest_status = 'skipped' "}"
         'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
         variables: _args([
           status,
@@ -4999,5 +5018,365 @@ LIMIT ?
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  // ── attachment chunks and their index ────────────────────────────────
+
+  /// Replaces one attachment's passages with [chunks], and hands back their
+  /// new ids in the order they were given.
+  ///
+  /// Delete-then-insert rather than a diff, because the chunker is
+  /// deterministic: the same text and the same code produce the same
+  /// passages, so a retry after a park re-derives exactly what was there and
+  /// this is idempotent by construction. What it is NOT is cheap in the index
+  /// — vec0 has no foreign key and no cascade, so the rowids of the passages
+  /// deleted here stay filed. That is harmless and deliberate: an orphan
+  /// rowid hydrates to no row in the join below and is dropped from the
+  /// results, and [AttachmentChunkIndex.rebuild] — reached only from
+  /// [wipeAll] — is what eventually clears them out.
+  ///
+  /// Every row is written un-embedded (`embedding` NULL, `dims` 0). The
+  /// embedder fills them in one POST at a time, and the index's backfill
+  /// deliberately cannot see a row until it has floats.
+  Future<List<int>> replaceChunks(
+    String source,
+    String messageId,
+    String attachmentId,
+    List<({int seq, String locator, String text})> chunks,
+  ) async {
+    final now = _nowIso();
+    final ids = <int>[];
+    await db.transaction(() async {
+      await db.customUpdate(
+        'DELETE FROM attachment_chunks '
+        'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+        variables: _args([source, messageId, attachmentId]),
+      );
+      for (final chunk in chunks) {
+        final row = await db
+            .customSelect(
+              'INSERT INTO attachment_chunks '
+              '(source, source_message_id, attachment_id, seq, locator, '
+              ' chunk_text, chars, embedding, dims, embed_model, embedded_at, '
+              ' indexed_at, created_at) '
+              'VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, NULL, NULL, NULL, ?) '
+              'RETURNING id',
+              variables: _args([
+                source,
+                messageId,
+                attachmentId,
+                chunk.seq,
+                chunk.locator,
+                chunk.text,
+                chunk.text.length,
+                now,
+              ]),
+            )
+            .getSingle();
+        ids.add(row.data['id'] as int);
+      }
+    });
+    return ids;
+  }
+
+  /// Adds one more passage to an attachment, after everything already stored.
+  ///
+  /// What the digest handler writes its summary through: the digest is a
+  /// passage of the document like any other — the one a search for "what is
+  /// this file about" should land on — and appending it must not disturb the
+  /// numbering [replaceChunks] laid down. The next `seq` is computed IN SQL
+  /// inside the transaction, so two writers cannot both read the same maximum.
+  Future<int> appendChunk(
+    String source,
+    String messageId,
+    String attachmentId, {
+    required String locator,
+    required String text,
+  }) async {
+    final now = _nowIso();
+    var id = 0;
+    await db.transaction(() async {
+      final row = await db
+          .customSelect(
+            'INSERT INTO attachment_chunks '
+            '(source, source_message_id, attachment_id, seq, locator, '
+            ' chunk_text, chars, embedding, dims, embed_model, embedded_at, '
+            ' indexed_at, created_at) '
+            'SELECT ?, ?, ?, '
+            '  COALESCE(MAX(seq), -1) + 1, ?, ?, ?, NULL, 0, NULL, NULL, '
+            '  NULL, ? '
+            'FROM attachment_chunks '
+            'WHERE source = ? AND source_message_id = ? AND attachment_id = ? '
+            'RETURNING id',
+            variables: _args([
+              source,
+              messageId,
+              attachmentId,
+              locator,
+              text,
+              text.length,
+              now,
+              source,
+              messageId,
+              attachmentId,
+            ]),
+          )
+          .getSingle();
+      id = row.data['id'] as int;
+    });
+    return id;
+  }
+
+  /// Files one passage's vector, and puts the row back on the index's
+  /// worklist.
+  ///
+  /// `indexed_at` is cleared rather than stamped: this method's whole job is
+  /// to make a row the backfill can finally see, and stamping it here would
+  /// write the float into the table and never into the index.
+  Future<void> setChunkEmbedding(
+    int id, {
+    required Uint8List embedding,
+    required int dims,
+    required String embedModel,
+  }) async {
+    await db.customUpdate(
+      'UPDATE attachment_chunks SET embedding = ?, dims = ?, '
+      '  embed_model = ?, embedded_at = ?, indexed_at = NULL WHERE id = ?',
+      variables: _args([embedding, dims, embedModel, _nowIso(), id]),
+    );
+  }
+
+  /// The passages of one attachment that have no vector yet, in document
+  /// order.
+  ///
+  /// The resume path's worklist. A park on the embedding server leaves the
+  /// text and the chunks stored and some tail of them un-embedded; the handler
+  /// asks this on its next claim and pays only for what is left.
+  Future<List<({int id, String text})>> unembeddedChunks(
+    String source,
+    String messageId,
+    String attachmentId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT id, chunk_text FROM attachment_chunks '
+          'WHERE source = ? AND source_message_id = ? AND attachment_id = ? '
+          '  AND embedding IS NULL ORDER BY seq',
+          variables: _args([source, messageId, attachmentId]),
+        )
+        .get();
+    return [
+      for (final row in result)
+        (
+          id: row.data['id'] as int,
+          text: row.data['chunk_text'] as String? ?? '',
+        ),
+    ];
+  }
+
+  /// Files every embedded passage the index has not seen. Returns how many
+  /// were attempted.
+  Future<int> indexPendingChunks() => _chunkIndex.backfill();
+
+  /// How many of one message's documents the model said ask for something.
+  ///
+  /// A LIKE over the encoded JSON rather than a JSON1 extract, and that is a
+  /// deliberate trade for a guarantee the model already gives:
+  /// [AttachmentDigest.toJson] writes all five keys always, and `jsonEncode`
+  /// emits them with no spaces, so `"asks":["` is present exactly when the
+  /// list has an entry. JSON1 would be the same answer through a function this
+  /// build is not obliged to have compiled in. A test pins the encoding.
+  Future<int> attachmentsWithAsks(String source, String messageId) async {
+    final row = await db
+        .customSelect(
+          'SELECT COUNT(*) AS n FROM attachments '
+          "WHERE source = ? AND source_message_id = ? "
+          "  AND digest_status = 'done' AND digest_json IS NOT NULL "
+          """  AND digest_json LIKE '%"asks":["%'""",
+          variables: _args([source, messageId]),
+        )
+        .getSingle();
+    return (row.data['n'] as num?)?.toInt() ?? 0;
+  }
+
+  /// Turns index hits into passages with their documents attached, back in
+  /// KNN order.
+  ///
+  /// Shared by the two reads below because the ranking rule is the same and
+  /// only the scope differs. The LEFT JOIN onto `message_progress` is
+  /// unconditional so [extraWhere] can carry a dropped filter without a second
+  /// shape of query; the LEFT JOIN onto `messages` is left because a pinned
+  /// document outlives the message it came on.
+  ///
+  /// Ids that hydrate to nothing are skipped rather than counted: that is
+  /// exactly what an orphaned vec0 rowid looks like, and it is how
+  /// [replaceChunks] gets away with leaving them behind.
+  Future<List<AttachmentChunkHit>> _hydrateChunkHits(
+    List<VecHit> hits, {
+    required String embedModel,
+    String extraWhere = '',
+    List<Object?> extraArgs = const [],
+    required int limit,
+    bool onePerAttachment = false,
+  }) async {
+    if (hits.isEmpty) return const [];
+    final ids = [for (final hit in hits) hit.id];
+    final result = await db
+        .customSelect(
+          '''
+SELECT c.id AS chunk_id, c.seq AS chunk_seq, c.locator AS chunk_locator,
+       c.chunk_text AS chunk_text,
+       a.*, m.from_name AS from_name, m.direction AS direction,
+       m.received_at AS received_at, m.conversation_key AS conversation_key
+FROM attachment_chunks c
+JOIN attachments a ON a.source = c.source
+  AND a.source_message_id = c.source_message_id
+  AND a.attachment_id = c.attachment_id
+LEFT JOIN messages m ON m.source = c.source
+  AND m.source_message_id = c.source_message_id
+LEFT JOIN message_progress p ON p.source = c.source
+  AND p.source_message_id = c.source_message_id
+WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
+''',
+          variables: _args([...ids, embedModel, ...extraArgs]),
+        )
+        .get();
+
+    final byChunk = <int, Map<String, Object?>>{
+      for (final row in result)
+        row.data['chunk_id'] as int: Map<String, Object?>.from(row.data),
+    };
+
+    // Back into the index's order. SQL returned a set; the ranking lives in
+    // [hits] and nowhere else.
+    final ranked = <AttachmentChunkHit>[];
+    final seenDocuments = <String>{};
+    for (final hit in hits) {
+      final row = byChunk[hit.id];
+      if (row == null) continue;
+      if (onePerAttachment) {
+        // The NEAREST passage stands for the whole document. Without this a
+        // fifty-chunk contract fills the page with itself and the second
+        // document never appears.
+        final document = '${row['source']}|${row['source_message_id']}'
+            '|${row['attachment_id']}';
+        if (!seenDocuments.add(document)) continue;
+      }
+      ranked.add(
+        AttachmentChunkHit(
+          ref: AttachmentRef.fromRow(row),
+          chunkId: hit.id,
+          seq: (row['chunk_seq'] as num?)?.toInt() ?? 0,
+          locator: row['chunk_locator'] as String? ?? '',
+          text: row['chunk_text'] as String? ?? '',
+          senderName: row['from_name'] as String?,
+          outbound: row['direction'] == 'outbound',
+          receivedAt: row['received_at'] as String?,
+          distance: hit.distance,
+        ),
+      );
+      if (ranked.length == limit) break;
+    }
+    return ranked;
+  }
+
+  /// The passages nearest [query] WITHIN a named scope — a thread's messages,
+  /// a storyline's pinned documents, or both.
+  ///
+  /// The retrieval read: what a reply cites. Null when the index is
+  /// unavailable, on [semanticSearch]'s reasoning.
+  ///
+  /// **Both scopes empty answers `const []` and never the corpus.** A caller
+  /// that could not work out which thread it is on must get nothing rather
+  /// than the nearest passage in the mailbox — a quote from a stranger's
+  /// contract pasted into a reply is the one failure this whole path has to
+  /// be incapable of.
+  Future<List<AttachmentChunkHit>?> chunkKnn(
+    Uint8List query, {
+    required String embedModel,
+    required String source,
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+    int limit = 6,
+  }) async {
+    if (!await _chunkIndex.ensureReady()) return null;
+    if (messageIds.isEmpty && attachmentIds.isEmpty) return const [];
+
+    // Heal before asking, for [semanticSearch]'s reason: a chunk whose index
+    // write never landed would otherwise stay unfindable until some unrelated
+    // document happened to be read.
+    await _chunkIndex.backfill();
+
+    final k = math.min(limit * 4, 400);
+    final hits = await _chunkIndex.knn(query, k: k);
+    if (hits.isEmpty) return const [];
+
+    // Each half of the OR is built only when it has values: an empty `IN ()`
+    // is a syntax error, and a scope with no ids has to contribute a
+    // predicate that is simply false.
+    final scope = StringBuffer();
+    final args = <Object?>[source];
+    if (messageIds.isNotEmpty) {
+      scope.write('c.source_message_id IN (${_placeholders(messageIds.length)})');
+      args.addAll(messageIds);
+    }
+    if (attachmentIds.isNotEmpty) {
+      if (scope.isNotEmpty) scope.write(' OR ');
+      scope.write('c.attachment_id IN (${_placeholders(attachmentIds.length)})');
+      args.addAll(attachmentIds);
+    }
+
+    return _hydrateChunkHits(
+      hits,
+      embedModel: embedModel,
+      extraWhere: 'AND c.source = ? AND ($scope)',
+      extraArgs: args,
+      limit: limit,
+    );
+  }
+
+  /// The passages nearest [query] anywhere in the mailbox, one per document.
+  ///
+  /// Home search's half of the chunk index, and the opposite of [chunkKnn] in
+  /// scope for the opposite reason: a person typing a phrase they remember
+  /// reading is asking about every file they have, and the answer they want is
+  /// "this document, here" rather than the same contract nine times.
+  ///
+  /// Null when the index is unavailable and `const []` when there is nothing
+  /// to search, exactly as [semanticSearch] separates them: one is a feature
+  /// switched off, the other a statement about the mailbox.
+  Future<List<AttachmentChunkHit>?> searchAttachmentChunks(
+    Uint8List query, {
+    required String embedModel,
+    int limit = 6,
+    bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (!await _chunkIndex.ensureReady()) return null;
+    if (sources.isEmpty) return const [];
+
+    await _chunkIndex.backfill();
+
+    // Eight times the ask rather than four. The collapse to one hit per
+    // document is what needs the extra slack: a long spreadsheet can occupy a
+    // whole page of neighbours on its own and still be one answer.
+    final k = math.min(limit * 8, 400);
+    final hits = await _chunkIndex.knn(query, k: k);
+    if (hits.isEmpty) return const [];
+
+    final where = StringBuffer('AND c.source IN (${_placeholders(sources.length)})');
+    final args = <Object?>[...sources];
+    // A gate-dropped message keeps its rows; its documents must not surface in
+    // the live search any more than the message does.
+    if (!includeDropped) where.write(' AND COALESCE(p.dropped, 0) = 0');
+
+    return _hydrateChunkHits(
+      hits,
+      embedModel: embedModel,
+      extraWhere: where.toString(),
+      extraArgs: args,
+      limit: limit,
+      onePerAttachment: true,
+    );
   }
 }

@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart' show immutable;
 
+import 'attachment_models.dart';
+
 /// Row models for the home screen — the live table of messages moving through
 /// the AI pipeline, and the counts above it.
 ///
@@ -203,7 +205,11 @@ class HomeSearch {
   /// and the state where there is no answer at all is no [HomeSearch] at all.
   final List<SemanticHit> hits;
 
-  const HomeSearch(this.query, this.hits);
+  /// The passages of attached documents that answer the same query. Never
+  /// null, for [hits]' reason: an empty list is a real answer.
+  final List<AttachmentChunkHit> documents;
+
+  const HomeSearch(this.query, this.hits, {this.documents = const []});
 }
 
 /// The archive pane's result set: what a search of the whole history came back

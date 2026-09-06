@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
 import 'activity_log.dart';
+import 'attachments/attachment_policy.dart';
 import 'pipeline_progress.dart';
 
 /// Restore: the owner's hand outranking the gates.
@@ -91,6 +92,32 @@ class RestoreService {
     // absent on purpose — the extract handler chains it.
     for (final kind in const ['extract', 'needs_you', 'embed_message']) {
       await _store.requeueWork(kind, source, sourceMessageId);
+    }
+
+    // Attachment work is ENQUEUED rather than requeued, and that is the whole
+    // difference: the sync refuses to queue a gated message's attachments in
+    // the first place, so there is no `done` row here to revive — there is no
+    // row at all. `enqueueWork` is `INSERT OR IGNORE`, so a message restored
+    // twice still queues each document once.
+    //
+    // The policy is asked again here for the same reason both handlers ask it:
+    // a signature logo and a 40 MB video are refused before a fetch, and the
+    // gate this restore just lifted was only one of its seven answers.
+    final row = await _store.getMessageRow(source, sourceMessageId);
+    if (row != null) {
+      for (final attachment
+          in await _store.attachmentsForMessage(source, sourceMessageId)) {
+        final (eligible, _) = attachmentTextPolicy(row, attachment);
+        if (!eligible) continue;
+        await _store.enqueueWork(
+          'attachment_text',
+          source,
+          attachmentEntityId(
+            sourceMessageId,
+            attachment['attachment_id'] as String? ?? '',
+          ),
+        );
+      }
     }
 
     await _log.record('restore', source: source, entityId: sourceMessageId);

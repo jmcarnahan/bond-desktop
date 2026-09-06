@@ -4,6 +4,7 @@ import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/attachment_chip_row.dart';
+import 'package:bond_inbox/widgets/attachment_format.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/inline_image_thumb.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
@@ -710,6 +711,134 @@ void main() {
       );
       await tester.tap(find.text('Terms.pdf'));
       expect(opened?.attachmentId, 'a1');
+    });
+  });
+
+  group('what the model made of a file', () {
+    AttachmentDigest digest(String summary) =>
+        AttachmentDigest(kind: 'quote', summary: summary);
+
+    testWidgets('a digested file says what the model read in it',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final file = ref(
+        attachmentId: 'a1',
+        name: 'Terms.pdf',
+        digest: digest('Fixed 4.25% for sixty months.'),
+      );
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [file]),
+      )));
+
+      expect(
+        find.text('AI: Terms.pdf: Fixed 4.25% for sixty months.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(attachmentKey('digest', file)), findsOneWidget);
+    });
+
+    testWidgets('a file still being read says nothing extra', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final file = ref(
+        attachmentId: 'a1',
+        name: 'Terms.pdf',
+        digestStatus: 'pending',
+      );
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [file]),
+      )));
+
+      // The chip's own hint is the whole signal while the digest is pending.
+      expect(find.byKey(attachmentKey('digest', file)), findsNothing);
+      expect(find.textContaining('AI:'), findsNothing);
+      expect(find.text('reading…'), findsOneWidget);
+    });
+
+    testWidgets('a digest with nothing in it is not a line', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final file = ref(
+        attachmentId: 'a1',
+        name: 'Terms.pdf',
+        digest: digest(''),
+      );
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [file]),
+      )));
+
+      expect(find.byKey(attachmentKey('digest', file)), findsNothing);
+    });
+
+    testWidgets('one line per digested file, and only for those',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [
+          ref(
+            attachmentId: 'a1',
+            name: 'Terms.pdf',
+            digest: digest('The renewal terms.'),
+          ),
+          ref(
+            attachmentId: 'a2',
+            name: 'Schedule.xlsx',
+            digestStatus: 'skipped',
+          ),
+        ]),
+      )));
+
+      expect(find.textContaining('AI: '), findsOneWidget);
+      expect(find.text('AI: Terms.pdf: The renewal terms.'), findsOneWidget);
+    });
+
+    testWidgets('a long digest never outgrows two lines', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final file = ref(
+        attachmentId: 'a1',
+        name: 'Terms.pdf',
+        digest: digest(List.filled(120, 'renewal').join(' ')),
+      );
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [file]),
+      )));
+
+      final line = tester.widget<Text>(
+        find.byKey(attachmentKey('digest', file)),
+      );
+      expect(line.maxLines, 2);
+      expect(line.overflow, TextOverflow.ellipsis);
+    });
+
+    testWidgets("a folded row keeps its files' digests folded too",
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final file = ref(
+        attachmentId: 'a1',
+        name: 'Terms.pdf',
+        digest: digest('The renewal terms.'),
+      );
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [file]),
+        collapsible: true,
+        initiallyCollapsed: true,
+      )));
+
+      expect(find.byKey(attachmentKey('digest', file)), findsNothing);
+      expect(
+        find.byKey(MessageRow.collapsedAttachmentHintKey),
+        findsOneWidget,
+      );
     });
   });
 

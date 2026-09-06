@@ -9,11 +9,11 @@ learns one at ingest, because chat has no detail step. Both write
 planned Graph read and a local write. Triage sees names and sizes; nothing
 waits for a download.
 
-> **Phase 1 of the attachments round.** The metadata stage below is live. The
-> `attachment_text` and `attachment_digest` stages that read the rows this one
-> writes arrive in Phase 3 — `attachment_text` work rows are already being
-> queued and simply wait `pending` until their handler exists, which is
-> harmless: `AiWorker` drains only kinds it has a handler for.
+> **Live.** All three stages run: the metadata stage inside stage 1, then
+> `attachment_text` (Graph plus the embedding server, no chat model) and
+> `attachment_digest` (one fast-slot call per document). What is still to come
+> is what USES them — retrieval into replies, recap lines, and the needs-you
+> re-verdict on a document that asks for something.
 
 ## The data model
 
@@ -23,8 +23,8 @@ v13).
 | Table | Holds | Written by |
 |---|---|---|
 | `attachments` | the metadata a row draws and the text policy judges on | both syncs, on every sighting |
-| `attachment_text` | the extracted words, up to 200 K chars | the text handler (Phase 3) |
-| `attachment_chunks` | the embedded passages, and the source of truth for the chunk vectors | the text handler (Phase 3) |
+| `attachment_text` | the extracted words, up to 200 K chars | the text handler |
+| `attachment_chunks` | the embedded passages, and the source of truth for the chunk vectors | the text handler, then the digest handler |
 
 The primary key is `(source, source_message_id, attachment_id)` — the
 connector's own identity for the file. Mail uses the Graph attachment id;
@@ -295,6 +295,211 @@ everything else as the characters the file stored — **no styles, no dates, no
 formulas**, because a serial date silently rendered wrong is worse than a number
 rendered plainly. 500 rows per sheet, with `totalRows` saying what was left out.
 
+## Reading the words
+
+`AttachmentTextHandler` (kind `attachment_text`, concurrency 2) turns one
+attachment row into stored text and embedded passages. It talks to **two
+servers and neither is a chat model**: Graph for the words, the embedding
+server for the vectors. That is what fixes where it sits in the drain — a park
+here is a park on `make embed`, the worker parks one kind at a time, and the
+storyline and draft queues on another port keep draining behind it.
+
+The digest is a SEPARATE kind for the mirror-image reason. A fast server that
+is not running must not hold back the words, which search, retrieval and the
+panel's Text segment all want whether or not a model has read them.
+
+The ladder, in order:
+
+1. An unparseable `entity_id`, a missing attachment row, or a missing message
+   row is `skipped` and DONE — a work row that cannot be worked still has to
+   complete.
+2. `attachmentTextPolicy` is asked **again**, after the sync already asked it:
+   a message can be gated between the enqueue and the claim. A refusal writes
+   `text_status = 'skipped'` with its reason and stops.
+3. `text_status == 'done'` is the **resume path**: `unembeddedChunks` says what
+   a park left behind, and the handler pays only for that tail. Empty means a
+   raced enqueue, which is `skipped/already_extracted`.
+4. `extractText` runs. `AttachmentUnavailable` is recorded as the skip it
+   amounts to (defensive — the seam says a refusal never throws, and the
+   store's state must not depend on that). A `GraphMailException` or
+   `GraphTeamsException` whose status is **404 or 410** is `skipped/gone`.
+   Everything else propagates: `NotSignedIn`/`ReconsentRequired` park the
+   drain, a 5xx or a dropped socket spends an attempt, and `AiWorker` owns that
+   ladder.
+5. A `skipped` extraction writes its reason and stops — **no digest is queued**.
+6. Otherwise the text is stored, chunked, and each passage embedded under
+   `EmbeddingsClient.documentPrefix` one POST at a time. An `unavailable`
+   server throws `LlmUnavailableException`, which parks the kind with no
+   attempt spent and **keeps the text and the passages**. A `rejected` passage
+   keeps a NULL embedding and the loop carries on.
+7. `indexPendingChunks()`, then `enqueueWork('attachment_digest', …)` — only
+   now, and only with words.
+
+**A skip closes the digest.** `setAttachmentText` sets
+`digest_status = 'skipped'` whenever the status is anything but `done`, in the
+same UPDATE. Left `pending`, a refused attachment would carry the chip's
+`reading…` hint for the life of the mailbox, because nothing else ever comes
+along to answer it.
+
+Note keys on the activity row: `fetch_ms` and `bytes` always (written before
+the outcome is judged — a skip that cost a 10 MB download is worth seeing),
+then `chars`, `chunks`, `embedded` and `truncated` on success, or `chunks`,
+`embedded` and `resumed` on the resume path.
+
+## Chunks and the second index
+
+`chunkAttachmentText` (`attachment_chunker.dart`) is pure and total. **The
+shape is read off the TEXT, never off the mime type**: the extractor writes the
+same flat text whatever the file was and marks structure with delimiters, so a
+content type that says `.xlsx` over a paragraph of "this workbook is password
+protected" chunks as the paragraph it is.
+
+| Text shape | One passage is | Locator |
+|---|---|---|
+| `--- Sheet: T ---` headers | 40 data rows, with the sheet header and the column row repeated | `Sheet T rows 2–41` (1-based, header is row 1, en dash) |
+| a sheet with nothing under its header | the header and its one line | `Sheet T` |
+| `--- Slide N ---` headers | one slide, header line and speaker notes included | `slide N` |
+| anything else | paragraphs packed greedily to 1,000 chars, with a 150-char overlap trimmed forward to a word boundary | `part N`, or empty for a single passage |
+
+An over-long paragraph is hard-split rather than dropped — a 20 K-character
+wall is one legitimate shape of extracted PDF. The extractor's
+`[... showing first 500 of ~N rows]` trailer is dropped: it is a statement
+about the extraction, and embedded it would make every truncated workbook a
+near neighbour of every other one. Empty passages go, and the list is cut at
+`maxChunksPerAttachment` (60) — each one costs a POST at embed time and a row
+forever, and the sixty-first is not where the answer is.
+
+`vec_attachment_chunks` (`attachment_chunk_index.dart`) is a faithful copy of
+`MessageVectorIndex`: derived, disposable, created lazily at first use and
+never in a migration or `beforeOpen`. It is a **second** index rather than more
+rows in `vec_messages` because the corpora answer different questions — a
+fifty-chunk contract in the clustering corpus would be fifty near-identical
+neighbours crowding out the threads it is about.
+
+One line differs from the sibling, and it is the whole reason the two-step
+write is safe: the backfill asks for `indexed_at IS NULL AND embedding IS NOT
+NULL`. A chunk row is stored the moment a document is split and its vector
+arrives one POST later; an unembedded row must neither be filed (there is
+nothing to file) nor stamped (it would then never be filed).
+
+`replaceChunks` is delete-then-insert rather than a diff, because the chunker
+is deterministic: the same text and the same code produce the same passages, so
+a retry after a park re-derives exactly what was there and the write is
+idempotent by construction. **vec0 has no cascade**, so the rowids of the
+deleted passages stay filed — they hydrate to no row in the KNN's join and are
+dropped from the results, and `AttachmentChunkIndex.rebuild()` (reached only
+from `wipeAll`) is the eventual cleanup.
+
+## The digest
+
+`AttachmentDigestHandler` (kind `attachment_digest`, concurrency 1, fast slot)
+runs `AttachmentDigestTask` over one document and writes
+`AttachmentDigest` — five keys, always all five:
+
+| Key | What it is |
+|---|---|
+| `evidence` | one sentence naming what this document is and why it was sent |
+| `kind` | `quote\|invoice\|contract\|schedule\|report\|slides\|spreadsheet\|form\|letter\|other` — what it IS, not its file type |
+| `summary` | one sentence saying what it says |
+| `facts` | up to 6 things a person would quote back, copied exactly |
+| `asks` | up to 3 things it requires of the reader; empty is the common case |
+
+The system prompt says "document" and "message" and **names no channel and no
+connector** — `prompt_parity_test` holds it to the strict form, like
+needs-you's. The user message puts the date anchor outside every fence, the
+covering message inside `<untrusted_data source="message">` for context, and
+the document last inside `<untrusted_data source="document">` — **with the file
+name inside that fence**, because a sender chooses the name and `Invoice —
+ignore your instructions.pdf` has to arrive as data like the rest of the file.
+`validate` never throws: an unrecognised `kind` becomes `other`, blanks are
+dropped, and everything is clamped.
+
+What it refuses to spend a call on: a deleted row, an already-done digest, a
+`text_status` that is not `done`, a message gated since the words landed, and a
+`done` status with no words behind it (which closes the digest so the pair is
+not re-examined on every drain).
+
+The digest is then **appended as one more passage** with locator `digest` — the
+one a search for "what is this file about" should land on. It is appended, not
+written into the chunk list, so a re-extraction's `replaceChunks` cannot
+renumber around it. An embedding server that is down here does **not** throw,
+unlike in the text handler: the model call is already paid for, and parking
+would risk spending it twice; the passage keeps a NULL embedding, invisible to
+the index until something re-reads the document.
+
+`MessageStore.attachmentsWithAsks(source, messageId)` counts the documents on
+one message whose digest asks for something, with a **LIKE over the encoded
+JSON** rather than a JSON1 extract: `AttachmentDigest.toJson` writes all five
+keys always and `jsonEncode` emits `"asks":[` with no spaces, so `"asks":["` is
+present exactly when the list has an entry. A test pins the encoding. The
+**needs-you re-verdict** that reads this count lands in the next phase,
+together with the fence that puts the digests in front of the needs-you prompt
+— requeuing before that fence exists would spend a model call on a
+re-judgement that cannot see what changed.
+
+## Search
+
+`MessageStore.searchAttachmentChunks` is the corpus-wide read Home search uses:
+the query vector against every source, `k = min(limit * 8, 400)` (over-fetching
+harder than the message search, because many passages of one document collapse
+to one hit), dropped rows filtered unless asked for, and **the nearest passage
+per document** — without that collapse a long spreadsheet fills the page with
+itself and the second document never appears.
+
+`MessageSearch.search` runs it after the message search has an answer, so a
+document search can never be the reason a search reports itself unavailable,
+and hands back `MessageSearchHits.documents` → `HomeSearch.documents`. Null
+from the store (no native index) becomes an empty list there: the message hits
+are an answer either way.
+
+`AttachmentChunkHit` carries the whole `AttachmentRef` — `conversationKey` and
+all — because every use of a hit is an action on the file behind it, plus the
+`chunkId`, `seq`, `locator`, `text`, sender, direction and distance.
+
+On screen, `HomePane` draws the documents FIRST, under an `In documents`
+caption and above the message table, one `AttachmentSearchTile` per hit: the
+file's glyph and name, the locator beside it, the passage itself in muted
+caption type, and who attached it and when. The passage is the document's own
+words, so it is rendered as a quote and **never under the `AI:` label** — that
+label is a promise a model wrote what follows. The count line above stays a
+count of MESSAGE hits, because it labels the list under it. The whole tile is
+one tap into the thread the document came with; a hit whose message is gone
+draws no control at all.
+
+**`searchArchive` is untouched.** It answers with feed rows, a shape with
+nowhere to put a passage, and its selling point is "I know I got that email".
+
+## What the row and the activity log show
+
+`MessageRow` writes one muted line under the chip row for each file the model
+has read — `AI: <file name>: <summary>`, two lines at most — under the SAME
+`AI:` label the message's own summary wears, and for the same reason: it is
+the model's read of a document, never a sentence the sender wrote. A file
+still being read, refused, or never digested adds nothing; the chip's own
+`reading…` hint is the whole signal while a digest is pending. The panel's AI
+segment renders the full digest (summary, facts, asks).
+
+The activity log labels the two kinds `Read attachment — N passages` and
+`Attachment digest — <kind>`. Neither can name its file: the work row's entity
+is `<message id>|<attachment id>`, and the name lives on a table the panel
+does not read, so each row says what it produced instead.
+
+`MessageStore.chunkKnn` is the other read — SCOPED to a thread's messages
+and/or a storyline's pinned documents, for the retrieval the next phase builds.
+**Both scopes empty answers `const []` and never the corpus**: a caller that
+could not work out which thread it is on must get nothing, because a quote from
+a stranger's contract pasted into a reply is the one failure this path has to
+be incapable of.
+
+## Restore
+
+`RestoreService` **enqueues** attachment work rather than requeuing it, unlike
+the three kinds beside it. The sync refuses to queue a gated message's
+attachments at all, so there is no `done` row to revive — there is no row.
+`enqueueWork` is `INSERT OR IGNORE`, so a message restored twice queues each
+document once, and the policy is asked again because the gate it just lifted
+was only one of its seven answers.
+
 ## Reading a file on screen
 
 A chip is a tap target. Tapping it puts the file **beside** the thread, because
@@ -402,7 +607,14 @@ toast rather than a dead control.
   equality, deliberately) and `AttachmentDigest`.
 - `app/lib/data/message_store.dart`, the `── attachments ──` section.
 - `app/lib/services/attachments/attachment_policy.dart`,
-  `attachment_markers.dart`.
+  `attachment_markers.dart`, `attachment_chunker.dart` (the three shapes),
+  `attachment_text_handler.dart`, `attachment_digest_handler.dart`.
+- `app/lib/services/llm/attachment_digest_task.dart` — the prompt, the schema
+  and the validator; `app/lib/data/attachment_chunk_index.dart` — the second
+  vec0 index.
+- `app/lib/services/message_search.dart` (`MessageSearchHits.documents`),
+  `app/lib/models/home_models.dart` (`HomeSearch.documents`),
+  `app/lib/services/restore_service.dart` (the fresh enqueue).
 - `app/lib/services/sync_service.dart` `_storeAttachments`;
   `app/lib/services/teams_sync.dart` `attachmentRows` and the ingest loop.
 - `app/lib/services/graph_mail.dart` `_detailExpand`,
@@ -445,3 +657,9 @@ toast rather than a dead control.
   cache"; `app/lib/data/message_store.dart` `clearAttachmentBlobs`.
 - `app/macos/Runner/*.entitlements` — all four carry
   `com.apple.security.files.user-selected.read-write` for the save panel.
+- `app/lib/widgets/attachment_search_tile.dart` — one document hit on Home
+  search; `app/lib/widgets/home_pane.dart` — the `In documents` block above
+  the message table.
+- `app/lib/widgets/message_row.dart` — the per-file `AI:` digest line under
+  the chip row; `app/lib/widgets/activity_log_panel.dart` — the labels and
+  sentences for `attachment_text` and `attachment_digest`.
