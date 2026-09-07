@@ -605,6 +605,115 @@ void main() {
     });
   });
 
+  group('opening a chat', () {
+    test('one person is a 1:1, and says so', () async {
+      final mcp = _FakeMcp({
+        'ensure_chat_json': [
+          {'chat_id': 'chat-9', 'chat_type': 'oneOnOne'},
+        ],
+      });
+
+      final chat = await _build(mcp).ensureChat(['u1']);
+
+      expect(mcp.argsOf('ensure_chat_json').single, {
+        'user_ids': 'u1',
+        'topic': '',
+      });
+      expect(chat.chatId, 'chat-9');
+      // The flag the caller retries on: a 1:1 can be asked for twice, a group
+      // cannot.
+      expect(chat.isGroup, isFalse);
+    });
+
+    test('several people travel comma-separated, with the topic', () async {
+      final mcp = _FakeMcp({
+        'ensure_chat_json': [
+          {'chat_id': 'chat-10', 'chat_type': 'group'},
+        ],
+      });
+
+      final chat = await _build(mcp).ensureChat(
+        ['u1', 'u2', 'u3'],
+        topic: 'Contract review',
+      );
+
+      expect(mcp.argsOf('ensure_chat_json').single, {
+        'user_ids': 'u1,u2,u3',
+        'topic': 'Contract review',
+      });
+      expect(chat.isGroup, isTrue);
+    });
+
+    test('nobody at all is refused without a request', () async {
+      // The answer is already known, and the round trip would only spend a
+      // request to be told so.
+      final mcp = _FakeMcp();
+
+      await expectLater(
+        _build(mcp).ensureChat(const []),
+        throwsA(isA<GraphTeamsException>()),
+      );
+      expect(mcp.calls, isEmpty);
+    });
+
+    test('each permanent refusal gets words a person can act on', () async {
+      // The shared `_call` special-cases only `not_connected`, so every one of
+      // these would otherwise arrive as a result with no `chat_id` in it and be
+      // sent to as a null chat.
+      const expected = {
+        'invalid_members': 'not a Teams user',
+        'no_members': 'Pick at least one person.',
+        'no_identity': 'Sign in again.',
+        'teams_unavailable': 'Teams is not available',
+      };
+
+      for (final entry in expected.entries) {
+        await expectLater(
+          _build(_FakeMcp({
+            'ensure_chat_json': [
+              {'error': entry.key},
+            ],
+          })).ensureChat(['u1']),
+          throwsA(isA<GraphTeamsException>()
+              .having((e) => e.message, entry.key, contains(entry.value))),
+          reason: entry.key,
+        );
+      }
+    });
+
+    test('an error nobody mapped still throws, carrying what it said',
+        () async {
+      await expectLater(
+        _build(_FakeMcp({
+          'ensure_chat_json': [
+            {'error': 'something_new'},
+          ],
+        })).ensureChat(['u1']),
+        throwsA(isA<GraphTeamsException>()
+            .having((e) => e.message, 'message', contains('something_new'))),
+      );
+    });
+
+    test('a chat with no id is not a chat', () async {
+      await expectLater(
+        _build(_FakeMcp()).ensureChat(['u1']),
+        throwsA(isA<GraphTeamsException>()
+            .having((e) => e.message, 'message', contains('no id'))),
+      );
+    });
+
+    test('a disconnected server routes to sign-in instead', () async {
+      await expectLater(
+        _build(_FakeMcp({
+          'ensure_chat_json': [
+            {'error': 'not_connected'},
+          ],
+        })).ensureChat(['u1']),
+        throwsA(isA<ReconsentRequired>()),
+      );
+    });
+  });
+
   group('the throttle floors', () {
     test('are the Graph backend’s own, not a second pair', () {
       // The ToU discipline is ours whichever transport carries the request.

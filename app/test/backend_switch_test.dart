@@ -9,11 +9,13 @@ import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
+import 'package:bond_inbox/services/graph_people.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
 import 'package:bond_inbox/services/mcp/mcp_auth.dart';
 import 'package:bond_inbox/services/mcp/mcp_mail_backend.dart';
+import 'package:bond_inbox/services/mcp/mcp_people_backend.dart';
 import 'package:bond_inbox/services/mcp/mcp_teams_backend.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
@@ -86,13 +88,14 @@ void main() {
   tearDown(() => db.close());
 
   group('which backend a fresh install gets', () {
-    test('is the MCP one, in all three providers', () async {
+    test('is the MCP one, in every backend provider', () async {
       final ref = await container();
 
       expect(ref.read(appPrefsProvider).backendMode, backendModeMcp);
       expect(ref.read(authSessionProvider), isA<McpAuthSession>());
       expect(ref.read(mailBackendProvider), isA<McpMailBackend>());
       expect(ref.read(teamsBackendProvider), isA<McpTeamsBackend>());
+      expect(ref.read(peopleBackendProvider), isA<McpPeopleBackend>());
     });
 
     test('pointed at the default server for this build', () async {
@@ -137,7 +140,7 @@ void main() {
   });
 
   group('switching to the direct-Graph backend', () {
-    test('changes all three providers', () async {
+    test('changes every backend provider', () async {
       final ref = await container();
       expect(ref.read(authSessionProvider), isA<McpAuthSession>());
 
@@ -146,6 +149,7 @@ void main() {
       expect(ref.read(authSessionProvider), isA<GraphAuth>());
       expect(ref.read(mailBackendProvider), isA<GraphMail>());
       expect(ref.read(teamsBackendProvider), isA<GraphTeams>());
+      expect(ref.read(peopleBackendProvider), isA<GraphPeople>());
     });
 
     test('and everything built on them follows, with nothing invalidated by '

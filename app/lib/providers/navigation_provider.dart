@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../models/message_models.dart' show Conversation;
+import '../models/person.dart';
 import '../widgets/app_rail.dart' show RailSection;
 
 /// Where something outside [InboxScreen]'s State is asking the app to go.
@@ -30,6 +32,21 @@ class OpenStorylineIntent extends NavIntent {
   final String storylineId;
 
   OpenStorylineIntent(this.storylineId);
+}
+
+/// Open the New message screen, optionally pre-filled. [chat] wins over [to]
+/// when both are given: a thread names its own members, and a chip beside it
+/// would claim the message goes to two sets of people.
+class OpenComposeIntent extends NavIntent {
+  final RecipientChannel channel;
+  final List<Person> to;
+  final Conversation? chat;
+
+  OpenComposeIntent({
+    this.channel = RecipientChannel.mail,
+    this.to = const [],
+    this.chat,
+  });
 }
 
 class OpenSectionIntent extends NavIntent {

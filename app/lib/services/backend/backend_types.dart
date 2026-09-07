@@ -95,6 +95,105 @@ class AccountInfo {
       };
 }
 
+/// One person on a sent message's To or Cc line, as the server reported them
+/// back.
+///
+/// [name] is absent far more often than it looks — it is filled in from the
+/// address book and left null for anyone not in one — so nothing may key on
+/// it. [address] is the identity, and the only field a stored row keeps.
+@immutable
+class Recipient {
+  final String? name;
+  final String address;
+
+  const Recipient({this.name, required this.address});
+}
+
+/// What a send actually put in front of somebody.
+///
+/// A draft dies the moment it is sent: its id names a message that has left
+/// Drafts and is not yet the copy in Sent Items. So the only way to show a
+/// reply before the next sync catches up is to learn these fields while the
+/// draft still exists and write a local row from them — which is what
+/// `mail_echo.dart` does.
+///
+/// [internetMessageId] is the field that makes the row RECONCILABLE. The Sent
+/// Items copy carries the same one and a different [draftId], so the sync can
+/// replace the local echo rather than duplicate it. Without it there would be
+/// two rows for one message and nothing able to tell.
+///
+/// [sentAt] is ISO-8601 UTC at SECONDS precision with a `Z` suffix — the shape
+/// Graph prints `receivedDateTime` in, e.g. `2026-09-06T20:37:16Z`. It goes
+/// verbatim into a column the fold compares as a string, so a stamp printed at
+/// any other precision would sort against its own thread wrongly.
+@immutable
+class SentDraft {
+  /// The id that was sent. Dies with the draft; kept because the local echo is
+  /// keyed on it and nothing else about the message is unique yet.
+  final String draftId;
+
+  final String? conversationId;
+
+  /// The RFC 5322 Message-ID, and the only identifier the Sent Items copy
+  /// shares with the draft that became it.
+  final String? internetMessageId;
+
+  final String? subject;
+  final List<Recipient> to;
+  final List<Recipient> cc;
+
+  /// The server's clock, not this machine's — see the class doc for the
+  /// precision this must be printed at.
+  final String? sentAt;
+
+  const SentDraft({
+    required this.draftId,
+    this.conversationId,
+    this.internetMessageId,
+    this.subject,
+    this.to = const [],
+    this.cc = const [],
+    this.sentAt,
+  });
+}
+
+/// The directory could not be searched. Held apart from every other failure
+/// because the recipients field degrades rather than errors: with no directory
+/// it still offers recents and typed addresses, so what it needs to know is
+/// only whether the affordance is worth showing again.
+///
+/// [scopeMissing] is what separates the two answers. True means the tenant has
+/// not granted `User.ReadBasic.All` and no retry can change that until somebody
+/// consents and the app reconnects — the field stops asking for the rest of the
+/// session. False means a throttle, a network, a server: the next keystroke is
+/// worth trying.
+class DirectoryUnavailable implements Exception {
+  final bool scopeMissing;
+  final String message;
+
+  const DirectoryUnavailable({
+    required this.scopeMissing,
+    required this.message,
+  });
+
+  @override
+  String toString() => message;
+}
+
+/// A Teams chat that is now known to exist and can be posted to.
+///
+/// [isGroup] is carried because the two are not the same promise: a 1:1 chat
+/// is idempotent — asking for it twice returns the same chat — while every
+/// group request CREATES another chat. A caller retrying a failed send has to
+/// reuse this id rather than ask again, and this flag is how it knows it must.
+@immutable
+class EnsuredChat {
+  final String chatId;
+  final bool isGroup;
+
+  const EnsuredChat({required this.chatId, required this.isGroup});
+}
+
 /// Graph refused the delta cursor (HTTP 410): the token is older than the
 /// server's change history and only a fresh drain can recover.
 class DeltaResyncRequired implements Exception {

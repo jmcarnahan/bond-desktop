@@ -6,7 +6,20 @@ import 'package:drift/drift.dart';
 import '../models/attachment_models.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
+import '../models/person.dart';
 import '../models/storyline_models.dart';
+// The second thing this layer reads out of `services/`, on the same licence as
+// `conversation_state.dart` below: `chat_roster.dart` is arithmetic over rows
+// with no I/O and no imports above `models/`. [recentPeople] needs the query
+// match, and a second copy of it here would be the compose field and the
+// recipients list disagreeing about who a typed word names.
+import '../services/chat_roster.dart';
+// The one thing this layer reads out of `services/`, and it is not a service:
+// `conversation_state.dart` is the fold's arithmetic with no I/O in it and no
+// imports of its own. [foldOutboundSend] needs the fold rules, and a second
+// copy of the "an outbound may go quiet, but never off `done`" asymmetry is
+// exactly how a send would start disagreeing with the sync about a thread.
+import '../services/conversation_state.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
@@ -327,6 +340,197 @@ INSERT OR IGNORE INTO message_progress (
     return created > 0 ? receivedAt : null;
   }
 
+  /// Writes a `local:` echo of a message this app just sent, unless the real
+  /// copy has already landed. True when the row was written.
+  ///
+  /// The check is the whole method. The mail poll has no re-entrancy guard and
+  /// the Sent Items copy can turn up on the very first poll after a send, so a
+  /// sync already in flight can ingest the real row BEFORE this call runs.
+  /// [deleteLocalEcho] would then have nothing to remove, and the echo written
+  /// after it would sit in the thread forever as a duplicate that nothing is
+  /// ever going to reconcile. One transaction, so the check and the write
+  /// cannot straddle that ingest.
+  ///
+  /// A row with no `internet_message_id` skips the check: there is nothing to
+  /// match the real copy on, so there is nothing to be second to either.
+  Future<bool> insertLocalEcho(Map<String, Object?> row) async {
+    final source = row['source'] ?? 'email';
+    final internetMessageId = row['internet_message_id'];
+    return db.transaction(() async {
+      if (internetMessageId != null) {
+        final landed = await db
+            .customSelect(
+              'SELECT 1 FROM messages '
+              'WHERE source = ? AND internet_message_id = ? '
+              "AND source_message_id NOT LIKE '$localEchoPrefix%' LIMIT 1",
+              variables: _args([source, internetMessageId]),
+            )
+            .get();
+        if (landed.isNotEmpty) return false;
+      }
+      await upsertMessage(row);
+      return true;
+    });
+  }
+
+  /// The key just past every `local:` id, so `>= 'local:' AND < 'local;'`
+  /// is exactly "starts with `local:`" — and, unlike `LIKE 'local:%'`, a
+  /// range the primary key can serve. SQLite will not use a BINARY index for
+  /// a case-insensitive LIKE, and the guard below runs once per Sent Items
+  /// message on every drain, so as a LIKE it was a scan of the whole source
+  /// per message: minutes on a first sync of a mailbox with years of sent
+  /// mail behind it.
+  static final String _localEchoPrefixEnd = _keyAfterPrefix(localEchoPrefix);
+
+  /// [prefix] with its last character stepped up by one: the smallest key
+  /// that no string starting with [prefix] can reach.
+  static String _keyAfterPrefix(String prefix) {
+    final last = prefix.length - 1;
+    return prefix.substring(0, last) +
+        String.fromCharCode(prefix.codeUnitAt(last) + 1);
+  }
+
+  /// The internet message ids of every `local:` echo [source] is holding —
+  /// what the drain asks once per page, so the reconciliation below costs a
+  /// page nothing when there is nothing to reconcile, which is every page
+  /// but the one right after a send.
+  ///
+  /// Echoes are always few: one per message sent from this app and not yet
+  /// folded, and the next drain takes them. An echo with no internet message
+  /// id is not listed, because nothing could ever match it.
+  Future<Set<String>> pendingEchoInternetMessageIds(String source) async {
+    final rows = await db
+        .customSelect(
+          'SELECT internet_message_id FROM messages '
+          'WHERE source = ? '
+          '  AND source_message_id >= ? AND source_message_id < ? '
+          '  AND internet_message_id IS NOT NULL',
+          variables: _args([source, localEchoPrefix, _localEchoPrefixEnd]),
+        )
+        .get();
+    return {
+      for (final row in rows)
+        if (row.data['internet_message_id'] case final String id
+            when id.isNotEmpty)
+          id,
+    };
+  }
+
+  /// Removes the local echo of the message [internetMessageId] names, and its
+  /// progress row with it. Returns how many message rows went.
+  ///
+  /// **The only DELETE on `messages` in this app**, and it may only ever reach
+  /// a `local:` row — hence the key range on both statements rather than on
+  /// the first alone (a range rather than a LIKE for the planner's sake; see
+  /// [_localEchoPrefixEnd]). Everything else in the pipeline treats a stored
+  /// message as permanent, so a widening of this predicate would be a
+  /// widening of what the app can destroy.
+  ///
+  /// Called from inside the Sent Items page transaction, immediately before
+  /// the real row is written: the echo and the copy that replaces it are never
+  /// both visible to a reader.
+  Future<int> deleteLocalEcho(String source, String internetMessageId) async {
+    return db.transaction(() async {
+      await db.customUpdate(
+        'DELETE FROM message_progress '
+        'WHERE source = ? AND source_message_id IN ('
+        '  SELECT source_message_id FROM messages '
+        '  WHERE source = ? '
+        '    AND source_message_id >= ? AND source_message_id < ? '
+        '    AND internet_message_id = ?'
+        ')',
+        variables: _args([
+          source,
+          source,
+          localEchoPrefix,
+          _localEchoPrefixEnd,
+          internetMessageId,
+        ]),
+      );
+      return db.customUpdate(
+        'DELETE FROM messages '
+        'WHERE source = ? '
+        '  AND source_message_id >= ? AND source_message_id < ? '
+        '  AND internet_message_id = ?',
+        variables: _args([
+          source,
+          localEchoPrefix,
+          _localEchoPrefixEnd,
+          internetMessageId,
+        ]),
+      );
+    });
+  }
+
+  /// Folds a message this app just sent into its conversation row.
+  ///
+  /// [recomputeConversationCounts] rewrites counts and nothing else, but the
+  /// rail orders threads by `last_message_at` and shows
+  /// `last_message_preview` — so a send that only recounted would leave the
+  /// thread sitting where it was, previewing the message it just answered.
+  /// And it would never heal: the next pull skips a row it has already seen.
+  ///
+  /// The fold rules are [foldMessage]'s, not this method's. Reimplementing the
+  /// "an outbound may go quiet, but never off `done`" asymmetry here is how
+  /// the two paths would drift.
+  ///
+  /// All of it in ONE transaction, because it is a read-modify-write against a
+  /// row the sync's own page transaction rewrites — and a send can land in the
+  /// middle of a poll. Drift serialises transactions, so wrapping the read is
+  /// what stops this method folding onto a snapshot the ingest has already
+  /// replaced and writing the ingest's work back out.
+  ///
+  /// A thread with no stored row is left alone. Composing a new message writes
+  /// its own conversation; this is for replying into one that exists.
+  Future<void> foldOutboundSend(
+    String source,
+    String conversationKey, {
+    required String? receivedAt,
+    String? preview,
+    String? subject,
+  }) async {
+    await db.transaction(() async {
+      final row = await getConversationRow(source, conversationKey);
+      if (row == null) return;
+
+      final folded = foldMessage(
+        ConvSnapshot(
+          state: row['state'] as String? ?? stateWaiting,
+          lastInboundAt: row['last_inbound_at'] as String?,
+          lastOutboundAt: row['last_outbound_at'] as String?,
+          lastMessageAt: row['last_message_at'] as String?,
+          lastMessagePreview: row['last_message_preview'] as String?,
+          subject: row['subject'] as String?,
+        ),
+        outbound: true,
+        receivedAt: receivedAt,
+        subject: subject,
+        preview: preview,
+      );
+
+      await upsertConversation({
+        'source': source,
+        'conversation_key': conversationKey,
+        'subject': folded.subject,
+        // Read back and passed through, every one of them: the conflict clause
+        // overwrites participants, state, counts and preview unconditionally,
+        // so a field this call did not carry would be erased by a send.
+        'participants_json': row['participants_json'],
+        'state': folded.state,
+        'category': row['category'],
+        'cta_text': row['cta_text'],
+        'cta_urgency': row['cta_urgency'],
+        'message_count': row['message_count'],
+        'inbound_count': row['inbound_count'],
+        'last_inbound_at': folded.lastInboundAt,
+        'last_outbound_at': folded.lastOutboundAt,
+        'last_message_at': folded.lastMessageAt,
+        'last_message_preview': folded.lastMessagePreview,
+      });
+      await recomputeConversationCounts(source, conversationKey);
+    });
+  }
+
   /// Whether this `(source, id)` is already stored.
   ///
   /// Asked BEFORE the upsert, because afterwards there is no way to tell an
@@ -625,6 +829,150 @@ WHERE source = ? AND conversation_key = ?
         )
         .get();
     return [for (final row in result) Conversation.fromRow(row.data)];
+  }
+
+  /// How many rows each half of [recentPeople] reads before merging.
+  ///
+  /// A bound rather than a page: what the caller wants is the handful of
+  /// people it will actually show, and the query cannot know which rows those
+  /// are until the two halves are merged and filtered. Four hundred of each is
+  /// months of correspondence at any volume a desktop mailbox sees, and both
+  /// queries are indexed reads of two columns.
+  static const int _recentScanRows = 400;
+
+  /// People the user has corresponded with, most recent first.
+  ///
+  /// Two sources, because neither is enough on its own: inbound messages know
+  /// who WROTE, and conversation rosters know who was on the thread — the
+  /// second is the only place a Teams member or a mail recipient the user
+  /// never heard back from appears at all. Merged on the lowercased address,
+  /// keeping the newest sighting of each, so somebody who wrote yesterday
+  /// outranks somebody on a thread from March.
+  ///
+  /// A `teams:` address becomes a person carrying the GRAPH ID and no mail,
+  /// which is what makes them chat-able; one with no display name beside it is
+  /// dropped, because an id alone renders as an empty chip and cannot be
+  /// searched for by name.
+  ///
+  /// [source] restricts BOTH halves — `'email'` or `'teams'`; null means both.
+  /// The compose screen passes one, because only a Graph id can open a chat
+  /// and only an address can be mailed.
+  Future<List<Person>> recentPeople({
+    String query = '',
+    int limit = 8,
+    String? source,
+  }) async {
+    // Address key → the person and when they were last seen. The key is the
+    // lowercased address exactly as stored, so a `teams:` id and a mail
+    // address can never collide.
+    final seen = <String, ({Person person, String at})>{};
+
+    void offer(String? name, String? address, String? at) {
+      if (address == null || address.isEmpty) return;
+      final stamp = at ?? '';
+      final key = address.toLowerCase();
+      final existing = seen[key];
+      if (existing != null && stamp.compareTo(existing.at) <= 0) return;
+
+      // A newer sighting with no name keeps the name an older one had: the
+      // roster stores a mail RECIPIENT as a bare address, so the user's own
+      // reply being the newest thing on a thread must not turn "Sarah
+      // Whitfield" back into "sarah@x.com".
+      final known = name == null || name.isEmpty
+          ? existing?.person.displayName
+          : name;
+
+      final Person person;
+      if (key.startsWith('teams:')) {
+        final id = address.substring('teams:'.length);
+        // An id with no name is unshowable and unsearchable: there is nothing
+        // to render in a chip and nothing for a query to match.
+        if (id.isEmpty || known == null || known.isEmpty) return;
+        person =
+            Person(id: id, displayName: known, source: PersonSource.recent);
+      } else {
+        person = Person(
+          id: 'mail:$key',
+          displayName: known == null || known.isEmpty ? address : known,
+          mail: address,
+          source: PersonSource.recent,
+        );
+      }
+      seen[key] = (person: person, at: stamp);
+    }
+
+    // Bare `from_name` beside `MAX(received_at)`: SQLite takes the bare
+    // columns from the row the max came from, so the name is the one on the
+    // newest message rather than an arbitrary one.
+    final senders = await db
+        .customSelect(
+          'SELECT from_name, from_address, MAX(received_at) AS last_at '
+          'FROM messages '
+          "WHERE direction = 'inbound' AND from_address IS NOT NULL "
+          "  AND from_address <> '' "
+          '${source == null ? '' : 'AND source = ? '}'
+          'GROUP BY LOWER(from_address) '
+          'ORDER BY last_at DESC LIMIT $_recentScanRows',
+          variables: _args([?source]),
+        )
+        .get();
+    for (final row in senders) {
+      offer(
+        row.data['from_name'] as String?,
+        row.data['from_address'] as String?,
+        row.data['last_at'] as String?,
+      );
+    }
+
+    final threads = await db
+        .customSelect(
+          'SELECT participants_json, last_message_at FROM conversations '
+          '${source == null ? '' : 'WHERE source = ? '}'
+          'ORDER BY last_message_at DESC LIMIT $_recentScanRows',
+          variables: _args([?source]),
+        )
+        .get();
+    for (final row in threads) {
+      final at = row.data['last_message_at'] as String?;
+      for (final entry in _decodeJsonList(row.data['participants_json'])) {
+        if (entry is! Map) continue;
+        offer(entry['name'] as String?, entry['email'] as String?, at);
+      }
+    }
+
+    final matched = [
+      for (final entry in seen.values)
+        if (matchesPersonQuery(entry.person, query)) entry,
+    ]..sort((a, b) => b.at.compareTo(a.at));
+
+    return [
+      for (final entry in matched.take(limit)) entry.person,
+    ];
+  }
+
+  /// Teams chats, newest activity first, whose subject or participant names
+  /// contain [query]. A blank query lists them all.
+  ///
+  /// Filtered in Dart rather than in SQL because the names live inside
+  /// `participants_json`, and a LIKE against that column would match the
+  /// address half of an entry as readily as the name half — searching for
+  /// `sam` would turn up every chat with `sam` inside a Graph id.
+  ///
+  /// A CONTAINS rather than the prefix match [recentPeople] uses: a chat is
+  /// recognised by any word of a topic somebody else wrote, not by how it
+  /// starts.
+  Future<List<Conversation>> teamsChats({String query = ''}) async {
+    final chats = await loadConversations(sources: const ['teams']);
+    final needle = query.trim().toLowerCase();
+    if (needle.isEmpty) return chats;
+    return [
+      for (final chat in chats)
+        if ((chat.subject ?? '').toLowerCase().contains(needle) ||
+            chat.participants.any(
+              (p) => (p.name ?? '').toLowerCase().contains(needle),
+            ))
+          chat,
+    ];
   }
 
   /// Flips a thread's state and stamps when it happened — "done 3 days ago"

@@ -5,14 +5,21 @@ import 'dart:typed_data';
 // table, and this file means the app's own.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/person.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/screens/new_message_screen.dart';
 import 'package:bond_inbox/services/attachments/file_dialogs.dart';
 import 'package:bond_inbox/services/attachments/xlsx_reader.dart';
+import 'package:bond_inbox/services/backend/auth_session.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/backend/mail_backend.dart';
+import 'package:bond_inbox/services/backend/people_backend.dart';
+import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
@@ -49,6 +56,44 @@ class _FakeSync implements MailSync {
 
   @override
   Future<void> ensureMessageBody(String sourceMessageId) async {}
+}
+
+/// The compose collaborators, for the one test that opens New message over a
+/// preview. None of them is exercised past construction: the screen reads the
+/// capability off the session and the recents off the store, and the fakes
+/// answer "no grant, no account" so nothing here reaches a network.
+class _FakeAuth implements AuthSession {
+  @override
+  Future<bool> get isSignedIn async => true;
+
+  @override
+  Future<bool> get needsReconsent async => false;
+
+  @override
+  Future<bool> hasScope(String bareScope) async => false;
+
+  @override
+  Future<AccountInfo?> get storedAccount async => null;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
+class _FakeMail implements MailBackend {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
+/// `myUserId` throws on purpose: `RecipientSearch` swallows it.
+class _FakeTeams implements TeamsBackend {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
+}
+
+class _FakePeople implements PeopleBackend {
+  @override
+  Future<List<Person>> searchPeople(String query, {int top = 10}) async =>
+      const [];
 }
 
 /// A save panel that answers with a path the test picked, and remembers what
@@ -126,6 +171,7 @@ void main() {
   Future<void> pumpInbox(
     WidgetTester tester, {
     Size surface = const Size(1400, 900),
+    List<Override> overrides = const [],
   }) async {
     await tester.binding.setSurfaceSize(surface);
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -137,6 +183,7 @@ void main() {
       syncServiceProvider.overrideWithValue(_FakeSync()),
       notificationCoordinatorProvider
           .overrideWithValue(NotificationCoordinator(store)),
+      ...overrides,
     ]);
     addTearDown(container.dispose);
 
@@ -224,6 +271,47 @@ void main() {
 
     expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
     expect(find.byType(ThreadDetailPanel), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('New message outranks the full viewer, and Back does not revive it',
+      (tester) async {
+    await seedThread();
+    await pumpInbox(tester, overrides: [
+      authSessionProvider.overrideWithValue(_FakeAuth()),
+      mailBackendProvider.overrideWithValue(_FakeMail()),
+      teamsBackendProvider.overrideWithValue(_FakeTeams()),
+      peopleBackendProvider.overrideWithValue(_FakePeople()),
+    ]);
+    await openThread(tester);
+    await openAttachment(tester, 'Terms.pdf');
+    await tester.tap(find.byKey(AttachmentPreviewPanel.expandKey));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(AttachmentViewerPane), findsOneWidget);
+
+    // Compose is first in the pane ladder: it wins over a viewer that was
+    // filling the whole pane a moment ago.
+    await tester.tap(find.byTooltip('New message'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(NewMessageScreen), findsOneWidget);
+    expect(find.byType(AttachmentViewerPane), findsNothing);
+    expect(find.byType(AttachmentPreviewPanel), findsNothing);
+
+    // Leaving compose lands on the overview, not back in the viewer: opening
+    // a pane put the thread away, and the file it was previewing with it.
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(NewMessageScreen), findsNothing);
+    expect(find.byType(AttachmentViewerPane), findsNothing);
+    expect(find.byType(AttachmentPreviewPanel), findsNothing);
+    expect(find.byType(ThreadDetailPanel), findsNothing);
+    await tester.pump(const Duration(milliseconds: 600));
     await settleQueues(tester);
   });
 

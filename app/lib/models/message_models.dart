@@ -13,6 +13,20 @@ import 'attachment_models.dart';
 /// Ported from a sibling app's conversation models, minus the fields this
 /// inbox has no use for (campaign, relevance, suggestions, attachments).
 
+/// What marks a message id as the app's own optimistic row: the local echo a
+/// mail send writes for itself, before the server's copy comes back. See
+/// `services/mail_echo.dart` for the whole contract, which re-exports this so
+/// a caller reasoning about echoes still imports one file.
+///
+/// It lives HERE, at the bottom of the layering, because three layers share
+/// it and none of them may import the other two: [Message.isLocalEcho] reads
+/// it, the echo writer builds ids with it, and `MessageStore.deleteLocalEcho`
+/// guards BOTH of its statements with a `LIKE 'local:%'` over it. That guard
+/// is the only thing standing between the app's one delete and a widening of
+/// what it is able to destroy, so a second copy of this string — drifting
+/// from the one the guard uses — is the failure worth designing against.
+const String localEchoPrefix = 'local:';
+
 /// Decodes a JSON-encoded TEXT column into a list, tolerating null, empty
 /// string, malformed JSON, and a payload that decodes to a non-list.
 List<dynamic> _decodeJsonList(Object? raw) {
@@ -405,6 +419,15 @@ class Message {
   });
 
   bool get inbound => !outbound;
+
+  /// Whether this row is the app's own record of a message it just sent,
+  /// written before the server's copy came back — see [localEchoPrefix].
+  ///
+  /// It renders as an ordinary outbound message on purpose: it IS one, and the
+  /// only thing provisional about it is the id, which the next sync swaps for
+  /// the server's. Callers that must not act on a provisional id — anything
+  /// asking Graph about a specific message — ask this first.
+  bool get isLocalEcho => id.startsWith(localEchoPrefix);
 
   /// This message with its attachments filled in.
   ///

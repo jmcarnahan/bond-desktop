@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
+import '../models/person.dart';
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
@@ -19,6 +20,7 @@ import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/notify_routing.dart';
 import '../providers/prefs_provider.dart';
+import '../providers/recipient_search_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/attachments/attachment_bytes.dart';
 import '../services/attachments/file_dialogs.dart';
@@ -54,6 +56,7 @@ import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
+import 'new_message_screen.dart';
 
 /// The whole app, for now: a dark rail of sections beside one main pane that
 /// shows either a section's threads or the open thread's transcript.
@@ -153,6 +156,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// set as [_showingActivityLog] and the three selections above: one thing
   /// in the pane, and every setter clears the rest.
   bool _showingSettings = false;
+
+  /// Whether the main pane is showing the New message screen. The same
+  /// exclusive set again: composing is not a section, and it clears whatever
+  /// was being read exactly as Settings and the log do.
+  bool _showingCompose = false;
+
+  /// Who or what compose was opened on, when something asked for it
+  /// pre-filled. Null is the rail's own button — a blank message.
+  OpenComposeIntent? _composePrefill;
 
   /// One HTTP client for every server check the settings screen makes, closed
   /// with the screen. Held here rather than built per check because a client
@@ -334,25 +346,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// bug that reads as "the app is broken": the row updates, the transcript
   /// beside it does not, and the two disagree on screen.
   ///
-  /// Returns the mail sync's own future — awaited by nothing on the timer or
-  /// button paths, and by [_syncNow] alone, which has a label to hold up for
-  /// as long as the pull is actually running.
+  /// The ordering is load bearing. The list load starts FIRST, so the rail is
+  /// never a tick behind. Everything the open thread shows is reloaded AFTER
+  /// that sync has finished, because the rows this tick pulled in — a reply
+  /// the user sent from Outlook, the Sent Items copy that takes an echo's
+  /// place — must be on screen on THIS tick, not the next one. Reading the
+  /// transcript beside the sync, as this did, meant a message could sit
+  /// stored-but-unshown for a full minute.
+  ///
+  /// The returned future covers the whole pass — the sync and the reads behind
+  /// it. Nothing on the timer path awaits it; [_syncNow] does, because it has
+  /// a "Syncing…" label to hold up until the screen is actually showing what
+  /// the pull brought in.
   Future<void> _refresh() async {
     if (!mounted) return;
     final mail = ref.read(conversationsProvider.notifier).load();
     ref.read(storylinesProvider.notifier).load();
+    await mail;
+    if (!mounted) return;
     final selected = _selectedId;
     if (selected != null) {
-      ref
-          .read(
-            threadProvider(
-              (
-                source: _selectedSource ?? 'email',
-                conversationKey: selected,
-              ),
-            ).notifier,
-          )
-          .load();
       // The sync deletes a draft whose thread just received new mail. The
       // composer must find that out NOW, not on the next AI progress event —
       // a stale suggestion left on screen gets sent as a reply to a message
@@ -368,13 +381,37 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           )
           .load();
     }
+    await _reloadOpenThread();
+  }
+
+  /// Re-reads whatever transcript is open: the selected thread, or the
+  /// selected storyline's timeline.
+  ///
+  /// Called after a send and after every pull, and it is the ONLY thing that
+  /// puts a newly stored message on screen — the thread providers are one-shot
+  /// reads, not watches. Bodies are not fetched: everything this reload is for
+  /// is already stored, and a fetch here would put a network call on the timer
+  /// path.
+  Future<void> _reloadOpenThread() async {
+    if (!mounted) return;
+    final selected = _selectedId;
+    if (selected != null) {
+      await ref
+          .read(
+            threadProvider(
+              (
+                source: _selectedSource ?? 'email',
+                conversationKey: selected,
+              ),
+            ).notifier,
+          )
+          .load(fetchBodies: false);
+    }
+    if (!mounted) return;
     final storyline = _selectedStorylineId;
     if (storyline != null) {
-      ref.read(storylineTimelineProvider(storyline).notifier).load();
+      await ref.read(storylineTimelineProvider(storyline).notifier).load();
     }
-    // Last, so every load above is already started: they run beside the sync,
-    // not behind it.
-    await mail;
   }
 
   /// What the refresh button does: the mail refresh the timer also runs, plus
@@ -426,6 +463,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     await ref.read(conversationsProvider.notifier).refreshTeams();
     if (!mounted) return;
     setState(() => _teamsSyncedAt = null);
+    // The chat the user is looking at is the one they most want a pull they
+    // asked for to have refreshed, and the list reload above does not touch
+    // the transcript. No network: everything the pull found is already stored.
+    await _reloadOpenThread();
   }
 
   Future<void> _signOut() async {
@@ -490,6 +531,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -532,6 +574,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -562,6 +605,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -584,6 +628,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -600,6 +645,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _showingActivityLog = true;
       _showingSettings = false;
+      _showingCompose = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -646,6 +692,29 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }
     });
 
+    // The open thread's own sends, whoever started them. Both arms store the
+    // reply BEFORE the epoch moves and before `onSent`'s list sync, which can
+    // take seconds — so the row is sitting in sqlite, unread, for as long as
+    // that sync runs. This is what reads it.
+    //
+    // Registered in `build` rather than in `initState` because the target is
+    // the SELECTION: `ref.listen` re-registers on every build, so it follows
+    // the user from thread to thread with no bookkeeping.
+    final open = _selectedId;
+    if (open != null) {
+      ref.listen<DraftState>(
+        draftProvider(
+          (source: _selectedSource ?? 'email', conversationKey: open),
+        ),
+        (previous, next) {
+          if (previous == null || !mounted) return;
+          if (next.sendEpoch > previous.sendEpoch) {
+            unawaited(_reloadOpenThread());
+          }
+        },
+      );
+    }
+
     // A queued reply leaves on a timer, so nothing is awaiting its outcome the
     // way the composer's own send is. Listening from HERE rather than from the
     // thread pane is what lets it be announced after the user has moved on:
@@ -685,6 +754,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           _selectStoryline(storylineId);
         case OpenSectionIntent(:final section):
           _selectSection(section);
+        case OpenComposeIntent():
+          _openCompose(prefill: intent);
       }
       // Cleared after the frame, not inside the listener: writing to a
       // notifier while it is notifying is a re-entrant write.
@@ -948,7 +1019,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               _selectedStorylineId == null &&
               _selectedLaterDay == null &&
               !_showingActivityLog &&
-              !_showingSettings)
+              !_showingSettings &&
+              !_showingCompose)
           ? _section
           : null,
       onSelectConversation: (source, id) => _select(id, source: source),
@@ -1002,6 +1074,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                     );
                   },
                 ),
+              ),
+              // First of the actions: writing to somebody is the one thing
+              // here that starts something rather than adjusting the app.
+              _railAction(
+                Icons.edit_outlined,
+                'New message',
+                () => _openCompose(),
               ),
               if (ref.watch(appPrefsProvider).showActivityLog)
                 _railAction(
@@ -1081,6 +1160,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _showingSettings = true;
       _showingActivityLog = false;
+      _showingCompose = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -1097,6 +1177,47 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   void _closeSettings() => setState(() => _showingSettings = false);
+
+  /// Opens the New message screen. A pane and not a section, like Settings and
+  /// the log, and it clears the same things they do — including the reply
+  /// window, which belongs to a thread that is no longer on screen.
+  void _openCompose({OpenComposeIntent? prefill}) {
+    setState(() {
+      _showingCompose = true;
+      _composePrefill = prefill;
+      _showingSettings = false;
+      _showingActivityLog = false;
+      _selectedId = null;
+      _selectedSource = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
+      // At narrow widths the rail is an overlay: leaving it open would put the
+      // pane the button just opened behind a scrim.
+      _railOpen = false;
+      _replyOpenFor = null;
+      // The file being previewed belonged to that thread too. The ladder
+      // would not show it without a selection, but a pane leaves the same
+      // state behind whichever pane it was — Settings clears these, so does
+      // this.
+      _previewing = null;
+      _viewerFull = false;
+    });
+  }
+
+  /// Leaves compose. The prefill goes with it, so the rail's own button opens
+  /// a blank message next time rather than whoever was addressed last.
+  void _closeCompose() => setState(() {
+        _showingCompose = false;
+        _composePrefill = null;
+      });
+
+  Widget _compose() => NewMessageScreen(
+        onBack: _closeCompose,
+        onHome: () => _selectSection(RailSection.home),
+        prefill: _composePrefill,
+      );
 
   /// The tuning controls, the two owner texts, and what Microsoft granted. The
   /// threshold reloads the list as it changes — the whole point of the slider
@@ -1322,6 +1443,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // in-flight change; a dead host must answer with nothing rather than with
     // "ref after dispose".
     if (!mounted) return;
+    // The session just changed, so a "this account has no directory" verdict
+    // about the old one is not evidence about the new one; take it back and
+    // let the next search ask the server that is actually connected now.
+    ref.read(recipientSearchProvider).resetScope();
     ref.read(conversationsProvider.notifier).load(syncFirst: false);
   }
 
@@ -1345,6 +1470,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Future<void> _connectMicrosoft() async {
     if (!mounted) return;
+    // The user is on their way to fix exactly the thing the cached verdict is
+    // about, so it stops being worth believing the moment they leave. The next
+    // search asks once and re-remembers if the grant is still refused.
+    ref.read(recipientSearchProvider).resetScope();
     final url = await ref.read(mcpStackProvider).auth.microsoftConnectUrl();
     final uri = url == null ? null : Uri.tryParse(url);
     if (uri == null) return;
@@ -1413,12 +1542,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
-  /// Exactly one view, never two: Settings, then the activity log, then the two
-  /// picker panes, then the full attachment viewer, then the thread transcript,
-  /// then the storyline timeline, then the section overview. The order is the
-  /// priority — Settings and the log come first because they are the two that
-  /// are not about the mail at all, and a pane outranks what it was opened from
-  /// because it is the newer thing the user asked for.
+  /// Exactly one view, never two: compose, then Settings, then the activity
+  /// log, then the two picker panes, then the full attachment viewer, then the
+  /// thread transcript, then the storyline timeline, then the section
+  /// overview. The order is the priority — compose, Settings and the log come
+  /// first because they are the three that are not about the mail already on
+  /// screen, and a pane outranks what it was opened from because it is the
+  /// newer thing the user asked for.
   ///
   /// The viewer sits directly above the transcript because that is what it was
   /// opened from and what Back returns to — and above the storyline too, since
@@ -1427,6 +1557,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
+    if (_showingCompose) return _compose();
     if (_showingSettings) return _settings();
     if (_showingActivityLog) return _activityLog();
 
@@ -1924,6 +2055,58 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
+  /// Compose to the people on [thread]. A chat is addressed as ITSELF — the
+  /// message goes into it — while a mail thread yields its participants as To,
+  /// minus the user, who is on every thread they have ever replied on.
+  Future<void> _composeFrom(Conversation thread) async {
+    if (thread.source == 'teams') {
+      _openCompose(
+        prefill: OpenComposeIntent(
+          channel: RecipientChannel.teams,
+          chat: thread,
+        ),
+      );
+      return;
+    }
+
+    // A stored account is a keychain read, and a session that cannot answer is
+    // no reason to refuse the compose: without an owner the only thing lost is
+    // the filter that drops the user from their own To line.
+    AccountInfo? owner;
+    try {
+      owner = await _account;
+    } catch (_) {
+      owner = null;
+    }
+    if (!mounted) return;
+
+    final ownerKey = (owner?.mail ?? owner?.userPrincipalName)
+        ?.trim()
+        .toLowerCase();
+    final seen = <String>{};
+    final to = <Person>[];
+    for (final p in thread.participants) {
+      final email = p.email?.trim() ?? '';
+      // A Teams roster entry stored on a mail row has no address to send to,
+      // and the same person can appear on several messages of one thread.
+      if (email.isEmpty || email.startsWith('teams:')) continue;
+      final key = email.toLowerCase();
+      if (key == ownerKey || !seen.add(key)) continue;
+      to.add(Person(
+        id: 'mail:$key',
+        displayName: (p.name?.trim().isNotEmpty ?? false)
+            ? p.name!.trim()
+            : email,
+        mail: email,
+        // The SAME id `MessageStore.recentPeople` gives this person, so the
+        // typeahead's own row for them collapses into the chip rather than
+        // offering a duplicate — `Person` compares on the id.
+        source: PersonSource.recent,
+      ));
+    }
+    _openCompose(prefill: OpenComposeIntent(to: to));
+  }
+
   Widget _thread(Conversation selected) {
     final target = (source: selected.source, conversationKey: selected.id);
     final thread = ref.watch(threadProvider(target));
@@ -1941,7 +2124,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     };
 
     final draft = ref.watch(draftProvider(target));
-    final pending = draft.pending;
+    // The undo window's text, or the text of a send that has left it and whose
+    // row is not in this transcript yet. One unbroken bubble from the click to
+    // the stored row, and never both at once — see [DraftState.bubbleBody].
+    final pendingBody = draft.bubbleBody(messages);
 
     // Whether this pane offers to reply at all. Mail always does — the ladder
     // bottoms out at the clipboard, which needs no grant. A chat does only on
@@ -1956,7 +2142,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // it back.
     final answersSomebody = messages.isNotEmpty && messages.last.inbound;
 
-    final shown = pending == null
+    final shown = pendingBody == null
         ? messages
         : [
             ...messages,
@@ -1964,7 +2150,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               id: 'pending-send',
               outbound: true,
               source: selected.source,
-              bodyText: pending.body,
+              bodyText: pendingBody,
               // UTC, like every stored timestamp: the open-ask comparison is
               // lexicographic over these strings, and a local-time stamp sorts
               // before the mail it answers for every zone west of UTC.
@@ -2046,7 +2232,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The reply affordance rides at the end of the transcript so it reads as
       // attached to the message it answers. After the user's OWN last message
       // there is nothing to answer, and it renders nothing.
-      afterTranscript: canReply && (answersSomebody || pending != null)
+      afterTranscript: canReply && (answersSomebody || pendingBody != null)
           ? _quickReplies(selected, target, draft)
           : null,
       // Every ask on the pane is a call to action, so every one of them opens
@@ -2066,6 +2252,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? () => _laterSender(selected.primaryEmail!, selected.source)
           : null,
       onKeepInInbox: () => _keepThread(selected.source, selected.id),
+      onCompose: () => unawaited(_composeFrom(selected)),
       // Opening a file is a selection like any other: it replaces whatever was
       // being previewed and always lands on the split, never on the full pane
       // the user may have left open for the last one.
@@ -2609,6 +2796,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (!mounted) return;
     switch (outcome) {
       case SendOutcome.sent:
+        // A second read, after the sync `send` runs on its way out. The epoch
+        // listener already put the echo on screen; by now the Sent Items copy
+        // may have replaced it, and this is what shows that swap.
+        await _reloadOpenThread();
+        if (!mounted) return;
         _toast('Reply sent.');
       case SendOutcome.savedToOutlook:
         _toast('Saved to your Outlook drafts.');

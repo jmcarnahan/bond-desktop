@@ -234,6 +234,54 @@ class McpTeamsBackend implements TeamsBackend {
     return _messageShape(message);
   }
 
+  /// Opens the chat holding exactly [userIds] plus the signed-in user.
+  ///
+  /// Every one of the server's permanent errors gets its own sentence here,
+  /// because each names a different thing the person in front of the screen
+  /// can do about it — pick somebody else, pick anybody, sign in again, or
+  /// give up on Teams for this account. The shared [_call] special-cases only
+  /// `not_connected`, so an unmapped error would otherwise arrive as a result
+  /// with no `chat_id` in it and be sent to as a null chat.
+  ///
+  /// The empty list is refused WITHOUT a call for the same reason a blank
+  /// directory query is: the answer is already known, and the round trip would
+  /// only spend a request to be told so.
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) async {
+    if (userIds.isEmpty) {
+      throw const GraphTeamsException('Pick at least one person.');
+    }
+
+    final result = await _call('ensure_chat_json', {
+      'user_ids': userIds.join(','),
+      'topic': topic ?? '',
+    });
+
+    final error = result['error'];
+    if (error != null) {
+      throw GraphTeamsException(switch (error) {
+        'invalid_members' =>
+          'One of the people picked is not a Teams user in this organization.',
+        'no_members' => 'Pick at least one person.',
+        'no_identity' =>
+          'Your Teams identity could not be resolved. Sign in again.',
+        'teams_unavailable' => 'Teams is not available for this account.',
+        _ => 'Could not open a Teams chat: $error',
+      });
+    }
+
+    final chatId = result['chat_id'] as String?;
+    if (chatId == null || chatId.isEmpty) {
+      throw const GraphTeamsException(
+        'The Bond server opened a chat but returned no id for it.',
+      );
+    }
+    return EnsuredChat(
+      chatId: chatId,
+      isGroup: result['chat_type'] == 'group',
+    );
+  }
+
   /// Whether this page's oldest message is at or before the cursor.
   ///
   /// An empty page ends the walk: there is nothing older to ask for. A page

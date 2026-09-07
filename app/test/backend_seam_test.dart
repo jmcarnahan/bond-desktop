@@ -8,10 +8,12 @@ import 'package:bond_inbox/services/attachments/attachment_bytes.dart';
 import 'package:bond_inbox/services/backend/attachment_backend.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
+import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/graph_attachment_backend.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
+import 'package:bond_inbox/services/graph_people.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -70,6 +72,11 @@ void main() {
       expect(GraphTeams(auth, httpClient: client), isA<TeamsBackend>());
     });
 
+    test('GraphPeople is a PeopleBackend', () {
+      final auth = GraphAuth(httpClient: client, store: _Tokens());
+      expect(GraphPeople(auth, httpClient: client), isA<PeopleBackend>());
+    });
+
     test('GraphAttachmentBackend is an AttachmentBackend', () {
       final auth = GraphAuth(httpClient: client, store: _Tokens());
       expect(
@@ -113,12 +120,14 @@ void main() {
       final AuthSession auth = container.read(authSessionProvider);
       final MailBackend mail = container.read(mailBackendProvider);
       final TeamsBackend teams = container.read(teamsBackendProvider);
+      final PeopleBackend people = container.read(peopleBackendProvider);
       final AttachmentBackend files =
           container.read(attachmentBackendProvider);
 
       expect(auth, isA<GraphAuth>());
       expect(mail, isA<GraphMail>());
       expect(teams, isA<GraphTeams>());
+      expect(people, isA<GraphPeople>());
       expect(files, isA<GraphAttachmentBackend>());
     });
 
@@ -136,6 +145,7 @@ void main() {
       // These build at all only because the override supplied their session.
       expect(container.read(mailBackendProvider), isA<GraphMail>());
       expect(container.read(teamsBackendProvider), isA<GraphTeams>());
+      expect(container.read(peopleBackendProvider), isA<GraphPeople>());
       expect(
         container.read(attachmentBackendProvider),
         isA<GraphAttachmentBackend>(),

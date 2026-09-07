@@ -50,6 +50,24 @@ class _FakeMcp implements BondMcpClient {
   Future<void> close() async => closes++;
 }
 
+/// The server's answer to `send_draft`: a flat dict, `to`/`cc` as
+/// `[{name, address}]`, and a `sent_at` on the SERVER's clock at seconds
+/// precision — the shape the Sent Items copy will be stamped in.
+const Map<String, dynamic> _sendOk = {
+  'ok': true,
+  'id': 'draft-1',
+  'conversation_id': 'conv-1',
+  'internet_message_id': '<abc@bond.local>',
+  'subject': 'Re: Contract review',
+  'to': [
+    {'name': 'Sarah', 'address': 'sarah@x.com'},
+  ],
+  'cc': [
+    {'name': null, 'address': 'legal@x.com'},
+  ],
+  'sent_at': '2026-09-06T20:37:16Z',
+};
+
 Map<String, dynamic> _delta({
   List<Object> messages = const [],
   String next = '',
@@ -309,7 +327,12 @@ void main() {
         () async {
       final mcp = _FakeMcp({
         'create_reply_draft_json': [
-          {'id': 'draft-1', 'web_link': 'https://outlook/draft-1'},
+          {
+            'id': 'draft-1',
+            'web_link': 'https://outlook/draft-1',
+            'conversation_id': 'conv-1',
+            'internet_message_id': '<abc@bond.local>',
+          },
         ],
       });
 
@@ -319,6 +342,10 @@ void main() {
       // webLink, not web_link: the hand-off to Outlook is the whole capability
       // ladder for an account that may save drafts but not send them.
       expect(draft['webLink'], 'https://outlook/draft-1');
+      // Graph's own key names for the same reason. The callers read these, and
+      // a snake_case key would simply be absent to them.
+      expect(draft['conversationId'], 'conv-1');
+      expect(draft['internetMessageId'], '<abc@bond.local>');
 
       final args = mcp.argsFor('create_reply_draft_json');
       expect(args['message_id'], 'm1');
@@ -328,7 +355,7 @@ void main() {
     });
 
     test('filling in and sending name the draft', () async {
-      final mcp = _FakeMcp();
+      final mcp = _FakeMcp({'send_draft': [_sendOk]});
       final mail = McpMailBackend(mcp);
 
       await mail.updateDraftBody('draft-1', 'Sounds good.');
@@ -339,6 +366,175 @@ void main() {
         'text': 'Sounds good.',
       });
       expect(mcp.argsFor('send_draft'), {'draft_id': 'draft-1'});
+    });
+
+    test('the send answers with what went out, recipients and all', () async {
+      // These fields are the only record of the message until Sent Items
+      // catches up: the draft they were read off no longer exists.
+      final sent = await McpMailBackend(
+        _FakeMcp({'send_draft': [_sendOk]}),
+      ).sendDraft('draft-1');
+
+      expect(sent.draftId, 'draft-1');
+      expect(sent.conversationId, 'conv-1');
+      expect(sent.internetMessageId, '<abc@bond.local>');
+      expect(sent.subject, 'Re: Contract review');
+      expect(sent.sentAt, '2026-09-06T20:37:16Z');
+      expect([for (final r in sent.to) r.address], ['sarah@x.com']);
+      expect(sent.to.single.name, 'Sarah');
+      expect([for (final r in sent.cc) r.address], ['legal@x.com']);
+      expect(sent.cc.single.name, isNull);
+    });
+
+    test('an entry naming nobody is dropped rather than stored', () async {
+      final sent = await McpMailBackend(
+        _FakeMcp({
+          'send_draft': [
+            {
+              ...Map<String, dynamic>.from(_sendOk),
+              'to': const [
+                {'name': 'Nobody'},
+                {'name': 'Sarah', 'address': 'sarah@x.com'},
+                'not a map',
+              ],
+            },
+          ],
+        }),
+      ).sendDraft('draft-1');
+
+      expect([for (final r in sent.to) r.address], ['sarah@x.com']);
+    });
+
+    test('a send the server did not confirm is a failure, not an empty record',
+        () async {
+      // The caller writes a local row from this answer. A row built out of a
+      // refusal would claim a message was sent that never left.
+      await expectLater(
+        McpMailBackend(
+          _FakeMcp({
+            'send_draft': [
+              {'ok': false, 'error': 'mailbox_full'},
+            ],
+          }),
+        ).sendDraft('draft-1'),
+        throwsA(
+          isA<GraphMailException>().having(
+            (e) => e.message,
+            'message',
+            contains('mailbox_full'),
+          ),
+        ),
+      );
+    });
+
+    test('and so is a result with no verdict in it at all', () async {
+      await expectLater(
+        McpMailBackend(_FakeMcp()).sendDraft('draft-1'),
+        throwsA(isA<GraphMailException>()),
+      );
+    });
+  });
+
+  group('a new draft', () {
+    test('sends each recipient line as one comma-separated string', () async {
+      // The server's convention for every list-shaped argument it takes.
+      final mcp = _FakeMcp({
+        'create_draft_json': [
+          {'id': 'draft-9'},
+        ],
+      });
+
+      await McpMailBackend(mcp).createDraft(
+        to: ['sarah@x.com', 'ravi@x.com'],
+        cc: ['legal@x.com'],
+        subject: 'Contract review',
+        body: 'Friday works.',
+      );
+
+      expect(mcp.argsFor('create_draft_json'), {
+        'to': 'sarah@x.com,ravi@x.com',
+        'cc': 'legal@x.com',
+        'subject': 'Contract review',
+        'body': 'Friday works.',
+      });
+    });
+
+    test('sends an empty Cc rather than leaving the argument out', () async {
+      final mcp = _FakeMcp({
+        'create_draft_json': [
+          {'id': 'draft-9'},
+        ],
+      });
+
+      await McpMailBackend(mcp)
+          .createDraft(to: ['sarah@x.com'], subject: '', body: 'Hi.');
+
+      expect(mcp.argsFor('create_draft_json')['cc'], '');
+    });
+
+    test('comes back with the same keys the reply draft does', () async {
+      // The composer's capability ladder and the local echo row both read
+      // these, and neither knows which of the two calls made the draft.
+      final draft = await McpMailBackend(
+        _FakeMcp({
+          'create_draft_json': [
+            {
+              'id': 'draft-9',
+              'web_link': 'https://outlook/draft-9',
+              'conversation_id': 'conv-9',
+              'internet_message_id': '<new@bond.local>',
+            },
+          ],
+        }),
+      ).createDraft(to: ['sarah@x.com'], subject: 'Hi', body: 'Hello.');
+
+      expect(draft['id'], 'draft-9');
+      expect(draft['webLink'], 'https://outlook/draft-9');
+      expect(draft['conversationId'], 'conv-9');
+      expect(draft['internetMessageId'], '<new@bond.local>');
+    });
+
+    test('a refusal is a failure, not a draft with a null id', () async {
+      await expectLater(
+        McpMailBackend(
+          _FakeMcp({
+            'create_draft_json': [
+              {'error': 'invalid_recipients'},
+            ],
+          }),
+        ).createDraft(to: ['nope'], subject: '', body: ''),
+        throwsA(isA<GraphMailException>().having(
+          (e) => e.message,
+          'message',
+          contains('invalid_recipients'),
+        )),
+      );
+    });
+
+    test('and so is a result with no id in it', () async {
+      // The caller is about to fill in a body and send it. There is nothing
+      // worse to hand it than a draft id that is null.
+      await expectLater(
+        McpMailBackend(_FakeMcp()).createDraft(
+          to: ['sarah@x.com'],
+          subject: '',
+          body: '',
+        ),
+        throwsA(isA<GraphMailException>()),
+      );
+    });
+
+    test('a disconnected server routes to sign-in instead', () async {
+      await expectLater(
+        McpMailBackend(
+          _FakeMcp({
+            'create_draft_json': [
+              {'error': 'not_connected'},
+            ],
+          }),
+        ).createDraft(to: ['sarah@x.com'], subject: '', body: ''),
+        throwsA(isA<ReconsentRequired>()),
+      );
     });
   });
 

@@ -62,11 +62,13 @@ Map<String, dynamic> graphMessage({
   required String id,
   String conversationId = 'conv-1',
   String fromAddress = 'sarah@example.com',
+  String? internetMessageId,
   required String receivedDateTime,
 }) =>
     {
       'id': id,
       'conversationId': conversationId,
+      'internetMessageId': ?internetMessageId,
       'subject': 'Contract review',
       'from': {
         'emailAddress': {'name': 'Sarah', 'address': fromAddress}
@@ -352,4 +354,183 @@ void main() {
     });
   });
 
+  /// What the drain does about the row a mail send wrote for itself.
+  ///
+  /// The echo carries the internet message id the Sent Items copy will carry
+  /// and an id the server has never heard of, so without the delete inside the
+  /// page transaction the thread would end up holding the same message twice —
+  /// once under `local:` forever.
+  group('the local echo', () {
+    const messageId = '<reply-1@bond.local>';
+
+    /// The row the send writes: the draft's id, the body typed here, gated
+    /// exactly as a Sent Items copy is.
+    Future<void> seedEcho(String sentAt) => store.insertLocalEcho({
+          'source': 'email',
+          'source_message_id': 'local:draft-1',
+          'internet_message_id': messageId,
+          'conversation_key': 'conv-1',
+          'direction': 'outbound',
+          'received_at': sentAt,
+          'body_text': 'Friday works.',
+          'body_preview': 'Friday works.',
+          'is_read': 1,
+          'triage_status': 'skipped',
+          'gate_reason': 'outbound',
+        });
+
+    Future<List<Map<String, Object?>>> outbound() async {
+      final rows = await db
+          .customSelect(
+            "SELECT * FROM messages WHERE direction = 'outbound' "
+            'ORDER BY source_message_id',
+          )
+          .get();
+      return [for (final r in rows) r.data];
+    }
+
+    Future<List<String>> progressIds() async {
+      final rows = await db
+          .customSelect(
+            'SELECT source_message_id FROM message_progress ORDER BY 1',
+          )
+          .get();
+      return [for (final r in rows) r.data['source_message_id'] as String];
+    }
+
+    test('a Sent Items copy replaces the echo with the same internet message '
+        'id', () async {
+      final inboundAt = fresh(const Duration(hours: 2));
+      final sentAt = fresh(const Duration(hours: 1));
+      queueInbound([graphMessage(id: 'in-1', receivedDateTime: inboundAt)]);
+      await sync.syncNow();
+      await seedEcho(sentAt);
+
+      // Graph's own copy: same internet message id, an id of its own.
+      queueSent([
+        graphMessage(
+          id: 'sent-1',
+          fromAddress: 'lo@bond.com',
+          internetMessageId: messageId,
+          receivedDateTime: sentAt,
+        ),
+      ]);
+      await sync.syncNow();
+
+      final rows = await outbound();
+      expect(rows, hasLength(1), reason: 'one message, one row');
+      expect(rows.single['source_message_id'], 'sent-1');
+      expect(await progressIds(), ['in-1', 'sent-1'],
+          reason: 'the echo\'s progress row went with it');
+      final conversation = (await row())!;
+      expect(conversation['message_count'], 2);
+      expect(conversation['inbound_count'], 1);
+      expect(conversation['state'], stateWaiting);
+      expect(conversation['last_outbound_at'], sentAt);
+    });
+
+    test('and folds it, because the real row is a true first sighting',
+        () async {
+      // The delete runs BEFORE `hasMessage`, so the copy that lands is news to
+      // the fold and resolves the ask exactly as a reply from Outlook would.
+      final inboundAt = fresh(const Duration(hours: 2));
+      final sentAt = fresh(const Duration(hours: 1));
+      queueInbound([graphMessage(id: 'in-1', receivedDateTime: inboundAt)]);
+      await sync.syncNow();
+      await store.updateConversationTriage(
+        'email',
+        'conv-1',
+        ctaText: 'Review the contract sent earlier',
+        ctaUrgency: 'high',
+      );
+      await seedEcho(sentAt);
+
+      queueSent([
+        graphMessage(
+          id: 'sent-1',
+          fromAddress: 'lo@bond.com',
+          internetMessageId: messageId,
+          receivedDateTime: sentAt,
+        ),
+      ]);
+      await sync.syncNow();
+
+      final conversation = (await row())!;
+      expect(conversation['cta_text'], isNull);
+      expect(conversation['state'], stateWaiting);
+    });
+
+    test('a Sent Items copy with no echo folds as before', () async {
+      final inboundAt = fresh(const Duration(hours: 2));
+      final sentAt = fresh(const Duration(hours: 1));
+      queueInbound([graphMessage(id: 'in-1', receivedDateTime: inboundAt)]);
+      await sync.syncNow();
+
+      queueSent([
+        graphMessage(
+          id: 'sent-1',
+          fromAddress: 'lo@bond.com',
+          internetMessageId: messageId,
+          receivedDateTime: sentAt,
+        ),
+      ]);
+      await sync.syncNow();
+
+      final rows = await outbound();
+      expect(rows.single['source_message_id'], 'sent-1');
+      expect((await row())!['state'], stateWaiting);
+      expect((await row())!['message_count'], 2);
+    });
+
+    test('a replay of the same page does not resurrect the echo', () async {
+      final sentAt = fresh(const Duration(hours: 1));
+      queueInbound([
+        graphMessage(
+          id: 'in-1',
+          receivedDateTime: fresh(const Duration(hours: 2)),
+        ),
+      ]);
+      await sync.syncNow();
+      await seedEcho(sentAt);
+
+      final copy = graphMessage(
+        id: 'sent-1',
+        fromAddress: 'lo@bond.com',
+        internetMessageId: messageId,
+        receivedDateTime: sentAt,
+      );
+      queueSent([copy]);
+      await sync.syncNow();
+      // A delta feed legitimately replays: across pages, and wholesale after a
+      // 410. The second pass has nothing to delete and nothing to fold.
+      queueSent([copy], token: 's2');
+      await sync.syncNow();
+
+      final rows = await outbound();
+      expect(rows, hasLength(1));
+      expect(rows.single['source_message_id'], 'sent-1');
+      expect((await row())!['message_count'], 2);
+    });
+
+    test('an echo whose copy has not arrived is left alone', () async {
+      // The reply is on screen and stays there. Nothing in a drain that never
+      // reaches this message may touch it.
+      final sentAt = fresh(const Duration(hours: 1));
+      queueInbound([
+        graphMessage(
+          id: 'in-1',
+          receivedDateTime: fresh(const Duration(hours: 2)),
+        ),
+      ]);
+      await sync.syncNow();
+      await seedEcho(sentAt);
+
+      queueSent(const [], token: 's-empty');
+      await sync.syncNow();
+
+      final rows = await outbound();
+      expect(rows.single['source_message_id'], 'local:draft-1');
+      expect(rows.single['body_text'], 'Friday works.');
+    });
+  });
 }

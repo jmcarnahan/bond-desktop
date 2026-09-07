@@ -155,6 +155,10 @@ class _FakeTeams implements TeamsBackend {
   @override
   Future<Map<String, dynamic>> sendChatMessage(String chatId, String text) =>
       throw UnimplementedError();
+
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) =>
+      throw UnimplementedError();
 }
 
 /// Two endpoints that resolve without DNS and refuse instantly. The widget

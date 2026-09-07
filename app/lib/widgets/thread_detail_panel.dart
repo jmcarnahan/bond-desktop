@@ -74,6 +74,12 @@ class ThreadDetailPanel extends StatelessWidget {
   /// open.
   final VoidCallback? onOpenReply;
 
+  /// Opens a new message to this thread's people. What that means is the
+  /// host's business — a chat is addressed as itself, a mail thread as its
+  /// participants — and the panel neither knows nor asks. Null hides the
+  /// button, for a host with no compose to open.
+  final VoidCallback? onCompose;
+
   /// What opening one of the thread's files does. Null leaves every chip and
   /// picture in the transcript a statement — the panel has nowhere of its own
   /// to show a file, and never invents one.
@@ -100,6 +106,7 @@ class ThreadDetailPanel extends StatelessWidget {
     this.afterTranscript,
     this.suggestionFor,
     this.onOpenReply,
+    this.onCompose,
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
@@ -356,6 +363,22 @@ class ThreadDetailPanel extends StatelessWidget {
             ),
           ),
           const SizedBox(width: BondSpacing.s12),
+          // Before the state chip, because writing to these people is
+          // something to DO with the thread, while the chip and the buttons
+          // after it are about the thread's own state. An icon like Back and
+          // More rather than a labelled button: this header shares its width
+          // with the attachment preview in the split, and the title is the
+          // one child that can give, so every label here comes out of it.
+          if (onCompose != null) ...[
+            IconButton(
+              key: const Key('thread-compose'),
+              onPressed: onCompose,
+              icon: const Icon(Icons.edit_outlined),
+              iconSize: 20,
+              tooltip: 'Message',
+            ),
+            const SizedBox(width: BondSpacing.s4),
+          ],
           BondChip.semantic(
             _stateLabel(conversation.state),
             _stateTone(conversation.state),

@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 
+import 'backend/backend_types.dart';
 import 'backend/teams_backend.dart';
 import 'graph_auth.dart';
 import 'attachments/attachment_markers.dart' show hostedContentIds;
@@ -297,6 +298,71 @@ class GraphTeams implements TeamsBackend {
     }
     return message;
   }
+
+  /// Opens the chat holding exactly [userIds] plus the signed-in user.
+  ///
+  /// Graph has no "get or create": POSTing a `oneOnOne` chat with the same two
+  /// members returns the EXISTING one, while POSTing a `group` makes another
+  /// one every time. That asymmetry is the whole contract — see
+  /// [TeamsBackend.ensureChat] — and it is why the type is decided by the
+  /// member count here rather than passed in: one other person is a 1:1 by
+  /// definition, and calling it a group would create a second, nameless thread
+  /// beside the conversation they already have.
+  ///
+  /// The signed-in user goes in FIRST, because a chat is created on their
+  /// behalf and Graph refuses a member list without them in it. `roles:
+  /// ['owner']` on everybody is what a personal chat looks like; Teams has no
+  /// other role for one.
+  ///
+  /// **Dormant in SDK mode**, for the reason [markChatRead] gives.
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) async {
+    if (userIds.isEmpty) {
+      throw const GraphTeamsException('Pick at least one person.');
+    }
+    final me = await myUserId();
+    // The user is added once, by this method, whatever the caller passed:
+    // a pick that included them would otherwise turn a 1:1 into a two-member
+    // "group" beside the chat they already have, or list a member twice.
+    final others = {for (final id in userIds) if (id != me) id};
+    if (others.isEmpty) {
+      throw const GraphTeamsException('Pick somebody other than yourself.');
+    }
+    final isGroup = others.length > 1;
+
+    final response = await _request(
+      'POST',
+      Uri.parse('$_base/chats'),
+      jsonBody: {
+        'chatType': isGroup ? 'group' : 'oneOnOne',
+        if (isGroup && topic != null && topic.isNotEmpty) 'topic': topic,
+        'members': [
+          for (final id in [me, ...others]) _member(id),
+        ],
+      },
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _describe(response, 'Could not open a Teams chat');
+    }
+
+    final chatId = _decodeObject(response)['id'] as String?;
+    if (chatId == null || chatId.isEmpty) {
+      throw const GraphTeamsException(
+        'Microsoft Graph opened a chat but returned no id for it.',
+      );
+    }
+    return EnsuredChat(chatId: chatId, isGroup: isGroup);
+  }
+
+  /// One member of a chat being created. The bind URL is Graph's way of
+  /// naming an existing user from inside a POST body; an id on its own is not
+  /// accepted.
+  static Map<String, dynamic> _member(String userId) => {
+        '@odata.type': '#microsoft.graph.aadUserConversationMember',
+        'roles': const ['owner'],
+        'user@odata.bind':
+            "https://graph.microsoft.com/v1.0/users('$userId')",
+      };
 
   /// One Graph chat message's attachments, as the flat entries the sync reads.
   ///
