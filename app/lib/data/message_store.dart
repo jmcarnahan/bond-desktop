@@ -1426,19 +1426,36 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// triage has finished with. Scoped to [sinceIso] so a retired gate cannot
   /// hand the model a year of archive, and self-exhausting — once no code
   /// writes [gateReason], the second call matches nothing.
+  ///
+  /// The progress rows go back with the messages, in one transaction, because
+  /// a re-pended message is about to be triaged again and its row has to read
+  /// that way. The gate cascade [writeTriageProgress] wrote — every stage
+  /// `skipped`, `settle_state = 'done'`, `outcome = 'dropped'` — would
+  /// otherwise stay behind, and the settle machine reads that stale cascade as
+  /// a finished pipeline: the message settles again on stages that never ran,
+  /// and [reviveOwedStorylineStages] cannot heal it either, since its
+  /// `dropped = 0` guard correctly refuses a row that says it was dropped.
   Future<int> rependGatedTriage({
     required String source,
     required String gateReason,
     required String sinceIso,
   }) {
-    return db.customUpdate(
-      "UPDATE messages SET triage_status = 'pending', gate_reason = NULL, "
-      'updated_at = ? '
-      "WHERE source = ? AND direction = 'inbound' "
-      "AND triage_status = 'skipped' AND gate_reason = ? "
-      'AND received_at >= ?',
-      variables: _args([_nowIso(), source, gateReason, sinceIso]),
-    );
+    return db.transaction(() async {
+      final rows = await db.customWriteReturning(
+        "UPDATE messages SET triage_status = 'pending', gate_reason = NULL, "
+        'updated_at = ? '
+        "WHERE source = ? AND direction = 'inbound' "
+        "AND triage_status = 'skipped' AND gate_reason = ? "
+        'AND received_at >= ? '
+        'RETURNING source_message_id',
+        variables: _args([_nowIso(), source, gateReason, sinceIso]),
+      );
+      final ids = [
+        for (final row in rows) row.data['source_message_id'] as String? ?? '',
+      ];
+      await _resetProgressRows(source, ids);
+      return ids.length;
+    });
   }
 
   /// The owner pulling one message back past the gates.
@@ -2167,7 +2184,7 @@ RETURNING *
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` SURVIVES, with five exceptions. What this method isolates is
+  /// `app_prefs` SURVIVES, with eight exceptions. What this method isolates is
   /// one person's presence: which backend the app talks through, which server
   /// it points at, and where the slider sits are the machine's configuration,
   /// not the previous account's data, and wiping them turned every account
@@ -2180,8 +2197,12 @@ RETURNING *
   /// them) — and the two bootstrap-floor markers, [mailBootstrapFloorKey] and
   /// [teamsBootstrapFloorKey], which describe how far back THIS account's
   /// mail was drained and would otherwise tell the next account's first
-  /// bootstrap that its window had already been covered. Both callers depend
-  /// on the first: sign-out leaves the database unclaimed, and `IdentityGuard`
+  /// bootstrap that its window had already been covered — and the three
+  /// one-shot markers, which say a catch-up has already run over rows this
+  /// method is deleting: left behind, they would tell the next account's first
+  /// sync that its mailbox had been reconciled and its verdicts backfilled
+  /// when nothing had read a single row of it. Both callers depend on the
+  /// first: sign-out leaves the database unclaimed, and `IdentityGuard`
   /// writes the new owner immediately after.
   Future<void> wipeAll() async {
     const tables = [
@@ -2210,13 +2231,21 @@ RETURNING *
         await db.customUpdate('DELETE FROM $table');
       }
       await db.customUpdate(
-        'DELETE FROM app_prefs WHERE key IN (?, ?, ?, ?, ?)',
+        'DELETE FROM app_prefs WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?)',
         variables: _args([
           dbOwnerKey,
           aboutMeKey,
           needsYouRulesKey,
           mailBootstrapFloorKey,
           teamsBootstrapFloorKey,
+          // The one-shot markers. Each says "this catch-up has already run
+          // over these rows" — and the rows are about to be deleted, so on
+          // the next account they would be a claim about a mailbox that was
+          // never read. The catch-ups are cheap and self-exhausting; a
+          // marker that outlived its data is not.
+          'needs_you_flag_backfill',
+          'needs_you_model_revive',
+          'mail_last_reconcile',
         ]),
       );
     });
@@ -3553,6 +3582,62 @@ FROM storylines s''';
     );
   }
 
+  /// Puts the storyline pass back on the queue for every conversation the
+  /// settle race left owing one, and returns how many that was.
+  ///
+  /// The shape it heals: the coordinator settled a message in the middle of a
+  /// sync, before its storyline work was enqueued, so the row carries
+  /// `settle_state = 'done'` with `storyline_state` still `pending` — and
+  /// `outcome` stuck at `pending` behind it, because both
+  /// [writeDraftProgress] and [sweepSettledProgress] wait for a terminal
+  /// storyline stage. With [writeStorylineProgress]'s owed-stage arm the pass
+  /// this queues now lands, which is what makes this a heal rather than a
+  /// retry loop: self-exhausting, because a row it fixes no longer matches.
+  ///
+  /// `dropped = 0` is load-bearing and not defensive. A gate cascade writes
+  /// `settle_state = 'done'` too, with every stage `skipped` — but a gated row
+  /// whose stages were left `pending` by an older write must stay dropped, and
+  /// requeueing the model for mail the gate threw out is exactly what the gate
+  /// exists to prevent.
+  ///
+  /// The NOT EXISTS keeps this off a conversation the queue is already going
+  /// to reach: [requeueWork] would revive a `done` row under a drain that has
+  /// not written its result yet, and one pass per stuck thread is the point.
+  Future<int> reviveOwedStorylineStages({
+    required List<String> sources,
+  }) async {
+    if (sources.isEmpty) return 0;
+    final rows = await db
+        .customSelect(
+          '''
+SELECT DISTINCT source, conversation_key
+FROM message_progress
+WHERE source IN (${_placeholders(sources.length)})
+  AND settle_state = 'done'
+  AND outcome = 'pending'
+  AND storyline_state = 'pending'
+  AND dropped = 0
+  AND NOT EXISTS (
+    SELECT 1 FROM work_items w
+     WHERE w.task_kind = 'storyline'
+       AND w.source = message_progress.source
+       AND w.entity_id = message_progress.conversation_key
+       AND w.status IN ('pending', 'processing')
+  )
+''',
+          variables: _args(sources),
+        )
+        .get();
+    for (final row in rows) {
+      await requeueWork(
+        'storyline',
+        row.data['source'] as String? ?? '',
+        row.data['conversation_key'] as String? ?? '',
+      );
+    }
+    return rows.length;
+  }
+
   // ── drafts ───────────────────────────────────────────────────────────
 
   /// Writes the one draft a MESSAGE is allowed, replacing whatever was there.
@@ -3987,16 +4072,35 @@ RETURNING source_message_id
   /// The joins to `conversations` and `conversation_ai` are LEFT on purpose: a
   /// message can outrun its own conversation row, and a candidate with no
   /// attention score yet is not a candidate to drop — it is one to keep
-  /// waiting on.
+  /// waiting on. `message_progress` is LEFT for a harder reason:
+  /// [admitNotifyCandidates] selects from `messages` alone, so a candidate
+  /// whose progress row is missing is still an admitted candidate, and an
+  /// inner join would drop it out of the sweep entirely — a row that never
+  /// settles at all, which is worse than one that settles on the deadline.
   ///
-  /// `storyline_open` is keyed by CONVERSATION rather than by message, which
-  /// over-waits when a sibling thread queued the work. That is the intended
-  /// trade: announcing a message under the wrong storyline is worse than
-  /// announcing it a few seconds late, and the deadline bounds how late.
+  /// Completeness reads the PIPELINE'S OWN RECORD, not the queue.
+  /// `extract_state` and `storyline_state` are what those stages write when
+  /// they finish. The work rows behind them are enqueued after BOTH drains of
+  /// a sync, while triage claims `messages.triage_status = 'pending'` the
+  /// instant a page commits — so in the seconds between there is a freshly
+  /// triaged message with no work rows at all, which the EXISTS flags this
+  /// replaced read as "nothing left to do". The sweep settled it, and
+  /// [writeStorylineProgress] then refused the stamp that arrived a minute
+  /// later, freezing the row at `storyline_state = 'pending'` forever.
   ///
-  /// `needs_you_open` is keyed by MESSAGE, like `extract_open`, and is waited
-  /// on the same way: a verdict that is still being decided is one the settle
-  /// would otherwise announce without.
+  /// Needs-you has no stage column by design — its handler writes two columns
+  /// on `messages` and no progress stage — so "judged" is spelled out here
+  /// instead: a verdict actually written, or a `needs_you` work row that
+  /// reached `done` or `error`. The second arm is not redundant. The handler
+  /// finishes an item `done` WITHOUT a verdict on every one of its guards
+  /// (deleted, outbound, gated), and waiting past that would be waiting on
+  /// nobody.
+  ///
+  /// `storyline_state` is a CONVERSATION-grained stage, so it over-waits when
+  /// what the pass is still working on is a sibling message of the thread.
+  /// That is the intended trade, unchanged from the flag it replaces:
+  /// announcing a message under the wrong storyline is worse than announcing
+  /// it a few seconds late, and the deadline bounds how late.
   Future<List<Map<String, Object?>>> openNotifyCandidates({
     int limit = 50,
   }) async {
@@ -4010,22 +4114,19 @@ SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
   m.updated_at AS message_updated_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   ai.attention_score, ai.bucket, ai.updated_at AS ai_updated_at,
-  EXISTS (SELECT 1 FROM work_items w
-          WHERE w.task_kind = 'needs_you' AND w.source = n.source
-            AND w.entity_id = n.source_message_id
-            AND w.status IN ('pending','processing')) AS needs_you_open,
-  EXISTS (SELECT 1 FROM work_items w
-          WHERE w.task_kind = 'extract' AND w.source = n.source
-            AND w.entity_id = n.source_message_id
-            AND w.status IN ('pending','processing')) AS extract_open,
-  EXISTS (SELECT 1 FROM work_items w
-          WHERE w.task_kind = 'storyline' AND w.source = n.source
-            AND w.entity_id = n.conversation_key
-            AND w.status IN ('pending','processing')) AS storyline_open
+  p.extract_state, p.storyline_state,
+  CASE WHEN m.needs_you_verdict IS NOT NULL THEN 1
+       WHEN EXISTS (SELECT 1 FROM work_items w
+                    WHERE w.task_kind = 'needs_you' AND w.source = n.source
+                      AND w.entity_id = n.source_message_id
+                      AND w.status IN ('done', 'error')) THEN 1
+       ELSE 0 END AS needs_you_judged
 FROM message_notify n
 JOIN messages m ON m.source = n.source AND m.source_message_id = n.source_message_id
 LEFT JOIN conversations c ON c.source = n.source AND c.conversation_key = n.conversation_key
 LEFT JOIN conversation_ai ai ON ai.source = n.source AND ai.conversation_key = n.conversation_key
+LEFT JOIN message_progress p
+       ON p.source = n.source AND p.source_message_id = n.source_message_id
 WHERE n.state = 'pending'
 ORDER BY n.deadline_at ASC
 LIMIT ?
@@ -4034,6 +4135,47 @@ LIMIT ?
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// One message in the shape [openNotifyCandidates] hands the sweep, for a
+  /// caller that has a message id rather than a candidate row.
+  ///
+  /// It exists for the needs-you re-verdict, which has to answer the sweep's
+  /// own question — `notifyWorthy` — about a message whose `message_notify`
+  /// row settled long ago and is no longer selected by anything. Projecting
+  /// the same column NAMES is the whole contract: the predicate reads a map,
+  /// so a column renamed on one path and not the other would read null and
+  /// quietly answer no.
+  ///
+  /// `received_at` rides along for the caller's own guard rather than for the
+  /// predicate: `notifyWorthy` has no outbound clause, and a re-verdict has to
+  /// know whether the user has already answered this thread.
+  ///
+  /// Null when the message is gone — queued, then deleted.
+  Future<Map<String, Object?>?> notifyRowFor(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          '''
+SELECT m.subject, m.from_name, m.summary, m.urgency, m.deadline,
+  m.needs_action, m.reply_expected, m.needs_you_verdict, m.is_read,
+  m.triage_status, m.received_at,
+  c.cta_text, c.cta_urgency, c.state AS conversation_state,
+  c.last_outbound_at,
+  ai.attention_score, ai.bucket
+FROM messages m
+LEFT JOIN conversations c
+       ON c.source = m.source AND c.conversation_key = m.conversation_key
+LEFT JOIN conversation_ai ai
+       ON ai.source = m.source AND ai.conversation_key = m.conversation_key
+WHERE m.source = ? AND m.source_message_id = ?
+''',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    return rows.isEmpty ? null : Map<String, Object?>.from(rows.first.data);
   }
 
   /// Moves one candidate out of `pending`, and reports whether THIS call is
@@ -4206,21 +4348,49 @@ RETURNING received_at
   /// dropped for. A restored row must not carry the old reason forward.
   Future<String?> restoreProgress(String source, String sourceMessageId) async {
     final rows = await db.customWriteReturning(
-      '''
-UPDATE message_progress SET
+      'UPDATE message_progress SET\n$_resetProgressSet\n'
+      'WHERE source = ?2 AND source_message_id = ?3\n'
+      'RETURNING received_at',
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// The SET list every re-open shares, so the one-row path and the bulk path
+  /// cannot drift into resetting different columns. `?1` is the stamp; each
+  /// caller numbers its own WHERE from `?2`.
+  static const String _resetProgressSet = '''
   triage_state = 'pending', extract_state = 'pending',
   storyline_state = 'pending', draft_state = 'pending',
   settle_state = 'pending',
   triage_at = NULL, extract_at = NULL, storyline_at = NULL,
   draft_at = NULL, settle_at = NULL,
   outcome = 'pending', dropped = 0, drop_reason = NULL,
-  updated_at = ?1
-WHERE source = ?2 AND source_message_id = ?3
-RETURNING received_at
-''',
-      variables: _args([_nowIso(), source, sourceMessageId]),
-    );
-    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  updated_at = ?1''';
+
+  /// How many ids one reset statement carries. Well under SQLite's variable
+  /// ceiling, and the same chunking [attachmentRefsFor] does for the same
+  /// reason: a retired gate can match a whole window at once.
+  static const int _resetProgressChunk = 200;
+
+  /// [restoreProgress] for a list of messages, without the RETURNING — the
+  /// bulk callers re-pend rows the user is not watching, and the tick per row
+  /// would say nothing the next stage write does not say better.
+  Future<void> _resetProgressRows(String source, List<String> ids) async {
+    for (var start = 0; start < ids.length; start += _resetProgressChunk) {
+      final chunk = ids.sublist(
+        start,
+        math.min(start + _resetProgressChunk, ids.length),
+      );
+      final slots = [
+        for (var i = 0; i < chunk.length; i++) '?${i + 3}',
+      ].join(', ');
+      await db.customUpdate(
+        'UPDATE message_progress SET\n$_resetProgressSet\n'
+        'WHERE source = ?2 AND source_message_id IN ($slots)',
+        variables: _args([_nowIso(), source, ...chunk]),
+      );
+    }
   }
 
   /// Records where extraction got to. Same return contract as
@@ -4291,10 +4461,21 @@ RETURNING received_at
   /// assignment decides for the whole thread, so writing it per message would
   /// mean a read to find them and a statement each.
   ///
-  /// Bounded by `settle_state <> 'done'`, which is what keeps a thread that
-  /// keeps growing from rewriting the history above it — a message the user
-  /// was told about last week must not gain a storyline column today, because
-  /// the row they are scrolling past is a record of what they were told.
+  /// Bounded by `(settle_state <> 'done' OR storyline_state = 'pending')`,
+  /// which is what keeps a thread that keeps growing from rewriting the
+  /// history above it — a message the user was told about last week must not
+  /// gain a storyline column today, because the row they are scrolling past is
+  /// a record of what they were told.
+  ///
+  /// The second arm is what "history" actually means here, and the first arm
+  /// alone got it wrong. A stage that was already TERMINAL when the row
+  /// settled is frozen: that pass had its answer and the user was told it. A
+  /// stage still `pending` at settle was OWED — the settle machine can land in
+  /// the middle of a sync, before the storyline work is even enqueued — and
+  /// owed work finishes normally. Without this arm such a row is stuck
+  /// forever: `storyline_state` never leaves `pending`, and both
+  /// [writeDraftProgress] and [sweepSettledProgress] require a terminal
+  /// storyline stage before they will close the `outcome`.
   ///
   /// [storylineId] null leaves whatever is stored alone: `noCandidate` and
   /// `rejected` are outcomes about this pass, not retractions of an earlier
@@ -4314,7 +4495,8 @@ UPDATE message_progress SET
     CASE WHEN ?1 IN $_terminalStates THEN ?2 ELSE storyline_at END,
   storyline_id = COALESCE(?3, storyline_id),
   updated_at = ?2
-WHERE source = ?4 AND conversation_key = ?5 AND settle_state <> 'done'
+WHERE source = ?4 AND conversation_key = ?5
+  AND (settle_state <> 'done' OR storyline_state = 'pending')
 RETURNING source_message_id, received_at
 ''',
       variables: _args([state, _nowIso(), storylineId, source, conversationKey]),
@@ -4530,6 +4712,102 @@ RETURNING source, source_message_id, received_at
     return [
       for (final row in rows)
         (
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
+  /// Moves one SETTLED row's Needs You snapshot to a value the caller has
+  /// recomputed, and hands back its `received_at` when it actually moved.
+  ///
+  /// `message_progress.needs_you` is a snapshot taken at settle time, and the
+  /// verdict it copies can move afterwards — the needs-you pass re-judging a
+  /// message after a document landed, or the owner editing their rules. A
+  /// snapshot that never followed the verdict is a Needs You tile that
+  /// disagrees with the verdict stored one table over.
+  ///
+  /// Two guards, each doing its own work. `settle_state = 'done'` because an
+  /// UNSETTLED row has no snapshot to correct — it will take one at settle,
+  /// from the same predicate, and writing early would only race the settle.
+  /// `needs_you <> ?1` so the RETURNING carries only rows that CHANGED, the
+  /// same discipline [clearNeedsYou] keeps: the caller ticks the bus per row,
+  /// and a re-verdict that returned the same answer must not announce itself.
+  Future<String?> refreshNeedsYouFlag(
+    String source,
+    String sourceMessageId, {
+    required bool needsYou,
+  }) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET needs_you = ?1, updated_at = ?2
+WHERE source = ?3 AND source_message_id = ?4 AND settle_state = 'done'
+  AND needs_you <> ?1
+RETURNING received_at
+''',
+      variables: _args([
+        needsYou ? 1 : 0,
+        _nowIso(),
+        source,
+        sourceMessageId,
+      ]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// The one-shot catch-up for rows that settled before there was a verdict to
+  /// read, and returns the ones it flagged.
+  ///
+  /// The `needs_you_verdict` column arrived in schema v10 and the settle
+  /// snapshot predates it, so every row settled before then took its snapshot
+  /// from asks that did not include the verdict — a message the needs-you pass
+  /// later judged yes has `needs_you_verdict = 1` and `needs_you = 0`, and
+  /// nothing in the app would ever reconcile them. Raise-only: this never
+  /// clears a chip, because a 0 here can mean the coordinator decided against
+  /// it on grounds this statement cannot see.
+  ///
+  /// The guards past the verdict are the ones `notifyWorthy` carries plus one
+  /// it does not. Thread `done`, the `later` bucket and the attention floor are
+  /// the user's loudness control and gate a judged yes like any other ask. The
+  /// extra one is the outbound clause: the coordinator settles before any reply
+  /// can exist, so `notifyWorthy` never needed it — but a chip raised months
+  /// after the fact must not land on a thread the user already answered.
+  /// `dropped = 0` keeps a gate cascade out of it: a gated row also carries
+  /// `settle_state = 'done'`, and it is dropped, not owed.
+  Future<List<({String source, String sourceMessageId, String receivedAt})>>
+      backfillNeedsYouFromVerdicts({required double threshold}) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET needs_you = 1, updated_at = ?1
+WHERE settle_state = 'done' AND needs_you = 0 AND dropped = 0
+  AND EXISTS (SELECT 1 FROM messages m
+              WHERE m.source = message_progress.source
+                AND m.source_message_id = message_progress.source_message_id
+                AND m.direction = 'inbound' AND m.needs_you_verdict = 1)
+  AND COALESCE((SELECT c.state FROM conversations c
+                WHERE c.source = message_progress.source
+                  AND c.conversation_key = message_progress.conversation_key),
+               '') <> 'done'
+  AND COALESCE((SELECT c.last_outbound_at FROM conversations c
+                WHERE c.source = message_progress.source
+                  AND c.conversation_key = message_progress.conversation_key),
+               '') < message_progress.received_at
+  AND COALESCE((SELECT ai.bucket FROM conversation_ai ai
+                WHERE ai.source = message_progress.source
+                  AND ai.conversation_key = message_progress.conversation_key),
+               '') <> 'later'
+  AND COALESCE((SELECT ai.attention_score FROM conversation_ai ai
+                WHERE ai.source = message_progress.source
+                  AND ai.conversation_key = message_progress.conversation_key),
+               0) >= ?2
+RETURNING source, source_message_id, received_at
+''',
+      variables: _args([_nowIso(), threshold]),
+    );
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? '',
           sourceMessageId: row.data['source_message_id'] as String? ?? '',
           receivedAt: row.data['received_at'] as String? ?? '',
         ),

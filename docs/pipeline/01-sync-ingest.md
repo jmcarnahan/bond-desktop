@@ -36,6 +36,35 @@ sync** pair at the top of Settings → Sync & data — a preset per source or a
 custom `YYYY-MM-DD` date, with the calendar day the window reaches spelled out
 under it (see [../settings.md](../settings.md)).
 
+**Catch-up and revive.** Every pass ends with a block of cheap statements that
+put back what an outage, a crash or a race left behind: `reviveErroredTriage`
+and `reviveErroredWork` for what failed, `reclaimStaleTriage` /
+`reclaimStaleWork` for claims nobody is holding, and `reviveTerminalTriage` /
+`reviveTerminalWork` for one more try a day past those ceilings. Two more join
+them here.
+
+`reviveOwedStorylineStages` heals the settle race. The notification
+coordinator can settle a message in the middle of a sync — before this pass's
+own enqueue has run — leaving the row with `settle_state = 'done'` and
+`storyline_state` still `pending`, and an `outcome` that will never close
+behind it. Both syncs call it (mail and Teams, since the race is not
+mail-specific), it requeues the `storyline` work for each stuck conversation,
+and it reports `revived_storyline` on the sync event only when it found any.
+`dropped = 0` keeps a gate cascade out of it; the loosened guard on
+`writeStorylineProgress` is what lets the pass it queues actually land (see
+[09-notifications.md](09-notifications.md)).
+
+The one-shot `needs_you_flag_backfill` runs once, beside the other one-shots,
+raising the Needs You chip on rows that settled before the verdict column
+existed. It reports `backfilled_needs_you` (see
+[11-needs-you.md](11-needs-you.md)). Every one-shot marker is deleted by
+`wipeAll`, so a sign-out-and-wipe lets them run again on the next account.
+
+`rependGatedTriage` — the Teams sync's catch-up for the retired `teams_source`
+gate — now resets the progress rows it re-pends in the same transaction. A
+re-pended message is about to be triaged again, and the gate cascade left on
+its row would otherwise read as a finished pipeline.
+
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never
 interleave (PR #9).

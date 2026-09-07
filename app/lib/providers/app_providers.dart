@@ -209,6 +209,21 @@ final pipelineProgressProvider = Provider<PipelineProgress>(
   ),
 );
 
+/// The user's attention floor, read fresh on every call.
+///
+/// A shared closure rather than three copies of the same four lines, because
+/// three things now judge against this number and they have to judge against
+/// the SAME one: the settle machine deciding whether to interrupt, the
+/// needs-you handler moving a chip after a re-verdict, and the sync's one-shot
+/// backfill raising chips over history. A slider read differently by any of
+/// them is a tile disagreeing with the toast it came from.
+Future<double> Function() attentionThresholdReader(MessageStore store) =>
+    () async {
+      final raw = await store.getPref(attentionThresholdKey);
+      return (raw == null ? null : double.tryParse(raw)) ??
+          AttentionTuning.defaultThreshold;
+    };
+
 /// The settle machine. Watches ONLY the store and the log, so a backend
 /// switch — which rebuilds the session, both backends, the sync service and
 /// the queues — leaves it standing: rebuilding it would reset the arm and
@@ -219,11 +234,7 @@ final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) 
     store,
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
-    attentionThreshold: () async {
-      final raw = await store.getPref(attentionThresholdKey);
-      return (raw == null ? null : double.tryParse(raw)) ??
-          AttentionTuning.defaultThreshold;
-    },
+    attentionThreshold: attentionThresholdReader(store),
   );
   unawaited(coordinator.start());
   ref.onDispose(coordinator.dispose);
@@ -356,6 +367,9 @@ final syncServiceProvider = Provider<MailSync>(
     userAddress: () => ref.read(authSessionProvider).storedAccount.then(
           (account) => account?.mail ?? account?.userPrincipalName,
         ),
+    // For the one-shot needs-you backfill, which judges history against the
+    // same floor the settle machine judges live mail against.
+    attentionThreshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
     // `ref.read` inside the closure, never `watch`: watching would rebuild
     // this provider — and abort the drain running on it — the moment someone
     // moved the setting, the same hazard [llmClientProvider] documents below.
@@ -584,6 +598,12 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // Bulk work: the fast server. See [fastLlmClientProvider].
         ref.watch(fastLlmClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        // A verdict this pass CHANGES has to move the chip beside it, and
+        // moving it means re-asking `notifyWorthy` — which needs the recorder
+        // to write through and the same floor the settle machine used.
+        progress: ref.watch(pipelineProgressProvider),
+        attentionThreshold:
+            attentionThresholdReader(ref.watch(messageStoreProvider)),
         // A callback, not a value: the account is a keychain read, and this
         // provider is built by plenty that never drains. The handler asks
         // once, on the first message that reaches the model; until the answer

@@ -317,8 +317,11 @@ void main() {
     });
 
     test('a settled row is history and does not join later', () async {
+      // "History" is a TERMINAL stage on a settled row, not the settle alone.
+      // m1's storyline pass ran and found nothing, and the user was told that;
+      // a thread that keeps growing must not rewrite the row they scrolled by.
       await ingest('m1');
-      await ingest('m2', receivedAt: '2026-09-01T11:00:00Z');
+      await progress.noteStoryline('email', 'c1', state: 'done');
       // m1 was already announced to the user last week.
       await progress.noteSettled(
         'email',
@@ -328,6 +331,8 @@ void main() {
         dropped: false,
       );
 
+      // m2 arrives afterwards and the thread is assigned.
+      await ingest('m2', receivedAt: '2026-09-01T11:00:00Z');
       await progress.noteStoryline(
         'email',
         'c1',
@@ -337,6 +342,37 @@ void main() {
 
       expect((await progressOf('m1'))['storyline_id'], null);
       expect((await progressOf('m2'))['storyline_id'], 'sl-1');
+    });
+
+    test('a settled row whose storyline stage was still owed completes it',
+        () async {
+      // The settle race: the coordinator can settle a message in the middle of
+      // a sync, before the storyline work for its thread is even enqueued. The
+      // stage was OWED, not answered — and refusing the stamp that follows
+      // left the row stuck at `outcome = 'pending'` forever.
+      await ingest('m1');
+      await progress.noteSettled(
+        'email',
+        'm1',
+        needsYou: false,
+        reason: 'not_worthy',
+        dropped: false,
+      );
+      expect((await progressOf('m1'))['storyline_state'], 'pending');
+
+      ticks.clear();
+      await progress.noteStoryline(
+        'email',
+        'c1',
+        state: 'done',
+        storylineId: 'sl-1',
+      );
+
+      final row = await progressOf('m1');
+      expect(row['storyline_state'], 'done');
+      expect(row['storyline_id'], 'sl-1');
+      await pumpEventQueue();
+      expect(ticks.map((t) => t.sourceMessageId), ['m1']);
     });
 
     test('an outcome with no storyline behind it keeps the one already stored',
@@ -710,6 +746,295 @@ void main() {
       // over it.
       expect((await progressOf('m1'))['needs_you'], 1);
       expect((await progressOf('m1'))['settle_at'], isNotNull);
+    });
+  });
+
+  // The settle race's cleanup crew. A row that settled mid-sync carries a
+  // `pending` storyline stage and an `outcome` that will never close behind
+  // it; this pass hands the thread back to the queue, and the loosened
+  // `writeStorylineProgress` guard is what lets the answer land.
+  group('reviving an owed storyline stage', () {
+    /// The stuck shape exactly: settled, storyline never stamped, outcome
+    /// still open, not dropped.
+    Future<void> seedStuck({
+      String id = 'm1',
+      String conversationKey = 'c1',
+    }) async {
+      await ingest(id, conversationKey: conversationKey);
+      await progress.noteSettled(
+        'email',
+        id,
+        needsYou: false,
+        reason: 'not_worthy',
+        dropped: false,
+      );
+    }
+
+    Future<List<String>> storylineWork() async => [
+          for (final row in await db
+              .customSelect(
+                "SELECT entity_id FROM work_items WHERE task_kind = 'storyline'"
+                ' AND status = ? ORDER BY entity_id',
+                variables: [Variable('pending')],
+              )
+              .get())
+            row.data['entity_id'] as String,
+        ];
+
+    test('a row the settle race left behind gets its pass back', () async {
+      await seedStuck();
+      expect((await progressOf('m1'))['outcome'], 'pending');
+
+      expect(
+        await store.reviveOwedStorylineStages(sources: const ['email']),
+        1,
+      );
+      expect(await storylineWork(), ['c1']);
+    });
+
+    test('and one pass is all it takes — the second call finds nothing',
+        () async {
+      await seedStuck();
+      await store.reviveOwedStorylineStages(sources: const ['email']);
+
+      // The work row it just wrote is `pending`, which is exactly what the
+      // NOT EXISTS refuses to queue over.
+      expect(
+        await store.reviveOwedStorylineStages(sources: const ['email']),
+        0,
+      );
+
+      // And once the pass lands, the row is no longer stuck at all.
+      await store.writeWork('storyline', 'email', 'c1', status: 'done');
+      await progress.noteStoryline('email', 'c1', state: 'done');
+      expect(
+        await store.reviveOwedStorylineStages(sources: const ['email']),
+        0,
+      );
+      expect((await progressOf('m1'))['storyline_state'], 'done');
+    });
+
+    test('a gate cascade is not a stuck row and stays dropped', () async {
+      // A gated message also carries `settle_state = 'done'`, written by the
+      // cascade rather than by the coordinator. Queueing the model for mail
+      // the gate threw out is what the gate exists to prevent.
+      await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
+      expect((await progressOf('m1'))['dropped'], 1);
+
+      expect(
+        await store.reviveOwedStorylineStages(sources: const ['email']),
+        0,
+      );
+      expect(await storylineWork(), isEmpty);
+    });
+
+    test('a conversation the queue is already going to reach is left alone',
+        () async {
+      await seedStuck();
+      await store.enqueueWork('storyline', 'email', 'c1');
+
+      expect(
+        await store.reviveOwedStorylineStages(sources: const ['email']),
+        0,
+      );
+    });
+
+    test('a row still being worked is not stuck', () async {
+      await ingest('m1');
+
+      expect(
+        await store.reviveOwedStorylineStages(sources: const ['email']),
+        0,
+      );
+    });
+  });
+
+  // The chip that has to follow the verdict when the verdict moves. Nothing
+  // else in the app reconciles `message_progress.needs_you` with
+  // `messages.needs_you_verdict`, so a snapshot taken at settle would go on
+  // showing an answer the pipeline has since changed its mind about.
+  group('the needs-you snapshot', () {
+    Future<void> seedSettled({required bool needsYou}) async {
+      await ingest('m1');
+      await progress.noteSettled(
+        'email',
+        'm1',
+        needsYou: needsYou,
+        reason: 'settled',
+        dropped: false,
+      );
+    }
+
+    test('a settled row follows the value it is handed, both ways', () async {
+      await seedSettled(needsYou: true);
+
+      expect(
+        await store.refreshNeedsYouFlag('email', 'm1', needsYou: false),
+        isNotNull,
+      );
+      expect((await progressOf('m1'))['needs_you'], 0);
+
+      expect(
+        await store.refreshNeedsYouFlag('email', 'm1', needsYou: true),
+        isNotNull,
+      );
+      expect((await progressOf('m1'))['needs_you'], 1);
+    });
+
+    test('the same value writes nothing and reports nothing', () async {
+      // The RETURNING is what the recorder ticks on, so a re-verdict that
+      // returned the same answer must not announce itself.
+      await seedSettled(needsYou: true);
+
+      expect(
+        await store.refreshNeedsYouFlag('email', 'm1', needsYou: true),
+        isNull,
+      );
+    });
+
+    test('an unsettled row is left to take its own snapshot', () async {
+      await ingest('m1');
+
+      expect(
+        await store.refreshNeedsYouFlag('email', 'm1', needsYou: true),
+        isNull,
+      );
+      expect((await progressOf('m1'))['needs_you'], 0);
+    });
+  });
+
+  // The one-shot for rows that settled before there was a verdict column to
+  // read. Everything here is a row whose snapshot says 0 while the verdict
+  // beside it says 1.
+  group('the needs-you backfill', () {
+    Future<void> seedJudged({
+      String conversationKey = 'c1',
+      String? lastOutboundAt,
+      String state = 'needs_reply',
+      String? bucket,
+      double score = 0.9,
+    }) async {
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': conversationKey,
+        'subject': 'Launch date',
+        'state': state,
+        'last_message_at': '2026-09-01T10:00:00Z',
+        'last_outbound_at': lastOutboundAt,
+      });
+      await ingest('m1', conversationKey: conversationKey);
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'names the owner');
+      await progress.noteSettled(
+        'email',
+        'm1',
+        needsYou: false,
+        reason: 'not_worthy',
+        dropped: false,
+      );
+      if (bucket != null) {
+        await store.setConversationBucket('email', conversationKey,
+            bucket: bucket);
+      }
+      await store.writeAttentionScore('email', conversationKey, score);
+    }
+
+    test('a judged yes on a live thread gains the chip, and ticks', () async {
+      await seedJudged();
+      ticks.clear();
+
+      expect(await progress.backfillNeedsYou(threshold: 0.5), 1);
+      expect((await progressOf('m1'))['needs_you'], 1);
+      await pumpEventQueue();
+      expect(ticks.single.sourceMessageId, 'm1');
+      expect(ticks.single.stage, 'settle');
+    });
+
+    test('a thread the user has already answered does not', () async {
+      // `notifyWorthy` has no outbound clause because the coordinator settles
+      // before any reply can exist. A chip raised months later has to carry
+      // the guard itself.
+      await seedJudged(lastOutboundAt: '2026-09-01T12:00:00Z');
+
+      expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
+      expect((await progressOf('m1'))['needs_you'], 0);
+    });
+
+    test('a thread the user marked done does not', () async {
+      await seedJudged(state: 'done');
+
+      expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
+    });
+
+    test('a thread parked in Later does not', () async {
+      await seedJudged(bucket: 'later');
+
+      expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
+    });
+
+    test('and neither does one under the attention floor', () async {
+      await seedJudged(score: 0.2);
+
+      expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
+    });
+
+    test('a gate-dropped row keeps its drop', () async {
+      await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
+      await store.writeNeedsYouVerdict('email', 'm1',
+          verdict: true, reason: 'names the owner');
+      await store.writeAttentionScore('email', 'c1', 0.9);
+
+      expect(await progress.backfillNeedsYou(threshold: 0.5), 0);
+      expect((await progressOf('m1'))['needs_you'], 0);
+    });
+  });
+
+  // Re-pending a retired gate's messages has to re-open their progress rows
+  // too, or the settle machine reads the stale cascade as a finished pipeline.
+  group('re-pending a retired gate', () {
+    test('the progress row goes back with the message', () async {
+      await ingest('m1', triageStatus: 'skipped', gateReason: 'teams_source');
+      expect((await progressOf('m1'))['outcome'], 'dropped');
+
+      expect(
+        await store.rependGatedTriage(
+          source: 'email',
+          gateReason: 'teams_source',
+          sinceIso: '2026-08-01T00:00:00Z',
+        ),
+        1,
+      );
+
+      final message = (await store.getMessageRow('email', 'm1'))!;
+      expect(message['triage_status'], 'pending');
+      expect(message['gate_reason'], isNull);
+
+      final row = await progressOf('m1');
+      expect(row['triage_state'], 'pending');
+      expect(row['extract_state'], 'pending');
+      expect(row['storyline_state'], 'pending');
+      expect(row['settle_state'], 'pending');
+      expect(row['dropped'], 0);
+      expect(row['drop_reason'], isNull);
+      expect(row['outcome'], 'pending');
+    });
+
+    test('a message another gate stopped keeps its cascade', () async {
+      await ingest('m1', triageStatus: 'skipped', gateReason: 'newsletter');
+
+      expect(
+        await store.rependGatedTriage(
+          source: 'email',
+          gateReason: 'teams_source',
+          sinceIso: '2026-08-01T00:00:00Z',
+        ),
+        0,
+      );
+
+      final row = await progressOf('m1');
+      expect(row['triage_state'], 'skipped');
+      expect(row['dropped'], 1);
+      expect(row['outcome'], 'dropped');
     });
   });
 

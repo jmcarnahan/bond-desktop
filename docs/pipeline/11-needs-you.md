@@ -189,6 +189,32 @@ entirely unjudged, which is what the pass is looking for.
 `MessageStore.upsertMessage`'s conflict branch does not name these columns, so
 a re-sync cannot clobber a verdict.
 
+**The chip follows the verdict.** `message_progress.needs_you` is a snapshot
+taken at settle time from `notifyWorthy` — the same call that decided whether
+to interrupt — so a verdict written *afterwards* would leave the home screen's
+chip and tile showing an answer the pipeline has changed its mind about. When,
+and only when, the stored verdict MOVES (`null`→0/1, 0↔1), `NeedsYouHandler`
+hands the message to `PipelineProgress.refreshNeedsYou`, which re-asks
+`notifyWorthy` and rewrites the flag through
+`MessageStore.refreshNeedsYouFlag`. Three rules make that safe. A re-verdict
+that returns the **same** answer writes nothing, so a chip cleared by a reply
+or by a Done stays cleared. Only a **settled** row is touched; an unsettled one
+takes its snapshot at settle from the same predicate. And the path adds an
+outbound guard `notifyWorthy` has no need of — the coordinator settles before
+any reply can exist — so a false→true re-verdict never re-chips a thread the
+user has already answered or marked done. Reading is deliberately *not* a
+clearing condition: a chip once earned survives being read.
+
+**The one-shot flag backfill.** Rows that settled before the v10 verdict column
+existed took a snapshot that never saw it, so a message later judged yes sits
+at `needs_you_verdict = 1` beside `needs_you = 0`.
+`MessageStore.backfillNeedsYouFromVerdicts` raises those chips once, behind the
+`needs_you_flag_backfill` pref in the mail sync, reported as
+`backfilled_needs_you` on the activity row (absent, not zero, when it did not
+run). Raise-only, and carrying the same guards as the live path plus
+`dropped = 0`, so a gate cascade — which also writes `settle_state = 'done'` —
+stays dropped.
+
 **Queueing.** `MessageStore.enqueueNeedsYouBacklog` is
 `enqueueExtractBacklog`'s twin — same filter, same caps, same `OR IGNORE`
 idempotence, one shared private statement — and both syncs call the two side
@@ -246,7 +272,9 @@ is about. The system prompt does not change.
 ## The re-verdict
 
 A document that asks for a signature can change whether its message wants the
-owner — and the first needs-you pass ran before anything had read it.
+owner — and the first needs-you pass ran before anything had read it. Whatever
+triggers a re-judge, the chip on the home screen follows it: see **The chip
+follows the verdict** above.
 `AttachmentDigestHandler` therefore requeues the message once, right after the
 digest chunk is embedded:
 

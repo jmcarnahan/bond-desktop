@@ -1,10 +1,13 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../data/message_store.dart';
 import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
 import 'attachments/attachment_policy.dart';
 import 'attachments/owa_links.dart';
+import 'attention.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
@@ -92,16 +95,38 @@ class SyncService implements MailSync {
   /// and answers [syncFloorDays].
   final int Function()? _lookbackDays;
 
+  /// The user's attention floor, for the one-shot backfill below. A callback
+  /// for [_lookbackDays]'s reason — the slider moves under a service built
+  /// once — and null for every caller that predates the backfill, which then
+  /// judges history against [AttentionTuning.defaultThreshold].
+  final Future<double> Function()? _threshold;
+
   SyncService(
     this._mail,
     this._store, {
     ActivityLog? activityLog,
     PipelineProgress? progress,
     Future<String?> Function()? userAddress,
+    Future<double> Function()? attentionThreshold,
     this._lookbackDays,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _progress = progress ?? const PipelineProgress.disabled(),
-        _userAddressReader = userAddress;
+        _userAddressReader = userAddress,
+        _threshold = attentionThreshold;
+
+  /// The settle machine's reader, degraded its way — see
+  /// `NotificationCoordinator._attentionThreshold`. A preference that cannot
+  /// be read is a default, never a failed sync.
+  Future<double> _thresholdOrDefault() async {
+    final read = _threshold;
+    if (read == null) return AttentionTuning.defaultThreshold;
+    try {
+      return await read();
+    } catch (e) {
+      debugPrint('sync: reading the attention threshold failed: $e');
+      return AttentionTuning.defaultThreshold;
+    }
+  }
 
   @override
   Future<void> syncNow() async {
@@ -190,6 +215,15 @@ class SyncService implements MailSync {
         olderThanIso: terminalBefore,
       );
 
+      // The rows the settle race left owing a storyline stage — settled while
+      // this sync's own enqueue was still to come, so their `outcome` never
+      // closed. Self-exhausting: with the owed-stage arm on
+      // [MessageStore.writeStorylineProgress] the pass this queues finishes
+      // them, and the next sync matches nothing.
+      final revivedStoryline = await _store.reviveOwedStorylineStages(
+        sources: const [_source],
+      );
+
       // Mail the first triage judged before it asked whether a reply is
       // expected. BEFORE the enqueue below for the same reason the teams sync
       // orders its re-pend first: a row this flips to `pending` is one the
@@ -250,6 +284,22 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_model_revive', '1');
       }
 
+      // The other half of that catch-up, on the home screen's side. The v10
+      // verdict column arrived AFTER these rows settled, so the `needs_you`
+      // snapshot each of them took never saw it: a message the pass later
+      // judged yes carries `needs_you_verdict = 1` beside `needs_you = 0`, and
+      // nothing else in the app would ever reconcile the two. Raise-only, and
+      // guarded on the thread not being done and having no reply newer than
+      // the message — a chip raised months late must not land on something the
+      // user has already answered. Null until it runs, like the revive above.
+      int? backfilledNeedsYou;
+      if (await _store.getPref('needs_you_flag_backfill') == null) {
+        backfilledNeedsYou = await _progress.backfillNeedsYou(
+          threshold: await _thresholdOrDefault(),
+        );
+        await _store.setPref('needs_you_flag_backfill', '1');
+      }
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -287,8 +337,10 @@ class SyncService implements MailSync {
           if (revivedTerminalWork > 0)
             'revived_terminal_work': revivedTerminalWork,
           if (rejudged > 0) 'rejudged_triage': rejudged,
+          if (revivedStoryline > 0) 'revived_storyline': revivedStoryline,
           'backfilled_addressed_me': ?backfilled,
           'revived_needs_you': ?revivedNeedsYou,
+          'backfilled_needs_you': ?backfilledNeedsYou,
           if (inboxResync || sentResync) 'resync': true,
         },
       );

@@ -416,6 +416,86 @@ void main() {
     });
   });
 
+  // The stage the settle machine now waits on. A thread whose card did not
+  // change queues no storyline pass, so the handler is the only writer left
+  // for the new message's row — and a row left `pending` here would wait out
+  // the notification deadline and never close its outcome.
+  group('the storyline stage when no pass is queued', () {
+    Future<Map<String, Object?>> progressOf(String id) async => (await db
+            .customSelect(
+              'SELECT * FROM message_progress '
+              'WHERE source = ? AND source_message_id = ?',
+              variables: [Variable('email'), Variable(id)],
+            )
+            .getSingle())
+        .data;
+
+    test('an unchanged card closes the stage with the thread\'s storyline',
+        () async {
+      await seedConversation();
+      await seedMessage();
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Launch date',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'conv-1',
+          addedBy: 'auto');
+      final handler = ExtractHandler(
+        store,
+        FakeLlm([answer()]),
+        FakeEmbeddings().client,
+        progress: PipelineProgress(store),
+      );
+
+      // The first message embeds the card and queues the pass, which is what
+      // writes the stage for it later — so it is still owed here.
+      await runOne(handler);
+      expect((await progressOf('m1'))['storyline_state'], 'pending');
+
+      // The second lands the same card: no pass, and the stage is closed
+      // with the storyline the thread already sits in.
+      await seedMessage(id: 'm2');
+      await runOne(handler, id: 'm2');
+
+      final row = await progressOf('m2');
+      expect(row['storyline_state'], 'done');
+      expect(row['storyline_id'], 'sl-1');
+    });
+
+    test('a thread in no storyline still finishes the stage', () async {
+      await seedConversation();
+      await seedMessage();
+      final handler = ExtractHandler(
+        store,
+        FakeLlm([answer()]),
+        FakeEmbeddings().client,
+        progress: PipelineProgress(store),
+      );
+      await runOne(handler);
+      await seedMessage(id: 'm2');
+      await runOne(handler, id: 'm2');
+
+      final row = await progressOf('m2');
+      expect(row['storyline_state'], 'done');
+      expect(row['storyline_id'], isNull);
+    });
+
+    test('a message with no thread row is skipped, not owed', () async {
+      await seedMessage();
+
+      await runOne(ExtractHandler(
+        store,
+        FakeLlm([answer()]),
+        FakeEmbeddings().client,
+        progress: PipelineProgress(store),
+      ));
+
+      expect((await progressOf('m1'))['storyline_state'], 'skipped');
+    });
+  });
+
   group('the storyline recap trigger', () {
     Future<void> fileInStoryline({String key = 'conv-1'}) async {
       await store.insertStoryline(

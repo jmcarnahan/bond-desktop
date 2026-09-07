@@ -325,7 +325,13 @@ class ExtractHandler extends WorkHandler {
     final key = row['conversation_key'] as String?;
     if (key == null || key.isEmpty) return;
     final conversation = await _store.getConversationRow(source, key);
-    if (conversation == null) return;
+    if (conversation == null) {
+      // No thread to group means no pass will ever be queued for it, and a
+      // stage nobody is going to write must not read as owed: the settle
+      // machine now waits on this column, and it would wait out its deadline.
+      await _pipeline.noteStoryline(source, key, state: 'skipped');
+      return;
+    }
 
     final card = buildConversationCard(
       subject: stripReFw(conversation['subject'] as String?),
@@ -340,7 +346,22 @@ class ExtractHandler extends WorkHandler {
     // The whole reason a hash is stored: re-extracting the same thread's tenth
     // message must not spend an embedding call to arrive at the same vector.
     final stored = await _store.getConversationAi(source, key);
-    if (stored != null && stored['embedded_hash'] == hash) return;
+    if (stored != null && stored['embedded_hash'] == hash) {
+      // The same vector is the same answer, so the pass is not queued — and
+      // the stage is closed HERE, with the storyline the thread already sits
+      // in, because nothing else would ever write it for this message. The
+      // settle machine reads this column now; left `pending`, a reply that
+      // changed nothing about its thread's card would wait out the six-minute
+      // deadline before the user heard about it, and its outcome would never
+      // close at all.
+      await _pipeline.noteStoryline(
+        source,
+        key,
+        state: 'done',
+        storylineId: await _pipeline.assignedStorylineId(source, key),
+      );
+      return;
+    }
 
     final embedded = await _embeddings.embedResult(card);
     final vector = embedded.vector;
@@ -357,6 +378,10 @@ class ExtractHandler extends WorkHandler {
         await _store.requeueWork('storyline', source, key);
       } else {
         _log.note({'embed': 'rejected'});
+        // No pass is coming for a vector the server refused, so the stage is
+        // closed as skipped rather than left owed — see the unchanged-card
+        // branch above for why an owed stage nobody will write is worse.
+        await _pipeline.noteStoryline(source, key, state: 'skipped');
       }
       return;
     }

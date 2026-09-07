@@ -4,7 +4,9 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/services/graph_auth.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -305,6 +307,73 @@ void main() {
     expect(await queuedIds(), contains('old-but-inside'));
     expect(
         await queuedIds(kind: 'embed_message'), contains('old-but-inside'));
+  });
+
+  // The heal for the settle race, on the sync event. Rare-path keys are absent
+  // rather than zero, because a zero here would read as an event where there
+  // was none.
+  group('the owed-storyline revive', () {
+    /// The same sync, wired to an activity log so the event it writes can be
+    /// read back.
+    Future<Map<String, Object?>> syncAndReadDetail() async {
+      final tokens = InMemoryTokenStore();
+      tokens.values['refresh_token'] = 'rt-initial';
+      tokens.values['granted_scopes'] = _grantedScopes;
+      final auth = GraphAuth(httpClient: graph.client, store: tokens);
+      final logged = SyncService(
+        GraphMail(auth, httpClient: graph.client),
+        store,
+        activityLog: ActivityLog(store),
+        progress: PipelineProgress(store),
+      );
+
+      await logged.syncNow();
+
+      final rows = await store.recentActivity(limit: 20);
+      final event = rows.firstWhere((r) => r['kind'] == 'sync_mail');
+      return jsonDecode(event['detail_json'] as String) as Map<String, Object?>;
+    }
+
+    test('says nothing when there is nothing stuck', () async {
+      graph.queue('inbox', [
+        () => jsonOk(deltaBody(
+              [
+                graphMessage(
+                  id: 'm1',
+                  receivedDateTime: fresh(const Duration(hours: 1)),
+                )
+              ],
+              deltaLink: deltaCursor('inbox', 'c1'),
+            )),
+      ]);
+
+      expect(await syncAndReadDetail(), isNot(contains('revived_storyline')));
+    });
+
+    test('counts the conversations it handed back to the queue', () async {
+      // A row the coordinator settled mid-sync: storyline never stamped, and
+      // the outcome will never close behind it.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'stuck-1',
+        'conversation_key': 'conv-stuck',
+        'direction': 'inbound',
+        'subject': 'Retool test',
+        'from_name': 'Sarah',
+        'received_at': fresh(const Duration(hours: 2)),
+      });
+      await store.writeSettledProgress(
+        'email',
+        'stuck-1',
+        needsYou: false,
+        reason: 'not_worthy',
+        dropped: false,
+      );
+
+      final detail = await syncAndReadDetail();
+      expect(detail['revived_storyline'], 1);
+      expect(await queuedIds(kind: 'storyline'), ['conv-stuck']);
+    });
   });
 
   test('an empty mailbox queues nothing', () async {
