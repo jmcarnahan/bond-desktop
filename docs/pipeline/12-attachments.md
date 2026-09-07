@@ -305,13 +305,13 @@ facts.
 
 | ref | MCP | SDK (Graph) |
 |---|---|---|
-| mail `file`/`item`/`unknown`, text | `get_mail_attachment_json` `mode: text` | text-like types only, else `no_extractor` |
-| mail `file`/`item`/`unknown`, bytes | `get_mail_attachment_json` `mode: bytes` | `GET /me/messages/{id}/attachments/{aid}/$value` |
+| mail `file`/`item`/`unknown`, text | `get_mail_attachment` `mode: text` | text-like types only, else `no_extractor` |
+| mail `file`/`item`/`unknown`, bytes | `get_mail_attachment` `mode: bytes` | `GET /me/messages/{id}/attachments/{aid}/$value` |
 | mail `reference`, teams `file`, text | `inspect_file` `mode: text` by `source_url` | `GET /shares/{token}/driveItem/content` |
 | mail `reference`, bytes | `inspect_file` `mode: bytes` by `source_url` | `GET /shares/{token}/driveItem/content` |
 | mail `reference` thumbnail | `inspect_file` `mode: thumbnail`, `options: '{"thumbnail":"small"}'` | `GET /shares/{token}/driveItem/thumbnails/0/{size}/content` |
-| teams `file` thumbnail | `get_chat_attachment_json` `thumbnail: small` | `GET /shares/{token}/driveItem/thumbnails/0/{size}/content` |
-| teams `image` | `get_chat_attachment_json` (the attachment id IS the hosted-content id) | `GET /chats/{chat}/messages/{msg}/hostedContents/{id}/$value` |
+| teams `file` thumbnail | `get_teams_attachment` `mode: thumbnail`, `options: '{"thumbnail":"small"}'` | `GET /shares/{token}/driveItem/thumbnails/0/{size}/content` |
+| teams `image` | `get_teams_attachment` `mode: bytes` (the attachment id IS the hosted-content id) | `GET /chats/{chat}/messages/{msg}/hostedContents/{id}/$value` |
 | teams `card`/`message_reference`/`other` | — | — (`binary` / `kind_<k>`) |
 
 Two Graph details are load-bearing and fail as something else when they are
@@ -323,7 +323,7 @@ deleted message rather than as a wrong route.
 
 **The preview cap belongs to the connector, not to the app.**
 `AttachmentBackend.maxPreviewBytes` is **10 MB on MCP** — the server's
-`get_mail_attachment_json` and `get_chat_attachment_json` both refuse above it,
+`get_mail_attachment` and `get_teams_attachment` both refuse above it,
 because the payload rides back base64 inside one JSON reply, and only a chunked
 bytes mode on bond-mcps would raise it — and **25 MB on the SDK path**, which
 streams and is limited only by `maxAttachmentBytes`, the same figure the text

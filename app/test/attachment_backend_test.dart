@@ -155,7 +155,7 @@ void main() {
       ];
       for (final word in words) {
         final mcp = _FakeMcp({
-          'get_mail_attachment_json': [
+          'get_mail_attachment': [
             <String, dynamic>{'error': word},
           ],
         });
@@ -165,7 +165,7 @@ void main() {
       }
 
       final unknown = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{'error': 'the_server_invented_this'},
         ],
       });
@@ -176,7 +176,7 @@ void main() {
     test('an empty text is a skip that names the reason the server gave',
         () async {
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{'text': '', 'reason': 'no_extractor'},
         ],
       });
@@ -190,7 +190,7 @@ void main() {
     test('words come back with what they cost and whether they were cut',
         () async {
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{
             'text': 'The quote is attached.',
             'truncated': true,
@@ -205,7 +205,7 @@ void main() {
       expect(result.text, 'The quote is attached.');
       expect(result.truncated, isTrue);
       expect(result.fetchedBytes, 4096);
-      expect(mcp.argsFor('get_mail_attachment_json'), {
+      expect(mcp.argsFor('get_mail_attachment'), {
         'message_id': 'm1',
         'attachment_id': 'a1',
         'mode': 'text',
@@ -239,13 +239,13 @@ void main() {
 
     test("a mail file's own text call teaches the row nothing, whatever the "
         'server states', () async {
-      // `get_mail_attachment_json`'s `size` is what the server moved to
+      // `get_mail_attachment`'s `size` is what the server moved to
       // answer and its type is the extractor's — and a mail attachment
       // already knew both from its listing. Carrying them here would let an
       // extracted PDF's `text/plain` land on a row whose type was never
       // stated and turn its preview into a text dump.
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{
             'text': 'The quote is attached.',
             'size': 4096,
@@ -288,7 +288,7 @@ void main() {
     test('the MCP text result carries the attached message\'s subject, sender '
         'and date', () async {
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{
             'text': 'Please see the terms below.',
             'size': 27,
@@ -312,7 +312,7 @@ void main() {
       // A forwarded mail the extractor got nowhere with is still a forwarded
       // mail, and the preview draws its header either way.
       final empty = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{
             'text': '',
             'reason': 'empty',
@@ -332,7 +332,7 @@ void main() {
       expect(skipped.itemReceived, '2026-08-14T09:12:00Z');
 
       final failed = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{
             'error': 'access_denied',
             'item_subject': 'Re: Studio lease',
@@ -382,7 +382,7 @@ void main() {
     test('decodes what the server sent and keeps the name it gave it',
         () async {
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{
             'content_base64': base64Encode(const [1, 2, 3, 4]),
             'content_type': 'application/pdf',
@@ -396,12 +396,15 @@ void main() {
       expect(result.bytes, [1, 2, 3, 4]);
       expect(result.contentType, 'application/pdf');
       expect(result.name, 'Quote-88.pdf');
-      expect(mcp.argsFor('get_mail_attachment_json')['mode'], 'bytes');
+      expect(mcp.argsFor('get_mail_attachment')['mode'], 'bytes');
     });
 
-    test('a thumbnail word reaches the chat tool verbatim', () async {
+    test('a chat thumbnail rides the options JSON', () async {
+      // The size is not a flat parameter on the published tool: it is a mode
+      // plus one JSON option, and a flat `thumbnail` would be ignored and a
+      // medium picture come back instead.
       final mcp = _FakeMcp({
-        'get_chat_attachment_json': [
+        'get_teams_attachment': [
           <String, dynamic>{'content_base64': base64Encode(const [9])},
         ],
       });
@@ -411,12 +414,98 @@ void main() {
         thumbnail: 'small',
       );
 
-      expect(mcp.argsFor('get_chat_attachment_json'), {
-        'chat_id': 'chat-7',
+      expect(mcp.argsFor('get_teams_attachment'), {
         'message_id': 'm1',
         'attachment_id': 'a1',
-        'thumbnail': 'small',
+        'chat_id': 'chat-7',
+        'mode': 'thumbnail',
+        'options': '{"thumbnail":"small"}',
       });
+    });
+
+    test("a chat file's bytes send a mode and no options", () async {
+      // No size asked for means no options at all — an empty option object
+      // would be one more thing the server has to decide is harmless.
+      final mcp = _FakeMcp({
+        'get_teams_attachment': [
+          <String, dynamic>{'content_base64': base64Encode(const [9])},
+        ],
+      });
+
+      await McpAttachmentBackend(mcp).fetchBytes(
+        ref(source: 'teams', kind: 'file', conversationKey: 'chat-7'),
+      );
+
+      final args = mcp.argsFor('get_teams_attachment');
+      expect(args, {
+        'message_id': 'm1',
+        'attachment_id': 'a1',
+        'chat_id': 'chat-7',
+        'mode': 'bytes',
+      });
+      expect(args.containsKey('options'), isFalse);
+    });
+
+    test('the mail attachment readers never forget their mode', () async {
+      // One published tool answers both paths and DEFAULTS to text, so the
+      // bytes call that dropped its mode would get extracted words back with
+      // nothing to say they were not base64.
+      final mcp = _FakeMcp({
+        'get_mail_attachment': [
+          <String, dynamic>{'text': 'The quote is attached.', 'size': 4096},
+          <String, dynamic>{
+            'content_base64': base64Encode(const [1, 2, 3, 4]),
+          },
+        ],
+      });
+
+      await McpAttachmentBackend(mcp).extractText(ref());
+      await McpAttachmentBackend(mcp).fetchBytes(ref());
+
+      expect(
+        [
+          for (final c in mcp.calls)
+            if (c.tool == 'get_mail_attachment') c.args['mode'],
+        ],
+        ['text', 'bytes'],
+      );
+    });
+
+    test("a link's thumbnail and a chat's thumbnail speak the same option",
+        () async {
+      // One helper builds the pair for both tools, so a size can never be sent
+      // as JSON at one site and as a flat parameter at the other.
+      final mcp = _FakeMcp({
+        'inspect_file': [
+          <String, dynamic>{'content_base64': base64Encode(const [9])},
+        ],
+        'get_teams_attachment': [
+          <String, dynamic>{'content_base64': base64Encode(const [9])},
+        ],
+      });
+      final backend = McpAttachmentBackend(mcp);
+
+      await backend.fetchBytes(
+        ref(
+          kind: 'reference',
+          sourceUrl: 'https://example.invalid/sites/deals/Rates.xlsx',
+        ),
+        thumbnail: 'large',
+      );
+      await backend.fetchBytes(
+        ref(source: 'teams', kind: 'file', conversationKey: 'chat-7'),
+        thumbnail: 'large',
+      );
+
+      for (final tool in const ['inspect_file', 'get_teams_attachment']) {
+        final args = mcp.argsFor(tool);
+        expect(args['mode'], 'thumbnail', reason: tool);
+        expect(
+          jsonDecode(args['options'] as String),
+          {'thumbnail': 'large'},
+          reason: tool,
+        );
+      }
     });
 
     test('a chat attachment with no chat behind it is refused, not sent',
@@ -550,7 +639,7 @@ void main() {
       // amounts to and ends up on a chip, so the bytes path closes the
       // vocabulary exactly as the text path does.
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{'error': 'the_server_invented_this'},
         ],
       });
@@ -566,7 +655,7 @@ void main() {
 
     test('a known one is kept', () async {
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{'error': 'too_large'},
         ],
       });
@@ -582,7 +671,7 @@ void main() {
 
     test('an answer with no bytes in it is a refusal', () async {
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [<String, dynamic>{'content_base64': ''}],
+        'get_mail_attachment': [<String, dynamic>{'content_base64': ''}],
       });
 
       await expectLater(
@@ -599,7 +688,7 @@ void main() {
     test('a mail failure is the mail exception and a chat failure the chat one',
         () async {
       final mail = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           const McpToolException('Graph API error 500 (Internal): oh dear'),
         ],
       });
@@ -612,7 +701,7 @@ void main() {
       );
 
       final chat = _FakeMcp({
-        'get_chat_attachment_json': [
+        'get_teams_attachment': [
           const McpToolException('Graph API error 503 (Busy): later'),
         ],
       });
@@ -629,7 +718,7 @@ void main() {
 
     test('not_connected is the one failure a person can fix', () async {
       final mcp = _FakeMcp({
-        'get_mail_attachment_json': [
+        'get_mail_attachment': [
           <String, dynamic>{'error': 'not_connected'},
         ],
       });

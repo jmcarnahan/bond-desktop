@@ -27,6 +27,10 @@ void main() {
     'ensure_chat_json',
     'search_people_json',
     'inspect_file_json',
+    'list_chat_messages_page',
+    'send_chat_message_json',
+    'get_mail_attachment_json',
+    'get_chat_attachment_json',
   ];
 
   /// Every name the desktop is allowed to send. The published names, plus the
@@ -44,11 +48,11 @@ void main() {
     'ensure_chat',
     'search_people',
     'inspect_file',
+    'read_teams_messages',
+    'send_teams_message',
+    'get_mail_attachment',
+    'get_teams_attachment',
     // Still aliases — renamed in the later phases of this round.
-    'list_chat_messages_page', // Phase 2
-    'send_chat_message_json', // Phase 2
-    'get_mail_attachment_json', // Phase 2
-    'get_chat_attachment_json', // Phase 2
     'get_mail_detail', // Phase 3
     'create_reply_draft_json', // Phase 3
     'create_draft_json', // Phase 3

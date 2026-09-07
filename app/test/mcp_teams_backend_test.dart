@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
@@ -21,12 +23,15 @@ class _FakeMcp implements BondMcpClient {
   /// is thrown. The last entry is sticky.
   final Map<String, List<Object>> scripted;
 
-  final List<({String tool, Map<String, Object?> args, DateTime at})> calls = [];
+  final List<({String tool, Map<String, Object?> args, DateTime at})> calls =
+      [];
 
   _FakeMcp([this.scripted = const {}]);
 
-  List<Map<String, Object?>> argsOf(String tool) =>
-      [for (final c in calls) if (c.tool == tool) c.args];
+  List<Map<String, Object?>> argsOf(String tool) => [
+    for (final c in calls)
+      if (c.tool == tool) c.args,
+  ];
 
   /// The gap in milliseconds before the [i]th call.
   int gapBefore(int i) =>
@@ -53,12 +58,11 @@ McpTeamsBackend _build(
   _FakeMcp mcp, {
   Duration? chatListGap,
   Duration? sameChatGap,
-}) =>
-    McpTeamsBackend(
-      mcp,
-      chatListGap: chatListGap ?? Duration.zero,
-      sameChatGap: sameChatGap ?? Duration.zero,
-    );
+}) => McpTeamsBackend(
+  mcp,
+  chatListGap: chatListGap ?? Duration.zero,
+  sameChatGap: sameChatGap ?? Duration.zero,
+);
 
 /// [mentionedUserIds] is null by default, which is an older server that does
 /// not send the key at all — the case the reshape has to degrade quietly for.
@@ -69,19 +73,18 @@ Map<String, dynamic> _wireMessage({
   String? fromUserDisplay = 'Sarah Whitfield',
   String? fromApplicationId,
   List<Object?>? mentionedUserIds,
-}) =>
-    {
-      'id': id,
-      'message_type': 'message',
-      'from_user_id': fromUserId,
-      'from_user_display': fromUserDisplay,
-      'from_application_id': fromApplicationId,
-      'body_content': 'hello',
-      'body_content_type': 'text',
-      'created': lastModified,
-      'last_modified': lastModified,
-      'mentioned_user_ids': ?mentionedUserIds,
-    };
+}) => {
+  'id': id,
+  'message_type': 'message',
+  'from_user_id': fromUserId,
+  'from_user_display': fromUserDisplay,
+  'from_application_id': fromApplicationId,
+  'body_content': 'hello',
+  'body_content_type': 'text',
+  'created': lastModified,
+  'last_modified': lastModified,
+  'mentioned_user_ids': ?mentionedUserIds,
+};
 
 void main() {
   group('the profile', () {
@@ -235,10 +238,12 @@ void main() {
       final chats = await _build(mcp).listChats();
 
       expect(chats, hasLength(4), reason: 'four pages is the default cap');
-      expect(
-        mcp.argsOf('list_chats').map((a) => a['cursor']).toList(),
-        ['', 'cursor-1', 'cursor-2', 'cursor-3'],
-      );
+      expect(mcp.argsOf('list_chats').map((a) => a['cursor']).toList(), [
+        '',
+        'cursor-1',
+        'cursor-2',
+        'cursor-3',
+      ]);
     });
 
     test('an empty next_cursor ends the walk', () async {
@@ -284,16 +289,14 @@ void main() {
         {'displayName': 'Sarah Whitfield', 'userId': 'u-1'},
         {'displayName': 'Jared', 'userId': 'me-1'},
       ]);
-      expect(mcp.argsOf('get_chat_members').single, {
-        'chat_id': 'chat-1',
-      });
+      expect(mcp.argsOf('get_chat_members').single, {'chat_id': 'chat-1'});
     });
   });
 
   group('a chat this app has never seen', () {
     test('takes exactly one page and asks for no history', () async {
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           {
             'messages': [_wireMessage(id: 'm1')],
             'next_cursor': 'more-behind-this',
@@ -304,11 +307,33 @@ void main() {
       final messages = await _build(mcp).chatMessagesSince('chat-1', null);
 
       expect(messages, hasLength(1));
-      expect(mcp.argsOf('list_chat_messages_page').single, {
-        'chat_id': 'chat-1',
-        'since': '',
-        'cursor': '',
+      final args = mcp.argsOf('read_teams_messages').single;
+      expect(
+        args.keys,
+        unorderedEquals(['chat_id', 'since', 'cursor', 'options']),
+      );
+      expect(args['chat_id'], 'chat-1');
+      expect(args['since'], '');
+      expect(args['cursor'], '');
+      expect(jsonDecode(args['options'] as String), {'page': true});
+    });
+
+    test('a message page ignores the count the server adds', () async {
+      // The published tool states a `count` beside the page. Nothing here
+      // reads it, and an extra key must change nothing about what comes back.
+      final mcp = _FakeMcp({
+        'read_teams_messages': [
+          {
+            'messages': [_wireMessage(id: 'm1')],
+            'next_cursor': '',
+            'count': 1,
+          },
+        ],
       });
+
+      final messages = await _build(mcp).chatMessagesSince('chat-1', null);
+
+      expect(messages.single['id'], 'm1');
     });
 
     test('and an empty cursor string counts as never seen', () async {
@@ -316,7 +341,7 @@ void main() {
 
       await _build(mcp).chatMessagesSince('chat-1', '');
 
-      expect(mcp.argsOf('list_chat_messages_page').single['since'], '');
+      expect(mcp.argsOf('read_teams_messages').single['since'], '');
     });
   });
 
@@ -324,7 +349,7 @@ void main() {
     test('runs until the pages run out', () async {
       const since = '2026-08-01T00:00:00Z';
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           {
             'messages': [_wireMessage(id: 'm1')],
             'next_cursor': 'c2',
@@ -340,16 +365,44 @@ void main() {
 
       expect(messages.map((m) => m['id']).toList(), ['m1', 'm2']);
       expect(
-        mcp.argsOf('list_chat_messages_page').map((a) => a['cursor']).toList(),
+        mcp.argsOf('read_teams_messages').map((a) => a['cursor']).toList(),
         ['', 'c2'],
       );
-      expect(mcp.argsOf('list_chat_messages_page').first['since'], since);
+      expect(mcp.argsOf('read_teams_messages').first['since'], since);
+    });
+
+    test('every chat page asks for page mode, cursor or not', () async {
+      // Without the option `read_teams_messages` is a different tool: it walks
+      // back to `since` on creation time rather than answering one page on
+      // last-modified. The second call carries a cursor, which implies the
+      // mode, and it says so anyway.
+      const since = '2026-08-01T00:00:00Z';
+      final mcp = _FakeMcp({
+        'read_teams_messages': [
+          {
+            'messages': [_wireMessage(id: 'm1')],
+            'next_cursor': 'p2',
+          },
+          {
+            'messages': [_wireMessage(id: 'm2')],
+            'next_cursor': '',
+          },
+        ],
+      });
+
+      await _build(mcp).chatMessagesSince('chat-1', since, maxPages: 4);
+
+      final calls = mcp.argsOf('read_teams_messages');
+      expect(calls, hasLength(2));
+      for (final args in calls) {
+        expect(jsonDecode(args['options'] as String), {'page': true});
+      }
     });
 
     test('stops as soon as a page reaches back past the cursor', () async {
       const since = '2026-08-28T10:00:00Z';
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           {
             'messages': [
               _wireMessage(id: 'm1', lastModified: '2026-08-28T12:00:00Z'),
@@ -365,14 +418,14 @@ void main() {
       final messages = await _build(mcp).chatMessagesSince('chat-1', since);
 
       expect(messages, hasLength(2));
-      expect(mcp.argsOf('list_chat_messages_page'), hasLength(1));
+      expect(mcp.argsOf('read_teams_messages'), hasLength(1));
     });
 
     test('an undated oldest message does not stop it', () async {
       // An undated message says nothing about how far back the page reached;
       // stopping on one would silently truncate the sync.
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           {
             'messages': [
               {
@@ -392,24 +445,24 @@ void main() {
 
       await _build(mcp).chatMessagesSince('chat-1', '2026-08-01T00:00:00Z');
 
-      expect(mcp.argsOf('list_chat_messages_page'), hasLength(2));
+      expect(mcp.argsOf('read_teams_messages'), hasLength(2));
     });
 
     test('an empty page ends it', () async {
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           {'messages': const [], 'next_cursor': 'c2'},
         ],
       });
 
       await _build(mcp).chatMessagesSince('chat-1', '2026-08-01T00:00:00Z');
 
-      expect(mcp.argsOf('list_chat_messages_page'), hasLength(1));
+      expect(mcp.argsOf('read_teams_messages'), hasLength(1));
     });
 
     test('hitting the runaway bound is logged, because it is a hole', () async {
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           {
             'messages': [
               _wireMessage(id: 'm', lastModified: '2026-08-28T12:00:00Z'),
@@ -423,13 +476,10 @@ void main() {
       debugPrint = (message, {wrapWidth}) => logged.add(message ?? '');
       addTearDown(() => debugPrint = previous);
 
-      await _build(mcp).chatMessagesSince(
-        'chat-1',
-        '2026-08-01T00:00:00Z',
-        maxPages: 3,
-      );
+      await _build(mcp)
+          .chatMessagesSince('chat-1', '2026-08-01T00:00:00Z', maxPages: 3);
 
-      expect(mcp.argsOf('list_chat_messages_page'), hasLength(3));
+      expect(mcp.argsOf('read_teams_messages'), hasLength(3));
       expect(logged.single, contains('chat-1'));
       expect(logged.single, contains('will not be fetched'));
     });
@@ -437,7 +487,7 @@ void main() {
     test('but an early stop is the walk finishing, and says nothing', () async {
       const since = '2026-08-28T10:00:00Z';
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           {
             'messages': [_wireMessage(id: 'm1', lastModified: since)],
             'next_cursor': 'c2',
@@ -458,7 +508,7 @@ void main() {
   group('the message reshape', () {
     Future<Map<String, dynamic>> only(Map<String, dynamic> wire) async {
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           {
             'messages': [wire],
             'next_cursor': '',
@@ -488,12 +538,14 @@ void main() {
       // There is no from_application_display on the wire, so the name is null.
       // TeamsSync tolerates that, and gates the message out of extraction on
       // the application key alone.
-      final message = await only(_wireMessage(
-        id: 'm1',
-        fromUserId: null,
-        fromUserDisplay: null,
-        fromApplicationId: 'app-1',
-      ));
+      final message = await only(
+        _wireMessage(
+          id: 'm1',
+          fromUserId: null,
+          fromUserDisplay: null,
+          fromApplicationId: 'app-1',
+        ),
+      );
 
       expect(message['from'], {
         'application': {'id': 'app-1', 'displayName': null},
@@ -502,11 +554,9 @@ void main() {
 
     test('a system event has no sender at all', () async {
       // Not an object full of nulls: that would read as a person with no name.
-      final message = await only(_wireMessage(
-        id: 'm1',
-        fromUserId: null,
-        fromUserDisplay: null,
-      ));
+      final message = await only(
+        _wireMessage(id: 'm1', fromUserId: null, fromUserDisplay: null),
+      );
 
       expect(message['from'], isNull);
     });
@@ -535,7 +585,9 @@ void main() {
     });
 
     test('an empty mention list is a message that named nobody', () async {
-      final message = await only(_wireMessage(id: 'm1', mentionedUserIds: const []));
+      final message = await only(
+        _wireMessage(id: 'm1', mentionedUserIds: const []),
+      );
 
       expect(message['mentions'], isEmpty);
       expect(TeamsSync.mentionedUserIds(message['mentions']), isEmpty);
@@ -551,7 +603,9 @@ void main() {
 
       expect(message['mentions'], [
         {
-          'mentioned': {'user': {'id': 'u-7'}},
+          'mentioned': {
+            'user': {'id': 'u-7'},
+          },
         },
       ]);
     });
@@ -583,8 +637,7 @@ void main() {
       expect(mcp.argsOf('mark_chat_read').single, {'chat_id': 'chat-1'});
     });
 
-    test('an ok:false is a failure the queue must see, not a quiet no-op',
-        () async {
+    test('an ok:false is a failure the queue must see, not a quiet no-op', () async {
       // The whole point of the ack queue is noticing a read that did not land.
       // Swallowing this would leave the server's unread badge wrong forever
       // with nothing recorded anywhere.
@@ -596,8 +649,13 @@ void main() {
 
       await expectLater(
         _build(mcp).markChatRead('chat-1'),
-        throwsA(isA<GraphTeamsException>()
-            .having((e) => e.message, 'message', contains('no_identity'))),
+        throwsA(
+          isA<GraphTeamsException>().having(
+            (e) => e.message,
+            'message',
+            contains('no_identity'),
+          ),
+        ),
       );
     });
 
@@ -616,22 +674,21 @@ void main() {
   });
 
   group('sending a chat message', () {
-    test('carries the text, and answers in the shape a synced message has',
-        () async {
+    test('carries the text, and answers in the shape a synced message has', () async {
       // Shape-identical on purpose: the caller writes this straight into
       // `messages`, and a row built from a different shape would disagree with
       // the one the next pull builds for the very same message.
       final mcp = _FakeMcp({
-        'send_chat_message_json': [
+        'send_teams_message': [
           {'message': _wireMessage(id: 'sent-1', fromUserId: 'me-1')},
         ],
       });
 
       final sent = await _build(mcp).sendChatMessage('chat-1', 'On it.');
 
-      expect(mcp.argsOf('send_chat_message_json').single, {
+      expect(mcp.argsOf('send_teams_message').single, {
         'chat_id': 'chat-1',
-        'text': 'On it.',
+        'message': 'On it.',
       });
       expect(sent, {
         'id': 'sent-1',
@@ -647,18 +704,95 @@ void main() {
 
     test('a null message is a send that did not happen', () async {
       // Returning something empty here would put "sent" on screen over a chat
-      // that never received anything.
+      // that never received anything. The reply is the published tool's shape
+      // — a word plus a sentence — not the alias's bare prose, so the fixture
+      // describes an answer the server can actually give.
       final mcp = _FakeMcp({
-        'send_chat_message_json': [
-          {'message': null, 'error': 'text must not be empty'},
+        'send_teams_message': [
+          {
+            'message': null,
+            'error': 'invalid_arguments',
+            'reason': 'text must not be empty',
+          },
         ],
       });
 
       await expectLater(
         _build(mcp).sendChatMessage('chat-1', ''),
-        throwsA(isA<GraphTeamsException>()
-            .having((e) => e.message, 'message', contains('must not be empty'))),
+        throwsA(
+          isA<GraphTeamsException>().having(
+            (e) => e.message,
+            'message',
+            contains('must not be empty'),
+          ),
+        ),
       );
+    });
+
+    test('a Teams send the server refuses names the reason', () async {
+      // The word alone does not tell the person what to change, so the
+      // sentence beside it travels to the banner too.
+      final mcp = _FakeMcp({
+        'send_teams_message': [
+          {
+            'message': null,
+            'error': 'invalid_arguments',
+            'reason': 'nothing to send',
+          },
+        ],
+      });
+
+      await expectLater(
+        _build(mcp).sendChatMessage('chat-1', ''),
+        throwsA(
+          isA<GraphTeamsException>().having(
+            (e) => e.message,
+            'message',
+            allOf(contains('invalid_arguments'), contains('nothing to send')),
+          ),
+        ),
+      );
+    });
+
+    test(
+      'a Teams send refused without a reason still names the word',
+      () async {
+        // No sentence means no dash: an empty tail would put punctuation on the
+        // banner with nothing behind it.
+        final mcp = _FakeMcp({
+          'send_teams_message': [
+            {'message': null, 'error': 'chat_not_found'},
+          ],
+        });
+
+        await expectLater(
+          _build(mcp).sendChatMessage('chat-1', 'On it.'),
+          throwsA(
+            isA<GraphTeamsException>().having(
+              (e) => e.message,
+              'message',
+              allOf(contains('chat_not_found'), isNot(contains(' — '))),
+            ),
+          ),
+        );
+      },
+    );
+
+    test('a Teams send passes the text as message, never as text', () async {
+      // The published tool names the body `message` and takes it first
+      // positionally, so a stray `text` key would be dropped and an empty
+      // message sent in its place.
+      final mcp = _FakeMcp({
+        'send_teams_message': [
+          {'message': _wireMessage(id: 'sent-1')},
+        ],
+      });
+
+      await _build(mcp).sendChatMessage('chat-1', 'On it.');
+
+      final args = mcp.argsOf('send_teams_message').single;
+      expect(args.containsKey('text'), isFalse);
+      expect(args['message'], 'On it.');
     });
   });
 
@@ -672,10 +806,7 @@ void main() {
 
       final chat = await _build(mcp).ensureChat(['u1']);
 
-      expect(mcp.argsOf('ensure_chat').single, {
-        'user_ids': 'u1',
-        'topic': '',
-      });
+      expect(mcp.argsOf('ensure_chat').single, {'user_ids': 'u1', 'topic': ''});
       expect(chat.chatId, 'chat-9');
       // The flag the caller retries on: a 1:1 can be asked for twice, a group
       // cannot.
@@ -689,10 +820,8 @@ void main() {
         ],
       });
 
-      final chat = await _build(mcp).ensureChat(
-        ['u1', 'u2', 'u3'],
-        topic: 'Contract review',
-      );
+      final chat = await _build(mcp)
+          .ensureChat(['u1', 'u2', 'u3'], topic: 'Contract review');
 
       expect(mcp.argsOf('ensure_chat').single, {
         'user_ids': 'u1,u2,u3',
@@ -726,46 +855,69 @@ void main() {
 
       for (final entry in expected.entries) {
         await expectLater(
-          _build(_FakeMcp({
-            'ensure_chat': [
-              {'error': entry.key},
-            ],
-          })).ensureChat(['u1']),
-          throwsA(isA<GraphTeamsException>()
-              .having((e) => e.message, entry.key, contains(entry.value))),
+          _build(
+            _FakeMcp({
+              'ensure_chat': [
+                {'error': entry.key},
+              ],
+            }),
+          ).ensureChat(['u1']),
+          throwsA(
+            isA<GraphTeamsException>().having(
+              (e) => e.message,
+              entry.key,
+              contains(entry.value),
+            ),
+          ),
           reason: entry.key,
         );
       }
     });
 
-    test('an error nobody mapped still throws, carrying what it said',
-        () async {
-      await expectLater(
-        _build(_FakeMcp({
-          'ensure_chat': [
-            {'error': 'something_new'},
-          ],
-        })).ensureChat(['u1']),
-        throwsA(isA<GraphTeamsException>()
-            .having((e) => e.message, 'message', contains('something_new'))),
-      );
-    });
+    test(
+      'an error nobody mapped still throws, carrying what it said',
+      () async {
+        await expectLater(
+          _build(
+            _FakeMcp({
+              'ensure_chat': [
+                {'error': 'something_new'},
+              ],
+            }),
+          ).ensureChat(['u1']),
+          throwsA(
+            isA<GraphTeamsException>().having(
+              (e) => e.message,
+              'message',
+              contains('something_new'),
+            ),
+          ),
+        );
+      },
+    );
 
     test('a chat with no id is not a chat', () async {
       await expectLater(
         _build(_FakeMcp()).ensureChat(['u1']),
-        throwsA(isA<GraphTeamsException>()
-            .having((e) => e.message, 'message', contains('no id'))),
+        throwsA(
+          isA<GraphTeamsException>().having(
+            (e) => e.message,
+            'message',
+            contains('no id'),
+          ),
+        ),
       );
     });
 
     test('a disconnected server routes to sign-in instead', () async {
       await expectLater(
-        _build(_FakeMcp({
-          'ensure_chat': [
-            {'error': 'not_connected'},
-          ],
-        })).ensureChat(['u1']),
+        _build(
+          _FakeMcp({
+            'ensure_chat': [
+              {'error': 'not_connected'},
+            ],
+          }),
+        ).ensureChat(['u1']),
         throwsA(isA<ReconsentRequired>()),
       );
     });
@@ -796,8 +948,11 @@ void main() {
       await teams.chatMessagesSince('chat-1', null);
       await teams.chatMessagesSince('chat-2', null);
 
-      expect(mcp.gapBefore(1), lessThan(400),
-          reason: 'the floor is per chat, as the throttle is');
+      expect(
+        mcp.gapBefore(1),
+        lessThan(400),
+        reason: 'the floor is per chat, as the throttle is',
+      );
     });
 
     test('and the writes wait on it too, not only the reads', () async {
@@ -806,7 +961,7 @@ void main() {
         'mark_chat_read': [
           {'ok': true},
         ],
-        'send_chat_message_json': [
+        'send_teams_message': [
           {'message': _wireMessage(id: 'sent-1')},
         ],
       });
@@ -850,15 +1005,20 @@ void main() {
 
     test('a Graph status inside a tool error is carried through', () async {
       final mcp = _FakeMcp({
-        'list_chat_messages_page': [
+        'read_teams_messages': [
           const McpToolException('Graph API error 403 (Forbidden): no consent'),
         ],
       });
 
       await expectLater(
         _build(mcp).chatMessagesSince('chat-1', null),
-        throwsA(isA<GraphTeamsException>()
-            .having((e) => e.statusCode, 'statusCode', 403)),
+        throwsA(
+          isA<GraphTeamsException>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            403,
+          ),
+        ),
       );
     });
 
@@ -871,8 +1031,13 @@ void main() {
 
       await expectLater(
         _build(mcp).chatMembers('chat-1'),
-        throwsA(isA<GraphTeamsException>()
-            .having((e) => e.statusCode, 'statusCode', 502)),
+        throwsA(
+          isA<GraphTeamsException>().having(
+            (e) => e.statusCode,
+            'statusCode',
+            502,
+          ),
+        ),
       );
     });
 

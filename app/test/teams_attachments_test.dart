@@ -146,7 +146,7 @@ class _FakeMcp implements BondMcpClient {
 Future<Map<String, dynamic>> _throughMcp(Map<String, Object?> wire) async {
   final backend = McpTeamsBackend(
     _FakeMcp({
-      'list_chat_messages_page': {
+      'read_teams_messages': {
         'messages': [wire],
         'next_cursor': null,
       },
