@@ -39,8 +39,10 @@ It carries the `internet_message_id` that `send_draft` reported, which is the
 same one the Sent Items copy will carry — the copy's `id` differs, because the
 draft the app sent no longer exists.
 
-Reconciliation happens inside the Sent Items page transaction: for every
-outbound message with an `internetMessageId`, `_ingestPage` calls
+Reconciliation happens inside the Sent Items page transaction. `_ingestPage`
+reads `MessageStore.pendingEchoInternetMessageIds` once per page — one indexed
+read, empty on every drain but the one after a send — and for each outbound
+message whose `internetMessageId` is in that set calls
 `MessageStore.deleteLocalEcho` before asking `hasMessage`. The echo and its
 `message_progress` row go, the real row lands as a true first sighting, and it
 folds like any other sent copy. No reader ever sees both.
@@ -51,4 +53,8 @@ It checks, in one transaction, for a non-`local:` row with the same
 `internet_message_id` and declines to write when it finds one.
 
 `deleteLocalEcho` is the only `DELETE FROM messages` in the app, and both of
-its statements are guarded by `LIKE 'local:%'`.
+its statements are guarded by the key range `>= 'local:' AND < 'local;'` —
+exactly "starts with `local:`", written as a range rather than a LIKE so the
+primary key serves it (SQLite will not use a BINARY index for a
+case-insensitive LIKE, and a per-message scan of the source was minutes on a
+first sync).

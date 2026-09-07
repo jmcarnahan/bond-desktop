@@ -1,5 +1,6 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -111,6 +112,72 @@ void main() {
       );
 
       expect(await messageIds(), ['local:d1']);
+    });
+  });
+
+  group('pendingEchoInternetMessageIds', () {
+    test('lists the echoes and nothing else', () async {
+      await store.insertLocalEcho(row(id: 'local:d1'));
+      await store.insertLocalEcho(
+        row(id: 'local:d2', internetMessageId: '<def@bond.local>'),
+      );
+      // A real row sharing an id, a real row of its own, and an echo with
+      // nothing to match on: none of them is a reconciliation waiting.
+      await store.upsertMessage(row(id: 'AAMk-real'));
+      await store.upsertMessage(
+        row(id: 'AAMk-other', internetMessageId: '<ghi@bond.local>'),
+      );
+      await store.insertLocalEcho(row(id: 'local:d3', internetMessageId: null));
+      // And an echo in the other connector's namespace.
+      await store.insertLocalEcho({
+        ...row(id: 'local:t1', internetMessageId: '<teams@bond.local>'),
+        'source': 'teams',
+      });
+
+      expect(
+        await store.pendingEchoInternetMessageIds('email'),
+        {'<abc@bond.local>', '<def@bond.local>'},
+      );
+      expect(await store.pendingEchoInternetMessageIds('teams'),
+          {'<teams@bond.local>'});
+    });
+
+    test('is empty for a mailbox with no send in flight', () async {
+      await store.upsertMessage(row(id: 'AAMk-real'));
+      expect(await store.pendingEchoInternetMessageIds('email'), isEmpty);
+    });
+
+    test('the echo range is served by the primary key, not a scan', () async {
+      // The whole reason the guard is a key range rather than a LIKE: the
+      // drain asks this on every page, and the delete under every Sent Items
+      // copy it matches. A plan that only narrows on `source` walks the whole
+      // mailbox each time.
+      Future<String> plan(String sql, List<Object?> args) async {
+        final rows = await db
+            .customSelect(
+              'EXPLAIN QUERY PLAN $sql',
+              variables: [for (final a in args) Variable<Object>(a)],
+            )
+            .get();
+        return [for (final r in rows) r.data['detail']].join('\n');
+      }
+
+      final read = await plan(
+        'SELECT internet_message_id FROM messages '
+        'WHERE source = ? AND source_message_id >= ? '
+        '  AND source_message_id < ? AND internet_message_id IS NOT NULL',
+        ['email', 'local:', 'local;'],
+      );
+      expect(read, contains('source_message_id>?'));
+      expect(read, isNot(contains('SCAN')));
+
+      final remove = await plan(
+        'DELETE FROM messages WHERE source = ? '
+        '  AND source_message_id >= ? AND source_message_id < ? '
+        '  AND internet_message_id = ?',
+        ['email', 'local:', 'local;', '<abc@bond.local>'],
+      );
+      expect(remove, contains('source_message_id>?'));
     });
   });
 

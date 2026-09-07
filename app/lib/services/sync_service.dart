@@ -421,6 +421,15 @@ class SyncService implements MailSync {
       var newMessages = 0;
       final work = <String, _ConversationWork>{};
 
+      // The echoes this page could be carrying the real copies of, read once
+      // for the page rather than looked for under every message: on every
+      // drain but the one after a send there are none, and the answer is one
+      // indexed read. Consistent for the whole page — the send's own write
+      // is a transaction of its own, and drift runs them one at a time.
+      final pendingEchoes = outbound
+          ? await _store.pendingEchoInternetMessageIds(_source)
+          : const <String>{};
+
       for (final message in raw) {
         // A deletion tombstone carries no fields to store. The local row is
         // left alone: this app reads mail it has already seen, and a thread
@@ -473,7 +482,8 @@ class SyncService implements MailSync {
         // read as a true first sighting so it folds like any other Sent Items
         // copy, and the delete must be in the same transaction as the insert
         // so no reader can ever see both rows at once.
-        if (outbound && internetMessageId != null) {
+        if (internetMessageId != null &&
+            pendingEchoes.contains(internetMessageId)) {
           await _store.deleteLocalEcho(_source, internetMessageId);
         }
 

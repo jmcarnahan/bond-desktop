@@ -364,14 +364,58 @@ INSERT OR IGNORE INTO message_progress (
     });
   }
 
+  /// The key just past every `local:` id, so `>= 'local:' AND < 'local;'`
+  /// is exactly "starts with `local:`" — and, unlike `LIKE 'local:%'`, a
+  /// range the primary key can serve. SQLite will not use a BINARY index for
+  /// a case-insensitive LIKE, and the guard below runs once per Sent Items
+  /// message on every drain, so as a LIKE it was a scan of the whole source
+  /// per message: minutes on a first sync of a mailbox with years of sent
+  /// mail behind it.
+  static final String _localEchoPrefixEnd = _keyAfterPrefix(localEchoPrefix);
+
+  /// [prefix] with its last character stepped up by one: the smallest key
+  /// that no string starting with [prefix] can reach.
+  static String _keyAfterPrefix(String prefix) {
+    final last = prefix.length - 1;
+    return prefix.substring(0, last) +
+        String.fromCharCode(prefix.codeUnitAt(last) + 1);
+  }
+
+  /// The internet message ids of every `local:` echo [source] is holding —
+  /// what the drain asks once per page, so the reconciliation below costs a
+  /// page nothing when there is nothing to reconcile, which is every page
+  /// but the one right after a send.
+  ///
+  /// Echoes are always few: one per message sent from this app and not yet
+  /// folded, and the next drain takes them. An echo with no internet message
+  /// id is not listed, because nothing could ever match it.
+  Future<Set<String>> pendingEchoInternetMessageIds(String source) async {
+    final rows = await db
+        .customSelect(
+          'SELECT internet_message_id FROM messages '
+          'WHERE source = ? '
+          '  AND source_message_id >= ? AND source_message_id < ? '
+          '  AND internet_message_id IS NOT NULL',
+          variables: _args([source, localEchoPrefix, _localEchoPrefixEnd]),
+        )
+        .get();
+    return {
+      for (final row in rows)
+        if (row.data['internet_message_id'] case final String id
+            when id.isNotEmpty)
+          id,
+    };
+  }
+
   /// Removes the local echo of the message [internetMessageId] names, and its
   /// progress row with it. Returns how many message rows went.
   ///
   /// **The only DELETE on `messages` in this app**, and it may only ever reach
-  /// a `local:` row — hence the LIKE on both statements rather than on the
-  /// first alone. Everything else in the pipeline treats a stored message as
-  /// permanent, so a widening of this predicate would be a widening of what
-  /// the app can destroy.
+  /// a `local:` row — hence the key range on both statements rather than on
+  /// the first alone (a range rather than a LIKE for the planner's sake; see
+  /// [_localEchoPrefixEnd]). Everything else in the pipeline treats a stored
+  /// message as permanent, so a widening of this predicate would be a
+  /// widening of what the app can destroy.
   ///
   /// Called from inside the Sent Items page transaction, immediately before
   /// the real row is written: the echo and the copy that replaces it are never
@@ -382,16 +426,29 @@ INSERT OR IGNORE INTO message_progress (
         'DELETE FROM message_progress '
         'WHERE source = ? AND source_message_id IN ('
         '  SELECT source_message_id FROM messages '
-        "  WHERE source = ? AND source_message_id LIKE '$localEchoPrefix%' "
+        '  WHERE source = ? '
+        '    AND source_message_id >= ? AND source_message_id < ? '
         '    AND internet_message_id = ?'
         ')',
-        variables: _args([source, source, internetMessageId]),
+        variables: _args([
+          source,
+          source,
+          localEchoPrefix,
+          _localEchoPrefixEnd,
+          internetMessageId,
+        ]),
       );
       return db.customUpdate(
         'DELETE FROM messages '
-        "WHERE source = ? AND source_message_id LIKE '$localEchoPrefix%' "
-        'AND internet_message_id = ?',
-        variables: _args([source, internetMessageId]),
+        'WHERE source = ? '
+        '  AND source_message_id >= ? AND source_message_id < ? '
+        '  AND internet_message_id = ?',
+        variables: _args([
+          source,
+          localEchoPrefix,
+          _localEchoPrefixEnd,
+          internetMessageId,
+        ]),
       );
     });
   }
