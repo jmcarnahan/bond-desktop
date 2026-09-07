@@ -13,13 +13,14 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
-import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/services/attachments/attachment_bytes.dart';
 import 'package:bond_inbox/services/attachments/xlsx_reader.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
+import 'package:bond_inbox/widgets/side_panel.dart';
+import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/widgets/preview/preview_engines.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:flutter/material.dart';
@@ -467,7 +468,7 @@ void main() {
       await tester.tap(find.text('Reply…'));
       await tester.pump();
 
-      await tester.tap(find.byTooltip('Close'));
+      await tester.tap(find.byTooltip('Close reply'));
       await tester.pump();
 
       expect(find.byType(Composer), findsNothing);
@@ -613,12 +614,13 @@ void main() {
   /// the CAPABILITY is, and under `Chat.ReadWrite` alone the two sources sit on
   /// different rungs: a chat can send, a mail thread can only be copied. So the
   /// rung the box reports is the proof of which conversation it is answering.
-  group('a mixed storyline replies to the episode the user picked', () {
+  group('a mixed storyline replies in the thread that opens beside', () {
+    /// The storyline, open in the main pane, with both connectors in it. The
+    /// chat is the newer of the two.
     Future<void> openMixedStoryline(
       WidgetTester tester, {
       String grantedScopes = _withChatWrite,
     }) async {
-      // The chat is the newer of the two, so it is the default target.
       await seedMail('c1');
       await seedChat('chat-1');
       await store.insertStoryline(
@@ -639,47 +641,43 @@ void main() {
       await tester.pump();
       await tester.pump();
       await tester.pump();
+    }
 
-      // A storyline's reply window is collapsed by default, the way a thread's
-      // is, so every test below has to ask for it before there is a target to
-      // pick or a box to type into.
-      await tester.tap(find.text('Reply…'));
+    /// Opens one card's thread beside the spine, and its reply box with it.
+    /// The spine itself has no composer: a storyline is several conversations,
+    /// and the one an answer belongs to is the one that opens beside it.
+    /// The card by its title, scoped to the spine: the rail names the same
+    /// chat, and a bare text finder would find both.
+    Finder cardNamed(String title) => find.descendant(
+          of: find.byType(StorylineTimelinePanel),
+          matching: find.text(title),
+        );
+
+    Future<void> openBeside(WidgetTester tester, String card) async {
+      await tester.tap(cardNamed(card));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.text('Reply…'),
+      ));
       await tester.pump();
       await tester.pump();
     }
 
-    /// The reply targets by name, and which one the box is pointed at. The
-    /// source filter bar is built from the same pill, so these are read by
-    /// label rather than counted.
-    Map<String, bool> replyPills(WidgetTester tester) => {
-          for (final pill
-              in tester.widgetList<BondFilterPill>(find.byType(BondFilterPill)))
-            pill.label: pill.selected,
-        };
-
-    /// By the pill and not by its text: the list pane names the same threads.
-    Finder pillNamed(String label) =>
-        find.byWidgetPredicate((w) => w is BondFilterPill && w.label == label);
-
-    testWidgets('a chat is offered as a target and drafted down the chat path',
-        (tester) async {
+    testWidgets('a chat episode opens a box that can send', (tester) async {
       await openMixedStoryline(tester);
 
-      // Both episodes are on offer, which is the change: a chat used to be
-      // filtered out of the list entirely. The newest is the default target,
-      // and here that is the chat.
-      final labels = tester
-          .widgetList<BondFilterPill>(find.byType(BondFilterPill))
-          .map((pill) => pill.label)
-          .where((label) =>
-              label == 'Homepage copy' || label == 'Sarah Whitfield')
-          .toList();
-      expect(labels, ['Homepage copy', 'Sarah Whitfield']);
-      expect(replyPills(tester)['Sarah Whitfield'], isTrue);
-      // A chat message has no subject of its own, so the pill is named by who
+      // A chat message has no subject of its own, so the card is named by who
       // is on it rather than by a blank.
-      expect(find.text('Sarah Whitfield'), findsWidgets);
-      expect(find.text('(no subject)'), findsNothing);
+      expect(cardNamed('💬 Sarah Whitfield'), findsOneWidget);
+      expect(find.text('💬 (no subject)'), findsNothing);
+      // And the spine has no box of its own to be routed anywhere.
+      expect(find.byType(Composer), findsNothing);
+
+      await openBeside(tester, '💬 Sarah Whitfield');
 
       final composer = tester.widget<Composer>(find.byType(Composer));
       expect(composer.capability, SendCapability.send,
@@ -687,36 +685,32 @@ void main() {
               'routed at the mail thread would report copy-only');
     });
 
-    testWidgets('picking the mail thread routes the box back to mail',
+    testWidgets('and the mail episode beside it routes down the mail path',
         (tester) async {
       await openMixedStoryline(tester);
 
-      await tester.tap(pillNamed('Homepage copy'));
-      await tester.pump();
-      await tester.pump();
+      await openBeside(tester, '✉ Homepage copy');
 
-      expect(replyPills(tester)['Homepage copy'], isTrue);
       final composer = tester.widget<Composer>(find.byType(Composer));
       expect(composer.capability, SendCapability.copyOnly,
           reason: 'this grant carries no Mail.Send and no Mail.ReadWrite');
     });
 
-    testWidgets(
-        'without Chat.ReadWrite the chat says where to reply, and the mail '
-        'thread is still one pick away', (tester) async {
+    testWidgets('without Chat.ReadWrite the chat says where to reply',
+        (tester) async {
       await openMixedStoryline(tester, grantedScopes: _withChat);
 
+      await tester.tap(cardNamed('💬 Sarah Whitfield'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
       // The same ladder the thread pane applies: a box that could not send is
-      // worse than none, in a storyline as much as in a thread.
+      // worse than none. The mail episode is one card away, and it has one.
       expect(find.byType(Composer), findsNothing);
       expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
 
-      // The pills stay put above the caption, because they are the way to the
-      // episode this build CAN answer. Hiding them with the box would strand a
-      // storyline whose newest episode happens to be a chat.
-      await tester.tap(pillNamed('Homepage copy'));
-      await tester.pump();
-      await tester.pump();
+      await openBeside(tester, '✉ Homepage copy');
 
       expect(find.text('Reply in Microsoft Teams'), findsNothing);
       expect(find.byType(Composer), findsOneWidget);

@@ -7,17 +7,22 @@ import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
 import 'attachment_documents_strip.dart';
 import 'inline_alert.dart';
-import 'message_row.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
 /// One storyline as a spine of thread episodes, newest at the bottom.
 ///
-/// Each member thread is one collapsible card rather than a run of messages
-/// spliced into a merged transcript: a storyline is several conversations, and
-/// interleaving them by timestamp made the reader reassemble each one in their
-/// head. Collapse is how you skim the spine; the card header is how you jump
-/// into the thread the card stands for.
+/// Each member thread is ONE card rather than a run of messages spliced into a
+/// merged transcript: a storyline is several conversations, and interleaving
+/// them by timestamp made the reader reassemble each one in their head.
+///
+/// A card is a root message and not a drawer: it says what the thread is, what
+/// it wants and how much of it there is, and a tap opens the thread itself
+/// beside the spine. Cards used to expand in place, which gave the app two
+/// ways to read the same conversation — one of them without a header, an
+/// overflow menu or anywhere to reply from. There is one way now, and the
+/// thread that opens beside carries its own composer, so a reply is addressed
+/// to exactly one conversation.
 class StorylineTimelinePanel extends StatefulWidget {
   final Storyline storyline;
 
@@ -55,8 +60,8 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// menu: the choice is a whole mailbox long.
   final VoidCallback onAddThread;
 
-  /// Displays the spine newest card first. Only the rendering order changes:
-  /// the newest episode is still the one that opens on its own.
+  /// Displays the spine newest card first. A reading direction and nothing
+  /// more — every card says the same thing whichever end it is read from.
   final bool newestFirst;
 
   final VoidCallback onToggleSort;
@@ -65,19 +70,11 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// panel is one of the things it takes away.
   final VoidCallback onDismiss;
 
-  /// Rendered at the END of an OPEN card, under that thread's messages, so it
-  /// reads as attached to the episode rather than to the spine.
-  ///
-  /// Hosts pass the reply affordance here. The panel does not know what it is
-  /// and does not ask — it renders a spine and knows nothing about drafts or
-  /// sending, which is the arrangement `ThreadDetailPanel.afterTranscript`
-  /// already lives under. The widget owns its own spacing, so a footer with
-  /// nothing to show can render nothing and leave no gap behind.
-  final Widget Function(StorylineEpisode episode)? episodeFooter;
-
-  /// A message's open ask was tapped, on the card it belongs to. Null leaves
-  /// every ask a statement.
-  final void Function(StorylineEpisode episode)? onAskTap;
+  /// A card was tapped: open that thread beside the spine. Required, because a
+  /// card that opens nothing is a headline the reader cannot follow — and the
+  /// thread it opens is where the reply, the files and the whole transcript
+  /// are.
+  final void Function(StorylineEpisode episode) onOpenEpisode;
 
   /// The same action the overview's Sync runs: the ordinary two-connector
   /// pull, whose tail heals the refreshes and recaps the storylines were owed.
@@ -107,17 +104,6 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// Remove is not.
   final void Function(AttachmentRef attachment)? onUnpinDocument;
 
-  /// A chip or a thumbnail inside one of the spine's messages was tapped.
-  /// Forwarded to every row, exactly as the thread panel forwards it.
-  final void Function(AttachmentRef attachment)? onOpenAttachment;
-
-  /// Which file the host is showing, so the row that carries it can say so.
-  final AttachmentRef? selectedAttachment;
-
-  /// The picture for one attachment, or null while there is not one yet. The
-  /// host owns the cache; the rows only ask.
-  final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
-
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -130,21 +116,17 @@ class StorylineTimelinePanel extends StatefulWidget {
     required this.onDismissSuggestion,
     required this.onRemoveThread,
     required this.onOpenThread,
+    required this.onOpenEpisode,
     required this.onAddThread,
     required this.newestFirst,
     required this.onToggleSort,
     required this.onDismiss,
     required this.onSync,
     required this.syncing,
-    this.episodeFooter,
-    this.onAskTap,
     this.documents = const [],
     this.onOpenDocument,
     this.onPinDocument,
     this.onUnpinDocument,
-    this.onOpenAttachment,
-    this.selectedAttachment,
-    this.thumbnailFor,
   });
 
   static const Key documentsButtonKey = ValueKey('storyline-documents-button');
@@ -163,11 +145,6 @@ class StorylineTimelinePanel extends StatefulWidget {
 }
 
 class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
-  /// Cards the user has opened or shut, by thread key. Only the ones they
-  /// touched: everything else follows the default, so a reload that brings in
-  /// a newer episode moves what is open without undoing a choice.
-  final Map<String, bool> _overrides = {};
-
   bool _showMembers = false;
   bool _showAbout = false;
 
@@ -240,16 +217,6 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     widget.onRename(trimmed);
   }
 
-  /// The thread whose messages the storyline ends on, which is the one card
-  /// that opens on its own. Read from the episodes on every build rather than
-  /// pinned in `initState`: a reload can put a different thread last, and the
-  /// open card should follow the conversation.
-  String? get _newestKey =>
-      widget.episodes.isEmpty ? null : widget.episodes.last.threadKey;
-
-  bool _isExpanded(StorylineEpisode episode) =>
-      _overrides[episode.threadKey] ?? (episode.threadKey == _newestKey);
-
   /// A member thread's name, taken from its episode. A member whose thread
   /// holds no messages has no episode and so no subject, which reads as a
   /// thread with nothing in it rather than as an error.
@@ -320,52 +287,25 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
-  /// One member thread, shut or open. Shut it is a headline the reader can
-  /// skip; open it is the thread itself.
+  /// One member thread as a root message: what it is, what it is waiting for,
+  /// and how much of it there is. The whole card is the tap target and it
+  /// opens the thread beside the spine, which is where the transcript, the
+  /// files and the reply box actually are.
   Widget _episodeCard(StorylineEpisode episode) {
-    final expanded = _isExpanded(episode);
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: BondSpacing.s12),
-      decoration: BoxDecoration(
-        color: BondColors.surface,
-        borderRadius: BondRadii.mdAll,
-        border: Border.all(color: BondColors.border),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _cardHeader(episode, expanded),
-          if (expanded)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(
-                BondSpacing.s12,
-                0,
-                BondSpacing.s12,
-                BondSpacing.s12,
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ..._run(episode),
-                  ?widget.episodeFooter?.call(episode),
-                ],
-              ),
-            )
-          else
-            ..._preview(episode),
-        ],
-      ),
-    );
-  }
-
-  Widget _cardHeader(StorylineEpisode episode, bool expanded) {
     final count = episode.messages.length;
+    // A chat's messages carry no subject — Graph does not give them one — so
+    // an episode built out of them has none either. Named by who is on it
+    // instead, the way a chat is named everywhere else: a storyline holding
+    // two chats must not put two identical '(no subject)' cards on the spine.
+    final named = episode.subject.isEmpty
+        ? episode.participants.join(', ')
+        : episode.subject;
+    // The count is not repeated here: it is the card's own affordance line
+    // below, where it is also the promise of what opening the card gives you.
+    // Nor are the participants, where they are already the title.
     final meta = [
-      if (episode.participants.isNotEmpty) episode.participants.join(', '),
-      '$count ${count == 1 ? 'message' : 'messages'}',
+      if (episode.subject.isNotEmpty && episode.participants.isNotEmpty)
+        episode.participants.join(', '),
       ?relativeTime(episode.latestAt, DateTime.now()),
     ].join(' · ');
     final summary = episode.summary ?? '';
@@ -379,132 +319,163 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         cta.isNotEmpty;
 
     // The banner names the newest ask only. When older ones are still open,
-    // the count says so — the messages below are where they are read.
+    // the count says so — the thread that opens beside is where they are read.
     final openAsks = openAskCount(
       episode.messages,
       conversationClosed: episode.state != ConversationState.needsReply,
     );
 
-    return InkWell(
-      onTap: () => setState(
-        () => _overrides[episode.threadKey] = !expanded,
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(BondSpacing.s12),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(
-              expanded ? Icons.expand_less : Icons.expand_more,
-              size: 18,
-              color: BondColors.inkMuted,
+    final preview = _previewOf(episode);
+
+    // A Material under the InkWell rather than a decorated Container alone:
+    // ink paints on the nearest Material ancestor, and the card's own opaque
+    // surface would otherwise hide the splash of the tap that opens it.
+    return Padding(
+      padding: const EdgeInsets.only(bottom: BondSpacing.s12),
+      child: Material(
+        color: BondColors.surface,
+        borderRadius: BondRadii.mdAll,
+        child: InkWell(
+          onTap: () => widget.onOpenEpisode(episode),
+          borderRadius: BondRadii.mdAll,
+          child: Container(
+            padding: const EdgeInsets.all(BondSpacing.s12),
+            decoration: BoxDecoration(
+              borderRadius: BondRadii.mdAll,
+              border: Border.all(color: BondColors.border),
             ),
-            const SizedBox(width: BondSpacing.s8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    // The source is marked on EVERY card, mail included: a
-                    // storyline merges threads and chats, and marking only the
-                    // exception leaves the reader guessing what the unmarked
-                    // ones were.
-                    '${sourceChipPrefix(episode.source)}'
-                    '${episode.subject.isEmpty ? '(no subject)' : episode.subject}',
-                    style: BondType.body.copyWith(fontWeight: FontWeight.w600),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    meta,
-                    style: BondType.caption,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  // The ask replaces the summary rather than stacking above
-                  // it: they are the same fact in two moods, and a card that
-                  // spent four lines saying it twice would crowd the spine.
-                  if (showCta) ...[
-                    const SizedBox(height: BondSpacing.s4),
-                    _cardCta(
-                      episode,
-                      cta,
-                      openAsks > 1 ? '$cta · $openAsks open asks' : cta,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            // The source is marked on EVERY card, mail
+                            // included: a storyline merges threads and chats,
+                            // and marking only the exception leaves the reader
+                            // guessing what the unmarked ones were.
+                            '${sourceChipPrefix(episode.source)}'
+                            '${named.isEmpty ? '(no subject)' : named}',
+                            style: BondType.body
+                                .copyWith(fontWeight: FontWeight.w600),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          if (meta.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              meta,
+                              style: BondType.caption,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                          // The ask replaces the summary rather than stacking
+                          // above it: they are the same fact in two moods, and
+                          // a card that spent four lines saying it twice would
+                          // crowd the spine.
+                          if (showCta) ...[
+                            const SizedBox(height: BondSpacing.s4),
+                            _cardCta(
+                              cta,
+                              openAsks > 1 ? '$cta · $openAsks open asks' : cta,
+                            ),
+                          ] else if (summary.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              summary,
+                              style: BondType.caption,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                        ],
+                      ),
                     ),
-                  ] else if (summary.isNotEmpty) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      summary,
-                      style: BondType.caption,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    // The two-step stands where a confirm dialog would: the
+                    // first tap asks, the second takes the thread out. Both
+                    // icons give way to the pair, so the card reads as one
+                    // question rather than a question next to an unrelated
+                    // button.
+                    if (_confirmingRemoveKey == episode.threadKey) ...[
+                      _quietButton('Remove thread', () {
+                        setState(() => _confirmingRemoveKey = null);
+                        widget.onRemoveThread(
+                          episode.source,
+                          episode.conversationKey,
+                        );
+                      }),
+                      const SizedBox(width: BondSpacing.s4),
+                      _quietButton(
+                        'Cancel',
+                        () => setState(() => _confirmingRemoveKey = null),
+                      ),
+                    ] else ...[
+                      // Beside the card's own tap, which opens the thread in
+                      // the side panel: this one hands it the whole main pane.
+                      IconButton(
+                        onPressed: () => widget.onOpenThread(
+                          episode.source,
+                          episode.conversationKey,
+                        ),
+                        icon: const Icon(Icons.open_in_new),
+                        iconSize: 14,
+                        tooltip: 'Open thread',
+                        padding: const EdgeInsets.all(BondSpacing.s4),
+                        constraints: const BoxConstraints(),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      IconButton(
+                        onPressed: () => setState(
+                          () => _confirmingRemoveKey = episode.threadKey,
+                        ),
+                        icon: const Icon(Icons.close),
+                        iconSize: 14,
+                        tooltip: 'Remove from storyline',
+                        padding: const EdgeInsets.all(BondSpacing.s4),
+                        constraints: const BoxConstraints(),
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ],
                   ],
+                ),
+                if (preview.isNotEmpty) ...[
+                  const SizedBox(height: BondSpacing.s8),
+                  Text(
+                    preview,
+                    style: BondType.caption,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 ],
-              ),
+                const SizedBox(height: BondSpacing.s8),
+                Text(
+                  '$count ${count == 1 ? 'message' : 'messages'} · open \u203a',
+                  style: BondType.caption.copyWith(color: BondColors.inkMuted),
+                ),
+              ],
             ),
-            // The two-step stands where a confirm dialog would: the first tap
-            // asks, the second takes the thread out. Both icons give way to
-            // the pair, so the header reads as one question rather than a
-            // question next to an unrelated button.
-            if (_confirmingRemoveKey == episode.threadKey) ...[
-              _quietButton('Remove thread', () {
-                setState(() => _confirmingRemoveKey = null);
-                widget.onRemoveThread(
-                  episode.source,
-                  episode.conversationKey,
-                );
-              }),
-              const SizedBox(width: BondSpacing.s4),
-              _quietButton(
-                'Cancel',
-                () => setState(() => _confirmingRemoveKey = null),
-              ),
-            ] else ...[
-              IconButton(
-                onPressed: () => widget.onOpenThread(
-                  episode.source,
-                  episode.conversationKey,
-                ),
-                icon: const Icon(Icons.open_in_new),
-                iconSize: 14,
-                tooltip: 'Open thread',
-                padding: const EdgeInsets.all(BondSpacing.s4),
-                constraints: const BoxConstraints(),
-                visualDensity: VisualDensity.compact,
-              ),
-              IconButton(
-                onPressed: () => setState(
-                  () => _confirmingRemoveKey = episode.threadKey,
-                ),
-                icon: const Icon(Icons.close),
-                iconSize: 14,
-                tooltip: 'Remove from storyline',
-                padding: const EdgeInsets.all(BondSpacing.s4),
-                constraints: const BoxConstraints(),
-                visualDensity: VisualDensity.compact,
-              ),
-            ],
-          ],
+          ),
         ),
       ),
     );
   }
 
-  /// The ask on a card header. [tooltip] stays the bare ask: it exists to show
-  /// the full text [text] had to clamp.
+  /// The ask on a card. [tooltip] stays the bare ask: it exists to show the
+  /// full text [text] had to clamp.
   ///
-  /// It takes its own tap where the host has a reply to open. The thread pane's
-  /// banner is the shortest way into the reply
-  /// (`thread_detail_panel._ctaBanner`), and the same copper text here must not
-  /// mean "shut the card" instead — the nested [InkWell] absorbs the tap so the
-  /// header's collapse never sees it. Its own transparent [Material] for the
-  /// usual reason: ink paints on the nearest Material ancestor, which sits
-  /// behind the card's opaque surface.
-  Widget _cardCta(StorylineEpisode episode, String tooltip, String text) {
-    final banner = Tooltip(
+  /// It takes no tap of its own any more. The whole card opens the thread the
+  /// ask is in, and that thread has the reply box the banner used to reach —
+  /// so there is nothing left here for a nested target to mean.
+  Widget _cardCta(String tooltip, String text) {
+    return Tooltip(
       message: tooltip,
       child: InlineAlert(
         severity: InlineAlertSeverity.attention,
@@ -512,97 +483,17 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         maxLines: 2,
       ),
     );
-    final onAskTap = widget.onAskTap;
-    if (onAskTap == null) return banner;
-    return Material(
-      type: MaterialType.transparency,
-      child: InkWell(
-        onTap: () => onAskTap(episode),
-        borderRadius: BondRadii.smAll,
-        child: banner,
-      ),
-    );
   }
 
-  /// What a shut card shows of the thread: the newest message, and nothing at
-  /// all when that message has no text to show yet.
-  List<Widget> _preview(StorylineEpisode episode) {
-    if (episode.messages.isEmpty) return const [];
+  /// What the card shows of the thread: the newest message, and nothing at all
+  /// when that message has no text to show yet.
+  String _previewOf(StorylineEpisode episode) {
+    if (episode.messages.isEmpty) return '';
     final message = episode.messages.last;
-    final preview = (message.bodyPreview?.isNotEmpty == true
+    return (message.bodyPreview?.isNotEmpty == true
             ? message.bodyPreview!
             : (message.bodyText ?? ''))
         .trim();
-    if (preview.isEmpty) return const [];
-
-    return [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(
-          BondSpacing.s12,
-          0,
-          BondSpacing.s12,
-          BondSpacing.s12,
-        ),
-        child: Text(
-          preview,
-          style: BondType.caption,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
-        ),
-      ),
-    ];
-  }
-
-  /// One thread's messages: day dividers and runs collapsed under one header,
-  /// the same reading as the thread panel. The dividers live inside the card
-  /// because a day only means something within one conversation here.
-  List<Widget> _run(StorylineEpisode episode) {
-    final items = <Widget>[];
-    String? previousDay;
-    Message? previous;
-    var first = true;
-
-    // One scan of the thread answers the open-ask rule for every row in it.
-    // Anything but "needs reply" closes them: without this, a send that clears
-    // the banner leaves the ask lines lit for up to a minute until the sent
-    // message syncs back.
-    final lastOut = latestOutboundAt(episode.messages);
-    final closed = episode.state != ConversationState.needsReply;
-
-    for (final message in episode.messages) {
-      final day = dayKeyOf(message);
-      final label = formatDayLabel(message.receivedAt);
-      if (label != null && (first || day != previousDay)) {
-        items.add(DayDivider(label: label));
-        previous = null;
-      }
-      previousDay = day;
-      first = false;
-
-      final open = hasOpenAsk(
-        message,
-        lastOutboundAt: lastOut,
-        conversationClosed: closed,
-      );
-      final onAskTap = widget.onAskTap;
-      items.add(MessageRow(
-        key: ValueKey(message.id),
-        message: message,
-        showHeader: previous == null || !sameRun(previous, message),
-        openAsk: open,
-        // The same three props the thread panel forwards. A file is read
-        // against the message that carried it wherever that message is drawn,
-        // and the spine draws the same rows.
-        onOpenAttachment: widget.onOpenAttachment,
-        selectedAttachment: widget.selectedAttachment,
-        thumbnailFor: widget.thumbnailFor,
-        // Only a line that is actually on screen gets a tap, and it carries
-        // the episode with it: the answer goes to the thread the ask is in.
-        onAskTap: open && onAskTap != null ? () => onAskTap(episode) : null,
-      ));
-      previous = message;
-    }
-    return items;
   }
 
   Widget _header() {
@@ -650,19 +541,23 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
-                Row(
+                // A Wrap and not a Row: seven quiet buttons is more than
+                // the header has room for once a thread is open beside the
+                // spine, and a second line of them beats a clipped Sync.
+                Wrap(
+                  spacing: BondSpacing.s4,
+                  runSpacing: BondSpacing.s4,
+                  crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     _quietButton(
                       '${widget.members.length} '
                       '${widget.members.length == 1 ? 'thread' : 'threads'}',
                       () => setState(() => _showMembers = !_showMembers),
                     ),
-                    const SizedBox(width: BondSpacing.s4),
                     _quietButton(
                       'About',
                       () => setState(() => _showAbout = !_showAbout),
                     ),
-                    const SizedBox(width: BondSpacing.s4),
                     // The count is the label, the way the threads button
                     // reads: a storyline with no documents on it should not
                     // need a tap to find that out.
@@ -674,16 +569,13 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                       () => setState(() => _showDocuments = !_showDocuments),
                       key: StorylineTimelinePanel.documentsButtonKey,
                     ),
-                    const SizedBox(width: BondSpacing.s4),
                     _quietButton('Add thread', widget.onAddThread),
-                    const SizedBox(width: BondSpacing.s4),
                     // The label names the order the spine is in; tapping it
                     // flips to the other one.
                     _quietButton(
                       widget.newestFirst ? 'Newest first' : 'Oldest first',
                       widget.onToggleSort,
                     ),
-                    const SizedBox(width: BondSpacing.s4),
                     // The two-step stands where a confirm dialog would: the
                     // first tap asks, the second retires the storyline.
                     if (!_confirmingDismiss)
@@ -693,13 +585,11 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                       )
                     else ...[
                       _quietButton('Dismiss storyline', widget.onDismiss),
-                      const SizedBox(width: BondSpacing.s4),
                       _quietButton(
                         'Cancel',
                         () => setState(() => _confirmingDismiss = false),
                       ),
                     ],
-                    const SizedBox(width: BondSpacing.s4),
                     // Last in the row: it is the only button here that is not
                     // about this storyline in particular. A running pull says
                     // so and takes no second tap — the screen holds the flag,

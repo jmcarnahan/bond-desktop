@@ -29,6 +29,8 @@ import 'package:bond_inbox/widgets/inline_image_thumb.dart';
 import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
 import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
 import 'package:bond_inbox/widgets/preview/preview_engines.dart';
+import 'package:bond_inbox/widgets/side_panel.dart';
+import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -253,7 +255,10 @@ void main() {
     await openThread(tester);
     await openAttachment(tester, 'Terms.pdf');
 
-    await tester.tap(find.byKey(AttachmentPreviewPanel.closeKey));
+    // The host's ✕, not the panel's: the panel renders with `showHeader:
+    // false` inside it, so there is exactly one close control on screen.
+    expect(find.byKey(AttachmentPreviewPanel.closeKey), findsNothing);
+    await tester.tap(find.byKey(SidePanelHost.closeKey));
     await tester.pump();
     await tester.pump();
 
@@ -285,7 +290,7 @@ void main() {
     ]);
     await openThread(tester);
     await openAttachment(tester, 'Terms.pdf');
-    await tester.tap(find.byKey(AttachmentPreviewPanel.expandKey));
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
     await tester.pump();
     await tester.pump();
     expect(find.byType(AttachmentViewerPane), findsOneWidget);
@@ -302,7 +307,8 @@ void main() {
     expect(find.byType(AttachmentPreviewPanel), findsNothing);
 
     // Leaving compose lands on the overview, not back in the viewer: opening
-    // a pane put the thread away, and the file it was previewing with it.
+    // a pane calls `_clearOverlays`, which puts the thread away and the side
+    // panel with it.
     await tester.tap(find.byTooltip('Back'));
     await tester.pump();
     await tester.pump();
@@ -329,7 +335,17 @@ void main() {
     await openAttachment(tester, 'Terms.pdf');
 
     expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
+    // In the MAIN pane, under the transcript — scoped, because a thread can be
+    // open beside another one and `findsOneWidget` alone would not say which
+    // of the two boxes this is.
     expect(find.byType(Composer), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(Composer),
+      ),
+      findsNothing,
+    );
     await settleQueues(tester);
   });
 
@@ -340,7 +356,7 @@ void main() {
     await openThread(tester);
     await openAttachment(tester, 'Terms.pdf');
 
-    await tester.tap(find.byKey(AttachmentPreviewPanel.expandKey));
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
     await tester.pump();
     await tester.pump();
 
@@ -362,7 +378,7 @@ void main() {
     await pumpInbox(tester);
     await openThread(tester);
     await openAttachment(tester, 'Terms.pdf');
-    await tester.tap(find.byKey(AttachmentPreviewPanel.expandKey));
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
     await tester.pump();
     await tester.pump();
 
@@ -386,7 +402,7 @@ void main() {
     await pumpInbox(tester);
     await openThread(tester);
     await openAttachment(tester, 'Terms.pdf');
-    await tester.tap(find.byKey(AttachmentPreviewPanel.expandKey));
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
     await tester.pump();
     await tester.pump();
     expect(find.byType(AttachmentViewerPane), findsOneWidget);
@@ -559,6 +575,141 @@ void main() {
           .get();
       expect(rows, hasLength(1));
       expect(rows.single.data['payload_json'], contains('a1'));
+      await settleQueues(tester);
+    });
+  });
+
+  group('a file opened from the thread beside', () {
+    /// The storyline that holds [key], and a second thread that does not carry
+    /// the file — so the thread the file resolves through is a real choice
+    /// rather than the only one on screen.
+    Future<void> seedStorylineWith(String key) async {
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Boundary survey',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', key, addedBy: 'auto');
+    }
+
+    /// Opens the storyline in the main pane and its episode card beside it.
+    Future<void> openBeside(WidgetTester tester) async {
+      await tester.tap(find.text('Boundary survey'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+
+      await tester.tap(find.text('✉ Survey window'));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('the thread beside carries the only composer on screen',
+        (tester) async {
+      await seedThread(needsReply: true);
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+
+      expect(
+        find.descendant(
+          of: find.byType(SidePanelHost),
+          matching: find.byType(ThreadDetailPanel),
+        ),
+        findsOneWidget,
+      );
+      // The spine keeps the main pane and has no box of its own: a storyline
+      // is several conversations, and the one the reply belongs to is the one
+      // that just opened beside it.
+      expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+      expect(find.byType(Composer), findsNothing);
+
+      // The card in the spine says the same thing, so the tap is scoped: this
+      // is the banner in the thread beside, and it is the one with a box.
+      await tester.tap(find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.text('Confirm the survey window'),
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byType(SidePanelHost),
+          matching: find.byType(Composer),
+        ),
+        findsOneWidget,
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('a file from it replaces it, and Use in reply drafts on it',
+        (tester) async {
+      await seedThread(needsReply: true);
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+
+      await openAttachment(tester, 'Terms.pdf');
+
+      // One side panel, and the file has it: reading a file from a thread
+      // beside is still one thing at a time on that side of the seam.
+      expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
+      expect(find.byType(ThreadDetailPanel), findsNothing);
+      expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+
+      await tester.tap(find.byKey(AttachmentPreviewPanel.useInReplyKey));
+      await tester.pump();
+      await tester.pump();
+
+      // The thread comes back beside the spine with its box open, and the file
+      // goes: the draft is what was asked for, and a box off screen is nothing
+      // happening. The main pane is untouched.
+      expect(find.byType(AttachmentPreviewPanel), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byType(SidePanelHost),
+          matching: find.byType(Composer),
+        ),
+        findsOneWidget,
+      );
+      expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+
+      // The draft is asked for on the thread the file came from — the panel
+      // carried its origin, which is the only thing that still named it while
+      // the thread itself was off the side.
+      final rows = await db
+          .customSelect("SELECT * FROM work_items WHERE task_kind = 'draft'")
+          .get();
+      expect(rows, hasLength(1));
+      expect(rows.single.data['entity_id'], 'c1-m1');
+      expect(rows.single.data['payload_json'], contains('a1'));
+      await settleQueues(tester);
+    });
+
+    testWidgets('and its pin resolves through that thread, not the pane',
+        (tester) async {
+      // The storyline on screen is NOT the file's answer here: the thread the
+      // file came from is a member of a different one, and that is the one a
+      // pin belongs to.
+      await seedThread();
+      await seedStorylineWith('c1');
+      await pumpInbox(tester);
+      await openBeside(tester);
+      await openAttachment(tester, 'Terms.pdf');
+
+      expect(find.byKey(AttachmentPreviewPanel.pinKey), findsOneWidget);
+
+      await tester.tap(find.byKey(AttachmentPreviewPanel.pinKey));
+      await tester.pump();
+      await tester.pump();
+
+      final rows = await db
+          .customSelect('SELECT pinned_storyline_id FROM attachments')
+          .get();
+      expect(rows.single.data['pinned_storyline_id'], 'sl-1');
       await settleQueues(tester);
     });
   });

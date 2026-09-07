@@ -121,7 +121,7 @@ class BondFilterPill extends StatelessWidget {
       fg = selected
           ? BondColors.onDarkPrimary
           : (disabled ? BondColors.onDarkMuted : BondColors.onDarkSecondary);
-      fill = selected ? BondColors.onDarkTint : BondColors.ink;
+      fill = selected ? BondColors.onDarkTint : BondColors.rail;
       hover = BondColors.onDarkFaint;
       outline = selected ? null : BondColors.onDarkBorder;
     } else {

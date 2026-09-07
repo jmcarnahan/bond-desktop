@@ -308,19 +308,33 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (widget.showReplyRow)
-          TextButton.icon(
-            onPressed: widget.onReply,
-            icon: const Icon(Icons.reply_outlined, size: 16),
-            label: const Text('Reply…'),
+        // A Wrap where a Spacer used to be: the two labelled buttons do not
+        // both fit beside a thread read in the side panel, and a second line
+        // of them beats a clipped one. It still pushes the × to the right.
+        Expanded(
+          child: Wrap(
+            runSpacing: BondSpacing.s4,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              if (widget.showReplyRow)
+                TextButton.icon(
+                  onPressed: widget.onReply,
+                  icon: const Icon(Icons.reply_outlined, size: 16),
+                  label: const Text('Reply…'),
+                ),
+              if (widget.showReplyRow &&
+                  suggest != null &&
+                  widget.options.isEmpty)
+                TextButton.icon(
+                  onPressed: widget.suggesting ? null : suggest,
+                  icon: const Icon(Icons.auto_awesome, size: 16),
+                  label: Text(
+                    widget.suggesting ? 'Drafting…' : 'Suggest a reply',
+                  ),
+                ),
+            ],
           ),
-        if (widget.showReplyRow && suggest != null && widget.options.isEmpty)
-          TextButton.icon(
-            onPressed: widget.suggesting ? null : suggest,
-            icon: const Icon(Icons.auto_awesome, size: 16),
-            label: Text(widget.suggesting ? 'Drafting…' : 'Suggest a reply'),
-          ),
-        const Spacer(),
+        ),
         if (canDismiss)
           IconButton(
             // Arms rather than closes: what the × means has not changed, only

@@ -240,6 +240,7 @@ void main() {
         onDismissSuggestion: () {},
         onRemoveThread: (_, _) {},
         onOpenThread: (_, _) {},
+        onOpenEpisode: (_) {},
         onAddThread: () {},
         newestFirst: false,
         onToggleSort: () {},

@@ -1,7 +1,6 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
-import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/attachment_documents_strip.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/inline_alert.dart';
@@ -61,13 +60,6 @@ StorylineEpisode _episode({
       state: state,
       ctaText: ctaText,
     );
-
-/// The messages actually on screen, in order — which is what "expanded" means
-/// here. A shut card renders a preview and no [MessageRow].
-List<String> _renderedIds(WidgetTester tester) => tester
-    .widgetList<MessageRow>(find.byType(MessageRow))
-    .map((row) => row.message.id)
-    .toList();
 
 const _storyline = Storyline(
   id: 'sl-1',
@@ -161,6 +153,7 @@ void main() {
     VoidCallback? onDismissSuggestion,
     void Function(String source, String key)? onRemoveThread,
     void Function(String source, String key)? onOpenThread,
+    void Function(StorylineEpisode episode)? onOpenEpisode,
     VoidCallback? onBack,
     VoidCallback? onAddThread,
     bool newestFirst = false,
@@ -168,15 +161,10 @@ void main() {
     VoidCallback? onDismiss,
     Future<void> Function()? onSync,
     bool syncing = false,
-    Widget Function(StorylineEpisode episode)? episodeFooter,
-    void Function(StorylineEpisode episode)? onAskTap,
     List<AttachmentRef> documents = const [],
     void Function(AttachmentRef attachment)? onOpenDocument,
     void Function(AttachmentRef attachment)? onPinDocument,
     void Function(AttachmentRef attachment)? onUnpinDocument,
-    void Function(AttachmentRef attachment)? onOpenAttachment,
-    AttachmentRef? selectedAttachment,
-    ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -193,21 +181,17 @@ void main() {
           onDismissSuggestion: onDismissSuggestion ?? () {},
           onRemoveThread: onRemoveThread ?? (_, _) {},
           onOpenThread: onOpenThread ?? (_, _) {},
+          onOpenEpisode: onOpenEpisode ?? (_) {},
           onAddThread: onAddThread ?? () {},
           newestFirst: newestFirst,
           onToggleSort: onToggleSort ?? () {},
           onDismiss: onDismiss ?? () {},
           onSync: onSync ?? () async {},
           syncing: syncing,
-          episodeFooter: episodeFooter,
-          onAskTap: onAskTap,
           documents: documents,
           onOpenDocument: onOpenDocument,
           onPinDocument: onPinDocument,
           onUnpinDocument: onUnpinDocument,
-          onOpenAttachment: onOpenAttachment,
-          selectedAttachment: selectedAttachment,
-          thumbnailFor: thumbnailFor,
         ),
       ),
     ));
@@ -278,8 +262,7 @@ void main() {
       );
     });
 
-    testWidgets('newest first flips the spine, not the default expansion',
-        (tester) async {
+    testWidgets('newest first flips the spine', (tester) async {
       await pumpPanel(tester, newestFirst: true);
 
       final homepageCard = find.text('✉ Homepage copy');
@@ -288,9 +271,6 @@ void main() {
         tester.getTopLeft(launchCard).dy,
         lessThan(tester.getTopLeft(homepageCard).dy),
       );
-      // The preference is a reading direction and nothing more: the newest
-      // thread is still the one the reader lands in, now at the top.
-      expect(_renderedIds(tester), ['m2']);
     });
 
     testWidgets('the sort button names the current order and reports a toggle',
@@ -312,39 +292,39 @@ void main() {
       expect(find.text('Newest first'), findsOneWidget);
     });
 
-    testWidgets('the newest episode is the one that opens', (tester) async {
-      await pumpPanel(tester);
-
-      // The last card holds the newest message, so it is the one the reader
-      // lands in. Everything above it is a headline until they ask for more.
-      expect(_renderedIds(tester), ['m2']);
-    });
-
-    testWidgets('tapping a card header opens it, and tapping again shuts it',
+    testWidgets('tapping a card opens the thread it stands for',
         (tester) async {
-      await pumpPanel(tester);
+      final opened = <String>[];
+      await pumpPanel(
+        tester,
+        onOpenEpisode: (episode) => opened.add(episode.conversationKey),
+      );
 
       await tester.tap(find.text('✉ Homepage copy'));
-      await tester.pumpAndSettle();
+      await tester.pump();
 
-      // Opening one leaves the other where it was: this is skimming, not a
-      // single-expansion accordion.
-      expect(_renderedIds(tester), ['m1', 'm3', 'm2']);
-
-      await tester.tap(find.text('✉ Launch date'));
-      await tester.pumpAndSettle();
-
-      expect(_renderedIds(tester), ['m1', 'm3']);
+      // A card is a root message, not a drawer: the tap opens the thread
+      // beside the spine, where the transcript and the reply box are.
+      expect(opened, ['c1']);
+      expect(find.byType(MessageRow), findsNothing);
     });
 
-    testWidgets('a shut card previews the newest message in its thread',
+    testWidgets('and says how much of the thread is behind it', (tester) async {
+      await pumpPanel(tester);
+
+      expect(find.text('2 messages · open ›'), findsOneWidget);
+      expect(find.text('1 message · open ›'), findsOneWidget);
+    });
+
+    testWidgets('every card previews the newest message in its thread',
         (tester) async {
       await pumpPanel(tester);
 
-      // m3 is the homepage thread's last message, and the card is shut, so the
-      // preview is the only place it appears.
-      expect(_renderedIds(tester), ['m2']);
+      // m3 is the homepage thread's last message and m2 the launch thread's.
+      // Both cards carry their own, always: there is no open state left for a
+      // preview to be the alternative to.
       expect(find.text('body of m3'), findsOneWidget);
+      expect(find.text('body of m2'), findsOneWidget);
       expect(find.text('body of m1'), findsNothing);
     });
 
@@ -358,21 +338,6 @@ void main() {
       // line fewer rather than an empty one.
       expect(tester.takeException(), isNull);
       expect(find.text('✉ Launch date'), findsOneWidget);
-    });
-
-    testWidgets('day dividers live inside an episode', (tester) async {
-      final overnight = _episode(
-        key: 'c3',
-        subject: 'Overnight',
-        messages: [
-          _message(id: 'n1', receivedAt: '2026-08-01T09:00:00Z'),
-          _message(id: 'n2', receivedAt: '2026-08-02T09:00:00Z'),
-        ],
-      );
-      await pumpPanel(tester, only: [overnight]);
-
-      expect(find.byType(MessageRow), findsNWidgets(2));
-      expect(find.byType(DayDivider), findsNWidgets(2));
     });
 
     testWidgets('nothing left of the seam pills', (tester) async {
@@ -495,7 +460,7 @@ void main() {
       expect(find.textContaining('open asks'), findsNothing);
     });
 
-    testWidgets('and the banner is the way into the reply', (tester) async {
+    testWidgets('and the banner does not swallow the card', (tester) async {
       final asking = _episode(
         key: 'c1',
         subject: 'Homepage copy',
@@ -503,167 +468,20 @@ void main() {
         ctaText: 'Confirm attendance',
         messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
       );
-      final tapped = <String>[];
+      final opened = <String>[];
       await pumpPanel(
         tester,
         only: [asking],
-        onAskTap: (episode) => tapped.add(episode.conversationKey),
+        onOpenEpisode: (episode) => opened.add(episode.conversationKey),
       );
 
+      // The ask used to take its own tap, to reach a reply box on the spine.
+      // There is no box there now, so the banner is a statement and the tap
+      // means what every other part of the card means: open the thread.
       await tester.tap(find.text('Confirm attendance'));
-      await tester.pumpAndSettle();
-
-      expect(tapped, ['c1']);
-      // And NOT the header's collapse: the same copper text on the thread pane
-      // opens the reply, and it must not mean "shut the card" here.
-      expect(_renderedIds(tester), ['m1']);
-    });
-
-    testWidgets('and still collapses the card where there is no reply to open',
-        (tester) async {
-      final asking = _episode(
-        key: 'c1',
-        subject: 'Homepage copy',
-        state: ConversationState.needsReply,
-        ctaText: 'Confirm attendance',
-        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
-      );
-      await pumpPanel(tester, only: [asking]);
-      expect(_renderedIds(tester), ['m1']);
-
-      await tester.tap(find.text('Confirm attendance'));
-      await tester.pumpAndSettle();
-
-      // Nothing absorbs the tap, so it reaches the header the banner sits in.
-      expect(_renderedIds(tester), isEmpty);
-    });
-  });
-
-  group('open asks in an episode', () {
-    testWidgets('an unanswered message carries its own ask', (tester) async {
-      final asking = _episode(
-        key: 'c1',
-        subject: 'Homepage copy',
-        state: ConversationState.needsReply,
-        messages: [
-          _message(
-            id: 'm1',
-            receivedAt: '2026-08-01T09:00:00Z',
-            needsAction: true,
-            actionItems: ['Send the deck'],
-          ),
-        ],
-      );
-      await pumpPanel(tester, only: [asking]);
-
-      expect(find.text('Send the deck'), findsOneWidget);
-    });
-
-    testWidgets('a thread that is no longer waiting on the user carries none',
-        (tester) async {
-      // The reply went, the thread folded to waiting and the CTA was cleared in
-      // the same pass. The ask lines must not outlive that banner.
-      final answered = _episode(
-        key: 'c1',
-        subject: 'Homepage copy',
-        messages: [
-          _message(
-            id: 'm1',
-            receivedAt: '2026-08-01T09:00:00Z',
-            needsAction: true,
-            actionItems: ['Send the deck'],
-          ),
-        ],
-      );
-      await pumpPanel(tester, only: [answered]);
-
-      expect(find.text('Send the deck'), findsNothing);
-    });
-
-    testWidgets('a later reply closes it', (tester) async {
-      final answered = _episode(
-        key: 'c1',
-        subject: 'Homepage copy',
-        state: ConversationState.needsReply,
-        messages: [
-          _message(
-            id: 'm1',
-            receivedAt: '2026-08-01T09:00:00Z',
-            needsAction: true,
-            actionItems: ['Send the deck'],
-          ),
-          _message(
-            id: 'm2',
-            receivedAt: '2026-08-01T09:30:00Z',
-            outbound: true,
-            from: 'You',
-            address: 'me@example.com',
-          ),
-        ],
-      );
-      await pumpPanel(tester, only: [answered]);
-
-      expect(find.text('Send the deck'), findsNothing);
-    });
-
-    testWidgets('and a tap on one names the thread it is in', (tester) async {
-      final asking = _episode(
-        key: 'c2',
-        subject: 'Launch date',
-        state: ConversationState.needsReply,
-        messages: [
-          _message(
-            id: 'm2',
-            receivedAt: '2026-08-01T10:00:00Z',
-            needsAction: true,
-            actionItems: ['Send the deck'],
-          ),
-        ],
-      );
-      final tapped = <String>[];
-      await pumpPanel(
-        tester,
-        only: [homepage, asking],
-        onAskTap: (episode) => tapped.add(episode.conversationKey),
-      );
-
-      await tester.tap(find.text('Send the deck'));
       await tester.pump();
 
-      // The answer goes to the conversation the ask is in, not to whichever
-      // one the storyline happens to end on.
-      expect(tapped, ['c2']);
-    });
-  });
-
-  group('the episode footer', () {
-    Widget footer(StorylineEpisode episode) =>
-        Text('footer for ${episode.conversationKey}');
-
-    testWidgets('rides at the end of an open card', (tester) async {
-      await pumpPanel(tester, episodeFooter: footer);
-
-      // The newest card is the one that opens on its own.
-      expect(find.text('footer for c2'), findsOneWidget);
-
-      // And it sits under the messages, where a reply to them belongs.
-      final message = tester.getBottomLeft(find.text('body of m2'));
-      expect(
-        tester.getTopLeft(find.text('footer for c2')).dy,
-        greaterThanOrEqualTo(message.dy),
-      );
-    });
-
-    testWidgets('and a shut card carries none', (tester) async {
-      await pumpPanel(tester, episodeFooter: footer);
-
-      expect(find.text('footer for c1'), findsNothing);
-    });
-
-    testWidgets('a panel given none renders none', (tester) async {
-      await pumpPanel(tester);
-
-      expect(find.textContaining('footer for'), findsNothing);
+      expect(opened, ['c1']);
     });
   });
 
@@ -1373,60 +1191,6 @@ void main() {
           findsOneWidget);
       expect(find.byKey(AttachmentDocumentsStrip.pinKeyFor(quote)),
           findsNothing);
-    });
-  });
-
-  group('files in the spine', () {
-    final quote = ref(name: 'Quote.pdf');
-
-    StorylineEpisode withFile() => _episode(
-          key: 'c1',
-          subject: 'Homepage copy',
-          messages: [
-            _message(
-              id: 'm1',
-              receivedAt: '2026-08-01T09:00:00Z',
-              attachments: [quote],
-            ),
-          ],
-        );
-
-    testWidgets('a chip in a message opens through the panel', (tester) async {
-      final opened = <String>[];
-      await pumpPanel(
-        tester,
-        only: [withFile()],
-        onOpenAttachment: (attachment) => opened.add(attachment.attachmentId),
-      );
-
-      await tester.tap(find.byKey(AttachmentChip.keyFor(quote)));
-      await tester.pump();
-
-      expect(opened, ['a1']);
-    });
-
-    testWidgets('the file the host is showing is the one marked',
-        (tester) async {
-      await pumpPanel(
-        tester,
-        only: [withFile()],
-        onOpenAttachment: (_) {},
-        selectedAttachment: quote,
-      );
-
-      final chip = tester.widget<AttachmentChip>(
-        find.byKey(AttachmentChip.keyFor(quote)),
-      );
-      expect(chip.selected, isTrue);
-    });
-
-    testWidgets('no host to open into leaves the chips inert', (tester) async {
-      await pumpPanel(tester, only: [withFile()]);
-
-      final chip = tester.widget<AttachmentChip>(
-        find.byKey(AttachmentChip.keyFor(quote)),
-      );
-      expect(chip.onTap, isNull);
     });
   });
 }

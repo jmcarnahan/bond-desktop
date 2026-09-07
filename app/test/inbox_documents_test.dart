@@ -13,8 +13,10 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/attachment_documents_strip.dart';
+import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
 import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
 import 'package:bond_inbox/widgets/preview/preview_engines.dart';
+import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/services/attachments/xlsx_reader.dart';
 import 'package:flutter/material.dart';
@@ -300,8 +302,8 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('opening one fills the pane and Back returns to the storyline',
-      (tester) async {
+  testWidgets('opening one puts it beside the storyline, and Expand and Back '
+      'move between the two', (tester) async {
     await seedThread();
     await seedStoryline(pinned: 'c1/a1');
 
@@ -311,7 +313,15 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // There is no split on this pane, so a document opens the whole thing.
+    // Beside the spine, not over it: the storyline is the room the reader is
+    // in, and the document is read against it.
+    expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
+    expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
+    await tester.pump();
+    await tester.pump();
+
     expect(find.byType(AttachmentViewerPane), findsOneWidget);
     expect(find.byType(StorylineTimelinePanel), findsNothing);
 
@@ -319,9 +329,10 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // Back has nowhere to drop to here, so the preview leaves with the pane
-    // and the storyline is what is underneath.
+    // There is always somewhere to drop back to now — the side panel is the
+    // shell's, so Back returns to the split whatever the pane underneath is.
     expect(find.byType(AttachmentViewerPane), findsNothing);
+    expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
     expect(find.byType(StorylineTimelinePanel), findsOneWidget);
     await settleQueues(tester);
   });

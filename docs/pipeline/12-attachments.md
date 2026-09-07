@@ -650,23 +650,52 @@ was only one of its seven answers.
 
 ## Reading a file on screen
 
-A chip is a tap target. Tapping it puts the file **beside** the thread, because
-a preview is read against the message that carried it: the transcript keeps the
-pane and the panel takes 45 % of it, clamped to 360–640 px, and the transcript
-never goes under 420. When those cannot both be had — a narrow window, or a pane
-under the 960 px two-pane breakpoint — the preview **replaces** the transcript
-rather than squeezing it. The composer stays under either arrangement, so a
-reply is still possible with the file on screen.
+A chip is a tap target. Tapping it puts the file **beside** whatever the reader
+was looking at, because a preview is read against the message that carried it.
+The panel is the shell's now, not the thread pane's: `_side` holds one
+`SidePanel` — a `FilePanel` or a `ThreadPanel` — and `_wide()` renders it as
+the last column of the shell's `Row`, so a file opens beside a thread, beside a
+storyline's spine, and beside a thread that is itself in the side panel (where
+it REPLACES that thread, one thing at a time on that side of the seam).
+
+The width is measured **post-rail** — the window less `AppRail.width`, the 1 px
+divider and the 16 px seam — and the two-pane breakpoint is applied to that
+figure, so the split appears from a window of 1237 px. The panel takes 45 % of
+what is left, clamped to 360–640 px for a file and 420–640 px for a thread (a
+`ThreadDetailPanel` header spends its width on controls before the subject sees
+any), and the main pane never goes under 420. When both cannot be had — a
+narrow window, or a wide one with no room — the panel **replaces** the main
+pane rather than squeezing it. The composer stays under either arrangement, so
+a reply is still possible with the file on screen.
+
+`SidePanelHost` draws the header for whatever is in the panel: the glyph, the
+name, a subtitle, the size, and the ⤢ and ✕ (`SidePanelHost.expandKey` /
+`closeKey`). The preview renders inside it with `showHeader: false`, so its own
+keys never reach the screen — one owner for the two controls.
 
 `Expand` gives the same panel the whole pane, on a `PaneSurface` whose back
-arrow returns to the split with the thread still selected underneath, and whose
-`Home` clears both. The viewer is a rung in `_main()` directly above the
-transcript — the pane it was opened from and the one Back returns to — and a
-viewer whose thread has vanished falls through it rather than stranding the
-screen. `_previewing` and `_viewerFull` are cleared by every selector that
-clears `_replyOpenFor`, and by sign-out beside the thumbnails and the pin keys
-— the ref points into a mailbox that has just been wiped. A preview left
-visible under another pane is exactly the bug that list exists to prevent.
+arrow returns to the split and whose `Home` clears everything. Back drops to
+the split in **every** case, storyline included: the panel belongs to the
+shell, so there is always something underneath it. The viewer is a rung in
+`_main()` directly above the transcript, guarded on the thread OR the storyline
+still existing — a viewer whose thread has vanished falls through it rather
+than stranding the screen. `_side` and `_sideFull` are cleared by
+`_clearOverlays()`, which every one of the seven selection setters calls, and by
+sign-out beside the thumbnails and the pin keys — the panel points into a
+mailbox that has just been wiped. A panel left visible under another pane is
+exactly the bug that list exists to prevent.
+
+A `FilePanel` carries the conversation it was opened **from**. That origin is
+what `Use in reply` writes into — offered on the same ladder the thread pane
+uses, so mail always and a chat only with the send grant — and what a pin
+resolves its storyline through: a thread open beside a storyline is not
+`_selectedId`, so without the origin a file from it would pin to whichever
+storyline the main pane happened to be showing. A document off a storyline's
+shelf carries no origin, and offers no `Use in reply`: the shelf's files belong
+to the storyline rather than to any one conversation. When the file was opened
+from the thread beside — which it replaced — `Use in reply` brings that thread
+back beside with its box open and the file goes: the draft is what was asked
+for, and a box off screen is nothing happening.
 
 ### Three segments, always all three
 
@@ -973,13 +1002,17 @@ whose spinner is off screen is not visible feedback.
 - `app/lib/widgets/attachment_documents_strip.dart` — the storyline's
   documents shelf, pinned first, with Pin and the two-step Remove;
   `app/lib/widgets/storyline_timeline.dart` — the Documents button that unfolds
-  it and the three attachment props the spine's rows forward.
+  it. The spine's cards carry no chips: a card is a root message, and the files
+  on a thread are reached by opening that thread beside the spine.
 - `app/lib/providers/storylines_provider.dart` — `storylineDocumentsProvider`,
   dropped by hand after every pin and unpin.
 - `app/lib/widgets/message_row.dart` — `layOutBody`'s `thumbnailable` list and
   the document pictures it drives.
-- `app/lib/screens/inbox_screen.dart` — `_threadBody` (the split),
-  `_attachmentViewer` (the `_main` rung, which a storyline reaches too),
+- `app/lib/widgets/side_panel.dart` — `SidePanel`/`ThreadPanel`/`FilePanel`,
+  `SidePanelHost` and its width math (`widthFor`, `availableBesideRail`).
+- `app/lib/screens/inbox_screen.dart` — `_wide` (the split), `_sidePanel` and
+  `_filePanel`, `_attachmentViewer` (the `_main` rung, which a storyline
+  reaches too),
   `_thumbnailFor`/`_loadThumb`, `_openAttachmentInOs`, `_saveAttachment`,
   `_launchExternal`, the clear-cache wiring, and the pinning trio
   `_pinTargetFor`/`_pinAttachment`/`_unpinDocument` over `_pinnedKeys`.

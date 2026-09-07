@@ -782,7 +782,7 @@ void main() {
 
       expect(inkOf(tester, 'Settled'), BondColors.onDarkPrimary);
       final dot = dotOf(tester, 'Settled');
-      expect(dot.color, BondColors.seaGlassOnDark);
+      expect(dot.color, BondColors.railAccent);
       expect(dot.border, isNull);
     });
 

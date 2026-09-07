@@ -38,7 +38,6 @@ import '../widgets/activity_log_panel.dart';
 import '../widgets/app_rail.dart';
 import '../widgets/archive_pane.dart';
 import '../widgets/attachment_format.dart';
-import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/home_pane.dart';
@@ -51,6 +50,7 @@ import '../widgets/preview/preview_engines.dart';
 import '../widgets/preview/preview_kind.dart' show openRefused;
 import '../widgets/quick_replies.dart';
 import '../widgets/settings_screen.dart';
+import '../widgets/side_panel.dart';
 import '../widgets/source_filter.dart';
 import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
@@ -180,21 +180,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The thread the add-to-storyline pane is filing. Same overlay contract.
   ({String source, String id})? _pickingStorylineForThread;
 
-  /// The thread whose reply window is open, if any. Collapsed is the DEFAULT:
-  /// a thread opens as something to read, and the composer appears when the
-  /// user says they are writing. Cleared wherever the selection moves — a
-  /// window opened on one thread must not be open on the next.
-  String? _replyOpenFor;
+  /// The conversation whose reply window is open, if any. Collapsed is the
+  /// DEFAULT: a thread opens as something to read, and the composer appears
+  /// when the user says they are writing. Cleared wherever the selection moves
+  /// — a window opened on one thread must not be open on the next.
+  ///
+  /// A [DraftTarget] and not a bare key, because a thread can be open in the
+  /// main pane and ANOTHER one beside it: each pane compares this against its
+  /// own target, and one string could not say which of the two boxes is open.
+  DraftTarget? _replyOpenFor;
 
-  /// The file the preview is showing, if any. An overlay ON the open thread
-  /// rather than a peer of it: the transcript stays beside it, because a
-  /// preview is read against the message that carried it. Cleared wherever the
-  /// selection moves, exactly like [_replyOpenFor].
-  AttachmentRef? _previewing;
+  /// What is open beside the main pane, if anything: a file, or a thread
+  /// reached from inside a storyline. An overlay ON what the main pane is
+  /// showing rather than a peer of it — a file is read against the message
+  /// that carried it, and a thread against the storyline it belongs to.
+  /// Cleared wherever the selection moves, exactly like [_replyOpenFor].
+  SidePanel? _side;
 
-  /// Whether that preview has the whole pane. Only meaningful with
-  /// [_previewing], and cleared with it.
-  bool _viewerFull = false;
+  /// Whether that panel has the whole main pane. Only ever true of a
+  /// [FilePanel] — ⤢ on a thread hands it to the main pane proper, which
+  /// clears [_side] — and cleared with it.
+  bool _sideFull = false;
 
   /// Built on first use and never under `flutter test` — see
   /// [InboxScreen.previewEngines]. Constructing [PdfrxRenderer] is what loads
@@ -244,21 +250,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// and two sends can be in flight at once. One slot silenced the first send's
   /// outcome — including its failure.
   final Set<DraftTarget> _announceSendsFor = {};
-
-  /// Which member thread a storyline's composer replies to, when the user has
-  /// picked one. Null means "the thread the newest message is in", which is
-  /// what the dropdown shows by default — a storyline has no inbox of its own
-  /// to reply to, so the composer always answers exactly one real thread.
-  ///
-  /// Source and key together: a bare key names a conversation only within one
-  /// connector, and a storyline can hold members from both.
-  DraftTarget? _storylineReplyKey;
-
-  /// The storyline whose reply window is open, if any. Collapsed is the
-  /// DEFAULT here too: a storyline opens as a spine to read, and the box —
-  /// with the pills that pick which member thread it answers — appears when
-  /// the user says they are writing.
-  String? _storylineReplyOpenFor;
 
   /// Narrow layouts only: whether the rail overlay is up.
   bool _railOpen = false;
@@ -394,6 +385,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// path.
   Future<void> _reloadOpenThread() async {
     if (!mounted) return;
+    // The thread beside counts as open: it is being read as much as the one in
+    // the main pane, and a transcript that never refreshed under a storyline
+    // would sit a poll behind the rail rows beside it.
+    final side = _side;
+    if (side is ThreadPanel) {
+      await ref
+          .read(
+            threadProvider(
+              (source: side.source, conversationKey: side.conversationKey),
+            ).notifier,
+          )
+          .load(fetchBodies: false);
+      if (!mounted) return;
+    }
     final selected = _selectedId;
     if (selected != null) {
       await ref
@@ -487,12 +492,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     await ref.read(attachmentCacheProvider).clear();
     _forgetThumbnails();
     _pinnedKeys.clear();
-    // The preview holds an [AttachmentRef] out of the mailbox that was just
-    // wiped, and the viewer rung would keep drawing it over the next person's
-    // empty inbox. Cleared here rather than left to the next selection,
-    // because signing out is not a selection.
-    _previewing = null;
-    _viewerFull = false;
+    // The side panel holds an [AttachmentRef] — or a conversation key — out of
+    // the mailbox that was just wiped, and it would keep drawing over the next
+    // person's empty inbox. Cleared here rather than left to the next
+    // selection, because signing out is not a selection.
+    _clearOverlays();
     if (!mounted) return;
     ref.invalidate(conversationsProvider);
     ref.invalidate(storylinesProvider);
@@ -500,6 +504,62 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     ref.invalidate(draftProvider);
     ref.invalidate(storylineTimelineProvider);
     widget.onSignedOut?.call();
+  }
+
+  /// Everything that is an overlay on the pane rather than the pane itself.
+  ///
+  /// The seven selection setters each clear exactly this list before setting
+  /// their own field: a picker, a reply box or a file left open over the next
+  /// thing the user asked for is the bug, and it is the same list every time.
+  /// Called from inside the caller's own `setState`, so one selection is one
+  /// frame.
+  void _clearOverlays() {
+    _side = null;
+    _sideFull = false;
+    _addingToStorylineId = null;
+    _pickingStorylineForThread = null;
+    _railOpen = false;
+    _replyOpenFor = null;
+    _showingActivityLog = false;
+    _showingSettings = false;
+    _showingCompose = false;
+  }
+
+  /// Opens something beside the main pane, always in the split and never in
+  /// the full pane: a panel that inherited the last one's ⤢ would take over a
+  /// screen the user did not ask it to.
+  void _openBeside(SidePanel panel) => setState(() {
+        _side = panel;
+        _sideFull = false;
+      });
+
+  void _closeSide() => setState(() {
+        _side = null;
+        _sideFull = false;
+      });
+
+  /// Opens a conversation BESIDE whatever is in the main pane — a storyline's
+  /// episode card, and in later phases a person room's root message.
+  ///
+  /// Everything [_select] does except take the main pane: the thread and its
+  /// draft are loaded the same way, and opening it still counts as reading it.
+  void _openThreadBeside(String source, String conversationKey) {
+    _openBeside(
+      ThreadPanel(source: source, conversationKey: conversationKey),
+    );
+    final target = (source: source, conversationKey: conversationKey);
+    ref.read(conversationsProvider.notifier).noteThreadOpened(conversationKey);
+    ref.read(conversationsProvider.notifier).markRead(source, conversationKey);
+    ref.read(threadProvider(target).notifier).load();
+    ref.read(draftProvider(target).notifier).load();
+  }
+
+  /// Which file the side panel is showing, for the chips that mark it. Both
+  /// panes read this one getter — a chip highlighted in the transcript and not
+  /// in the spine is two answers to one question.
+  AttachmentRef? get _sideAttachment {
+    final side = _side;
+    return side is FilePanel ? side.attachment : null;
   }
 
   void _select(String id, {String? source}) {
@@ -525,19 +585,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }
     }
     setState(() {
+      _clearOverlays();
       _selectedId = id;
       _selectedSource = resolvedSource;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
-      _showingActivityLog = false;
-      _showingSettings = false;
-      _showingCompose = false;
-      _addingToStorylineId = null;
-      _pickingStorylineForThread = null;
-      _railOpen = false;
-      _replyOpenFor = null;
-      _previewing = null;
-      _viewerFull = false;
     });
     // The quietest signal the app collects: opening a thread is the user saying
     // this one was worth their time. Fire-and-forget, and nothing on screen
@@ -568,23 +620,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   void _selectStoryline(String id) {
     setState(() {
+      _clearOverlays();
       _selectedStorylineId = id;
       _selectedId = null;
       _selectedSource = null;
       _selectedLaterDay = null;
-      _showingActivityLog = false;
-      _showingSettings = false;
-      _showingCompose = false;
-      _addingToStorylineId = null;
-      _pickingStorylineForThread = null;
-      _railOpen = false;
-      _replyOpenFor = null;
-      _previewing = null;
-      _viewerFull = false;
-      // The reply target belongs to the storyline that was open, not to this
-      // one; the default below picks the newest thread in the new timeline.
-      _storylineReplyKey = null;
-      _storylineReplyOpenFor = null;
     });
     ref.read(storylineTimelineProvider(id).notifier).load();
   }
@@ -598,20 +638,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       ref.read(archiveProvider.notifier).refreshDropped();
     }
     setState(() {
+      _clearOverlays();
       _section = section;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
-      _showingActivityLog = false;
-      _showingSettings = false;
-      _showingCompose = false;
-      _addingToStorylineId = null;
-      _pickingStorylineForThread = null;
-      _railOpen = false;
-      _replyOpenFor = null;
-      _previewing = null;
-      _viewerFull = false;
     });
   }
 
@@ -620,21 +652,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// and the tab moves with it too, since a day only means anything in Later.
   void _selectLaterDay(String dayKey) {
     setState(() {
+      _clearOverlays();
       _section = RailSection.archive;
       _archiveTab = ArchiveTab.later;
       _selectedLaterDay = dayKey;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
-      _showingActivityLog = false;
-      _showingSettings = false;
-      _showingCompose = false;
-      _addingToStorylineId = null;
-      _pickingStorylineForThread = null;
-      _railOpen = false;
-      _replyOpenFor = null;
-      _previewing = null;
-      _viewerFull = false;
     });
   }
 
@@ -643,19 +667,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// and clears whatever the user was reading.
   void _openActivityLog() {
     setState(() {
+      _clearOverlays();
       _showingActivityLog = true;
-      _showingSettings = false;
-      _showingCompose = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
-      _addingToStorylineId = null;
-      _pickingStorylineForThread = null;
-      _railOpen = false;
-      _replyOpenFor = null;
-      _previewing = null;
-      _viewerFull = false;
     });
   }
 
@@ -796,9 +813,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // Announcing the thread the user is already reading is telling them what
     // is on their screen. Only when it is the whole batch — a pile that
     // happens to include it still has somewhere else to go.
+    //
+    // A thread open BESIDE the main pane is being read just as much as one in
+    // it, and it is not [_selectedId]; without the second arm the ribbon
+    // announces the conversation the user is looking at.
+    final side = _side;
+    final beside = side is ThreadPanel ? side : null;
     final onScreen = items.length == 1 &&
-        items.single.conversationKey == _selectedId &&
-        (_selectedSource == null || items.single.source == _selectedSource);
+        ((items.single.conversationKey == _selectedId &&
+                (_selectedSource == null ||
+                    items.single.source == _selectedSource)) ||
+            (beside != null &&
+                items.single.conversationKey == beside.conversationKey &&
+                items.single.source == beside.source));
 
     final show = ribbon.visible && !onScreen;
 
@@ -875,14 +902,57 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
   }
 
+  /// The rail, the main pane, and whatever is open beside it.
+  ///
+  /// The width is measured POST-RAIL — see [SidePanelHost.availableBesideRail]
+  /// — and the two-pane breakpoint is applied to THAT figure rather than to
+  /// the window: 260 of rail, its 1px divider and the 16px seam come off
+  /// first, so the split appears from a window of 1237px. Measuring the raw
+  /// window instead would open the split at 960, where the main pane would be
+  /// left with 379 — under the transcript's own minimum, with nothing to
+  /// catch it.
   Widget _wide(List<Conversation> conversations, String? loadError) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _rail(conversations),
-        const SizedBox(width: 1, child: ColoredBox(color: BondColors.border)),
-        Expanded(child: _main(conversations, loadError)),
-      ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final side = _side;
+        // A full-pane file is a rung of [_main], not a panel beside it.
+        final beside = _sideFull ? null : side;
+        final available =
+            SidePanelHost.availableBesideRail(constraints.maxWidth);
+        final width = (beside == null || available < _twoPaneBreakpoint)
+            ? null
+            : SidePanelHost.widthFor(
+                available: available,
+                minWidth: beside is ThreadPanel
+                    ? SidePanelHost.threadMinWidth
+                    : SidePanelHost.fileMinWidth,
+                mainMinWidth: SidePanelHost.mainMinWidth,
+              );
+
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _rail(conversations),
+            const SizedBox(
+              width: 1,
+              child: ColoredBox(color: BondColors.border),
+            ),
+            // Both cannot be had at this width, so the panel REPLACES the main
+            // pane rather than squeezing it — the same call the rail makes at
+            // its own breakpoint, and the one the thread pane's split made
+            // before this moved out here.
+            if (beside != null && width == null)
+              Expanded(child: _sidePanel(beside))
+            else ...[
+              Expanded(child: _main(conversations, loadError)),
+              if (beside != null && width != null) ...[
+                const SizedBox(width: BondSpacing.s16),
+                SizedBox(width: width, child: _sidePanel(beside)),
+              ],
+            ],
+          ],
+        );
+      },
     );
   }
 
@@ -908,7 +978,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                 ),
               ),
             ),
-            Expanded(child: _main(conversations, loadError)),
+            // One thing at a time at this width: an open side panel has the
+            // pane, exactly as the file preview did before the panel was a
+            // shell-level thing.
+            Expanded(
+              child: (_side != null && !_sideFull)
+                  ? _sidePanel(_side!)
+                  : _main(conversations, loadError),
+            ),
           ],
         ),
         if (_railOpen) ...[
@@ -1158,21 +1235,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// clears whatever the user was reading, exactly as the activity log does.
   void _openSettings() {
     setState(() {
+      // Which includes the rail overlay: at narrow widths leaving it open
+      // would put the pane the gear just opened behind a scrim.
+      _clearOverlays();
       _showingSettings = true;
-      _showingActivityLog = false;
-      _showingCompose = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
-      _addingToStorylineId = null;
-      _pickingStorylineForThread = null;
-      // At narrow widths the rail is an overlay: leaving it open would put the
-      // pane the gear just opened behind a scrim.
-      _railOpen = false;
-      _replyOpenFor = null;
-      _previewing = null;
-      _viewerFull = false;
     });
   }
 
@@ -1183,26 +1253,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// window, which belongs to a thread that is no longer on screen.
   void _openCompose({OpenComposeIntent? prefill}) {
     setState(() {
+      // The side panel goes with the thread it was opened from. The ladder
+      // would not show it without a selection, but a pane leaves the same
+      // state behind whichever pane it was — Settings clears these, so does
+      // this.
+      _clearOverlays();
       _showingCompose = true;
       _composePrefill = prefill;
-      _showingSettings = false;
-      _showingActivityLog = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
-      _addingToStorylineId = null;
-      _pickingStorylineForThread = null;
-      // At narrow widths the rail is an overlay: leaving it open would put the
-      // pane the button just opened behind a scrim.
-      _railOpen = false;
-      _replyOpenFor = null;
-      // The file being previewed belonged to that thread too. The ladder
-      // would not show it without a selection, but a pane leaves the same
-      // state behind whichever pane it was — Settings clears these, so does
-      // this.
-      _previewing = null;
-      _viewerFull = false;
     });
   }
 
@@ -1558,9 +1619,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// screen, and a pane outranks what it was opened from because it is the
   /// newer thing the user asked for.
   ///
-  /// The viewer sits directly above the transcript because that is what it was
-  /// opened from and what Back returns to — and above the storyline too, since
-  /// a chip in the spine opens the same pane and Back lands back on it.
+  /// The full-pane file viewer sits directly above the transcript because that
+  /// is what it was expanded from and what Back returns to — and above the
+  /// storyline too, since a document on the shelf expands into the same pane.
+  /// Back from it drops to the split in every case now: the side panel is the
+  /// shell's, so there is always something for it to drop back to.
   ///
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
@@ -1580,16 +1643,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final picking = _pickingStorylineForThread;
     if (picking != null) return _pickStorylinePane(picking);
 
-    final viewing = _previewing;
+    final side = _side;
     // A viewer whose thread vanished falls through — never setState in build;
-    // the next selection clears it.
+    // the next selection clears it. BOTH arms matter: a file can be expanded
+    // from a thread or from a storyline, and dropping either leaves a blank
+    // pane where one of them used to be.
     final viewerStorylineId = _selectedStorylineId;
-    if (viewing != null &&
-        _viewerFull &&
+    if (side is FilePanel &&
+        _sideFull &&
         (_selected(conversations) != null ||
             (viewerStorylineId != null &&
                 _storylineById(viewerStorylineId) != null))) {
-      return _attachmentViewer(viewing);
+      return _attachmentViewer(side);
     }
 
     final selected = _selected(conversations);
@@ -1807,8 +1872,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.watch(storylineMembersProvider(storyline.id)).valueOrNull ??
               const [],
       onBack: () => setState(() {
+        _clearOverlays();
         _selectedStorylineId = null;
-        _storylineReplyOpenFor = null;
       }),
       onRename: (title) => notifier.rename(storyline.id, title),
       onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
@@ -1822,6 +1887,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
       onOpenThread: (source, key) => _select(key, source: source),
+      // The card's own tap. A thread opens BESIDE the spine rather than over
+      // it: the storyline is the room the reader is in, and the answer they
+      // are about to write belongs to one conversation in it.
+      onOpenEpisode: (episode) =>
+          _openThreadBeside(episode.source, episode.conversationKey),
       onAddThread: () =>
           setState(() => _addingToStorylineId = storyline.id),
       newestFirst: newestFirst,
@@ -1833,11 +1903,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // so the selection pointing at it goes first and the pane is back on
         // the overview in the frame the row disappears.
         setState(() {
+          _clearOverlays();
           _selectedStorylineId = null;
-          _addingToStorylineId = null;
-          _storylineReplyOpenFor = null;
-          _previewing = null;
-          _viewerFull = false;
         });
         unawaited(notifier.dismiss(storyline.id));
       },
@@ -1852,57 +1919,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               .watch(storylineDocumentsProvider(storyline.id))
               .valueOrNull ??
           const [],
-      // There is no split on this pane, so a file opens the whole thing. Both
-      // routes in — the shelf and a chip in the spine — land on the same pane
-      // for the same reason.
-      onOpenDocument: (attachment) => setState(() {
-        _previewing = attachment;
-        _viewerFull = true;
-      }),
-      onOpenAttachment: (attachment) => setState(() {
-        _previewing = attachment;
-        _viewerFull = true;
-      }),
-      selectedAttachment: _previewing,
-      thumbnailFor: _thumbnailFor,
+      // Beside the spine, not over it — the storyline stays on screen while
+      // the document is read against it. No thread rides along: the shelf's
+      // files belong to the storyline rather than to any one conversation, so
+      // there is no composer for 'Use in reply' to write into.
+      onOpenDocument: (attachment) =>
+          _openBeside(FilePanel(attachment: attachment)),
       onPinDocument: (attachment) =>
           unawaited(_pinAttachment(attachment, storyline.id)),
       onUnpinDocument: (attachment) =>
           unawaited(_unpinDocument(storyline.id, attachment)),
-      // The suggestions ride on the episode they answer, not under the spine:
-      // a storyline is several conversations, and a card offering to reply has
-      // to say which one it would reply to.
-      episodeFooter: (episode) => _EpisodeQuickReplies(
-        target: (
-          source: episode.source,
-          conversationKey: episode.conversationKey,
-        ),
-        onOpenReply: () => _openStorylineReply(storyline.id, episode),
-        onQueueSend: (body) => unawaited(_queueQuickReply(
-          (source: episode.source, conversationKey: episode.conversationKey),
-          body,
-        )),
-        onUndo: () => _cancelQueuedSend(
-          (source: episode.source, conversationKey: episode.conversationKey),
-        ),
-      ),
-      onAskTap: (episode) => _openStorylineReply(storyline.id, episode),
     );
-
-    // A storyline replies to any of its episodes, chats included: the group is
-    // the unit of work, and the answer belongs wherever the conversation
-    // actually is. The pills name them all.
-    final targets = _replyTargets(episodes);
-    final target = _replyTargetFor(episodes, targets);
-
-    // The same rung ladder the thread pane applies (see [_thread]): mail always
-    // offers a box because it bottoms out at the clipboard, a chat only on the
-    // top rung, because without `Chat.ReadWrite` there is nowhere for the text
-    // to go. A storyline whose only reachable episodes are chats this build
-    // cannot send to says where to reply instead.
-    final canReply = target != null &&
-        (target.source == 'email' ||
-            ref.watch(draftProvider(target)).capability == SendCapability.send);
 
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -1917,149 +1944,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
             const SizedBox(height: BondSpacing.s12),
           ],
+          // No composer under the spine, and no picker over it. A storyline
+          // is several conversations and this pane could only ever answer one
+          // of them, which is a question the reader had to answer before they
+          // could type. Tapping a card opens that conversation beside the
+          // spine WITH its own box, so the reply is addressed to exactly one
+          // thread and the pane it belongs to says which.
           Expanded(child: panel),
-          if (target != null) ...[
-            const SizedBox(height: BondSpacing.s12),
-            if (_storylineReplyOpenFor != storyline.id)
-              Row(
-                children: [
-                  TextButton.icon(
-                    onPressed: () => setState(
-                      () => _storylineReplyOpenFor = storyline.id,
-                    ),
-                    icon: const Icon(Icons.reply_outlined, size: 16),
-                    label: const Text('Reply…'),
-                  ),
-                ],
-              )
-            else ...[
-              // The pills sit above the box rather than inside the `canReply`
-              // branch: when the picked episode is a chat this build cannot
-              // answer, they are exactly how the user reaches the thread it can.
-              _replyHeaderForStoryline(target, targets),
-              const SizedBox(height: BondSpacing.s8),
-              // The target carries its own source — a picked chat is drafted and
-              // sent down the chat path, a picked thread down the mail one.
-              if (canReply) _composer(target) else _replyElsewhere(),
-            ],
-          ] else if (episodes.isNotEmpty) ...[
-            const SizedBox(height: BondSpacing.s12),
-            _replyElsewhere(),
-          ],
         ],
       ),
-    );
-  }
-
-  /// Every member conversation a reply can go to, keyed by which conversation
-  /// it is, valued by the subject the picker names it with.
-  ///
-  /// The key carries its source because a conversation key is only unique
-  /// within one: the mail and chat connectors mint keys with no knowledge of
-  /// each other, so the two sets are disjoint only by accident of shape. The
-  /// picker must never conflate a chat with the thread that happens to share
-  /// its key — pick one and the answer would go out on the other.
-  Map<DraftTarget, String> _replyTargets(
-    List<StorylineEpisode> episodes,
-  ) {
-    return {
-      for (final episode in episodes)
-        (source: episode.source, conversationKey: episode.conversationKey):
-            // A chat's messages carry no subject — Graph does not give them
-            // one — so an episode built out of them has none either. Named by
-            // who is on it instead, the way a chat is named everywhere else:
-            // without this a storyline holding two chats would offer the user
-            // two identical "(no subject)" rows to choose between.
-            episode.subject.isEmpty
-                ? episode.participants.join(', ')
-                : episode.subject,
-    };
-  }
-
-  /// Which member conversation a storyline's composer answers.
-  ///
-  /// The user's pick when they made one and it is still a member; otherwise the
-  /// newest episode, which is nearly always the one actually waiting on an
-  /// answer — the episodes arrive oldest first, so that is the last of them.
-  DraftTarget? _replyTargetFor(
-    List<StorylineEpisode> episodes,
-    Map<DraftTarget, String> targets,
-  ) {
-    final picked = _storylineReplyKey;
-    if (picked != null && targets.containsKey(picked)) return picked;
-    for (final episode in episodes.reversed) {
-      final key = (
-        source: episode.source,
-        conversationKey: episode.conversationKey,
-      );
-      if (targets.containsKey(key)) return key;
-    }
-    // Unreachable while targets is built from these episodes; null, not a
-    // fake fallback, so a future divergence surfaces as "no reply bar".
-    return null;
-  }
-
-  /// Opens the storyline's reply window on one episode's thread.
-  ///
-  /// Both halves, always: a box that opened on a different thread than the ask
-  /// the user tapped would send the answer to the wrong conversation.
-  void _openStorylineReply(String storylineId, StorylineEpisode episode) {
-    setState(() {
-      _storylineReplyKey = (
-        source: episode.source,
-        conversationKey: episode.conversationKey,
-      );
-      _storylineReplyOpenFor = storylineId;
-    });
-  }
-
-  /// Which member thread the open reply window is answering, and the way out
-  /// of it. The pills are the picker — every target is on screen at once, so
-  /// switching threads is one click and nothing has to open over the spine.
-  Widget _replyHeaderForStoryline(
-    DraftTarget selected,
-    Map<DraftTarget, String> targets,
-  ) {
-    return Row(
-      children: [
-        Text('Reply to', style: BondType.caption),
-        const SizedBox(width: BondSpacing.s8),
-        Expanded(child: _replyTargetPills(selected, targets)),
-        IconButton(
-          onPressed: () => setState(() => _storylineReplyOpenFor = null),
-          icon: const Icon(Icons.close),
-          iconSize: 16,
-          tooltip: 'Close',
-          padding: const EdgeInsets.all(BondSpacing.s4),
-          constraints: const BoxConstraints(),
-          visualDensity: VisualDensity.compact,
-        ),
-      ],
-    );
-  }
-
-  /// How much of a subject a pill carries. A pill's label does not ellipsize
-  /// and the row wraps, so one long subject would take a whole line to itself.
-  static const int _replyPillLabelCap = 40;
-
-  Widget _replyTargetPills(
-    DraftTarget selected,
-    Map<DraftTarget, String> targets,
-  ) {
-    return BondFilterPillRow<DraftTarget>(
-      options: targets.keys.toList(),
-      selected: selected,
-      labelOf: (key) {
-        final subject = targets[key]!;
-        final label = subject.isEmpty ? '(no subject)' : subject;
-        // By grapheme cluster, not by index: `substring` cuts UTF-16 code
-        // units and can split a surrogate pair or a ZWJ emoji, which renders
-        // as the replacement glyph on the end of the pill.
-        return label.characters.length > _replyPillLabelCap
-            ? '${label.characters.take(_replyPillLabelCap)}…'
-            : label;
-      },
-      onSelected: (key) => setState(() => _storylineReplyKey = key),
     );
   }
 
@@ -2115,7 +2008,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _openCompose(prefill: OpenComposeIntent(to: to));
   }
 
-  Widget _thread(Conversation selected) {
+  /// The thread in the MAIN pane: the transcript, and the composer under it.
+  Widget _thread(Conversation selected) => _threadColumn(
+        selected,
+        inSidePanel: false,
+      );
+
+  /// One conversation, wherever it is being read.
+  ///
+  /// The main pane and the side panel render the SAME column — one transcript
+  /// widget, one composer, one set of quick replies — because two renderers
+  /// for one conversation is how the two of them come to disagree about
+  /// whether a thread can be replied to. What differs is only what the
+  /// surrounding chrome already provides: in the side panel the host draws the
+  /// header, so the panel offers no Back and no compose of its own, and a file
+  /// opened from here REPLACES the panel it was opened from.
+  Widget _threadColumn(
+    Conversation selected, {
+    required bool inSidePanel,
+  }) {
     final target = (source: selected.source, conversationKey: selected.id);
     final thread = ref.watch(threadProvider(target));
 
@@ -2206,13 +2117,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           // a tap opens the box with the words in it rather than appearing to
           // send them.
           if (!armed) {
-            setState(() => _replyOpenFor = selected.id);
+            setState(() => _replyOpenFor = target);
             unawaited(notifier.markEdited(option.body));
             return;
           }
           unawaited(_queueQuickReply(target, option.body, replyTo: m.id));
         },
-        onReply: () => setState(() => _replyOpenFor = selected.id),
+        onReply: () => setState(() => _replyOpenFor = target),
         onDismiss: () => unawaited(notifier.dismissOptionsFor(m.id)),
       );
     }
@@ -2230,13 +2141,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onReopen: () => ref
           .read(conversationsProvider.notifier)
           .reopenThread(selected.source, selected.id),
-      onBack: () => setState(() {
-        _selectedId = null;
-        _selectedSource = null;
-        _replyOpenFor = null;
-        _previewing = null;
-        _viewerFull = false;
-      }),
+      // In the side panel the host's ✕ is the way out, and there is no
+      // selection under this thread for a Back to return to.
+      onBack: inSidePanel
+          ? null
+          : () => setState(() {
+                _clearOverlays();
+                _selectedId = null;
+                _selectedSource = null;
+              }),
       // The reply affordance rides at the end of the transcript so it reads as
       // attached to the message it answers. After the user's OWN last message
       // there is nothing to answer, and it renders nothing.
@@ -2246,11 +2159,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // Every ask on the pane is a call to action, so every one of them opens
       // the box — the banner included. Null where there is no box to open.
       onOpenReply:
-          canReply ? () => setState(() => _replyOpenFor = selected.id) : null,
+          canReply ? () => setState(() => _replyOpenFor = target) : null,
       onAddToStoryline: () => setState(() {
+        _clearOverlays();
         _pickingStorylineForThread = (source: selected.source, id: selected.id);
-        _previewing = null;
-        _viewerFull = false;
       }),
       // Sender-scoped, because the screen is the layer that knows the address
       // behind the row. A thread with no address to key a rule on gets no item
@@ -2260,15 +2172,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? () => _laterSender(selected.primaryEmail!, selected.source)
           : null,
       onKeepInInbox: () => _keepThread(selected.source, selected.id),
-      onCompose: () => unawaited(_composeFrom(selected)),
-      // Opening a file is a selection like any other: it replaces whatever was
-      // being previewed and always lands on the split, never on the full pane
-      // the user may have left open for the last one.
-      onOpenAttachment: (attachment) => setState(() {
-        _previewing = attachment;
-        _viewerFull = false;
-      }),
-      selectedAttachment: _previewing,
+      // Compose is a whole pane, which a thread being read BESIDE something
+      // else has no business opening: the ✕ and the ⤢ are the two ways out of
+      // the side panel.
+      onCompose: inSidePanel ? null : () => unawaited(_composeFrom(selected)),
+      // Opening a file is a selection like any other: it replaces whatever the
+      // side panel was showing — including this very thread, when the file was
+      // opened from the side panel — and always lands on the split, never on
+      // the full pane the user may have left open for the last one.
+      //
+      // The origin ALWAYS rides along, reply box or not: it is what a pin
+      // resolves its storyline through, and a chat this build cannot send to
+      // is still the thread the file came from. Whether 'Use in reply' is
+      // offered is the file panel's own capability check, not this one's.
+      onOpenAttachment: (attachment) => _openBeside(FilePanel(
+        attachment: attachment,
+        from: target,
+      )),
+      selectedAttachment: _sideAttachment,
       thumbnailFor: _thumbnailFor,
     );
 
@@ -2276,7 +2197,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // transcript and knows nothing about drafts or sending, and it stays that
     // way.
     return Padding(
-      padding: const EdgeInsets.all(BondSpacing.s24),
+      // Tighter beside than in the main pane: the host already spends 16 on
+      // each side of its header, and 24 more inside a 420-wide panel is a
+      // quarter of the transcript.
+      padding: EdgeInsets.all(
+        inSidePanel ? BondSpacing.s12 : BondSpacing.s24,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -2288,13 +2214,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
             const SizedBox(height: BondSpacing.s12),
           ],
-          // The target rides in only where there is a box to write into: a
-          // chat with no send grant has no composer on this pane, and a draft
-          // written for one would be spent on words nobody ever sees.
-          Expanded(child: _threadBody(panel, target: canReply ? target : null)),
+          Expanded(child: panel),
           // Collapsed is the default: the box appears when the user says they
           // are writing, and until then the transcript has the pane to itself.
-          if (canReply && _replyOpenFor == selected.id) ...[
+          // Compared against this pane's OWN target, so a box opened on the
+          // thread beside does not open one here too.
+          if (canReply && _replyOpenFor == target) ...[
             const SizedBox(height: BondSpacing.s12),
             _replyHeader(selected),
             const SizedBox(height: BondSpacing.s4),
@@ -2308,95 +2233,166 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// How much of the thread pane a preview takes, and the two widths that stop
-  /// it taking too much: below [_previewMinWidth] a preview is a column of
-  /// clipped words, and below [_transcriptMinWidth] the transcript beside it is
-  /// unreadable. When both cannot be had, the preview REPLACES the transcript
-  /// rather than squeezing it — the same call the rail makes at
-  /// [_twoPaneBreakpoint].
-  static const double _previewFraction = 0.45;
-  static const double _previewMinWidth = 360;
-  static const double _previewMaxWidth = 640;
-  static const double _transcriptMinWidth = 420;
+  /// Whatever is open beside the main pane, in the chrome every side panel
+  /// wears.
+  Widget _sidePanel(SidePanel side) => switch (side) {
+        FilePanel() => _filePanel(side),
+        ThreadPanel() => _threadPanel(side),
+      };
 
-  /// The transcript, and the file beside it when one is open.
-  Widget _threadBody(Widget panel, {DraftTarget? target}) {
-    final previewing = _previewing;
-    if (previewing == null) return panel;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // The thread rides in so the preview can offer 'Use in reply': the
-        // draft is keyed by the conversation, not by the file. Null where
-        // `canReply` is false — there is no composer to write into.
-        final preview = _previewPanel(previewing, target: target);
-        final available = constraints.maxWidth - BondSpacing.s16;
-        // Narrow: one thing at a time. The composer below stays either way, so
-        // a reply is still possible with the file on screen.
-        if (constraints.maxWidth < _twoPaneBreakpoint) return preview;
+  /// A file beside the thread or the storyline it was opened from.
+  ///
+  /// Keyed by the file, so moving from one attachment to another builds a new
+  /// panel — and its memoised fetches — rather than reusing the last one's.
+  Widget _filePanel(FilePanel side) {
+    final attachment = side.attachment;
+    final from = side.from;
+    // Read here rather than in the closure: this is the build path, and the
+    // control has to appear the frame the thread's membership lands.
+    final pinTo = _pinTargetFor(attachment, from: from);
+    // The same rung ladder the thread pane applies: mail always has a box
+    // because it bottoms out at the clipboard, a chat only with the send
+    // grant. A file with no thread behind it — one off a storyline's shelf —
+    // has nowhere to write at all.
+    final canReply = from != null &&
+        (from.source == 'email' ||
+            ref.watch(draftProvider(from)).capability == SendCapability.send);
+    final size = formatBytes(attachment.size);
 
-        var width = (available * _previewFraction)
-            .clamp(_previewMinWidth, _previewMaxWidth)
-            .toDouble();
-        if (available - width < _transcriptMinWidth) {
-          width = available - _transcriptMinWidth;
-        }
-        if (width < _previewMinWidth) return preview;
-
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(child: panel),
-            const SizedBox(width: BondSpacing.s16),
-            SizedBox(width: width, child: preview),
-          ],
-        );
-      },
+    return SidePanelHost(
+      leading: Text(
+        attachmentGlyph(
+          attachment.kind,
+          attachment.contentType,
+          name: attachment.name,
+        ),
+        style: BondType.body,
+      ),
+      title: attachment.name ?? '(unnamed attachment)',
+      trailing: size.isEmpty ? null : Text(size, style: BondType.caption),
+      onExpand: () => setState(() => _sideFull = true),
+      onClose: _closeSide,
+      child: AttachmentPreviewPanel(
+        key: attachmentKey('preview', attachment),
+        attachment: attachment,
+        bytes: _attachmentBytes,
+        engines: _previewEngines,
+        // The host draws the header, including the ⤢ and the ✕ — two of each
+        // on one panel is two controls doing one thing.
+        showHeader: false,
+        onClose: _closeSide,
+        onOpen: () => unawaited(_openAttachmentInOs(attachment)),
+        onSave: () => unawaited(_saveAttachment(attachment)),
+        // Only where there is a composer to write into. Opening the box is
+        // what makes the new draft visible; the spinner in it is the
+        // notifier's own `generating`, so nothing here waits.
+        onUseInReply: canReply
+            ? () {
+                setState(() {
+                  _replyOpenFor = from;
+                  // The box the draft lands in has to be on screen. A file
+                  // opened from the MAIN thread leaves that thread where it
+                  // is; one opened from the thread beside REPLACED it, so the
+                  // thread comes back and the file goes — the draft is what
+                  // was asked for, and a draft written off screen is nothing
+                  // happening.
+                  if (!_isMainThread(from)) {
+                    _side = ThreadPanel(
+                      source: from.source,
+                      conversationKey: from.conversationKey,
+                    );
+                    _sideFull = false;
+                  }
+                });
+                unawaited(ref.read(draftProvider(from).notifier).generate(
+                      pinnedAttachmentIds: [attachment.attachmentId],
+                    ));
+              }
+            : null,
+        // Nowhere to pin is not a disabled button, it is no button: a thread in
+        // no storyline has nothing to offer here.
+        onPinToStoryline: pinTo == null
+            ? null
+            : () => unawaited(_pinAttachment(attachment, pinTo)),
+        pinned: _isPinned(attachment),
+        onOpenLink: (url) => unawaited(_launchExternal(url)),
+      ),
     );
   }
 
-  /// Keyed by the file, so moving from one attachment to another builds a new
-  /// panel — and its memoised fetches — rather than reusing the last one's.
-  Widget _previewPanel(AttachmentRef attachment, {DraftTarget? target}) {
-    // Read here rather than in the closure: this is the build path, and the
-    // control has to appear the frame the thread's membership lands.
-    final pinTo = _pinTargetFor(attachment);
-    return AttachmentPreviewPanel(
-      key: attachmentKey('preview', attachment),
-      attachment: attachment,
-      bytes: _attachmentBytes,
-      engines: _previewEngines,
-      onExpand: () => setState(() => _viewerFull = true),
-      onClose: () => setState(() {
-        _previewing = null;
-        _viewerFull = false;
-      }),
-      onOpen: () => unawaited(_openAttachmentInOs(attachment)),
-      onSave: () => unawaited(_saveAttachment(attachment)),
-      // Only where there is a composer to write into — the caller passes a
-      // null target when `canReply` is false. Opening the box is what makes
-      // the new draft visible; the spinner in it is the notifier's own
-      // `generating`, so nothing here waits.
-      onUseInReply: target == null
-          ? null
-          : () {
-              setState(() => _replyOpenFor = target.conversationKey);
-              unawaited(ref.read(draftProvider(target).notifier).generate(
-                    pinnedAttachmentIds: [attachment.attachmentId],
-                  ));
-            },
-      // Nowhere to pin is not a disabled button, it is no button: a thread in
-      // no storyline has nothing to offer here.
-      onPinToStoryline:
-          pinTo == null ? null : () => unawaited(_pinAttachment(attachment, pinTo)),
-      pinned: _isPinned(attachment),
-      onOpenLink: (url) => unawaited(_launchExternal(url)),
+  /// A conversation beside the storyline it belongs to.
+  ///
+  /// The thread is resolved the way [_selected] resolves the main pane's, out
+  /// of the UNFILTERED list: a storyline merges mail and chats, and the source
+  /// pills are what the user is browsing with rather than a statement about
+  /// what a card may open.
+  Widget _threadPanel(ThreadPanel side) {
+    final conversation = _conversationFor(side.source, side.conversationKey);
+    if (conversation == null) {
+      // Moved by a sync, marked done, wiped. Saying so beats a blank panel,
+      // and never a `setState` from a build to close it.
+      return SidePanelHost(
+        title: 'Conversation',
+        onClose: _closeSide,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(BondSpacing.s24),
+            child: Text(
+              'This conversation is no longer in your inbox.',
+              style: BondType.small,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      );
+    }
+
+    final subject = conversation.subject ?? '';
+    final who = [
+      for (final p in conversation.participants)
+        if (p.display.isNotEmpty) p.display,
+    ].join(', ');
+
+    return SidePanelHost(
+      // A chat carries no subject — Graph does not give one — so it is named
+      // by who is on it, the way a chat is named everywhere else.
+      title: subject.isNotEmpty ? subject : (who.isNotEmpty ? who : '(no subject)'),
+      subtitle: subject.isNotEmpty ? (who.isEmpty ? null : who) : null,
+      // ⤢ hands the thread the main pane proper, which is a selection: it
+      // clears the side panel on its way, so the thread is never in both.
+      onExpand: () => _select(side.conversationKey, source: side.source),
+      onClose: _closeSide,
+      child: _threadColumn(conversation, inSidePanel: true),
     );
+  }
+
+  /// Whether [target] is the thread the MAIN pane is showing. The main pane
+  /// keeps its own composer on screen, so a draft written into it needs no
+  /// panel brought back.
+  bool _isMainThread(DraftTarget target) =>
+      _selectedId == target.conversationKey &&
+      (_selectedSource == null || _selectedSource == target.source);
+
+  /// One conversation by source and key, wherever it is in the loaded list.
+  ///
+  /// Unfiltered, for the reason [_selected] reads the unfiltered list: an
+  /// explicit click outranks whichever source pill happens to be down.
+  Conversation? _conversationFor(String source, String key) {
+    final state = ref.watch(conversationsProvider);
+    if (state is ConversationsLoaded) {
+      for (final c in state.conversations) {
+        if (c.id == key && c.source == source) return c;
+      }
+    }
+    return null;
   }
 
   /// The same panel with the pane to itself. Back returns to the split — the
-  /// thread is still selected underneath — and Home clears everything.
-  Widget _attachmentViewer(AttachmentRef attachment) {
-    final pinTo = _pinTargetFor(attachment);
+  /// panel is the shell's, so there is always something underneath it — and
+  /// Home clears everything.
+  Widget _attachmentViewer(FilePanel side) {
+    final attachment = side.attachment;
+    final pinTo = _pinTargetFor(attachment, from: side.from);
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
       child: AttachmentViewerPane(
@@ -2404,20 +2400,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         attachment: attachment,
         bytes: _attachmentBytes,
         engines: _previewEngines,
-        // From a thread, Back drops to the split and the transcript is there
-        // again. From a storyline there is no split to drop to, so the preview
-        // goes with it and the pane underneath is the storyline.
-        onBack: () => setState(() {
-          _viewerFull = false;
-          if (_selectedId == null) _previewing = null;
-        }),
+        onBack: () => setState(() => _sideFull = false),
         onHome: () => _selectSection(RailSection.home),
         onOpen: () => unawaited(_openAttachmentInOs(attachment)),
         onSave: () => unawaited(_saveAttachment(attachment)),
         // No 'Use in reply' here: there is no composer on the full pane, and
         // an action whose result is off screen is not an action.
-        onPinToStoryline:
-            pinTo == null ? null : () => unawaited(_pinAttachment(attachment, pinTo)),
+        onPinToStoryline: pinTo == null
+            ? null
+            : () => unawaited(_pinAttachment(attachment, pinTo)),
         pinned: _isPinned(attachment),
         onOpenLink: (url) => unawaited(_launchExternal(url)),
       ),
@@ -2438,17 +2429,25 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// From a thread: the oldest storyline that thread is live in. The set comes
   /// back in join order, so `.first` is the one it was filed under first,
   /// which is the one a person means by "this storyline" when the thread is in
-  /// two. From the storyline pane there is no guessing: it is the storyline
-  /// on screen.
+  /// two. From the storyline's own shelf there is no guessing: it is the
+  /// storyline on screen.
+  ///
+  /// [from] is the conversation the file was opened from, and it is asked
+  /// FIRST: a thread open beside a storyline is not [_selectedId], so without
+  /// it a file opened from that thread would pin to whatever storyline the
+  /// main pane happened to be showing rather than to the thread's own.
   ///
   /// Watched, not read: this runs from a build path, and a thread joining a
   /// storyline has to make the control appear without a second selection.
-  String? _pinTargetFor(AttachmentRef attachment) {
-    final threadId = _selectedId;
+  String? _pinTargetFor(AttachmentRef attachment, {DraftTarget? from}) {
+    final threadId = from?.conversationKey ?? _selectedId;
     if (threadId == null) return _selectedStorylineId;
     final ids = ref
         .watch(storylineThreadIdsProvider(
-          (source: attachment.source, conversationKey: threadId),
+          (
+            source: from?.source ?? attachment.source,
+            conversationKey: threadId,
+          ),
         ))
         .valueOrNull;
     if (ids == null || ids.isEmpty) return null;
@@ -2638,7 +2637,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           onPressed: () => setState(() => _replyOpenFor = null),
           icon: const Icon(Icons.close),
           iconSize: 16,
-          tooltip: 'Close',
+          tooltip: 'Close reply',
           padding: const EdgeInsets.all(BondSpacing.s4),
           constraints: const BoxConstraints(),
           visualDensity: VisualDensity.compact,
@@ -2663,7 +2662,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       options: const [],
       armed: draft.capability == SendCapability.send,
       onPick: (option) => unawaited(_pickQuickReply(selected, option)),
-      onReply: () => setState(() => _replyOpenFor = selected.id),
+      onReply: () => setState(() => _replyOpenFor = target),
       pending: draft.pending,
       onUndo: () => _cancelQueuedSend(target),
       // The way back from the ×, and the way in for a thread the queue never
@@ -2695,7 +2694,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Future<void> _pickQuickReply(Conversation c, DraftOption option) async {
     final target = (source: c.source, conversationKey: c.id);
     if (ref.read(draftProvider(target)).capability != SendCapability.send) {
-      setState(() => _replyOpenFor = c.id);
+      setState(() => _replyOpenFor = target);
       await ref.read(draftProvider(target).notifier).markEdited(option.body);
       return;
     }
@@ -3113,100 +3112,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ),
         );
       },
-    );
-  }
-}
-
-/// One episode's suggestions, inside the card that holds the thread they
-/// answer.
-///
-/// Its own widget because the spine renders every open card at once: watching
-/// each episode's draft from the screen would rebuild the whole storyline
-/// whenever any one of them changed, and the panel itself must stay
-/// provider-free — it is handed a builder and never learns what comes back.
-///
-/// Renders NOTHING when there is nothing to offer. A card is not the place for
-/// an empty state: the pane's own `Reply…` already owns that, and a row of
-/// identical bare buttons down the spine would say nothing about any of them.
-class _EpisodeQuickReplies extends ConsumerWidget {
-  final DraftTarget target;
-
-  /// Opens the storyline's reply window on this episode's thread.
-  final VoidCallback onOpenReply;
-
-  /// Arms a send of this text, with the undo window the screen announces.
-  /// Reached only where the grant actually allows a send.
-  final void Function(String body) onQueueSend;
-
-  final VoidCallback onUndo;
-
-  const _EpisodeQuickReplies({
-    required this.target,
-    required this.onOpenReply,
-    required this.onQueueSend,
-    required this.onUndo,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final draft = ref.watch(draftProvider(target));
-    final notifier = ref.read(draftProvider(target).notifier);
-    if (draft.options.isEmpty && draft.pending == null) {
-      return _suggestAgain(draft, notifier);
-    }
-
-    return Padding(
-      // The card's own gap. The footer owns its spacing so that the empty case
-      // above can leave no trace.
-      padding: const EdgeInsets.only(top: BondSpacing.s12),
-      child: QuickReplyBar(
-        options: draft.options,
-        armed: draft.capability == SendCapability.send,
-        onPick: (option) {
-          // The same honest split the thread pane makes: without a send grant
-          // a tap opens the box with the words in it rather than appearing to
-          // send them.
-          if (draft.capability != SendCapability.send) {
-            onOpenReply();
-            unawaited(notifier.markEdited(option.body));
-            return;
-          }
-          onQueueSend(option.body);
-        },
-        onReply: onOpenReply,
-        onDismiss: () => unawaited(notifier.dismissOptions()),
-        pending: draft.pending,
-        onUndo: onUndo,
-      ),
-    );
-  }
-
-  /// The way back from a dismissal, on a card that has nothing to show.
-  ///
-  /// Offered only where the cards were closed rather than never written: a
-  /// thread the model has not drafted for yet gets nothing, because a bare
-  /// button on every card in the spine would say nothing about any of them.
-  /// [DraftState.generate] deletes the row on its way to a new draft, so the
-  /// `generating` arm is what keeps `Drafting…` on screen for the second the
-  /// row is gone.
-  Widget _suggestAgain(DraftState draft, DraftNotifier notifier) {
-    // A drafted thread whose cards were closed — the one state a fresh pair
-    // costs nothing. The `draft != null` half is what keeps a never-drafted
-    // card rendering nothing at all.
-    final hidden = draft.draft != null && draft.suggestable;
-    final suggesting = draft.generating;
-    if (!hidden && !suggesting) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: BondSpacing.s12),
-      child: Row(
-        children: [
-          TextButton.icon(
-            onPressed: suggesting ? null : () => unawaited(notifier.generate()),
-            icon: const Icon(Icons.auto_awesome, size: 16),
-            label: Text(suggesting ? 'Drafting…' : 'Suggest a reply'),
-          ),
-        ],
-      ),
     );
   }
 }

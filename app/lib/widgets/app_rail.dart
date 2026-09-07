@@ -334,7 +334,7 @@ class _AppRailState extends State<AppRail> {
     return SizedBox(
       width: AppRail.width,
       child: Material(
-        color: BondColors.ink,
+        color: BondColors.rail,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -426,7 +426,7 @@ class _AppRailState extends State<AppRail> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
       child: Material(
-        color: selected ? BondColors.onDarkTint : BondColors.ink,
+        color: selected ? BondColors.onDarkTint : BondColors.rail,
         borderRadius: BondRadii.smAll,
         child: InkWell(
           onTap: () => widget.onSelectSection(section),
@@ -489,7 +489,7 @@ class _AppRailState extends State<AppRail> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
       child: Material(
-        color: selected ? BondColors.onDarkTint : BondColors.ink,
+        color: selected ? BondColors.onDarkTint : BondColors.rail,
         borderRadius: BondRadii.smAll,
         child: SizedBox(
           height: _rowHeight,
@@ -576,7 +576,7 @@ class _AppRailState extends State<AppRail> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
       child: Material(
-        color: selected ? BondColors.onDarkTint : BondColors.ink,
+        color: selected ? BondColors.onDarkTint : BondColors.rail,
         borderRadius: BondRadii.smAll,
         child: InkWell(
           onTap: () => widget.onSelectConversation(c.source, c.id),
@@ -605,7 +605,7 @@ class _AppRailState extends State<AppRail> {
                         : BoxDecoration(
                             shape: BoxShape.circle,
                             color: bold
-                                ? BondColors.seaGlassOnDark
+                                ? BondColors.railAccent
                                 : BondColors.onDarkBorder,
                           ),
                   ),
@@ -637,7 +637,7 @@ class _AppRailState extends State<AppRail> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
       child: Material(
-        color: BondColors.ink,
+        color: BondColors.rail,
         borderRadius: BondRadii.smAll,
         child: InkWell(
           onTap: () => widget.onSelectSection(RailSection.needsYou),
@@ -676,7 +676,7 @@ class _AppRailState extends State<AppRail> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
       child: Material(
-        color: selected ? BondColors.onDarkTint : BondColors.ink,
+        color: selected ? BondColors.onDarkTint : BondColors.rail,
         borderRadius: BondRadii.smAll,
         child: InkWell(
           onTap: widget.onSelectLaterDay == null
@@ -724,7 +724,7 @@ class _AppRailState extends State<AppRail> {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
       child: Material(
-        color: selected ? BondColors.onDarkTint : BondColors.ink,
+        color: selected ? BondColors.onDarkTint : BondColors.rail,
         borderRadius: BondRadii.smAll,
         child: InkWell(
           onTap: widget.onSelectStoryline == null
@@ -746,7 +746,7 @@ class _AppRailState extends State<AppRail> {
                       // A suggestion is always live-coloured: it is the one
                       // row in the rail that is asking for something.
                       color: (suggested || open)
-                          ? BondColors.seaGlassOnDark
+                          ? BondColors.railAccent
                           : BondColors.onDarkBorder,
                     ),
                   ),
@@ -835,7 +835,7 @@ class _AppRailState extends State<AppRail> {
       constraints: const BoxConstraints(minWidth: 20),
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s4),
       decoration: BoxDecoration(
-        color: attention ? BondColors.error : BondColors.onDarkTint,
+        color: attention ? BondColors.railBadge : BondColors.onDarkTint,
         borderRadius: BondRadii.fullAll,
       ),
       alignment: Alignment.center,
