@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import '../models/message_models.dart' show Conversation;
@@ -536,7 +537,7 @@ class _RecipientsFieldState extends State<RecipientsField> {
         ),
     };
 
-    return InkWell(
+    final row = InkWell(
       key: key,
       onTap: () => onSelected(option),
       hoverColor: BondColors.faintGround,
@@ -579,6 +580,31 @@ class _RecipientsFieldState extends State<RecipientsField> {
           ],
         ),
       ),
+    );
+
+    // Arrowing past the list's 280 px fold used to leave the highlight out of
+    // sight. Scrolling it back is exactly what the SDK's own
+    // `_AutocompleteOptions` does, and the `Builder` is what makes it possible:
+    // the context that asks must be the ROW's, not the overlay's, or
+    // `ensureVisible` scrolls the list to itself and nothing moves. EVERY row
+    // wears the Builder, highlighted or not, so the highlight moving does not
+    // change a slot's widget type and rebuild the row underneath it.
+    //
+    // The highlight moves one row per keystroke, so the row it lands on is
+    // always within the list's cache extent and therefore already built. That
+    // is what makes a post-frame ask from its own context enough — no
+    // `ScrollController`, and no remount of the `RawAutocomplete`, which holds
+    // an external `FocusNode` and leaks a listener on every one.
+    return Builder(
+      builder: (context) {
+        if (highlighted) {
+          SchedulerBinding.instance.addPostFrameCallback((_) {
+            if (!context.mounted) return;
+            Scrollable.ensureVisible(context, alignment: 0.5);
+          });
+        }
+        return row;
+      },
     );
   }
 

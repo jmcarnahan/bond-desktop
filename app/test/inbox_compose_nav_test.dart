@@ -4,6 +4,7 @@ import 'package:bond_inbox/models/person.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/providers/recipient_search_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/screens/new_message_screen.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
@@ -15,7 +16,10 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/chips.dart' show BondFilterPillRow;
 import 'package:bond_inbox/widgets/home_pane.dart';
+import 'package:bond_inbox/widgets/recipients_field.dart';
+import 'package:bond_inbox/widgets/settings_connection_section.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
+import 'package:bond_inbox/widgets/settings_section.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -61,6 +65,26 @@ class _FakePeople implements PeopleBackend {
       const [];
 }
 
+/// A directory this account is not allowed to read — the server's own verdict,
+/// which `RecipientSearch` remembers for five minutes.
+class _RefusedPeople implements PeopleBackend {
+  @override
+  Future<List<Person>> searchPeople(String query, {int top = 10}) async {
+    throw const DirectoryUnavailable(
+      scopeMissing: true,
+      message: 'directory scope missing',
+    );
+  }
+}
+
+/// An account that DOES hold the directory grant, so the refusal above can
+/// only be the server's verdict and nothing else.
+class _GrantingAuth extends _FakeAuth {
+  @override
+  Future<bool> hasScope(String bareScope) async =>
+      bareScope == 'user.readbasic.all';
+}
+
 class _FakeAuth implements AuthSession {
   @override
   Future<bool> get isSignedIn async => true;
@@ -71,8 +95,11 @@ class _FakeAuth implements AuthSession {
   @override
   Future<bool> hasScope(String bareScope) async => false;
 
+  /// A real account, because `_composeFrom` reads it to drop the user from
+  /// the To line of a thread they are on.
   @override
-  Future<AccountInfo?> get storedAccount async => null;
+  Future<AccountInfo?> get storedAccount async =>
+      const AccountInfo(displayName: 'Jordan Bond', mail: 'jordan@corp.example');
 
   @override
   dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
@@ -90,9 +117,14 @@ void main() {
 
   tearDown(() => db.close());
 
-  Future<void> seedThread(String key, String subject) async {
+  Future<void> seedThread(
+    String key,
+    String subject, {
+    String source = 'email',
+    String participantsJson = '[]',
+  }) async {
     await store.upsertMessage({
-      'source': 'email',
+      'source': source,
       'source_message_id': '$key-m1',
       'conversation_key': key,
       'direction': 'inbound',
@@ -102,15 +134,25 @@ void main() {
       'body_text': 'body',
     });
     await store.upsertConversation({
-      'source': 'email',
+      'source': source,
       'conversation_key': key,
       'subject': subject,
       'state': 'waiting',
       'last_message_at': '2026-09-05T09:00:00Z',
+      'participants_json': participantsJson,
     });
   }
 
-  Future<void> pumpInbox(WidgetTester tester) async {
+  Future<void> openThread(WidgetTester tester, String source, String key) async {
+    container
+        .read(navIntentProvider.notifier)
+        .request(OpenThreadIntent(source, key));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+  }
+
+  Future<void> pumpInbox(WidgetTester tester, {RecipientSearch? search}) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
@@ -125,6 +167,7 @@ void main() {
         teamsBackendProvider.overrideWithValue(_FakeTeams()),
         peopleBackendProvider.overrideWithValue(_FakePeople()),
         authSessionProvider.overrideWithValue(_FakeAuth()),
+        if (search != null) recipientSearchProvider.overrideWithValue(search),
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -243,6 +286,100 @@ void main() {
 
     expect(find.byType(NewMessageScreen), findsNothing);
     expect(find.byType(SettingsScreen), findsOneWidget);
+  });
+
+  testWidgets('changing the backend takes back the directory verdict',
+      (tester) async {
+    // Granting User.ReadBasic.All later has to light the directory up with no
+    // restart and no five-minute wait, so every path that swaps the session
+    // underneath forgets what the OLD one said about it.
+    final search = RecipientSearch(
+      _RefusedPeople(),
+      store,
+      _GrantingAuth(),
+      () async => null,
+    );
+    await search.search('sa', channel: RecipientChannel.mail);
+    expect(search.scopeMissing, isTrue);
+
+    await pumpInbox(tester, search: search);
+    await tester.tap(find.byTooltip('Settings'));
+    await tester.pump();
+    await tester.pump();
+
+    final toggle =
+        find.byKey(SettingsSection.toggleKey(MicrosoftConnectionSection.title));
+    await tester.ensureVisible(toggle);
+    await tester.pump();
+    await tester.tap(toggle);
+    await tester.pump();
+    await tester.pump();
+
+    final other = find.text('This device');
+    await tester.ensureVisible(other);
+    await tester.pump();
+    await tester.tap(other);
+    await tester.pump();
+    await tester.pump();
+
+    expect(search.scopeMissing, isFalse);
+  });
+
+  testWidgets('the thread header composes to its people, minus the owner',
+      (tester) async {
+    await seedThread(
+      'c1',
+      'Homepage copy',
+      participantsJson: '[{"name":"Sarah Whitfield","email":"sarah@corp.example"},'
+          '{"name":"Jordan Bond","email":"jordan@corp.example"}]',
+    );
+    await pumpInbox(tester);
+    await openThread(tester, 'email', 'c1');
+
+    await tester.tap(find.byKey(const Key('thread-compose')));
+    // Three: the tap, the account read, and the post-frame the prefill lands
+    // in.
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(NewMessageScreen), findsOneWidget);
+    expect(
+      find.byKey(const Key('recipient-chip-mail:sarah@corp.example')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('recipient-chip-mail:jordan@corp.example')),
+      findsNothing,
+      reason: 'the user is on every thread they have replied on',
+    );
+
+    await tester.pump(const Duration(milliseconds: 600));
+  });
+
+  testWidgets('the thread header addresses a chat as itself', (tester) async {
+    await seedThread(
+      'chat-1',
+      'Launch week',
+      source: 'teams',
+      participantsJson: '[{"name":"Sarah Whitfield","email":"teams:u1"}]',
+    );
+    await pumpInbox(tester);
+    await openThread(tester, 'teams', 'chat-1');
+
+    await tester.tap(find.byKey(const Key('thread-compose')));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Sending in Launch week'), findsOneWidget);
+    expect(
+      find.byType(RecipientsField),
+      findsNothing,
+      reason: 'there is nobody to pick — the message goes into this chat',
+    );
+
+    await tester.pump(const Duration(milliseconds: 600));
   });
 
   testWidgets("a notification's OpenThreadIntent closes compose",

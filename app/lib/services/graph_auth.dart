@@ -116,12 +116,18 @@ class GraphAuth implements AuthSession {
 
   /// Which granted scopes stand in for a scope this app wants.
   ///
-  /// Exactly one pair, and deliberately not a general lattice: Entra's own
-  /// consent hierarchy makes `Mail.ReadWrite` include `Mail.Read`, so a grant
-  /// carrying only the former satisfies a build asking for the latter. Nothing
-  /// else here subsumes anything.
+  /// Two entries, and deliberately not a general lattice: Entra's own consent
+  /// hierarchy makes `Mail.ReadWrite` include `Mail.Read`, and makes both
+  /// `User.Read.All` and `Directory.Read.All` include `User.ReadBasic.All`, so
+  /// a grant carrying only the wider scope satisfies a build asking for the
+  /// narrower one. The directory entry earns its place because an admin
+  /// usually grants the wider read rather than the basic one. Nothing else
+  /// here subsumes anything, and none of it runs the other way. Kept in step
+  /// with the copy in `McpAuthSession`, which answers the same question for
+  /// the other backend.
   static const Map<String, Set<String>> _subsumedBy = {
     'mail.read': {'mail.readwrite'},
+    'user.readbasic.all': {'user.read.all', 'directory.read.all'},
   };
 
   static const String _authority =

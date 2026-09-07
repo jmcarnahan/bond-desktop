@@ -282,8 +282,20 @@ void main() {
       expect(await ask('chat.read', ['chat.readwrite']), isTrue);
     });
 
+    test('user.read.all subsumes user.readbasic.all', () async {
+      // Admins hand out the wider directory read far more often than the
+      // basic one; reading only the narrow name would hide a directory the
+      // server is willing to serve.
+      expect(await ask('user.readbasic.all', ['user.read.all']), isTrue);
+    });
+
+    test('directory.read.all subsumes user.readbasic.all', () async {
+      expect(await ask('user.readbasic.all', ['directory.read.all']), isTrue);
+    });
+
     test('subsumption does not run the other way', () async {
       expect(await ask('mail.readwrite', ['mail.read']), isFalse);
+      expect(await ask('user.read.all', ['user.readbasic.all']), isFalse);
     });
 
     test('the comparison is case-insensitive', () async {

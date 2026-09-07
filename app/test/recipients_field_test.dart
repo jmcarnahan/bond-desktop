@@ -323,6 +323,48 @@ void main() {
       expect(rowColor('u1'), BondColors.faintGround);
     });
 
+    testWidgets('arrowing past the fold scrolls the highlight into view',
+        (tester) async {
+      // More people than the 280 px overlay can show, so the highlight has
+      // somewhere to go that the reader cannot otherwise see.
+      final crowd = [
+        for (var i = 0; i < 14; i++)
+          Person(
+            id: 'u$i',
+            displayName: 'Sarah $i',
+            mail: 'sarah$i@corp.example',
+          ),
+      ];
+      final search = _FakeSearch(directory: crowd);
+      await pumpField(tester, search: search.call);
+
+      Color? rowColor(String id) => tester
+          .widget<Container>(find.descendant(
+            of: find.byKey(Key('recipient-option-$id')),
+            matching: find.byType(Container),
+          ))
+          .color;
+
+      await type(tester, 'sa');
+      final list = find.descendant(
+        of: find.byKey(const Key('recipients-options')),
+        matching: find.byType(Scrollable),
+      );
+      expect(tester.state<ScrollableState>(list).position.pixels, 0);
+
+      for (var i = 0; i < 12; i++) {
+        await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+        // Twice: the first frame paints the new highlight and schedules the
+        // scroll, the second builds whatever the scroll brought into range.
+        await tester.pump();
+        await tester.pump();
+      }
+
+      expect(tester.state<ScrollableState>(list).position.pixels, greaterThan(0));
+      expect(find.byKey(const Key('recipient-option-u12')), findsOneWidget);
+      expect(rowColor('u12'), BondColors.faintGround);
+    });
+
     testWidgets('a picked person is excluded from later options',
         (tester) async {
       final search = _FakeSearch(recents: [sam], directory: [sarah]);

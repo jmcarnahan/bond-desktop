@@ -123,15 +123,20 @@ class McpAuthSession implements AuthSession {
   /// Which granted scope stands in for a scope this app wants.
   ///
   /// Pairs from Microsoft's own consent hierarchy — `Mail.ReadWrite` includes
-  /// `Mail.Read`, `Chat.ReadWrite` includes `Chat.Read` — and nothing else;
-  /// deliberately not a general lattice. The chat pair matters because the
-  /// platform's admin grant is `Chat.ReadWrite`, while this app asks the
-  /// read-only question. Duplicated from `GraphAuth` rather than shared: the
-  /// copy there is private, and two sessions agreeing by coincidence is
-  /// cheaper than a shared constant that invites unrelated entries.
+  /// `Mail.Read`, `Chat.ReadWrite` includes `Chat.Read`, and both
+  /// `User.Read.All` and `Directory.Read.All` include `User.ReadBasic.All` —
+  /// and nothing else; deliberately not a general lattice. The chat pair
+  /// matters because the platform's admin grant is `Chat.ReadWrite`, while
+  /// this app asks the read-only question. The directory pair matters for the
+  /// same reason one step further out: an admin usually grants the wider read,
+  /// and without it the app would hide a directory the server would serve.
+  /// Duplicated from `GraphAuth` rather than shared: the copy there is
+  /// private, and two sessions agreeing by coincidence is cheaper than a
+  /// shared constant that invites unrelated entries.
   static const Map<String, Set<String>> _subsumedBy = {
     'mail.read': {'mail.readwrite'},
     'chat.read': {'chat.readwrite'},
+    'user.readbasic.all': {'user.read.all', 'directory.read.all'},
   };
 
   /// The `/mcp` endpoint. Also the RFC 8707 `resource` value: the JWT's `aud`

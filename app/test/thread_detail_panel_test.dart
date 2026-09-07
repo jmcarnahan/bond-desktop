@@ -54,6 +54,7 @@ void main() {
     ConversationState state = ConversationState.needsReply,
     VoidCallback? onOpenReply,
     VoidCallback? onReopen,
+    VoidCallback? onCompose,
     Widget? Function(Message message)? suggestionFor,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
@@ -71,6 +72,7 @@ void main() {
           onMarkDone: () {},
           onReopen: onReopen,
           onOpenReply: onOpenReply,
+          onCompose: onCompose,
           suggestionFor: suggestionFor,
         ),
       ),
@@ -86,6 +88,23 @@ void main() {
         matching:
             find.byIcon(collapsed ? Icons.expand_more : Icons.expand_less),
       );
+
+  testWidgets('a Message button appears only when the host can compose',
+      (tester) async {
+    final messages = [_msg(id: 'a', receivedAt: '2026-08-25T09:00:00')];
+
+    await pump(tester, messages: messages);
+    expect(find.byKey(const Key('thread-compose')), findsNothing);
+
+    var asked = 0;
+    await pump(tester, messages: messages, onCompose: () => asked++);
+    expect(find.byKey(const Key('thread-compose')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('thread-compose')));
+    await tester.pump();
+
+    expect(asked, 1);
+  });
 
   testWidgets('more than one open ask is counted in the banner', (tester) async {
     await pump(tester, messages: [

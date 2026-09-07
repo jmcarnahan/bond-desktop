@@ -73,6 +73,12 @@ class ThreadDetailPanel extends StatelessWidget {
   /// open.
   final VoidCallback? onOpenReply;
 
+  /// Opens a new message to this thread's people. What that means is the
+  /// host's business — a chat is addressed as itself, a mail thread as its
+  /// participants — and the panel neither knows nor asks. Null hides the
+  /// button, for a host with no compose to open.
+  final VoidCallback? onCompose;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -86,6 +92,7 @@ class ThreadDetailPanel extends StatelessWidget {
     this.afterTranscript,
     this.suggestionFor,
     this.onOpenReply,
+    this.onCompose,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -336,6 +343,25 @@ class ThreadDetailPanel extends StatelessWidget {
             ),
           ),
           const SizedBox(width: BondSpacing.s12),
+          // Before the state chip, because writing to these people is
+          // something to DO with the thread, while the chip and the buttons
+          // after it are about the thread's own state.
+          if (onCompose != null) ...[
+            TextButton.icon(
+              key: const Key('thread-compose'),
+              onPressed: onCompose,
+              icon: const Icon(Icons.edit_outlined, size: 16),
+              label: const Text('Message'),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: BondSpacing.s8,
+                ),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            ),
+            const SizedBox(width: BondSpacing.s4),
+          ],
           BondChip.semantic(
             _stateLabel(conversation.state),
             _stateTone(conversation.state),

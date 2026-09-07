@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
+import '../models/person.dart';
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
@@ -17,6 +18,7 @@ import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/notify_routing.dart';
 import '../providers/prefs_provider.dart';
+import '../providers/recipient_search_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../services/backend/backend_types.dart';
 import '../services/llm/draft_task.dart' show DraftOption;
@@ -1320,6 +1322,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // in-flight change; a dead host must answer with nothing rather than with
     // "ref after dispose".
     if (!mounted) return;
+    // The session just changed, so a "this account has no directory" verdict
+    // about the old one is not evidence about the new one; take it back and
+    // let the next search ask the server that is actually connected now.
+    ref.read(recipientSearchProvider).resetScope();
     ref.read(conversationsProvider.notifier).load(syncFirst: false);
   }
 
@@ -1343,6 +1349,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Future<void> _connectMicrosoft() async {
     if (!mounted) return;
+    // The user is on their way to fix exactly the thing the cached verdict is
+    // about, so it stops being worth believing the moment they leave. The next
+    // search asks once and re-remembers if the grant is still refused.
+    ref.read(recipientSearchProvider).resetScope();
     final url = await ref.read(mcpStackProvider).auth.microsoftConnectUrl();
     final uri = url == null ? null : Uri.tryParse(url);
     if (uri == null) return;
@@ -1883,6 +1893,58 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
+  /// Compose to the people on [thread]. A chat is addressed as ITSELF — the
+  /// message goes into it — while a mail thread yields its participants as To,
+  /// minus the user, who is on every thread they have ever replied on.
+  Future<void> _composeFrom(Conversation thread) async {
+    if (thread.source == 'teams') {
+      _openCompose(
+        prefill: OpenComposeIntent(
+          channel: RecipientChannel.teams,
+          chat: thread,
+        ),
+      );
+      return;
+    }
+
+    // A stored account is a keychain read, and a session that cannot answer is
+    // no reason to refuse the compose: without an owner the only thing lost is
+    // the filter that drops the user from their own To line.
+    AccountInfo? owner;
+    try {
+      owner = await _account;
+    } catch (_) {
+      owner = null;
+    }
+    if (!mounted) return;
+
+    final ownerKey = (owner?.mail ?? owner?.userPrincipalName)
+        ?.trim()
+        .toLowerCase();
+    final seen = <String>{};
+    final to = <Person>[];
+    for (final p in thread.participants) {
+      final email = p.email?.trim() ?? '';
+      // A Teams roster entry stored on a mail row has no address to send to,
+      // and the same person can appear on several messages of one thread.
+      if (email.isEmpty || email.startsWith('teams:')) continue;
+      final key = email.toLowerCase();
+      if (key == ownerKey || !seen.add(key)) continue;
+      to.add(Person(
+        id: 'mail:$key',
+        displayName: (p.name?.trim().isNotEmpty ?? false)
+            ? p.name!.trim()
+            : email,
+        mail: email,
+        // The SAME id `MessageStore.recentPeople` gives this person, so the
+        // typeahead's own row for them collapses into the chip rather than
+        // offering a duplicate — `Person` compares on the id.
+        source: PersonSource.recent,
+      ));
+    }
+    _openCompose(prefill: OpenComposeIntent(to: to));
+  }
+
   Widget _thread(Conversation selected) {
     final target = (source: selected.source, conversationKey: selected.id);
     final thread = ref.watch(threadProvider(target));
@@ -2023,6 +2085,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? () => _laterSender(selected.primaryEmail!, selected.source)
           : null,
       onKeepInInbox: () => _keepThread(selected.source, selected.id),
+      onCompose: () => unawaited(_composeFrom(selected)),
     );
 
     // The composer sits OUTSIDE the panel, in this column: the panel renders a

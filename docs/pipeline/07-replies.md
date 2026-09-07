@@ -126,4 +126,7 @@ count and the outcome, and deliberately no addresses.
 
 The directory scope (`User.ReadBasic.All`) gates only the recipients
 typeahead's org search. Recents, typed addresses, drafts, sends and chats all
-work without it.
+work without it. A tenant that granted the wider `User.Read.All` or
+`Directory.Read.All` satisfies it too — Entra's consent hierarchy puts the
+basic read inside both, and the app reads them that way rather than insisting
+on the narrow name an admin rarely picks.
