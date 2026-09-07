@@ -22,8 +22,8 @@ import 'bond_mcp_client.dart';
 /// | ref | tool |
 /// |---|---|
 /// | mail `file`/`item`/`unknown` | `get_mail_attachment_json` |
-/// | mail `reference`, teams `file` text | `inspect_file_json`, by url |
-/// | mail `reference` bytes/thumbnail | `inspect_file`, by url |
+/// | mail `reference`, teams `file` text | `inspect_file`, by url, `mode: text` |
+/// | mail `reference` bytes/thumbnail | `inspect_file`, by url, `mode: bytes`/`thumbnail` |
 /// | teams `file`/`image` bytes | `get_chat_attachment_json` |
 ///
 /// Failures follow `mcp_mail_backend.dart`'s policy exactly, including which
@@ -99,9 +99,12 @@ class McpAttachmentBackend implements AttachmentBackend {
         // chips on one fact.
         return const AttachmentText.skipped('reference_no_url');
       }
-      final result = await _call(ref, 'inspect_file_json', {
+      // `mode` and not `read_content`: an explicit mode wins over that older
+      // flag on the server, and the bytes and thumbnail branch of [fetchBytes]
+      // already speaks `mode:` — one tool, one argument style.
+      final result = await _call(ref, 'inspect_file', {
         'url': url,
-        'read_content': 'true',
+        'mode': 'text',
       });
       // The inspector is the only text call that describes the FILE: a row
       // reached by url was born knowing a name and an address and nothing
@@ -126,9 +129,9 @@ class McpAttachmentBackend implements AttachmentBackend {
 
     // A mail link IS a file — it just lives in OneDrive or SharePoint rather
     // than on the message — so it is fetched by its url like a chat's shared
-    // file. `inspect_file` by its NEW name, because the modes exist only
-    // there: the `inspect_file_json` alias the text path above still calls
-    // keeps its old four arguments, and Round 3 renames the rest.
+    // file. The same `inspect_file` the text path above calls, one mode over:
+    // every mode of it answers the file's name, size and type, and only the
+    // payload key differs.
     if (ref.kind == 'reference') {
       final url = ref.contentUrl;
       if (url == null || url.isEmpty) {

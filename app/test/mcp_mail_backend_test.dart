@@ -90,12 +90,12 @@ void main() {
       // delta_cursor stored as a real cursor would ask the server to resume
       // from nothing on every sync after this one.
       final mcp = _FakeMcp({
-        'list_mail_delta': [_delta(delta: 'd1')],
+        'sync_mail': [_delta(delta: 'd1')],
       });
 
       final page = await McpMailBackend(mcp).deltaPage('inbox');
 
-      expect(mcp.argsFor('list_mail_delta'), {
+      expect(mcp.argsFor('sync_mail'), {
         'folder': 'inbox',
         'cursor': '',
         'min_received': '',
@@ -106,7 +106,7 @@ void main() {
 
     test('hands a cursor and a floor straight through', () async {
       final mcp = _FakeMcp({
-        'list_mail_delta': [_delta(next: 'n2')],
+        'sync_mail': [_delta(next: 'n2')],
       });
 
       final page = await McpMailBackend(mcp).deltaPage(
@@ -115,7 +115,7 @@ void main() {
         minReceivedIso: '2026-08-16T00:00:00Z',
       );
 
-      expect(mcp.argsFor('list_mail_delta'), {
+      expect(mcp.argsFor('sync_mail'), {
         'folder': 'sentitems',
         'cursor': 'opaque-cursor-1',
         'min_received': '2026-08-16T00:00:00Z',
@@ -126,7 +126,7 @@ void main() {
 
     test('a resync answer is the cursor being refused', () async {
       final mcp = _FakeMcp({
-        'list_mail_delta': [_delta(resync: true, delta: 'ignored')],
+        'sync_mail': [_delta(resync: true, delta: 'ignored')],
       });
 
       expect(
@@ -142,7 +142,7 @@ void main() {
       };
       final live = {'id': 'm1', 'subject': 'Homepage copy', 'isRead': false};
       final mcp = _FakeMcp({
-        'list_mail_delta': [
+        'sync_mail': [
           _delta(messages: [live, tombstone]),
         ],
       });
@@ -158,7 +158,7 @@ void main() {
     test('an unconnected workspace is a sign-in problem, not a mail one',
         () async {
       final mcp = _FakeMcp({
-        'list_mail_delta': [
+        'sync_mail': [
           {'error': 'not_connected', 'connect_url': 'https://connect/me'},
         ],
       });
@@ -543,14 +543,14 @@ void main() {
       // Every argument this server takes is a string — the tools' own
       // convention, and the reason the list is encoded rather than passed.
       final mcp = _FakeMcp({
-        'mark_mail_read_json': [
+        'mark_mail_read': [
           {'updated': 2, 'failed': const []},
         ],
       });
 
       final failed = await McpMailBackend(mcp).markRead(['m1', 'm2']);
 
-      expect(mcp.argsFor('mark_mail_read_json'), {
+      expect(mcp.argsFor('mark_mail_read'), {
         'message_ids': '["m1","m2"]',
         'is_read': 'true',
       });
@@ -559,19 +559,19 @@ void main() {
 
     test('unread is the same call with the flag turned over', () async {
       final mcp = _FakeMcp({
-        'mark_mail_read_json': [
+        'mark_mail_read': [
           {'updated': 1, 'failed': const []},
         ],
       });
 
       await McpMailBackend(mcp).markRead(['m1'], isRead: false);
 
-      expect(mcp.argsFor('mark_mail_read_json')['is_read'], 'false');
+      expect(mcp.argsFor('mark_mail_read')['is_read'], 'false');
     });
 
     test('a failed id comes back to be retried', () async {
       final mcp = _FakeMcp({
-        'mark_mail_read_json': [
+        'mark_mail_read': [
           {
             'updated': 1,
             'failed': [
@@ -589,7 +589,7 @@ void main() {
       // the same parse: there is no read flag left to set, so retrying forever
       // is the only thing calling this a failure would buy.
       final mcp = _FakeMcp({
-        'mark_mail_read_json': [
+        'mark_mail_read': [
           {
             'updated': 0,
             'failed': [
@@ -608,7 +608,7 @@ void main() {
       // Its shape: a whole-call error with an empty `failed`. The same input
       // would come back the same way three times over.
       final mcp = _FakeMcp({
-        'mark_mail_read_json': [
+        'mark_mail_read': [
           {
             'updated': 0,
             'failed': const [],
@@ -623,7 +623,7 @@ void main() {
     test('an unconnected workspace is a sign-in problem, not a mail one',
         () async {
       final mcp = _FakeMcp({
-        'mark_mail_read_json': [
+        'mark_mail_read': [
           {'error': 'not_connected', 'connect_url': 'https://connect'},
         ],
       });
@@ -670,7 +670,7 @@ void main() {
 
     test('a transport failure keeps the HTTP status it arrived with', () async {
       final mcp = _FakeMcp({
-        'list_mail_delta': [
+        'sync_mail': [
           const McpTransportException('gateway said no', statusCode: 502),
         ],
       });
@@ -688,7 +688,7 @@ void main() {
       // sync — a banner the next drain clears — and never as a session that has
       // gone bad: the very next call has to work with no reset in between.
       final backend = McpMailBackend(_FakeMcp({
-        'list_mail_delta': [
+        'sync_mail': [
           const McpTransportException('timed out'),
           _delta(delta: 'd1'),
         ],
@@ -706,7 +706,7 @@ void main() {
       // NotSignedIn is what routes the app to the sign-in screen. Wrapped in a
       // GraphMailException it would become a banner instead.
       final mcp = _FakeMcp({
-        'list_mail_delta': [const NotSignedIn()],
+        'sync_mail': [const NotSignedIn()],
       });
 
       await expectLater(
@@ -721,7 +721,7 @@ void main() {
       // twice. It has to arrive as itself, message and all: it is the app's
       // only cue that this server is not the open one it was taken for.
       final mcp = _FakeMcp({
-        'list_mail_delta': [const NotSignedIn('This server requires a sign-in.')],
+        'sync_mail': [const NotSignedIn('This server requires a sign-in.')],
       });
 
       await expectLater(

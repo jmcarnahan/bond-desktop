@@ -87,8 +87,8 @@ void main() {
   group('the profile', () {
     test('is fetched once and held for the instance', () async {
       final mcp = _FakeMcp({
-        'get_profile_json': [
-          {'id': 'me-1', 'display_name': 'Jared'},
+        'get_profile': [
+          {'id': 'me-1', 'display_name': 'Ada Lovelace'},
         ],
       });
       final teams = _build(mcp);
@@ -98,14 +98,29 @@ void main() {
 
       // One instance per session, and the id cannot change under it — a second
       // round trip would buy nothing.
-      expect(mcp.argsOf('get_profile_json'), hasLength(1));
+      expect(mcp.argsOf('get_profile'), hasLength(1));
+    });
+
+    test('is asked for by its published name', () async {
+      // `get_profile_json` is a deprecated alias with a removal date. The
+      // server answers both today, so only naming the call proves which one
+      // went out — and this is the call every Teams sync starts with.
+      final mcp = _FakeMcp({
+        'get_profile': [
+          {'id': 'me-1', 'display_name': 'Ada Lovelace'},
+        ],
+      });
+
+      await _build(mcp).myUserId();
+
+      expect([for (final c in mcp.calls) c.tool], ['get_profile']);
     });
 
     test('a profile with no id is a failure, not an empty user', () async {
       // The id is the one fact that decides whether a message is the user's
       // own; carrying on with '' would mark every message inbound.
       final mcp = _FakeMcp({
-        'get_profile_json': [
+        'get_profile': [
           {'display_name': 'Jared'},
         ],
       });
@@ -120,7 +135,7 @@ void main() {
   group('the chat list', () {
     test('reshapes each chat into what TeamsSync reads', () async {
       final mcp = _FakeMcp({
-        'list_chats_page': [
+        'list_chats': [
           {
             'chats': [
               {
@@ -162,9 +177,51 @@ void main() {
       ]);
     });
 
+    test('ignores the keys it does not know', () async {
+      // `list_chats` answers a superset of what the alias did — an unread
+      // count, a chat type, the members, the last sender and preview text, and
+      // a count beside the page. The reshape builds its own map key by key, so
+      // every one of those is dropped rather than carried into the sync, which
+      // is what lets the server add a key without a desktop release.
+      final mcp = _FakeMcp({
+        'list_chats': [
+          {
+            'chats': [
+              {
+                'id': 'chat-1',
+                'topic': 'Website redesign',
+                'last_preview_at': '2026-08-28T11:00:00Z',
+                'last_read_at': '2026-08-28T10:30:00Z',
+                'unread': 3,
+                'chat_type': 'group',
+                'members': [
+                  {'display_name': 'Dana Whitfield', 'user_id': 'u-2'},
+                ],
+                'last_sender': 'Dana Whitfield',
+                'last_preview': 'Sending the revised deck tonight.',
+              },
+            ],
+            'count': 1,
+            'next_cursor': '',
+          },
+        ],
+      });
+
+      final chats = await _build(mcp).listChats();
+
+      expect(chats, [
+        {
+          'id': 'chat-1',
+          'topic': 'Website redesign',
+          'lastMessagePreview': {'createdDateTime': '2026-08-28T11:00:00Z'},
+          'viewpoint': {'lastMessageReadDateTime': '2026-08-28T10:30:00Z'},
+        },
+      ]);
+    });
+
     test('walks cursors and stops at the page cap', () async {
       final mcp = _FakeMcp({
-        'list_chats_page': [
+        'list_chats': [
           for (var i = 0; i < 6; i++)
             {
               'chats': [
@@ -179,14 +236,14 @@ void main() {
 
       expect(chats, hasLength(4), reason: 'four pages is the default cap');
       expect(
-        mcp.argsOf('list_chats_page').map((a) => a['cursor']).toList(),
+        mcp.argsOf('list_chats').map((a) => a['cursor']).toList(),
         ['', 'cursor-1', 'cursor-2', 'cursor-3'],
       );
     });
 
     test('an empty next_cursor ends the walk', () async {
       final mcp = _FakeMcp({
-        'list_chats_page': [
+        'list_chats': [
           {
             'chats': [
               {'id': 'chat-1', 'topic': null, 'last_preview_at': null},
@@ -204,14 +261,14 @@ void main() {
 
       await _build(mcp).listChats();
 
-      expect(mcp.argsOf('list_chats_page'), hasLength(1));
+      expect(mcp.argsOf('list_chats'), hasLength(1));
     });
   });
 
   group('members', () {
     test('are reshaped to the two keys TeamsSync reads', () async {
       final mcp = _FakeMcp({
-        'get_chat_members_json': [
+        'get_chat_members': [
           {
             'members': [
               {'user_id': 'u-1', 'display_name': 'Sarah Whitfield'},
@@ -227,7 +284,7 @@ void main() {
         {'displayName': 'Sarah Whitfield', 'userId': 'u-1'},
         {'displayName': 'Jared', 'userId': 'me-1'},
       ]);
-      expect(mcp.argsOf('get_chat_members_json').single, {
+      expect(mcp.argsOf('get_chat_members').single, {
         'chat_id': 'chat-1',
       });
     });
@@ -516,14 +573,14 @@ void main() {
       // No message ids and no user: the server resolves the identity from the
       // connected account, and Teams keeps one read viewpoint per chat.
       final mcp = _FakeMcp({
-        'mark_chat_read_json': [
+        'mark_chat_read': [
           {'ok': true},
         ],
       });
 
       await _build(mcp).markChatRead('chat-1');
 
-      expect(mcp.argsOf('mark_chat_read_json').single, {'chat_id': 'chat-1'});
+      expect(mcp.argsOf('mark_chat_read').single, {'chat_id': 'chat-1'});
     });
 
     test('an ok:false is a failure the queue must see, not a quiet no-op',
@@ -532,7 +589,7 @@ void main() {
       // Swallowing this would leave the server's unread badge wrong forever
       // with nothing recorded anywhere.
       final mcp = _FakeMcp({
-        'mark_chat_read_json': [
+        'mark_chat_read': [
           {'ok': false, 'error': 'no_identity'},
         ],
       });
@@ -546,7 +603,7 @@ void main() {
 
     test('an unconnected workspace is still a sign-in problem', () async {
       final mcp = _FakeMcp({
-        'mark_chat_read_json': [
+        'mark_chat_read': [
           {'error': 'not_connected', 'connect_url': null},
         ],
       });
@@ -608,14 +665,14 @@ void main() {
   group('opening a chat', () {
     test('one person is a 1:1, and says so', () async {
       final mcp = _FakeMcp({
-        'ensure_chat_json': [
+        'ensure_chat': [
           {'chat_id': 'chat-9', 'chat_type': 'oneOnOne'},
         ],
       });
 
       final chat = await _build(mcp).ensureChat(['u1']);
 
-      expect(mcp.argsOf('ensure_chat_json').single, {
+      expect(mcp.argsOf('ensure_chat').single, {
         'user_ids': 'u1',
         'topic': '',
       });
@@ -627,7 +684,7 @@ void main() {
 
     test('several people travel comma-separated, with the topic', () async {
       final mcp = _FakeMcp({
-        'ensure_chat_json': [
+        'ensure_chat': [
           {'chat_id': 'chat-10', 'chat_type': 'group'},
         ],
       });
@@ -637,7 +694,7 @@ void main() {
         topic: 'Contract review',
       );
 
-      expect(mcp.argsOf('ensure_chat_json').single, {
+      expect(mcp.argsOf('ensure_chat').single, {
         'user_ids': 'u1,u2,u3',
         'topic': 'Contract review',
       });
@@ -670,7 +727,7 @@ void main() {
       for (final entry in expected.entries) {
         await expectLater(
           _build(_FakeMcp({
-            'ensure_chat_json': [
+            'ensure_chat': [
               {'error': entry.key},
             ],
           })).ensureChat(['u1']),
@@ -685,7 +742,7 @@ void main() {
         () async {
       await expectLater(
         _build(_FakeMcp({
-          'ensure_chat_json': [
+          'ensure_chat': [
             {'error': 'something_new'},
           ],
         })).ensureChat(['u1']),
@@ -705,7 +762,7 @@ void main() {
     test('a disconnected server routes to sign-in instead', () async {
       await expectLater(
         _build(_FakeMcp({
-          'ensure_chat_json': [
+          'ensure_chat': [
             {'error': 'not_connected'},
           ],
         })).ensureChat(['u1']),
@@ -746,7 +803,7 @@ void main() {
     test('and the writes wait on it too, not only the reads', () async {
       const gap = Duration(milliseconds: 120);
       final mcp = _FakeMcp({
-        'mark_chat_read_json': [
+        'mark_chat_read': [
           {'ok': true},
         ],
         'send_chat_message_json': [
@@ -764,7 +821,7 @@ void main() {
     test('and the chat list has a floor of its own', () async {
       const gap = Duration(milliseconds: 80);
       final mcp = _FakeMcp({
-        'list_chats_page': [
+        'list_chats': [
           {'chats': const [], 'next_cursor': 'c2'},
           {'chats': const [], 'next_cursor': ''},
         ],
@@ -772,7 +829,7 @@ void main() {
 
       await _build(mcp, chatListGap: gap).listChats();
 
-      expect(mcp.argsOf('list_chats_page'), hasLength(2));
+      expect(mcp.argsOf('list_chats'), hasLength(2));
       expect(mcp.gapBefore(1), greaterThanOrEqualTo(gap.inMilliseconds - 10));
     });
   });
@@ -780,7 +837,7 @@ void main() {
   group('failures', () {
     test('an unconnected workspace is a sign-in problem', () async {
       final mcp = _FakeMcp({
-        'list_chats_page': [
+        'list_chats': [
           {'error': 'not_connected', 'connect_url': null},
         ],
       });
@@ -807,7 +864,7 @@ void main() {
 
     test('a transport failure keeps its HTTP status', () async {
       final mcp = _FakeMcp({
-        'get_chat_members_json': [
+        'get_chat_members': [
           const McpTransportException('gateway said no', statusCode: 502),
         ],
       });
@@ -821,7 +878,7 @@ void main() {
 
     test('an auth failure passes through unwrapped', () async {
       final mcp = _FakeMcp({
-        'get_profile_json': [const NotSignedIn()],
+        'get_profile': [const NotSignedIn()],
       });
 
       await expectLater(_build(mcp).myUserId(), throwsA(isA<NotSignedIn>()));

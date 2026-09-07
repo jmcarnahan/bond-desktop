@@ -211,9 +211,9 @@ the chip learns `2.3 MB` and the preview learns which cap applies.
 
 **The preview is fetched by url** — `inspect_file`'s bytes and thumbnail modes
 on the MCP server (bond-mcps PR #31), the `/shares` route on the SDK; 10 MB
-cap. `inspect_file` by its NEW name on purpose: the modes exist only there, and
-the deprecated `inspect_file_json` alias the text path still calls keeps its
-old four arguments until the Round 3 rename. In thumbnail mode the answer
+cap. The text path calls the same tool with `mode: 'text'`, so all three modes
+are one tool with one argument style and the deprecated `inspect_file_json`
+alias is no longer called at all. In thumbnail mode the answer
 carries `thumbnail_content_type` for the picture beside the `content_type` that
 still describes the FILE, and the picture's own type is the one the cache names
 it by.
@@ -307,7 +307,7 @@ facts.
 |---|---|---|
 | mail `file`/`item`/`unknown`, text | `get_mail_attachment_json` `mode: text` | text-like types only, else `no_extractor` |
 | mail `file`/`item`/`unknown`, bytes | `get_mail_attachment_json` `mode: bytes` | `GET /me/messages/{id}/attachments/{aid}/$value` |
-| mail `reference`, teams `file`, text | `inspect_file_json` by `source_url` | `GET /shares/{token}/driveItem/content` |
+| mail `reference`, teams `file`, text | `inspect_file` `mode: text` by `source_url` | `GET /shares/{token}/driveItem/content` |
 | mail `reference`, bytes | `inspect_file` `mode: bytes` by `source_url` | `GET /shares/{token}/driveItem/content` |
 | mail `reference` thumbnail | `inspect_file` `mode: thumbnail`, `options: '{"thumbnail":"small"}'` | `GET /shares/{token}/driveItem/thumbnails/0/{size}/content` |
 | teams `file` thumbnail | `get_chat_attachment_json` `thumbnail: small` | `GET /shares/{token}/driveItem/thumbnails/0/{size}/content` |

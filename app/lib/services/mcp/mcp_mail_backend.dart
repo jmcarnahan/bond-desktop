@@ -60,7 +60,7 @@ class McpMailBackend implements MailBackend {
     String? link,
     String? minReceivedIso,
   }) async {
-    final result = await _call('list_mail_delta', {
+    final result = await _call('sync_mail', {
       'folder': folder,
       'cursor': link ?? '',
       'min_received': minReceivedIso ?? '',
@@ -255,7 +255,7 @@ class McpMailBackend implements MailBackend {
     List<String> messageIds, {
     bool isRead = true,
   }) async {
-    final result = await _call('mark_mail_read_json', {
+    final result = await _call('mark_mail_read', {
       'message_ids': jsonEncode(messageIds),
       'is_read': isRead ? 'true' : 'false',
     });

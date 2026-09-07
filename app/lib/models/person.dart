@@ -13,7 +13,7 @@ import 'package:flutter/foundation.dart' show immutable;
 
 /// Where a [Person] was learned.
 enum PersonSource {
-  /// A `search_people_json` / Graph `/users` hit — the only source that always
+  /// A `search_people` / Graph `/users` hit — the only source that always
   /// carries a real Graph user id.
   directory,
 
@@ -72,7 +72,7 @@ class Person {
     );
   }
 
-  /// One entry of `search_people_json`'s `people` list.
+  /// One entry of `search_people`'s `people` list.
   ///
   /// The wire is snake_case; Graph's own `/users` is camelCase and is mapped
   /// by `graph_people.dart` instead. An empty string is read as absent — the

@@ -47,7 +47,7 @@ class McpPeopleBackend implements PeopleBackend {
     final trimmed = query.trim();
     if (trimmed.isEmpty) return const [];
 
-    final result = await _call('search_people_json', {
+    final result = await _call('search_people', {
       'query': trimmed,
       'top': top.clamp(_minTop, _maxTop),
     });

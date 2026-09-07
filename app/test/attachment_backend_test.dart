@@ -216,7 +216,7 @@ void main() {
       // A file attached as a link has no listing behind it: the row is born
       // size 0 and typeless, and `inspect_file` states both beside the words.
       final mcp = _FakeMcp({
-        'inspect_file_json': [
+        'inspect_file': [
           <String, dynamic>{
             'text': 'The agency confirms the September dates.',
             'size': 2441466,
@@ -350,10 +350,10 @@ void main() {
       expect(refused.itemFrom, 'dana.whitfield@example.test');
     });
 
-    test('a chat file is read from its sharing url, not from the message',
-        () async {
+    test('a link is read by the inspector in text mode, from its sharing url '
+        'rather than from the message', () async {
       final mcp = _FakeMcp({
-        'inspect_file_json': [
+        'inspect_file': [
           <String, dynamic>{'text': 'Rates for October.', 'size': 12},
         ],
       });
@@ -367,10 +367,14 @@ void main() {
       );
 
       expect(result.status, 'ok');
-      expect(mcp.argsFor('inspect_file_json'), {
+      // `mode` and not `read_content`: one tool, one argument style, and an
+      // explicit mode is what the server obeys when both are present.
+      final args = mcp.argsFor('inspect_file');
+      expect(args, {
         'url': 'https://example.invalid/sites/deals/Rates.xlsx',
-        'read_content': 'true',
+        'mode': 'text',
       });
+      expect(args.containsKey('read_content'), isFalse);
     });
   });
 
@@ -464,9 +468,8 @@ void main() {
       final result = await McpAttachmentBackend(mcp)
           .fetchBytes(ref(kind: 'reference', sourceUrl: url));
 
-      // `inspect_file` by its NEW name: the modes exist only there, and the
-      // deprecated alias the text path still calls would refuse these
-      // arguments.
+      // The same tool the text path calls, one mode over — which is why the
+      // mode is spelled out on every branch rather than left to a default.
       expect(mcp.argsFor('inspect_file'), {'url': url, 'mode': 'bytes'});
       expect(result.bytes, [5, 6, 7]);
       expect(result.name, 'HARBORLIGHT TALENT AGREEMENT.pdf');
