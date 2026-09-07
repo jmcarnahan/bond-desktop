@@ -636,9 +636,10 @@ class SyncService implements MailSync {
       _fetchDetailInto(sourceMessageId);
 
   /// Fetches one message's detail and stores it. A message that vanished
-  /// between the delta page and this call is skipped rather than thrown over:
-  /// it must not cost the rest of a thread its bodies, nor park a triage
-  /// queue. Anything else is a real failure and belongs on the banner.
+  /// between the delta page and this call is skipped rather than thrown over,
+  /// and so is one the server refuses to show: it must not cost the rest of a
+  /// thread its bodies, nor park a triage queue. Anything else is a real
+  /// failure and belongs on the banner.
   Future<void> _fetchDetailInto(String sourceMessageId) async {
     // A local echo's id was minted by this app before the server had the
     // message, and its body was written by the hand that sent it. Asking
@@ -650,7 +651,14 @@ class SyncService implements MailSync {
     try {
       detail = await _mail.getMessageDetail(sourceMessageId);
     } on GraphMailException catch (e) {
-      if (e.statusCode == 404 || e.statusCode == 410) return;
+      // A 403 on one message's detail is a permanent refusal of that message
+      // and nothing more — the sender policy on the MCP server, a mailbox
+      // permission on the SDK — so it is skipped the way a vanished message
+      // is. The delta feed already omits hidden senders; this path only runs
+      // after a policy flip, and it must not park a thread or a triage queue.
+      if (e.statusCode == 403 || e.statusCode == 404 || e.statusCode == 410) {
+        return;
+      }
       rethrow;
     }
 

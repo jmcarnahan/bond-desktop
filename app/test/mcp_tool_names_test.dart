@@ -31,33 +31,33 @@ void main() {
     'send_chat_message_json',
     'get_mail_attachment_json',
     'get_chat_attachment_json',
+    'get_mail_detail',
+    'create_reply_draft_json',
+    'create_draft_json',
+    'update_draft_body',
+    'send_draft',
   ];
 
-  /// Every name the desktop is allowed to send. The published names, plus the
-  /// aliases the later phases of this round still have to move — each marked
-  /// with the phase that retires it, so retiring one is a line moved from this
-  /// list into [deprecatedToolNames] above.
+  /// Every name the desktop is allowed to send: the sixteen published tools it
+  /// calls, and nothing else. The migration is finished, so a name that is not
+  /// on this list is either a typo or a new dependency on the server.
   const publishedToolNames = {
     'connection_status',
     'get_profile',
     'sync_mail',
+    'read_email',
+    'manage_draft',
     'mark_mail_read',
     'list_chats',
     'get_chat_members',
+    'read_teams_messages',
     'mark_chat_read',
+    'send_teams_message',
     'ensure_chat',
     'search_people',
     'inspect_file',
-    'read_teams_messages',
-    'send_teams_message',
     'get_mail_attachment',
     'get_teams_attachment',
-    // Still aliases — renamed in the later phases of this round.
-    'get_mail_detail', // Phase 3
-    'create_reply_draft_json', // Phase 3
-    'create_draft_json', // Phase 3
-    'update_draft_body', // Phase 3
-    'send_draft', // Phase 3
   };
 
   /// The package root: `flutter test` runs from it, so lib/ is right here. The
@@ -121,6 +121,13 @@ void main() {
     // nothing at all, so it has to find the one call every session makes.
     expect(called, isNotEmpty);
     expect(called, contains('get_profile'));
+
+    expect(
+      publishedToolNames.length,
+      16,
+      reason: 'a name added here is a new server dependency and belongs in a '
+          'review',
+    );
 
     expect(
       called.difference(publishedToolNames),

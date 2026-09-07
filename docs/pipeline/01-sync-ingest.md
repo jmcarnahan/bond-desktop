@@ -35,9 +35,9 @@ written reply and the copy the next drain folds in must agree on every column.
 **Local echo rows.** A mail reply sent from this app is written immediately,
 under the id `local:<draftId>`, by `mailEchoRow`
 (`app/lib/services/mail_echo.dart`) through `MessageStore.insertLocalEcho`.
-It carries the `internet_message_id` that `send_draft` reported, which is the
-same one the Sent Items copy will carry — the copy's `id` differs, because the
-draft the app sent no longer exists.
+It carries the `internet_message_id` that `manage_draft(action="send")`
+reported, which is the same one the Sent Items copy will carry — the copy's
+`id` differs, because the draft the app sent no longer exists.
 
 Reconciliation happens inside the Sent Items page transaction. `_ingestPage`
 reads `MessageStore.pendingEchoInternetMessageIds` once per page — one indexed

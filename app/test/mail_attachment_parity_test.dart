@@ -188,7 +188,7 @@ void main() {
     List<Map<String, Object?>> summaries,
   ) async {
     final mcp = _FakeMcp({
-      'get_mail_detail': {
+      'read_email': {
         'body_text': 'The plans and the note are attached.',
         'headers': <String, Object?>{},
         'has_attachments': true,
@@ -241,7 +241,7 @@ void main() {
   /// The same, through the server.
   Future<String?> mcpBody(String body) async {
     final mcp = _FakeMcp({
-      'get_mail_detail': {
+      'read_email': {
         'body_text': body,
         'headers': <String, Object?>{},
         'has_attachments': false,
