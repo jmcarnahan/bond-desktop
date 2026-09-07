@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../data/message_store.dart';
+import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
 import 'attachments/attachment_policy.dart';
 import 'attachments/owa_links.dart';
@@ -639,6 +640,12 @@ class SyncService implements MailSync {
   /// it must not cost the rest of a thread its bodies, nor park a triage
   /// queue. Anything else is a real failure and belongs on the banner.
   Future<void> _fetchDetailInto(String sourceMessageId) async {
+    // A local echo's id was minted by this app before the server had the
+    // message, and its body was written by the hand that sent it. Asking
+    // Graph for it is a 400 at best; every body fetch — triage's, Restore's,
+    // a thread's — comes through here, so this is the one place to refuse.
+    if (sourceMessageId.startsWith(localEchoPrefix)) return;
+
     final Map<String, dynamic> detail;
     try {
       detail = await _mail.getMessageDetail(sourceMessageId);

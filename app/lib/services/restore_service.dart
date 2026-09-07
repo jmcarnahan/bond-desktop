@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
+import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
 import 'attachments/attachment_policy.dart';
 import 'pipeline_progress.dart';
@@ -66,6 +67,13 @@ class RestoreService {
   }
 
   Future<void> _restore(String source, String sourceMessageId) async {
+    // A local echo is the app's own record of a send, not a message the gates
+    // dropped: it is born gated `outbound` like every Sent Items row, so the
+    // Dropped tab lists it for the minute it exists, but its id is on no
+    // server and the next drain deletes the row from under anything queued on
+    // it. The real copy takes its place and is restorable on its own.
+    if (sourceMessageId.startsWith(localEchoPrefix)) return;
+
     await _store.restoreMessage(source, sourceMessageId);
 
     // Resets the progress row and ticks the bus, so the home feed sheds the

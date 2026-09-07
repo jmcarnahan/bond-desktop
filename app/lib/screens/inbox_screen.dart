@@ -1197,8 +1197,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // pane the button just opened behind a scrim.
       _railOpen = false;
       _replyOpenFor = null;
-      // The file being previewed belonged to that thread too; left set, a
-      // full-pane viewer would sit under compose and come back on Back.
+      // The file being previewed belonged to that thread too. The ladder
+      // would not show it without a selection, but a pane leaves the same
+      // state behind whichever pane it was — Settings clears these, so does
+      // this.
       _previewing = null;
       _viewerFull = false;
     });

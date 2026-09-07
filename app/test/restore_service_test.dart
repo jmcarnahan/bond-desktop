@@ -180,6 +180,43 @@ void main() {
       expect((await messageOf('t1', source: 'teams'))['gate_override'], 'user');
     });
 
+    test('a local echo is left exactly as it is', () async {
+      // The row a mail send writes for itself: gated `outbound`, so the
+      // Dropped tab lists it, with an id no server knows.
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'local:draft-1',
+        'internet_message_id': '<echo@example.com>',
+        'conversation_key': 'c-1',
+        'direction': 'outbound',
+        'subject': 'Re: This week at Northwind',
+        'from_address': 'owner@example.com',
+        'to_json': '["no-reply@example.com"]',
+        'body_text': 'Thanks, will do.',
+        'received_at': '2026-09-01T10:05:00Z',
+        'is_read': 1,
+        'triage_status': 'skipped',
+        'gate_reason': 'outbound',
+      });
+      final fetched = <String>[];
+      final service = RestoreService(
+        store,
+        ensureBody: (id) async => fetched.add(id),
+      );
+
+      await service.restore('email', 'local:draft-1');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(fetched, isEmpty);
+      final row = await messageOf('local:draft-1');
+      expect(row['triage_status'], 'skipped');
+      expect(row['gate_reason'], 'outbound');
+      expect((await progressOf('local:draft-1'))['dropped'], 1);
+      for (final kind in const ['extract', 'needs_you', 'embed_message']) {
+        expect(await workStatus(kind, 'local:draft-1'), isNull);
+      }
+    });
+
     test('a failed fetch degrades rather than aborting the restore', () async {
       await seed();
       var pumped = 0;

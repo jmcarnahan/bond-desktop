@@ -59,6 +59,12 @@ primary key serves it (SQLite will not use a BINARY index for a
 case-insensitive LIKE, and a per-message scan of the source was minutes on a
 first sync).
 
+An echo's id is on no server, and two paths refuse it by name: the detail
+fetch (`_fetchDetailInto`, which every body fetch goes through) returns
+without a call, and Restore leaves the row untouched — it is gated `outbound`
+like any Sent Items copy, so the Dropped tab lists it for the minute it
+exists, but reviving it would queue work on a row the next drain deletes.
+
 **Attachments.** Sync is where a message learns what came with it. The
 paperclip (`messages.has_attachments`) rides the mail delta page, so a list
 card shows it before any body is fetched. The attachment LIST arrives later

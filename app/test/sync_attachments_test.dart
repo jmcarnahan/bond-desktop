@@ -205,6 +205,17 @@ void main() {
     });
   });
 
+  group('a local echo', () {
+    test('is never asked of Graph', () async {
+      // The id was minted by the app; the server has no such message, and
+      // every body fetch in the app comes through this one method.
+      await sync.ensureMessageBody('local:draft-1');
+
+      expect(graph.detailCalls, 0);
+      expect(graph.requests, isEmpty);
+    });
+  });
+
   group('the detail fetch', () {
     test('asks Graph for the attachment list in the cast form', () async {
       graph.deltaMessages = [_deltaMessage(id: 'm1', hasAttachments: true)];
