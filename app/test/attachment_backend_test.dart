@@ -212,6 +212,55 @@ void main() {
       });
     });
 
+    test("the inspector's size and type ride along", () async {
+      // A file attached as a link has no listing behind it: the row is born
+      // size 0 and typeless, and `inspect_file` states both beside the words.
+      final mcp = _FakeMcp({
+        'inspect_file_json': [
+          <String, dynamic>{
+            'text': 'The agency confirms the September dates.',
+            'size': 2441466,
+            'content_type': 'application/pdf',
+          },
+        ],
+      });
+
+      final result = await McpAttachmentBackend(mcp).extractText(
+        ref(
+          kind: 'reference',
+          sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+        ),
+      );
+
+      expect(result.status, 'ok');
+      expect(result.size, 2441466);
+      expect(result.contentType, 'application/pdf');
+    });
+
+    test("a mail file's own text call teaches the row nothing, whatever the "
+        'server states', () async {
+      // `get_mail_attachment_json`'s `size` is what the server moved to
+      // answer and its type is the extractor's — and a mail attachment
+      // already knew both from its listing. Carrying them here would let an
+      // extracted PDF's `text/plain` land on a row whose type was never
+      // stated and turn its preview into a text dump.
+      final mcp = _FakeMcp({
+        'get_mail_attachment_json': [
+          <String, dynamic>{
+            'text': 'The quote is attached.',
+            'size': 4096,
+            'content_type': 'text/plain',
+          },
+        ],
+      });
+
+      final result = await McpAttachmentBackend(mcp).extractText(ref());
+
+      expect(result.status, 'ok');
+      expect(result.size, isNull);
+      expect(result.contentType, isNull);
+    });
+
     test('a chat image is never sent for text', () async {
       final mcp = _FakeMcp();
 
@@ -383,16 +432,113 @@ void main() {
 
     test('a kind that is a pointer rather than a payload is refused with no '
         'call', () async {
+      // A card is a rendering of a message and has no bytes anywhere. A
+      // `reference` is NOT one of these — it is a real file on a drive, and
+      // the tests below fetch it.
+      final mcp = _FakeMcp();
+
+      await expectLater(
+        McpAttachmentBackend(mcp).fetchBytes(ref(kind: 'card')),
+        throwsA(
+          isA<AttachmentUnavailable>()
+              .having((e) => e.reason, 'reason', 'kind_card'),
+        ),
+      );
+      expect(mcp.calls, isEmpty);
+    });
+
+    test('a mail link fetches its bytes through the file inspector by url',
+        () async {
+      const url =
+          'https://southbayequity2-my.sharepoint.com/:b:/g/personal/x/abc';
+      final mcp = _FakeMcp({
+        'inspect_file': [
+          <String, dynamic>{
+            'content_base64': base64Encode(const [5, 6, 7]),
+            'content_type': 'application/pdf',
+            'name': 'HARBORLIGHT TALENT AGREEMENT.pdf',
+          },
+        ],
+      });
+
+      final result = await McpAttachmentBackend(mcp)
+          .fetchBytes(ref(kind: 'reference', sourceUrl: url));
+
+      // `inspect_file` by its NEW name: the modes exist only there, and the
+      // deprecated alias the text path still calls would refuse these
+      // arguments.
+      expect(mcp.argsFor('inspect_file'), {'url': url, 'mode': 'bytes'});
+      expect(result.bytes, [5, 6, 7]);
+      expect(result.name, 'HARBORLIGHT TALENT AGREEMENT.pdf');
+      expect(result.contentType, 'application/pdf');
+    });
+
+    test('a link thumbnail names its size and carries the image type, not the '
+        'file type', () async {
+      final mcp = _FakeMcp({
+        'inspect_file': [
+          <String, dynamic>{
+            'content_base64': base64Encode(const [1]),
+            'content_type': 'application/pdf',
+            'thumbnail_content_type': 'image/jpeg',
+          },
+        ],
+      });
+
+      final result = await McpAttachmentBackend(mcp).fetchBytes(
+        ref(kind: 'reference', sourceUrl: 'https://example.invalid/x'),
+        thumbnail: 'small',
+      );
+
+      // The options argument is a JSON STRING, which is what the server parses.
+      expect(mcp.argsFor('inspect_file'), {
+        'url': 'https://example.invalid/x',
+        'mode': 'thumbnail',
+        'options': '{"thumbnail":"small"}',
+      });
+      // What came back is the picture, so the picture's own type is what the
+      // cache names it by; `content_type` still describes the PDF.
+      expect(result.contentType, 'image/jpeg');
+    });
+
+    test('a link with no url is refused before any call', () async {
       final mcp = _FakeMcp();
 
       await expectLater(
         McpAttachmentBackend(mcp).fetchBytes(ref(kind: 'reference')),
         throwsA(
           isA<AttachmentUnavailable>()
-              .having((e) => e.reason, 'reason', 'kind_reference'),
+              .having((e) => e.reason, 'reason', 'reference_no_url'),
         ),
       );
       expect(mcp.calls, isEmpty);
+    });
+
+    test("the inspector's refusal words are kept", () async {
+      for (final word in [
+        'too_large',
+        'no_thumbnail',
+        'is_folder',
+        'invalid_thumbnail',
+        'invalid_mode',
+        'invalid_options',
+      ]) {
+        final mcp = _FakeMcp({
+          'inspect_file': [
+            <String, dynamic>{'error': word},
+          ],
+        });
+
+        await expectLater(
+          McpAttachmentBackend(mcp).fetchBytes(
+            ref(kind: 'reference', sourceUrl: 'https://example.invalid/x'),
+          ),
+          throwsA(
+            isA<AttachmentUnavailable>().having((e) => e.reason, 'reason', word),
+          ),
+          reason: word,
+        );
+      }
     });
 
     test('an unknown server word on the bytes path becomes unavailable',
@@ -766,6 +912,30 @@ void main() {
       );
 
       expect(graph.urls.single.path, '/v1.0/shares/$token/driveItem/content');
+    });
+
+    test("a mail link's bytes come from the shares route", () async {
+      const url = 'https://example.invalid/x.pdf';
+      graph.replies.add(() => http.Response('pdf', 200));
+
+      await build().fetchBytes(ref(kind: 'reference', sourceUrl: url));
+
+      expect(
+        graph.urls.single.path,
+        '/v1.0/shares/${GraphAttachmentBackend.shareToken(url)}'
+        '/driveItem/content',
+      );
+    });
+
+    test('a mail link asks the drive for its rendering', () async {
+      graph.replies.add(() => http.Response('png', 200));
+
+      await build().fetchBytes(
+        ref(kind: 'reference', sourceUrl: 'https://example.invalid/x.pdf'),
+        thumbnail: 'small',
+      );
+
+      expect(graph.urls.single.path, endsWith('/thumbnails/0/small/content'));
     });
 
     test('a size word asks the drive for its own rendering', () async {

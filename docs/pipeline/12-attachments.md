@@ -136,24 +136,118 @@ The work-queue id is `'<message id>|<attachment id>'`
 half — a Graph attachment id and a hosted-content id are base64url, a Teams
 message id is decimal.
 
-## The known hole: reference attachments have no url
+## Link attachments
 
-**Every mail reference (OneDrive-link) attachment arrives with
-`source_url = NULL` today**, on both backends, so the policy refuses it as
-`reference_no_url` and it renders as a chip that says "link".
+**Outlook's "attach as link" is not a Graph attachment.** A message that shares
+a OneDrive or SharePoint file this way arrives with `hasAttachments: false` and
+an empty `attachments[]`, and the file is in the BODY — an OWALink entity,
+which Exchange renders to plain text as a run delimited by zero-width spaces:
 
-Neither path asks Graph for the property: the MCP server's
-`ATTACHMENT_LIST_SELECT` omits it, and `sourceUrl` is declared on the
-`referenceAttachment` subtype and is not reachable through the SDK path's
-`$expand` either. The code path is built and the refusal is named, so the fix
-is a one-line bond-mcps change
-(`ATTACHMENT_LIST_SELECT += ",microsoft.graph.referenceAttachment/sourceUrl"`)
-after which the desktop needs no change at all.
+```
+U+200B [<icon url>]<file name><<target url>> U+200B
+```
+
+Graph previews such a message as the file name in those same delimiters
+(`\u200bHARBORLIGHT TALENT AGREEMENT.pdf\u200b`), which is why the delta loop
+strips U+200B out of `body_preview` before it is stored: search and cards must
+never carry a character nobody can see or type.
+
+**The delimiters are the discriminator, not the shape.** An ordinary hyperlink
+converts to exactly the same `text<url>` form. Reading the shape alone would
+turn every link in every mail into an attachment, so `owa_links.dart` matches
+only a run wrapped in U+200B, which Exchange writes for an entity and for
+nothing else.
+
+**The host is the second gate.** A row is only worth writing for a file a
+connector can actually read: `*.sharepoint.com` (which covers the
+`*-my.sharepoint.com` where every personal OneDrive for Business file lives),
+`onedrive.live.com`, `1drv.ms`. Everything else — Google Drive, Dropbox, a
+share on somebody's own domain — is cleaned to `name <url>` and gets no row: a
+chip that could never be read is worse than the text the sender wrote. The host
+test is on the suffix WITH its dot, so `notsharepoint.com` and
+`sharepoint.com.evil.example` are other people's domains and stay that way. The
+url itself must be a web address on the same rule `webUriOf` states, re-stated
+in `owa_links.dart` because a service must not import a widget file (a test
+pins that the two agree).
+
+**The row count is bounded by the read cap.** The body is the sender's, so
+the number of runs in it is the sender's too. A run whose ordinal would be
+past `maxAttachmentsPerMessage` — which the policy refuses by ordinal before
+any fetch — is cleaned to `name <url>` like a foreign host's and gets no row:
+a row that exists only to be refused on every sync and to sit on the shelf is
+not worth writing.
+
+**The id is derived, not allocated:** `link-` + the first 16 hex characters of
+`sha256(url)`. There is no connector id to borrow, and the same message fetched
+twice must produce the same row and the same work item or every detail fetch
+would double the shelf. It never contains `|`, which is what
+`attachmentEntityId` splits a work item's id on.
+
+**Parsed in `SyncService._fetchDetailInto`, once**, because the detail fetch is
+the first and only moment the body exists — and both mail connectors deliver
+plain text bodies, so one parse serves both. Rows are numbered from the count
+of the connector's own entries, so a real attachment always keeps the lower
+ordinal and the per-message cap counts real files first. Each accepted run
+becomes an `[[att:<id>]]` marker in `body_text`, so `layOutBody` places the chip
+exactly where the link sat, and the same marker rules as a chat's apply: no
+prompt and no embedding ever sees one. Any U+200B left over from a run the
+regex did not match is stripped. `has_attachments` is RAISED to 1 when a link
+was found and never lowered — a link the connector never counted is still a
+file on the message, and the paperclip is how a card says so.
+
+The row is born `kind = 'reference'`, `size = 0`, `content_type = NULL`, with
+the target in `source_url` — which is what the text policy accepts, so the link
+is enqueued like any other file. The icon url in the run is Office's own
+file-type glyph on a CDN; it is decoration, never stored and never fetched,
+because `thumbnail_url` is the column a preview fetches a picture from.
+
+**Size and type are learned on the first read.** The connector states them
+beside the words (`inspect_file` returns `name, size, content_type, web_url,
+modified, is_folder, text`), `AttachmentText` carries them, and the text
+handler writes them back through `MessageStore.setAttachmentResolved`: size
+only ever GROWS and a type already known is KEPT, so a listing that rounded
+cannot walk a file back under a cap it had already failed. That call is where
+the chip learns `2.3 MB` and the preview learns which cap applies.
+
+**The preview is fetched by url** — `inspect_file`'s bytes and thumbnail modes
+on the MCP server (bond-mcps PR #31), the `/shares` route on the SDK; 10 MB
+cap. `inspect_file` by its NEW name on purpose: the modes exist only there, and
+the deprecated `inspect_file_json` alias the text path still calls keeps its
+old four arguments until the Round 3 rename. In thumbnail mode the answer
+carries `thumbnail_content_type` for the picture beside the `content_type` that
+still describes the FILE, and the picture's own type is the one the cache names
+it by.
+
+So a link previews like the file it is. `previewKindFor` reads its name and
+then its type, `reference` is no longer a link kind in the bytes ladder, and
+the drive's rendering is asked for FIRST for its thumbnail — before the PDF
+branch, which would download the whole document to draw one page. A link
+nothing could name (an extensionless SharePoint url with no type) still answers
+`link` rather than `unsupported`, because the url out is worth offering. The
+panel keeps **Open link** beside Open and Save for every reference, except
+where the body already carries it — a link body, a file over the cap, and a
+file the server refused for its size all draw the link themselves. A link row
+is born `size = 0`, so that last refusal is the one the app cannot see before
+the request: `AttachmentUnavailable('too_large')` off the fetch renders the
+too-large body, whose sentence drops the size when there is none rather than
+leaving a dangling dash.
+
+**Already-synced messages get no backfill.** The parse runs on a detail fetch,
+so a message whose body was stored before this existed keeps the body it has.
+Restore is the manual backfill: it re-fetches the body, which re-runs the parse
+and writes the row.
 
 Related: **a bare `contentId` in the SDK's `$expand` is a Graph 400.** It is
 written in the cast form, `microsoft.graph.fileAttachment/contentId`, and the
 error names no field, so a hand that "simplifies" it gets a broken request
 that reads as a broken request.
+
+Related, and still open: **a true Graph `referenceAttachment` has no url on
+either backend.** `sourceUrl` is declared on the subtype and is not reachable
+through the SDK's `$expand`, and the MCP server's `ATTACHMENT_LIST_SELECT`
+omits it, so the policy refuses such an entry as `reference_no_url`. That is a
+different thing from a link attachment, which never reaches `attachments[]` at
+all.
 
 ## Where the two connectors meet
 
@@ -213,7 +307,9 @@ facts.
 |---|---|---|
 | mail `file`/`item`/`unknown`, text | `get_mail_attachment_json` `mode: text` | text-like types only, else `no_extractor` |
 | mail `file`/`item`/`unknown`, bytes | `get_mail_attachment_json` `mode: bytes` | `GET /me/messages/{id}/attachments/{aid}/$value` |
-| mail `reference`, teams `file` | `inspect_file_json` by `source_url` | `GET /shares/{token}/driveItem/content` |
+| mail `reference`, teams `file`, text | `inspect_file_json` by `source_url` | `GET /shares/{token}/driveItem/content` |
+| mail `reference`, bytes | `inspect_file` `mode: bytes` by `source_url` | `GET /shares/{token}/driveItem/content` |
+| mail `reference` thumbnail | `inspect_file` `mode: thumbnail`, `options: '{"thumbnail":"small"}'` | `GET /shares/{token}/driveItem/thumbnails/0/{size}/content` |
 | teams `file` thumbnail | `get_chat_attachment_json` `thumbnail: small` | `GET /shares/{token}/driveItem/thumbnails/0/{size}/content` |
 | teams `image` | `get_chat_attachment_json` (the attachment id IS the hosted-content id) | `GET /chats/{chat}/messages/{msg}/hostedContents/{id}/$value` |
 | teams `card`/`message_reference`/`other` | — | — (`binary` / `kind_<k>`) |
@@ -594,7 +690,8 @@ answers for a link and for a file over the cap too.
 | text | `TextPreview`, mono for csv/tsv/json/xml/yaml/log/ini | the same | yes |
 | document (docx, pptx) | the server's words, under OneDrive's picture for a chat file | the same | **no** |
 | eml / `item` | `EmlPreview` — a `MessageRow`, because a forwarded message is a message | the body | **no** |
-| link (reference, card, message\_reference) | "This is a link, not a file." + Open in Outlook/Teams | — | **no** |
+| reference (a mail link) | whatever its name or type says — a PDF renders as a PDF, with the drive's own thumbnail | the server's words | **yes**, by url |
+| link (card, message\_reference, and a reference nothing could name) | "This is a link, not a file." + Open in Outlook/Teams, or the OneDrive sentence + Open link | — | **no** |
 | unsupported (heic, tiff, xls, everything else) | `UnsupportedPreview` | the server's words | **no** |
 
 `previewKindFor` reads the **name before the content type**, because Graph
@@ -604,8 +701,9 @@ unsupported on purpose — the first two are images Flutter cannot decode, the
 third a binary workbook `xlsx_reader.dart` does not read, and a broken frame
 says less than a line naming the file.
 
-Two refusals come before any fetch. A **link** has no bytes to get, and offers
-the url out instead. A file over the **live** cap — `bytes.maxPreviewBytes`, per
+Two refusals come before any fetch. A **link** — a card, a quoted message, a
+reference nothing could name — has no file to draw and offers the url out
+instead. A file over the **live** cap — `bytes.maxPreviewBytes`, per
 connector, never the `attachmentTooLargeBytes` constant — says how big it is and
 offers the same link; Open and Save are hidden there too, since there is nothing
 this app can hand over. A file already in the cache is never too large: the
@@ -841,7 +939,10 @@ whose spinner is off screen is not visible feedback.
 - `app/lib/services/message_search.dart` (`MessageSearchHits.documents`),
   `app/lib/models/home_models.dart` (`HomeSearch.documents`),
   `app/lib/services/restore_service.dart` (the fresh enqueue).
-- `app/lib/services/sync_service.dart` `_storeAttachments`;
+- `app/lib/services/attachments/owa_links.dart` — the OWALink parse:
+  `extractOwaLinks`, `isCloudFileUrl`, `linkAttachmentId`.
+- `app/lib/services/sync_service.dart` `_fetchDetailInto` (the link parse and
+  the preview's zero-width strip) and `_storeAttachments`;
   `app/lib/services/teams_sync.dart` `attachmentRows` and the ingest loop.
 - `app/lib/services/graph_mail.dart` `_detailExpand`,
   `app/lib/services/graph_teams.dart` `attachmentEntries`.

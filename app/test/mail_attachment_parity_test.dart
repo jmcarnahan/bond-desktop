@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:bond_inbox/services/attachments/owa_links.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
@@ -198,6 +199,59 @@ void main() {
     return (detail['attachments'] as List).cast<Map<String, Object?>>();
   }
 
+  /// The body [GraphMail.getMessageDetail] answers with, for a message whose
+  /// only attachment is one the connector never lists.
+  Future<String?> sdkBody(String body) async {
+    final tokens = _InMemoryTokenStore();
+    tokens.values['refresh_token'] = 'rt';
+
+    final client = MockClient((request) async {
+      if (request.url.host == 'login.microsoftonline.com') {
+        return http.Response(
+          jsonEncode({
+            'access_token': 'at-1',
+            'refresh_token': 'rt-1',
+            'expires_in': 3600,
+          }),
+          200,
+          headers: const {'content-type': 'application/json'},
+        );
+      }
+      return http.Response(
+        jsonEncode({
+          'id': 'msg-1',
+          'uniqueBody': {'content': body},
+          'internetMessageHeaders': <Object?>[],
+          'hasAttachments': false,
+          'attachments': <Object?>[],
+        }),
+        200,
+        headers: const {'content-type': 'application/json'},
+      );
+    });
+
+    final mail = GraphMail(
+      GraphAuth(httpClient: client, store: tokens),
+      httpClient: client,
+    );
+    final detail = await mail.getMessageDetail('msg-1');
+    return (detail['uniqueBody'] as Map)['content'] as String?;
+  }
+
+  /// The same, through the server.
+  Future<String?> mcpBody(String body) async {
+    final mcp = _FakeMcp({
+      'get_mail_detail': {
+        'body_text': body,
+        'headers': <String, Object?>{},
+        'has_attachments': false,
+        'attachments': <Object?>[],
+      },
+    });
+    final detail = await McpMailBackend(mcp).getMessageDetail('msg-1');
+    return (detail['uniqueBody'] as Map)['content'] as String?;
+  }
+
   /// An entry without the one key the two paths are allowed to disagree on.
   List<Map<String, Object?>> withoutSourceUrl(
     List<Map<String, Object?>> entries,
@@ -301,5 +355,36 @@ void main() {
     ]);
 
     expect(sdk.map((e) => e['kind']), ['unknown', 'unknown']);
+  });
+
+  test('a file attached as a link reads the same on both connectors', () async {
+    // The one attachment neither backend can list. Outlook's "attach as link"
+    // is a U+200B-delimited run in the BODY, and both connectors deliver plain
+    // text bodies — so the parse belongs to the sync, once, and the only thing
+    // parity can mean here is that the two hand the sync the same string.
+    const zwsp = '\u200b';
+    const linkUrl =
+        'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
+        'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ';
+    const body = 'Please review.\n\n'
+        '$zwsp[https://res-1.cdn.office.net/files/assets/pdf.svg]'
+        'HARBORLIGHT TALENT AGREEMENT.pdf<$linkUrl>$zwsp\n\nThanks';
+
+    final sdk = await sdkBody(body);
+    final mcp = await mcpBody(body);
+
+    expect(sdk, mcp);
+    expect(sdk, body);
+
+    // And the one parse over either string says the same thing. The sync-level
+    // claim — that the row and the marker are actually written — is pinned in
+    // `sync_attachments_test.dart`, which drives a real store.
+    for (final delivered in [sdk, mcp]) {
+      final parsed = extractOwaLinks(delivered);
+      expect(parsed.rows.single['kind'], 'reference');
+      expect(parsed.rows.single['source_url'], linkUrl);
+      expect(parsed.body, contains('[[att:link-'));
+      expect(parsed.body, isNot(contains(zwsp)));
+    }
   });
 }

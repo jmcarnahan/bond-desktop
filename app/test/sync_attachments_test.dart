@@ -4,8 +4,10 @@ import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
+import 'package:bond_inbox/services/restore_service.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -60,6 +62,7 @@ final String _fresh =
 Map<String, dynamic> _deltaMessage({
   required String id,
   bool hasAttachments = false,
+  String bodyPreview = 'Signed copy attached.',
 }) =>
     {
       'id': id,
@@ -77,7 +80,7 @@ Map<String, dynamic> _deltaMessage({
       'receivedDateTime': _fresh,
       'isRead': false,
       'isDraft': false,
-      'bodyPreview': 'Signed copy attached.',
+      'bodyPreview': bodyPreview,
       'hasAttachments': hasAttachments,
     };
 
@@ -106,6 +109,11 @@ Map<String, dynamic> _graphAttachment({
 class _GraphStub {
   final List<Uri> requests = [];
   final Map<String, List<Map<String, dynamic>>> attachments = {};
+
+  /// The detail body per message id, for the messages that need a particular
+  /// one — an Outlook "attach as link" IS its body, and there is nowhere else
+  /// for the fact to live.
+  final Map<String, String> bodies = {};
   int detailCalls = 0;
   List<Map<String, dynamic>> deltaMessages = const [];
 
@@ -135,7 +143,7 @@ class _GraphStub {
           final id = Uri.decodeComponent(request.url.pathSegments.last);
           return _jsonOk({
             'id': id,
-            'uniqueBody': {'content': 'Signed copy attached.'},
+            'uniqueBody': {'content': bodies[id] ?? 'Signed copy attached.'},
             'internetMessageHeaders': const [],
             'hasAttachments': attachments.containsKey(id),
             'attachments': attachments[id] ?? const [],
@@ -364,6 +372,144 @@ void main() {
       expect(rows.single['text_status'], 'done');
       expect(rows.single['text_reason'], isNull);
       expect(rows.single['digest_status'], 'done');
+    });
+  });
+
+  group('a file attached as a link', () {
+    // Outlook's "attach as link" is not a Graph attachment: the message says
+    // `hasAttachments: false`, lists nothing, and carries the file as a
+    // U+200B-delimited run in the body. The detail fetch is the only place
+    // that fact exists, so it is the only place it can be read.
+    const zwsp = '\u200b';
+    const icon = 'https://res-1.cdn.office.net/files/assets/pdf.svg';
+    const linkUrl =
+        'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
+        'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ';
+    const run = '$zwsp[$icon]HARBORLIGHT TALENT AGREEMENT.pdf<$linkUrl>$zwsp';
+    const linkBody = 'Please review.\n\n$run\n\nThanks';
+
+    test('a link in the body becomes a reference row, a marker and the '
+        'paperclip', () async {
+      graph.deltaMessages = [_deltaMessage(id: 'm1')];
+      graph.bodies['m1'] = linkBody;
+      await sync.syncNow();
+
+      await sync.ensureMessageBody('m1');
+
+      final row = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(row['kind'], 'reference');
+      expect(row['name'], 'HARBORLIGHT TALENT AGREEMENT.pdf');
+      expect(row['source_url'], linkUrl);
+      expect(row['ordinal'], 0);
+
+      // The connector counted no attachments; the body says otherwise, and the
+      // card's paperclip follows the body.
+      final message = (await store.getMessageRow('email', 'm1'))!;
+      expect(message['has_attachments'], 1);
+      final body = message['body_text'] as String;
+      expect(body, contains('[[att:link-'));
+      expect(body, isNot(contains(zwsp)));
+      expect(body, contains('[[att:${row['attachment_id']}]]'));
+
+      expect(
+        (await workItems()).map((r) => r['entity_id']),
+        ['m1|${row['attachment_id']}'],
+      );
+    });
+
+    test('fetched twice, one row and one work item', () async {
+      graph.deltaMessages = [_deltaMessage(id: 'm1')];
+      graph.bodies['m1'] = linkBody;
+      await sync.syncNow();
+
+      await sync.ensureMessageBody('m1');
+      await sync.ensureMessageBody('m1');
+
+      // The id is derived from the url, so a second fetch upserts the same row
+      // and the INSERT OR IGNORE queues the same item.
+      expect((await store.attachmentsForMessage('email', 'm1')).length, 1);
+      expect((await workItems()).length, 1);
+    });
+
+    test('a gated message stores the link and records the refusal', () async {
+      graph.deltaMessages = [_deltaMessage(id: 'm1')];
+      graph.bodies['m1'] = linkBody;
+      await sync.syncNow();
+      await db.customUpdate(
+        "UPDATE messages SET triage_status = 'skipped', "
+        "gate_reason = 'bulk_sender' WHERE source_message_id = 'm1'",
+      );
+
+      await sync.ensureMessageBody('m1');
+
+      final row = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(row['text_status'], 'skipped');
+      expect(row['text_reason'], 'gated');
+      expect(await workItems(), isEmpty);
+    });
+
+    test('the preview loses its zero-width spaces', () async {
+      graph.deltaMessages = [
+        _deltaMessage(
+          id: 'm1',
+          bodyPreview: '${zwsp}HARBORLIGHT TALENT AGREEMENT.pdf$zwsp',
+        ),
+      ];
+
+      await sync.syncNow();
+
+      // Graph previews a link-attachment message as the file name in zero-width
+      // spaces. Search and cards must never carry a character nobody can see.
+      expect(
+        (await store.getMessageRow('email', 'm1'))!['body_preview'],
+        'HARBORLIGHT TALENT AGREEMENT.pdf',
+      );
+    });
+
+    test('a link beside a real attachment is numbered after it', () async {
+      graph.deltaMessages = [_deltaMessage(id: 'm1', hasAttachments: true)];
+      graph.attachments['m1'] = [_graphAttachment(id: 'att-1')];
+      graph.bodies['m1'] = linkBody;
+      await sync.syncNow();
+
+      await sync.ensureMessageBody('m1');
+
+      final rows = await store.attachmentsForMessage('email', 'm1');
+      expect(rows.map((r) => r['ordinal']), [0, 1]);
+      expect(rows.first['attachment_id'], 'att-1');
+      expect(rows.last['kind'], 'reference');
+    });
+
+    test('Restore is the backfill for a message synced before the parse '
+        'existed', () async {
+      graph.deltaMessages = [_deltaMessage(id: 'm1')];
+      graph.bodies['m1'] = linkBody;
+      await sync.syncNow();
+      // What an older build left behind: the raw run in the body, no row, no
+      // paperclip. Nothing re-reads a stored body on its own — the parse runs
+      // on a detail fetch, and Restore's tier-two fetch is the one a person
+      // can trigger.
+      await db.customUpdate(
+        "UPDATE messages SET body_text = ?, has_attachments = 0, "
+        "triage_status = 'skipped', gate_reason = 'bulk_sender' "
+        "WHERE source_message_id = 'm1'",
+        variables: [Variable(linkBody)],
+      );
+      expect(await store.attachmentsForMessage('email', 'm1'), isEmpty);
+
+      await RestoreService(store, ensureBody: sync.ensureMessageBody)
+          .restore('email', 'm1');
+
+      final row = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(row['kind'], 'reference');
+      expect(row['text_status'], 'pending');
+      final message = (await store.getMessageRow('email', 'm1'))!;
+      expect(message['has_attachments'], 1);
+      expect(message['body_text'], contains('[[att:${row['attachment_id']}]]'));
+      expect(
+        (await workItems()).map((r) => r['status']),
+        ['pending'],
+      );
     });
   });
 }

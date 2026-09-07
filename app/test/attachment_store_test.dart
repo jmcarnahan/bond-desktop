@@ -882,6 +882,71 @@ void main() {
     });
   });
 
+  group('what a link learns on its first read', () {
+    test('resolving never shrinks a size or overwrites a known type', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [
+        row('att-a', kind: 'reference', size: 5000),
+      ]);
+
+      // A listing that states less than a download already proved was
+      // rounding, and a shrinking size would walk a file back under a cap it
+      // had already failed. A type the connector named beats a guess made
+      // while reading.
+      await store.setAttachmentResolved(
+        'email',
+        'm1',
+        'att-a',
+        size: 100,
+        contentType: 'text/plain',
+      );
+
+      var stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['size'], 5000);
+      expect(stored['content_type'], 'application/pdf');
+
+      await store.setAttachmentResolved('email', 'm1', 'att-a', size: 9000);
+
+      stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['size'], 9000);
+      expect(stored['content_type'], 'application/pdf');
+
+      // Nothing learned is not a write. Nearly every attachment reaches this
+      // method having taught it nothing.
+      await store.setAttachmentResolved('email', 'm1', 'att-a');
+
+      stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['size'], 9000);
+      expect(stored['content_type'], 'application/pdf');
+    });
+
+    test('a link born typeless takes the type its first read stated', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [
+        row(
+          'link-abc',
+          kind: 'reference',
+          name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+          contentType: null,
+          size: 0,
+          sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+        ),
+      ]);
+
+      await store.setAttachmentResolved(
+        'email',
+        'm1',
+        'link-abc',
+        size: 2441466,
+        contentType: 'application/pdf',
+      );
+
+      final stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['size'], 2441466);
+      expect(stored['content_type'], 'application/pdf');
+    });
+  });
+
   group('a text status that closes the digest', () {
     test('a skip after a successful read keeps the count and the cut',
         () async {

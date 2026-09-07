@@ -317,7 +317,10 @@ class GraphAttachmentBackend implements AttachmentBackend {
   /// image id to the mail endpoint and read the 404 as a deleted file.
   Uri _uriFor(AttachmentRef ref, String thumbnail) {
     if (ref.source == 'email') {
-      if (ref.kind == 'reference') return _shareUri(ref, thumbnail: '');
+      // A mail link is a drive item like any other, so it gets the drive's
+      // own rendering exactly as a chat's shared file does — the size word
+      // travels through rather than being dropped.
+      if (ref.kind == 'reference') return _shareUri(ref, thumbnail: thumbnail);
       if (!const {'file', 'item', 'unknown'}.contains(ref.kind)) {
         throw AttachmentUnavailable('kind_${ref.kind}');
       }

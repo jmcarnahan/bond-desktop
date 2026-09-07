@@ -190,6 +190,17 @@ class AttachmentTextHandler extends WorkHandler {
       truncated: extracted.truncated,
     );
 
+    // A link row is born size 0 and typeless — the body's run stated a name and
+    // an address and nothing more — and this call is where the chip learns
+    // `2.3 MB` and the preview learns which cap applies.
+    await _store.setAttachmentResolved(
+      source,
+      messageId,
+      attachmentId,
+      size: extracted.size,
+      contentType: extracted.contentType,
+    );
+
     final chunks = chunkAttachmentText(
       text,
       contentType: ref.contentType ?? '',

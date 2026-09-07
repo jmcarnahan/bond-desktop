@@ -26,6 +26,7 @@ import 'package:flutter/material.dart';
 import '../../models/attachment_models.dart';
 import '../../services/attachments/attachment_bytes.dart';
 import '../../services/attachments/xlsx_reader.dart';
+import '../../services/backend/attachment_backend.dart';
 import '../../theme/tokens.dart';
 import '../attachment_format.dart';
 import '../chips.dart';
@@ -137,6 +138,16 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   /// has a picture but no bytes to draw it from.
   Future<Uint8List?>? _thumbLoad;
 
+  /// The connector refused the bytes for being too big.
+  ///
+  /// A mail link is born with no size on it — the row says 0 until something
+  /// reads the file — so the ceiling is discovered by ASKING rather than
+  /// before the request, which is the one case [_isTooLarge] cannot see.
+  /// Remembered here rather than read out of the snapshot because [_actions]
+  /// is built beside the body and has to know the body is already showing the
+  /// way out.
+  bool _serverRefusedTooLarge = false;
+
   @override
   void initState() {
     super.initState();
@@ -163,10 +174,12 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     _workbookLoad = null;
     _pdfTextLoad = null;
     _thumbLoad = null;
+    // Cleared here for EVERY attachment, not only inside `_startBytes`: a
+    // document or a link needs no bytes, so a refusal remembered from the
+    // previous file would otherwise outlive it and hide the new one's way out.
+    _serverRefusedTooLarge = false;
     _textLoad = _held(widget.bytes.textFor(attachment));
-    _bytesLoad = _needsBytes(kind)
-        ? _held(widget.bytes.bytesFor(attachment))
-        : null;
+    _bytesLoad = _needsBytes(kind) ? _startBytes() : null;
 
     if (kind == PreviewKind.document && _hasRenderedThumbnail) {
       _thumbLoad = _held(widget.bytes.thumbnailFor(attachment));
@@ -186,6 +199,25 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   Future<T> _held<T>(Future<T> future) {
     unawaited(future.then((_) {}, onError: (Object _) {}));
     return future;
+  }
+
+  /// The download, with the one refusal that changes what the panel OFFERS
+  /// watched for.
+  ///
+  /// Everything else the bytes can fail with is an error the body draws and
+  /// the actions row need know nothing about. `too_large` is different: the
+  /// body turns into [_tooLargeBody], which carries the link out itself, so
+  /// the actions row has to stop drawing a second one.
+  Future<Uint8List> _startBytes() {
+    _serverRefusedTooLarge = false;
+    final load = _held(widget.bytes.bytesFor(widget.attachment));
+    unawaited(load.then((_) {}, onError: (Object e) {
+      if (!mounted || !identical(_bytesLoad, load)) return;
+      if (e is AttachmentUnavailable && e.reason == 'too_large') {
+        setState(() => _serverRefusedTooLarge = true);
+      }
+    }));
+    return load;
   }
 
   /// The loads that hang off the bytes, for the segment that is showing.
@@ -248,10 +280,12 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     return attachment.size > widget.bytes.maxPreviewBytes;
   }
 
-  /// A chat's shared file is the one document OneDrive will draw a picture of
-  /// without this app downloading it.
+  /// A file that lives on a drive — a chat's shared file, a mail link — is a
+  /// document OneDrive will draw a picture of without this app downloading
+  /// it. The same pair the bytes ladder renders first for.
   bool get _hasRenderedThumbnail =>
-      widget.attachment.source != 'email' && widget.attachment.kind == 'file';
+      (widget.attachment.source != 'email' && widget.attachment.kind == 'file') ||
+      widget.attachment.kind == 'reference';
 
   String get _sourceName =>
       widget.attachment.name ?? widget.attachment.attachmentId;
@@ -388,9 +422,19 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   /// [openRefused]. A caption stands where the button was, because a control
   /// that simply vanished for one file and not the next reads as a bug rather
   /// than as a decision.
+  ///
+  /// A mail link previews like any other file now, so its real home has to
+  /// stay one click away beside Open and Save. Drawn only where the BODY is
+  /// not already showing it — a link body, a file over the cap and a file the
+  /// server refused for its size each carry the link themselves, and two of
+  /// the same button on one panel reads as a bug.
   Widget _actions() {
     final kind = previewKindFor(widget.attachment);
     final fetchable = kind != PreviewKind.link && !_isTooLarge;
+    final linkInBody = !fetchable || _serverRefusedTooLarge;
+    final sourceLink = widget.attachment.kind == 'reference' && !linkInBody
+        ? _sourceLink()
+        : null;
     final refused = openRefused(widget.attachment);
     final openable = fetchable && !refused;
     final open = widget.onOpen;
@@ -422,6 +466,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
             icon: const Icon(Icons.download_outlined, size: 16),
             label: const Text('Save…'),
           ),
+        ?sourceLink,
         if (useInReply != null)
           TextButton.icon(
             key: AttachmentPreviewPanel.useInReplyKey,
@@ -472,6 +517,19 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
             ),
           );
         }
+        // A link file is born size 0, so the connector's own ceiling is the
+        // first thing that can say the file is too big — and it says it here,
+        // as a refusal, rather than to [_isTooLarge] before the request.
+        // The same carve-out as the pre-request cap above: the server's text
+        // ceiling is higher than its bytes ceiling, so a file it refused to
+        // hand over may well have had its words read, and the Text segment is
+        // where they are.
+        final failure = snapshot.error;
+        if (failure is AttachmentUnavailable && failure.reason == 'too_large') {
+          return _segment == PreviewSegment.text
+              ? _textBody()
+              : _tooLargeBody();
+        }
         if (snapshot.hasError || snapshot.data == null) return _errorBody();
         return _readyBody(kind, snapshot.data!);
       },
@@ -481,7 +539,13 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   Widget _linkBody() => UnsupportedPreview(
     glyph: '🔗',
     name: widget.attachment.name ?? widget.attachment.cardText,
-    reason: 'This is a link, not a file.',
+    // A reference that reached here is a file nothing could name — the words
+    // and the summary were still read from it, and only the rendering is
+    // missing. A card or a quoted message has no file behind it at all.
+    reason: widget.attachment.kind == 'reference'
+        ? 'This file lives in OneDrive or SharePoint. Open the link for the '
+            'file itself; its text and summary are read here.'
+        : 'This is a link, not a file.',
     action: _sourceLink(),
   );
 
@@ -494,15 +558,19 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   /// and the Text segment beside this one may already have its words.
   Widget _tooLargeBody() {
     final link = _sourceLink();
+    // A link file's row says 0 until something reads it, so the size is not
+    // always known here — and a sentence with a hole where the number should
+    // be reads worse than one that never promised a number.
     final size = formatBytes(widget.attachment.size);
+    final measured = size.isEmpty ? 'This file is' : 'This file is $size —';
     return UnsupportedPreview(
       key: AttachmentPreviewPanel.tooLargeKey,
       glyph: _glyph,
       name: widget.attachment.name,
       size: widget.attachment.size,
       reason: link != null
-          ? 'This file is $size — too large to preview here.'
-          : 'This file is $size — over what this connection can hand over. '
+          ? '$measured too large to preview here.'
+          : '$measured over what this connection can hand over. '
               'Open the message in your mail app to get it. Its text, if the '
               'server read it, is under Text.',
       action: link,
@@ -525,10 +593,14 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
       key: AttachmentPreviewPanel.sourceLinkKey,
       onPressed: () => openLink(url),
       icon: const Icon(Icons.open_in_new, size: 16),
+      // A mail link's home is a drive, not Outlook — 'Open in Outlook' would
+      // send the reader to the message rather than to the file.
       label: Text(
         widget.attachment.source == 'teams'
             ? 'Open in Teams'
-            : 'Open in Outlook',
+            : widget.attachment.kind == 'reference'
+                ? 'Open link'
+                : 'Open in Outlook',
       ),
     );
   }
@@ -543,7 +615,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
       action: TextButton(
         key: AttachmentPreviewPanel.retryKey,
         onPressed: () => setState(() {
-          _bytesLoad = _held(widget.bytes.bytesFor(widget.attachment));
+          _bytesLoad = _startBytes();
           _workbookLoad = null;
           _pdfTextLoad = null;
           _ensureDerived();

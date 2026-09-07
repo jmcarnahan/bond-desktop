@@ -22,7 +22,8 @@ import 'bond_mcp_client.dart';
 /// | ref | tool |
 /// |---|---|
 /// | mail `file`/`item`/`unknown` | `get_mail_attachment_json` |
-/// | mail `reference`, teams `file` | `inspect_file_json`, by url |
+/// | mail `reference`, teams `file` text | `inspect_file_json`, by url |
+/// | mail `reference` bytes/thumbnail | `inspect_file`, by url |
 /// | teams `file`/`image` bytes | `get_chat_attachment_json` |
 ///
 /// Failures follow `mcp_mail_backend.dart`'s policy exactly, including which
@@ -57,6 +58,11 @@ const Set<String> _permanentServerReasons = {
   'external_sender',
   'missing_target',
   'no_thumbnail',
+  'invalid_mode',
+  'invalid_thumbnail',
+  'invalid_options',
+  'invalid_arguments',
+  'teams_unavailable',
 };
 
 class McpAttachmentBackend implements AttachmentBackend {
@@ -97,7 +103,10 @@ class McpAttachmentBackend implements AttachmentBackend {
         'url': url,
         'read_content': 'true',
       });
-      return _textFrom(result);
+      // The inspector is the only text call that describes the FILE: a row
+      // reached by url was born knowing a name and an address and nothing
+      // else, and this answer is where its size and type come from.
+      return _textFrom(result, learnsFile: true);
     }
 
     final result = await _call(ref, 'get_mail_attachment_json', {
@@ -115,7 +124,22 @@ class McpAttachmentBackend implements AttachmentBackend {
   }) async {
     final Map<String, dynamic> result;
 
-    if (ref.source == 'email') {
+    // A mail link IS a file — it just lives in OneDrive or SharePoint rather
+    // than on the message — so it is fetched by its url like a chat's shared
+    // file. `inspect_file` by its NEW name, because the modes exist only
+    // there: the `inspect_file_json` alias the text path above still calls
+    // keeps its old four arguments, and Round 3 renames the rest.
+    if (ref.kind == 'reference') {
+      final url = ref.contentUrl;
+      if (url == null || url.isEmpty) {
+        throw const AttachmentUnavailable('reference_no_url');
+      }
+      result = await _call(ref, 'inspect_file', {
+        'url': url,
+        'mode': thumbnail.isEmpty ? 'bytes' : 'thumbnail',
+        if (thumbnail.isNotEmpty) 'options': jsonEncode({'thumbnail': thumbnail}),
+      });
+    } else if (ref.source == 'email') {
       if (!const {'file', 'item', 'unknown'}.contains(ref.kind)) {
         throw AttachmentUnavailable('kind_${ref.kind}');
       }
@@ -166,9 +190,16 @@ class McpAttachmentBackend implements AttachmentBackend {
     // the argument is a String, so both are sendable across the isolate port.
     final bytes = await compute(base64Decode, encoded);
 
+    // In thumbnail mode `content_type` still describes the FILE and
+    // `thumbnail_content_type` describes the picture. The picture is what came
+    // back, and its own type is what the cache names it by.
+    final type = thumbnail.isEmpty
+        ? result['content_type']
+        : result['thumbnail_content_type'] ?? result['content_type'];
+
     return AttachmentBytesResult(
       bytes,
-      contentType: _stringOrNull(result['content_type']),
+      contentType: _stringOrNull(type),
       name: _stringOrNull(result['name']),
     );
   }
@@ -179,7 +210,16 @@ class McpAttachmentBackend implements AttachmentBackend {
   /// everything; then the absence of words, which the server usually explains
   /// in `reason` and which is `empty` when it does not; then the words
   /// themselves.
-  static AttachmentText _textFrom(Map<String, dynamic> result) {
+  ///
+  /// [learnsFile] is true only for the inspector: `inspect_file`'s `size` and
+  /// `content_type` describe the file itself, whereas
+  /// `get_mail_attachment_json`'s `size` is what the server moved to answer
+  /// and its type, when it states one, is the extractor's — and a mail
+  /// attachment already knew both from its listing.
+  static AttachmentText _textFrom(
+    Map<String, dynamic> result, {
+    bool learnsFile = false,
+  }) {
     // What the server says about the message an `item` attachment wraps. Read
     // once and carried onto every answer below, including the two skips: a
     // forwarded mail that could not be read still has a subject, a sender and
@@ -221,6 +261,14 @@ class McpAttachmentBackend implements AttachmentBackend {
       itemSubject: itemSubject,
       itemFrom: itemFrom,
       itemReceived: itemReceived,
+      // What `inspect_file` learned about a file the app had only a url for.
+      // Carried on the same result as the words because it is the same call:
+      // the server states `name, size, content_type` beside the text, and a
+      // link row has nowhere else to learn either. Zero is "the server did not
+      // say" rather than an empty file, so it is dropped here instead of being
+      // written over a size a listing already stated.
+      size: learnsFile && size != null && size > 0 ? size : null,
+      contentType: learnsFile ? _stringOrNull(result['content_type']) : null,
     );
   }
 

@@ -106,13 +106,17 @@ class StoreAttachmentBytes implements AttachmentBytes {
   /// pixels nobody sees paid for on every scroll.
   static const int _thumbnailWidth = 320;
 
-  /// Kinds that are a POINTER to a file rather than a file.
+  /// Kinds that are a POINTER to something that is not a file at all.
   ///
-  /// Fetching one means following a url out of this app entirely, which the
-  /// preview does by opening it in the browser. Asking for its bytes is a
-  /// category error and answers so immediately, with no request.
+  /// A card is a rendering of a message, a `message_reference` is a quote of
+  /// one, and `other` is whatever the connector could not name. None of the
+  /// three has bytes anywhere, so asking for them is a category error and
+  /// answers so immediately, with no request.
+  ///
+  /// `reference` is deliberately NOT here. A mail link is a real file that
+  /// lives in OneDrive or SharePoint, and both connectors fetch it by its url
+  /// — the same way a chat's shared file has always been fetched.
   static const Set<String> _linkKinds = {
-    'reference',
     'card',
     'message_reference',
     'other',
@@ -156,13 +160,21 @@ class StoreAttachmentBytes implements AttachmentBytes {
 
       if (_isDrawableImage(ref)) return await _imageThumbnail(ref);
 
-      // A chat's shared file is rendered by OneDrive, which costs one small
-      // fetch — so it goes FIRST for a chat file, before the PDF branch, which
-      // would download the whole document just to draw its first page. The
-      // PDF branch is the fallback when the drive has no rendering to give.
-      if (ref.source != 'email' && ref.kind == 'file') {
-        final rendered = await _renderedThumbnail(ref);
-        if (rendered != null) return rendered;
+      // A file that lives on a drive is rendered by the drive, which costs one
+      // small fetch — so it goes FIRST for a chat's shared file and for a mail
+      // link, before the PDF branch, which would download the whole document
+      // just to draw its first page. The PDF branch is the fallback when the
+      // drive has no rendering to give.
+      if ((ref.source != 'email' && ref.kind == 'file') ||
+          ref.kind == 'reference') {
+        try {
+          final rendered = await _renderedThumbnail(ref);
+          if (rendered != null) return rendered;
+        } on AttachmentUnavailable {
+          // "The drive has no rendering to give" arrives as a refusal
+          // (`no_thumbnail`), not as an empty answer. That is exactly the case
+          // the PDF branch below exists for, so it must not end the ladder.
+        }
       }
 
       // A mail PDF has nothing to render it but this build. The bytes are the
@@ -296,7 +308,8 @@ class StoreAttachmentBytes implements AttachmentBytes {
     return drawn;
   }
 
-  /// OneDrive's own rendering of a chat's shared file.
+  /// OneDrive's own rendering of a file that lives on a drive — a chat's
+  /// shared file, a mail link.
   ///
   /// Named by the attachment's IDENTITY rather than by a digest of its bytes:
   /// there is no blob to hash — the file itself was never downloaded, which is

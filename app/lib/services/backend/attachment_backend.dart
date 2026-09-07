@@ -78,6 +78,17 @@ class AttachmentText {
   /// When that inner message was received, ISO-8601.
   final String? itemReceived;
 
+  /// How big the connector found the file to be, when the app had only a url
+  /// for it. A link attachment is born `size = 0` and typeless — nothing about
+  /// a OneDrive address states either — and the read is the first moment
+  /// anybody knows. Null for a mail file, which already carried both on the
+  /// attachment listing, and null on a skip, which learned nothing.
+  final int? size;
+
+  /// What the connector called that file. Same story as [size]: the answer to
+  /// a question only the read could ask.
+  final String? contentType;
+
   /// The three item fields are optional on BOTH constructors, not only on the
   /// ok one. A forwarded message whose body came back empty is still a
   /// forwarded message, and the preview draws its header — subject, sender,
@@ -89,6 +100,8 @@ class AttachmentText {
     this.itemSubject,
     this.itemFrom,
     this.itemReceived,
+    this.size,
+    this.contentType,
   })  : status = 'ok',
         reason = null;
 
@@ -100,7 +113,9 @@ class AttachmentText {
   })  : status = 'skipped',
         text = null,
         truncated = false,
-        fetchedBytes = 0;
+        fetchedBytes = 0,
+        size = null,
+        contentType = null;
 }
 
 /// One attachment's bytes, and what the connector called them.

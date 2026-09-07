@@ -216,6 +216,64 @@ void main() {
       expectClean(buildMessageBlock(chat()));
     });
 
+    // The other way a marker gets into a body, and the one that arrives on
+    // MAIL: a file attached as a link is not in Graph's attachment list, so
+    // the sync's own parse writes a `reference` row and puts the marker where
+    // the link sat. A minted token is a minted token whichever pass wrote it.
+    const linkId = 'link-9f2a1c0d4b6e8a11';
+    Message linked() => Message(
+          id: 'm1',
+          source: 'email',
+          outbound: false,
+          fromName: 'Dana Kessler',
+          fromAddress: 'dana@example.com',
+          receivedAt: '2026-09-04T09:00:00.000Z',
+          bodyText: 'Please review [[att:$linkId]] before Friday.',
+          attachments: const [
+            AttachmentRef(
+              source: 'email',
+              messageId: 'm1',
+              attachmentId: linkId,
+              kind: 'reference',
+              name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+              sourceUrl:
+                  'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
+                  'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ',
+            ),
+          ],
+        );
+
+    test('and a mail whose file came as a link', () {
+      expectClean(buildMessageBlock(linked()));
+      expectClean(
+        const TriageTask().buildUserMessage(
+          TriageInput(linked(), now, thread: [linked()]),
+        ),
+      );
+      expectClean(
+        const ReplyDecisionTask().buildUserMessage(
+          ReplyDecisionInput(message: linked(), now: now, context: [linked()]),
+        ),
+      );
+      expectClean(
+        const NeedsYouTask().buildUserMessage(
+          NeedsYouInput(message: linked(), now: now, thread: [linked()]),
+        ),
+      );
+      expectClean(
+        const DraftTask().buildUserMessage(
+          DraftInput(replyTo: linked(), now: now, thread: [linked()]),
+        ),
+      );
+      // The marker comes out and the sentence around it still reads. A body
+      // that stripped to nothing is where the block names the file instead —
+      // that case is the marker-only test below.
+      expect(
+        buildMessageBlock(linked()),
+        contains('Please review before Friday.'),
+      );
+    });
+
 
     test('a marker-only chat message reads as what was shared', () {
       final block = buildMessageBlock(chat(

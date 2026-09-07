@@ -293,14 +293,17 @@ void main() {
       expect(bytes.bytesCalls, 0);
     });
 
-    testWidgets('a reference opens its link and asks for no bytes',
-        (tester) async {
+    testWidgets('a link nothing could name opens its link and asks for no '
+        'bytes', (tester) async {
       var opened = '';
       await pump(
         tester,
+        // No extension and no content type: nothing here knows what the file
+        // is, so the link out is all there is to offer.
         ref(
           kind: 'reference',
-          name: 'Budget.xlsx',
+          name: 'Shared item',
+          contentType: null,
           sourceUrl: 'https://drive/budget',
         ),
         onOpen: () {},
@@ -309,12 +312,149 @@ void main() {
       );
 
       expect(bytes.bytesCalls, 0);
-      expect(find.text('This is a link, not a file.'), findsOneWidget);
+      expect(
+        find.textContaining('This file lives in OneDrive or SharePoint.'),
+        findsOneWidget,
+      );
       expect(find.byKey(AttachmentPreviewPanel.openKey), findsNothing);
       expect(find.byKey(AttachmentPreviewPanel.saveKey), findsNothing);
 
       await tester.tap(find.byKey(AttachmentPreviewPanel.sourceLinkKey));
       expect(opened, 'https://drive/budget');
+    });
+
+    testWidgets('a mail link named .pdf previews the file and still offers '
+        'Open link', (tester) async {
+      final attachment = ref(
+        kind: 'reference',
+        name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+        size: 0,
+        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+      );
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList([1, 2, 3]);
+      await pump(
+        tester,
+        attachment,
+        onOpen: () {},
+        onSave: () {},
+        onOpenLink: (_) {},
+      );
+
+      // A file on a drive is fetched like any other file, and its real home
+      // stays one click away beside Open and Save.
+      expect(bytes.bytesCalls, 1);
+      expect(find.text('Open link'), findsOneWidget);
+      expect(find.text('Open in Outlook'), findsNothing);
+      expect(find.byKey(AttachmentPreviewPanel.openKey), findsOneWidget);
+      expect(find.byKey(AttachmentPreviewPanel.saveKey), findsOneWidget);
+    });
+
+    testWidgets('a link the server calls too large says so', (tester) async {
+      final attachment = ref(
+        kind: 'reference',
+        name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+        size: 0,
+        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+      );
+      // A link row is born size 0, so the ceiling is discovered by asking.
+      bytes.throwOnBytes = const AttachmentUnavailable('too_large');
+      await pump(
+        tester,
+        attachment,
+        onOpen: () {},
+        onSave: () {},
+        onOpenLink: (_) {},
+      );
+
+      expect(find.byKey(AttachmentPreviewPanel.tooLargeKey), findsOneWidget);
+      expect(
+        find.text('This file is too large to preview here.'),
+        findsOneWidget,
+        reason: 'no dangling dash where the unknown size would have been',
+      );
+      // The body carries the link out, so the actions row must not draw a
+      // second one.
+      expect(find.byKey(AttachmentPreviewPanel.sourceLinkKey), findsOneWidget);
+    });
+
+    testWidgets("a refusal for one file's size does not hide the next file's "
+        'link', (tester) async {
+      // A document needs no bytes, so nothing about the second file would
+      // ever reset a flag the first one raised — unless the load does.
+      bytes.throwOnBytes = const AttachmentUnavailable('too_large');
+      await pump(
+        tester,
+        ref(
+          kind: 'reference',
+          attachmentId: 'link-a',
+          name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+          size: 0,
+          sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/a',
+        ),
+        onOpen: () {},
+        onSave: () {},
+        onOpenLink: (_) {},
+      );
+      expect(find.byKey(AttachmentPreviewPanel.tooLargeKey), findsOneWidget);
+
+      bytes.throwOnBytes = null;
+      await pump(
+        tester,
+        ref(
+          kind: 'reference',
+          attachmentId: 'link-b',
+          name: 'Schedule.docx',
+          size: 0,
+          sourceUrl: 'https://southbayequity2-my.sharepoint.com/:w:/g/b',
+        ),
+        onOpen: () {},
+        onSave: () {},
+        onOpenLink: (_) {},
+      );
+
+      expect(find.byKey(AttachmentPreviewPanel.tooLargeKey), findsNothing);
+      expect(find.text('Open link'), findsOneWidget);
+    });
+
+    testWidgets('a link the server calls too large still shows its words',
+        (tester) async {
+      // The bytes cap is lower than the text cap, so a file refused for its
+      // size may well have been read; the Text segment is where that is.
+      final attachment = ref(
+        kind: 'reference',
+        name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+        size: 0,
+        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+      );
+      bytes.throwOnBytes = const AttachmentUnavailable('too_large');
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          'The agency confirms the September dates.';
+      await pump(tester, attachment, onOpenLink: (_) {});
+      await tapSegment(tester, 'Text');
+
+      expect(
+        find.text('The agency confirms the September dates.'),
+        findsOneWidget,
+      );
+      expect(find.byKey(AttachmentPreviewPanel.tooLargeKey), findsNothing);
+    });
+
+    testWidgets('a chat link still offers Open in Teams', (tester) async {
+      await pump(
+        tester,
+        ref(
+          source: 'teams',
+          kind: 'reference',
+          name: 'Shared item',
+          contentType: null,
+          sourceUrl: 'https://teams/shared/1',
+        ),
+        onOpenLink: (_) {},
+      );
+
+      expect(find.text('Open in Teams'), findsOneWidget);
+      expect(find.text('Open link'), findsNothing);
     });
 
     testWidgets('a link that is not a web address gets no button',
@@ -324,10 +464,10 @@ void main() {
         tester,
         ref(
           kind: 'reference',
-          name: 'Budget.xlsx',
+          name: 'Shared item',
+          contentType: null,
           // The connector stores the sender's string verbatim; this one would
-          // launch a local application under a button saying 'Open in
-          // Outlook'.
+          // launch a local application under a button saying 'Open link'.
           sourceUrl: 'file:///Applications/Calculator.app',
         ),
         onOpenLink: (_) => opened++,
@@ -386,6 +526,27 @@ void main() {
   });
 
   group('the Preview segment', () {
+    testWidgets("a linked document asks for the drive's picture", (tester) async {
+      // A mail link lives on a drive exactly as a chat's shared file does, so
+      // the panel asks for the same rendering the bytes ladder renders first.
+      final attachment = ref(
+        kind: 'reference',
+        name: 'Schedule.docx',
+        contentType: null,
+        size: 0,
+        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:w:/g/x',
+      );
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          'The survey is booked for the ninth.';
+      bytes.thumbnailsByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList(onePixelPng);
+      await pump(tester, attachment, pumps: 6);
+
+      expect(bytes.thumbnailCalls, 1);
+      expect(bytes.bytesCalls, 0);
+      expect(find.text('The survey is booked for the ninth.'), findsOneWidget);
+    });
+
     testWidgets('an image sits on the preview ground', (tester) async {
       final attachment = imageRef(name: 'Screenshot.png');
       bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
@@ -627,6 +788,10 @@ void main() {
         (tester) async {
       await pump(tester, ref(
         kind: 'reference',
+        // Nothing names this one, so the panel never asks for its bytes — and
+        // the model's read is still there.
+        name: 'Shared item',
+        contentType: null,
         sourceUrl: 'https://drive/x',
         digest: const AttachmentDigest(summary: 'A shared budget.'),
       ));

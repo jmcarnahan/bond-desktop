@@ -61,14 +61,50 @@ void main() {
       }
     });
 
-    test('a reference is a link and never a fetch', () {
-      for (final kind in ['reference', 'card', 'message_reference']) {
+    test('a card or a quoted message is a link and never a fetch', () {
+      for (final kind in ['card', 'message_reference']) {
         expect(
           previewKindFor(ref(kind: kind, name: 'Budget.xlsx')),
           PreviewKind.link,
           reason: kind,
         );
       }
+    });
+
+    test('a link named .pdf previews as a PDF', () {
+      // A mail link is a real file kept on a drive, so its name decides what
+      // it previews as, exactly as an attached file's would.
+      expect(
+        previewKindFor(ref(kind: 'reference', name: 'Budget.pdf')),
+        PreviewKind.pdf,
+      );
+      expect(
+        previewKindFor(
+          ref(kind: 'reference', name: 'Photo.png', contentType: null),
+        ),
+        PreviewKind.image,
+      );
+      expect(
+        previewKindFor(
+          ref(kind: 'reference', name: 'Budget.xlsx', contentType: null),
+        ),
+        PreviewKind.sheet,
+      );
+    });
+
+    test('a link with no readable name stays a link', () {
+      // An extensionless SharePoint url is still worth the link out, which
+      // `unsupported` would not offer.
+      expect(
+        previewKindFor(
+          ref(kind: 'reference', name: 'Shared item', contentType: null),
+        ),
+        PreviewKind.link,
+      );
+      expect(
+        previewKindFor(ref(kind: 'reference', name: null, contentType: null)),
+        PreviewKind.link,
+      );
     });
 
     test('an item and a .eml are mail', () {

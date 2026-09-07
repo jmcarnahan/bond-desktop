@@ -5056,6 +5056,44 @@ LIMIT ?
     );
   }
 
+  /// What the connector learned about a file it only had a url for.
+  ///
+  /// A link attachment is born `size = 0` and typeless — an Outlook "attach as
+  /// link" run states a name and an address and nothing else — so the first
+  /// read is where the chip learns `2.3 MB` and the preview learns which cap
+  /// applies to it.
+  ///
+  /// Size only ever GROWS: a later listing stating less than a download
+  /// already proved is a listing that was rounding, and a shrinking size would
+  /// walk a file back under a cap it had already failed. A type already known
+  /// is KEPT, because the connector's own word on a listing beats a guess made
+  /// while reading. Both null is a no-op — nearly every attachment reaches
+  /// this method having taught it nothing.
+  Future<void> setAttachmentResolved(
+    String source,
+    String sourceMessageId,
+    String attachmentId, {
+    int? size,
+    String? contentType,
+  }) async {
+    if (size == null && contentType == null) return;
+    await db.customUpdate(
+      'UPDATE attachments SET '
+      '  size = MAX(size, COALESCE(?, size)), '
+      '  content_type = COALESCE(content_type, ?), '
+      '  updated_at = ? '
+      'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+      variables: _args([
+        size,
+        contentType,
+        _nowIso(),
+        source,
+        sourceMessageId,
+        attachmentId,
+      ]),
+    );
+  }
+
   /// Where the cache put this attachment's bytes and its thumbnail.
   ///
   /// COALESCE per column, so a thumbnail write does not blank the blob path a

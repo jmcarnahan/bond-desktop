@@ -70,9 +70,10 @@ void main() {
     String source = 'email',
     String kind = 'file',
     String name = 'Lease.pdf',
-    String contentType = 'application/pdf',
+    String? contentType = 'application/pdf',
     int size = 240 * 1024,
     Object isInline = false,
+    String? sourceUrl,
   }) async {
     await store.upsertAttachments(source, messageId, [
       {
@@ -83,6 +84,7 @@ void main() {
         'content_type': contentType,
         'size': size,
         'is_inline': isInline,
+        'source_url': sourceUrl,
       },
     ]);
   }
@@ -153,6 +155,39 @@ void main() {
       // Under the DOCUMENT prefix, the same one message cards use — a query
       // embedded as a query is what these are matched against.
       expect(server.inputs.single, startsWith(EmbeddingsClient.documentPrefix));
+    });
+
+    test('a link is read through the file inspector and learns its size',
+        () async {
+      if (!available) return;
+      // A file attached as a link is born knowing a name and an address and
+      // nothing else — no listing ever stated a size or a type for it. The
+      // read is the first moment either is known, and the chip and the cap
+      // both want the answer written back on the row.
+      await seedMessage('m1');
+      await seedAttachment(
+        'm1',
+        'link-abc',
+        kind: 'reference',
+        name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+        contentType: null,
+        size: 0,
+        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
+            'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ',
+      );
+      backend.textByKey['email|m1|link-abc'] = const AttachmentText.ok(
+        'The agency confirms the September dates.',
+        fetchedBytes: 2441466,
+        size: 2441466,
+        contentType: 'application/pdf',
+      );
+
+      await handlerWith(FakeEmbedServer()).run(item('m1', 'link-abc'));
+
+      final row = await attachmentOf('m1', 'link-abc');
+      expect(row['text_status'], 'done');
+      expect(row['size'], 2441466);
+      expect(row['content_type'], 'application/pdf');
     });
 
     test('queues the digest only once there are words', () async {

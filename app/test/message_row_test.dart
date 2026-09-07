@@ -440,6 +440,34 @@ void main() {
       expect(layout.plainText, 'Here it is have a look');
     });
 
+    test('a link marker places the chip in the sentence', () {
+      // A file attached as a link has no connector id to key on — the sync
+      // mints `link-<hash>` and writes the marker where the link sat, so the
+      // chip lands mid-sentence exactly the way a chat's file does.
+      final linked = ref(
+        attachmentId: 'link-abc',
+        kind: 'reference',
+        name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+        contentType: null,
+        size: 0,
+        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/personal/'
+            'jane_southbayequity2_onmicrosoft_com/EaBcDeFgHiJkLmNoPqRsTuVwXyZ',
+      );
+      final layout = layOutBody('Please review [[att:link-abc]] today.', [
+        linked,
+      ]);
+
+      expect(layout.segments.length, 3);
+      expect((layout.segments[0] as BodyTextSegment).text, 'Please review');
+      final placed = layout.segments[1] as BodyAttachmentSegment;
+      expect(placed.attachment.attachmentId, 'link-abc');
+      expect(placed.attachment.name, 'HARBORLIGHT TALENT AGREEMENT.pdf');
+      expect(placed.asImage, isFalse);
+      expect((layout.segments[2] as BodyTextSegment).text, 'today.');
+      expect(layout.chips, isEmpty);
+      expect(layout.plainText, 'Please review today.');
+    });
+
     test('a marker naming nothing leaves nothing behind', () {
       final layout = layOutBody('Sent it over [[att:gone]]', const []);
 

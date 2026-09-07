@@ -25,9 +25,14 @@ import '../attachment_format.dart';
 /// better said than half-drawn.
 enum PreviewKind { image, pdf, sheet, text, document, eml, link, unsupported }
 
-/// Kinds that are a POINTER to a file rather than a file, and are therefore
-/// never fetched: the preview offers the link out instead.
-const Set<String> _linkKinds = {'reference', 'card', 'message_reference'};
+/// Kinds that point at something that is NOT a file — a card is a rendering of
+/// a message, a `message_reference` a quote of one — and are therefore never
+/// fetched: the preview offers the link out instead.
+///
+/// A `reference` is not one of them. A mail link is a real file kept on a
+/// drive, and it previews like any other file once its name or its type says
+/// what it is.
+const Set<String> _linkKinds = {'card', 'message_reference'};
 
 /// Which body the panel would build for [ref].
 PreviewKind previewKindFor(AttachmentRef ref) {
@@ -38,7 +43,12 @@ PreviewKind previewKindFor(AttachmentRef ref) {
 
   final byName = _kindForExtension(extensionOf(ref.name));
   if (byName != null) return byName;
-  return _kindForContentType(ref.contentType) ?? PreviewKind.unsupported;
+  final byType = _kindForContentType(ref.contentType);
+  if (byType != null) return byType;
+  // A link nothing could name still has somewhere to go: an extensionless
+  // SharePoint url with no content type is shown as the link it came as,
+  // rather than as a file this app has decided it cannot draw.
+  return ref.kind == 'reference' ? PreviewKind.link : PreviewKind.unsupported;
 }
 
 /// Whether this file's words should be set in the mono face.

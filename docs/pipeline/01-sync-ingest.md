@@ -37,4 +37,12 @@ queue `attachment_text` work for the rows the text policy accepts — and only
 that kind, since a digest of a document nobody has extracted yet is a call
 that can only fail. Rows are written on EVERY sighting, not only the first: an
 edit can add a file, and the upsert preserves everything the handlers and the
-owner wrote. See [12-attachments.md](12-attachments.md).
+owner wrote.
+
+The mail detail fetch also REWRITES the body it stores. Outlook's "attach as
+link" is not in Graph's attachment list at all — it is a zero-width-space
+delimited run in the body — so `_fetchDetailInto` parses it out
+(`owa_links.dart`), replaces the run with an `[[att:<id>]]` marker, writes a
+`reference` row numbered after the connector's own, and raises the paperclip
+even though the message said `hasAttachments: false`. See
+[12-attachments.md](12-attachments.md).

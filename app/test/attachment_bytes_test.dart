@@ -184,20 +184,46 @@ void main() {
       );
     });
 
-    test('a link is refused without a fetch', () async {
+    test('a pointer at something that is not a file is refused without a fetch',
+        () async {
+      for (final kind in ['card', 'message_reference', 'other']) {
+        final attachment = ref(
+          kind: kind,
+          attachmentId: 'a-$kind',
+          sourceUrl: 'https://example.invalid/x',
+        );
+        await seed(attachment);
+
+        await expectLater(
+          bytes.bytesFor(attachment),
+          throwsA(
+            isA<AttachmentUnavailable>()
+                .having((e) => e.reason, 'reason', 'link'),
+          ),
+          reason: kind,
+        );
+      }
+      expect(backend.fetchCalls, 0);
+    });
+
+    test('a link to a file is fetched by its url and cached', () async {
+      // A mail link IS a file — it just lives on a drive — so it goes down the
+      // same ladder as everything else, cache included.
       final attachment = ref(
         kind: 'reference',
-        sourceUrl: 'https://example.invalid/x.docx',
+        name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+        size: 0,
+        sourceUrl: 'https://example.invalid/:b:/g/personal/x/abc',
       );
       await seed(attachment);
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] =
+          payload('the agency letter');
 
-      await expectLater(
-        bytes.bytesFor(attachment),
-        throwsA(
-          isA<AttachmentUnavailable>().having((e) => e.reason, 'reason', 'link'),
-        ),
-      );
-      expect(backend.fetchCalls, 0);
+      expect(await bytes.bytesFor(attachment), payload('the agency letter'));
+      expect(backend.fetchCalls, 1);
+
+      expect(await bytes.bytesFor(attachment), payload('the agency letter'));
+      expect(backend.fetchCalls, 1, reason: 'the second read is the cache');
     });
 
     test('a failure is not remembered — the next click tries again', () async {
@@ -275,6 +301,35 @@ void main() {
           reason: 'OneDrive renders it; this app never downloads the workbook');
     });
 
+    test("a link's thumbnail is the drive's rendering first", () async {
+      final attachment = ref(
+        kind: 'reference',
+        name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+        size: 0,
+        sourceUrl: 'https://example.invalid/:b:/g/personal/x/abc',
+      );
+      await seed(attachment);
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] =
+          payload('a rendering');
+      var drawn = 0;
+      final withPdf = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        pdfThumbnailer: (pdfBytes, {int maxWidth = 320}) async {
+          drawn++;
+          return payload('drawn');
+        },
+      );
+
+      final thumb = await withPdf.thumbnailFor(attachment);
+
+      expect(thumb, payload('a rendering'));
+      expect(backend.thumbnailWords, ['small'],
+          reason: 'the drive draws it; this app never downloads the file');
+      expect(drawn, 0);
+    });
+
     test('a chat PDF asks the drive for its picture before downloading it',
         () async {
       final attachment = ref(
@@ -304,6 +359,40 @@ void main() {
       expect(thumb, payload('a rendering'));
       expect(backend.thumbnailWords, ['small']);
       expect(drawn, 0, reason: 'OneDrive answered, so the file never came down');
+    });
+
+    test('a drive with no picture of a linked PDF still gets its first page '
+        'drawn', () async {
+      // "The drive has no rendering to give" arrives as a REFUSAL, not an
+      // empty answer, and a refusal must not end the ladder: the PDF branch
+      // is the fallback for exactly this case.
+      final attachment = ref(
+        kind: 'reference',
+        name: 'HARBORLIGHT TALENT AGREEMENT.pdf',
+        contentType: null,
+        size: 0,
+        sourceUrl: 'https://southbayequity2-my.sharepoint.com/:b:/g/x',
+      );
+      await seed(attachment);
+      backend.throwOnThumbnail = const AttachmentUnavailable('no_thumbnail');
+      backend.bytesByKey[FakeAttachmentBackend.keyOf(attachment)] =
+          payload('%PDF-1.7 pretend');
+      var drawn = 0;
+      final withPdf = StoreAttachmentBytes(
+        store: store,
+        backend: backend,
+        cache: cache,
+        pdfThumbnailer: (pdfBytes, {int maxWidth = 320}) async {
+          drawn++;
+          return payload('drawn');
+        },
+      );
+
+      final thumb = await withPdf.thumbnailFor(attachment);
+
+      expect(thumb, payload('drawn'));
+      expect(backend.thumbnailWords, ['small', '']);
+      expect(drawn, 1);
     });
 
     test("a PDF's thumbnail is what the thumbnailer draws, and is remembered",

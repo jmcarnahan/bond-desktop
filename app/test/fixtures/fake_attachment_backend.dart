@@ -40,6 +40,11 @@ class FakeAttachmentBackend implements AttachmentBackend {
   /// transport failure; left null for the ordinary case.
   Object? throwOnFetch;
 
+  /// Thrown by [fetchBytes] only when a rendering (a non-empty `thumbnail`
+  /// word) was asked for — a drive that has no picture of a file to give,
+  /// which the connectors say as `AttachmentUnavailable('no_thumbnail')`.
+  Object? throwOnThumbnail;
+
   /// The ceiling this connector claims. Settable because the cap is a property
   /// of the connector now — the MCP server answers 10 MiB and the SDK path
   /// 25 MiB — and a test about the cap has to be able to be either of them.
@@ -66,6 +71,8 @@ class FakeAttachmentBackend implements AttachmentBackend {
     thumbnailWords.add(thumbnail);
     final failure = throwOnFetch;
     if (failure != null) throw failure;
+    final noRendering = throwOnThumbnail;
+    if (thumbnail.isNotEmpty && noRendering != null) throw noRendering;
     return AttachmentBytesResult(
       bytesByKey[keyOf(ref)] ?? Uint8List(0),
       contentType: ref.contentType,
