@@ -188,6 +188,33 @@ every question ever put to them and not one of their answers, and the model
 writes open items they settled last week. Nothing above the SQL needed changing
 — the prompt already renders these lines as `You`.
 
+**The documents in the window.** After the gate and before the call, the
+service reads `MessageStore.digestsForMessages` **once per distinct source in
+the window** — a second query, never a join onto the window read, which is
+already a UNION across every member thread. Each message line then carries one
+aside per digested attachment that recorded facts: ` ⟨attached <name>:
+<fact>; <fact>⟩`. The facts and not the summary, because "the quote came in" is
+what the message line already says and "48,200 total, valid 30 days" is what it
+cannot. A document with no facts contributes nothing.
+
+Digests are **never filtered by direction** — the window carries the owner's
+own messages on purpose, and the quote they sent is as much of the story as the
+one they received.
+
+**The pinned footer.** After the message lines, one line per document pinned to
+this storyline whose message is **not** already in the window:
+`⟨pinned <name>: <summary>⟩`, or `⟨pinned <name>⟩` when nothing has read it. A
+footer rather than an interleaved line because the window is chronological and
+a pin has no place in that order; the summary rather than the facts because a
+pinned document is being named for what it *is*. A pin whose message is in the
+window is skipped — its own line already carries it, and saying it twice is how
+a recap starts reading as though two things happened.
+
+Both are clamped to 160 characters, and the clamp bites the text *inside* the
+angle brackets so the closing `⟩` survives. `_recapLineCap = 400` still applies
+to the message text before its aside, and `StorylineRecapTask._messagesCap =
+6000` is the final clamp on the whole window — there is no third one.
+
 **The gate** is the `recap_through` watermark (schema v10): the pass returns
 before any model call when `recap_through >= ` the newest `received_at` in the
 window. ISO-8601 with a fixed offset compares correctly as a string, so no
@@ -319,6 +346,44 @@ storyline does not mean going back to the overview to ask for the pass that
 brings it up to date. It is one action and one flag: the screen owns the sync
 and hands the panel the label, which is why both buttons read *Syncing…*
 together.
+
+Beside *About* in that same row sits **Documents**, which counts what it holds
+— *3 documents*, or the bare word when the storyline's threads carry no files
+at all, so a storyline answers "is there anything on the shelf" without a tap.
+It unfolds `AttachmentDocumentsStrip` under the header, where the member strip
+and the About block unfold, and folds again on a second press.
+
+The shelf is **every document on the storyline's threads, the pinned ones
+first** — `storylineDocumentsProvider` over `attachmentsForStoryline`, not a
+pin list. A storyline is several conversations about one thing and the file
+somebody is looking for is nearly always simply on one of them; pinning is how
+they float the one that matters most, and how they keep a file whose thread
+later leaves. Inline images are excluded by the store: a signature graphic is
+not a document. Each entry is the file's glyph and name over its size and the
+model's one-line read, with a 📌 in front of a file pinned to *this* storyline;
+tapping one opens it.
+
+Both directions are on the entry itself. An unpinned document offers **Pin**,
+one tap, and floats to the top. A pinned one offers **Remove**, two taps in
+place — the second reads *Remove document* beside a *Cancel*. Unpinning takes
+the pin, not the file: a document whose thread is still a member stays on the
+shelf and simply stops floating, which is why the bar reads *Unpinned
+<name>.* A pane handed no pin or unpin closure shows neither control.
+
+Files also get onto that shelf from the other end: **Pin to storyline** on the
+preview panel and on the full viewer, which is the only way a file on a thread
+that is *not* a member gets here. From an open thread the pin goes to the
+oldest storyline that thread is live in — the same `storylineIdsFor(...).first`
+pick the hand-filing stamp makes, for the same reason: two answers about "this
+thread's storyline" have to agree. From the storyline pane it goes to the
+storyline on screen. A thread in no storyline is offered no button rather than
+a dead one, and a file already pinned reads *Pinned* and does nothing.
+
+A chip or a thumbnail inside one of the spine's messages opens the file too,
+and on this pane it opens the **full viewer**: there is no split here, because
+the storyline pane is already several conversations side by side and halving
+it again leaves neither readable. *Back* out of that viewer lands on the
+storyline, not on a split that was never there.
 
 Refresh and recap both report progress under their own kinds, and
 `StorylinesNotifier` listens for both, so a pass that rewrites a title or a

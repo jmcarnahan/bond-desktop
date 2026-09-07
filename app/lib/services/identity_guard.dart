@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../data/message_store.dart';
 import 'backend/backend_types.dart';
 
@@ -16,9 +18,20 @@ import 'backend/backend_types.dart';
 /// person reaching the same mailbox through the deployed platform and through a
 /// local server is one owner, and must not lose their mail for switching.
 class IdentityGuard {
-  IdentityGuard(this._store);
+  IdentityGuard(this._store, {this.onWipe});
 
   final MessageStore _store;
+
+  /// Everything OUTSIDE the database that belongs to the departing identity.
+  ///
+  /// The wipe empties sqlite, and sqlite is not the whole of what this app
+  /// keeps: the attachment cache is a tree of files under Application Support
+  /// holding somebody's contracts and screenshots. Deleting the rows that point
+  /// at them would leave the files themselves on disk, readable by the next
+  /// person to sign in — which is precisely the leak this class exists to
+  /// close. Optional because the guard is constructed in tests that have no
+  /// cache; null means there is nothing else to clear.
+  final Future<void> Function()? onWipe;
 
   /// Claims the database for [account], wiping it first if it belonged to
   /// somebody else. True only when a wipe happened, so the caller knows the
@@ -45,6 +58,19 @@ class IdentityGuard {
     // The one case this class exists for. The wipe clears db_owner along with
     // the mail, so the claim below is the write that re-establishes ownership.
     await _store.wipeAll();
+    // Right after the rows, and before the new owner is recorded: whatever
+    // this clears belongs to the identity that just lost the database.
+    //
+    // Its failure is logged and not raised. The rows are already gone by this
+    // point, so a throw here would abandon the adoption half-done — an empty
+    // database with the OLD owner still recorded on it, which is the one state
+    // this class must never leave behind. A cache that could not be emptied is
+    // files without rows; a database claimed by the wrong person is the bug.
+    try {
+      await onWipe?.call();
+    } on Object catch (e) {
+      debugPrint('identity wipe could not clear the local files: $e');
+    }
     await _store.setPref(dbOwnerKey, identity);
     return true;
   }

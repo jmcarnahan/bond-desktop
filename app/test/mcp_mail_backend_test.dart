@@ -195,7 +195,67 @@ void main() {
           {'name': 'precedence', 'value': 'bulk'},
         ],
         'hasAttachments': true,
+        'attachments': <Map<String, Object?>>[],
       });
+    });
+
+    test('the attachment summaries ride through untouched', () async {
+      // The server's flat summary IS the shape the `attachments` columns are
+      // named after, so nothing here rebuilds it — a key this backend renamed
+      // would be a key the sync silently dropped.
+      final mcp = _FakeMcp({
+        'get_mail_detail': [
+          {
+            'body_text': 'Signed copy attached.',
+            'headers': <String, Object?>{},
+            'has_attachments': true,
+            'attachments': [
+              {
+                'id': 'att-1',
+                'name': 'lease-addendum.pdf',
+                'content_type': 'application/pdf',
+                'size': 184320,
+                'is_inline': false,
+                'content_id': null,
+                'kind': 'file',
+                'source_url': null,
+              },
+            ],
+          },
+        ],
+      });
+
+      final detail = await McpMailBackend(mcp).getMessageDetail('m1');
+
+      expect(detail['attachments'], [
+        {
+          'id': 'att-1',
+          'name': 'lease-addendum.pdf',
+          'content_type': 'application/pdf',
+          'size': 184320,
+          'is_inline': false,
+          'content_id': null,
+          'kind': 'file',
+          'source_url': null,
+        },
+      ]);
+    });
+
+    test('a server that sends no attachments reads as none, not as null',
+        () async {
+      final mcp = _FakeMcp({
+        'get_mail_detail': [
+          {
+            'body_text': 'No files here.',
+            'headers': <String, Object?>{},
+            'has_attachments': false,
+          },
+        ],
+      });
+
+      final detail = await McpMailBackend(mcp).getMessageDetail('m1');
+
+      expect(detail['attachments'], isEmpty);
     });
 
     test('a null-valued header is dropped rather than emptied', () async {

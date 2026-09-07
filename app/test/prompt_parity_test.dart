@@ -1,4 +1,7 @@
+import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
@@ -29,6 +32,7 @@ void main() {
   const draft = DraftTask();
   const replyDecision = ReplyDecisionTask();
   const needsYou = NeedsYouTask();
+  const attachmentDigest = AttachmentDigestTask();
 
   final emailMessage = Message(
     id: 'm1',
@@ -54,20 +58,51 @@ void main() {
 
   final now = DateTime(2026, 8, 29);
 
-  DraftInput draftInput(Message message) => DraftInput(
+  const excerpt = AttachmentExcerpt(
+    name: 'Lease Addendum.pdf',
+    locator: 'part 2',
+    sender: 'Jordan Feld',
+    date: '2026-08-28',
+    text: 'The rent rises to 2,600 on 1 January.',
+    ref: AttachmentRef(
+      source: 'email',
+      messageId: 'm1',
+      attachmentId: 'a1',
+    ),
+  );
+
+  DraftInput draftInput(Message message,
+          {List<AttachmentExcerpt> excerpts = const []}) =>
+      DraftInput(
         thread: [message],
         replyTo: message,
+        attachmentExcerpts: excerpts,
         now: now,
       );
 
-  ReplyDecisionInput replyDecisionInput(Message message) => ReplyDecisionInput(
+  ReplyDecisionInput replyDecisionInput(Message message,
+          {List<AttachmentExcerpt> excerpts = const []}) =>
+      ReplyDecisionInput(
         context: const [],
         message: message,
+        attachmentExcerpts: excerpts,
         now: now,
       );
 
-  NeedsYouInput needsYouInput(Message message) => NeedsYouInput(
+  NeedsYouInput needsYouInput(Message message,
+          {List<String> digests = const []}) =>
+      NeedsYouInput(
         message: message,
+        attachmentDigests: digests,
+        now: now,
+      );
+
+  AttachmentDigestInput digestInput(Message message) => AttachmentDigestInput(
+        message: message,
+        name: 'Lease Addendum.pdf',
+        contentType: 'application/pdf',
+        size: 240 * 1024,
+        text: 'The tenant pays 2,400 on the fourth of each month.',
         now: now,
       );
 
@@ -114,6 +149,12 @@ void main() {
       expect(betweenTwo, before);
       expect(after, before);
       expect(identical(after, before), isTrue);
+
+      // And with documents retrieved into it, which is a whole block of text
+      // the prompt did not used to carry — and which lives in the USER message
+      // precisely so this stays true.
+      draft.buildUserMessage(draftInput(emailMessage, excerpts: [excerpt]));
+      expect(identical(draft.systemPrompt, before), isTrue);
     });
 
     test('the reply decision hands back the identical string across both', () {
@@ -126,6 +167,10 @@ void main() {
       expect(betweenTwo, before);
       expect(after, before);
       expect(identical(after, before), isTrue);
+
+      replyDecision
+          .buildUserMessage(replyDecisionInput(emailMessage, excerpts: [excerpt]));
+      expect(identical(replyDecision.systemPrompt, before), isTrue);
     });
 
     test('needs-you hands back the identical string across both channels', () {
@@ -134,6 +179,28 @@ void main() {
       final betweenTwo = needsYou.systemPrompt;
       needsYou.buildUserMessage(needsYouInput(chatMessage));
       final after = needsYou.systemPrompt;
+
+      expect(betweenTwo, before);
+      expect(after, before);
+      expect(identical(after, before), isTrue);
+
+      needsYou.buildUserMessage(needsYouInput(
+        emailMessage,
+        digests: const ['Lease Addendum.pdf: The rent rises in January.'],
+      ));
+      expect(identical(needsYou.systemPrompt, before), isTrue);
+    });
+
+    test('the attachment digest hands back the identical string across both',
+        () {
+      // The task with the least reason to know its channel and the most to
+      // gain from not knowing: one KV prefix serves every document in the
+      // mailbox, whichever connector carried it.
+      final before = attachmentDigest.systemPrompt;
+      attachmentDigest.buildUserMessage(digestInput(emailMessage));
+      final betweenTwo = attachmentDigest.systemPrompt;
+      attachmentDigest.buildUserMessage(digestInput(chatMessage));
+      final after = attachmentDigest.systemPrompt;
 
       expect(betweenTwo, before);
       expect(after, before);
@@ -212,6 +279,16 @@ void main() {
       expect(prompt, isNot(contains('chat')));
     });
 
+    test('the attachment-digest prompt does not name a channel at all', () {
+      // The STRICT form, like needs-you's. It reads a DOCUMENT, and how the
+      // document arrived is exactly the thing the rules tell the model to say
+      // nothing about.
+      final prompt = attachmentDigest.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
     test('no prompt names a connector', () {
       // "teams" is not on this list on purpose: the extraction prompt asks for
       // "companies, schools, teams, or vendors", which is a kind of
@@ -222,6 +299,7 @@ void main() {
         draft.systemPrompt,
         replyDecision.systemPrompt,
         needsYou.systemPrompt,
+        attachmentDigest.systemPrompt,
       ]) {
         expect(prompt.toLowerCase(), isNot(contains('microsoft')));
         expect(prompt.toLowerCase(), isNot(contains('outlook')));
@@ -281,6 +359,25 @@ void main() {
         );
       }
     });
+
+    test('the digest fences the covering message and the document apart', () {
+      for (final message in [emailMessage, chatMessage]) {
+        final built = attachmentDigest.buildUserMessage(digestInput(message));
+        // Two fences and not one, because they are two different things to the
+        // model: the message is why the document was sent, and the document is
+        // the only thing being read.
+        expect(
+          built,
+          contains('<untrusted_data source="message">'),
+          reason: message.source,
+        );
+        expect(
+          built,
+          contains('<untrusted_data source="document">'),
+          reason: message.source,
+        );
+      }
+    });
   });
 
   group('the drafting channel note lives in the USER message', () {
@@ -321,6 +418,93 @@ void main() {
       expect(chat, isNot(contains('under 150 words')));
       expect(mail, isNot(contains('This is an instant-message chat.')));
       expect(mail, isNot(contains('under 50 words')));
+    });
+  });
+
+  group('attachments do not reach a system prompt', () {
+    // A Teams body records where a shared file sat as `[[att:<id>]]`. Every
+    // user message strips those (attachment_markers_test is the exhaustive
+    // pass); the point HERE is that adding an attachment to a message cannot
+    // move a system prompt, because that is the byte the prefix cache is
+    // keyed on.
+    final withAttachment = Message(
+      id: 'c2',
+      source: 'teams',
+      outbound: false,
+      fromName: 'Dana Kessler',
+      fromAddress: 'teams:8f2c-…',
+      bodyText: 'Signed copy [[att:file-1]].',
+      receivedAt: '2026-08-29T16:05:00Z',
+      attachments: const [
+        AttachmentRef(
+          source: 'teams',
+          messageId: 'c2',
+          attachmentId: 'file-1',
+          name: 'lease-addendum.pdf',
+        ),
+      ],
+    );
+
+    test('the triage system prompt is identical with and without them', () {
+      final before = triage.systemPrompt;
+      triage.buildUserMessage(TriageInput(
+        withAttachment,
+        now,
+        attachments: const [
+          {'attachment_id': 'file-1', 'name': 'lease-addendum.pdf',
+            'size': 184320, 'is_inline': 0},
+        ],
+      ));
+
+      expect(identical(triage.systemPrompt, before), isTrue);
+    });
+
+    test('and so is every other one', () {
+      final before = [
+        extract.systemPrompt,
+        draft.systemPrompt,
+        replyDecision.systemPrompt,
+        needsYou.systemPrompt,
+        attachmentDigest.systemPrompt,
+      ];
+
+      extract.buildUserMessage(ExtractionInput(withAttachment, now));
+      draft.buildUserMessage(draftInput(withAttachment));
+      replyDecision.buildUserMessage(replyDecisionInput(withAttachment));
+      needsYou.buildUserMessage(needsYouInput(withAttachment));
+      attachmentDigest.buildUserMessage(digestInput(withAttachment));
+
+      expect(identical(extract.systemPrompt, before[0]), isTrue);
+      expect(identical(draft.systemPrompt, before[1]), isTrue);
+      expect(identical(replyDecision.systemPrompt, before[2]), isTrue);
+      expect(identical(needsYou.systemPrompt, before[3]), isTrue);
+      expect(identical(attachmentDigest.systemPrompt, before[4]), isTrue);
+    });
+
+    test('a marker in the covering message never reaches the digest prompt',
+        () {
+      // The digest renders its message through `buildMessageBlock`, which is
+      // the one place a marker is stripped for every prompt in the app.
+      final built = attachmentDigest.buildUserMessage(
+        digestInput(withAttachment),
+      );
+
+      expect(built, isNot(contains('[[att:')));
+      expect(built, contains('Signed copy'));
+    });
+
+    test('no system prompt names an attachment marker', () {
+      for (final prompt in [
+        triage.systemPrompt,
+        extract.systemPrompt,
+        draft.systemPrompt,
+        replyDecision.systemPrompt,
+        needsYou.systemPrompt,
+        attachmentDigest.systemPrompt,
+      ]) {
+        expect(prompt, isNot(contains('[[att:')));
+        expect(prompt, isNot(contains('[[img:')));
+      }
     });
   });
 }

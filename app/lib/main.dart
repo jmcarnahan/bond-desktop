@@ -8,12 +8,26 @@ import 'providers/prefs_provider.dart';
 import 'screens/inbox_screen.dart';
 import 'screens/sign_in_screen.dart';
 import 'services/triage_queue.dart';
+import 'widgets/preview/pdf_preview.dart';
 import 'theme/bond_theme.dart';
 
 Future<void> main() async {
   // Required before path_provider's platform channel can be called, which
   // openAppDb does.
   WidgetsFlutterBinding.ensureInitialized();
+
+  // pdfium is loaded here so the first PDF anybody opens does not pay the
+  // init on the UI thread. Called through the wrapper next to the renderer so
+  // this file is not a second import site for pdfrx.
+  try {
+    await initPdfEngine();
+  } on Object catch (e) {
+    // Guarded because a native library that fails to load is a launch
+    // failure only if it is allowed to be one: the viewer re-attempts the
+    // init on first use and shows its own error, and the mail is worth
+    // reading without it.
+    debugPrint('pdf engine did not initialise: $e');
+  }
 
   // Opened once, here, rather than lazily behind a provider: the open is
   // async, every screen needs it, and a database that cannot be opened is a
@@ -51,6 +65,10 @@ Future<void> main() async {
         // that arrived after the app was already open, and this is the only
         // place that knows when that was.
         sessionStartProvider.overrideWithValue(DateTime.now()),
+        // The one place the app admits it has pdfium. The provider's default
+        // is null, so nothing under `flutter test` can reach a native library
+        // by rendering a row.
+        pdfThumbnailerProvider.overrideWithValue(pdfPageOnePng),
       ],
       child: const BondInboxApp(),
     ),

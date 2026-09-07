@@ -1,6 +1,7 @@
 import 'package:intl/intl.dart';
 
 import '../../models/message_models.dart';
+import '../attachments/attachment_markers.dart';
 import 'json_task.dart';
 import 'message_block.dart';
 import 'prompt_guard.dart';
@@ -42,7 +43,24 @@ class TriageInput {
   /// message, or a caller with no thread to hand over — and costs nothing.
   final List<Message> thread;
 
-  const TriageInput(this.message, this.now, {this.thread = const []});
+  /// The message's attachment rows, as [MessageStore.attachmentsForMessage]
+  /// returns them. Names and sizes only — nothing here waits for a download,
+  /// and triage never sees a document's contents.
+  ///
+  /// Raw rows rather than [AttachmentRef] because the queue reads them straight
+  /// out of the store and hands them over, and the line below wants three
+  /// columns of them.
+  ///
+  /// Empty is the ordinary case, and also what a failed detail fetch leaves
+  /// behind — the line is simply absent, and triage is never delayed for it.
+  final List<Map<String, Object?>> attachments;
+
+  const TriageInput(
+    this.message,
+    this.now, {
+    this.thread = const [],
+    this.attachments = const [],
+  });
 }
 
 /// Classifies one inbound message — mail or chat: urgency, category, a short
@@ -73,6 +91,14 @@ class TriageTask implements JsonTask<TriageResult> {
   /// Per quoted message, and much tighter than the judged message's own cap:
   /// the tail is there to show what was asked, not to be classified itself.
   static const int _threadMessageCap = 300;
+
+  /// How many attachments the line names, and how long the whole line may get.
+  /// Both are about prompt cost rather than truth: a message carrying twenty
+  /// files is a distribution list, and the first few names are what say what it
+  /// is. The clamp is on the joined list, so one absurdly long filename cannot
+  /// push the judged message down the prompt.
+  static const int _maxAttachmentNames = 5;
+  static const int _attachmentLineCap = 120;
 
   static const Set<String> _urgencies = {'low', 'normal', 'high', 'urgent'};
   static const Set<String> _categories = {
@@ -147,12 +173,70 @@ class TriageTask implements JsonTask<TriageResult> {
   @override
   String buildUserMessage(TriageInput input) {
     final threadText = _threadText(input.thread);
-    return 'Today is ${_date.format(input.now)} '
-        '(${_weekday.format(input.now)}).\n'
-        '${buildDirectnessLine(input.message)}\n'
-        '${threadText.isEmpty ? '' : 'Recent thread before this message, oldest first, for context:\n${wrapUntrusted('thread', threadText)}\n'}'
-        'Judge ONLY this message:\n'
-        '${wrapUntrusted('inbound_message', buildMessageBlock(input.message))}';
+    final attachmentLine = _attachmentLine(input.attachments);
+    final buffer = StringBuffer()
+      ..writeln('Today is ${_date.format(input.now)} '
+          '(${_weekday.format(input.now)}).')
+      ..writeln(buildDirectnessLine(input.message));
+    if (attachmentLine.isNotEmpty) buffer.writeln(attachmentLine);
+    if (threadText.isNotEmpty) {
+      buffer
+        ..writeln('Recent thread before this message, oldest first, for '
+            'context:')
+        ..writeln(wrapUntrusted('thread', threadText));
+    }
+    return (buffer
+          ..writeln('Judge ONLY this message:')
+          ..write(wrapUntrusted(
+            'inbound_message',
+            buildMessageBlock(input.message),
+          )))
+        .toString();
+  }
+
+  /// What came with the message, named and sized — or nothing.
+  ///
+  /// OUTSIDE the fence, with the directness line, and for the same reason: it
+  /// is the APP's own statement about the message, built from columns the
+  /// connector wrote, not text the sender composed. A model may act on it.
+  ///
+  /// The FILE NAMES inside it are the sender's, and a filename is as
+  /// attacker-controlled as a body — so they ride inside their own
+  /// `attachment_names` fence on the same logical line. The sentence around
+  /// them is the app's; the names are data.
+  ///
+  /// Inline rows are left out. A signature logo is not something that came with
+  /// a message in any sense the reader cares about, and listing three of them
+  /// would make every reply look like it carried files.
+  static String _attachmentLine(List<Map<String, Object?>> attachments) {
+    final named = <String>[];
+    for (final attachment in attachments) {
+      if (attachment['is_inline'] == 1 || attachment['is_inline'] == true) {
+        continue;
+      }
+      final name = (attachment['name'] as String? ?? '').trim();
+      final size = (attachment['size'] as num?)?.toInt() ?? 0;
+      named.add('${name.isEmpty ? 'a file' : name}${_sizeSuffix(size)}');
+      if (named.length >= _maxAttachmentNames) break;
+    }
+    if (named.isEmpty) return '';
+    final joined = named.join(', ');
+    return 'Attachments: ${wrapUntrusted('attachment_names', joined.length > _attachmentLineCap ? joined.substring(0, _attachmentLineCap) : joined)}';
+  }
+
+  /// ` (2.4 MB)`, ` (48 KB)`, or nothing at all.
+  ///
+  /// Nothing for zero, because zero means UNKNOWN here rather than empty — the
+  /// Teams wire never states a size — and "(0 B)" would be a claim about the
+  /// file rather than an admission that nobody said.
+  static String _sizeSuffix(int size) {
+    if (size <= 0) return '';
+    if (size < 1024) return ' ($size B)';
+    if (size < 1024 * 1024) return ' (${(size / 1024).round()} KB)';
+    final mb = size / (1024 * 1024);
+    return mb < 10
+        ? ' (${mb.toStringAsFixed(1)} MB)'
+        : ' (${mb.round()} MB)';
   }
 
   /// The tail rendered as a transcript: who spoke, then what they said.
@@ -175,10 +259,13 @@ class TriageTask implements JsonTask<TriageResult> {
     ].join('\n---\n');
   }
 
-  static String _body(Message message) =>
-      message.bodyText?.isNotEmpty == true
-          ? message.bodyText!
-          : (message.bodyPreview ?? '');
+  /// Markers out, for [buildMessageBlock]'s reason — the tail is quoted text
+  /// too, and a `[[att:…]]` in it is a token nobody typed.
+  static String _body(Message message) => stripAttachmentMarkers(
+        message.bodyText?.isNotEmpty == true
+            ? message.bodyText!
+            : message.bodyPreview,
+      );
 
   /// Clamps every field to something the inbox can render.
   ///

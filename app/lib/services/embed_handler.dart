@@ -1,7 +1,9 @@
 import '../data/message_store.dart';
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
+import 'attachments/attachment_markers.dart';
 import 'extract_handler.dart';
 import 'llm/embeddings_client.dart';
 import 'llm/llm_client.dart';
@@ -46,13 +48,32 @@ Future<MessageEmbedOutcome> embedMessageRow(
 ) async {
   final id = row['source_message_id'] as String? ?? '';
   final body = row['body_text'] as String?;
+  // **The one place the card's body is stripped of attachment markers.**
+  // [ExtractHandler] and [EmbedHandler] both come through here, and a strip in
+  // either of them alone would give the two callers different cards and
+  // different hashes for the same message.
+  //
+  // The cost of the change is one slow drain: every Teams message that carries
+  // a marker gets a new `cardHash` and re-embeds once.
+  final stripped = stripAttachmentMarkers(
+    (body?.isNotEmpty ?? false) ? body : row['body_preview'] as String?,
+  );
+  // A message whose whole content was a shared file would otherwise embed as a
+  // subject and a sender, and be findable by neither the file's name nor
+  // anything about it.
+  final cardBody = stripped.isEmpty
+      ? attachmentStandIn([
+          for (final attachment in await store.attachmentsForMessage(source, id))
+            AttachmentRef.fromRow(attachment),
+        ])
+      : stripped;
   final card = buildMessageCard(
     subject: row['subject'] as String?,
     sender: senderLine(Message.fromRow(row)),
     // The stored triage summary when there is one. The preview is the fallback
     // for a message whose body never came down with the delta.
     summary: row['summary'] as String?,
-    body: (body?.isNotEmpty ?? false) ? body : row['body_preview'] as String?,
+    body: cardBody,
   );
   final hash = cardHash(card);
 

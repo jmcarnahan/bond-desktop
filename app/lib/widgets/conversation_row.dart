@@ -165,6 +165,11 @@ class ConversationRow extends StatelessWidget {
                           if (c.ctaUrgency == CtaUrgency.urgent)
                             const BondChip(
                                 label: 'Urgent', tone: BondTone.attention),
+                          // What came with the thread, counted at read time
+                          // over its non-inline attachments — a signature logo
+                          // is not a file somebody sent.
+                          if (c.attachmentCount > 0)
+                            BondChip.metric('📎 ${c.attachmentCount}'),
                           BondChip.metric(
                             c.messageCount == 1
                                 ? '1 message'

@@ -87,6 +87,8 @@ class ActivityLogPanel extends StatefulWidget {
     'storyline_recruit': 'Storyline recruit',
     'embed_fail': 'Embeddings',
     'restore': 'Restore',
+    'attachment_text': 'Read attachment',
+    'attachment_digest': 'Attachment digest',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -213,6 +215,18 @@ class ActivityLogPanel extends StatefulWidget {
         // end at "rejected", exactly as they were written.
         final joined = detail['joined'];
         return joined is num ? '$sentence, ${joined.toInt()} joined' : sentence;
+      // Neither attachment row can name its file: the entity is
+      // `<message id>|<attachment id>`, and the name lives on a table this
+      // panel does not read. So each says what it produced instead — the
+      // passages a document became, and what the model decided it was.
+      case 'attachment_text':
+        final chunks = detail['chunks'];
+        if (chunks is! num) return label;
+        final count = chunks.toInt();
+        return '$label — $count ${count == 1 ? 'passage' : 'passages'}';
+      case 'attachment_digest':
+        final kind = detail['kind'];
+        return kind is String && kind.isNotEmpty ? '$label — $kind' : label;
       case 'storyline_recruit':
         final recruited = detail['recruited'];
         final considered = detail['considered'];

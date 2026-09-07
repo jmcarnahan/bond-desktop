@@ -94,6 +94,7 @@ class McpMailBackend implements MailBackend {
   Future<Map<String, dynamic>> getMessageDetail(String id) async {
     final result = await _call('get_mail_detail', {'message_id': id});
     final headers = result['headers'];
+    final attachments = result['attachments'];
     return {
       'uniqueBody': {'content': result['body_text']},
       'internetMessageHeaders': [
@@ -103,6 +104,15 @@ class McpMailBackend implements MailBackend {
               {'name': entry.key, 'value': entry.value},
       ],
       'hasAttachments': result['has_attachments'],
+      // The one key deliberately NOT rebuilt into Graph's shape. The server
+      // already flattens Graph's attachment entries into a snake_case summary,
+      // and the `attachments` columns are named after that summary — so the
+      // SDK backend converts INTO this shape rather than this one converting
+      // out of it, and the sync reads one shape from both.
+      'attachments': [
+        for (final entry in attachments is List ? attachments : const [])
+          if (entry is Map) Map<String, Object?>.from(entry),
+      ],
     };
   }
 

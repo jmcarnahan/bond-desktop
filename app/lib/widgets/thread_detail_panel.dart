@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
 import '../theme/tokens.dart';
@@ -79,6 +80,19 @@ class ThreadDetailPanel extends StatelessWidget {
   /// button, for a host with no compose to open.
   final VoidCallback? onCompose;
 
+  /// What opening one of the thread's files does. Null leaves every chip and
+  /// picture in the transcript a statement — the panel has nowhere of its own
+  /// to show a file, and never invents one.
+  final void Function(AttachmentRef attachment)? onOpenAttachment;
+
+  /// The file the host is previewing, so the row that carried it can say so.
+  /// Passed straight down; the comparison is `sameAttachment`, never `==`.
+  final AttachmentRef? selectedAttachment;
+
+  /// The picture for an attachment, or null while there is none. An
+  /// [ImageProvider] rather than bytes or a path — see [MessageRow.thumbnailFor].
+  final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -93,6 +107,9 @@ class ThreadDetailPanel extends StatelessWidget {
     this.suggestionFor,
     this.onOpenReply,
     this.onCompose,
+    this.onOpenAttachment,
+    this.selectedAttachment,
+    this.thumbnailFor,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -169,6 +186,9 @@ class ThreadDetailPanel extends StatelessWidget {
         // thread has moved past. An open ask or a live suggestion is the whole
         // reason to scroll back, so neither ever starts hidden.
         initiallyCollapsed: collapsible && !open && suggestion == null,
+        onOpenAttachment: onOpenAttachment,
+        selectedAttachment: selectedAttachment,
+        thumbnailFor: thumbnailFor,
       ));
       previous = message;
     }
@@ -345,20 +365,17 @@ class ThreadDetailPanel extends StatelessWidget {
           const SizedBox(width: BondSpacing.s12),
           // Before the state chip, because writing to these people is
           // something to DO with the thread, while the chip and the buttons
-          // after it are about the thread's own state.
+          // after it are about the thread's own state. An icon like Back and
+          // More rather than a labelled button: this header shares its width
+          // with the attachment preview in the split, and the title is the
+          // one child that can give, so every label here comes out of it.
           if (onCompose != null) ...[
-            TextButton.icon(
+            IconButton(
               key: const Key('thread-compose'),
               onPressed: onCompose,
-              icon: const Icon(Icons.edit_outlined, size: 16),
-              label: const Text('Message'),
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: BondSpacing.s8,
-                ),
-                minimumSize: const Size(0, 32),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
+              icon: const Icon(Icons.edit_outlined),
+              iconSize: 20,
+              tooltip: 'Message',
             ),
             const SizedBox(width: BondSpacing.s4),
           ],

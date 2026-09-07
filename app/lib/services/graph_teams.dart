@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'backend/backend_types.dart';
 import 'backend/teams_backend.dart';
 import 'graph_auth.dart';
+import 'attachments/attachment_markers.dart' show hostedContentIds;
 
 /// The Microsoft Graph chat reads this app makes: the chat list, one chat's
 /// members, and a chat's messages since a cursor. Nothing here touches sqlite —
@@ -197,6 +198,13 @@ class GraphTeams implements TeamsBackend {
       }
       final json = _decodeObject(response);
       final value = _values(json);
+      // Normalised HERE rather than in the sync, so `TeamsSync` reads one
+      // attachment shape whichever backend it is talking to. The MCP server
+      // already sends this shape; Graph does not, and converting at the point
+      // the sync reads would mean the sync knowing both.
+      for (final message in value) {
+        message['attachments'] = attachmentEntries(message);
+      }
       messages.addAll(value);
 
       // Descending order means the last item on a page is its oldest. Once
@@ -355,6 +363,76 @@ class GraphTeams implements TeamsBackend {
         'user@odata.bind':
             "https://graph.microsoft.com/v1.0/users('$userId')",
       };
+
+  /// One Graph chat message's attachments, as the flat entries the sync reads.
+  ///
+  /// Two sources, in this order. Graph's own `attachments[]` carries the files
+  /// and cards somebody attached; the message's HTML body carries the images
+  /// somebody pasted, as `<img>` tags pointing at hosted content, and Graph
+  /// lists none of those as attachments. Both are things that came with the
+  /// message, so both become rows.
+  ///
+  /// The discriminator for the first group is `contentType`, not an
+  /// `@odata.type` — chat attachments have no subtypes, and the content type is
+  /// what says whether an entry is a shared file, a rendered card, or a quote
+  /// of another message. An unrecognised one is `other`, which the text policy
+  /// refuses by kind rather than fetching bytes it cannot read.
+  ///
+  /// `card_text` is always null: parsing an adaptive card's JSON into a
+  /// sentence is the server's job, and the desktop reads what the server
+  /// rendered rather than rendering a second, differently-wrong version.
+  static List<Map<String, Object?>> attachmentEntries(
+    Map<String, dynamic> message,
+  ) {
+    final entries = <Map<String, Object?>>[];
+    final raw = message['attachments'];
+    if (raw is List) {
+      for (final entry in raw) {
+        if (entry is! Map) continue;
+        final id = entry['id'] as String? ?? '';
+        if (id.isEmpty) continue;
+        final contentType = (entry['contentType'] as String? ?? '')
+            .toLowerCase();
+        entries.add({
+          'id': id,
+          'kind': switch (contentType) {
+            'reference' => 'file',
+            'application/vnd.microsoft.card.adaptive' => 'card',
+            'messagereference' => 'message_reference',
+            _ => 'other',
+          },
+          'name': entry['name'] as String?,
+          'content_type': entry['contentType'] as String?,
+          'content_url': entry['contentUrl'] as String?,
+          'thumbnail_url': entry['thumbnailUrl'] as String?,
+          'card_text': null,
+        });
+      }
+    }
+
+    // Only an HTML body can carry one: a `text` body is what a person typed
+    // and holds no markup at all.
+    for (final id in hostedContentIds(_bodyHtml(message))) {
+      entries.add({
+        'id': id,
+        'kind': 'image',
+        'name': null,
+        'content_type': null,
+        'content_url': null,
+        'thumbnail_url': null,
+        'card_text': null,
+      });
+    }
+    return entries;
+  }
+
+  /// A message's body when it is HTML, and nothing when it is not.
+  static String? _bodyHtml(Map<String, dynamic> message) {
+    final body = message['body'];
+    if (body is! Map) return null;
+    if (body['contentType'] != 'html') return null;
+    return body['content'] as String?;
+  }
 
   /// Whether this page's oldest message is at or before the cursor.
   ///

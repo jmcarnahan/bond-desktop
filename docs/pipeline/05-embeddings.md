@@ -12,6 +12,16 @@ are never mixed:
    in `EmbedHandler` (`app/lib/services/embed_handler.dart`) for anything the
    fast path missed.
 
+**Attachment markers and the card hash.** `embedMessageRow` strips
+`[[att:…]]` / `[[img:…]]` markers out of the body before building the card, and
+it is the ONE place that happens on this path — `ExtractHandler` and
+`EmbedHandler` both come through it, and a strip in either alone would give
+them different cards and different hashes for the same message. Adding that
+strip changes `cardHash` for every marker-bearing Teams message, which costs
+one slow re-embed drain and nothing else. A chat message that was nothing but a
+shared file embeds as `Shared a file: <name>` rather than as a subject and a
+sender. See [12-attachments.md](12-attachments.md).
+
 **Each corpus has its own sqlite-vec index, and the separation above holds
 through them.** `MessageVectorIndex` (`vec_messages`, over `message_vectors`)
 answers search; `ConversationVectorIndex` (`vec_conversations`, over
@@ -21,6 +31,19 @@ never in a migration or `beforeOpen`** — drift's `SchemaVerifier` diffs the
 whole of `sqlite_master`, so a virtual table appearing during a migration step
 fails every migration pair in the suite — and both are derived, so losing one
 costs a rebuild and not a single model call.
+
+**A THIRD table, and it is not one of those two.** `attachment_chunks`
+(`AttachmentChunkIndex`, `vec_attachment_chunks`) holds the passages of
+attached documents: same embedding server, same `documentPrefix`, same
+`documentModelTag`, so a query embedded for message search finds documents too.
+It is a separate corpus for the same reason the first two are separate from
+each other — a document is many passages, and the clustering corpus has to stay
+"what people said". Fifty chunks of one contract in `message_vectors` would be
+fifty near-identical neighbours crowding out the threads the sweep is about.
+Its backfill is the message index's, with one added clause: `embedding IS NOT
+NULL`. A chunk row is written when the document is split and its vector arrives
+one POST later, so an unembedded row must be neither filed nor stamped. See
+[12-attachments.md](12-attachments.md).
 
 Their *bookkeeping* differs, because their durable sides do.
 `message_vectors` has an `indexed_at` column, so the message index files the

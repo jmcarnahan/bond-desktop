@@ -4,10 +4,13 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
+import 'package:bond_inbox/services/attachments/attachment_bytes.dart';
+import 'package:bond_inbox/services/backend/attachment_backend.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
+import 'package:bond_inbox/services/graph_attachment_backend.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/graph_mail.dart';
 import 'package:bond_inbox/services/graph_people.dart';
@@ -73,6 +76,14 @@ void main() {
       final auth = GraphAuth(httpClient: client, store: _Tokens());
       expect(GraphPeople(auth, httpClient: client), isA<PeopleBackend>());
     });
+
+    test('GraphAttachmentBackend is an AttachmentBackend', () {
+      final auth = GraphAuth(httpClient: client, store: _Tokens());
+      expect(
+        GraphAttachmentBackend(auth, httpClient: client),
+        isA<AttachmentBackend>(),
+      );
+    });
   });
 
   group('the providers the app consumes', () {
@@ -110,11 +121,14 @@ void main() {
       final MailBackend mail = container.read(mailBackendProvider);
       final TeamsBackend teams = container.read(teamsBackendProvider);
       final PeopleBackend people = container.read(peopleBackendProvider);
+      final AttachmentBackend files =
+          container.read(attachmentBackendProvider);
 
       expect(auth, isA<GraphAuth>());
       expect(mail, isA<GraphMail>());
       expect(teams, isA<GraphTeams>());
       expect(people, isA<GraphPeople>());
+      expect(files, isA<GraphAttachmentBackend>());
     });
 
     test('still follow an override of the concrete session provider', () async {
@@ -132,6 +146,21 @@ void main() {
       expect(container.read(mailBackendProvider), isA<GraphMail>());
       expect(container.read(teamsBackendProvider), isA<GraphTeams>());
       expect(container.read(peopleBackendProvider), isA<GraphPeople>());
+      expect(
+        container.read(attachmentBackendProvider),
+        isA<GraphAttachmentBackend>(),
+      );
+    });
+
+    test('the bytes provider is built on the seam, not on a backend', () async {
+      // The one thing the UI reads. It is typed to the interface for the same
+      // reason the three above are: a provider that went concrete would close
+      // the seam while every behaviour test kept passing.
+      final container = await sdkContainer();
+
+      final AttachmentBytes files = container.read(attachmentBytesProvider);
+
+      expect(files, isA<StoreAttachmentBytes>());
     });
   });
 }

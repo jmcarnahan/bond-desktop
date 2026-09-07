@@ -1,3 +1,4 @@
+import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
@@ -24,6 +25,7 @@ Set<String> taskSchemaNames() => {
       const TriageTask().schemaName,
       const NeedsYouTask().schemaName,
       const ExtractTask().schemaName,
+      const AttachmentDigestTask().schemaName,
       const ConfirmMembershipTask().schemaName,
       const NameStorylineTask().schemaName,
       const RefineStorylineTask().schemaName,
@@ -67,6 +69,7 @@ void main() {
       'triage',
       'needs_you',
       'extraction',
+      'attachment_digest',
       'storyline_membership',
     });
     expect(idsOn(ModelSlot.prose), {

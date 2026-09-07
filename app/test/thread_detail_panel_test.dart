@@ -1,7 +1,11 @@
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'fixtures/attachment_refs.dart';
 
 /// The open-ask banner, the per-message ask lines under it, the suggestion
 /// cards beside them, and which messages the transcript folds away. The
@@ -14,6 +18,7 @@ Message _msg({
   bool? replyExpected,
   List<String> actionItems = const [],
   String? bodyText,
+  List<AttachmentRef> attachments = const [],
 }) {
   return Message(
     id: id,
@@ -26,6 +31,7 @@ Message _msg({
     needsAction: needsAction,
     replyExpected: replyExpected,
     actionItems: actionItems,
+    attachments: attachments,
   );
 }
 
@@ -56,6 +62,9 @@ void main() {
     VoidCallback? onReopen,
     VoidCallback? onCompose,
     Widget? Function(Message message)? suggestionFor,
+    void Function(AttachmentRef attachment)? onOpenAttachment,
+    AttachmentRef? selectedAttachment,
+    ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -74,6 +83,9 @@ void main() {
           onOpenReply: onOpenReply,
           onCompose: onCompose,
           suggestionFor: suggestionFor,
+          onOpenAttachment: onOpenAttachment,
+          selectedAttachment: selectedAttachment,
+          thumbnailFor: thumbnailFor,
         ),
       ),
     ));
@@ -525,6 +537,69 @@ void main() {
       );
 
       expect(find.text('Reopen'), findsNothing);
+    });
+  });
+
+  group('attachments', () {
+    testWidgets('a row that carried a file offers it to the host',
+        (tester) async {
+      AttachmentRef? opened;
+      await pump(
+        tester,
+        messages: [
+          _msg(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            attachments: [ref(messageId: 'a', name: 'Terms.pdf')],
+          ),
+        ],
+        onOpenAttachment: (attachment) => opened = attachment,
+      );
+
+      await tester.tap(find.text('Terms.pdf'));
+      expect(opened?.attachmentId, 'a1');
+    });
+
+    testWidgets('and the one on screen is the one that says so',
+        (tester) async {
+      final file = ref(messageId: 'a', name: 'Terms.pdf');
+      await pump(
+        tester,
+        messages: [
+          _msg(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            attachments: [file, ref(messageId: 'a', attachmentId: 'a2')],
+          ),
+        ],
+        onOpenAttachment: (_) {},
+        selectedAttachment: file,
+      );
+
+      final chips =
+          tester.widgetList<AttachmentChip>(find.byType(AttachmentChip));
+      expect(chips.where((c) => c.selected).length, 1);
+      expect(chips.firstWhere((c) => c.selected).attachment.attachmentId, 'a1');
+    });
+
+    testWidgets('a panel told nothing about files leaves them as statements',
+        (tester) async {
+      await pump(
+        tester,
+        messages: [
+          _msg(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            attachments: [ref(messageId: 'a', name: 'Terms.pdf')],
+          ),
+        ],
+      );
+
+      expect(find.text('Terms.pdf'), findsOneWidget);
+      expect(
+        tester.widget<AttachmentChip>(find.byType(AttachmentChip)).onTap,
+        isNull,
+      );
     });
   });
 }

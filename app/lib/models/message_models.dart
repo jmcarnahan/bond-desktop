@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show immutable;
 
+import 'attachment_models.dart';
+
 /// Wire/row models for the inbox. Hand-written and deliberately defensive:
 /// every field reads through a nullable cast with a default, so neither a
 /// drifting API payload nor a half-written sqlite row can throw during a
@@ -148,6 +150,13 @@ class Conversation {
   /// turns off.
   final int aiPendingCount;
 
+  /// How many non-inline attachments the thread carries. Counted at read time
+  /// by the subquery in `loadConversations` for [unreadCount]'s reason — the
+  /// attachments ARE the truth, and a maintained counter would drift with
+  /// nothing to correct it. Zero on any read that does not run the subquery,
+  /// which reads as "no paperclip" rather than as a wrong number.
+  final int attachmentCount;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -167,6 +176,7 @@ class Conversation {
     this.attentionScore,
     this.unreadCount = 0,
     this.aiPendingCount = 0,
+    this.attachmentCount = 0,
   });
 
   /// First participant — the row's primary sender. Null when a conversation
@@ -206,6 +216,7 @@ class Conversation {
       attentionScore: attentionScore,
       unreadCount: unreadCount ?? this.unreadCount,
       aiPendingCount: aiPendingCount,
+      attachmentCount: attachmentCount,
     );
   }
 
@@ -233,6 +244,7 @@ class Conversation {
       attentionScore: attentionScore,
       unreadCount: unreadCount,
       aiPendingCount: aiPendingCount,
+      attachmentCount: attachmentCount,
     );
   }
 
@@ -292,6 +304,10 @@ class Conversation {
       // user is being told the model is working, not which queue it is in.
       aiPendingCount: ((row['ai_busy_messages'] as num?)?.toInt() ?? 0) +
           ((row['ai_busy_thread'] as num?)?.toInt() ?? 0),
+      // The third subquery, and absent from every read that does not run it —
+      // which reads as "nothing attached", never as a paperclip on a thread
+      // that has none.
+      attachmentCount: (row['attachment_count'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -362,6 +378,18 @@ class Message {
   /// Local-only optimistic bubble.
   final bool pendingSend;
 
+  /// What came with this message, in the order the connector listed it.
+  ///
+  /// Hydrated by [MessageStore.loadThread] with ONE query for the whole thread
+  /// — never per message — and empty everywhere else. Empty therefore means
+  /// "nobody asked", not "nothing attached", which is why nothing keys a
+  /// decision off an empty list: the row reads `has_attachments` for that.
+  ///
+  /// [Message.fromRow] does not fill it. A `messages` row has no attachment
+  /// columns and hydration needs a second query, so the store is the one place
+  /// that can do it and the model stays constructible from a row alone.
+  final List<AttachmentRef> attachments;
+
   const Message({
     required this.id,
     required this.outbound,
@@ -387,6 +415,7 @@ class Message {
     this.replyExpected,
     this.deadline,
     this.pendingSend = false,
+    this.attachments = const [],
   });
 
   bool get inbound => !outbound;
@@ -399,6 +428,40 @@ class Message {
   /// the server's. Callers that must not act on a provisional id — anything
   /// asking Graph about a specific message — ask this first.
   bool get isLocalEcho => id.startsWith(localEchoPrefix);
+
+  /// This message with its attachments filled in.
+  ///
+  /// Its own method rather than a general `copyWith` because there is exactly
+  /// one caller and one field: the store, hydrating a thread it has just read.
+  /// A broad copyWith on a twenty-field model is a place for a field to be
+  /// silently dropped.
+  Message withAttachments(List<AttachmentRef> attachments) => Message(
+        id: id,
+        outbound: outbound,
+        source: source,
+        fromName: fromName,
+        fromAddress: fromAddress,
+        to: to,
+        receivedAt: receivedAt,
+        subject: subject,
+        bodyText: bodyText,
+        isRead: isRead,
+        bodyPreview: bodyPreview,
+        gateReason: gateReason,
+        sourceMetaJson: sourceMetaJson,
+        urgency: urgency,
+        category: category,
+        label: label,
+        summary: summary,
+        needsAction: needsAction,
+        actionItems: actionItems,
+        triageStatus: triageStatus,
+        addressedMe: addressedMe,
+        replyExpected: replyExpected,
+        deadline: deadline,
+        pendingSend: pendingSend,
+        attachments: attachments,
+      );
 
   /// The message's wire headers, lowercase-keyed. Empty when there are none
   /// stored — which is the normal state for a message whose thread has never

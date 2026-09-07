@@ -800,6 +800,46 @@ void main() {
       expect(notifier.state.body, isNull);
     });
 
+    test('Use in reply names the document on the work row', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.generate(pinnedAttachmentIds: const ['att-survey']);
+
+      final work = (await db
+              .customSelect(
+                "SELECT payload_json FROM work_items "
+                "WHERE task_kind = 'draft'",
+              )
+              .get())
+          .single
+          .data;
+      expect(work['payload_json'], '{"pinned_attachment_ids":["att-survey"]}');
+    });
+
+    test('and a plain Regenerate after it drops the name again', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+      await notifier.generate(pinnedAttachmentIds: const ['att-survey']);
+      await store.writeWork('draft', 'email', 'inbound-1', status: 'done');
+
+      await notifier.generate();
+
+      final work = (await db
+              .customSelect(
+                "SELECT payload_json FROM work_items "
+                "WHERE task_kind = 'draft'",
+              )
+              .get())
+          .single
+          .data;
+      // Asking again without naming a file means the last file is no longer
+      // named.
+      expect(work['payload_json'], isNull);
+    });
+
     test('generate on a thread with nothing to answer says so', () async {
       // No inbound message at all: there is nothing to reply to, which is a
       // sentence rather than a spinner that never stops.
