@@ -188,6 +188,24 @@ void main() {
       expect(headers['Authorization'], 'Bearer the-jwt');
     });
 
+    test('every request names the desktop client', () {
+      // Without it the server renders every tool result as compact text for
+      // a model to read, with no structuredContent, and decodeToolResult
+      // has nothing it can parse — the old tool names included.
+      final headers = buildRequestInit(null)['headers'] as Map<String, dynamic>;
+      expect(headers[desktopClientHeader], desktopClientValue);
+      expect(desktopClientHeader, 'X-Bond-Client');
+      expect(desktopClientValue, 'desktop');
+    });
+
+    test('the desktop header rides beside the bearer', () {
+      final headers =
+          buildRequestInit('the-jwt')['headers'] as Map<String, dynamic>;
+      expect(headers[desktopClientHeader], desktopClientValue);
+      expect(headers['Authorization'], 'Bearer the-jwt');
+      expect(headers['Accept'], 'application/json, text/event-stream');
+    });
+
     test('no bearer means no Authorization header at all', () {
       final headers = buildRequestInit(null)['headers'] as Map<String, dynamic>;
       expect(headers.containsKey('Authorization'), isFalse);
