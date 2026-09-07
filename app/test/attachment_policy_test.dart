@@ -65,13 +65,49 @@ void main() {
     });
 
     test('the owner\'s own attachment is eligible', () {
-      // The documents somebody sends are the storyline's biggest facts.
+      // The documents somebody sends are the storyline's biggest facts, and
+      // this is the shape the store actually writes for them: `gates.dart`
+      // marks every outbound message `skipped` under `outbound`, so a fixture
+      // that left the status `triaged` asked a question the mailbox never
+      // asks — and passed while the live path refused every sent document.
       expect(
         attachmentTextPolicy(
-          message(direction: 'outbound'),
+          message(
+            direction: 'outbound',
+            triageStatus: 'skipped',
+            gateReason: 'outbound',
+          ),
           attachment(),
         ),
         (true, null),
+      );
+    });
+
+    test('a sent document is eligible however the send was gated', () {
+      // The exemption is the direction, not the reason word: an outbound
+      // message stored under some later gate reason is still the owner's own
+      // document.
+      expect(
+        attachmentTextPolicy(
+          message(
+            direction: 'outbound',
+            triageStatus: 'skipped',
+            gateReason: 'newsletter',
+          ),
+          attachment(),
+        ),
+        (true, null),
+      );
+    });
+
+    test('an inbound message gated as backlog is still refused', () {
+      // The outbound arm must not widen into "skipped never means skipped".
+      expect(
+        attachmentTextPolicy(
+          message(triageStatus: 'skipped', gateReason: 'backlog'),
+          attachment(),
+        ),
+        (false, 'gated'),
       );
     });
   });

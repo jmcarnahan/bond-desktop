@@ -43,14 +43,19 @@ const int maxAttachmentsPerMessage = 5;
 /// fact about a channel with no detail fetch, not a judgement that the message
 /// is junk.
 ///
-/// Outbound messages are processed deliberately (the owner's own documents are
-/// usually the most quotable thing on a thread), so nothing here reads
-/// `direction`.
+/// Outbound is the second exception, and it has to be spelled out rather than
+/// assumed: the owner's own documents are usually the most quotable thing on a
+/// thread, but every outbound message is born `skipped` under `outbound`
+/// (`gates.dart` `triageStatusOnInsert`), so a gate check that only excused
+/// `teams_source` refused all of them. The predicate is
+/// [MessageStore.recentStorylineMessages]' rule character for character —
+/// outbound, or not skipped, or a chat.
 (bool, String?) attachmentTextPolicy(
   Map<String, Object?> message,
   Map<String, Object?> attachment,
 ) {
   if (message['triage_status'] == 'skipped' &&
+      message['direction'] != 'outbound' &&
       message['gate_reason'] != 'teams_source') {
     return (false, 'gated');
   }
