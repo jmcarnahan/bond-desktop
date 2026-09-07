@@ -81,6 +81,7 @@ class ActivityLogPanel extends StatefulWidget {
     'extract': 'Extract',
     'draft': 'Draft',
     'mark_read': 'Mark read',
+    'compose': 'New message',
     'storyline': 'Storylines',
     'storyline_sweep': 'Storyline sweep',
     'storyline_recruit': 'Storyline recruit',
@@ -179,6 +180,16 @@ class ActivityLogPanel extends StatefulWidget {
         return count == 1
             ? '$label — 1 message'
             : '$label — $count messages';
+      case 'compose':
+        // The channel and how many people, and deliberately not who: the
+        // panel is a record of what the app did, not a copy of the address
+        // book it did it to.
+        final channel =
+            detail['channel'] == 'teams' ? 'Teams' : 'email';
+        final count = e.count ?? 0;
+        return count == 1
+            ? '$label — $channel, 1 recipient'
+            : '$label — $channel, $count recipients';
       case 'storyline':
         return 'Storylines updated';
       case 'restore':

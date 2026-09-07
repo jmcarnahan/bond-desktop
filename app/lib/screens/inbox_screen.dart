@@ -43,6 +43,7 @@ import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
+import 'new_message_screen.dart';
 
 /// The whole app, for now: a dark rail of sections beside one main pane that
 /// shows either a section's threads or the open thread's transcript.
@@ -126,6 +127,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// set as [_showingActivityLog] and the three selections above: one thing
   /// in the pane, and every setter clears the rest.
   bool _showingSettings = false;
+
+  /// Whether the main pane is showing the New message screen. The same
+  /// exclusive set again: composing is not a section, and it clears whatever
+  /// was being read exactly as Settings and the log do.
+  bool _showingCompose = false;
+
+  /// Who or what compose was opened on, when something asked for it
+  /// pre-filled. Null is the rail's own button — a blank message.
+  OpenComposeIntent? _composePrefill;
 
   /// One HTTP client for every server check the settings screen makes, closed
   /// with the screen. Held here rather than built per check because a client
@@ -432,6 +442,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -472,6 +483,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -500,6 +512,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -520,6 +533,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
       _railOpen = false;
@@ -534,6 +548,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _showingActivityLog = true;
       _showingSettings = false;
+      _showingCompose = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -640,6 +655,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           _selectStoryline(storylineId);
         case OpenSectionIntent(:final section):
           _selectSection(section);
+        case OpenComposeIntent():
+          _openCompose(prefill: intent);
       }
       // Cleared after the frame, not inside the listener: writing to a
       // notifier while it is notifying is a re-entrant write.
@@ -903,7 +920,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               _selectedStorylineId == null &&
               _selectedLaterDay == null &&
               !_showingActivityLog &&
-              !_showingSettings)
+              !_showingSettings &&
+              !_showingCompose)
           ? _section
           : null,
       onSelectConversation: (source, id) => _select(id, source: source),
@@ -957,6 +975,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                     );
                   },
                 ),
+              ),
+              // First of the actions: writing to somebody is the one thing
+              // here that starts something rather than adjusting the app.
+              _railAction(
+                Icons.edit_outlined,
+                'New message',
+                () => _openCompose(),
               ),
               if (ref.watch(appPrefsProvider).showActivityLog)
                 _railAction(
@@ -1036,6 +1061,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _showingSettings = true;
       _showingActivityLog = false;
+      _showingCompose = false;
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
@@ -1050,6 +1076,41 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   void _closeSettings() => setState(() => _showingSettings = false);
+
+  /// Opens the New message screen. A pane and not a section, like Settings and
+  /// the log, and it clears the same things they do — including the reply
+  /// window, which belongs to a thread that is no longer on screen.
+  void _openCompose({OpenComposeIntent? prefill}) {
+    setState(() {
+      _showingCompose = true;
+      _composePrefill = prefill;
+      _showingSettings = false;
+      _showingActivityLog = false;
+      _selectedId = null;
+      _selectedSource = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
+      _addingToStorylineId = null;
+      _pickingStorylineForThread = null;
+      // At narrow widths the rail is an overlay: leaving it open would put the
+      // pane the button just opened behind a scrim.
+      _railOpen = false;
+      _replyOpenFor = null;
+    });
+  }
+
+  /// Leaves compose. The prefill goes with it, so the rail's own button opens
+  /// a blank message next time rather than whoever was addressed last.
+  void _closeCompose() => setState(() {
+        _showingCompose = false;
+        _composePrefill = null;
+      });
+
+  Widget _compose() => NewMessageScreen(
+        onBack: _closeCompose,
+        onHome: () => _selectSection(RailSection.home),
+        prefill: _composePrefill,
+      );
 
   /// The tuning controls, the two owner texts, and what Microsoft granted. The
   /// threshold reloads the list as it changes — the whole point of the slider
@@ -1350,16 +1411,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return null;
   }
 
-  /// Exactly one view, never two: Settings, then the activity log, then the two
-  /// picker panes, then the thread transcript, then the storyline timeline,
-  /// then the section overview. The order is the priority — Settings and the
-  /// log come first because they are the two that are not about the mail at
-  /// all, and a pane outranks what it was opened from because it is the newer
-  /// thing the user asked for.
+  /// Exactly one view, never two: compose, then Settings, then the activity
+  /// log, then the two picker panes, then the thread transcript, then the
+  /// storyline timeline, then the section overview. The order is the priority
+  /// — compose, Settings and the log come first because they are the three
+  /// that are not about the mail already on screen, and a pane outranks what
+  /// it was opened from because it is the newer thing the user asked for.
   ///
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
   Widget _main(List<Conversation> conversations, String? loadError) {
+    if (_showingCompose) return _compose();
     if (_showingSettings) return _settings();
     if (_showingActivityLog) return _activityLog();
 

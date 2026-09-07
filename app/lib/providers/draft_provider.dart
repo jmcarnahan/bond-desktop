@@ -17,6 +17,8 @@ import '../services/graph_mail.dart';
 import '../services/graph_teams.dart' show GraphTeamsException;
 import '../services/llm/draft_task.dart' show DraftOption;
 import '../services/mail_echo.dart' show firstLine, mailEchoRow, nowSecondsZ;
+import '../services/outbound_chat.dart'
+    show queueRecapFor, writeOutboundChatRow;
 import '../services/pipeline_progress.dart';
 import '../services/teams_sync.dart' show TeamsSync;
 import '../widgets/composer.dart' show SendCapability;
@@ -834,25 +836,11 @@ class DraftNotifier extends StateNotifier<DraftState> {
     state = state.copyWith(sending: true, error: null);
     try {
       final sent = await teams.sendChatMessage(conversationKey, text);
-      final row = TeamsSync.messageRow(sent, conversationKey, outbound: true);
-      // Null only if what came back is not a chat message — a shape this app
-      // cannot store. The reply still went, so it is not a failure: the next
-      // pull writes the transcript entry that this one could not.
-      if (row != null) {
-        await _store.upsertMessage(row);
-        // The fold, not just the counts: the rail orders by `last_message_at`
-        // and shows `last_message_preview`, so recounting alone left a chat
-        // the user had just answered sitting where it was, previewing the
-        // question. Nothing would ever have corrected it — the next pull skips
-        // this row as already seen.
-        await _store.foldOutboundSend(
-          _source,
-          conversationKey,
-          receivedAt: row['received_at'] as String?,
-          preview: firstLine(text),
-        );
-        await _queueRecap();
-      }
+      // The row, the fold and the recap, all in the writer compose-new shares
+      // — see `outbound_chat.dart` for why a chat's own row is written here at
+      // all, and for the null the writer answers when Graph hands back
+      // something that is not a chat message.
+      await writeOutboundChatRow(_store, sent, conversationKey, text);
       // A chat send never marked a draft row before. That was fine while only
       // the newest suggestion was tappable — the row it would have marked was
       // the only one on screen — and it is wrong now that an older message's
@@ -905,33 +893,14 @@ class DraftNotifier extends StateNotifier<DraftState> {
     }
   }
 
-  /// Wakes the recap of every storyline this chat is filed in, because the
+  /// Wakes the recap of every storyline this thread is filed in, because the
   /// user just changed the answer to the question a recap exists to ask.
   ///
-  /// Called from BOTH send arms, because both now write a row no ingest will
-  /// announce. The chat reply is written with the id Graph assigned and the
-  /// next pull deliberately skips it as already-known; the mail echo is
-  /// written under a `local:` id the drain has never heard of and then quietly
-  /// deleted when the real copy lands. Neither ever reaches
-  /// [MessageStore.staleRecapStorylineIds] on its own.
-  ///
-  /// That catch-up is what covers every OTHER outbound row: a reply sent from
-  /// Outlook or from Teams itself arrives on a pull, and every sync ends by
-  /// requeueing `storyline_sweep`, whose recap handler drains later in the
-  /// same pass. Wiring a per-message requeue into the mail ingest would buy
-  /// nothing and would cost a query per message inside the page transaction,
-  /// on first syncs that can run to six figures.
-  ///
-  /// Mirrors `ExtractHandler._queueRecap`, label included — `requeueWork` is
-  /// keyed on `(kind, source, entity_id)`, and 'email' is the label
-  /// `StorylineService` writes storyline work under for BOTH connectors.
-  Future<void> _queueRecap() async {
-    for (final storylineId
-        in await _store.storylineIdsFor(_source, conversationKey)) {
-      if (storylineId.isEmpty) continue;
-      await _store.requeueWork('storyline_recap', 'email', storylineId);
-    }
-  }
+  /// The mail arm's call; the chat arm reaches the same code through
+  /// [writeOutboundChatRow]. The reasoning lives with the function in
+  /// `outbound_chat.dart`.
+  Future<void> _queueRecap() =>
+      queueRecapFor(_store, _source, conversationKey);
 
   /// `Mail.ReadWrite` without `Mail.Send`: the reply exists in Outlook and the
   /// user finishes it there. The stored draft stays `suggested` — it was not
