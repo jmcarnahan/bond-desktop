@@ -184,7 +184,8 @@ class AttachmentRef {
       thumbPath: row['thumb_path'] as String?,
       pinnedStorylineId: row['pinned_storyline_id'] as String?,
       // The join's own column wins when a caller did not name one, which is
-      // how `attachmentsForThread` hands the chat id over.
+      // how `attachmentsForStoryline` and `pinnedAttachmentsForStoryline` hand
+      // the chat id over.
       conversationKey:
           conversationKey ?? row['conversation_key'] as String?,
     );

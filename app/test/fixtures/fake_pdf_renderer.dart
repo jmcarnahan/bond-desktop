@@ -57,9 +57,6 @@ class _FakeDoc implements PdfPreviewDoc {
   _FakeDoc(this._renderer);
 
   @override
-  int get pageCount => _renderer.pages.length;
-
-  @override
   Future<List<String>> pageTexts() async => _renderer.pages;
 
   @override

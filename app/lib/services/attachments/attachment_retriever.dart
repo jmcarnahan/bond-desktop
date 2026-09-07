@@ -126,6 +126,19 @@ class AttachmentRetriever {
     // index nothing at all.
     if (messageIds.isEmpty && attachmentIds.isEmpty) return const [];
 
+    // The cheap read before the expensive one, and the order is the point.
+    // This runs on EVERY draft, and almost every thread has never had a
+    // document on it — so one indexed `LIMIT 1` stands in front of a vector
+    // read, an index backfill, a KNN, and the embedding POST that a message
+    // the embed queue has not reached yet would cost.
+    if (!await _store.hasAttachmentChunks(
+      source,
+      messageIds: messageIds,
+      attachmentIds: attachmentIds.toList(),
+    )) {
+      return const [];
+    }
+
     final query = await _queryVector(source, replyToId);
     // The embedding server is down, or refused the card. Degraded, never
     // thrown: the draft below this is written without citations.

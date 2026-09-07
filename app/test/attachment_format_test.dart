@@ -130,6 +130,73 @@ void main() {
     });
   });
 
+  group('webUriOf', () {
+    test('a web address comes back parsed', () {
+      expect(webUriOf('https://contoso.example/plan.pdf')?.host,
+          'contoso.example');
+      expect(webUriOf('http://contoso.example/plan.pdf')?.host,
+          'contoso.example');
+      // The scheme is compared case-insensitively: a url is not required to
+      // shout or to whisper.
+      expect(webUriOf('HTTPS://Contoso.example/plan')?.scheme, 'https');
+      expect(webUriOf('  https://contoso.example/plan  ')?.path, '/plan');
+    });
+
+    test('anything the operating system would ACT on answers nothing', () {
+      // The whole point: this string is the sender's, and every one of these
+      // launches something under a button labelled 'Open in Teams'.
+      expect(webUriOf('file:///Applications/Calculator.app'), isNull);
+      expect(webUriOf('javascript:alert(1)'), isNull);
+      expect(webUriOf('smb://198.51.100.7/share'), isNull);
+      expect(webUriOf('zoommtg://zoom.us/join?confno=1'), isNull);
+      expect(webUriOf('mailto:someone@contoso.example'), isNull);
+    });
+
+    test('a web scheme with no host is not an address', () {
+      expect(webUriOf('https://'), isNull);
+      expect(webUriOf('https:///plan.pdf'), isNull);
+    });
+
+    test('nothing at all answers nothing', () {
+      expect(webUriOf(null), isNull);
+      expect(webUriOf(''), isNull);
+      expect(webUriOf('   '), isNull);
+      expect(webUriOf('not a url at all'), isNull);
+    });
+  });
+
+  group('safeSuggestedName', () {
+    test('a name shaped like a path loses its separators', () {
+      // Not a prettier name — a name with no separator left in it, which is
+      // the only property that matters here.
+      expect(safeSuggestedName('../../.ssh/config'), '_.._.ssh_config');
+      expect(safeSuggestedName(r'C:\Windows\notes.txt'), 'C__Windows_notes.txt');
+      expect(safeSuggestedName('two\nlines.pdf'), 'two_lines.pdf');
+    });
+
+    test('a leading dot comes off, so the file is not hidden', () {
+      expect(safeSuggestedName('...quote.pdf'), 'quote.pdf');
+    });
+
+    test('a very long name is cut and keeps its extension', () {
+      final long = '${'a' * 4000}.pdf';
+      final cut = safeSuggestedName(long);
+      expect(cut.length, 120);
+      expect(cut.endsWith('.pdf'), isTrue);
+    });
+
+    test('a name with nothing left in it falls back', () {
+      expect(safeSuggestedName(null), 'attachment');
+      expect(safeSuggestedName(''), 'attachment');
+      expect(safeSuggestedName('   '), 'attachment');
+      expect(safeSuggestedName('...'), 'attachment');
+    });
+
+    test('an ordinary name is left exactly as it was', () {
+      expect(safeSuggestedName('Q3 forecast.xlsx'), 'Q3 forecast.xlsx');
+    });
+  });
+
   group('extensionOf', () {
     test('lower-cased, without the dot', () {
       expect(extensionOf('Report.PDF'), 'pdf');

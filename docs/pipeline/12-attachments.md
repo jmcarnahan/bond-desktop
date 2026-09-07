@@ -9,11 +9,12 @@ learns one at ingest, because chat has no detail step. Both write
 planned Graph read and a local write. Triage sees names and sizes; nothing
 waits for a download.
 
-> **Live.** All three stages run: the metadata stage inside stage 1, then
-> `attachment_text` (Graph plus the embedding server, no chat model) and
-> `attachment_digest` (one fast-slot call per document). What is still to come
-> is what USES them — retrieval into replies, recap lines, and the needs-you
-> re-verdict on a document that asks for something.
+> **Live.** Every stage runs, and so does everything that uses them: the
+> metadata stage inside stage 1, then `attachment_text` (Graph plus the
+> embedding server, no chat model) and `attachment_digest` (one fast-slot call
+> per document) — and then retrieval into replies, recap lines, and the
+> needs-you re-verdict on a document that asks for something. Each of those
+> three is documented further down this file.
 
 ## The data model
 
@@ -47,10 +48,14 @@ counting **non-inline** rows over the thread's messages — the same pattern
 and a maintained counter would drift with nothing to correct it.
 `Message.attachments` is hydrated by `loadThread` with ONE query per thread,
 never one per message. A handler that read a SINGLE row with `getMessageRow`
-gets no such hydration, so triage, needs-you, extraction and drafting each
-hydrate the message they judge — `MessageStore.attachmentRefsFor`, guarded on
-the row's own `has_attachments` — before it reaches a prompt builder. Without
-that, a chat message whose whole body is a marker arrives at the model empty.
+gets no such hydration, so needs-you, extraction, drafting and the digest
+handler each hydrate the message they judge — `MessageStore.attachmentRefsFor`,
+guarded on the row's own `has_attachments` — before it reaches a prompt
+builder. Triage is the exception in mechanism and not in outcome: `TriageQueue`
+reads `attachmentsForMessage` unconditionally into `TriageInput.attachments`,
+because it wants the raw rows for the attachment line rather than refs. Without
+one or the other, a chat message whose whole body is a marker arrives at the
+model empty.
 
 ## Markers: where a file sat in a chat sentence
 
@@ -180,6 +185,15 @@ on (`GraphMailException`, `GraphTeamsException`, `ReconsentRequired`). Conflatin
 the two costs a document permanently or spends three requests reaching the same
 no.
 
+**One closed vocabulary, one word per condition.** A refusal word is written
+into `text_reason` and printed on the chip verbatim, so both backends map every
+server answer through `_permanentServerReasons` — on the bytes path as well as
+the text path — and anything outside that set becomes `unavailable` rather than
+putting a stranger's error string on screen. For the same reason a link with
+nowhere to fetch from is `reference_no_url` everywhere: the policy, both
+backends, and the chip. Two spellings of one condition read as two different
+facts.
+
 ### Which call gets made
 
 | ref | MCP | SDK (Graph) |
@@ -212,10 +226,30 @@ always `maxPreviewBytes`.
 **The SDK backend has no extractor, and says so.** It decodes only what a codec
 can read (`text/plain`, `text/csv`, `text/markdown`, `text/html`, `text/xml`,
 `application/json`, `application/xml`, or the extensions `.txt .csv .json .md
-.log .xml .html .htm`), capped at 2 MB — the MCP server's own download ceiling —
-and answers `skipped/no_extractor` for docx, pptx, xlsx and pdf **without
-fetching**. That is a refusal, not a failure: downloading a 20 MB deck to
-discover it is a deck helps nobody.
+.log .xml .html .htm`) and answers `skipped/no_extractor` for docx, pptx, xlsx
+and pdf **without fetching**. That is a refusal, not a failure: downloading a
+20 MB deck to discover it is a deck helps nobody.
+
+**Three caps, in that order, on the SDK text path.** The size the connector
+CLAIMS is the cheap first gate — over 2 MB is refused before a request — and it
+is trusted no further than that, because Teams writes 0 for every file it syncs
+and Graph omits the size on plenty of mail attachments. So the download itself
+carries the cap: the text request goes out with `Range: bytes=0-2097151`, and
+whether the server honours it (206) or ignores it (200), anything past 2 MB is
+cut — as is a 206 whose `Content-Range` total is larger. The decoded text is
+then cut again at **200,000 characters**, the MCP server's own extractor cap, so
+the two connectors store the same size for the same file. Any of the three sets
+`truncated`, and `fetchedBytes` stays what actually came down the wire.
+
+**A forwarded message keeps its own identity.** A mail `item` attachment wraps
+another message, and `item_subject`, `item_from` and `item_received` are what
+the `.eml` preview draws. Both connectors learn them on the TEXT call — the MCP
+server returns them beside the words, and the SDK path asks Graph to expand
+`microsoft.graph.itemattachment/item` (the type cast is mandatory; a bare `item`
+is a 400) in the same request that fetches the body. The text handler writes
+them through `MessageStore.setAttachmentItem`, which COALESCEs per column: a
+later pass that learned nothing must not blank what an earlier one learned, and
+a wrapped message with an empty body still has a subject worth showing.
 
 ### The cache
 
@@ -254,9 +288,9 @@ off a row rendering, and a missing picture must not take out the thread around
 it).
 
 `bytesFor` ladders: a link kind is refused outright; the ref's `blob_path`, then
-the row's, because a ref built before the fetch carries no path; then the 10 MB
-preview cap (`attachmentTooLargeBytes`, the server's bytes-mode ceiling), refused
-before the request; then the connector, the cache and the row. One in-flight
+the row's, because a ref built before the fetch carries no path; then the
+connector's own `backend.maxPreviewBytes` — 10 MB on MCP, 25 MB on the SDK —
+refused before the request; then the connector, the cache and the row. One in-flight
 future per `source|message|attachment` means two rows wanting the same image in
 one frame cost one download.
 
@@ -341,10 +375,12 @@ same UPDATE. Left `pending`, a refused attachment would carry the chip's
 `reading…` hint for the life of the mailbox, because nothing else ever comes
 along to answer it.
 
-Note keys on the activity row: `fetch_ms` and `bytes` always (written before
-the outcome is judged — a skip that cost a 10 MB download is worth seeing),
-then `chars`, `chunks`, `embedded` and `truncated` on success, or `chunks`,
-`embedded` and `resumed` on the resume path.
+Note keys on the activity row: `fetch_ms` and `bytes` whenever a fetch was
+made, written before the outcome is judged — a skip that cost a 10 MB download
+is worth seeing — and then `chars`, `chunks`, `embedded` and `truncated` on
+success. The paths that never reach the connector carry neither: the resume
+path notes `chunks`, `embedded` and `resumed`, and an early refusal (a policy
+skip, a row that is gone, a malformed work id) notes only its reason.
 
 ## Chunks and the second index
 
@@ -458,7 +494,10 @@ caption and above the message table, one `AttachmentSearchTile` per hit: the
 file's glyph and name, the locator beside it, the passage itself in muted
 caption type, and who attached it and when. The passage is the document's own
 words, so it is rendered as a quote and **never under the `AI:` label** — that
-label is a promise a model wrote what follows. The count line above stays a
+label is a promise a model wrote what follows. The read keeps that promise at
+the source: `searchAttachmentChunks` filters `locator != 'digest'`, because the
+digest passage IS a model's summary and showing one would put sentences nobody
+wrote under a file name. The count line above stays a
 count of MESSAGE hits, because it labels the list under it. The whole tile is
 one tap into the thread the document came with; a hit whose message is gone
 draws no control at all.
@@ -514,8 +553,9 @@ arrow returns to the split with the thread still selected underneath, and whose
 transcript — the pane it was opened from and the one Back returns to — and a
 viewer whose thread has vanished falls through it rather than stranding the
 screen. `_previewing` and `_viewerFull` are cleared by every selector that
-clears `_replyOpenFor`; a preview left visible under another pane is exactly the
-bug that list exists to prevent.
+clears `_replyOpenFor`, and by sign-out beside the thumbnails and the pin keys
+— the ref points into a mailbox that has just been wiped. A preview left
+visible under another pane is exactly the bug that list exists to prevent.
 
 ### Three segments, always all three
 
@@ -554,6 +594,25 @@ connector, never the `attachmentTooLargeBytes` constant — says how big it is a
 offers the same link; Open and Save are hidden there too, since there is nothing
 this app can hand over. A file already in the cache is never too large: the
 download the cap exists to prevent has happened.
+
+Neither refusal reaches the **Text** segment. The server's extracted words cost
+no bytes, so the cap has nothing to say about them, and the ladder checks the
+segment before the size — otherwise the one thing still showable about a large
+document would be the one thing unreachable. A file over the cap **with no
+link** — which is every mail attachment, since Graph gives one no sharing url —
+says so outright rather than showing a card and a dead end: *over what this
+connection can hand over, open the message in your mail app to get it, its
+text, if the server read it, is under Text.*
+
+**A link is followed only when it is a web address.** `sourceUrl` is the
+SENDER's string — a Teams card or a reference attachment carries whatever the
+connector posted, verbatim — so `webUriOf` lets through `http` and `https` with
+a real host and nothing else. `file:///Applications/Calculator.app`,
+`smb://…` and a custom scheme would each launch something under a button
+labelled *Open in Teams*. A url that is not a web address gets **no button at
+all**, not a disabled one: there is nothing safe to do with it, and a greyed
+control invites a second look. `_launchExternal` checks again behind the panel,
+so a second caller cannot get past the rule by not knowing about it.
 
 ### Thumbnails in the row
 
@@ -594,7 +653,30 @@ here ever executes anything. **Save** asks the panel first and fetches second, s
 a cancelled save costs no download, then writes with `file_selector`'s chosen
 path — the reason all four entitlement files carry
 `com.apple.security.files.user-selected.read-write`. Both report failure as a
-toast rather than a dead control.
+toast rather than a dead control, and neither toast carries the exception: a
+path, a socket error or a plugin's own words tell the reader nothing they can
+act on.
+
+**Files that can run are Save-only.** For those, the operating system's idea of
+opening *is* executing — a script runs, a macro document runs on load, a web
+page opened from a `file:` origin can ask for a password while looking like it
+came from the user's mail. `openRefused` (`preview_kind.dart`) names them by
+extension — executables, installers, scripts, disk images, macro documents,
+web pages and `.svg` — or by content type where the connector named the file
+better than its sender did. The panel renders a caption where Open was, so the
+missing control reads as a decision rather than as a bug, and
+`_openAttachmentInOs` checks again behind it. **Previews are unaffected**: an
+`.xlsm` still renders as a sheet and an `.html` still shows as text, because
+reading a file is not running it and this app's own renderers are the safe way
+to look inside one.
+
+The save panel's suggested name is clamped by `safeSuggestedName`
+(`attachment_format.dart`). It comes off the wire, so it can carry a path, a
+Windows separator, a newline or four thousand characters: separators and
+control characters become underscores, leading dots come off so the file is not
+hidden, an empty result becomes `attachment`, and the whole is capped at 120
+grapheme clusters with the extension kept — the extension is what the operating
+system opens it by.
 
 ## Retrieval into replies
 
@@ -607,8 +689,23 @@ date, text, and the `AttachmentRef` behind them.
 - **Scope** is this thread's messages (the ids the caller already loaded
   `untilIso`, so a later attachment cannot be quoted) plus every document
   pinned to the thread's storylines plus anything named by "Use in reply".
-  Both scopes empty returns `const []` with **no embedding call and no store
-  read**.
+  Both scopes empty returns `const []` before anything else happens.
+- **Two guards before any cost.** The thread and the pins are read first,
+  because they ARE the scope. Then one indexed `LIMIT 1` —
+  `MessageStore.hasAttachmentChunks` over the same predicate — answers whether
+  the scope holds a single passage, and a no returns `const []` with **no
+  embedding call and no index read** past it. Almost every thread has never had
+  a document on it, and this runs on every draft.
+- **The scope is applied INSIDE the index query**, not after it.
+  `AttachmentChunkIndex.knn` takes a `rowid IN (SELECT id FROM
+  attachment_chunks WHERE …)` clause (sqlite-vec has supported it since 0.1.2;
+  the vendored build is 0.1.9), so the k nearest are the k nearest WITHIN the
+  scope. Filtered afterwards instead, a generic "please see attached" on a
+  mailbox of a few hundred chunks has its whole shortlist filled by strangers'
+  documents and the thread's own contract contributes nothing — silently, with
+  no way to tell that from a thread with no documents. The same predicate is
+  repeated on the hydration query, which also keeps an orphaned vec0 rowid from
+  hydrating into a passage outside the scope.
 - **Query vector** is the reply-to message's stored vector under the current
   model tag (`MessageStore.messageVectorBlob`), else the same card
   `embedMessageRow` builds, re-embedded under `documentPrefix`. Never
@@ -651,6 +748,13 @@ its own. Both are in `06-storylines.md`; the store side is
 `digestsForMessages` (one query per source, never a join) and
 `pinnedAttachmentsForStoryline`.
 
+The storyline's own Documents list is a third read, `attachmentsForStoryline`:
+every non-inline file on a thread the storyline holds, plus every file pinned to
+it, de-duplicated, pinned first and then newest message first. The pin half is a
+separate arm of the same OR because a pin outlives membership — a thread the
+sweep dropped takes its files with it, but not the one somebody deliberately
+kept.
+
 ## Documents and pinning
 
 `pinned_storyline_id` is the one attachment column a person sets by hand,
@@ -664,7 +768,7 @@ not the panel's: from a thread it is the first id
 thread was filed under first; from the storyline pane it is the storyline on
 screen. Nowhere to pin renders **no button** rather than a disabled one — a
 thread in no storyline has nothing here a user could act on. After the write
-the screen invalidates `storylinePinnedDocumentsProvider` and toasts the
+the screen invalidates `storylineDocumentsProvider` and toasts the
 storyline's title, read back after the write because the panel only ever held
 the id.
 
@@ -675,13 +779,30 @@ read, so without the second the button would still say `Pin to storyline`
 after the pin landed. It is cleared on sign-out beside the thumbnails.
 
 **The shelf** is `AttachmentDocumentsStrip` behind the storyline pane's
-Documents button, fed by `storylinePinnedDocumentsProvider` — a store read,
-because a widget build cannot await one. Unpinning is two taps in place, never
-a dialog, and it drops the session key as well as the column. The rows the
-shelf hands back came fresh from the store, so that is enough.
+Documents button, fed by `storylineDocumentsProvider` over
+`attachmentsForStoryline` — a store read, because a widget build cannot await
+one. It is **every non-inline document on the storyline's member threads, plus
+the pins from elsewhere, pinned first, then newest message first**: a storyline
+is several conversations about one thing, and the file somebody wants is nearly
+always simply on one of them. The count in the button is over all of them.
+
+Both directions live on the entry. An unpinned one offers **Pin**, one tap,
+which writes the column, invalidates the provider and floats it. A file pinned
+to *this* storyline wears a 📌 and offers **Remove**, two taps in place, never a
+dialog. Unpinning takes the pin and not the file — a document whose thread is
+still a member stays on the shelf, which is why the bar reads *Unpinned
+<name>.* Both drop the session key as well as the column; the rows the shelf
+hands back came fresh from the store, so that is enough. A file whose thread is
+*not* a member does leave when its pin goes, which is the case pinning exists
+for. `AttachmentDocumentsStrip` needs the storyline's id to tell a pin to this
+storyline from a pin to another one; the panel passes its own.
 
 **Use in reply** is the panel's other Phase 4 action, and only where there is
-a composer to write into — the full viewer has none, so it offers none. It
+a composer to write into. The full viewer has none, so `AttachmentViewerPane`
+takes no such callback at all. Neither does a thread the pane cannot reply to:
+a chat without `Chat.ReadWrite` shows no composer, so the host passes a null
+target and the offer disappears rather than spending a fast-slot draft on words
+nobody would see. It
 opens the reply box and asks the draft notifier to regenerate with this
 attachment's id in `pinned_attachment_ids`, which is what floats it to the
 front of what the retriever quotes. Opening the box is the point: a regenerate
@@ -732,12 +853,12 @@ whose spinner is off screen is not visible feedback.
 - `app/lib/widgets/preview/image_preview.dart`, `sheet_preview.dart`
   (fixed 160 px columns, never `IntrinsicColumnWidth`), `text_preview.dart`,
   `eml_preview.dart`, `unsupported_preview.dart`.
-- `app/lib/widgets/attachment_documents_strip.dart` — the pinned-documents
-  shelf; `app/lib/widgets/storyline_timeline.dart` — the Documents button that
-  unfolds it and the three attachment props the spine's rows forward.
-- `app/lib/providers/storylines_provider.dart` —
-  `storylinePinnedDocumentsProvider`, dropped by hand after every pin and
-  unpin.
+- `app/lib/widgets/attachment_documents_strip.dart` — the storyline's
+  documents shelf, pinned first, with Pin and the two-step Remove;
+  `app/lib/widgets/storyline_timeline.dart` — the Documents button that unfolds
+  it and the three attachment props the spine's rows forward.
+- `app/lib/providers/storylines_provider.dart` — `storylineDocumentsProvider`,
+  dropped by hand after every pin and unpin.
 - `app/lib/widgets/message_row.dart` — `layOutBody`'s `thumbnailable` list and
   the document pictures it drives.
 - `app/lib/screens/inbox_screen.dart` — `_threadBody` (the split),

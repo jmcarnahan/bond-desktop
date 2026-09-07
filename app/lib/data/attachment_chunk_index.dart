@@ -136,14 +136,35 @@ class AttachmentChunkIndex {
   /// `AND k = ?` is not a typo for a LIMIT: in sqlite-vec's KNN form `k` is a
   /// constraint the virtual table reads off the WHERE clause to decide how
   /// many neighbours to compute. A LIMIT instead would make it a full scan.
-  Future<List<VecHit>> knn(Uint8List query, {required int k}) async {
+  ///
+  /// [rowidWhere] narrows the search to the chunks matching a predicate over
+  /// `attachment_chunks` — `source = ? AND (source_message_id IN (…) OR …)`,
+  /// with its values in [rowidArgs] after the query and the k. The scope is
+  /// applied INSIDE the KNN, and that is the whole point of it: filtering
+  /// afterwards gives the k nearest passages in the CORPUS that happen to be
+  /// in scope, which on a small mailbox is regularly none of them, while this
+  /// gives the k nearest within the scope. sqlite-vec has accepted
+  /// `rowid IN (subquery)` in a KNN query since 0.1.2 and the vendored build
+  /// is 0.1.9; without the clause the query is exactly what it always was.
+  Future<List<VecHit>> knn(
+    Uint8List query, {
+    required int k,
+    String? rowidWhere,
+    List<Object?> rowidArgs = const [],
+  }) async {
     if (!await ensureReady()) return const [];
     try {
       final rows = await _db!
           .customSelect(
             'SELECT rowid, distance FROM vec_attachment_chunks '
-            'WHERE embedding MATCH ?1 AND k = ?2',
-            variables: [Variable<Uint8List>(query), Variable<int>(k)],
+            'WHERE embedding MATCH ?1 AND k = ?2'
+            '${rowidWhere == null ? '' : ' AND rowid IN '
+                '(SELECT id FROM attachment_chunks WHERE $rowidWhere)'}',
+            variables: [
+              Variable<Uint8List>(query),
+              Variable<int>(k),
+              for (final arg in rowidArgs) Variable(arg),
+            ],
           )
           .get();
       // vec0 hands them back in distance order; re-sorting would only be a

@@ -194,6 +194,68 @@ void main() {
     });
   });
 
+  group('the message inside a forwarded attachment', () {
+    test('a forwarded message keeps its subject, sender and date on the row',
+        () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedAttachment('m1', 'a1', kind: 'item', name: 'FW Q3.eml');
+      backend.textByKey['email|m1|a1'] = const AttachmentText.ok(
+        'The forecast holds at 2.4 million.',
+        itemSubject: 'Q3 forecast',
+        itemFrom: 'dana@example.test',
+        itemReceived: '2026-08-20T10:00:00Z',
+      );
+
+      await handlerWith(FakeEmbedServer()).run(item('m1', 'a1'));
+
+      // The three columns nothing wrote until now. They ride on the text call
+      // because that is where both connectors hand them over.
+      final row = await attachmentOf('m1', 'a1');
+      expect(row['item_subject'], 'Q3 forecast');
+      expect(row['item_from'], 'dana@example.test');
+      expect(row['item_received'], '2026-08-20T10:00:00Z');
+      expect(row['text_status'], 'done');
+    });
+
+    test('a skipped attached message still records who sent it', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedAttachment('m1', 'a1', kind: 'item', name: 'FW Q3.eml');
+      // A wrapped message with an empty body still has a subject, a sender and
+      // a date, and the `.eml` preview draws all three.
+      backend.textByKey['email|m1|a1'] = const AttachmentText.skipped(
+        'empty',
+        itemSubject: 'Q3 forecast',
+        itemFrom: 'dana@example.test',
+        itemReceived: '2026-08-20T10:00:00Z',
+      );
+
+      await handlerWith(FakeEmbedServer()).run(item('m1', 'a1'));
+
+      final row = await attachmentOf('m1', 'a1');
+      expect(row['text_status'], 'skipped');
+      expect(row['item_subject'], 'Q3 forecast');
+      expect(row['item_from'], 'dana@example.test');
+      expect(row['item_received'], '2026-08-20T10:00:00Z');
+    });
+
+    test('an ordinary file writes none of them', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedAttachment('m1', 'a1');
+      backend.textByKey['email|m1|a1'] =
+          const AttachmentText.ok('The tenant pays 2,400.');
+
+      await handlerWith(FakeEmbedServer()).run(item('m1', 'a1'));
+
+      final row = await attachmentOf('m1', 'a1');
+      expect(row['item_subject'], isNull);
+      expect(row['item_from'], isNull);
+      expect(row['item_received'], isNull);
+    });
+  });
+
   group('a refusal is an answer', () {
     test('a binary attachment is skipped with its reason and queues no digest',
         () async {

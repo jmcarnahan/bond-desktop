@@ -601,9 +601,9 @@ class SyncService implements MailSync {
   /// handler once there are words to digest — asking a model to read a document
   /// nobody has extracted yet is a call that can only fail.
   ///
-  /// The handler for that kind does not exist yet, and the rows waiting
-  /// `pending` are harmless: the worker drains only kinds it has a handler for,
-  /// and `enqueueWork` is INSERT OR IGNORE, so the same message fetched twice
+  /// `AttachmentTextHandler` drains the kind, in the post-sync pass; a row
+  /// queued while it is already running is picked up on the next one.
+  /// `enqueueWork` is INSERT OR IGNORE, so the same message fetched twice
   /// queues one item.
   Future<void> _storeAttachments(
     String sourceMessageId,

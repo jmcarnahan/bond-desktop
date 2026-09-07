@@ -55,9 +55,6 @@ class _PdfrxDoc implements PdfPreviewDoc {
   _PdfrxDoc(this._doc);
 
   @override
-  int get pageCount => _doc.pages.length;
-
-  @override
   Future<List<String>> pageTexts() async {
     final texts = <String>[];
     for (final page in _doc.pages) {

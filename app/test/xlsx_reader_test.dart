@@ -145,6 +145,51 @@ void main() {
     expect(tables.sheets.single.header, ['A', '', 'C']);
   });
 
+  test('a cell reference past the last column is read as the next column along',
+      () {
+    // Excel stops at `XFD`, and nothing in the file format stops a cell
+    // claiming otherwise. Twelve letters name column 3,817,158,266,467,285, so
+    // trusting the reference means building a row that long before anything
+    // can refuse it — the decode below returning at all is half of what this
+    // test says. The other half is that the refusal costs the row nothing: the
+    // cell takes the next column, exactly as one carrying no reference does.
+    final tables = decodeXlsx(workbook(
+      sheets: [
+        (
+          'Sheet1',
+          row(
+            1,
+            '<c r="A1" t="inlineStr"><is><t>Term</t></is></c>'
+            '<c r="AAAAAAAAAAAA1" t="inlineStr"><is><t>Rate</t></is></c>',
+          ),
+        ),
+      ],
+    ));
+
+    expect(tables.sheets.single.header, ['Term', 'Rate']);
+  });
+
+  test('a reference that would overflow is not trusted either', () {
+    // Thirty letters do not run the count up, they run it over: the column
+    // index wraps negative, which is a different wrong answer from the same
+    // missing bound. Both end at the same place.
+    final tables = decodeXlsx(workbook(
+      sheets: [
+        (
+          'Sheet1',
+          row(
+            1,
+            '<c r="A1" t="inlineStr"><is><t>Term</t></is></c>'
+            '<c r="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1" t="inlineStr">'
+            '<is><t>Rate</t></is></c>',
+          ),
+        ),
+      ],
+    ));
+
+    expect(tables.sheets.single.header, ['Term', 'Rate']);
+  });
+
   test('booleans read as TRUE and FALSE', () {
     final tables = decodeXlsx(workbook(
       shared: ['Signed'],

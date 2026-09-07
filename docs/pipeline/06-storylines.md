@@ -348,16 +348,31 @@ and hands the panel the label, which is why both buttons read *Syncing…*
 together.
 
 Beside *About* in that same row sits **Documents**, which counts what it holds
-— *3 documents*, or the bare word when nothing is pinned yet, so a storyline
-answers "is there anything on the shelf" without a tap. It unfolds
-`AttachmentDocumentsStrip` under the header, where the member strip and the
-About block unfold, and folds again on a second press. Each entry is the
-file's glyph and name over its size and the model's one-line read; tapping one
-opens it. **Remove** is two taps in place — the second reads *Remove document*
-beside a *Cancel* — and a pane handed no unpin closure shows no Remove at all.
+— *3 documents*, or the bare word when the storyline's threads carry no files
+at all, so a storyline answers "is there anything on the shelf" without a tap.
+It unfolds `AttachmentDocumentsStrip` under the header, where the member strip
+and the About block unfold, and folds again on a second press.
 
-Files get onto that shelf from the other end: **Pin to storyline** on the
-preview panel and on the full viewer. From an open thread the pin goes to the
+The shelf is **every document on the storyline's threads, the pinned ones
+first** — `storylineDocumentsProvider` over `attachmentsForStoryline`, not a
+pin list. A storyline is several conversations about one thing and the file
+somebody is looking for is nearly always simply on one of them; pinning is how
+they float the one that matters most, and how they keep a file whose thread
+later leaves. Inline images are excluded by the store: a signature graphic is
+not a document. Each entry is the file's glyph and name over its size and the
+model's one-line read, with a 📌 in front of a file pinned to *this* storyline;
+tapping one opens it.
+
+Both directions are on the entry itself. An unpinned document offers **Pin**,
+one tap, and floats to the top. A pinned one offers **Remove**, two taps in
+place — the second reads *Remove document* beside a *Cancel*. Unpinning takes
+the pin, not the file: a document whose thread is still a member stays on the
+shelf and simply stops floating, which is why the bar reads *Unpinned
+<name>.* A pane handed no pin or unpin closure shows neither control.
+
+Files also get onto that shelf from the other end: **Pin to storyline** on the
+preview panel and on the full viewer, which is the only way a file on a thread
+that is *not* a member gets here. From an open thread the pin goes to the
 oldest storyline that thread is live in — the same `storylineIdsFor(...).first`
 pick the hand-filing stamp makes, for the same reason: two answers about "this
 thread's storyline" have to agree. From the storyline pane it goes to the

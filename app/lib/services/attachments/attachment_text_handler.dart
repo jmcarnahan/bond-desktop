@@ -153,6 +153,21 @@ class AttachmentTextHandler extends WorkHandler {
       'bytes': extracted.fetchedBytes,
     });
 
+    // What the forwarded message inside an `item` attachment says it is. It
+    // rides on the TEXT call rather than getting one of its own because that
+    // is where both connectors hand it over — the server returns it beside the
+    // words, and the SDK's expand fetches the two in the same request — and it
+    // is written before the outcome is judged because a wrapped message with an
+    // empty body still has a subject, a sender and a date worth showing.
+    await _store.setAttachmentItem(
+      source,
+      messageId,
+      attachmentId,
+      subject: extracted.itemSubject,
+      from: extracted.itemFrom,
+      received: extracted.itemReceived,
+    );
+
     if (extracted.status != 'ok') {
       await _store.setAttachmentText(
         source,

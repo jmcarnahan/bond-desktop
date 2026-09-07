@@ -689,8 +689,9 @@ WHERE source = ? AND conversation_key = ?
   /// payload — and the payload is the whole point here. Ids merge into whatever
   /// is still pending, so a second read while the first ack is queued acks both.
   ///
-  /// Nothing drains `mark_read` yet: the queue behind it lands with the server
-  /// ack, and until then these rows accumulate at one per opened thread.
+  /// `ReadAckQueue` is what drains these rows, sending the ack to the connector
+  /// and marking the work done; a row that outlives a sign-out is simply
+  /// wiped with the mailbox.
   Future<int> markConversationRead(
     String source,
     String conversationKey,
@@ -4813,30 +4814,6 @@ LIMIT ?
     return byMessage;
   }
 
-  /// Everything attached anywhere on one thread, oldest message first.
-  ///
-  /// The join carries `conversation_key` out with each row, so an
-  /// [AttachmentRef] built from one already knows which chat to fetch its bytes
-  /// from without a second lookup.
-  Future<List<Map<String, Object?>>> attachmentsForThread(
-    String source,
-    String conversationKey,
-  ) async {
-    final result = await db
-        .customSelect(
-          'SELECT a.*, m.conversation_key AS conversation_key, '
-          '       m.received_at AS message_received_at '
-          'FROM attachments a '
-          'JOIN messages m ON m.source = a.source '
-          '  AND m.source_message_id = a.source_message_id '
-          'WHERE a.source = ? AND m.conversation_key = ? '
-          'ORDER BY m.received_at ASC, a.ordinal ASC, a.attachment_id ASC',
-          variables: _args([source, conversationKey]),
-        )
-        .get();
-    return [for (final row in result) Map<String, Object?>.from(row.data)];
-  }
-
   /// The digested attachments for a set of messages.
   ///
   /// A SECOND query rather than a join onto whatever produced [ids]. The recap
@@ -4899,6 +4876,12 @@ LIMIT ?
   /// carry the chip's `reading…` hint for the life of the mailbox, because
   /// nothing else would ever come along to answer it. A `done` leaves the
   /// column alone: the digest handler owns it from there.
+  ///
+  /// **A wordless skip leaves the count and the cut alone**, for the same
+  /// reason it leaves the words alone. A requeue answering `gone`, or a gate
+  /// applied after the fact, arrives with no text but does not un-read what an
+  /// earlier pass read — and writing `text_chars = 0` there would put a zero on
+  /// the chip above a Text segment still rendering forty thousand characters.
   Future<void> setAttachmentText(
     String source,
     String sourceMessageId,
@@ -4929,16 +4912,21 @@ LIMIT ?
           ]),
         );
       }
+      // A skip that carries no words says nothing about how many there were,
+      // so it says nothing: the two columns are left out of the statement
+      // entirely rather than written as zeroes.
+      final bool keepCount = words.isEmpty && status != 'done';
       await db.customUpdate(
         'UPDATE attachments SET text_status = ?, text_reason = ?, '
-        '  text_truncated = ?, text_chars = ?, updated_at = ? '
+        '${keepCount ? '' : '  text_truncated = ?, text_chars = ?, '}'
+        '  updated_at = ? '
         "${status == 'done' ? '' : ", digest_status = 'skipped' "}"
         'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
         variables: _args([
           status,
           (reason ?? '').isEmpty ? null : reason,
-          truncated ? 1 : 0,
-          words.length,
+          if (!keepCount) truncated ? 1 : 0,
+          if (!keepCount) words.length,
           now,
           source,
           sourceMessageId,
@@ -4963,6 +4951,49 @@ LIMIT ?
       variables: _args([
         status,
         digestJson,
+        _nowIso(),
+        source,
+        sourceMessageId,
+        attachmentId,
+      ]),
+    );
+  }
+
+  /// What the message inside an `item` attachment says it is.
+  ///
+  /// A forwarded message arrives as a file, and the three things a person needs
+  /// to recognise it — the subject it had, who sent it, when it arrived — are
+  /// inside the wrapper rather than on the row. Both connectors learn them on
+  /// the text call, which is why they are written here and not by
+  /// [upsertAttachments]: the sync's attachment list has never carried them.
+  ///
+  /// COALESCE per column, and that is the whole reason this is not three plain
+  /// assignments: a later pass that learned nothing must not blank what an
+  /// earlier one learned. A text handler re-run answering `gone` knows no
+  /// subject, and the subject it does not know is not an empty subject.
+  ///
+  /// All three null is a no-op, not a write — an ordinary file attachment
+  /// reaches this method never having had an inner message to describe.
+  Future<void> setAttachmentItem(
+    String source,
+    String sourceMessageId,
+    String attachmentId, {
+    String? subject,
+    String? from,
+    String? received,
+  }) async {
+    if (subject == null && from == null && received == null) return;
+    await db.customUpdate(
+      'UPDATE attachments SET '
+      '  item_subject = COALESCE(?, item_subject), '
+      '  item_from = COALESCE(?, item_from), '
+      '  item_received = COALESCE(?, item_received), '
+      '  updated_at = ? '
+      'WHERE source = ? AND source_message_id = ? AND attachment_id = ?',
+      variables: _args([
+        subject,
+        from,
+        received,
         _nowIso(),
         source,
         sourceMessageId,
@@ -5064,6 +5095,56 @@ LIMIT ?
           'WHERE a.pinned_storyline_id = ? '
           'ORDER BY m.received_at DESC, a.ordinal ASC, a.attachment_id ASC',
           variables: _args([storylineId]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// Every document a storyline can show: the files on its threads, plus the
+  /// ones somebody pinned to it.
+  ///
+  /// Two populations, one query. A storyline is a set of threads, so most of
+  /// its documents arrive by membership; a pin is the other way in, and it
+  /// OUTLIVES membership — the same reason [pinnedAttachmentsForStoryline]
+  /// joins messages on the left. A thread dropped from the storyline takes its
+  /// files with it, but not the one a person deliberately kept.
+  ///
+  /// `EXISTS` against `storyline_members` rather than a join, because a join
+  /// would multiply an attachment by its memberships and the caller wants each
+  /// file once. The OR then makes de-duplication free: a pinned file on a
+  /// member thread satisfies both halves and is still one row.
+  ///
+  /// Inline images are excluded on both halves. This is the Documents list —
+  /// a signature graphic in a footer is not a document, and it is not one
+  /// because somebody pinned it either.
+  ///
+  /// Ordered pinned-first, then newest message first: the files a person chose
+  /// are the ones they are coming back for, and everything after that is a
+  /// timeline. `pinned_storyline_id IS ?` in the ORDER BY is compared against
+  /// THIS storyline, so a file pinned to a different one sorts as the ordinary
+  /// thread attachment it is here — which is why the id is passed twice. `IS`
+  /// and not `=`, because `NULL = ?` is NULL and sqlite sorts NULL below 0: an
+  /// `=` would put every file pinned ELSEWHERE above every file pinned nowhere,
+  /// whatever their dates, and the timeline would be quietly wrong for exactly
+  /// the storylines that share a thread.
+  Future<List<Map<String, Object?>>> attachmentsForStoryline(
+    String storylineId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT a.*, m.conversation_key AS conversation_key, '
+          '       m.received_at AS message_received_at '
+          'FROM attachments a '
+          'LEFT JOIN messages m ON m.source = a.source '
+          '  AND m.source_message_id = a.source_message_id '
+          'WHERE a.is_inline = 0 AND ('
+          '  EXISTS (SELECT 1 FROM storyline_members sm '
+          '          WHERE sm.storyline_id = ? AND sm.source = m.source '
+          '            AND sm.conversation_key = m.conversation_key) '
+          '  OR a.pinned_storyline_id = ?) '
+          'ORDER BY (a.pinned_storyline_id IS ?) DESC, m.received_at DESC, '
+          '  a.ordinal ASC, a.attachment_id ASC',
+          variables: _args([storylineId, storylineId, storylineId]),
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
@@ -5357,31 +5438,106 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
     await _chunkIndex.backfill();
 
     final k = math.min(limit * 4, 400);
-    final hits = await _chunkIndex.knn(query, k: k);
+    // The scope goes INSIDE the neighbour search, not after it. A corpus-wide
+    // KNN filtered afterwards returns the k nearest passages in the MAILBOX
+    // that happen to be in scope, which on a mailbox of a few hundred chunks
+    // is routinely none of them: a message saying "please see attached" is
+    // near every strangers' document at once, and the thread's own contract
+    // never makes the shortlist. Scoped, the k nearest are the k nearest
+    // within the scope, which is the question that was being asked.
+    final (indexScope, indexArgs) = _chunkScope(
+      source,
+      messageIds,
+      attachmentIds,
+    );
+    final hits = await _chunkIndex.knn(
+      query,
+      k: k,
+      rowidWhere: indexScope,
+      rowidArgs: indexArgs,
+    );
     if (hits.isEmpty) return const [];
 
-    // Each half of the OR is built only when it has values: an empty `IN ()`
-    // is a syntax error, and a scope with no ids has to contribute a
-    // predicate that is simply false.
+    // The same predicate again on the hydration, belt and braces. It costs one
+    // indexed lookup and it means an orphaned vec0 rowid — [replaceChunks]
+    // leaves those behind — can never hydrate into a passage from outside the
+    // scope.
+    final (rowScope, rowArgs) = _chunkScope(
+      source,
+      messageIds,
+      attachmentIds,
+      prefix: 'c.',
+    );
+    return _hydrateChunkHits(
+      hits,
+      embedModel: embedModel,
+      extraWhere: 'AND $rowScope',
+      extraArgs: rowArgs,
+      limit: limit,
+    );
+  }
+
+  /// The SQL for "this source, and either one of these messages or one of
+  /// these documents", with its arguments.
+  ///
+  /// One builder for three readers — the KNN's rowid subquery, its hydration,
+  /// and [hasAttachmentChunks] — because a scope that disagreed with itself
+  /// between the guard and the search would be a silent narrowing nobody could
+  /// see. [prefix] is the table alias the caller needs (`c.` inside the join,
+  /// nothing inside the subquery over `attachment_chunks` itself).
+  ///
+  /// Each half of the OR is written only when it has values: an empty `IN ()`
+  /// is a syntax error, and a caller with neither half must not reach here at
+  /// all — the scope would be `source = ?` and that IS the corpus.
+  static (String, List<Object?>) _chunkScope(
+    String source,
+    List<String> messageIds,
+    List<String> attachmentIds, {
+    String prefix = '',
+  }) {
     final scope = StringBuffer();
     final args = <Object?>[source];
     if (messageIds.isNotEmpty) {
-      scope.write('c.source_message_id IN (${_placeholders(messageIds.length)})');
+      scope.write(
+        '${prefix}source_message_id IN (${_placeholders(messageIds.length)})',
+      );
       args.addAll(messageIds);
     }
     if (attachmentIds.isNotEmpty) {
       if (scope.isNotEmpty) scope.write(' OR ');
-      scope.write('c.attachment_id IN (${_placeholders(attachmentIds.length)})');
+      scope.write(
+        '${prefix}attachment_id IN (${_placeholders(attachmentIds.length)})',
+      );
       args.addAll(attachmentIds);
     }
+    return ('${prefix}source = ? AND ($scope)', args);
+  }
 
-    return _hydrateChunkHits(
-      hits,
-      embedModel: embedModel,
-      extraWhere: 'AND c.source = ? AND ($scope)',
-      extraArgs: args,
-      limit: limit,
-    );
+  /// Whether anything in this scope has passages at all.
+  ///
+  /// The cheap read before the expensive one. [AttachmentRetriever] runs on
+  /// every draft, and the overwhelming majority of threads have never had a
+  /// document on them — so one indexed `LIMIT 1` here saves that thread a
+  /// vector read, an index backfill, a KNN and, on a message the embed queue
+  /// has not reached yet, a POST to the embedding server.
+  ///
+  /// An empty scope is false without a query, on [chunkKnn]'s rule: a caller
+  /// that cannot say which thread it is on is asking about nothing, not about
+  /// everything.
+  Future<bool> hasAttachmentChunks(
+    String source, {
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+  }) async {
+    if (messageIds.isEmpty && attachmentIds.isEmpty) return false;
+    final (scope, args) = _chunkScope(source, messageIds, attachmentIds);
+    final result = await db
+        .customSelect(
+          'SELECT 1 FROM attachment_chunks WHERE $scope LIMIT 1',
+          variables: _args(args),
+        )
+        .get();
+    return result.isNotEmpty;
   }
 
   /// The passages nearest [query] anywhere in the mailbox, one per document.
@@ -5415,6 +5571,13 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
 
     final where = StringBuffer('AND c.source IN (${_placeholders(sources.length)})');
     final args = <Object?>[...sources];
+    // The digest passage is not a search hit. It is filed as a chunk of its own
+    // document so the retrieval side can find "what is this file about", but a
+    // search result promises the DOCUMENT'S OWN WORDS — and a digest is a
+    // model's summary of them. Showing one would put sentences nobody wrote
+    // under a file name, which is the same reason [AttachmentRetriever] drops
+    // it before a reply can quote it.
+    where.write(" AND c.locator != 'digest'");
     // A gate-dropped message keeps its rows; its documents must not surface in
     // the live search any more than the message does.
     if (!includeDropped) where.write(' AND COALESCE(p.dropped, 0) = 0');

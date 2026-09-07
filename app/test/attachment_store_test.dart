@@ -246,16 +246,98 @@ void main() {
   });
 
   group('a thread and a storyline', () {
-    test('attachments for a thread arrive oldest message first', () async {
+    Future<void> joinStoryline(String key, {String id = 'story-7'}) =>
+        store.addStorylineMember(id, 'email', key, addedBy: 'auto');
+
+    test('a storyline\'s documents are every file on its threads, pinned '
+        'first, newest first', () async {
       await seedMessage('m1', receivedAt: '2026-09-04T09:00:00.000Z');
       await seedMessage('m2', receivedAt: '2026-09-04T11:00:00.000Z');
-      await store.upsertAttachments('email', 'm2', [row('att-late')]);
+      await joinStoryline('conv-1');
       await store.upsertAttachments('email', 'm1', [row('att-early')]);
+      await store.upsertAttachments('email', 'm2', [row('att-late')]);
+      // Pinned, and on the OLDER message: the pin has to beat the clock or the
+      // ordering is just a timeline with an extra column.
+      await store.setAttachmentPinned('email', 'm1', 'att-early', 'story-7');
 
-      final thread = await store.attachmentsForThread('email', 'conv-1');
+      final documents = await store.attachmentsForStoryline('story-7');
 
-      expect(thread.map((r) => r['attachment_id']), ['att-early', 'att-late']);
-      expect(thread.first['conversation_key'], 'conv-1');
+      expect(
+        documents.map((r) => r['attachment_id']),
+        ['att-early', 'att-late'],
+      );
+      expect(documents.first['conversation_key'], 'conv-1');
+      expect(documents.last['message_received_at'], '2026-09-04T11:00:00.000Z');
+    });
+
+    test('a file pinned to another storyline keeps its place in the timeline',
+        () async {
+      await seedMessage('m1', receivedAt: '2026-09-04T09:00:00.000Z');
+      await seedMessage('m2', receivedAt: '2026-09-04T11:00:00.000Z');
+      await joinStoryline('conv-1');
+      await store.upsertAttachments('email', 'm1', [row('att-early')]);
+      await store.upsertAttachments('email', 'm2', [row('att-late')]);
+      // Pinned, but to a DIFFERENT storyline. Here that is an ordinary thread
+      // attachment, and an ordinary one on the older message sorts after the
+      // newer one — a `NULL = ?` in the ORDER BY would have put it first.
+      await store.setAttachmentPinned('email', 'm1', 'att-early', 'story-8');
+
+      final documents = await store.attachmentsForStoryline('story-7');
+
+      expect(
+        documents.map((r) => r['attachment_id']),
+        ['att-late', 'att-early'],
+      );
+    });
+
+    test('a pin whose thread left the storyline still shows', () async {
+      await seedMessage('m1', key: 'conv-other');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      await store.setAttachmentPinned('email', 'm1', 'att-a', 'story-7');
+
+      // Nothing joins `conv-other` to the storyline. A pin is a person's own
+      // decision and it outlives the membership that may never have existed.
+      final documents = await store.attachmentsForStoryline('story-7');
+
+      expect(documents.single['attachment_id'], 'att-a');
+    });
+
+    test('inline images are not documents', () async {
+      await seedMessage('m1');
+      await joinStoryline('conv-1');
+      await store.upsertAttachments('email', 'm1', [
+        row('att-signature', isInline: true, contentType: 'image/png'),
+        row('att-real', ordinal: 1),
+      ]);
+
+      final documents = await store.attachmentsForStoryline('story-7');
+
+      expect(documents.single['attachment_id'], 'att-real');
+    });
+
+    test('a thread outside the storyline contributes nothing', () async {
+      await seedMessage('m1', key: 'conv-1');
+      await seedMessage('m2', key: 'conv-2');
+      await joinStoryline('conv-1');
+      await store.upsertAttachments('email', 'm1', [row('att-mine')]);
+      await store.upsertAttachments('email', 'm2', [row('att-theirs')]);
+
+      final documents = await store.attachmentsForStoryline('story-7');
+
+      expect(documents.single['attachment_id'], 'att-mine');
+    });
+
+    test('a document counts once however many storylines its thread is in',
+        () async {
+      await seedMessage('m1');
+      await joinStoryline('conv-1');
+      await joinStoryline('conv-1', id: 'story-8');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      await store.setAttachmentPinned('email', 'm1', 'att-a', 'story-7');
+
+      // Both halves of the OR are true for this row. An EXISTS rather than a
+      // join is what keeps it one row rather than one per membership.
+      expect(await store.attachmentsForStoryline('story-7'), hasLength(1));
     });
 
     test('pinned documents come back newest message first', () async {
@@ -635,9 +717,142 @@ void main() {
       final pending = await store.unembeddedChunks('email', 'm1', 'att-a');
       expect(pending.map((c) => c.text), ['Two.', 'Three.']);
     });
+
+    test('a scope with no passages says so', () async {
+      await seedMessage('m1');
+      await seedMessage('m2');
+      await store.upsertAttachments('email', 'm2', [row('att-a')]);
+      await store.replaceChunks('email', 'm2', 'att-a', const [
+        (seq: 0, locator: '', text: 'The term runs eighteen months.'),
+      ]);
+
+      // The guard the retriever runs before it spends a vector: another
+      // message's passages are not this thread's.
+      expect(
+        await store.hasAttachmentChunks('email', messageIds: const ['m1']),
+        isFalse,
+      );
+    });
+
+    test('a scope with one says so', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: '', text: 'The tenant pays on the fourth.'),
+      ]);
+
+      expect(
+        await store.hasAttachmentChunks('email', messageIds: const ['m1']),
+        isTrue,
+      );
+      // The pinned half of the scope answers on its own, for a document from
+      // another thread that somebody named.
+      expect(
+        await store.hasAttachmentChunks('email',
+            attachmentIds: const ['att-a']),
+        isTrue,
+      );
+    });
+
+    test('asking about nothing is not asking about everything', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      await store.replaceChunks('email', 'm1', 'att-a', const [
+        (seq: 0, locator: '', text: 'The tenant pays on the fourth.'),
+      ]);
+
+      // An empty scope is false without a query, on `chunkKnn`'s rule: a
+      // caller that cannot say which thread it is on gets nothing.
+      expect(await store.hasAttachmentChunks('email'), isFalse);
+    });
+  });
+
+  group('the message inside a forwarded attachment', () {
+    test('the attached message\'s fields are kept when a later pass learns '
+        'nothing', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a', kind: 'item')]);
+      await store.setAttachmentItem(
+        'email',
+        'm1',
+        'att-a',
+        subject: 'Q3 forecast',
+        from: 'dana@example.test',
+        received: '2026-08-20T10:00:00Z',
+      );
+
+      // A text handler re-run answering `gone` knows no subject, and the
+      // subject it does not know is not an empty subject.
+      await store.setAttachmentItem('email', 'm1', 'att-a');
+      await store.setAttachmentItem('email', 'm1', 'att-a', from: null);
+
+      final stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['item_subject'], 'Q3 forecast');
+      expect(stored['item_from'], 'dana@example.test');
+      expect(stored['item_received'], '2026-08-20T10:00:00Z');
+    });
+
+    test('one field learned late does not blank the two already known',
+        () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a', kind: 'item')]);
+      await store.setAttachmentItem(
+        'email',
+        'm1',
+        'att-a',
+        subject: 'Q3 forecast',
+        from: 'dana@example.test',
+      );
+
+      await store.setAttachmentItem(
+        'email',
+        'm1',
+        'att-a',
+        received: '2026-08-20T10:00:00Z',
+      );
+
+      final stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['item_subject'], 'Q3 forecast');
+      expect(stored['item_received'], '2026-08-20T10:00:00Z');
+    });
   });
 
   group('a text status that closes the digest', () {
+    test('a skip after a successful read keeps the count and the cut',
+        () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      final words = 'a' * 40000;
+      await store.setAttachmentText(
+        'email',
+        'm1',
+        'att-a',
+        status: 'done',
+        text: words,
+        truncated: true,
+      );
+
+      // A requeue answering `gone`, or a gate applied after the fact. It has
+      // no words, and having none says nothing about how many there were.
+      await store.setAttachmentText(
+        'email',
+        'm1',
+        'att-a',
+        status: 'skipped',
+        reason: 'gone',
+      );
+
+      final stored = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(stored['text_status'], 'skipped');
+      expect(stored['text_reason'], 'gone');
+      // The count and the cut would otherwise contradict the Text segment
+      // still rendering forty thousand characters underneath them.
+      expect(stored['text_chars'], 40000);
+      expect(stored['text_truncated'], 1);
+      expect(stored['digest_status'], 'skipped');
+      expect(await store.attachmentTextOf('email', 'm1', 'att-a'), words);
+    });
+
     test('a skip marks the digest skipped too', () async {
       await seedMessage('m1');
       await store.upsertAttachments('email', 'm1', [row('att-a')]);

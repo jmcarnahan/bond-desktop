@@ -25,6 +25,10 @@ import 'attachment_policy.dart';
 /// document, and the queue behind it is already draining as fast as the server
 /// answers.
 class AttachmentDigestHandler extends WorkHandler {
+  /// A digest is a RECORD of one document, never a rewrite of it: a summary, a
+  /// few facts and any asks, which is a fraction of this even for a long file.
+  static const int _maxTokens = 512;
+
   final MessageStore _store;
   final LlmClient _client;
   final EmbeddingsClient _embeddings;
@@ -142,6 +146,7 @@ class AttachmentDigestHandler extends WorkHandler {
         now: DateTime.now(),
       ),
       temperature: 0,
+      maxTokens: _maxTokens,
     );
 
     await _store.setAttachmentDigest(

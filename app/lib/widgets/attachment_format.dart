@@ -4,10 +4,12 @@
 /// every attachment widget asks, answered once so a chip, a thumbnail and a
 /// preview header never disagree about what a file is called or how big it is.
 /// Nothing here imports Flutter's material layer — these are string and key
-/// functions, testable without pumping a widget.
+/// functions, testable without pumping a widget. The one Flutter import is
+/// narrowed to the two names it needs: [ValueKey], and the grapheme-cluster
+/// extension a name is cut on.
 library;
 
-import 'package:flutter/foundation.dart' show ValueKey;
+import 'package:flutter/widgets.dart' show StringCharacters, ValueKey;
 
 import '../models/attachment_models.dart';
 
@@ -147,4 +149,68 @@ String? _glyphForContentType(String? contentType) {
     return '🗜';
   }
   return null;
+}
+
+/// The parsed [url] when — and only when — it is a web address.
+///
+/// A `source_url` is the SENDER's string. Teams cards and reference
+/// attachments carry whatever the connector posted, verbatim, and handing that
+/// to the operating system is handing a stranger the launcher: `file:///…` runs
+/// a local application, `smb://…` mounts a share, and a custom scheme opens
+/// whichever app registered it. A button labelled "Open in Teams" must do the
+/// one thing it says, so only `http` and `https` with a real host get through.
+/// Everything else answers null, which is the caller's cue to offer no button
+/// at all rather than a button that would do something else.
+Uri? webUriOf(String? url) {
+  final trimmed = (url ?? '').trim();
+  if (trimmed.isEmpty) return null;
+  final uri = Uri.tryParse(trimmed);
+  if (uri == null) return null;
+  final scheme = uri.scheme.toLowerCase();
+  if (scheme != 'http' && scheme != 'https') return null;
+  if (uri.host.isEmpty) return null;
+  return uri;
+}
+
+/// How long a suggested file name may be before the save panel gets an
+/// unusable one. Well under every filesystem's own limit, and long enough that
+/// no real attachment is ever cut.
+const int _suggestedNameCap = 120;
+
+/// A name safe to hand a save panel.
+///
+/// The name comes off the wire, so it can carry a path (`../../.ssh/config`),
+/// a Windows drive separator, a newline, or four thousand characters. The
+/// panel decides where the file goes and the user confirms it, but a suggested
+/// name with a separator in it is still a name that reads as a path — so every
+/// separator and every control character becomes an underscore, leading dots
+/// (which hide a file) come off, and the whole thing is capped with its
+/// extension kept, because the extension is what the operating system opens it
+/// by. A name left with nothing in it becomes `attachment`, the same fallback
+/// the caller used before there was a name at all.
+String safeSuggestedName(String? name) {
+  final cleaned = (name ?? '')
+      .replaceAll(RegExp(r'[/\\:\x00-\x1f\x7f]'), '_')
+      .trim()
+      .replaceAll(RegExp(r'^\.+'), '')
+      .trim();
+  if (cleaned.isEmpty) return 'attachment';
+  if (cleaned.characters.length <= _suggestedNameCap) return cleaned;
+
+  // By grapheme cluster, the way `AttachmentChip.nameCap` cuts: `substring`
+  // splits a surrogate pair and leaves the replacement glyph in a file name.
+  final extension = extensionOf(cleaned);
+  if (extension.isEmpty) {
+    return cleaned.characters.take(_suggestedNameCap).toString();
+  }
+  final suffix = '.$extension';
+  final room = _suggestedNameCap - suffix.characters.length;
+  // An extension longer than the whole budget is not an extension worth
+  // keeping; the cut alone is the honest answer.
+  if (room <= 0) return cleaned.characters.take(_suggestedNameCap).toString();
+  final stem = cleaned.characters
+      .take(cleaned.characters.length - suffix.characters.length)
+      .take(room)
+      .toString();
+  return '$stem$suffix';
 }

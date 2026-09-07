@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/conversations_provider.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -16,6 +17,7 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/composer.dart';
+import 'package:bond_inbox/widgets/home_pane.dart';
 import 'package:bond_inbox/widgets/inline_image_thumb.dart';
 import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
 import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
@@ -287,6 +289,51 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('a thread that vanishes under the full viewer strands nobody',
+      (tester) async {
+    // A sync that moved the thread, a mark-done, a wipe: the conversation
+    // simply is not there any more. The viewer rung falls through rather than
+    // calling setState in build, and the pane underneath is whatever is left.
+    await seedThread();
+    await pumpInbox(tester);
+    await openThread(tester);
+    await openAttachment(tester, 'Terms.pdf');
+    await tester.tap(find.byKey(AttachmentPreviewPanel.expandKey));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(AttachmentViewerPane), findsOneWidget);
+
+    await db
+        .customStatement("DELETE FROM conversations WHERE conversation_key = 'c1'");
+    await db.customStatement("DELETE FROM messages WHERE conversation_key = 'c1'");
+    container.invalidate(conversationsProvider);
+    // The invalidate drops the notifier; the re-read builds a fresh one and
+    // the load is what fills it — the same pair the screen's own refresh does.
+    await container.read(conversationsProvider.notifier).load(syncFirst: false);
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(AttachmentViewerPane), findsNothing);
+    expect(find.byType(ThreadDetailPanel), findsNothing);
+    // Something is on screen: the app never lands on a blank pane.
+    expect(find.byType(HomePane), findsOneWidget);
+
+    // And it does not come back when the next thread is opened either — the
+    // viewer belongs to a file on a thread that no longer exists.
+    await seedThread(key: 'c2', attachmentId: 'b1', name: 'Quote.pdf');
+    await container.read(conversationsProvider.notifier).load(syncFirst: false);
+    await tester.pump();
+    await tester.pump();
+    await openThread(tester, key: 'c2');
+
+    expect(find.byType(AttachmentViewerPane), findsNothing);
+    expect(find.byType(AttachmentPreviewPanel), findsNothing);
+    expect(find.byType(ThreadDetailPanel), findsOneWidget);
+    await settleQueues(tester);
+  });
+
   testWidgets('selecting another thread takes the preview with it',
       (tester) async {
     await seedThread();
@@ -377,7 +424,9 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 
-    expect(find.textContaining('Could not save:'), findsOneWidget);
+    // The exception never reaches the bar: a path or a plugin's own words
+    // tell the reader nothing they can act on.
+    expect(find.text('Could not save Terms.pdf.'), findsOneWidget);
     await settleQueues(tester);
   });
 

@@ -88,6 +88,11 @@ const String _grantedScopes =
 class _GraphStub {
   final List<Uri> urls = [];
 
+  /// The headers each request carried, indexed alongside [urls]. The text path
+  /// caps what it FETCHES rather than what it stores, and the only proof of
+  /// that is the `Range` header on the wire.
+  final List<Map<String, String>> requestHeaders = [];
+
   /// Answers in order; the last one is sticky, so a retry test scripts two and
   /// a plain test scripts one.
   final List<http.Response Function()> replies = [];
@@ -107,6 +112,7 @@ class _GraphStub {
           );
         }
         urls.add(request.url);
+        requestHeaders.add(Map.of(request.headers));
         if (replies.isEmpty) return http.Response('', 200);
         final reply = replies.length == 1 ? replies.first : replies.removeAt(0);
         return reply();
@@ -223,8 +229,76 @@ void main() {
       final result = await McpAttachmentBackend(mcp)
           .extractText(ref(kind: 'reference', sourceUrl: null));
 
-      expect(result.reason, 'no_url');
+      // The word `attachment_policy.dart` uses, not a second spelling of it:
+      // the panel prints whichever token was stored, so one condition with two
+      // words is one fact wearing two chips.
+      expect(result.reason, 'reference_no_url');
       expect(mcp.calls, isEmpty);
+    });
+
+    test('the MCP text result carries the attached message\'s subject, sender '
+        'and date', () async {
+      final mcp = _FakeMcp({
+        'get_mail_attachment_json': [
+          <String, dynamic>{
+            'text': 'Please see the terms below.',
+            'size': 27,
+            'item_subject': 'Re: Studio lease',
+            'item_from': 'dana.whitfield@example.test',
+            'item_received': '2026-08-14T09:12:00Z',
+          },
+        ],
+      });
+
+      final result =
+          await McpAttachmentBackend(mcp).extractText(ref(kind: 'item'));
+
+      expect(result.status, 'ok');
+      expect(result.itemSubject, 'Re: Studio lease');
+      expect(result.itemFrom, 'dana.whitfield@example.test');
+      expect(result.itemReceived, '2026-08-14T09:12:00Z');
+    });
+
+    test('a skipped item still names the message it wrapped', () async {
+      // A forwarded mail the extractor got nowhere with is still a forwarded
+      // mail, and the preview draws its header either way.
+      final empty = _FakeMcp({
+        'get_mail_attachment_json': [
+          <String, dynamic>{
+            'text': '',
+            'reason': 'empty',
+            'item_subject': 'Re: Studio lease',
+            'item_from': 'dana.whitfield@example.test',
+            'item_received': '2026-08-14T09:12:00Z',
+          },
+        ],
+      });
+
+      final skipped =
+          await McpAttachmentBackend(empty).extractText(ref(kind: 'item'));
+
+      expect(skipped.status, 'skipped');
+      expect(skipped.itemSubject, 'Re: Studio lease');
+      expect(skipped.itemFrom, 'dana.whitfield@example.test');
+      expect(skipped.itemReceived, '2026-08-14T09:12:00Z');
+
+      final failed = _FakeMcp({
+        'get_mail_attachment_json': [
+          <String, dynamic>{
+            'error': 'access_denied',
+            'item_subject': 'Re: Studio lease',
+            'item_from': 'dana.whitfield@example.test',
+            'item_received': '2026-08-14T09:12:00Z',
+          },
+        ],
+      });
+
+      final refused =
+          await McpAttachmentBackend(failed).extractText(ref(kind: 'item'));
+
+      expect(refused.reason, 'access_denied');
+      expect(refused.itemSubject, 'Re: Studio lease');
+      expect(refused.itemFrom, 'dana.whitfield@example.test');
     });
 
     test('a chat file is read from its sharing url, not from the message',
@@ -319,6 +393,42 @@ void main() {
         ),
       );
       expect(mcp.calls, isEmpty);
+    });
+
+    test('an unknown server word on the bytes path becomes unavailable',
+        () async {
+      // The reason a failed fetch carries is recorded as the text skip it
+      // amounts to and ends up on a chip, so the bytes path closes the
+      // vocabulary exactly as the text path does.
+      final mcp = _FakeMcp({
+        'get_mail_attachment_json': [
+          <String, dynamic>{'error': 'the_server_invented_this'},
+        ],
+      });
+
+      await expectLater(
+        McpAttachmentBackend(mcp).fetchBytes(ref()),
+        throwsA(
+          isA<AttachmentUnavailable>()
+              .having((e) => e.reason, 'reason', 'unavailable'),
+        ),
+      );
+    });
+
+    test('a known one is kept', () async {
+      final mcp = _FakeMcp({
+        'get_mail_attachment_json': [
+          <String, dynamic>{'error': 'too_large'},
+        ],
+      });
+
+      await expectLater(
+        McpAttachmentBackend(mcp).fetchBytes(ref()),
+        throwsA(
+          isA<AttachmentUnavailable>()
+              .having((e) => e.reason, 'reason', 'too_large'),
+        ),
+      );
     });
 
     test('an answer with no bytes in it is a refusal', () async {
@@ -456,6 +566,134 @@ void main() {
       );
 
       expect(result.reason, 'gone');
+    });
+
+    test('a text file whose size is unknown is cut at the download cap and '
+        'marked truncated', () async {
+      // The claimed size is 0 for every Teams file and for plenty of mail
+      // attachments, so the cheap first gate lets this through and the
+      // DOWNLOAD is what has to stop.
+      const cap = 2 * 1024 * 1024;
+      graph.replies.add(() => http.Response('x' * (3 * 1024 * 1024), 200));
+
+      final result = await build().extractText(
+        ref(name: 'server.log', contentType: 'text/plain', size: 0),
+      );
+
+      expect(result.status, 'ok');
+      expect(result.truncated, isTrue);
+      expect(result.text!.length, lessThanOrEqualTo(cap));
+      expect(
+        graph.requestHeaders.single['Range'],
+        'bytes=0-${cap - 1}',
+        reason: 'the cap has to be on the wire, not only on what is stored',
+      );
+    });
+
+    test('a server that honours the range answers 206 and the cut is still '
+        'recorded', () async {
+      const cap = 2 * 1024 * 1024;
+      graph.replies.add(() => http.Response(
+            'y' * cap,
+            206,
+            headers: const {
+              'content-type': 'text/plain',
+              'content-range': 'bytes 0-2097151/5000000',
+            },
+          ));
+
+      final result = await build().extractText(
+        ref(name: 'server.log', contentType: 'text/plain', size: 0),
+      );
+
+      expect(result.status, 'ok');
+      // A body sitting exactly at the cap says nothing about itself; the
+      // header is the only thing that knows the file went on.
+      expect(result.truncated, isTrue);
+    });
+
+    test('a text file under the cap is stored whole and unmarked', () async {
+      graph.replies.add(() => http.Response('one,two\n3,4', 200,
+          headers: const {'content-type': 'text/csv'}));
+
+      final result = await build().extractText(
+        ref(name: 'Rates.csv', contentType: 'text/csv', size: 0),
+      );
+
+      expect(result.text, 'one,two\n3,4');
+      expect(result.truncated, isFalse);
+    });
+
+    test('the SDK path expands an attached message and reads its fields',
+        () async {
+      graph.replies.add(() => http.Response(
+            jsonEncode({
+              'id': 'a1',
+              'item': {
+                'subject': 'Re: Studio lease',
+                'from': {
+                  'emailAddress': {
+                    'name': 'Dana Whitfield',
+                    'address': 'dana.whitfield@example.test',
+                  },
+                },
+                'receivedDateTime': '2026-08-14T09:12:00Z',
+                'bodyPreview': 'Please see the terms below.',
+                'body': {
+                  'contentType': 'text',
+                  'content': 'Please see the terms below. Signed, Dana.',
+                },
+              },
+            }),
+            200,
+            headers: const {'content-type': 'application/json'},
+          ));
+
+      final result = await build().extractText(
+        ref(kind: 'item', name: 'Forwarded.eml', contentType: 'message/rfc822'),
+      );
+
+      // A bare `item` in the expand is a Graph 400 that names no property, so
+      // the cast form is pinned rather than trusted.
+      final query = Uri.decodeComponent(graph.urls.single.query);
+      expect(query, contains('microsoft.graph.itemattachment/item'));
+      expect(query, contains('\$select='));
+
+      expect(result.status, 'ok');
+      expect(result.text, 'Please see the terms below. Signed, Dana.');
+      expect(result.truncated, isFalse, reason: 'this is the body, not a cut');
+      expect(result.itemSubject, 'Re: Studio lease');
+      expect(result.itemFrom, 'dana.whitfield@example.test');
+      expect(result.itemReceived, '2026-08-14T09:12:00Z');
+    });
+
+    test('an attached message with an empty body still keeps its fields',
+        () async {
+      graph.replies.add(() => http.Response(
+            jsonEncode({
+              'item': {
+                'subject': 'Re: Studio lease',
+                'from': {
+                  'emailAddress': {'address': 'dana.whitfield@example.test'},
+                },
+                'receivedDateTime': '2026-08-14T09:12:00Z',
+                'bodyPreview': '',
+                'body': {'contentType': 'html', 'content': ''},
+              },
+            }),
+            200,
+            headers: const {'content-type': 'application/json'},
+          ));
+
+      final result = await build().extractText(
+        ref(kind: 'item', name: 'Forwarded.eml', contentType: 'message/rfc822'),
+      );
+
+      expect(result.status, 'skipped');
+      expect(result.reason, 'empty');
+      expect(result.itemSubject, 'Re: Studio lease');
+      expect(result.itemFrom, 'dana.whitfield@example.test');
+      expect(result.itemReceived, '2026-08-14T09:12:00Z');
     });
   });
 

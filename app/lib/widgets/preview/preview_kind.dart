@@ -118,3 +118,57 @@ PreviewKind? _kindForContentType(String? contentType) {
   }
   return null;
 }
+
+/// Extensions the operating system would RUN rather than show.
+///
+/// Executables and installers are obvious. Scripts are the same thing with a
+/// different first line — macOS "opens" a `.command` by handing it to Terminal.
+/// Disk images and archives-that-mount get in because opening one puts a
+/// stranger's volume on the desktop with an application inside it. Macro
+/// documents run code the moment Office opens them. Web pages are here for a
+/// quieter reason: a page opened from a `file:` origin is a page the user
+/// believes came from their mail, and it can ask them for a password.
+const Set<String> _executableExtensions = {
+  'exe', 'msi', 'com', 'scr', 'bat', 'cmd', 'ps1', 'vbs', 'vbe', 'js', 'jse',
+  'wsf', 'wsh', 'sh', 'bash', 'zsh', 'command', 'tool', 'terminal', 'app',
+  'action', 'workflow', 'pkg', 'mpkg', 'dmg', 'iso', 'jar', 'scpt', 'scptd',
+  'applescript', 'py', 'rb', 'pl', 'php', 'url', 'webloc', 'lnk', 'reg',
+  'docm', 'dotm', 'xlsm', 'xltm', 'xlam', 'pptm', 'potm', 'ppam',
+  'html', 'htm', 'xhtml', 'svg',
+};
+
+/// The same answer said by content type, for the connector that names a file
+/// better than its sender did.
+const Set<String> _executableContentTypes = {
+  'application/x-msdownload',
+  'application/x-msdos-program',
+  'application/x-sh',
+  'application/x-shellscript',
+  'application/x-apple-diskimage',
+  'application/java-archive',
+  'application/x-executable',
+  'application/vnd.ms-word.document.macroenabled.12',
+  'application/vnd.ms-excel.sheet.macroenabled.12',
+  'application/vnd.ms-powerpoint.presentation.macroenabled.12',
+  'text/html',
+  'image/svg+xml',
+};
+
+/// Whether handing this file to the operating system would be handing it a
+/// program.
+///
+/// "Open" means the OS decides what opening is, and for these it decides to
+/// run something: a script executes, a macro document executes on load, a web
+/// page from a local origin can phish for a password. None of that is what a
+/// person means when they click Open on a file a stranger mailed them. Save
+/// is still offered, because writing the bytes somewhere the user picked keeps
+/// them in charge of what happens next.
+///
+/// PREVIEWS are unaffected. An `.xlsm` still renders as a sheet and an `.html`
+/// still shows as text — reading a file is not running it, and this app's own
+/// renderers are the safe way to look inside one.
+bool openRefused(AttachmentRef ref) {
+  if (_executableExtensions.contains(extensionOf(ref.name))) return true;
+  final type = ref.contentType?.split(';').first.trim().toLowerCase() ?? '';
+  return _executableContentTypes.contains(type);
+}

@@ -90,13 +90,18 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// is the same sync the overview's button is already holding a label up for.
   final bool syncing;
 
-  /// The files pinned to this storyline, for the shelf behind the Documents
-  /// button. Empty is the ordinary state and renders an explanation, not a
-  /// gap — a storyline nobody has pinned to yet has to say so.
+  /// Every document on this storyline — the files on its member threads, the
+  /// pinned ones first — for the shelf behind the Documents button. Empty is
+  /// the ordinary state and renders an explanation, not a gap: a storyline
+  /// whose threads carry no files has to say so.
   final List<AttachmentRef> documents;
 
   /// A document on the shelf was tapped. Null leaves the entries inert.
   final void Function(AttachmentRef attachment)? onOpenDocument;
+
+  /// Null renders a shelf nothing can be pinned from — see
+  /// [AttachmentDocumentsStrip.onPin].
+  final void Function(AttachmentRef attachment)? onPinDocument;
 
   /// Null renders a read-only shelf: the entries are there, the two-step
   /// Remove is not.
@@ -135,6 +140,7 @@ class StorylineTimelinePanel extends StatefulWidget {
     this.onAskTap,
     this.documents = const [],
     this.onOpenDocument,
+    this.onPinDocument,
     this.onUnpinDocument,
     this.onOpenAttachment,
     this.selectedAttachment,
@@ -658,8 +664,8 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                     ),
                     const SizedBox(width: BondSpacing.s4),
                     // The count is the label, the way the threads button
-                    // reads: a storyline with nothing pinned should not need
-                    // a tap to find that out.
+                    // reads: a storyline with no documents on it should not
+                    // need a tap to find that out.
                     _quietButton(
                       widget.documents.isEmpty
                           ? 'Documents'
@@ -1061,12 +1067,16 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
-  /// The pinned files, on a shelf shaped like the member strip above it.
+  /// The storyline's files, on a shelf shaped like the member strip above it.
   ///
   /// A strip and not a column down the spine for the same reason the members
   /// are one: this is a shelf you reach for, not part of the reading. It sits
   /// under the header where the other two folds sit, so a storyline never has
   /// more than one thing unfolded above its divider that you did not ask for.
+  ///
+  /// The storyline's own id rides in so an entry can tell a pin to THIS
+  /// storyline from a pin to another one — the panel already holds it, so
+  /// there is nothing for the host to pass.
   Widget _documentsStrip() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -1078,7 +1088,9 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
       child: AttachmentDocumentsStrip(
         key: StorylineTimelinePanel.documentsStripKey,
         documents: widget.documents,
+        storylineId: widget.storyline.id,
         onOpen: (attachment) => widget.onOpenDocument?.call(attachment),
+        onPin: widget.onPinDocument,
         onUnpin: widget.onUnpinDocument,
       ),
     );

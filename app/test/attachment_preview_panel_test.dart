@@ -226,6 +226,45 @@ void main() {
       expect(find.byKey(AttachmentPreviewPanel.saveKey), findsNothing);
     });
 
+    testWidgets('the Text segment still reads a file too large to fetch',
+        (tester) async {
+      final attachment = ref(
+        name: 'Scan.pdf',
+        size: 12 * 1024 * 1024,
+        sourceUrl: 'https://o/1',
+      );
+      // The server read this one already, so its words cost no download —
+      // which is exactly why the cap must not stand in front of them.
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          'Survey booked for the fourteenth.';
+      await pump(tester, attachment, onOpenLink: (_) {});
+
+      await tapSegment(tester, 'Text');
+
+      expect(find.text('Survey booked for the fourteenth.'), findsOneWidget);
+      expect(bytes.bytesCalls, 0);
+    });
+
+    testWidgets('a mail file over the cap says where to get it',
+        (tester) async {
+      // Graph gives a mail attachment no sharing url, so without this sentence
+      // the panel is a card and a dead end.
+      await pump(
+        tester,
+        ref(name: 'Scan.pdf', size: 12 * 1024 * 1024),
+        onOpenLink: (_) {},
+      );
+
+      expect(find.byKey(AttachmentPreviewPanel.sourceLinkKey), findsNothing);
+      expect(
+        find.textContaining('over what this connection can hand over'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Open the message in your mail app'),
+          findsOneWidget);
+      expect(find.textContaining('is under Text'), findsOneWidget);
+    });
+
     testWidgets('the same file under a wider cap is fetched', (tester) async {
       final attachment = ref(name: 'Scan.pdf', size: 12 * 1024 * 1024);
       bytes.maxPreviewBytes = 25 * 1024 * 1024;
@@ -278,6 +317,28 @@ void main() {
       expect(opened, 'https://drive/budget');
     });
 
+    testWidgets('a link that is not a web address gets no button',
+        (tester) async {
+      var opened = 0;
+      await pump(
+        tester,
+        ref(
+          kind: 'reference',
+          name: 'Budget.xlsx',
+          // The connector stores the sender's string verbatim; this one would
+          // launch a local application under a button saying 'Open in
+          // Outlook'.
+          sourceUrl: 'file:///Applications/Calculator.app',
+        ),
+        onOpenLink: (_) => opened++,
+      );
+
+      // No button rather than a disabled one: there is nothing safe to do
+      // with this, and a greyed-out control invites a second look.
+      expect(find.byKey(AttachmentPreviewPanel.sourceLinkKey), findsNothing);
+      expect(opened, 0);
+    });
+
     testWidgets('a link with no url offers nothing to press', (tester) async {
       await pump(
         tester,
@@ -297,6 +358,29 @@ void main() {
       await pump(tester, attachment);
 
       expect(bytes.bytesCalls, 0);
+      expect(find.text('Dear Dana, the survey is booked.'), findsOneWidget);
+    });
+
+    testWidgets('a document thumbnail that will not decode is simply absent',
+        (tester) async {
+      final attachment = ref(
+        source: 'teams',
+        name: 'Letter.docx',
+        contentType: null,
+      );
+      bytes.textByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          'Dear Dana, the survey is booked.';
+      // What OneDrive answers with when the session has drifted: an HTML
+      // sign-in page, not a picture. Without an `errorBuilder` this throws
+      // into the tree and takes the panel with it.
+      bytes.thumbnailsByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList([1, 2, 3]);
+      await pump(tester, attachment, pumps: 6);
+
+      // The panel really did ask for, and receive, the undecodable bytes —
+      // otherwise this test would pass for the wrong reason.
+      expect(bytes.thumbnailCalls, 1);
+      expect(tester.takeException(), isNull);
       expect(find.text('Dear Dana, the survey is booked.'), findsOneWidget);
     });
   });
@@ -543,6 +627,26 @@ void main() {
 
       expect(opened, 1);
       expect(saved, 1);
+    });
+
+    testWidgets('a file that can run gets Save but not Open', (tester) async {
+      var opened = 0;
+      final attachment = ref(name: 'invoice.command', contentType: null);
+      bytes.bytesByKey[FakeAttachmentBytes.keyOf(attachment)] =
+          Uint8List.fromList([1]);
+      await pump(
+        tester,
+        attachment,
+        onOpen: () => opened++,
+        onSave: () {},
+      );
+
+      // The OS "opens" this by running it in Terminal, so Save — which writes
+      // the bytes somewhere the user picked — is the only thing on offer.
+      expect(find.byKey(AttachmentPreviewPanel.saveKey), findsOneWidget);
+      expect(find.byKey(AttachmentPreviewPanel.openKey), findsNothing);
+      expect(find.byKey(AttachmentPreviewPanel.openRefusedKey), findsOneWidget);
+      expect(opened, 0);
     });
 
     testWidgets('a host with nowhere to send them renders neither',

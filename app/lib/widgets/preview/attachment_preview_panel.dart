@@ -110,6 +110,7 @@ class AttachmentPreviewPanel extends StatefulWidget {
   static const Key useInReplyKey = ValueKey('attachment-preview-use-in-reply');
   static const Key pinKey = ValueKey('attachment-preview-pin');
   static const Key sourceLinkKey = ValueKey('attachment-preview-source-link');
+  static const Key openRefusedKey = ValueKey('attachment-preview-open-refused');
 
   @override
   State<AttachmentPreviewPanel> createState() => _AttachmentPreviewPanelState();
@@ -382,9 +383,16 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
   /// Open and Save are hidden for a link (there is no file) and for a file
   /// over the cap (there is nothing this app can fetch to hand over) — in both
   /// cases the body already offers the link out instead.
+  ///
+  /// Open alone is withheld for a file the operating system would RUN — see
+  /// [openRefused]. A caption stands where the button was, because a control
+  /// that simply vanished for one file and not the next reads as a bug rather
+  /// than as a decision.
   Widget _actions() {
     final kind = previewKindFor(widget.attachment);
     final fetchable = kind != PreviewKind.link && !_isTooLarge;
+    final refused = openRefused(widget.attachment);
+    final openable = fetchable && !refused;
     final open = widget.onOpen;
     final save = widget.onSave;
     final useInReply = widget.onUseInReply;
@@ -394,12 +402,18 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
       spacing: BondSpacing.s8,
       runSpacing: BondSpacing.s4,
       children: [
-        if (fetchable && open != null)
+        if (openable && open != null)
           TextButton.icon(
             key: AttachmentPreviewPanel.openKey,
             onPressed: open,
             icon: const Icon(Icons.open_in_new, size: 16),
             label: const Text('Open'),
+          ),
+        if (fetchable && refused && open != null)
+          Text(
+            'Open is off for files that can run. Save it instead.',
+            key: AttachmentPreviewPanel.openRefusedKey,
+            style: BondType.caption.copyWith(color: BondColors.inkMuted),
           ),
         if (fetchable && save != null)
           TextButton.icon(
@@ -435,6 +449,11 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
 
     final kind = previewKindFor(widget.attachment);
     if (kind == PreviewKind.link) return _linkBody();
+    // The words the server extracted need no bytes, so the cap has nothing to
+    // say about them. Checked BEFORE the refusal below, which would otherwise
+    // make the Text segment unreachable for exactly the files whose text is
+    // the only thing this app can still show.
+    if (_isTooLarge && _segment == PreviewSegment.text) return _textBody();
     if (_isTooLarge) return _tooLargeBody();
     if (kind == PreviewKind.document) return _documentBody();
     if (kind == PreviewKind.unsupported) return _unsupportedBody();
@@ -466,22 +485,42 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     action: _sourceLink(),
   );
 
-  Widget _tooLargeBody() => UnsupportedPreview(
-    key: AttachmentPreviewPanel.tooLargeKey,
-    glyph: _glyph,
-    name: widget.attachment.name,
-    size: widget.attachment.size,
-    reason:
-        'This file is ${formatBytes(widget.attachment.size)} — '
-        'too large to preview here.',
-    action: _sourceLink(),
-  );
+  /// Over the connector's ceiling, and what is left to do about it.
+  ///
+  /// With a link, the link IS the answer. Without one — which is every mail
+  /// attachment, since Graph gives a mail file no sharing url — the reader
+  /// would otherwise be looking at a dead end, so the sentence says the two
+  /// things that are still true: the message in their mail app has the file,
+  /// and the Text segment beside this one may already have its words.
+  Widget _tooLargeBody() {
+    final link = _sourceLink();
+    final size = formatBytes(widget.attachment.size);
+    return UnsupportedPreview(
+      key: AttachmentPreviewPanel.tooLargeKey,
+      glyph: _glyph,
+      name: widget.attachment.name,
+      size: widget.attachment.size,
+      reason: link != null
+          ? 'This file is $size — too large to preview here.'
+          : 'This file is $size — over what this connection can hand over. '
+              'Open the message in your mail app to get it. Its text, if the '
+              'server read it, is under Text.',
+      action: link,
+    );
+  }
 
   /// The way out of a refusal: the file where it actually lives.
+  ///
+  /// Only for a WEB address — see [webUriOf]. The url is the sender's own
+  /// string, so a hostile one gets no button at all rather than a disabled
+  /// one: a greyed-out control invites a second look at something there is
+  /// nothing safe to do with, and a refusal with no explanation for it is a
+  /// worse answer than a refusal that simply offers nothing.
   Widget? _sourceLink() {
     final url = widget.attachment.sourceUrl;
     final openLink = widget.onOpenLink;
-    if (url == null || url.isEmpty || openLink == null) return null;
+    if (url == null || openLink == null) return null;
+    if (webUriOf(url) == null) return null;
     return TextButton.icon(
       key: AttachmentPreviewPanel.sourceLinkKey,
       onPressed: () => openLink(url),
@@ -532,7 +571,20 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
           children: [
             ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 200),
-              child: Image.memory(png, fit: BoxFit.contain),
+              child: Image.memory(
+                png,
+                fit: BoxFit.contain,
+                // OneDrive answers a rendering request with a sign-in page
+                // when the session has drifted, so these bytes are not always
+                // a picture. An undecodable image throws into the widget tree
+                // and takes the whole panel with it; nothing at all is the
+                // right amount of noise for a thumbnail that never arrived,
+                // and the words below it are what the reader came for anyway.
+                errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                // The same bytes across a rebuild keep the frame that is
+                // already decoded rather than blanking for one frame.
+                gaplessPlayback: true,
+              ),
             ),
             const SizedBox(height: BondSpacing.s12),
             Expanded(child: _textBody()),

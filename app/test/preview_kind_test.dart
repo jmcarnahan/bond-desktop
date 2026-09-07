@@ -97,6 +97,53 @@ void main() {
     });
   });
 
+  group('openRefused', () {
+    test('anything the operating system would RUN is Save-only', () {
+      // macOS opens a `.command` by handing it to Terminal.
+      expect(openRefused(ref(name: 'invoice.command')), isTrue);
+      expect(openRefused(ref(name: 'setup.exe')), isTrue);
+      expect(openRefused(ref(name: 'Installer.dmg')), isTrue);
+      expect(openRefused(ref(name: 'build.sh')), isTrue);
+    });
+
+    test('a macro document runs its macros on open', () {
+      expect(openRefused(ref(name: 'Budget.xlsm')), isTrue);
+      expect(openRefused(ref(name: 'Letter.docm')), isTrue);
+    });
+
+    test('a web page from a local origin can ask for a password', () {
+      expect(openRefused(ref(name: 'invoice.html')), isTrue);
+      expect(openRefused(ref(name: 'logo.svg')), isTrue);
+      expect(
+        openRefused(ref(name: null, contentType: 'text/html; charset=utf-8')),
+        isTrue,
+      );
+    });
+
+    test('the ordinary documents are untouched', () {
+      expect(openRefused(ref(name: 'Quote.pdf')), isFalse);
+      expect(openRefused(ref(name: 'Letter.docx')), isFalse);
+      expect(openRefused(ref(name: 'Budget.xlsx')), isFalse);
+      expect(openRefused(imageRef()), isFalse);
+      expect(openRefused(ref(name: 'notes.txt', contentType: 'text/plain')),
+          isFalse);
+      expect(
+        openRefused(ref(name: null, contentType: 'application/pdf')),
+        isFalse,
+      );
+    });
+
+    test('a preview is not an open — the kinds are unchanged', () {
+      // Reading a file is not running it, so an `.xlsm` still renders as a
+      // sheet and an `.html` still shows as text.
+      expect(previewKindFor(ref(name: 'Budget.xlsm')), PreviewKind.sheet);
+      expect(
+        previewKindFor(ref(name: 'invoice.html', contentType: 'text/html')),
+        PreviewKind.text,
+      );
+    });
+  });
+
   group('monoForName', () {
     test('a csv is mono and a txt is not', () {
       expect(monoForName('Rows.csv'), isTrue);

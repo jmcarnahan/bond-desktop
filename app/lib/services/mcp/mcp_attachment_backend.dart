@@ -88,7 +88,10 @@ class McpAttachmentBackend implements AttachmentBackend {
     if (ref.kind == 'reference' || (ref.source != 'email' && ref.kind == 'file')) {
       final url = ref.contentUrl;
       if (url == null || url.isEmpty) {
-        return const AttachmentText.skipped('no_url');
+        // The word `attachment_policy.dart` uses for the same condition. The
+        // panel prints whatever was stored, so a second spelling would put two
+        // chips on one fact.
+        return const AttachmentText.skipped('reference_no_url');
       }
       final result = await _call(ref, 'inspect_file_json', {
         'url': url,
@@ -143,7 +146,13 @@ class McpAttachmentBackend implements AttachmentBackend {
 
     final error = result['error'];
     if (error is String && error.isNotEmpty) {
-      throw AttachmentUnavailable(error);
+      // Mapped exactly as the text path maps it, and for the reason
+      // [_permanentServerReasons] states: this reason is recorded as the text
+      // skip the failed fetch amounts to and ends up on a chip, so an
+      // unrecognised server word must not survive the trip.
+      throw AttachmentUnavailable(
+        _permanentServerReasons.contains(error) ? error : 'unavailable',
+      );
     }
 
     final encoded = result['content_base64'];
@@ -171,10 +180,23 @@ class McpAttachmentBackend implements AttachmentBackend {
   /// in `reason` and which is `empty` when it does not; then the words
   /// themselves.
   static AttachmentText _textFrom(Map<String, dynamic> result) {
+    // What the server says about the message an `item` attachment wraps. Read
+    // once and carried onto every answer below, including the two skips: a
+    // forwarded mail that could not be read still has a subject, a sender and
+    // a date, and the preview draws that header whether or not there were
+    // words underneath it. Dropping them on the skip would make the header
+    // appear and disappear according to whether the extractor got anywhere.
+    final itemSubject = _stringOrNull(result['item_subject']);
+    final itemFrom = _stringOrNull(result['item_from']);
+    final itemReceived = _stringOrNull(result['item_received']);
+
     final error = result['error'];
     if (error is String && error.isNotEmpty) {
       return AttachmentText.skipped(
         _permanentServerReasons.contains(error) ? error : 'unavailable',
+        itemSubject: itemSubject,
+        itemFrom: itemFrom,
+        itemReceived: itemReceived,
       );
     }
 
@@ -182,6 +204,9 @@ class McpAttachmentBackend implements AttachmentBackend {
     if (text is! String || text.isEmpty) {
       return AttachmentText.skipped(
         _stringOrNull(result['reason']) ?? 'empty',
+        itemSubject: itemSubject,
+        itemFrom: itemFrom,
+        itemReceived: itemReceived,
       );
     }
 
@@ -193,6 +218,9 @@ class McpAttachmentBackend implements AttachmentBackend {
       text,
       truncated: result['truncated'] == true,
       fetchedBytes: size ?? text.length,
+      itemSubject: itemSubject,
+      itemFrom: itemFrom,
+      itemReceived: itemReceived,
     );
   }
 

@@ -30,8 +30,9 @@ import 'fixtures/test_db.dart';
 ///
 /// `storyline_timeline_test.dart` pins what the panel does with a document
 /// list it is handed. This file pins where that list comes from and what
-/// happens on the way out of it: the pin column is the only one a person sets
-/// by hand, and the shelf is a cached read that every write has to drop.
+/// happens on the way in and out of it: the shelf is every file on the
+/// storyline's threads, the pin column is the only one a person sets by hand,
+/// and the shelf is a cached read that every write has to drop.
 
 class _FakeSync implements MailSync {
   @override
@@ -74,6 +75,7 @@ void main() {
     String key = 'c1',
     String name = 'Quote.pdf',
     String attachmentId = 'a1',
+    String receivedAt = '2026-08-28T09:00:00Z',
   }) async {
     await store.upsertMessage({
       'source': 'email',
@@ -82,7 +84,7 @@ void main() {
       'direction': 'inbound',
       'subject': 'Homepage copy',
       'from_name': 'Dana Whitfield',
-      'received_at': '2026-08-28T09:00:00Z',
+      'received_at': receivedAt,
       'body_text': 'The quote is attached.',
       'has_attachments': 1,
     });
@@ -91,7 +93,7 @@ void main() {
       'conversation_key': key,
       'subject': 'Homepage copy',
       'state': 'waiting',
-      'last_message_at': '2026-08-28T09:00:00Z',
+      'last_message_at': receivedAt,
     });
     await store.upsertAttachments('email', '$key-m1', [
       {
@@ -107,10 +109,11 @@ void main() {
         Uint8List.fromList(onePixelPng);
   }
 
-  /// The storyline the thread is filed under. [pinned] names the attachment
-  /// that starts life on its shelf.
+  /// The storyline the threads are filed under. [keys] names every member
+  /// thread; [pinned] names the `<conversation key>/<attachment id>` pair that
+  /// starts life pinned to it.
   Future<void> seedStoryline({
-    String key = 'c1',
+    List<String> keys = const ['c1'],
     String? pinned,
   }) async {
     await store.insertStoryline(
@@ -119,9 +122,17 @@ void main() {
       status: 'active',
       createdBy: 'auto',
     );
-    await store.addStorylineMember('sl-1', 'email', key, addedBy: 'auto');
+    for (final key in keys) {
+      await store.addStorylineMember('sl-1', 'email', key, addedBy: 'auto');
+    }
     if (pinned != null) {
-      await store.setAttachmentPinned('email', '$key-m1', pinned, 'sl-1');
+      final parts = pinned.split('/');
+      await store.setAttachmentPinned(
+        'email',
+        '${parts.first}-m1',
+        parts.last,
+        'sl-1',
+      );
     }
   }
 
@@ -183,19 +194,103 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('the shelf shows what the store says is pinned', (tester) async {
-    await seedThread();
-    await seedStoryline(pinned: 'a1');
+  testWidgets("the shelf lists every document on the storyline's threads, "
+      'pinned first', (tester) async {
+    await seedThread(receivedAt: '2026-08-20T09:00:00Z');
+    await seedThread(
+      key: 'c2',
+      name: 'Brief.pdf',
+      attachmentId: 'a2',
+      receivedAt: '2026-08-28T09:00:00Z',
+    );
+    // The OLDER file is the pinned one, so pinned-first and newest-first
+    // disagree — which is the only way to tell which order is actually shown.
+    await seedStoryline(keys: ['c1', 'c2'], pinned: 'c1/a1');
 
     await openShelf(tester);
 
-    expect(find.text('1 document'), findsOneWidget);
-    expect(find.textContaining('Quote.pdf'), findsOneWidget);
+    // Nobody pinned Brief.pdf and it is on the shelf all the same: membership
+    // is the ordinary way a document gets here.
+    expect(find.text('2 documents'), findsOneWidget);
+    expect(find.text('📌 📕 Quote.pdf'), findsOneWidget);
+    expect(find.text('📕 Brief.pdf'), findsOneWidget);
+
+    final shown = tester
+        .widgetList<Text>(find.descendant(
+          of: find.byKey(StorylineTimelinePanel.documentsStripKey),
+          matching: find.byType(Text),
+        ))
+        .map((t) => t.data)
+        .whereType<String>()
+        .where((text) => text.endsWith('.pdf'))
+        .toList();
+    expect(shown, ['📌 📕 Quote.pdf', '📕 Brief.pdf']);
     await settleQueues(tester);
   });
 
-  testWidgets('a storyline with nothing pinned says so', (tester) async {
-    await seedThread();
+  testWidgets('pinning from the shelf floats it and toasts', (tester) async {
+    await seedThread(receivedAt: '2026-08-20T09:00:00Z');
+    await seedThread(
+      key: 'c2',
+      name: 'Brief.pdf',
+      attachmentId: 'a2',
+      receivedAt: '2026-08-28T09:00:00Z',
+    );
+    await seedStoryline(keys: ['c1', 'c2']);
+
+    await openShelf(tester);
+    // Newest first while nothing is pinned.
+    expect(find.text('📕 Brief.pdf'), findsOneWidget);
+
+    await tester.tap(find.byKey(
+      const ValueKey<String>('document-pin-c1-m1-a1'),
+    ));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    final rows = await db
+        .customSelect(
+          "SELECT pinned_storyline_id FROM attachments "
+          "WHERE attachment_id = 'a1'",
+        )
+        .get();
+    expect(rows.single.data['pinned_storyline_id'], 'sl-1');
+    expect(find.text('Pinned Quote.pdf to Website redesign.'), findsOneWidget);
+
+    // The shelf is a cached read: without the invalidate the order below would
+    // still be the one the pin was supposed to change.
+    final shown = tester
+        .widgetList<Text>(find.descendant(
+          of: find.byKey(StorylineTimelinePanel.documentsStripKey),
+          matching: find.byType(Text),
+        ))
+        .map((t) => t.data)
+        .whereType<String>()
+        .where((text) => text.endsWith('.pdf'))
+        .toList();
+    expect(shown, ['📌 📕 Quote.pdf', '📕 Brief.pdf']);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a storyline whose threads carry no files says so',
+      (tester) async {
+    await store.upsertConversation({
+      'source': 'email',
+      'conversation_key': 'c1',
+      'subject': 'Homepage copy',
+      'state': 'waiting',
+      'last_message_at': '2026-08-28T09:00:00Z',
+    });
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'c1-m1',
+      'conversation_key': 'c1',
+      'direction': 'inbound',
+      'subject': 'Homepage copy',
+      'received_at': '2026-08-28T09:00:00Z',
+      'body_text': 'No file this time.',
+    });
     await seedStoryline();
 
     await openShelf(tester);
@@ -208,7 +303,7 @@ void main() {
   testWidgets('opening one fills the pane and Back returns to the storyline',
       (tester) async {
     await seedThread();
-    await seedStoryline(pinned: 'a1');
+    await seedStoryline(pinned: 'c1/a1');
 
     await openShelf(tester);
     await tester.tap(find.textContaining('Quote.pdf'));
@@ -231,10 +326,9 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('unpinning takes it off the shelf and out of the count',
-      (tester) async {
+  testWidgets('unpinning keeps it on the shelf', (tester) async {
     await seedThread();
-    await seedStoryline(pinned: 'a1');
+    await seedStoryline(pinned: 'c1/a1');
 
     await openShelf(tester);
     expect(find.text('1 document'), findsOneWidget);
@@ -244,17 +338,23 @@ void main() {
     await tester.tap(find.text('Remove document'));
     await tester.pump();
     await tester.pump();
+    await tester.pump();
 
     final rows = await db
         .customSelect('SELECT pinned_storyline_id FROM attachments')
         .get();
     expect(rows.single.data['pinned_storyline_id'], isNull);
 
-    // The shelf is a cached read: without the invalidate the count above would
-    // still say one however many documents the storyline actually holds.
-    expect(find.text('Documents'), findsOneWidget);
-    expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsOneWidget);
-    expect(find.text('Removed Quote.pdf from the storyline.'), findsOneWidget);
+    // What leaves is the PIN, not the file: the thread is still a member, so
+    // the document is still on the shelf — just no longer floated to the top.
+    expect(find.text('1 document'), findsOneWidget);
+    expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsNothing);
+    expect(find.text('📕 Quote.pdf'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey<String>('document-pin-c1-m1-a1')),
+      findsOneWidget,
+    );
+    expect(find.text('Unpinned Quote.pdf.'), findsOneWidget);
     await settleQueues(tester);
   });
 }

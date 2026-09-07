@@ -88,6 +88,15 @@ void main() {
     expect(bordered, findsNothing);
   });
 
+  testWidgets('the full pane never offers Use in reply', (tester) async {
+    // There is no composer here, so a draft written from this pane would land
+    // somewhere off screen. The pane takes no such callback at all — the split
+    // preview beside a thread is where that offer belongs.
+    await pump(tester);
+
+    expect(find.byKey(AttachmentPreviewPanel.useInReplyKey), findsNothing);
+  });
+
   testWidgets('Home renders only when it is wired', (tester) async {
     await pump(tester);
     expect(find.text('Home'), findsNothing);

@@ -1,8 +1,12 @@
-/// The documents somebody pinned to a storyline, on a shelf of their own.
+/// Every document on a storyline, on a shelf of its own, the pinned ones
+/// first.
 ///
 /// A storyline is several conversations about one thing, and the files that
 /// matter to it are scattered down all of them. This is the answer to "where
-/// is the quote" that does not involve scrolling four threads.
+/// is the quote" that does not involve scrolling four threads: every file on
+/// every member thread is here, and pinning is how a person floats the one
+/// they keep coming back to — and how they keep a file whose thread later
+/// leaves the storyline.
 ///
 /// Shaped like the member strip beside it (`storyline_timeline.dart`), because
 /// they are the same kind of list: small bordered entries that explain
@@ -11,7 +15,8 @@
 /// Unpinning is TWO taps in place — never a dialog. The house rule, and the
 /// same shape Settings uses to clear the cache: `Remove` turns into
 /// `Remove document` beside a `Cancel`, and nothing leaves until the second
-/// press.
+/// press. What leaves is the PIN, not the file: a document on a member thread
+/// stays on the shelf where it always was.
 library;
 
 import 'package:flutter/material.dart';
@@ -25,14 +30,26 @@ class AttachmentDocumentsStrip extends StatefulWidget {
 
   final void Function(AttachmentRef attachment) onOpen;
 
-  /// Null renders a read-only shelf — a storyline nobody can edit still shows
-  /// what is on it.
+  /// Which storyline this shelf belongs to, so an entry can tell whether the
+  /// pin it carries is a pin to THIS one. A file pinned to a different
+  /// storyline is an ordinary thread document here. Null renders every entry
+  /// as unpinned, which is the honest answer when nobody said.
+  final String? storylineId;
+
+  /// Null renders a shelf nothing can be pinned from — the entries are there,
+  /// the `Pin` is not.
+  final void Function(AttachmentRef attachment)? onPin;
+
+  /// Null renders a read-only shelf: the entries are there, the two-step
+  /// Remove is not.
   final void Function(AttachmentRef attachment)? onUnpin;
 
   const AttachmentDocumentsStrip({
     super.key,
     required this.documents,
     required this.onOpen,
+    this.storylineId,
+    this.onPin,
     this.onUnpin,
   });
 
@@ -44,6 +61,9 @@ class AttachmentDocumentsStrip extends StatefulWidget {
 
   static ValueKey<String> entryKeyFor(AttachmentRef attachment) =>
       attachmentKey('document-entry', attachment);
+
+  static ValueKey<String> pinKeyFor(AttachmentRef attachment) =>
+      attachmentKey('document-pin', attachment);
 
   static ValueKey<String> unpinKeyFor(AttachmentRef attachment) =>
       attachmentKey('document-unpin', attachment);
@@ -64,6 +84,13 @@ class _AttachmentDocumentsStripState extends State<AttachmentDocumentsStrip> {
   static String _idOf(AttachmentRef attachment) =>
       '${attachment.messageId}/${attachment.attachmentId}';
 
+  /// Pinned to THIS storyline, which is the only pin this shelf can undo.
+  bool _isPinnedHere(AttachmentRef attachment) {
+    final storylineId = widget.storylineId;
+    return storylineId != null &&
+        attachment.pinnedStorylineId == storylineId;
+  }
+
   @override
   Widget build(BuildContext context) {
     if (widget.documents.isEmpty) {
@@ -83,6 +110,8 @@ class _AttachmentDocumentsStripState extends State<AttachmentDocumentsStrip> {
   }
 
   Widget _entry(AttachmentRef document) {
+    final pinned = _isPinnedHere(document);
+    final pin = widget.onPin;
     final unpin = widget.onUnpin;
     final confirming = _confirming == _idOf(document);
     final glyph = attachmentGlyph(
@@ -121,7 +150,10 @@ class _AttachmentDocumentsStripState extends State<AttachmentDocumentsStrip> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                '$glyph ${document.name ?? '(unnamed)'}',
+                // The marker rather than a second line: the order already says
+                // which files were pinned, and the glyph is what makes that
+                // readable once the shelf is longer than a screen.
+                '${pinned ? '📌 ' : ''}$glyph ${document.name ?? '(unnamed)'}',
                 style: BondType.caption,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -133,10 +165,27 @@ class _AttachmentDocumentsStripState extends State<AttachmentDocumentsStrip> {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                 ),
-              if (unpin != null) _unpinControls(document, unpin, confirming),
+              if (pinned && unpin != null)
+                _unpinControls(document, unpin, confirming)
+              else if (!pinned && pin != null)
+                _pinControl(document, pin),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _pinControl(
+    AttachmentRef document,
+    void Function(AttachmentRef) pin,
+  ) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextButton(
+        key: AttachmentDocumentsStrip.pinKeyFor(document),
+        onPressed: () => pin(document),
+        child: const Text('Pin'),
       ),
     );
   }

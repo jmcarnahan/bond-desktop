@@ -47,11 +47,17 @@ class AttachmentText {
   final bool truncated;
 
   /// Why there are no words, when there are none: `binary`, `unsupported`,
-  /// `too_large`, `reference`, `no_extractor`, `empty`, `access_denied`,
-  /// `not_found`, `invalid_link`, `is_folder`, `external_sender`,
-  /// `unavailable`, `gone`, `no_url`. Stored in `attachments.text_reason` and
-  /// shown on the chip, so "why is this one not readable" is answered where the
-  /// question gets asked.
+  /// `too_large`, `reference`, `reference_no_url`, `no_extractor`, `empty`,
+  /// `access_denied`, `not_found`, `invalid_link`, `is_folder`,
+  /// `external_sender`, `unavailable`, `gone`. Stored in
+  /// `attachments.text_reason` and shown on the chip, so "why is this one not
+  /// readable" is answered where the question gets asked.
+  ///
+  /// A closed vocabulary, and closed in one direction: `reference_no_url` is
+  /// spelled the way `attachment_policy.dart` spells it because the panel
+  /// prints whichever word was stored, and a link with no url refused by the
+  /// policy and one refused by a backend are the same fact wearing two chips
+  /// if the two files disagree.
   final String? reason;
 
   /// How many bytes the connector moved to answer. Recorded on the activity
@@ -59,15 +65,39 @@ class AttachmentText {
   /// drain from a big mailbox.
   final int fetchedBytes;
 
+  /// The subject of the message an `item` attachment wraps — a mail forwarded
+  /// as a file. Null for every other kind, which is nearly all of them: only
+  /// an `item` has an inner message to describe.
+  final String? itemSubject;
+
+  /// That inner message's sender, as an address rather than a display name.
+  /// The server hands over the address because it is the half that identifies
+  /// a person across two connectors.
+  final String? itemFrom;
+
+  /// When that inner message was received, ISO-8601.
+  final String? itemReceived;
+
+  /// The three item fields are optional on BOTH constructors, not only on the
+  /// ok one. A forwarded message whose body came back empty is still a
+  /// forwarded message, and the preview draws its header — subject, sender,
+  /// date — whether or not there were words underneath it.
   const AttachmentText.ok(
     String this.text, {
     this.truncated = false,
     this.fetchedBytes = 0,
+    this.itemSubject,
+    this.itemFrom,
+    this.itemReceived,
   })  : status = 'ok',
         reason = null;
 
-  const AttachmentText.skipped(String this.reason)
-      : status = 'skipped',
+  const AttachmentText.skipped(
+    String this.reason, {
+    this.itemSubject,
+    this.itemFrom,
+    this.itemReceived,
+  })  : status = 'skipped',
         text = null,
         truncated = false,
         fetchedBytes = 0;

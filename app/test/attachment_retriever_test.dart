@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
@@ -192,6 +194,80 @@ void main() {
 
       expect(excerpts.single.text, 'The lot is 0.42 acres.');
       expect(excerpts.single.name, 'Survey.pdf');
+    });
+
+    test('the thread\'s own document is found under a mailbox of nearer '
+        'strangers', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedVector('m1', 3);
+      await seedAttachment('m1', 'a1');
+      await seedChunks('m1', 'a1', const [
+        (locator: 'part 1', text: 'The tenant pays 2,400 monthly.', axis: 3),
+      ]);
+      // …and the passage is moved OFF the query's axis, so every stranger
+      // below is strictly nearer to it than this thread's own document is.
+      final own = await db
+          .customSelect("SELECT id FROM attachment_chunks WHERE attachment_id "
+              "= 'a1'")
+          .getSingle();
+      await store.setChunkEmbedding(
+        own.data['id'] as int,
+        embedding: encodeEmbedding(axes({3: 0.6, 11: 0.8})),
+        dims: 768,
+        embedModel: tag,
+      );
+
+      // Sixty documents on sixty other threads, all sitting exactly on the
+      // query. A corpus-wide k of 48 is filled entirely by them, and the
+      // thread's own contract never makes the shortlist — which is what a
+      // real mailbox does to a generic "please see attached".
+      for (var i = 0; i < 60; i++) {
+        await seedMessage('other-$i', key: 'conv-other-$i');
+        await seedAttachment('other-$i', 'b$i', name: 'Stranger $i.pdf');
+        await seedChunks('other-$i', 'b$i', [
+          (locator: 'part 1', text: 'A figure from somewhere else. $i', axis: 3),
+        ]);
+      }
+      await store.indexPendingChunks();
+
+      final excerpts = await retrieverOver(FakeEmbedServer()).excerptsFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+        k: 6,
+      );
+
+      // The scope is applied INSIDE the neighbour search, so the six nearest
+      // are the six nearest ON THIS THREAD — of which there is one.
+      expect(excerpts.single.text, 'The tenant pays 2,400 monthly.');
+      expect(excerpts.single.name, 'Lease.pdf');
+    });
+
+    test('a thread with no documents asks the embedding server nothing',
+        () async {
+      if (!available) return;
+      await seedMessage('m1');
+      // A corpus that is not empty, and a thread that has nothing on it.
+      await seedMessage('other', key: 'conv-2');
+      await seedAttachment('other', 'a9');
+      await seedChunks('other', 'a9', const [
+        (locator: 'part 1', text: 'The buyer pays 900,000.', axis: 3),
+      ]);
+      final server = FakeEmbedServer();
+      final spy = _CountingStore(db);
+
+      final excerpts = await AttachmentRetriever(spy, server.client).excerptsFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+      );
+
+      expect(excerpts, isEmpty);
+      // The cheap read stands in front of the expensive ones: no vector was
+      // asked for and the index was never searched.
+      expect(server.calls, 0);
+      expect(spy.knnCalls, 0);
     });
 
     test('an empty scope asks nothing, whatever the corpus holds', () async {
@@ -472,4 +548,35 @@ void main() {
       expect(rendered.length, 90);
     });
   });
+}
+
+/// A store that counts the one read the guard is supposed to make unnecessary.
+///
+/// A subclass rather than a fake, because the point is that everything ELSE
+/// behaves exactly as the real store does — the guard has to be what stops the
+/// search, not a stubbed-out index.
+class _CountingStore extends MessageStore {
+  int knnCalls = 0;
+
+  _CountingStore(super.db);
+
+  @override
+  Future<List<AttachmentChunkHit>?> chunkKnn(
+    Uint8List query, {
+    required String embedModel,
+    required String source,
+    List<String> messageIds = const [],
+    List<String> attachmentIds = const [],
+    int limit = 6,
+  }) {
+    knnCalls++;
+    return super.chunkKnn(
+      query,
+      embedModel: embedModel,
+      source: source,
+      messageIds: messageIds,
+      attachmentIds: attachmentIds,
+      limit: limit,
+    );
+  }
 }

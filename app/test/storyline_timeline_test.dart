@@ -172,6 +172,7 @@ void main() {
     void Function(StorylineEpisode episode)? onAskTap,
     List<AttachmentRef> documents = const [],
     void Function(AttachmentRef attachment)? onOpenDocument,
+    void Function(AttachmentRef attachment)? onPinDocument,
     void Function(AttachmentRef attachment)? onUnpinDocument,
     void Function(AttachmentRef attachment)? onOpenAttachment,
     AttachmentRef? selectedAttachment,
@@ -202,6 +203,7 @@ void main() {
           onAskTap: onAskTap,
           documents: documents,
           onOpenDocument: onOpenDocument,
+          onPinDocument: onPinDocument,
           onUnpinDocument: onUnpinDocument,
           onOpenAttachment: onOpenAttachment,
           selectedAttachment: selectedAttachment,
@@ -1244,10 +1246,13 @@ void main() {
   });
 
   group('the documents shelf', () {
-    final quote = ref(name: 'Quote.pdf', size: 240 * 1024);
+    // Pinned to the storyline the panel is showing, so the two-step Remove is
+    // the control it carries.
+    final quote =
+        ref(name: 'Quote.pdf', size: 240 * 1024, pinnedStorylineId: 'sl-1');
     final photo = imageRef(name: 'Site.png', attachmentId: 'i9');
 
-    testWidgets('the button counts what is pinned and unfolds the shelf',
+    testWidgets('the button counts every document, pinned or not',
         (tester) async {
       await pumpPanel(tester, documents: [quote, photo]);
 
@@ -1268,8 +1273,7 @@ void main() {
       expect(find.text('1 document'), findsOneWidget);
     });
 
-    testWidgets('a storyline with nothing pinned still says so',
-        (tester) async {
+    testWidgets('a storyline with no documents still says so', (tester) async {
       await pumpPanel(tester);
 
       // The bare label, because there is no count to give — and the shelf
@@ -1329,6 +1333,45 @@ void main() {
       await tester.pump();
 
       expect(find.byKey(AttachmentDocumentsStrip.unpinKeyFor(quote)),
+          findsNothing);
+    });
+
+    testWidgets('Pin from the shelf reports through onPinDocument',
+        (tester) async {
+      // Not pinned anywhere: a document that arrived by membership, which is
+      // how most of the shelf gets there.
+      final loose = ref(name: 'Brief.pdf', attachmentId: 'a7');
+      final pinned = <String>[];
+      await pumpPanel(
+        tester,
+        documents: [loose],
+        onPinDocument: (attachment) => pinned.add(attachment.attachmentId),
+      );
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+      await tester.pump();
+      await tester.tap(find.byKey(AttachmentDocumentsStrip.pinKeyFor(loose)));
+      await tester.pump();
+
+      expect(pinned, ['a7']);
+    });
+
+    testWidgets('the panel tells the shelf which storyline it is', (tester) async {
+      // Without the id the shelf cannot tell a pin to THIS storyline from a
+      // pin to another one, and every entry would offer Pin.
+      await pumpPanel(
+        tester,
+        documents: [quote],
+        onPinDocument: (_) {},
+        onUnpinDocument: (_) {},
+      );
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+      await tester.pump();
+
+      expect(find.byKey(AttachmentDocumentsStrip.unpinKeyFor(quote)),
+          findsOneWidget);
+      expect(find.byKey(AttachmentDocumentsStrip.pinKeyFor(quote)),
           findsNothing);
     });
   });

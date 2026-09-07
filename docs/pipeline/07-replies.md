@@ -75,6 +75,21 @@ read: **both scopes empty answers `const []` and never the corpus.** A quote
 from a stranger's contract in a reply is the one failure this path has to be
 incapable of.
 
+**The scope goes inside the index query, not after it.** `chunkKnn` passes the
+scope down as a `rowid IN (SELECT id FROM attachment_chunks WHERE …)` clause on
+the vec0 search, so the nearest passages it computes are the nearest ones IN
+SCOPE. Filtering a corpus-wide search afterwards instead is the same safety
+property with a different failure: on a real mailbox a generic "please see
+attached" has its whole shortlist filled by strangers' documents, every one of
+them thrown away, and the thread's own contract never cited — which looks
+exactly like a thread that has no documents.
+
+**Nothing is spent on a thread with no documents.** Before any vector is read
+or embedded, `MessageStore.hasAttachmentChunks` answers with one indexed
+`LIMIT 1` over the same scope; a no returns no excerpts and the draft goes on
+without them. Almost every thread has never had a file on it, and this runs on
+every draft.
+
 **Query vector.** The reply-to message's own stored `message_vectors.embedding`
 when it has one under the current model tag (`messageVectorBlob`), otherwise
 the same card `embedMessageRow` builds, re-embedded under

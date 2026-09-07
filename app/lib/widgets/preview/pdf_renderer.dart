@@ -18,8 +18,6 @@ import 'package:flutter/widgets.dart';
 /// One open document, for the things a preview asks that are not the page
 /// itself.
 abstract interface class PdfPreviewDoc {
-  int get pageCount;
-
   /// One entry per page, in page order. A scanned page has no text layer and
   /// answers `''` rather than being left out — a reader counting pages down a
   /// document must find them where they are.

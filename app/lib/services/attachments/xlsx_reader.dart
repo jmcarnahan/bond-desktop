@@ -200,10 +200,23 @@ String _valueOf(XmlElement cell, List<String> shared) {
   }
 }
 
+/// Excel's last column is `XFD` — three letters, zero-based index 16383. A
+/// reference naming anything past it names a column no workbook has.
+const int _maxColumnLetters = 3;
+const int _maxColumn = 16383;
+
 /// The zero-based column a cell reference names: `A` → 0, `B` → 1, `AA` → 26.
 ///
 /// [fallback] is used when a cell carries no reference at all, which is legal
 /// and means "the next column along".
+///
+/// Counting stops at [_maxColumnLetters] because an unbounded parse is a hang
+/// rather than a wrong number. Nothing in the file format stops a cell writing
+/// `r="AAAAAAAAAAAA1"`, twelve letters name column 3,817,158,266,467,285, and
+/// [_readSheet] would then sit in the isolate building a row that long; thirty
+/// letters overflow the count into a negative index instead. A reference past
+/// `XFD` carries nothing this reader can use, so it is read the way a missing
+/// one is — the next column along — and the rest of the row still decodes.
 int _columnOf(String? reference, int fallback) {
   if (reference == null || reference.isEmpty) return fallback;
   var value = 0;
@@ -218,8 +231,11 @@ int _columnOf(String? reference, int fallback) {
     } else {
       break;
     }
+    if (seen > _maxColumnLetters) return fallback;
   }
-  return seen == 0 ? fallback : value - 1;
+  if (seen == 0) return fallback;
+  final column = value - 1;
+  return column > _maxColumn ? fallback : column;
 }
 
 /// `Id` → `Target`, from the workbook's relationship part.

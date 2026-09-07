@@ -156,7 +156,10 @@ class GraphMail implements MailBackend {
             'id': entry['id'],
             'name': entry['name'],
             'content_type': entry['contentType'],
-            'size': entry['size'],
+            // Zero for unknown, never null — the column's own convention, and
+            // the server answers 0 for the same entry. A null here would be a
+            // second spelling of "no size" that only this path produces.
+            'size': entry['size'] ?? 0,
             'is_inline': entry['isInline'] == true,
             'content_id': entry['contentId'],
             'kind': _attachmentKind(entry['@odata.type']),

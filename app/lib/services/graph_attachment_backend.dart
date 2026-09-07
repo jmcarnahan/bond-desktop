@@ -63,6 +63,12 @@ const Set<String> _textLikeExtensions = {
 /// download ceiling, so the two paths refuse the same files.
 const int _maxTextBytes = 2 * 1024 * 1024;
 
+/// The most characters this backend will store for one document — the MCP
+/// server's own extractor cap. The two connectors must store the same size for
+/// the same file, or a mailbox re-synced through the other backend would
+/// silently change how much of a document a draft can cite.
+const int _maxTextChars = 200000;
+
 class GraphAttachmentBackend implements AttachmentBackend {
   static const String _base = 'https://graph.microsoft.com/v1.0';
 
@@ -108,7 +114,19 @@ class GraphAttachmentBackend implements AttachmentBackend {
     final bool byUrl =
         ref.kind == 'reference' || (ref.source != 'email' && ref.kind == 'file');
     if (byUrl && (ref.contentUrl == null || ref.contentUrl!.isEmpty)) {
-      return const AttachmentText.skipped('no_url');
+      // The word `attachment_policy.dart` uses for the same condition. The
+      // panel prints whatever was stored, so a second spelling would put two
+      // chips on one fact.
+      return const AttachmentText.skipped('reference_no_url');
+    }
+
+    // A message forwarded as a file arrives as `message/rfc822`, which no text
+    // codec reads, so without a route of its own it would fall through to the
+    // refusal below and the forwarded mail's own subject, sender and date
+    // would be lost with it. Graph will expand the wrapped message onto the
+    // attachment, which is all of that in one request.
+    if (ref.source == 'email' && ref.kind == 'item') {
+      return _expandItem(ref);
     }
 
     // The refusal that defines this backend. There is no Office or PDF
@@ -121,13 +139,24 @@ class GraphAttachmentBackend implements AttachmentBackend {
 
     // The size the connector claims, checked before the request rather than
     // after it. A text file past two megabytes is a log, not a document.
+    // Kept as the cheap first gate and trusted no further than that: Teams
+    // writes 0 for every file it syncs and Graph omits the size on plenty of
+    // mail attachments, so a three-megabyte log passes this line unremarked.
     if (ref.size > _maxTextBytes) {
       return const AttachmentText.skipped('too_large');
     }
 
-    final AttachmentBytesResult result;
+    final http.Response response;
     try {
-      result = await fetchBytes(ref);
+      // Which is why the DOWNLOAD carries the cap too. Asking for a range
+      // stops the transfer at two megabytes instead of buffering the whole
+      // file to throw most of it away, and a server that ignores the header
+      // costs nothing but the bytes it was going to send anyway.
+      response = await _fetchOrRefuse(
+        ref,
+        _uriFor(ref, ''),
+        extraHeaders: {'Range': 'bytes=0-${_maxTextBytes - 1}'},
+      );
     } on AttachmentUnavailable catch (e) {
       // A permanent refusal reached while fetching IS the reason there are no
       // words; it travels on as the skip it amounts to rather than as a throw
@@ -135,9 +164,100 @@ class GraphAttachmentBackend implements AttachmentBackend {
       return AttachmentText.skipped(e.reason);
     }
 
-    final text = await compute(decodeUtf8Lenient, result.bytes);
+    // What was actually received, which is the number the activity row wants —
+    // before the character cap below, which throws away words rather than
+    // bytes moved.
+    final received = response.bodyBytes;
+
+    // A 206 says the server honoured the range and a 200 says it ignored it,
+    // and the cut has to be made either way: an ignored range arrives whole.
+    // The header is the one thing the body cannot tell us — a file cut at
+    // exactly the cap looks the same as a file that happened to be that long —
+    // so a total past the cap counts as a cut on its own.
+    var truncated = received.length > _maxTextBytes ||
+        _rangeExceedsCap(response.headers['content-range']);
+    final bytes = received.length > _maxTextBytes
+        ? received.sublist(0, _maxTextBytes)
+        : received;
+
+    var text = await compute(decodeUtf8Lenient, bytes);
+    // The MCP server's extractor stops at the same number of characters, and
+    // the two connectors must store the same size for the same file.
+    if (text.length > _maxTextChars) {
+      text = text.substring(0, _maxTextChars);
+      truncated = true;
+    }
     if (text.isEmpty) return const AttachmentText.skipped('empty');
-    return AttachmentText.ok(text, fetchedBytes: result.bytes.length);
+    return AttachmentText.ok(
+      text,
+      truncated: truncated,
+      fetchedBytes: received.length,
+    );
+  }
+
+  /// The message an `item` attachment wraps: its words, and the three fields
+  /// the `.eml` preview draws its header from.
+  ///
+  /// **The type cast in the `$expand` is mandatory.** A bare `item` is a Graph
+  /// 400 — the property is declared on the itemAttachment subtype, not on the
+  /// attachment base type — which is the same rule `graph_mail.dart`'s
+  /// `microsoft.graph.fileAttachment/contentId` select follows, and the error
+  /// names no property, so it reads as a broken request rather than as a wrong
+  /// column.
+  Future<AttachmentText> _expandItem(AttachmentRef ref) async {
+    const String expand = 'microsoft.graph.itemattachment/item('
+        '\$select=subject,from,receivedDateTime,bodyPreview,body)';
+    final uri = Uri.parse(
+      '$_base/me/messages/${Uri.encodeComponent(ref.messageId)}'
+      '/attachments/${Uri.encodeComponent(ref.attachmentId)}',
+    ).replace(query: '\$expand=${Uri.encodeComponent(expand)}');
+
+    final http.Response response;
+    try {
+      response = await _fetchOrRefuse(ref, uri);
+    } on AttachmentUnavailable catch (e) {
+      // Same bargain as the text path: the refusal that stopped the fetch is
+      // the reason there are no words.
+      return AttachmentText.skipped(e.reason);
+    }
+
+    // Every level of the walk survives the level above it being absent. Graph
+    // omits a branch rather than sending a null — a message with no sender has
+    // no `from` at all — and an expanded item is four levels deep.
+    final item = _mapAt(_decodeObject(response), 'item');
+    final body = _mapAt(item, 'body');
+    final bool isText = _stringAt(body, 'contentType') == 'text';
+    // `bodyPreview` IS a cut of the body — Graph's first couple of hundred
+    // characters of it — so falling back to the preview is a truncation and
+    // gets recorded as one rather than stored as the whole message.
+    final text =
+        (isText ? _stringAt(body, 'content') : _stringAt(item, 'bodyPreview')) ??
+            '';
+
+    final itemSubject = _stringAt(item, 'subject');
+    // The sender's ADDRESS rather than the display name, which is what the MCP
+    // server returns for the same field: the address is the half that
+    // identifies a person across both connectors.
+    final itemFrom = _stringAt(_mapAt(_mapAt(item, 'from'), 'emailAddress'),
+        'address');
+    final itemReceived = _stringAt(item, 'receivedDateTime');
+
+    if (text.isEmpty) {
+      return AttachmentText.skipped(
+        'empty',
+        itemSubject: itemSubject,
+        itemFrom: itemFrom,
+        itemReceived: itemReceived,
+      );
+    }
+    return AttachmentText.ok(
+      text,
+      truncated: !isText,
+      fetchedBytes: response.bodyBytes.length,
+      itemSubject: itemSubject,
+      itemFrom: itemFrom,
+      itemReceived: itemReceived,
+    );
   }
 
   @override
@@ -145,8 +265,33 @@ class GraphAttachmentBackend implements AttachmentBackend {
     AttachmentRef ref, {
     String thumbnail = '',
   }) async {
-    final uri = _uriFor(ref, thumbnail);
-    final response = await _send(uri, isMail: ref.source == 'email');
+    final response = await _fetchOrRefuse(ref, _uriFor(ref, thumbnail));
+    return AttachmentBytesResult(
+      response.bodyBytes,
+      contentType: _firstToken(response.headers['content-type']),
+      name: ref.name,
+    );
+  }
+
+  /// One attachment route fetched, with this connector's permanent refusals
+  /// already turned into [AttachmentUnavailable].
+  ///
+  /// A private method rather than a second parameter on the seam. Only this
+  /// backend can ask for a range — the MCP server hands back a whole file
+  /// inside one JSON reply and has no partial mode at all — so widening
+  /// [AttachmentBackend.fetchBytes] would put an option on the interface that
+  /// one of the two implementations could only ignore. [extraHeaders] rides
+  /// along on the GET beside the bearer.
+  Future<http.Response> _fetchOrRefuse(
+    AttachmentRef ref,
+    Uri uri, {
+    Map<String, String> extraHeaders = const {},
+  }) async {
+    final response = await _send(
+      uri,
+      isMail: ref.source == 'email',
+      extraHeaders: extraHeaders,
+    );
 
     // Gone is gone. A message deleted between the sync and the click, a file
     // removed from the drive — both answer 404/410 forever, and both are
@@ -156,16 +301,13 @@ class GraphAttachmentBackend implements AttachmentBackend {
       throw const AttachmentUnavailable('gone');
     }
     if (status == 403) throw const AttachmentUnavailable('access_denied');
+    // 206 falls inside this range, which is the point: a server that honoured
+    // the range answered successfully and its short body is the answer.
     if (status < 200 || status >= 300) {
       throw _describe(ref, response, 'Could not read an attachment from '
           'Microsoft Graph');
     }
-
-    return AttachmentBytesResult(
-      response.bodyBytes,
-      contentType: _firstToken(response.headers['content-type']),
-      name: ref.name,
-    );
+    return response;
   }
 
   /// Which of the four routes this ref is fetched by.
@@ -214,7 +356,10 @@ class GraphAttachmentBackend implements AttachmentBackend {
   Uri _shareUri(AttachmentRef ref, {required String thumbnail}) {
     final url = ref.contentUrl;
     if (url == null || url.isEmpty) {
-      throw const AttachmentUnavailable('no_url');
+      // The same word the text path and `attachment_policy.dart` use, because
+      // this refusal is recorded as the text skip it amounts to and lands on
+      // the same chip.
+      throw const AttachmentUnavailable('reference_no_url');
     }
     final token = shareToken(url);
     return Uri.parse(
@@ -233,7 +378,15 @@ class GraphAttachmentBackend implements AttachmentBackend {
   /// A GET with the bearer attached, retrying at most once for a throttle and
   /// once for a 401 — `graph_mail.dart`'s `_request`, narrowed to the one
   /// method this file makes.
-  Future<http.Response> _send(Uri uri, {required bool isMail}) async {
+  ///
+  /// [extraHeaders] defaults to none, so the bytes path sends exactly what it
+  /// always sent; the text path uses it for a `Range`. They go in after the
+  /// bearer and cannot displace it.
+  Future<http.Response> _send(
+    Uri uri, {
+    required bool isMail,
+    Map<String, String> extraHeaders = const {},
+  }) async {
     var retriedThrottle = false;
     var retriedAuth = false;
 
@@ -245,6 +398,7 @@ class GraphAttachmentBackend implements AttachmentBackend {
       final http.Response response;
       try {
         response = await _http.get(uri, headers: {
+          ...extraHeaders,
           'Authorization': 'Bearer $token',
         });
       } on http.ClientException catch (e) {
@@ -300,6 +454,46 @@ class GraphAttachmentBackend implements AttachmentBackend {
     return ref.source == 'email'
         ? GraphMailException(message, response.statusCode)
         : GraphTeamsException(message, response.statusCode);
+  }
+
+  /// Whether a `Content-Range: bytes 0-N/TOTAL` says the file is bigger than
+  /// the download cap — the one thing a capped body cannot say about itself.
+  ///
+  /// Read leniently on purpose. The header is optional, the total is `*` when
+  /// the server does not know it, and a proxy is free to rewrite it into a
+  /// shape this has never seen; anything unreadable means "no evidence of a
+  /// cut", which is the answer the body length gives on its own.
+  static bool _rangeExceedsCap(String? header) {
+    final total = int.tryParse((header ?? '').split('/').last.trim());
+    return total != null && total > _maxTextBytes;
+  }
+
+  /// Graph answers `application/json` with no charset, which makes `http`'s
+  /// `body` getter fall back to latin-1 and mangle non-ASCII subjects and
+  /// names. Decoding the bytes is the only correct read — the same helper,
+  /// and the same reasoning, as `graph_mail.dart`'s.
+  static Map<String, dynamic> _decodeObject(http.Response response) {
+    try {
+      final decoded =
+          jsonDecode(utf8.decode(response.bodyBytes, allowMalformed: true));
+      return decoded is Map<String, dynamic> ? decoded : const {};
+    } on FormatException {
+      return const {};
+    }
+  }
+
+  /// One level down a Graph object, or null when that level is not there.
+  static Map<String, dynamic>? _mapAt(Object? parent, String key) {
+    final value = parent is Map<String, dynamic> ? parent[key] : null;
+    return value is Map<String, dynamic> ? value : null;
+  }
+
+  /// A string one level down a Graph object. Empty reads as absent, for the
+  /// same reason [_firstToken] reads it that way: a subject Graph sent as `''`
+  /// is not a subject.
+  static String? _stringAt(Object? parent, String key) {
+    final value = parent is Map<String, dynamic> ? parent[key] : null;
+    return value is String && value.isNotEmpty ? value : null;
   }
 
   /// `text/plain; charset=utf-8` → `text/plain`. Null and empty stay null: a

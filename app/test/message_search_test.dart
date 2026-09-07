@@ -500,6 +500,51 @@ void main() {
         expect(documents.single.outbound, isFalse);
       });
 
+      test('a digest passage is never a search hit', () async {
+        if (!available) return;
+        await seedCorpus();
+        await store.upsertAttachments('email', 'inv', [
+          {
+            'attachment_id': 'a1',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'Rent Roll.xlsx',
+            'content_type': 'application/pdf',
+            'size': 240 * 1024,
+          },
+        ]);
+        // The digest sits ON the query's own words, so it is the nearest
+        // passage this document has; the document's own words are further off.
+        const digest = 'the escalator clause';
+        const passage = 'Line 14: escalator of three percent each year.';
+        final ids = await store.replaceChunks('email', 'inv', 'a1', const [
+          (seq: 0, locator: 'part 1', text: passage),
+          (seq: 1, locator: 'digest', text: digest),
+        ]);
+        for (final (index, text) in [passage, digest].indexed) {
+          final result = await server.client.embedResult(
+            text,
+            prefix: EmbeddingsClient.documentPrefix,
+          );
+          await store.setChunkEmbedding(
+            ids[index],
+            embedding: encodeEmbedding(result.vector!),
+            dims: result.vector!.length,
+            embedModel: EmbeddingsClient.documentModelTag,
+          );
+        }
+
+        final result = await MessageSearch(store, server.client)
+            .search('the escalator clause');
+
+        // A search result promises the document's OWN words. A digest is a
+        // model's summary of them, and showing one would put sentences nobody
+        // wrote under a file name.
+        final documents = (result as MessageSearchHits).documents;
+        expect(documents.single.locator, 'part 1');
+        expect(documents.single.text, passage);
+      });
+
       test('the message hits are unchanged by the documents beside them',
           () async {
         if (!available) return;

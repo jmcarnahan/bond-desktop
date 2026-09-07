@@ -35,7 +35,10 @@ class AttachmentViewerPane extends StatelessWidget {
 
   final VoidCallback? onOpen;
   final VoidCallback? onSave;
-  final VoidCallback? onUseInReply;
+
+  /// No `onUseInReply` here, deliberately: there is no composer on the full
+  /// pane, so a draft written from it would land somewhere off screen. The
+  /// split preview beside a thread is where that offer belongs.
   final VoidCallback? onPinToStoryline;
   final bool pinned;
   final void Function(String url)? onOpenLink;
@@ -49,7 +52,6 @@ class AttachmentViewerPane extends StatelessWidget {
     this.onHome,
     this.onOpen,
     this.onSave,
-    this.onUseInReply,
     this.onPinToStoryline,
     this.pinned = false,
     this.onOpenLink,
@@ -74,7 +76,6 @@ class AttachmentViewerPane extends StatelessWidget {
         onClose: onBack,
         onOpen: onOpen,
         onSave: onSave,
-        onUseInReply: onUseInReply,
         onPinToStoryline: onPinToStoryline,
         pinned: pinned,
         onOpenLink: onOpenLink,

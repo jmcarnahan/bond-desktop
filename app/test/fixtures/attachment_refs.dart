@@ -24,6 +24,7 @@ AttachmentRef ref({
   AttachmentDigest? digest,
   String? thumbPath,
   String? conversationKey,
+  String? pinnedStorylineId,
 }) {
   return AttachmentRef(
     source: source,
@@ -44,6 +45,7 @@ AttachmentRef ref({
     digest: digest,
     thumbPath: thumbPath,
     conversationKey: conversationKey,
+    pinnedStorylineId: pinnedStorylineId,
   );
 }
 

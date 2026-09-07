@@ -46,6 +46,7 @@ import '../widgets/preview/attachment_preview_panel.dart';
 import '../widgets/preview/attachment_viewer_pane.dart';
 import '../widgets/preview/pdf_preview.dart';
 import '../widgets/preview/preview_engines.dart';
+import '../widgets/preview/preview_kind.dart' show openRefused;
 import '../widgets/quick_replies.dart';
 import '../widgets/settings_screen.dart';
 import '../widgets/source_filter.dart';
@@ -445,6 +446,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     await ref.read(attachmentCacheProvider).clear();
     _forgetThumbnails();
     _pinnedKeys.clear();
+    // The preview holds an [AttachmentRef] out of the mailbox that was just
+    // wiped, and the viewer rung would keep drawing it over the next person's
+    // empty inbox. Cleared here rather than left to the next selection,
+    // because signing out is not a selection.
+    _previewing = null;
+    _viewerFull = false;
     if (!mounted) return;
     ref.invalidate(conversationsProvider);
     ref.invalidate(storylinesProvider);
@@ -1703,7 +1710,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       syncing: _syncing,
       // Empty for the frame before the read lands, like the members above.
       documents: ref
-              .watch(storylinePinnedDocumentsProvider(storyline.id))
+              .watch(storylineDocumentsProvider(storyline.id))
               .valueOrNull ??
           const [],
       // There is no split on this pane, so a file opens the whole thing. Both
@@ -1719,6 +1726,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }),
       selectedAttachment: _previewing,
       thumbnailFor: _thumbnailFor,
+      onPinDocument: (attachment) =>
+          unawaited(_pinAttachment(attachment, storyline.id)),
       onUnpinDocument: (attachment) =>
           unawaited(_unpinDocument(storyline.id, attachment)),
       // The suggestions ride on the episode they answer, not under the spine:
@@ -2084,7 +2093,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
             const SizedBox(height: BondSpacing.s12),
           ],
-          Expanded(child: _threadBody(panel, target: target)),
+          // The target rides in only where there is a box to write into: a
+          // chat with no send grant has no composer on this pane, and a draft
+          // written for one would be spent on words nobody ever sees.
+          Expanded(child: _threadBody(panel, target: canReply ? target : null)),
           // Collapsed is the default: the box appears when the user says they
           // are writing, and until then the transcript has the pane to itself.
           if (canReply && _replyOpenFor == selected.id) ...[
@@ -2113,13 +2125,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   static const double _transcriptMinWidth = 420;
 
   /// The transcript, and the file beside it when one is open.
-  Widget _threadBody(Widget panel, {required DraftTarget target}) {
+  Widget _threadBody(Widget panel, {DraftTarget? target}) {
     final previewing = _previewing;
     if (previewing == null) return panel;
     return LayoutBuilder(
       builder: (context, constraints) {
         // The thread rides in so the preview can offer 'Use in reply': the
-        // draft is keyed by the conversation, not by the file.
+        // draft is keyed by the conversation, not by the file. Null where
+        // `canReply` is false — there is no composer to write into.
         final preview = _previewPanel(previewing, target: target);
         final available = constraints.maxWidth - BondSpacing.s16;
         // Narrow: one thing at a time. The composer below stays either way, so
@@ -2164,8 +2177,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }),
       onOpen: () => unawaited(_openAttachmentInOs(attachment)),
       onSave: () => unawaited(_saveAttachment(attachment)),
-      // Only where there is a composer to write into. Opening the box is what
-      // makes the new draft visible — the spinner in it is the notifier's own
+      // Only where there is a composer to write into — the caller passes a
+      // null target when `canReply` is false. Opening the box is what makes
+      // the new draft visible; the spinner in it is the notifier's own
       // `generating`, so nothing here waits.
       onUseInReply: target == null
           ? null
@@ -2264,7 +2278,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (!mounted) return;
     setState(() =>
         _pinnedKeys.add(attachmentKey('pin', attachment).value));
-    ref.invalidate(storylinePinnedDocumentsProvider(storylineId));
+    ref.invalidate(storylineDocumentsProvider(storylineId));
     final title = (await store.getStoryline(storylineId))?.title;
     if (!mounted) return;
     _toast(
@@ -2273,9 +2287,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// Takes one file off a storyline's shelf. The row the shelf hands back was
-  /// read fresh from the store, so dropping the session key is enough to put
-  /// the panel's button back to 'Pin to storyline'.
+  /// Takes one file's PIN off a storyline. The file itself stays on the shelf
+  /// whenever its thread is still a member — which is the ordinary case, and
+  /// why the bar says 'Unpinned' rather than 'Removed'. What actually changes
+  /// is the order: it stops floating at the top.
+  ///
+  /// The row the shelf hands back was read fresh from the store, so dropping
+  /// the session key is enough to put the panel's button back to 'Pin to
+  /// storyline'.
   Future<void> _unpinDocument(
     String storylineId,
     AttachmentRef attachment,
@@ -2288,8 +2307,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         );
     if (!mounted) return;
     setState(() => _pinnedKeys.remove(attachmentKey('pin', attachment).value));
-    ref.invalidate(storylinePinnedDocumentsProvider(storylineId));
-    _toast('Removed ${attachment.name ?? 'the file'} from the storyline.');
+    ref.invalidate(storylineDocumentsProvider(storylineId));
+    _toast('Unpinned ${attachment.name ?? 'the file'}.');
   }
 
   /// The picture for one attachment, or null while there is not one yet.
@@ -2331,37 +2350,66 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// Hands the cached file to the operating system and lets it decide what
   /// opening means. Nothing here ever executes anything itself.
+  ///
+  /// Which is exactly why [openRefused] is checked again here: for a script or
+  /// a macro document, the operating system's idea of opening IS executing,
+  /// and a stranger's mail is where those arrive. The panel already hides the
+  /// button; this is the guard behind it, so a second caller cannot get past
+  /// the rule by not knowing about it.
   Future<void> _openAttachmentInOs(AttachmentRef attachment) async {
+    if (openRefused(attachment)) {
+      _toast('This file can run, so it is Save only.');
+      return;
+    }
     try {
       final path = await _attachmentBytes.pathFor(attachment);
       await launchUrl(Uri.file(path), mode: LaunchMode.externalApplication);
-    } on Object catch (e) {
-      _toast('Could not open ${attachment.name ?? 'the file'}: $e');
+    } on Object {
+      // The exception itself never reaches the bar: it is a path, a socket
+      // error or a plugin's own words, and none of those tell the reader
+      // anything they can act on.
+      _toast('Could not open ${attachment.name ?? 'the file'}.');
     }
   }
 
   /// The save panel first, the bytes second: a cancelled save must not cost a
   /// download.
+  ///
+  /// The suggested name is clamped — see [safeSuggestedName]. It comes off the
+  /// wire, and a name carrying separators reads as a path in the one field the
+  /// user is about to accept without looking.
   Future<void> _saveAttachment(AttachmentRef attachment) async {
     final target = await _fileDialogs.chooseSaveLocation(
-      suggestedName: attachment.name ?? 'attachment',
+      suggestedName: safeSuggestedName(attachment.name),
     );
     if (target == null) return;
     try {
       final bytes = await _attachmentBytes.bytesFor(attachment);
       await File(target).writeAsBytes(bytes, flush: true);
       _toast('Saved ${attachment.name ?? 'the file'}.');
-    } on Object catch (e) {
-      _toast('Could not save: $e');
+    } on Object {
+      _toast('Could not save ${attachment.name ?? 'the file'}.');
     }
   }
 
   /// A file this app cannot fetch, opened where it actually lives.
+  ///
+  /// Web addresses only. The url is the SENDER's string — a Teams card or a
+  /// reference attachment carries whatever the connector posted, verbatim —
+  /// so handing it straight to the operating system would let a message
+  /// launch a local application or mount a share behind a button that says
+  /// 'Open in Teams'. The panel already refuses to draw that button; this is
+  /// the guard behind it.
   Future<void> _launchExternal(String url) async {
+    final uri = webUriOf(url);
+    if (uri == null) {
+      _toast('That link is not a web address.');
+      return;
+    }
     try {
-      await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
-    } on Object catch (e) {
-      _toast('Could not open that link: $e');
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } on Object {
+      _toast('Could not open that link.');
     }
   }
 

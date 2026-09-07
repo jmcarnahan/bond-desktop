@@ -128,7 +128,7 @@ class AttachmentSearchTile extends StatelessWidget {
 
     // A bare [InkWell] needs its own transparent [Material] to paint into.
     return Material(
-      color: Colors.transparent,
+      type: MaterialType.transparency,
       child: InkWell(
         onTap: open,
         borderRadius: BondRadii.smAll,

@@ -368,6 +368,62 @@ void main() {
     });
   });
 
+  group('a scope inside the neighbour search', () {
+    test('a rowid scope keeps the neighbours inside it', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedAttachment('m1', 'a1');
+      // Five passages on five axes. The query sits on axis 0, so the nearest
+      // is `a1`'s first and the ordering runs away from it.
+      final ids = await seedChunks(
+        'm1',
+        'a1',
+        const ['One.', 'Two.', 'Three.', 'Four.', 'Five.'],
+        axis: 0,
+      );
+      for (var i = 0; i < ids.length; i++) {
+        await store.setChunkEmbedding(
+          ids[i],
+          embedding: encodeEmbedding(axes({0: 1.0 - i * 0.2, i + 1: 0.2})),
+          dims: 768,
+          embedModel: tag,
+        );
+      }
+      await store.indexPendingChunks();
+
+      final index = AttachmentChunkIndex(db);
+      // Scoped to the two FURTHEST passages. A corpus-wide k of two would
+      // answer the first two and then filter them all away; scoped, the k
+      // nearest are the k nearest within the scope.
+      final hits = await index.knn(
+        encodeEmbedding(axes({0: 1.0})),
+        k: 2,
+        rowidWhere: 'id IN (?, ?)',
+        rowidArgs: [ids[3], ids[4]],
+      );
+
+      expect(hits.map((h) => h.id), [ids[3], ids[4]]);
+    });
+
+    test('an empty scope subquery answers nothing', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      await seedAttachment('m1', 'a1');
+      await seedChunks('m1', 'a1', ['The rent is 2,400.'], axis: 0);
+      await store.indexPendingChunks();
+
+      final index = AttachmentChunkIndex(db);
+      final hits = await index.knn(
+        encodeEmbedding(axes({0: 1.0})),
+        k: 4,
+        rowidWhere: "source = ? AND source_message_id IN ('nobody')",
+        rowidArgs: const ['email'],
+      );
+
+      expect(hits, isEmpty);
+    });
+  });
+
   group('re-chunking', () {
     test('the passages a re-read replaced are dropped from the answers',
         () async {
