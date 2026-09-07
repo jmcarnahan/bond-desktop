@@ -466,6 +466,71 @@ void main() {
       );
       expect(await store.attachmentRow('email', 'm1', 'nope'), isNull);
     });
+
+    test('a refusal is recorded once and only on a pending row', () async {
+      await seedMessage('m1');
+      await store.upsertAttachments('email', 'm1', [row('att-a')]);
+      final born = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(born['text_status'], 'pending');
+
+      await store.recordAttachmentRefusal('email', 'm1', 'att-a', 'gated');
+
+      final refused = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(refused['text_status'], 'skipped');
+      expect(refused['text_reason'], 'gated');
+      // Left `pending`, the panel's AI segment would say it is still reading.
+      expect(refused['digest_status'], 'skipped');
+      expect(refused['updated_at'], isNot(born['updated_at']));
+
+      // A later sighting has nothing to add: the row is no longer pending.
+      await store.recordAttachmentRefusal('email', 'm1', 'att-a', 'too_large');
+      expect(
+        (await store.attachmentsForMessage('email', 'm1')).single['text_reason'],
+        'gated',
+      );
+    });
+
+    test('a refusal never downgrades a file already read', () async {
+      await seedMessage('m2');
+      await store.upsertAttachments('email', 'm2', [row('att-b')]);
+      await store.setAttachmentText(
+        'email',
+        'm2',
+        'att-b',
+        status: 'done',
+        text: 'words',
+      );
+
+      await store.recordAttachmentRefusal('email', 'm2', 'att-b', 'gated');
+
+      final stored = (await store.attachmentsForMessage('email', 'm2')).single;
+      expect(stored['text_status'], 'done');
+      expect(stored['text_reason'], isNull);
+    });
+
+    test('reopening lifts only a gate', () async {
+      await seedMessage('m3');
+      await store.upsertAttachments('email', 'm3', [
+        row('att-big'),
+        row('att-gated', ordinal: 1),
+      ]);
+      await store.recordAttachmentRefusal('email', 'm3', 'att-big', 'too_large');
+      await store.recordAttachmentRefusal('email', 'm3', 'att-gated', 'gated');
+
+      await store.reopenGatedAttachment('email', 'm3', 'att-big');
+      await store.reopenGatedAttachment('email', 'm3', 'att-gated');
+
+      final rows = {
+        for (final r in await store.attachmentsForMessage('email', 'm3'))
+          r['attachment_id'] as String: r,
+      };
+      // Still true with the gate open: a 40 MB file is 40 MB either way.
+      expect(rows['att-big']!['text_status'], 'skipped');
+      expect(rows['att-big']!['text_reason'], 'too_large');
+      expect(rows['att-gated']!['text_status'], 'pending');
+      expect(rows['att-gated']!['text_reason'], isNull);
+      expect(rows['att-gated']!['digest_status'], 'pending');
+    });
   });
 
   group('the list card and the wipe', () {

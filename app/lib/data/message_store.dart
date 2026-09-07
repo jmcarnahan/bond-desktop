@@ -4860,6 +4860,60 @@ LIMIT ?
     return result.first.data['extracted_text'] as String?;
   }
 
+  /// The sync's answer for a file it will not queue, written on the row so the
+  /// panel can say why instead of "still reading" for the life of the mailbox.
+  ///
+  /// **Only a `pending` row takes it.** A row already read (`done`), or one
+  /// already carrying a reason, is never downgraded by a later sighting — a
+  /// re-sync, a chat read a second time, a restore — so this is a single
+  /// guarded UPDATE, not a transaction: it is safe inside `_ingestChat`'s.
+  /// `digest_status` closes with it for the reason `setAttachmentText` gives:
+  /// left `pending`, the preview panel's AI segment would say "Still reading
+  /// this file…" about a document nothing will ever hand the model — and
+  /// nothing else comes back to answer it. (The chip's own `reading…` hint
+  /// needs `text_status = 'done'`, which a refused row never has.)
+  /// `AttachmentTextHandler` short-circuits only on `done`, so a
+  /// refusal recorded here is re-read when Restore lifts the gate and
+  /// enqueues the work afresh.
+  Future<void> recordAttachmentRefusal(
+    String source,
+    String sourceMessageId,
+    String attachmentId,
+    String reason,
+  ) async {
+    await db.customUpdate(
+      "UPDATE attachments SET text_status = 'skipped', text_reason = ?, "
+      "digest_status = 'skipped', updated_at = ? "
+      'WHERE source = ? AND source_message_id = ? AND attachment_id = ? '
+      "AND text_status = 'pending'",
+      variables: _args([
+        reason,
+        _nowIso(),
+        source,
+        sourceMessageId,
+        attachmentId,
+      ]),
+    );
+  }
+
+  /// Restore's undo of [recordAttachmentRefusal] for the one refusal Restore
+  /// lifts. Only a row refused as `gated` goes back to `pending`; every other
+  /// word — `too_large`, `kind_card`, a connector's `gone` — is still true
+  /// after the gate opens, and the policy will say it again.
+  Future<void> reopenGatedAttachment(
+    String source,
+    String sourceMessageId,
+    String attachmentId,
+  ) async {
+    await db.customUpdate(
+      "UPDATE attachments SET text_status = 'pending', text_reason = NULL, "
+      "digest_status = 'pending', updated_at = ? "
+      'WHERE source = ? AND source_message_id = ? AND attachment_id = ? '
+      "AND text_status = 'skipped' AND text_reason = 'gated'",
+      variables: _args([_nowIso(), source, sourceMessageId, attachmentId]),
+    );
+  }
+
   /// Records the outcome of trying to read one attachment.
   ///
   /// One transaction over two tables, because a `done` status with no words

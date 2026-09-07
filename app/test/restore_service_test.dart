@@ -253,6 +253,47 @@ void main() {
       // row.
       expect(await workStatus('attachment_text', 'm1|a1'), 'pending');
       expect(await workStatus('attachment_text', 'm1|logo'), isNull);
+
+      // And the refused one is told why, so the panel has a sentence rather
+      // than "still reading" for a file nothing will ever read.
+      final logo = (await store.attachmentsForMessage('email', 'm1'))
+          .firstWhere((r) => r['attachment_id'] == 'logo');
+      expect(logo['text_status'], 'skipped');
+      // By kind, not by `inline`: the kind check comes first, and an image
+      // carries no document whether it is pasted inline or attached.
+      expect(logo['text_reason'], 'kind_image');
+    });
+
+    test('a restored message re-reads a file refused as gated', () async {
+      await seed();
+      await store.upsertAttachments('email', 'm1', const [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Renewal.pdf',
+          'content_type': 'application/pdf',
+          'size': 240 * 1024,
+        },
+      ]);
+      // Exactly what the sync leaves behind when the gate was closed.
+      await db.customUpdate(
+        "UPDATE attachments SET text_status = 'skipped', "
+        "text_reason = 'gated', digest_status = 'skipped'",
+      );
+
+      await RestoreService(store).restore('email', 'm1');
+
+      // The work is offered again — the handler short-circuits only on `done`,
+      // so a row recorded `skipped` is re-read.
+      expect(await workStatus('attachment_text', 'm1|a1'), 'pending');
+      // And the row says so too: the gate was the whole reason, so leaving
+      // `gated` on it would have the panel explaining a refusal that has
+      // just been lifted.
+      final row = (await store.attachmentsForMessage('email', 'm1')).single;
+      expect(row['text_status'], 'pending');
+      expect(row['text_reason'], isNull);
+      expect(row['digest_status'], 'pending');
     });
 
     test('restoring the same message twice queues each document once',

@@ -604,7 +604,8 @@ class SyncService implements MailSync {
   /// `AttachmentTextHandler` drains the kind, in the post-sync pass; a row
   /// queued while it is already running is picked up on the next one.
   /// `enqueueWork` is INSERT OR IGNORE, so the same message fetched twice
-  /// queues one item.
+  /// queues one item. A row the policy refuses is told why, once, while it is
+  /// still `pending` — see `recordAttachmentRefusal`.
   Future<void> _storeAttachments(
     String sourceMessageId,
     Object? rawAttachments,
@@ -644,8 +645,16 @@ class SyncService implements MailSync {
       _source,
       sourceMessageId,
     )) {
-      final (eligible, _) = attachmentTextPolicy(message, row);
-      if (!eligible) continue;
+      final (eligible, why) = attachmentTextPolicy(message, row);
+      if (!eligible) {
+        await _store.recordAttachmentRefusal(
+          _source,
+          sourceMessageId,
+          row['attachment_id'] as String? ?? '',
+          why ?? 'ineligible',
+        );
+        continue;
+      }
       await _store.enqueueWork(
         'attachment_text',
         _source,

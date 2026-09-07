@@ -197,6 +197,27 @@ void main() {
     });
   });
 
+  group('refusalSentence', () {
+    test('every refusal word reads as a sentence', () {
+      for (final word in refusalWords) {
+        final sentence = refusalSentence(word);
+        expect(sentence, isNotEmpty, reason: word);
+        expect(sentence.endsWith('.'), isTrue, reason: word);
+        // The vocabulary is `snake_case`; a sentence on screen is not.
+        expect(sentence, isNot(contains('_')), reason: word);
+        expect(sentence, isNot(word), reason: word);
+      }
+    });
+
+    test('an unknown word still reads', () {
+      expect(refusalSentence('quota_exceeded'), 'Not read: quota exceeded.');
+    });
+
+    test('any kind is one sentence', () {
+      expect(refusalSentence('kind_zzz'), refusalSentence('kind_card'));
+    });
+  });
+
   group('extensionOf', () {
     test('lower-cased, without the dot', () {
       expect(extensionOf('Report.PDF'), 'pdf');

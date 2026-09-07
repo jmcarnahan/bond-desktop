@@ -118,6 +118,19 @@ be gated between those two moments.
 Outbound messages ARE processed: the owner's own documents are usually the
 most quotable thing on a thread.
 
+**A refusal is written on the row at enqueue time.** All three enqueue sites —
+the mail detail fetch, the chat insert loop, and Restore — call
+`MessageStore.recordAttachmentRefusal`, which sets `text_status = 'skipped'`,
+`text_reason = <word>` and `digest_status = 'skipped'` on a row that is still
+`pending`, and touches nothing else. A row already read, or already carrying a
+reason, is never downgraded by a later sighting. The panel's Text segment turns
+the word into a sentence through `refusalSentence` (`attachment_format.dart`);
+the AI segment says the file was not sent to the model. Restore is the way
+back: it puts a row refused as `gated` — and only that word — back to
+`pending` (`reopenGatedAttachment`), re-asks the policy and enqueues afresh, and the text handler
+short-circuits only on `done`, so a file refused as `gated` is read once the
+gate is lifted.
+
 The work-queue id is `'<message id>|<attachment id>'`
 (`attachmentEntityId` / `splitAttachmentEntityId`). `|` appears in neither
 half — a Graph attachment id and a hosted-content id are base64url, a Teams
@@ -451,9 +464,11 @@ ignore your instructions.pdf` has to arrive as data like the rest of the file.
 dropped, and everything is clamped.
 
 What it refuses to spend a call on: a deleted row, an already-done digest, a
-`text_status` that is not `done`, a message gated since the words landed, and a
-`done` status with no words behind it (which closes the digest so the pair is
-not re-examined on every drain).
+`text_status` that is not `done`, a message gated since the words landed (which
+closes `digest_status` as `skipped` on the row, not only in the log — `done`
+text over a `pending` digest is the chip's `reading…` state, and nothing else
+comes back to answer it), and a `done` status with no words behind it (which
+closes the digest so the pair is not re-examined on every drain).
 
 The digest is then **appended as one more passage** with locator `digest` — the
 one a search for "what is this file about" should land on. It is appended, not
@@ -563,7 +578,8 @@ visible under another pane is exactly the bug that list exists to prevent.
 it. All three render whatever they have, including "not yet": a segment that
 disappeared while a digest was running would move the controls under the
 reader's cursor. The Text segment's empty line answers in the order the question
-gets asked — still reading, refused (and why), or nothing to read — and a
+gets asked — still reading, refused (and why, as a sentence —
+`refusalSentence`), or nothing to read — and a
 truncated extraction says where it was cut. The AI segment speaks under the same
 `AI:` label as every other model line in the app and needs no bytes, so it
 answers for a link and for a file over the cap too.

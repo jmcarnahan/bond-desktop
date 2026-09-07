@@ -416,6 +416,7 @@ class TeamsSync {
         // the work is queued — the mail path does both inside its detail fetch.
         // Sqlite only: `_ingestChat` runs inside a transaction, and Teams'
         // terms forbid a background fetch, so nothing here reaches the network.
+        // The refusal write is one guarded UPDATE for the same reason.
         final attachments = attachmentRows(message);
         if (attachments.isNotEmpty) {
           await _store.upsertAttachments(source, id, attachments);
@@ -425,8 +426,16 @@ class TeamsSync {
               source,
               id,
             )) {
-              final (eligible, _) = attachmentTextPolicy(stored, attachment);
-              if (!eligible) continue;
+              final (eligible, why) = attachmentTextPolicy(stored, attachment);
+              if (!eligible) {
+                await _store.recordAttachmentRefusal(
+                  source,
+                  id,
+                  attachment['attachment_id'] as String? ?? '',
+                  why ?? 'ineligible',
+                );
+                continue;
+              }
               await _store.enqueueWork(
                 'attachment_text',
                 source,

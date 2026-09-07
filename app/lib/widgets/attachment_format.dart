@@ -12,6 +12,8 @@ library;
 import 'package:flutter/widgets.dart' show StringCharacters, ValueKey;
 
 import '../models/attachment_models.dart';
+import '../services/attachments/attachment_policy.dart'
+    show maxAttachmentsPerMessage;
 
 const int _kib = 1024;
 const int _mib = 1024 * 1024;
@@ -38,6 +40,67 @@ String formatBytes(int? bytes) {
   final wholeMb = mb.round();
   if (wholeMb < _kib) return '$wholeMb MB';
   return '${(bytes / _gib).toStringAsFixed(1)} GB';
+}
+
+/// Every refusal word the app or a connector can write to
+/// `attachments.text_reason`, so a test can prove each one reads as a
+/// sentence. Keep in step with the map below.
+const List<String> refusalWords = [
+  'gated',
+  'kind_card',
+  'kind_image',
+  'kind_other',
+  'inline',
+  'small_image',
+  'too_large',
+  'over_cap',
+  'reference_no_url',
+  'no_extractor',
+  'binary',
+  'unsupported',
+  'empty',
+  'external_sender',
+  'gone',
+  'not_found',
+  'access_denied',
+  'invalid_link',
+  'missing_target',
+  'is_folder',
+  'unavailable',
+  'reference',
+  'no_thumbnail',
+  'ineligible',
+];
+
+/// A refusal word from the text policy or a connector, as a sentence the
+/// panel's Text segment can show. The words are a closed vocabulary shared by
+/// `attachmentTextPolicy`, both attachment backends and the text handler; the
+/// fallback keeps an unknown word readable rather than raw, so a new server
+/// word never shows as `snake_case` on screen.
+String refusalSentence(String reason) {
+  if (reason.startsWith('kind_')) return 'This kind of attachment is not read.';
+  return switch (reason) {
+    'gated' =>
+      'This message was not sent to the model, so its files were not read.',
+    'inline' => 'Inline images are not read.',
+    'small_image' => 'Small images are treated as decoration and not read.',
+    'too_large' => 'Too large to read.',
+    'over_cap' =>
+      'Only the first $maxAttachmentsPerMessage files on a message are read.',
+    'reference_no_url' => 'This link has no address to open.',
+    'reference' => 'The server could not read this link as a file.',
+    'no_extractor' =>
+      'This connection cannot extract text from this kind of file.',
+    'binary' || 'unsupported' => 'There is no text in this kind of file.',
+    'empty' => 'The file has no text.',
+    'external_sender' => "The server hides this sender's mail.",
+    'gone' || 'not_found' => 'The file is no longer on the server.',
+    'access_denied' || 'invalid_link' || 'missing_target' =>
+      'The link could not be opened.',
+    'is_folder' => 'The link points to a folder, not a file.',
+    'unavailable' => 'The server could not read this file.',
+    _ => 'Not read: ${reason.replaceAll('_', ' ')}.',
+  };
 }
 
 /// A text glyph for a file, not an icon — the same reasoning `source_glyph.dart`

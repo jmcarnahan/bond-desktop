@@ -1,4 +1,5 @@
 import 'package:bond_inbox/services/attachments/attachment_policy.dart';
+import 'package:bond_inbox/widgets/attachment_format.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// Which attachments cost a fetch, and which are refused before one.
@@ -255,6 +256,49 @@ void main() {
     test('an id with no separator reads as a message and no attachment', () {
       // A work row that cannot be parsed still has to be able to complete.
       expect(splitAttachmentEntityId('m1'), ('m1', ''));
+    });
+  });
+
+  group('every refusal reaches the reader', () {
+    test('every word the policy can say has a sentence', () {
+      // The vocabulary is shared: the policy writes it, the panel reads it.
+      // A word added here without a sentence there shows as `snake_case` on
+      // screen, which is what this test exists to stop.
+      final refusals = [
+        attachmentTextPolicy(
+          message(triageStatus: 'skipped', gateReason: 'bulk_sender'),
+          attachment(),
+        ),
+        attachmentTextPolicy(message(), attachment(kind: 'card')),
+        attachmentTextPolicy(message(), attachment(isInline: 1)),
+        attachmentTextPolicy(
+          message(),
+          attachment(contentType: 'image/png', size: 4096),
+        ),
+        attachmentTextPolicy(
+          message(),
+          attachment(size: maxAttachmentBytes + 1),
+        ),
+        attachmentTextPolicy(message(), attachment(kind: 'reference')),
+        attachmentTextPolicy(
+          message(),
+          attachment(ordinal: maxAttachmentsPerMessage),
+        ),
+      ];
+
+      expect(refusals.map((r) => r.$2), [
+        'gated',
+        'kind_card',
+        'inline',
+        'small_image',
+        'too_large',
+        'reference_no_url',
+        'over_cap',
+      ]);
+      for (final (eligible, why) in refusals) {
+        expect(eligible, isFalse);
+        expect(refusalWords, contains(why));
+      }
     });
   });
 

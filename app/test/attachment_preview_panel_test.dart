@@ -522,7 +522,36 @@ void main() {
       ));
       await tapSegment(tester, 'Text');
 
-      expect(find.text('Not read: no_extractor.'), findsOneWidget);
+      expect(
+        find.text('This connection cannot extract text from this kind of file.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a file refused as gated explains the message', (tester) async {
+      await pump(tester, ref(
+        // A document, not a pdf: a pdf fetches its bytes, and the fake has
+        // none, so the panel's own load error would stand in front of the
+        // segments this test is about.
+        name: 'Order.docx',
+        textStatus: 'skipped',
+        textReason: 'gated',
+        digestStatus: 'skipped',
+      ));
+      await tapSegment(tester, 'Text');
+
+      expect(
+        find.text(
+          'This message was not sent to the model, so its files were not read.',
+        ),
+        findsOneWidget,
+      );
+
+      await tapSegment(tester, 'AI');
+      expect(
+        find.text('This file was not sent to the model.'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('a truncated text says where it was cut', (tester) async {

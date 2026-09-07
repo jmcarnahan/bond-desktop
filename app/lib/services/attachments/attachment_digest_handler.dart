@@ -99,6 +99,15 @@ class AttachmentDigestHandler extends WorkHandler {
     // stored and stay; what is refused is spending a model call on them.
     final (eligible, why) = attachmentTextPolicy(message, row);
     if (!eligible) {
+      // Closed on the row, not only in the log: `done` text over a `pending`
+      // digest is the chip's `reading…` state, and nothing else comes back to
+      // answer it.
+      await _store.setAttachmentDigest(
+        source,
+        messageId,
+        attachmentId,
+        status: 'skipped',
+      );
       _skip(why ?? 'ineligible');
       return;
     }

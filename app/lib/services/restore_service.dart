@@ -95,10 +95,12 @@ class RestoreService {
     }
 
     // Attachment work is ENQUEUED rather than requeued, and that is the whole
-    // difference: the sync refuses to queue a gated message's attachments in
-    // the first place, so there is no `done` row here to revive — there is no
-    // row at all. `enqueueWork` is `INSERT OR IGNORE`, so a message restored
-    // twice still queues each document once.
+    // difference: the sync never queued a gated message's attachments in the
+    // first place — it recorded `gated` on the row instead — so there is no
+    // `done` work row here to revive. `enqueueWork` is `INSERT OR IGNORE`, so
+    // a message restored twice still queues each document once, and the
+    // handler re-reads a row recorded `skipped` because it short-circuits only
+    // on `done`.
     //
     // The policy is asked again here for the same reason both handlers ask it:
     // a signature logo and a 40 MB video are refused before a fetch, and the
@@ -107,8 +109,23 @@ class RestoreService {
     if (row != null) {
       for (final attachment
           in await _store.attachmentsForMessage(source, sourceMessageId)) {
-        final (eligible, _) = attachmentTextPolicy(row, attachment);
-        if (!eligible) continue;
+        final (eligible, why) = attachmentTextPolicy(row, attachment);
+        if (!eligible) {
+          await _store.recordAttachmentRefusal(
+            source,
+            sourceMessageId,
+            attachment['attachment_id'] as String? ?? '',
+            why ?? 'ineligible',
+          );
+          continue;
+        }
+        // The gate was the reason; with it lifted the row is pending again
+        // until the handler answers.
+        await _store.reopenGatedAttachment(
+          source,
+          sourceMessageId,
+          attachment['attachment_id'] as String? ?? '',
+        );
         await _store.enqueueWork(
           'attachment_text',
           source,

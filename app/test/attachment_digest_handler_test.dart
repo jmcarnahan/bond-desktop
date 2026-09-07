@@ -279,6 +279,23 @@ void main() {
       );
     });
 
+    test('a message gated after its words landed closes the digest', () async {
+      if (!available) return;
+      await seed(triageStatus: 'skipped');
+      final llm = FakeLlm([answer()]);
+
+      await AttachmentDigestHandler(store, llm, FakeEmbedServer().client)
+          .run(item('m1', 'a1'));
+
+      expect(llm.calls, 0);
+      // Left `pending` over `done` text, this is exactly the pair the chip
+      // renders as `reading…`, and nothing else comes back to answer it.
+      final row = (await store.attachmentRow('email', 'm1', 'a1'))!;
+      expect(row['text_status'], 'done');
+      expect(row['digest_status'], 'skipped');
+      expect(row['digest_json'], isNull);
+    });
+
     test('an attachment that vanished is done, not failed', () async {
       if (!available) return;
       final llm = FakeLlm([answer()]);

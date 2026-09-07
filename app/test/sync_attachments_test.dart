@@ -320,5 +320,50 @@ void main() {
       expect((await store.attachmentsForMessage('email', 'm1')).length, 1);
       expect(await workItems(), isEmpty);
     });
+
+    test('a gated message\'s attachments record why they were not queued',
+        () async {
+      graph.deltaMessages = [_deltaMessage(id: 'm1', hasAttachments: true)];
+      graph.attachments['m1'] = [_graphAttachment(id: 'att-1')];
+      await sync.syncNow();
+      await db.customUpdate(
+        "UPDATE messages SET triage_status = 'skipped', "
+        "gate_reason = 'bulk_sender' WHERE source_message_id = 'm1'",
+      );
+
+      await sync.ensureMessageBody('m1');
+
+      // Left `pending`, the panel would say "still reading this file" about a
+      // document nothing will ever come back to read.
+      final rows = await store.attachmentsForMessage('email', 'm1');
+      expect(rows.single['text_status'], 'skipped');
+      expect(rows.single['text_reason'], 'gated');
+      expect(rows.single['digest_status'], 'skipped');
+      expect(await workItems(), isEmpty);
+    });
+
+    test('a second sighting never downgrades a file already read', () async {
+      graph.deltaMessages = [_deltaMessage(id: 'm1', hasAttachments: true)];
+      graph.attachments['m1'] = [_graphAttachment(id: 'att-1')];
+      await sync.syncNow();
+      await sync.ensureMessageBody('m1');
+
+      // As if the text handler had run and read it.
+      await db.customUpdate(
+        "UPDATE attachments SET text_status = 'done', text_reason = NULL, "
+        "digest_status = 'done' WHERE attachment_id = 'att-1'",
+      );
+      await db.customUpdate(
+        "UPDATE messages SET triage_status = 'skipped', "
+        "gate_reason = 'bulk_sender' WHERE source_message_id = 'm1'",
+      );
+
+      await sync.ensureMessageBody('m1');
+
+      final rows = await store.attachmentsForMessage('email', 'm1');
+      expect(rows.single['text_status'], 'done');
+      expect(rows.single['text_reason'], isNull);
+      expect(rows.single['digest_status'], 'done');
+    });
   });
 }

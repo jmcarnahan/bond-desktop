@@ -724,7 +724,7 @@ class _AttachmentPreviewPanelState extends State<AttachmentPreviewPanel> {
     final attachment = widget.attachment;
     if (attachment.textStatus == 'pending') return 'Still reading this file…';
     final reason = attachment.textReason;
-    if (reason != null && reason.isNotEmpty) return 'Not read: $reason.';
+    if (reason != null && reason.isNotEmpty) return refusalSentence(reason);
     return 'No text was extracted from this file.';
   }
 

@@ -373,6 +373,52 @@ void main() {
       );
       expect(await queuedEntities(), isEmpty);
     });
+
+    test('a card records its refusal inside the ingest transaction', () async {
+      graph.messages['chat-1'] = [
+        _message(
+          id: 'm1',
+          attachments: [
+            {
+              'id': 'card-1',
+              'contentType': 'application/vnd.microsoft.card.adaptive',
+              'name': null,
+            },
+          ],
+        ),
+      ];
+
+      await build().syncNow();
+
+      // `_ingestChat` already holds a transaction; the refusal is one guarded
+      // UPDATE so it can be written from inside it.
+      final row = (await store.attachmentsForMessage('teams', 'm1')).single;
+      expect(row['text_status'], 'skipped');
+      expect(row['text_reason'], 'kind_card');
+      expect(row['digest_status'], 'skipped');
+    });
+
+    test('a second read of the chat leaves a recorded refusal alone', () async {
+      graph.messages['chat-1'] = [
+        _message(
+          id: 'm1',
+          attachments: [
+            {
+              'id': 'card-1',
+              'contentType': 'application/vnd.microsoft.card.adaptive',
+              'name': null,
+            },
+          ],
+        ),
+      ];
+
+      await build().syncNow();
+      await build().syncNow();
+
+      final row = (await store.attachmentsForMessage('teams', 'm1')).single;
+      expect(row['text_status'], 'skipped');
+      expect(row['text_reason'], 'kind_card');
+    });
   });
 
   group('an ordinary message', () {
