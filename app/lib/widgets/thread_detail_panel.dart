@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
 import '../theme/tokens.dart';
@@ -73,6 +74,19 @@ class ThreadDetailPanel extends StatelessWidget {
   /// open.
   final VoidCallback? onOpenReply;
 
+  /// What opening one of the thread's files does. Null leaves every chip and
+  /// picture in the transcript a statement — the panel has nowhere of its own
+  /// to show a file, and never invents one.
+  final void Function(AttachmentRef attachment)? onOpenAttachment;
+
+  /// The file the host is previewing, so the row that carried it can say so.
+  /// Passed straight down; the comparison is `sameAttachment`, never `==`.
+  final AttachmentRef? selectedAttachment;
+
+  /// The picture for an attachment, or null while there is none. An
+  /// [ImageProvider] rather than bytes or a path — see [MessageRow.thumbnailFor].
+  final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -86,6 +100,9 @@ class ThreadDetailPanel extends StatelessWidget {
     this.afterTranscript,
     this.suggestionFor,
     this.onOpenReply,
+    this.onOpenAttachment,
+    this.selectedAttachment,
+    this.thumbnailFor,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -162,6 +179,9 @@ class ThreadDetailPanel extends StatelessWidget {
         // thread has moved past. An open ask or a live suggestion is the whole
         // reason to scroll back, so neither ever starts hidden.
         initiallyCollapsed: collapsible && !open && suggestion == null,
+        onOpenAttachment: onOpenAttachment,
+        selectedAttachment: selectedAttachment,
+        thumbnailFor: thumbnailFor,
       ));
       previous = message;
     }

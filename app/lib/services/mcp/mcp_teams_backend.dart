@@ -310,6 +310,19 @@ class McpTeamsBackend implements TeamsBackend {
             'user': {'id': userId, 'displayName': message['from_user_display']},
           },
       },
+      // The one key NOT re-nested into Graph's shape, and deliberately: the
+      // server's flat list is strictly richer than Graph's, because it has
+      // already merged the body's inline images into it. `GraphTeams` converts
+      // INTO this shape rather than this converting out of it.
+      //
+      // Absent stays absent, exactly like `mentions`: a server that does not
+      // send attachments yet must read as "none", which is what the parser
+      // already answers for a missing key.
+      if (message['attachments'] case final List attachments)
+        'attachments': [
+          for (final entry in attachments)
+            if (entry is Map) Map<String, Object?>.from(entry),
+        ],
       if (message['mentioned_user_ids'] case final List mentionedUserIds)
         'mentions': [
           for (final id in mentionedUserIds)

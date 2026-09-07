@@ -289,6 +289,58 @@ void main() {
     });
   });
 
+  group('attachment markers', () {
+    test('the card the message embeds from carries no marker', () async {
+      await seedMessage(body: 'Signed copy [[att:file-1]] is attached.');
+      final server = FakeEmbedServer();
+
+      await runOne(EmbedHandler(store, server.client));
+
+      expect(server.inputs.single, isNot(contains('[[att:')));
+      expect(server.inputs.single, contains('Signed copy is attached.'));
+    });
+
+    test('a message that is only a file embeds as what was shared', () async {
+      // Otherwise it would embed as a subject and a sender, and be findable by
+      // neither the file's name nor anything about it.
+      await seedMessage(id: 'c1', source: 'teams', body: '[[att:file-1]]');
+      await store.upsertAttachments('teams', 'c1', [
+        {
+          'attachment_id': 'file-1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'lease-addendum.pdf',
+          'size': 0,
+          'is_inline': false,
+        },
+      ]);
+      final server = FakeEmbedServer();
+
+      await EmbedHandler(store, server.client).run({
+        'task_kind': 'embed_message',
+        'source': 'teams',
+        'entity_id': 'c1',
+      });
+
+      expect(
+        server.inputs.single,
+        contains('Shared a file: lease-addendum.pdf'),
+      );
+    });
+
+    test('an ordinary message is embedded exactly as it was', () async {
+      await seedMessage(body: 'Can we still ship on Thursday?');
+      final server = FakeEmbedServer();
+
+      await runOne(EmbedHandler(store, server.client));
+
+      expect(
+        server.inputs.single,
+        contains('Can we still ship on Thursday?'),
+      );
+    });
+  });
+
   group('enqueueEmbedBacklog', () {
     Future<List<String>> queued() async => [
           for (final row in await db

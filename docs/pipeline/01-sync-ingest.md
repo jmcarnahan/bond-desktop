@@ -26,3 +26,23 @@ next launch, so a restart loses nothing.
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never
 interleave (PR #9).
+
+**Attachments.** Sync is where a message learns what came with it. The
+paperclip (`messages.has_attachments`) rides the mail delta page, so a list
+card shows it before any body is fetched. The attachment LIST arrives later
+and differently per connector: mail writes rows inside `_fetchDetailInto`,
+because the detail fetch is the first moment a list exists; chat writes them
+in `_ingestChat`'s insert loop, because chat has no detail step. Both then
+queue `attachment_text` work for the rows the text policy accepts — and only
+that kind, since a digest of a document nobody has extracted yet is a call
+that can only fail. Rows are written on EVERY sighting, not only the first: an
+edit can add a file, and the upsert preserves everything the handlers and the
+owner wrote.
+
+The mail detail fetch also REWRITES the body it stores. Outlook's "attach as
+link" is not in Graph's attachment list at all — it is a zero-width-space
+delimited run in the body — so `_fetchDetailInto` parses it out
+(`owa_links.dart`), replaces the run with an `[[att:<id>]]` marker, writes a
+`reference` row numbered after the connector's own, and raises the paperclip
+even though the message said `hasAttachments: false`. See
+[12-attachments.md](12-attachments.md).

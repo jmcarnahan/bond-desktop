@@ -36,7 +36,8 @@ class GraphMail implements MailBackend {
   /// bodies stay behind [getMessageDetail] and are fetched only for threads
   /// the user actually opens.
   static const String _deltaSelect = 'id,internetMessageId,conversationId,'
-      'subject,from,toRecipients,receivedDateTime,isRead,isDraft,bodyPreview';
+      'subject,from,toRecipients,receivedDateTime,isRead,isDraft,bodyPreview,'
+      'hasAttachments';
 
   /// Tier two. `uniqueBody` is the part of the message that is NOT quoted
   /// thread — Graph computes it server-side, and with the Prefer header
@@ -44,6 +45,20 @@ class GraphMail implements MailBackend {
   /// entire reason this app never parses mail HTML itself.
   static const String _detailSelect =
       'id,uniqueBody,internetMessageHeaders,hasAttachments';
+
+  /// The attachment list, expanded onto the same detail request rather than
+  /// fetched separately: a message's attachments are part of what the detail
+  /// fetch is FOR, and a second round trip per message would double the cost
+  /// of opening a thread.
+  ///
+  /// `microsoft.graph.fileAttachment/contentId` is written in the cast form
+  /// because it has to be. A bare `contentId` in the `$select` is a Graph 400
+  /// — the property is declared on the fileAttachment subtype, not on the
+  /// attachment base type — and the error names no field, so it reads as a
+  /// broken request rather than as a wrong column.
+  static const String _detailExpand =
+      'attachments(\$select=id,name,contentType,size,isInline,'
+      'lastModifiedDateTime,microsoft.graph.fileAttachment/contentId)';
 
   static const Map<String, String> _plainTextBody = {
     'Prefer': 'outlook.body-content-type="text"',
@@ -101,13 +116,69 @@ class GraphMail implements MailBackend {
   @override
   Future<Map<String, dynamic>> getMessageDetail(String id) async {
     final uri = Uri.parse('$_base/me/messages/${Uri.encodeComponent(id)}')
-        .replace(query: '\$select=${Uri.encodeComponent(_detailSelect)}');
+        .replace(
+      query: '\$select=${Uri.encodeComponent(_detailSelect)}'
+          '&\$expand=${Uri.encodeComponent(_detailExpand)}',
+    );
 
     final response = await _send(uri, headers: _plainTextBody);
     if (response.statusCode != 200) {
       throw _describe(response, 'Could not read a message from Microsoft Graph');
     }
-    return _decodeObject(response);
+    final detail = _decodeObject(response);
+    // The one key that leaves this file in a shape Graph never sent. Every
+    // other field stays camelCase because the sync reads Graph's own names;
+    // attachments are flattened into the MCP server's snake_case summary
+    // shape, which is what the `attachments` columns are named after, so the
+    // sync reads ONE shape whichever backend it is talking to.
+    detail['attachments'] = _attachmentSummaries(detail['attachments']);
+    return detail;
+  }
+
+  /// Graph's expanded `attachments[]` as the flat summary both backends hand
+  /// over.
+  ///
+  /// `kind` comes from the `@odata.type` tail, which is the only thing that
+  /// distinguishes a file from a forwarded message from a OneDrive link.
+  ///
+  /// `source_url` is always null here, and that is a known hole rather than an
+  /// oversight: `sourceUrl` is declared on the referenceAttachment subtype and
+  /// is not selectable through this expand (the MCP server's own select list
+  /// omits it too). A link attachment therefore arrives with no url and the
+  /// text policy refuses it as `reference_no_url`. The path is built; turning
+  /// it on is one line in the server's select.
+  static List<Map<String, Object?>> _attachmentSummaries(Object? raw) {
+    if (raw is! List) return const [];
+    return [
+      for (final entry in raw)
+        if (entry is Map)
+          {
+            'id': entry['id'],
+            'name': entry['name'],
+            'content_type': entry['contentType'],
+            // Zero for unknown, never null — the column's own convention, and
+            // the server answers 0 for the same entry. A null here would be a
+            // second spelling of "no size" that only this path produces.
+            'size': entry['size'] ?? 0,
+            'is_inline': entry['isInline'] == true,
+            'content_id': entry['contentId'],
+            'kind': _attachmentKind(entry['@odata.type']),
+            'source_url': null,
+          },
+    ];
+  }
+
+  /// `#microsoft.graph.fileAttachment` → `file`. An unknown or absent type is
+  /// `unknown` rather than `file`: the text policy accepts files, and guessing
+  /// would send it after bytes nothing knows how to read.
+  static String _attachmentKind(Object? odataType) {
+    final tail = (odataType as String? ?? '').split('.').last.toLowerCase();
+    return switch (tail) {
+      'fileattachment' => 'file',
+      'itemattachment' => 'item',
+      'referenceattachment' => 'reference',
+      _ => 'unknown',
+    };
   }
 
   // ── Drafts and sending ───────────────────────────────────────────────

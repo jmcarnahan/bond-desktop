@@ -220,3 +220,65 @@ when the worker rather than the handler decides how an exception ended;
 needs-you has no stage column, so an arm there would write nothing. The generic
 parking above those ladders still applies: a fast server that is not running
 parks the whole kind rather than burning attempts on it.
+
+## What the documents on a message say
+
+`NeedsYouInput.attachmentDigests` is one line per digested document on **this
+message** — `<name>: <summary>` plus ` Asks: <a; b>` when the digest recorded
+any — built by `attachmentDigestLines`
+(`app/lib/services/attachments/attachment_digest_lines.dart`) from
+`MessageStore.digestsForMessages(source, [id])`. Rows with no readable digest
+are skipped: "not read yet" and "says nothing" are different states, and only
+the second is worth a line.
+
+It sits in the user message after the thread block and before `Judge ONLY this
+message:`, inside `<untrusted_data source="attachment_digests">`, clamped to
+600 characters in total (each line to 300 of its own). The judged message stays
+last, as it always has. The fence count in `needs_you_task_test` went from two
+to three deliberately — what a file says is the sender's text like any other,
+so it arrives fenced rather than as a line the app appears to be asserting.
+
+The digests and not the documents: this judgement turns on what a file *asks
+for*, which is one sentence. The file's own words are the retriever's business
+(see `07-replies.md`), and a contract in this prompt would drown the message it
+is about. The system prompt does not change.
+
+## The re-verdict
+
+A document that asks for a signature can change whether its message wants the
+owner — and the first needs-you pass ran before anything had read it.
+`AttachmentDigestHandler` therefore requeues the message once, right after the
+digest chunk is embedded:
+
+```
+digest.asks.isNotEmpty
+  && message.direction == 'inbound'
+  && message.needs_you_verdict != 1
+  && attachmentsWithAsks(source, messageId) == 1
+```
+
+`== 1` is the whole guard against one requeue per file: `setAttachmentDigest`
+has already written this row by the time the count is taken, so the first
+document on a message to carry an ask sees exactly 1 and every later one sees 2
+or more. The other three each refuse their own case — the owner's own message
+is never judged, a verdict already at `1` cannot be raised, and asks are the
+only part of a digest that can move the verdict.
+
+Needs-you drains ahead of `attachment_digest`, so the pass that would have
+picked the requeue up has already gone by — which is why the handler also
+**wakes the worker**: its `onRequeue` callback is wired in `app_providers.dart`
+to `AiWorker.pump()`, which on a running drain only sets the re-pump flag and
+returns that drain's future (never awaited inside the handler, since that
+future is the drain the handler is running in). The drain then makes one more
+full pass, and the re-verdict lands in the **same** drain. That matters for the
+notification settle, which holds a message's candidate open while its
+`needs_you` item is pending: without the wake, a document that asks for
+something would cost its message up to the six-minute settle deadline.
+`requeueWork` revives only `done` and `error` rows, so a message still waiting
+for its first verdict keeps its place in the queue rather than being reset.
+The activity row for the digest notes `requeued: needs_you`
+(`ActivityLog.note` merges, so it lands beside the digest's own facts).
+
+This was deferred out of Phase 3 on purpose: a re-verdict before the
+`attachment_digests` fence existed would have spent a model call on a
+re-judgement that could not see what changed.

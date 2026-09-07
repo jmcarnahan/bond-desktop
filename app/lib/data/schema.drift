@@ -450,3 +450,113 @@ CREATE TABLE message_vectors (
 CREATE UNIQUE INDEX ix_message_vectors_message
   ON message_vectors(source, source_message_id);
 CREATE INDEX ix_message_vectors_unindexed ON message_vectors(indexed_at);
+
+-- Everything that came with a message: one row per attachment, per source.
+--
+-- The three attachment tables split by lifetime and size. This one holds the
+-- metadata a row draws and the pipeline judges on — small, written on every
+-- sighting, and safe to re-upsert. `attachment_text` holds the extracted
+-- words (up to 200 K chars), read only by the chunker. `attachment_chunks`
+-- holds the embedded passages and is the source of truth for the vec0 index
+-- built over it.
+--
+-- The primary key is the connector's own identity for the file. Mail uses the
+-- Graph attachment id; Teams uses the entry id, or the hosted-content id for
+-- an image pasted into the body. `ordinal` records the order the connector
+-- listed them in, which is both how a row draws its chips and the tie-break
+-- the text policy caps on.
+--
+-- `size` is 0 rather than NULL when unknown, because the Teams wire never
+-- states it and a later resolve should be able to raise it with MAX() without
+-- a NULL check at every call site.
+--
+-- The `text_*`, `digest_*`, `blob_*`, `thumb_path` and `pinned_storyline_id`
+-- columns belong to later stages and to the owner: a re-sync updates the
+-- metadata and never touches them.
+CREATE TABLE attachments (
+  source TEXT NOT NULL DEFAULT 'email',
+  source_message_id TEXT NOT NULL,
+  attachment_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT 'file',
+  name TEXT,
+  content_type TEXT,
+  size INTEGER NOT NULL DEFAULT 0,
+  is_inline INTEGER NOT NULL DEFAULT 0,
+  content_id TEXT,
+  source_url TEXT,
+  thumbnail_url TEXT,
+  card_text TEXT,
+  item_subject TEXT,
+  item_from TEXT,
+  item_received TEXT,
+  text_status TEXT NOT NULL DEFAULT 'pending',
+  text_reason TEXT,
+  text_truncated INTEGER NOT NULL DEFAULT 0,
+  text_chars INTEGER NOT NULL DEFAULT 0,
+  digest_status TEXT NOT NULL DEFAULT 'pending',
+  digest_json TEXT,
+  blob_path TEXT,
+  blob_sha256 TEXT,
+  blob_fetched_at TEXT,
+  thumb_path TEXT,
+  pinned_storyline_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (source, source_message_id, attachment_id)
+) STRICT;
+
+CREATE INDEX ix_attachments_message
+  ON attachments(source, source_message_id, ordinal);
+CREATE INDEX ix_attachments_pinned ON attachments(pinned_storyline_id);
+
+-- The extracted words, kept apart from the metadata because they are two
+-- orders of magnitude larger and nothing but the chunker reads them.
+CREATE TABLE attachment_text (
+  source TEXT NOT NULL DEFAULT 'email',
+  source_message_id TEXT NOT NULL,
+  attachment_id TEXT NOT NULL,
+  -- `extracted_text` rather than the obvious `text`, and not fixable with an
+  -- `AS` alias the way `to_json` is: the migration-snapshot generator names
+  -- its columns from the SQL name and ignores the alias, so a column called
+  -- `text` produces a `text` getter that collides with the
+  -- `ColumnBuilder<String> text()` every drift table inherits, in a file
+  -- nothing in this repo edits by hand.
+  extracted_text TEXT NOT NULL,
+  chars INTEGER NOT NULL DEFAULT 0,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (source, source_message_id, attachment_id)
+) STRICT;
+
+-- One passage of a document, and the SOURCE OF TRUTH for its vector, for the
+-- reason `message_vectors` gives: the sqlite-vec index over these rows is
+-- derived and rebuildable without a single model call.
+--
+-- `id` is a surrogate because it is also the vec0 rowid, and a row's own
+-- rowid is not stable across a VACUUM. `locator` is what the passage is
+-- called out loud — 'Sheet Q3 rows 41-80', 'slide 4', 'part 2', 'digest'.
+--
+-- `indexed_at` NULL is the backfill worklist. Unlike `message_vectors`, a
+-- chunk row is written before it is embedded, so `embedding` is nullable and
+-- the backfill also skips rows that have no vector yet.
+CREATE TABLE attachment_chunks (
+  id INTEGER PRIMARY KEY,
+  source TEXT NOT NULL,
+  source_message_id TEXT NOT NULL,
+  attachment_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  locator TEXT NOT NULL DEFAULT '',
+  -- Renamed for `attachment_text.extracted_text`'s reason.
+  chunk_text TEXT NOT NULL,
+  chars INTEGER NOT NULL DEFAULT 0,
+  embedding BLOB,
+  dims INTEGER NOT NULL DEFAULT 0,
+  embed_model TEXT,
+  embedded_at TEXT,
+  indexed_at TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX ix_attachment_chunks_seq
+  ON attachment_chunks(source, source_message_id, attachment_id, seq);
+CREATE INDEX ix_attachment_chunks_unindexed ON attachment_chunks(indexed_at);

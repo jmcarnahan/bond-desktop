@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
 import 'activity_log.dart';
+import 'attachments/attachment_policy.dart';
 import 'pipeline_progress.dart';
 
 /// Restore: the owner's hand outranking the gates.
@@ -91,6 +92,49 @@ class RestoreService {
     // absent on purpose — the extract handler chains it.
     for (final kind in const ['extract', 'needs_you', 'embed_message']) {
       await _store.requeueWork(kind, source, sourceMessageId);
+    }
+
+    // Attachment work is ENQUEUED rather than requeued, and that is the whole
+    // difference: the sync never queued a gated message's attachments in the
+    // first place — it recorded `gated` on the row instead — so there is no
+    // `done` work row here to revive. `enqueueWork` is `INSERT OR IGNORE`, so
+    // a message restored twice still queues each document once, and the
+    // handler re-reads a row recorded `skipped` because it short-circuits only
+    // on `done`.
+    //
+    // The policy is asked again here for the same reason both handlers ask it:
+    // a signature logo and a 40 MB video are refused before a fetch, and the
+    // gate this restore just lifted was only one of its seven answers.
+    final row = await _store.getMessageRow(source, sourceMessageId);
+    if (row != null) {
+      for (final attachment
+          in await _store.attachmentsForMessage(source, sourceMessageId)) {
+        final (eligible, why) = attachmentTextPolicy(row, attachment);
+        if (!eligible) {
+          await _store.recordAttachmentRefusal(
+            source,
+            sourceMessageId,
+            attachment['attachment_id'] as String? ?? '',
+            why ?? 'ineligible',
+          );
+          continue;
+        }
+        // The gate was the reason; with it lifted the row is pending again
+        // until the handler answers.
+        await _store.reopenGatedAttachment(
+          source,
+          sourceMessageId,
+          attachment['attachment_id'] as String? ?? '',
+        );
+        await _store.enqueueWork(
+          'attachment_text',
+          source,
+          attachmentEntityId(
+            sourceMessageId,
+            attachment['attachment_id'] as String? ?? '',
+          ),
+        );
+      }
     }
 
     await _log.record('restore', source: source, entityId: sourceMessageId);

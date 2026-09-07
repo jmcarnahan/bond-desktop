@@ -65,10 +65,12 @@ NeedsYouInput inputWith({
   List<Message> thread = const [],
   String? ownerName,
   String? ownerAddress,
+  List<String> attachmentDigests = const [],
 }) =>
     NeedsYouInput(
       message: message ?? mail(),
       thread: thread,
+      attachmentDigests: attachmentDigests,
       ownerName: ownerName,
       ownerAddress: ownerAddress,
       now: DateTime(2026, 8, 29),
@@ -358,6 +360,68 @@ void main() {
       final prompt = task.buildUserMessage(inputWith(thread: [sent()]));
 
       expect('<untrusted_data'.allMatches(prompt).length, 2);
+
+      // THREE with documents, and the third is deliberate: what a file says is
+      // the sender's text like any other, so it arrives fenced rather than as
+      // a line the app appears to be asserting. The count is bumped here
+      // rather than relaxed, so a fourth fence still has to be argued for.
+      final withDocuments = task.buildUserMessage(inputWith(
+        thread: [sent()],
+        attachmentDigests: const ['Lease.pdf: The rent rises in January.'],
+      ));
+
+      expect('<untrusted_data'.allMatches(withDocuments).length, 3);
+    });
+
+    test('the digest fence sits before the message being judged', () {
+      final prompt = task.buildUserMessage(inputWith(
+        thread: [sent()],
+        attachmentDigests: const [
+          'Lease.pdf: The rent rises in January. Asks: Sign and return by '
+              'Thursday',
+        ],
+      ));
+
+      expect(
+        prompt,
+        contains('What the documents attached to this message say:'),
+      );
+      expect(
+        prompt.indexOf('source="thread"'),
+        lessThan(prompt.indexOf('source="attachment_digests"')),
+      );
+      expect(
+        prompt.indexOf('source="attachment_digests"'),
+        lessThan(prompt.indexOf('Judge ONLY this message:')),
+      );
+    });
+
+    test('there is no digest fence when no document has been read', () {
+      expect(
+        task.buildUserMessage(inputWith()),
+        isNot(contains('attachment_digests')),
+      );
+    });
+
+    test('twenty documents cannot push the judged message out of view', () {
+      final prompt = task.buildUserMessage(inputWith(
+        attachmentDigests: [for (var i = 0; i < 20; i++) 'File $i: ${'x' * 80}'],
+      ));
+
+      final start = prompt.indexOf('source="attachment_digests"');
+      final end = prompt.indexOf('</untrusted_data>', start);
+      expect(end - start, lessThan(700));
+      expect(prompt, contains('Judge ONLY this message:'));
+    });
+
+    test('the system prompt is identical with and without digests', () {
+      final before = task.systemPrompt;
+      task.buildUserMessage(inputWith());
+      task.buildUserMessage(
+        inputWith(attachmentDigests: const ['Lease.pdf: It rises.']),
+      );
+
+      expect(identical(task.systemPrompt, before), isTrue);
     });
   });
 

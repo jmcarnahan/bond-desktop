@@ -213,6 +213,43 @@ void main() {
       expect(await store.getExtraction('teams', 't1'), isNotNull);
     });
 
+    test('a file-only chat message reaches the model as what was shared',
+        () async {
+      // The body is nothing but a marker, so the facts pulled from this
+      // message are the facts about the file — and only if the row's
+      // attachments are hydrated onto the message the prompt is built from.
+      await store.upsertMessage({
+        'source': 'teams',
+        'source_message_id': 't1',
+        'conversation_key': 'chat-1',
+        'direction': 'inbound',
+        'from_name': 'Dana',
+        'from_address': 'teams:u-1',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': '[[att:a1]]',
+        'has_attachments': 1,
+        'triage_status': 'skipped',
+        'gate_reason': 'teams_source',
+      });
+      await store.upsertAttachments('teams', 't1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Contract-v2.docx',
+          'size': 0,
+        },
+      ]);
+      final llm = FakeLlm([answer()]);
+
+      await ExtractHandler(store, llm, FakeEmbeddings().client).run(
+        {'task_kind': 'extract', 'source': 'teams', 'entity_id': 't1'},
+      );
+
+      expect(llm.userMessages.single, contains('Shared a file: Contract-v2.docx'));
+      expect(llm.userMessages.single, isNot(contains('[[att:')));
+    });
+
     test('stores the model answer as JSON', () async {
       await seedMessage();
       final llm = FakeLlm([answer()]);

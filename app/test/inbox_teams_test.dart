@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 // `show`: drift generates row classes named Message/Conversation from the
 // tables, and this file means the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
@@ -14,6 +16,11 @@ import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
+import 'package:bond_inbox/services/attachments/attachment_bytes.dart';
+import 'package:bond_inbox/services/attachments/xlsx_reader.dart';
+import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
+import 'package:bond_inbox/widgets/preview/preview_engines.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -21,6 +28,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'fixtures/fake_attachment_bytes.dart';
+import 'fixtures/fake_pdf_renderer.dart';
 import 'fixtures/test_db.dart';
 
 /// The whole screen, with sqlite real and every socket faked.
@@ -123,6 +132,8 @@ void main() {
     String key, {
     String subject = 'Sarah Whitfield',
     String body = 'Any word on the CD?',
+    /// A file shared into the chat, for the tests about what a preview offers.
+    bool withFile = false,
   }) async {
     await store.upsertMessage({
       'source': 'teams',
@@ -136,7 +147,21 @@ void main() {
       'body_preview': 'Any word on the CD?',
       'triage_status': 'skipped',
       'gate_reason': teamsSourceGate,
+      if (withFile) 'has_attachments': 1,
     });
+    if (withFile) {
+      await store.upsertAttachments('teams', '$key-m1', [
+        {
+          'attachment_id': 'f1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Plan.pdf',
+          'content_type': 'application/pdf',
+          'size': 240 * 1024,
+          'source_url': 'https://contoso.example/plan',
+        },
+      ]);
+    }
     await store.upsertConversation({
       'source': 'teams',
       'conversation_key': key,
@@ -183,6 +208,9 @@ void main() {
   Future<void> pumpScreen(
     WidgetTester tester, {
     String grantedScopes = _withChat,
+    // Null in every test that has no file on screen: building the real pair
+    // would load pdfium, which `flutter test` cannot.
+    AttachmentBytes? attachmentBytes,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1400, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -223,7 +251,14 @@ void main() {
         syncServiceProvider.overrideWithValue(sync),
         teamsSyncProvider.overrideWithValue(teams),
       ],
-      child: const MaterialApp(home: InboxScreen()),
+      child: MaterialApp(
+        home: InboxScreen(
+          attachmentBytes: attachmentBytes,
+          previewEngines: attachmentBytes == null
+              ? null
+              : PreviewEngines(pdf: FakePdfRenderer(), workbook: _decoder),
+        ),
+      ),
     ));
     // The launch refresh is a microtask; two pumps settle it and the loads
     // behind it without advancing the poll timer. A third for the reads
@@ -342,6 +377,45 @@ void main() {
       // does — only the channel's style rules differ, and those ride in the
       // user message — so the button is reachable on either kind of thread.
       expect(find.text('Draft reply'), findsOneWidget);
+    });
+
+    testWidgets('without Chat.ReadWrite a file offers no Use in reply',
+        (tester) async {
+      // The preview would happily write a draft, and this pane has no box to
+      // show it in: the offer would spend a fast-slot call on words nobody
+      // ever sees.
+      await seedChat('chat-1', withFile: true);
+      await pumpScreen(tester, attachmentBytes: FakeAttachmentBytes());
+
+      await openChat(tester);
+      await tester.tap(find.byType(AttachmentChip));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
+      expect(
+        find.byKey(AttachmentPreviewPanel.useInReplyKey),
+        findsNothing,
+      );
+    });
+
+    testWidgets('with it the file offers Use in reply', (tester) async {
+      await seedChat('chat-1', withFile: true);
+      await pumpScreen(
+        tester,
+        grantedScopes: _withChatWrite,
+        attachmentBytes: FakeAttachmentBytes(),
+      );
+
+      await openChat(tester);
+      await tester.tap(find.byType(AttachmentChip));
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.byKey(AttachmentPreviewPanel.useInReplyKey),
+        findsOneWidget,
+      );
     });
 
     testWidgets('and its stored options reach the transcript as cards',
@@ -649,3 +723,8 @@ void main() {
     });
   });
 }
+
+/// A workbook nothing in this file opens — the screen needs a decoder, and no
+/// chat here carries a spreadsheet.
+Future<WorkbookTables> _decoder(Uint8List bytes) async =>
+    throw UnimplementedError();

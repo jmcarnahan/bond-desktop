@@ -28,6 +28,21 @@ is independent verification. `reply_expected` and `deadline` are judged last,
 after the summary is written. The doc comment above the prompt records why it
 is shaped this way — read it before editing the prompt.
 
+**The Attachments line.** When the message carries non-inline attachments,
+the user message gains one line after the directness line and OUTSIDE every
+fence: `Attachments: ` followed by the names and sizes. Names and sizes only —
+no contents, no download, zero added latency. The sentence is the app's own
+statement, like the directness line, so it sits outside; the FILE NAMES are as
+attacker-controlled as a body, so they ride inside an `attachment_names`
+fence on the same logical line. At most five names, clamped to 120 characters,
+and a size of 0 (unknown, which is every chat attachment) is left unsaid
+rather than printed as `(0 B)`.
+
+The line is present when it can be. `_triageClaimed` calls `ensureBody` inside
+the claim, and that is `_fetchDetailInto`, so a mail attachment is on the row
+by the time the prompt is built; chat rows are written at ingest. A failed
+detail fetch costs the line and never the triage.
+
 **Failure behavior.** The queue's header comment in `triage_queue.dart`
 documents the degrade-vs-park policy and the concurrency economics. An
 unreachable fast server parks the queue; the backlog resumes when the server

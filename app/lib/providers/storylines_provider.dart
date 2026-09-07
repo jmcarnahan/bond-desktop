@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../services/ai_worker.dart';
@@ -251,6 +252,33 @@ final storylinesProvider =
 final storylineMembersProvider =
     FutureProvider.autoDispose.family<List<StorylineMember>, String>(
   (ref, id) => ref.watch(messageStoreProvider).membersOf(id),
+);
+
+/// Every document this storyline can show: the files on its member threads,
+/// plus the ones somebody pinned to it from elsewhere — pinned first, then
+/// newest message first.
+///
+/// The shelf is not a pin list. A storyline is several conversations about one
+/// thing, and the file a person is looking for is nearly always simply ON one
+/// of those conversations; pinning is how they float the one that matters most
+/// to the top and how they keep a file whose thread later leaves. Inline
+/// images are excluded by the store — a signature graphic is not a document.
+///
+/// A provider for the same reason [storylineMembersProvider] is one: the shelf
+/// is a store read and a widget build cannot await. The rows arrive with the
+/// covering message's `conversation_key` joined on, which is what lets a
+/// document opened from the shelf still say which thread it came off.
+///
+/// Invalidated by hand after every pin and unpin the screen performs — the
+/// order depends on that column, so a write that did not drop this would leave
+/// the shelf in the order it had before.
+final storylineDocumentsProvider =
+    FutureProvider.autoDispose.family<List<AttachmentRef>, String>(
+  (ref, id) async => [
+    for (final row
+        in await ref.watch(messageStoreProvider).attachmentsForStoryline(id))
+      AttachmentRef.fromRow(row),
+  ],
 );
 
 /// The threads the user blocked from one storyline, as

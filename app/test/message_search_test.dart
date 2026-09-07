@@ -53,6 +53,9 @@ class FakeEmbedServer {
             // still rank above the unrelated one.
             _ when lower.contains('parking') => axes({0: 0.9, 2: 0.4359}),
             _ when lower.contains('launch') => axes({0: 0.5, 1: 0.866}),
+            // The word that only ever appears inside a document, so a hit on
+            // it is a hit on an attachment and on nothing else.
+            _ when lower.contains('escalator') => axes({4: 1.0}),
             _ => axes({3: 1.0}),
           };
           return http.Response(
@@ -434,6 +437,162 @@ void main() {
           await MessageSearch(store, server.client).search('the invoice');
 
       expect(idsOf(result), ['inv', 'park', 'launch']);
+    });
+
+    group('the documents beside the messages', () {
+      /// One attached document with one passage, embedded on [text]'s own
+      /// axis through the same fake server the messages went through.
+      Future<void> attach(
+        String messageId,
+        String attachmentId, {
+        required String name,
+        required String text,
+      }) async {
+        await store.upsertAttachments('email', messageId, [
+          {
+            'attachment_id': attachmentId,
+            'ordinal': 0,
+            'kind': 'file',
+            'name': name,
+            'content_type': 'application/pdf',
+            'size': 240 * 1024,
+          },
+        ]);
+        final ids = await store.replaceChunks('email', messageId, attachmentId, [
+          (seq: 0, locator: 'part 1', text: text),
+        ]);
+        final result = await server.client.embedResult(
+          text,
+          prefix: EmbeddingsClient.documentPrefix,
+        );
+        await store.setChunkEmbedding(
+          ids.single,
+          embedding: encodeEmbedding(result.vector!),
+          dims: result.vector!.length,
+          embedModel: EmbeddingsClient.documentModelTag,
+        );
+      }
+
+      test('a phrase inside a spreadsheet finds the file', () async {
+        if (!available) return;
+        await seedCorpus();
+        await attach(
+          'inv',
+          'a1',
+          name: 'Rent Roll.xlsx',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        final result = await MessageSearch(store, server.client)
+            .search('the escalator clause');
+
+        // The word appears in no message, so the message hits are whatever
+        // the corpus ranks — the document is the answer, and it arrives on its
+        // own list because it is not a message and cannot be drawn as one.
+        final documents = (result as MessageSearchHits).documents;
+        expect(documents, hasLength(1));
+        expect(documents.single.name, 'Rent Roll.xlsx');
+        expect(documents.single.locator, 'part 1');
+        expect(documents.single.text, contains('escalator'));
+        expect(documents.single.distance, closeTo(0, 0.001));
+        expect(documents.single.ref.messageId, 'inv');
+        expect(documents.single.senderName, 'Sarah');
+        expect(documents.single.outbound, isFalse);
+      });
+
+      test('a digest passage is never a search hit', () async {
+        if (!available) return;
+        await seedCorpus();
+        await store.upsertAttachments('email', 'inv', [
+          {
+            'attachment_id': 'a1',
+            'ordinal': 0,
+            'kind': 'file',
+            'name': 'Rent Roll.xlsx',
+            'content_type': 'application/pdf',
+            'size': 240 * 1024,
+          },
+        ]);
+        // The digest sits ON the query's own words, so it is the nearest
+        // passage this document has; the document's own words are further off.
+        const digest = 'the escalator clause';
+        const passage = 'Line 14: escalator of three percent each year.';
+        final ids = await store.replaceChunks('email', 'inv', 'a1', const [
+          (seq: 0, locator: 'part 1', text: passage),
+          (seq: 1, locator: 'digest', text: digest),
+        ]);
+        for (final (index, text) in [passage, digest].indexed) {
+          final result = await server.client.embedResult(
+            text,
+            prefix: EmbeddingsClient.documentPrefix,
+          );
+          await store.setChunkEmbedding(
+            ids[index],
+            embedding: encodeEmbedding(result.vector!),
+            dims: result.vector!.length,
+            embedModel: EmbeddingsClient.documentModelTag,
+          );
+        }
+
+        final result = await MessageSearch(store, server.client)
+            .search('the escalator clause');
+
+        // A search result promises the document's OWN words. A digest is a
+        // model's summary of them, and showing one would put sentences nobody
+        // wrote under a file name.
+        final documents = (result as MessageSearchHits).documents;
+        expect(documents.single.locator, 'part 1');
+        expect(documents.single.text, passage);
+      });
+
+      test('the message hits are unchanged by the documents beside them',
+          () async {
+        if (!available) return;
+        await seedCorpus();
+        await attach(
+          'inv',
+          'a1',
+          name: 'Rent Roll.xlsx',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        final result =
+            await MessageSearch(store, server.client).search('the invoice');
+
+        expect(idsOf(result), ['inv', 'park', 'launch']);
+      });
+
+      test('a mailbox with no chunks still answers with an empty documents '
+          'list', () async {
+        if (!available) return;
+        await seedCorpus();
+
+        final result =
+            await MessageSearch(store, server.client).search('the invoice');
+
+        // Empty and never null: a search that ran is an answer about the whole
+        // mailbox, documents included.
+        expect((result as MessageSearchHits).documents, isEmpty);
+      });
+
+      test('the archive search is untouched by any of it', () async {
+        if (!available) return;
+        await seedCorpus();
+        await attach(
+          'inv',
+          'a1',
+          name: 'Rent Roll.xlsx',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        // The archive answers with feed ROWS — a shape that has no place to
+        // put a passage — and its selling point is "I know I got that email".
+        final archive = await MessageSearch(store, server.client)
+            .searchArchive('the escalator clause');
+
+        expect(archive.rows, isNotEmpty);
+        expect(archive.notice, isNull);
+      });
     });
   });
 }

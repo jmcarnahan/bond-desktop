@@ -6,9 +6,11 @@ import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/conversation_vec_index.dart';
 import '../data/message_store.dart';
+import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import 'activity_log.dart';
+import 'attachments/attachment_markers.dart';
 import 'conversation_state.dart';
 import 'extract_handler.dart';
 import 'llm/embeddings_client.dart';
@@ -599,6 +601,17 @@ class StorylineService {
     final through = storyline.recapThrough;
     if (through != null && through.compareTo(newestSeen) >= 0) return;
 
+    // What the documents in this window say, one query per source rather than
+    // a join onto the window read: the window query is already a UNION across
+    // every member thread, and hanging a second LEFT JOIN off it would make
+    // the common case — a storyline with no attachments anywhere — pay for the
+    // rare one.
+    final digests = await _digestsForWindow(rows);
+    // The pinned documents whose messages are NOT in the window, as a footer.
+    // A document somebody pinned is a document they said matters past the
+    // moment it arrived, and the window ages out in a fortnight.
+    final pinnedLines = await _pinnedRecapLines(storylineId, rows);
+
     final result = await runTask(
       _client,
       const StorylineRecapTask(),
@@ -609,7 +622,14 @@ class StorylineService {
         // Reversed into chronological order: the model is being asked where
         // things stand at the END of the sequence, and a sequence read
         // backwards ends at the oldest message.
-        messageLines: [for (final row in rows.reversed) _recapLine(row)],
+        messageLines: [
+          for (final row in rows.reversed)
+            _recapLine(
+              row,
+              digests[_windowKey(row)] ?? const [],
+            ),
+          ...pinnedLines,
+        ],
       ),
       // Zero, like every other storyline call: the same window recapped twice
       // must read the same, or a re-run after a park would rewrite the block
@@ -666,7 +686,10 @@ class StorylineService {
   /// tail renders them. It is the cheapest way to answer the question the
   /// recap most has to get right: a thread whose last word is the reader's is
   /// a thread nobody is waiting on them for.
-  static String _recapLine(Map<String, Object?> row) {
+  static String _recapLine(
+    Map<String, Object?> row,
+    List<Map<String, Object?>> digests,
+  ) {
     final subject = stripReFw(row['subject'] as String?);
     final sender = row['direction'] == 'outbound'
         ? 'You'
@@ -675,10 +698,115 @@ class StorylineService {
     final body = (preview != null && preview.isNotEmpty)
         ? preview
         : (row['body_text'] as String? ?? '');
-    final text = body.trim();
+    // Markers out, for [buildMessageBlock]'s reason: a recap window is quoted
+    // text, and a `[[att:…]]` in it is a token nobody typed.
+    final text = stripAttachmentMarkers(body);
     return '${subject.isEmpty ? '' : '[$subject] '}$sender: '
-        '${text.length > _recapLineCap ? text.substring(0, _recapLineCap) : text}';
+        '${text.length > _recapLineCap ? text.substring(0, _recapLineCap) : text}'
+        '${_attachmentSuffix(digests)}';
   }
+
+  /// What the documents on ONE message say, appended to its line.
+  ///
+  /// The FACTS and not the summary, because a recap's job is to carry the
+  /// figures and dates a person would otherwise reopen the file for — "the
+  /// quote came in" is already what the message line says, and "at 48,200,
+  /// valid 30 days" is what it cannot say.
+  ///
+  /// A document with no facts contributes nothing rather than an empty
+  /// bracket: the message line already announces that a file arrived.
+  ///
+  /// The angle brackets are the app's own punctuation and the text inside them
+  /// is the model's, which is why the cap clamps the INNER text — a suffix cut
+  /// at [_recapAttachmentCap] with its closing ⟩ lopped off would read as an
+  /// unterminated aside for the rest of the window.
+  static String _attachmentSuffix(List<Map<String, Object?>> digests) {
+    final buffer = StringBuffer();
+    for (final row in digests) {
+      final digest = decodeAttachmentDigest(row['digest_json'] as String?);
+      if (digest == null || digest.facts.isEmpty) continue;
+      final name = (row['name'] as String?)?.trim() ?? '';
+      buffer.write(
+        ' ⟨${_clampInner('attached ${name.isEmpty ? 'a file' : name}: '
+            '${digest.facts.join('; ')}')}⟩',
+      );
+    }
+    return buffer.toString();
+  }
+
+  /// The documents pinned to this storyline whose messages the window does not
+  /// already carry.
+  ///
+  /// A footer rather than an interleaved line, and after every message line:
+  /// the window is chronological and a pin has no place in that order — it is
+  /// the reader saying "and this file, whenever it arrived". The summary and
+  /// not the facts here, because a pinned document is usually being named for
+  /// what it IS rather than for a figure in it.
+  ///
+  /// A pin whose message IS in the window is skipped: its own line already
+  /// carries the facts, and saying it twice is how a recap starts reading as
+  /// though two things happened.
+  Future<List<String>> _pinnedRecapLines(
+    String storylineId,
+    List<Map<String, Object?>> window,
+  ) async {
+    final inWindow = {for (final row in window) _windowKey(row)};
+    final lines = <String>[];
+    for (final row in await _store.pinnedAttachmentsForStoryline(storylineId)) {
+      if (inWindow.contains(_windowKey(row))) continue;
+      final name = (row['name'] as String?)?.trim() ?? '';
+      final summary =
+          decodeAttachmentDigest(row['digest_json'] as String?)?.summary ?? '';
+      final label = 'pinned ${name.isEmpty ? 'a file' : name}'
+          '${summary.isEmpty ? '' : ': $summary'}';
+      lines.add('⟨${_clampInner(label)}⟩');
+    }
+    return lines;
+  }
+
+  /// The digested attachments of every message in the window, keyed
+  /// `source|source_message_id`.
+  ///
+  /// One query per distinct source, which in practice is one or two. Never
+  /// filtered by direction: the window carries the owner's own messages on
+  /// purpose (they are what says nobody is waiting), and the quote the owner
+  /// sent is exactly as much of the story as the one they received.
+  Future<Map<String, List<Map<String, Object?>>>> _digestsForWindow(
+    List<Map<String, Object?>> rows,
+  ) async {
+    final bySource = <String, List<String>>{};
+    for (final row in rows) {
+      final source = row['source'] as String? ?? '';
+      final id = row['source_message_id'] as String? ?? '';
+      if (source.isEmpty || id.isEmpty) continue;
+      (bySource[source] ??= []).add(id);
+    }
+    final digests = <String, List<Map<String, Object?>>>{};
+    for (final entry in bySource.entries) {
+      final found = await _store.digestsForMessages(entry.key, entry.value);
+      found.forEach((id, attachments) {
+        digests['${entry.key}|$id'] = attachments;
+      });
+    }
+    return digests;
+  }
+
+  /// How a window row and a pinned row name the same message. `source` alone
+  /// is not an identity — a mail id and a chat id are the same alphabet.
+  static String _windowKey(Map<String, Object?> row) =>
+      '${row['source']}|${row['source_message_id']}';
+
+  /// One attachment aside, clamped. See [_attachmentSuffix] for why the clamp
+  /// is inside the brackets rather than around them.
+  static String _clampInner(String text) => text.length > _recapAttachmentCap
+      ? text.substring(0, _recapAttachmentCap)
+      : text;
+
+  /// How much of one document reaches a recap line. Short on purpose: a dozen
+  /// message lines with a document apiece still has to fit under
+  /// [StorylineRecapTask]'s window cap alongside the messages themselves, and
+  /// the aside is a pointer to the file rather than a substitute for it.
+  static const int _recapAttachmentCap = 160;
 
   /// How much of one message reaches the recap. A dozen of these has to fit
   /// under [StorylineRecapTask]'s window cap with the thread names and the
