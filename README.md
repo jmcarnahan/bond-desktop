@@ -204,11 +204,13 @@ Outlook Drafts, or copies to the clipboard.
 
 Triage's cheap gates (the user's own address, no-reply senders, list and
 auto-generated headers) skip what is not worth a model call; the rest go through
-one at a time, newest first. First run syncs 14 days of mail and queues the
-newest 7 days for triage, capped at 150 messages. On the fast server that
-backlog annotates itself in a few minutes, in the background, with a
-`Triaging N remaining…` counter in the rail. It survives a restart: work in
-flight is re-queued at the next launch.
+one at a time, newest first. A sync reaches back as far as the lookback set in
+Settings → Sync & data — 14 days by default, separately for mail and Teams —
+and the whole window is what the models read: the backlog queues 150 messages
+per pass, so a deep window drains over successive passes rather than being cut
+to its newest 150. On the fast server that backlog annotates itself in a few
+minutes, in the background, with a `Triaging N remaining…` counter in the rail.
+It survives a restart: work in flight is re-queued at the next launch.
 
 ### Microsoft backends
 
