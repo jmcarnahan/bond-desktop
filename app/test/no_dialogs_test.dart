@@ -23,7 +23,12 @@ void main() {
     for (final entity in lib.listSync(recursive: true)) {
       if (entity is! File || !entity.path.endsWith('.dart')) continue;
       final source = entity.readAsStringSync();
-      if (source.contains('showDialog(') || source.contains('AlertDialog(')) {
+      // showDatePicker is on the list for the same reason: the lookback's
+      // custom date in Settings is an inline text field on purpose, and the
+      // Material date picker is a dialog like any other.
+      if (source.contains('showDialog(') ||
+          source.contains('AlertDialog(') ||
+          source.contains('showDatePicker(')) {
         offenders.add(entity.path);
       }
     }

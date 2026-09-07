@@ -122,6 +122,14 @@ Collapse; Back and Home are the screen's, which reaches it through a `GlobalKey`
 on the section — the state is the only thing that knows whether the field is
 showing and what is in it.
 
+**The custom lookback date keeps the same contract**, through
+`LookbackFieldState.commitPending` and a `GlobalKey` per side. Enter, focus
+leaving the field, and the same three clicks — Back, Home, collapsing **Sync &
+data** — with one difference from the URL above it: **a date that does not parse
+commits nothing.** A half-typed URL is still a server somebody could mean, but
+`2026-08` is a year and a month with nothing to sync between them, so the field
+keeps its `errorText` and the stored window is left exactly as it was.
+
 ## About me
 
 Read by exactly two steps of the pipeline: the reply decision
@@ -252,6 +260,45 @@ server button and nothing else.
 leak a connection pool per press, and this is a button a user can hammer.
 
 ## Sync & data
+
+**How far back to sync** sits at the top of the body, above the stamps, because
+it is the question they raise: somebody reading when the last pull ran is asking
+how much of their mail is in here. One `LookbackField`
+(`app/lib/widgets/settings_lookback_field.dart`) per connector — `Mail` and
+`Teams`, keyed `settings-mail-lookback` and `settings-teams-lookback` — each a
+dropdown of day presets (**7 / 14 / 30 / 60 / 90**) plus **Custom…**, which
+reveals an inline `YYYY-MM-DD` field prefilled with the day the current window
+reaches. **Not a `showDatePicker`**: that is a dialog, and `no_dialogs_test.dart`
+now fails on it too.
+
+Under the control, in every mode, is the line the setting exists for:
+`Last 14 days · since Aug 22, 2026`. A day count is a span; the thing a person
+asking for "three months" actually wants to know is which morning the mailbox
+starts on. Both halves come from the same arithmetic the sync uses — UTC
+midnight minus the count — so the day named here is the day the window reaches.
+
+A preset commits the instant it is picked. The custom date commits on Enter, on
+focus leaving the field, and on Back / Home / collapsing the section (see **What
+commits, and when**). A date that does not parse, one today or later, or one
+further back than a year commits nothing and shows `Use YYYY-MM-DD, a past date
+within the last year` — refused rather than clamped, because silently syncing a
+different span than the one on screen is worse than saying no. A stored value
+outside the presets — 45 days, say — opens on **Custom…**; it is never handed to
+the dropdown as a value of its own, which would be an assertion failure rather
+than a blank row.
+
+Nothing syncs on the strength of the change: the next sync — the sixty-second
+poll at the latest — applies it. **Widening re-drains history** on that pass
+through the bootstrap markers; **narrowing changes nothing retroactively**, since
+the lookback is how much history to reach for and never a licence to delete.
+A deep window (90+ days) therefore means a long first drain and more AI work
+behind it, paced by the backlog caps rather than truncated by them — see
+[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md).
+
+**The collapsed summary deliberately says nothing about it.** That line answers
+"is what I am looking at current?", which is a question about the stamps; adding
+a second clause about the window would make the summary two reports instead of
+one, and the table above is pinned verbatim by tests either way.
 
 The three stamps come from `syncStampsProvider`
 (`app/lib/providers/activity_provider.dart`), which `_settings()` **watches** —

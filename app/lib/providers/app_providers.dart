@@ -356,6 +356,10 @@ final syncServiceProvider = Provider<MailSync>(
     userAddress: () => ref.read(authSessionProvider).storedAccount.then(
           (account) => account?.mail ?? account?.userPrincipalName,
         ),
+    // `ref.read` inside the closure, never `watch`: watching would rebuild
+    // this provider — and abort the drain running on it — the moment someone
+    // moved the setting, the same hazard [llmClientProvider] documents below.
+    lookbackDays: () => ref.read(appPrefsProvider).mailLookbackDays,
   ),
 );
 
@@ -384,6 +388,10 @@ final teamsSyncProvider = Provider<TeamsSync>((ref) {
     canSync: () => auth.hasScope('chat.read'),
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
+    // `ref.read` inside the closure, never `watch`: watching would rebuild this
+    // provider — and abort a refresh running on it — the moment someone moved
+    // the setting. The same rule [syncServiceProvider] follows above.
+    lookbackDays: () => ref.read(appPrefsProvider).teamsLookbackDays,
   );
 });
 

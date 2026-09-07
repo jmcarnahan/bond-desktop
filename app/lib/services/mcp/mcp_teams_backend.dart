@@ -134,9 +134,11 @@ class McpTeamsBackend implements TeamsBackend {
   /// The rules are [GraphTeams]'s, held to line for line because they are what
   /// make the sync correct rather than merely working:
   ///
-  /// - a null or empty [sinceIso] takes exactly ONE page and sends no cursor. A
-  ///   chat the app has never seen starts from its newest messages; reaching
-  ///   further back would spend requests on history the user has already read.
+  /// - a null or empty [sinceIso] takes exactly ONE page and sends no cursor —
+  ///   the degenerate case, for a caller with no window to name. It is not what
+  ///   a chat the app has never seen gets: [TeamsSync] hands that one its sync
+  ///   floor, so a first fetch reaches as far back as the lookback setting
+  ///   promises rather than stopping at the newest page.
   /// - with a cursor the walk runs until the filtered set is exhausted, because
   ///   the caller advances its own cursor to the newest message returned — a
   ///   page cap that stopped early would advance it over messages never

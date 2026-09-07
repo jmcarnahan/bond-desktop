@@ -37,6 +37,14 @@ String? relativeTime(String? iso, DateTime now) {
   return '${elapsed.inDays}d ago';
 }
 
+/// The calendar day a lookback window reaches, as `Aug 22, 2026`.
+///
+/// Formatted from the components exactly as given, with deliberately no
+/// `toLocal()`: the caller passes a UTC-midnight day it computed itself, and a
+/// zone conversion would render it as the previous local day for anyone west
+/// of Greenwich — which would name a day the sync does not actually reach.
+String absoluteDay(DateTime day) => DateFormat('MMM d, yyyy').format(day);
+
 /// The local calendar day an ISO timestamp falls on, as `yyyy-mm-dd`. Null
 /// when it does not parse, which reads as "no day" upstream — a transcript
 /// drops the divider, a digest drops the group.

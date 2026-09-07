@@ -12,6 +12,7 @@ import 'inline_alert.dart';
 import 'needs_you_rules_editor.dart';
 import 'pane_surface.dart';
 import 'settings_connection_section.dart';
+import 'settings_lookback_field.dart';
 import 'settings_models_body.dart';
 import 'settings_section.dart';
 import 'time_format.dart' show relativeTime;
@@ -186,6 +187,23 @@ class SettingsScreen extends StatefulWidget {
   /// was the one thing on this section a user could not tell had worked.
   final Future<void> Function()? onRefreshNow;
 
+  /// How far back each connector's next sync reaches, in days. Two of them
+  /// because the two mailboxes are different sizes — a quarter of email is a
+  /// reasonable ask where a quarter of chat is rarely the same one.
+  final int mailLookbackDays;
+  final int teamsLookbackDays;
+
+  /// Fired by a preset pick, and by a custom date that parsed. Null hides that
+  /// one control and leaves the section otherwise whole — the Sync & data
+  /// section's premise is [onRefreshNow], not this.
+  ///
+  /// What the user reads back is the resolved line under the control, which
+  /// names the calendar day the window reaches rather than repeating the
+  /// number they just chose. Nothing syncs on the strength of the change: the
+  /// next sync is what applies it, and a wider window re-drains history then.
+  final void Function(int days)? onMailLookbackChanged;
+  final void Function(int days)? onTeamsLookbackChanged;
+
   /// Signs out AND wipes this device's copy of the mailbox — the rail's Sign
   /// out, in other words, and deliberately not [onSignOutOfServer], which
   /// leaves one server's session and keeps the mail. Null hides the block.
@@ -258,6 +276,10 @@ class SettingsScreen extends StatefulWidget {
     this.lastSweepIso,
     this.now = DateTime.now,
     this.onRefreshNow,
+    this.mailLookbackDays = 14,
+    this.teamsLookbackDays = 14,
+    this.onMailLookbackChanged,
+    this.onTeamsLookbackChanged,
     this.attachmentCacheBytes,
     this.onClearAttachmentCache,
     this.onSignOutAndClear,
@@ -305,6 +327,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// field is showing and what is in it — see
   /// [MicrosoftConnectionSectionState].
   final GlobalKey<MicrosoftConnectionSectionState> _connectionKey = GlobalKey();
+
+  /// The same handle again, for the two lookback fields.
+  ///
+  /// Their custom date is the other text on this screen with no Save of its
+  /// own, so Back, Home and collapsing Sync & data have to commit it before
+  /// they take the field off the screen — and only the field knows whether it
+  /// is showing and what has been typed into it. See [LookbackFieldState].
+  final GlobalKey<LookbackFieldState> _mailLookbackKey = GlobalKey();
+  final GlobalKey<LookbackFieldState> _teamsLookbackKey = GlobalKey();
 
   /// Which sections are open, by title. Several may be; none is by default.
   /// Deliberately not persisted — see the [SettingsSection] doc.
@@ -418,17 +449,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final onHome = widget.onHome;
     return PaneSurface(
       title: 'Settings',
-      // Both ways out commit a half-typed server URL first: they are the two
-      // clicks that take the field off the screen, and [Focus] does not see
-      // them (see _commitPendingServerUrl).
+      // Both ways out commit a half-typed server URL and a typed lookback date
+      // first: they are the two clicks that take those fields off the screen,
+      // and [Focus] does not see them (see _commitPendingServerUrl).
       onBack: () {
         _commitPendingServerUrl();
+        _commitPendingLookbacks();
         widget.onBack();
       },
       onHome: onHome == null
           ? null
           : () {
               _commitPendingServerUrl();
+              _commitPendingLookbacks();
               onHome();
             },
       // A Column in a SingleChildScrollView, never a ListView: two sections
@@ -506,6 +539,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
   );
 
   void _toggle(String title) {
+    // Collapsing Sync & data takes a typed lookback date off the screen
+    // without ever moving focus — the third of the same three clicks the
+    // custom server URL handles, and the only one the screen owns for a
+    // section it builds itself.
+    if (title == 'Sync & data' && _open.contains(title)) {
+      _commitPendingLookbacks();
+    }
     setState(
       () => _open.contains(title) ? _open.remove(title) : _open.add(title),
     );
@@ -517,6 +557,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// clicks that leave this pane have to commit for themselves.
   void _commitPendingServerUrl() =>
       _connectionKey.currentState?.commitPendingServerUrl();
+
+  /// The same errand for the two lookback fields. Either may be absent — an
+  /// unwired side renders no field and the key holds no state — and a field
+  /// that is not on Custom… has nothing pending, which it decides for itself.
+  void _commitPendingLookbacks() {
+    _mailLookbackKey.currentState?.commitPending();
+    _teamsLookbackKey.currentState?.commitPending();
+  }
 
   /// Whether the connection section has enough wiring to exist —
   /// [MicrosoftConnectionSection.isWired] holds the rule.
@@ -652,9 +700,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// When each source last ran, one button to run them all now, and the one
   /// destructive action in the app that is not the rail's own.
   Widget _syncBody(DateTime now) {
+    final onMail = widget.onMailLookbackChanged;
+    final onTeams = widget.onTeamsLookbackChanged;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        // Above the stamps because it is the question they raise: a person
+        // reading when the last pull ran is asking how much of their mail is
+        // in here, and this is the answer to the second half of that.
+        if (onMail != null || onTeams != null) ...[
+          Text(
+            'How far back to sync',
+            style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: BondSpacing.s8),
+          if (onMail != null)
+            LookbackField(
+              key: _mailLookbackKey,
+              label: 'Mail',
+              days: widget.mailLookbackDays,
+              now: now,
+              onChanged: onMail,
+              fieldKey: 'settings-mail-lookback',
+            ),
+          if (onMail != null && onTeams != null)
+            const SizedBox(height: BondSpacing.s8),
+          if (onTeams != null)
+            LookbackField(
+              key: _teamsLookbackKey,
+              label: 'Teams',
+              days: widget.teamsLookbackDays,
+              now: now,
+              onChanged: onTeams,
+              fieldKey: 'settings-teams-lookback',
+            ),
+          const SizedBox(height: BondSpacing.s12),
+        ],
         _stampRow('Mail', widget.lastMailSyncIso, now),
         _stampRow('Teams', widget.lastTeamsSyncIso, now),
         _stampRow('Storyline sweep', widget.lastSweepIso, now),

@@ -68,10 +68,11 @@ String? gateFor(Message message, {required String? userAddress}) =>
 /// for anything, and a message older than the caller's window is history the
 /// model should not spend seventeen seconds on.
 ///
-/// [backlogCutoff] null means "no cap", which is what the chat ingest passes:
-/// its own sync floor already bounds how far back messages can arrive from.
-/// The mail cap exists because a mailbox can hand over a hundred thousand
-/// messages on a first sync; a chat list cannot.
+/// [backlogCutoff] is the pass's effective sync floor — BOTH ingests pass it,
+/// so the depth the models read is exactly the lookback the user chose. Null
+/// means "no cap", and the only callers that pass null are the send paths
+/// (the mail echo, the composer's chat post), where `outbound` has already
+/// decided the answer before the cutoff is consulted.
 (String, String?) triageStatusOnInsert({
   required bool outbound,
   String? receivedAt,

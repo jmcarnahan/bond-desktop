@@ -165,11 +165,14 @@ class GraphTeams implements TeamsBackend {
   ///   "what is new", so the cursor rides on `lastModifiedDateTime`.
   /// - the order can only be descending.
   ///
-  /// A null [sinceIso] sends no filter and takes exactly ONE page: a chat the
-  /// app has never seen starts from its newest fifty messages. Reaching
-  /// further back would spend a request per page on history the user has
-  /// already read in Teams, and the conversation state machine only needs
-  /// enough of a chat to know who spoke last.
+  /// A null [sinceIso] sends no filter and takes exactly ONE page: the newest
+  /// fifty messages and nothing behind them. That is now the DEGENERATE case,
+  /// not the first-sight contract — [TeamsSync] hands a chat it has never seen
+  /// the sync floor, because the lookback setting says how far back this app
+  /// looks and a first fetch that stopped at fifty messages would make that
+  /// promise false. What is left for the null path is a caller with no window
+  /// to name at all, which is answered with the cheapest useful thing rather
+  /// than with the whole chat.
   ///
   /// With a cursor the walk runs until the FILTERED set is exhausted. The
   /// server-side `gt` filter means every returned message is newer than the

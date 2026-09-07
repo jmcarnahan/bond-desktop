@@ -125,7 +125,7 @@ void main() {
   late GraphStub graph;
   late SyncService sync;
 
-  /// Inside both the sync floor and the triage window.
+  /// Inside the sync floor, and so inside the AI window with it.
   String fresh(Duration ago) =>
       DateTime.now().toUtc().subtract(ago).toIso8601String();
 
@@ -165,13 +165,13 @@ void main() {
                 conversationId: 'conv-2',
                 receivedDateTime: fresh(const Duration(days: 2)),
               ),
-              // Older than the triage window: skipped on insert, and outside
-              // the window the backlog enqueue reads.
+              // Older than the sync window: skipped on insert, and outside the
+              // window the backlog enqueue reads.
               graphMessage(
                 id: 'stale',
                 conversationId: 'conv-3',
                 receivedDateTime:
-                    fresh(const Duration(days: triageWindowDays + 1)),
+                    fresh(const Duration(days: syncFloorDays + 1)),
               ),
             ],
             deltaLink: deltaCursor('inbox', 'c1'),
@@ -231,7 +231,7 @@ void main() {
     expect(await store.workCounts('extract'), {'done': 1, 'pending': 1});
   });
 
-  test('a first run queues no more than the triage cap', () async {
+  test('the enqueue paces at the cap and finishes on the next pass', () async {
     final base = DateTime.now().toUtc().subtract(const Duration(days: 1));
     graph.queue('inbox', [
       () => jsonOk(deltaBody(
@@ -249,11 +249,62 @@ void main() {
 
     await sync.syncNow();
 
-    // The ten the triage cap demoted are the ten this skips too — extraction
-    // is not worth doing on mail the app already decided not to read.
-    expect((await queuedIds()).length, firstRunTriageCap);
+    // One pass files [backlogEnqueueCap] rows, newest first. The ten oldest
+    // are not dropped, they are next.
+    expect((await queuedIds()).length, backlogEnqueueCap);
     expect(await queuedIds(), isNot(contains('m000')));
     expect(await queuedIds(), contains('m159'));
+
+    // And the next sync files them, without a single new message arriving.
+    graph.queue('inbox', [
+      () => jsonOk(deltaBody(const [], deltaLink: deltaCursor('inbox', 'c2'))),
+    ]);
+    await sync.syncNow();
+
+    expect((await queuedIds()).length, 160);
+    expect(await queuedIds(), contains('m000'));
+  });
+
+  test('a deeper lookback carries the AI window with it', () async {
+    // Under the old fixed seven-day window this message arrived
+    // `skipped`/`backlog` and never met a model, however far back the sync
+    // itself reached. The lookback IS the AI window now.
+    final tokens = InMemoryTokenStore();
+    tokens.values['refresh_token'] = 'rt-initial';
+    tokens.values['granted_scopes'] = _grantedScopes;
+    final auth = GraphAuth(httpClient: graph.client, store: tokens);
+    final deep = SyncService(
+      GraphMail(auth, httpClient: graph.client),
+      store,
+      lookbackDays: () => 30,
+    );
+
+    graph.queue('inbox', [
+      () => jsonOk(deltaBody(
+            [
+              graphMessage(
+                id: 'old-but-inside',
+                conversationId: 'conv-deep',
+                receivedDateTime: fresh(const Duration(days: 20)),
+              )
+            ],
+            deltaLink: deltaCursor('inbox', 'c1'),
+          )),
+    ]);
+
+    await deep.syncNow();
+
+    final row = (await db
+            .customSelect(
+              'SELECT triage_status FROM messages WHERE source_message_id = ?',
+              variables: [Variable<String>('old-but-inside')],
+            )
+            .getSingle())
+        .data;
+    expect(row['triage_status'], 'pending');
+    expect(await queuedIds(), contains('old-but-inside'));
+    expect(
+        await queuedIds(kind: 'embed_message'), contains('old-but-inside'));
   });
 
   test('an empty mailbox queues nothing', () async {

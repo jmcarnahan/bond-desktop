@@ -50,6 +50,25 @@ const String aboutMeKey = 'about_me';
 /// `prefs_provider.dart` for everything that reads or writes the setting.
 const String needsYouRulesKey = 'needs_you_rules';
 
+/// The oldest floor a bootstrap ever deliberately drained this source back to,
+/// one key per connector, ISO-8601 UTC.
+///
+/// Monotone: it only ever moves OLDER. That is what makes a widened lookback
+/// detectable at all — a configured floor older than the marker is history
+/// nobody has fetched yet, and the sync answers by re-draining from it; a
+/// narrower one is a preference about how much to keep, and changes nothing
+/// that already happened.
+///
+/// Declared here beside [aboutMeKey] because [wipeAll] is what has to name
+/// them, and that is not incidental: a marker that survived a sign-out would
+/// make the next account's very first bootstrap look like a floor no older
+/// than one already drained, and its legitimate first drain would be read as
+/// "no widen needed" and suppressed. Written and read only by the sync
+/// services; `prefs_provider.dart` never learns them, because this is
+/// bookkeeping about a drain rather than anything a user chose.
+const String mailBootstrapFloorKey = 'mail_bootstrap_floor';
+const String teamsBootstrapFloorKey = 'teams_bootstrap_floor';
+
 /// When each background pass last completed, ISO-8601 UTC.
 ///
 /// They live in `app_prefs` rather than being derived from `activity_events`
@@ -1275,11 +1294,12 @@ RETURNING *
   /// Demotes every pending inbound message except the newest [cap] to
   /// `skipped` / `backlog`.
   ///
-  /// A first sync of a real mailbox lands thousands of messages at once.
-  /// Triaging all of them would burn hours of model time on mail the user
-  /// stopped caring about weeks ago, so only the freshest slice stays in the
-  /// queue. Nothing is deleted — a skipped message still renders, it just
-  /// never reaches the model.
+  /// No sync calls this any more: with the lookback configurable, the window
+  /// the user chose is the window the models read, and the enqueue paces the
+  /// model work instead of demoting mail out of reach of it. What keeps the
+  /// method is the exemption below, which is a rule about restored messages
+  /// rather than about first runs. Nothing is deleted either way — a skipped
+  /// message still renders, it just never reaches the model.
   ///
   /// A restored message is exempt: the stamp is the user's explicit ask for
   /// this one row, so it is never demoted back to backlog even when it sits
@@ -1732,6 +1752,15 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// work is not re-queued — so calling it after every sync both picks up new
   /// mail and self-heals a queue that a crash or an old build left short.
   ///
+  /// A message that already has a work row is excluded by the statement rather
+  /// than dropped by the insert, and that is what makes [cap] a pace: it means
+  /// "the next [cap] not-yet-queued messages, newest first", so a deep window
+  /// drains over successive passes. Counting queued rows against the LIMIT
+  /// instead — which is what this did — let the newest [cap] messages hold
+  /// every slot forever, and older mail inside the window was never queued at
+  /// all. `OR IGNORE` stays as the belt to that suspender: it is what makes a
+  /// concurrent second call harmless.
+  ///
   /// Messages that triage skipped (outbound, bulk senders, backlog) are
   /// deliberately absent: extraction costs the same model time triage does,
   /// and mail not worth classifying is not worth extracting facts from.
@@ -1819,6 +1848,9 @@ WHERE source = ? AND direction = 'inbound'
   AND triage_status IN (${_placeholders(triageStatuses.length)})
   ${gateReasons == null ? '' : 'AND gate_reason IN (${_placeholders(gateReasons.length)})'}
   AND received_at >= ?
+  AND NOT EXISTS (SELECT 1 FROM work_items w
+    WHERE w.task_kind = ? AND w.source = messages.source
+      AND w.entity_id = messages.source_message_id)
 ORDER BY received_at DESC
 LIMIT ?
 ''',
@@ -1830,6 +1862,7 @@ LIMIT ?
         ...triageStatuses,
         ...?gateReasons,
         sinceIso,
+        kind,
         cap,
       ]),
     );
@@ -2134,19 +2167,22 @@ RETURNING *
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` SURVIVES, with three exceptions. What this method isolates is
+  /// `app_prefs` SURVIVES, with five exceptions. What this method isolates is
   /// one person's presence: which backend the app talks through, which server
   /// it points at, and where the slider sits are the machine's configuration,
   /// not the previous account's data, and wiping them turned every account
   /// switch into a re-setup. The exceptions are [dbOwnerKey] — the identity
   /// claim on these rows, which must not outlive the rows it describes, or
-  /// the next sign-in would read the wiped mailbox as still owned — and the
-  /// two texts one person wrote about themselves and their inbox:
-  /// [aboutMeKey], which would otherwise be inherited by the next identity and
-  /// steer THEIR triage, and [needsYouRulesKey], which would decide what
-  /// interrupts them. Both callers depend on the first: sign-out leaves the
-  /// database unclaimed, and `IdentityGuard` writes the new owner immediately
-  /// after.
+  /// the next sign-in would read the wiped mailbox as still owned — the two
+  /// texts one person wrote about themselves and their inbox ([aboutMeKey],
+  /// which would otherwise be inherited by the next identity and steer THEIR
+  /// triage, and [needsYouRulesKey], which would decide what interrupts
+  /// them) — and the two bootstrap-floor markers, [mailBootstrapFloorKey] and
+  /// [teamsBootstrapFloorKey], which describe how far back THIS account's
+  /// mail was drained and would otherwise tell the next account's first
+  /// bootstrap that its window had already been covered. Both callers depend
+  /// on the first: sign-out leaves the database unclaimed, and `IdentityGuard`
+  /// writes the new owner immediately after.
   Future<void> wipeAll() async {
     const tables = [
       'messages',
@@ -2174,8 +2210,14 @@ RETURNING *
         await db.customUpdate('DELETE FROM $table');
       }
       await db.customUpdate(
-        'DELETE FROM app_prefs WHERE key IN (?, ?, ?)',
-        variables: _args([dbOwnerKey, aboutMeKey, needsYouRulesKey]),
+        'DELETE FROM app_prefs WHERE key IN (?, ?, ?, ?, ?)',
+        variables: _args([
+          dbOwnerKey,
+          aboutMeKey,
+          needsYouRulesKey,
+          mailBootstrapFloorKey,
+          teamsBootstrapFloorKey,
+        ]),
       );
     });
     // The vec0 index is derived from `message_vectors`, and the DELETE above
@@ -4759,6 +4801,10 @@ RETURNING id
   /// IGNORE` against the work table's primary key means finished work stays
   /// finished and in-flight work is not re-queued, so running it after every
   /// sync both picks up new mail and self-heals a queue a crash left short.
+  /// Already-queued messages are excluded by the statement too, for the reason
+  /// given there: it is what makes [cap] "the next [cap] not-yet-queued
+  /// messages, newest first" rather than a ceiling the newest [cap] rows hold
+  /// forever.
   ///
   /// The triage filter is fixed here rather than passed in, because unlike
   /// extraction there is no caller who wants it any other way. Gated mail is
@@ -4787,6 +4833,9 @@ FROM messages
 WHERE source = ? AND direction = 'inbound'
   AND triage_status IN ('pending', 'processing', 'triaged')
   AND received_at >= ?
+  AND NOT EXISTS (SELECT 1 FROM work_items w
+    WHERE w.task_kind = 'embed_message' AND w.source = messages.source
+      AND w.entity_id = messages.source_message_id)
 ORDER BY received_at DESC
 LIMIT ?
 ''',

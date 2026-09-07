@@ -57,10 +57,10 @@ http.Response jsonOk(Object body) => http.Response(
       headers: const {'content-type': 'application/json'},
     );
 
-/// Yesterday, so a defaulted message is always inside the triage window.
-/// An absolute date here rots: it sat still while `triageWindowDays` walked
-/// past it, and the backlog gate started skipping fixtures that were fresh
-/// the day they were written.
+/// Yesterday, so a defaulted message is always inside the sync window.
+/// An absolute date here rots: it sat still while the window walked past it,
+/// and the backlog gate started skipping fixtures that were fresh the day they
+/// were written.
 final String _freshReceivedAt = DateTime.now()
     .toUtc()
     .subtract(const Duration(days: 1))
@@ -256,6 +256,9 @@ void main() {
       expect(second.toString(), deltaCursor('inbox', 'c1'));
       expect(second.queryParameters[r'$filter'], isNull,
           reason: 'the cursor already carries the window it was born with');
+      // And nothing widened between the two passes: the first one recorded the
+      // floor it drained from, the second one asks for the same window, so no
+      // re-drain is owed and the cursor is what the pass uses.
       expect(await store.getDeltaLink('inbox', source: 'email'),
           deltaCursor('inbox', 'c2'));
       expect((await messageRows()).length, 2);
@@ -359,19 +362,28 @@ void main() {
             deltaLink: deltaCursor('inbox', 'fresh'))),
       ]);
 
+      /// UTC midnight, fourteen days back — the floor's shape since the
+      /// lookback became a setting the screen names a day for.
+      String midnightFloor() {
+        final t = DateTime.now().toUtc().subtract(const Duration(days: 14));
+        return DateTime.utc(t.year, t.month, t.day)
+            .toIso8601String()
+            .replaceFirst('.000Z', 'Z');
+      }
+
+      // Asked on both sides of the sync, and either accepted: the only way the
+      // two differ is a run that straddled midnight.
+      final before = midnightFloor();
       await sync.syncNow();
+      final after = midnightFloor();
 
       final inboxRequests = graph.requestsFor('inbox');
       expect(inboxRequests.length, 2);
 
       final filter = inboxRequests[1].queryParameters[r'$filter']!;
-      final floor = DateTime.parse(
-          filter.replaceFirst('receivedDateTime ge ', ''));
-      final expected =
-          DateTime.now().toUtc().subtract(const Duration(days: 14));
       expect(
-        floor.difference(expected).abs(),
-        lessThan(const Duration(minutes: 5)),
+        filter.replaceFirst('receivedDateTime ge ', ''),
+        anyOf(before, after),
         reason: 'an expired cursor loses an UNKNOWN stretch of changes, so '
             'the only safe restart is the full first-run floor — a shorter '
             'window silently drops whatever fell between the dead cursor and '
@@ -450,15 +462,14 @@ void main() {
       expect(jsonDecode(row['to_json'] as String), ['sarah@example.com']);
     });
 
-    test('mail older than the triage window arrives already skipped',
-        () async {
+    test('mail older than the sync window arrives already skipped', () async {
       final fresh = DateTime.now()
           .toUtc()
           .subtract(const Duration(days: 1))
           .toIso8601String();
       final stale = DateTime.now()
           .toUtc()
-          .subtract(const Duration(days: triageWindowDays + 1))
+          .subtract(const Duration(days: syncFloorDays + 1))
           .toIso8601String();
 
       graph.queue('inbox', [
@@ -479,8 +490,8 @@ void main() {
       expect((await messageRow('stale'))['gate_reason'], 'backlog');
     });
 
-    test('a first run caps the triage queue, demoting the oldest', () async {
-      // 160 messages, all inside the triage window, one minute apart.
+    test('a first run leaves the whole window queued', () async {
+      // 160 messages, all inside the sync window, one minute apart.
       final base = DateTime.now().toUtc().subtract(const Duration(days: 1));
       final messages = [
         for (var i = 0; i < 160; i++)
@@ -498,28 +509,14 @@ void main() {
 
       await sync.syncNow();
 
-      expect(await store.triageCounts(sources: const ['email']),
-          {'pending': firstRunTriageCap, 'skipped': 160 - firstRunTriageCap});
-
-      // The ten demoted are the ten oldest, not an arbitrary ten.
-      final demoted = (await db
-              .customSelect("SELECT source_message_id FROM messages "
-                  "WHERE triage_status = 'skipped' ORDER BY source_message_id")
-              .get())
-          .map((r) => r.data['source_message_id'] as String)
-          .toList();
-      expect(demoted, [for (var i = 0; i < 10; i++) 'm${i.toString().padLeft(3, '0')}']);
+      // The cap that used to demote the oldest ten here went with the
+      // configurable lookback: the enqueue paces the model work at
+      // [backlogEnqueueCap] rows a pass instead, and pacing is not truncation.
       expect(
-        (await db
-                .customSelect("SELECT DISTINCT gate_reason FROM messages "
-                    "WHERE triage_status = 'skipped'")
-                .getSingle())
-            .data['gate_reason'],
-        'backlog',
-      );
+          await store.triageCounts(sources: const ['email']), {'pending': 160});
     });
 
-    test('the cap runs only on a first run', () async {
+    test('and later syncs leave it queued', () async {
       graph.queue('inbox', [
         () => jsonOk(deltaBody([graphMessage(id: 'm1')],
             deltaLink: deltaCursor('inbox', 'c1'))),
@@ -527,7 +524,9 @@ void main() {
       await sync.syncNow();
       expect((await messageRow('m1'))['triage_status'], 'pending');
 
-      // A later sync must not demote what the first one queued.
+      // No pass — first, incremental, or otherwise — demotes what an earlier
+      // one queued. The pin outlived the cap it was written against, and it
+      // stays: any future path that skips pending mail must answer to it.
       graph.queue('inbox', [
         () => jsonOk(deltaBody([graphMessage(id: 'm2')],
             deltaLink: deltaCursor('inbox', 'c2'))),
