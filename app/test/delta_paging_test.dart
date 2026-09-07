@@ -283,6 +283,7 @@ void main() {
         'isRead',
         'isDraft',
         'bodyPreview',
+        'hasAttachments',
       ]);
       // bodyPreview is a snippet; the body itself is tier two and never
       // rides along on a page that can carry hundreds of messages.

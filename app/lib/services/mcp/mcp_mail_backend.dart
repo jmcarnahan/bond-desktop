@@ -60,7 +60,7 @@ class McpMailBackend implements MailBackend {
     String? link,
     String? minReceivedIso,
   }) async {
-    final result = await _call('list_mail_delta', {
+    final result = await _call('sync_mail', {
       'folder': folder,
       'cursor': link ?? '',
       'min_received': minReceivedIso ?? '',
@@ -92,8 +92,22 @@ class McpMailBackend implements MailBackend {
   /// empty header is not the same claim as an absent one.
   @override
   Future<Map<String, dynamic>> getMessageDetail(String id) async {
-    final result = await _call('get_mail_detail', {'message_id': id});
+    final result = await _call('read_email', {'message_id': id});
+
+    // `external_sender` is the one permanent refusal this tool can answer with
+    // as data: the sender policy hides this message, and only this message.
+    // It is thrown as a 403 rather than a new exception type because the seam
+    // is shared with the Graph SDK backend, whose detail fetch answers a real
+    // 403 for a message the token may not read, and `SyncService` already
+    // treats that status as "this one message is refused; the rest of the
+    // thread must not pay for it".
+    final error = result['error'];
+    if (error is String && error.isNotEmpty) {
+      throw GraphMailException('The server refused this message: $error', 403);
+    }
+
     final headers = result['headers'];
+    final attachments = result['attachments'];
     return {
       'uniqueBody': {'content': result['body_text']},
       'internetMessageHeaders': [
@@ -103,6 +117,15 @@ class McpMailBackend implements MailBackend {
               {'name': entry.key, 'value': entry.value},
       ],
       'hasAttachments': result['has_attachments'],
+      // The one key deliberately NOT rebuilt into Graph's shape. The server
+      // already flattens Graph's attachment entries into a snake_case summary,
+      // and the `attachments` columns are named after that summary — so the
+      // SDK backend converts INTO this shape rather than this one converting
+      // out of it, and the sync reads one shape from both.
+      'attachments': [
+        for (final entry in attachments is List ? attachments : const [])
+          if (entry is Map) Map<String, Object?>.from(entry),
+      ],
     };
   }
 
@@ -117,23 +140,146 @@ class McpMailBackend implements MailBackend {
   /// The time zone rides along as an argument rather than a `Prefer` header:
   /// the server owns the Graph call, and the zone it should render the quoted
   /// timestamps in is this machine's, not the server's.
+  ///
+  /// `conversationId` and `internetMessageId` are renamed off the wire for the
+  /// same reason `webLink` is: the callers read Graph's own key names, and a
+  /// snake_case key would simply be absent to them.
+  ///
+  /// The guard on the way out is the one [createDraft] has, and it is here for
+  /// the same reason: `manage_draft` answers a refusal — `external_sender`, an
+  /// argument it could not read — as an ordinary result dict rather than an
+  /// exception, and a reply draft carrying a null id is the same disaster as a
+  /// new one, since the caller is about to fill in a body and send it.
   @override
   Future<Map<String, dynamic>> createReplyDraft(String messageId) async {
-    final result = await _call('create_reply_draft_json', {
+    final result = await _call('manage_draft', {
+      'action': 'reply',
       'message_id': messageId,
       'timezone': DateTime.now().timeZoneName,
     });
-    return {'id': result['id'], 'webLink': result['web_link']};
+    final id = result['id'] as String?;
+    if (result['error'] != null || id == null || id.isEmpty) {
+      throw GraphMailException(
+        'Microsoft Graph did not create the reply draft: '
+        '${result['error'] ?? 'unknown'}',
+      );
+    }
+    return {
+      'id': id,
+      'webLink': result['web_link'],
+      'conversationId': result['conversation_id'],
+      'internetMessageId': result['internet_message_id'],
+    };
   }
 
+  /// Creates a new draft, and answers with the keys [createReplyDraft] does.
+  ///
+  /// The recipients travel as ONE comma-separated string per line, which is
+  /// this server's convention for every list-shaped argument it takes. The
+  /// reshape back to Graph's key names is the same one the reply draft gets,
+  /// and for the same reason: the callers read one spelling.
+  ///
+  /// A result carrying an `error`, or one with no `id` in it, is thrown rather
+  /// than returned. The caller is about to fill in a body and send it, and
+  /// there is nothing worse to hand it than a draft id that is null.
+  @override
+  Future<Map<String, dynamic>> createDraft({
+    required List<String> to,
+    List<String> cc = const [],
+    required String subject,
+    required String body,
+  }) async {
+    final result = await _call('manage_draft', {
+      'action': 'create',
+      'to': to.join(','),
+      'cc': cc.join(','),
+      'subject': subject,
+      // The published tool calls the body `text`; the seam goes on calling it
+      // `body`, because that is the word both backends' callers use.
+      'text': body,
+    });
+    final id = result['id'] as String?;
+    if (result['error'] != null || id == null || id.isEmpty) {
+      throw GraphMailException(
+        'Microsoft Graph did not create the draft: '
+        '${result['error'] ?? 'unknown'}',
+      );
+    }
+    return {
+      'id': id,
+      'webLink': result['web_link'],
+      'conversationId': result['conversation_id'],
+      'internetMessageId': result['internet_message_id'],
+    };
+  }
+
+  /// Fills in the draft's body, and reads the verdict rather than discarding
+  /// it.
+  ///
+  /// The tool reports a refusal as an ordinary result dict, so a failed update
+  /// is silent unless someone looks. What follows this call is a send, and a
+  /// send after a silently failed update ships the empty draft.
   @override
   Future<void> updateDraftBody(String draftId, String text) async {
-    await _call('update_draft_body', {'draft_id': draftId, 'text': text});
+    final result = await _call('manage_draft', {
+      'action': 'update_body',
+      'draft_id': draftId,
+      'text': text,
+    });
+    if (result['ok'] != true) {
+      throw GraphMailException(
+        'Microsoft Graph did not update the draft: '
+        '${result['error'] ?? 'unknown'}',
+      );
+    }
   }
 
+  /// Sends the draft and reshapes what the server says went out.
+  ///
+  /// `ok` is checked rather than trusted, and its absence is a failure: the
+  /// caller writes a local row from this answer, and a row built out of an
+  /// empty result would claim a message was sent that never left. The server
+  /// reports a refusal as a normal result with an `error` key, so there is no
+  /// exception to catch — only this test.
   @override
-  Future<void> sendDraft(String draftId) async {
-    await _call('send_draft', {'draft_id': draftId});
+  Future<SentDraft> sendDraft(String draftId) async {
+    final result = await _call('manage_draft', {
+      'action': 'send',
+      'draft_id': draftId,
+    });
+    if (result['ok'] != true) {
+      throw GraphMailException(
+        'Microsoft Graph did not confirm the send: '
+        '${result['error'] ?? 'unknown'}',
+      );
+    }
+    return SentDraft(
+      // The server echoes the id back; falling through to the argument keeps
+      // the echo row keyed on something either way.
+      draftId: result['id'] as String? ?? draftId,
+      conversationId: result['conversation_id'] as String?,
+      internetMessageId: result['internet_message_id'] as String?,
+      subject: result['subject'] as String?,
+      to: _recipients(result['to']),
+      cc: _recipients(result['cc']),
+      sentAt: result['sent_at'] as String?,
+    );
+  }
+
+  /// `[{name, address}]` off the wire, with anything unreadable DROPPED.
+  ///
+  /// An entry with no address names nobody: it cannot be stored, cannot be
+  /// replied to, and would show in a thread header as an empty chip. Skipping
+  /// it loses nothing a caller could have used.
+  static List<Recipient> _recipients(Object? raw) {
+    final people = <Recipient>[];
+    for (final entry in raw is List ? raw : const []) {
+      if (entry is! Map) continue;
+      final address = entry['address'] as String? ?? '';
+      if (address.isEmpty) continue;
+      people.add(Recipient(name: entry['name'] as String?, address: address));
+    }
+    return people;
   }
 
   /// Marks messages read (or unread) and returns the ids worth trying again.
@@ -158,7 +304,7 @@ class McpMailBackend implements MailBackend {
     List<String> messageIds, {
     bool isRead = true,
   }) async {
-    final result = await _call('mark_mail_read_json', {
+    final result = await _call('mark_mail_read', {
       'message_ids': jsonEncode(messageIds),
       'is_read': isRead ? 'true' : 'false',
     });

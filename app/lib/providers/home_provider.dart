@@ -424,7 +424,11 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     switch (result) {
       case MessageSearchHits():
         state = state.copyWith(
-          search: HomeSearch(result.query, result.hits),
+          search: HomeSearch(
+            result.query,
+            result.hits,
+            documents: result.documents,
+          ),
           searching: false,
         );
       case MessageSearchUnavailable():

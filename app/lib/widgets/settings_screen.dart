@@ -7,6 +7,7 @@ import '../providers/prefs_provider.dart'
 import '../services/llm/model_probe.dart' show ModelProbeResult;
 import '../services/llm/model_slots.dart';
 import '../theme/tokens.dart';
+import 'attachment_format.dart' show formatBytes;
 import 'inline_alert.dart';
 import 'needs_you_rules_editor.dart';
 import 'pane_surface.dart';
@@ -208,6 +209,16 @@ class SettingsScreen extends StatefulWidget {
   /// leaves one server's session and keeps the mail. Null hides the block.
   final Future<void> Function()? onSignOutAndClear;
 
+  /// How much of this disk the fetched attachments occupy. Null hides nothing
+  /// on its own — the line simply says less until the future answers, and a
+  /// host with no cache to measure wires neither this nor
+  /// [onClearAttachmentCache].
+  final Future<int> Function()? attachmentCacheBytes;
+
+  /// Deletes every cached attachment file. Null hides the whole block: a build
+  /// with no cache behind it must not offer to empty one.
+  final Future<void> Function()? onClearAttachmentCache;
+
   /// Already composed by the host as `1.0.0 (1)`. Null when the platform did
   /// not answer, which is the ordinary case in a widget test.
   final String? appVersion;
@@ -269,6 +280,8 @@ class SettingsScreen extends StatefulWidget {
     this.teamsLookbackDays = 14,
     this.onMailLookbackChanged,
     this.onTeamsLookbackChanged,
+    this.attachmentCacheBytes,
+    this.onClearAttachmentCache,
     this.onSignOutAndClear,
     this.appVersion,
     this.databasePath,
@@ -280,6 +293,11 @@ class SettingsScreen extends StatefulWidget {
   static const Key signOutClearKey = ValueKey('settings-sign-out-clear');
   static const Key signOutConfirmKey = ValueKey('settings-sign-out-confirm');
   static const Key signOutKeepKey = ValueKey('settings-sign-out-keep');
+  static const Key clearCacheKey = ValueKey('settings-clear-attachment-cache');
+  static const Key clearCacheConfirmKey =
+      ValueKey('settings-clear-attachment-cache-confirm');
+  static const Key clearCacheKeepKey =
+      ValueKey('settings-clear-attachment-cache-keep');
 
   /// The three extended permissions, which are [microsoftPermissions] — the
   /// table itself moved to the section that renders the rows. Kept here
@@ -337,6 +355,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /// cleared by the next attempt.
   String? _clearError;
 
+  /// The cache's size in bytes, once the host has said. Null means "not
+  /// answered yet" and renders as nothing rather than as a zero — a line
+  /// claiming an empty cache before anyone has looked would be a lie a
+  /// fraction of a second long.
+  int? _cacheBytes;
+
+  /// The same three-state pair the wipe below keeps, for the same two-step
+  /// reason.
+  bool _confirmingCacheClear = false;
+  bool _clearingCache = false;
+  String? _cacheClearError;
+
   late final TextEditingController _aboutMe = TextEditingController(
     text: widget.aboutMe,
   );
@@ -363,6 +393,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // Save and Cancel are both enabled by what is in the field, so the buttons
     // have to hear every keystroke.
     _aboutMe.addListener(_onAboutMeChanged);
+    // Started once, here, rather than in build: the section rebuilds on every
+    // keystroke in the fields above it, and a future created in build would
+    // walk the cache tree each time.
+    unawaited(_readCacheBytes());
+  }
+
+  /// Asks the host how big the cache is and forgets a failure.
+  ///
+  /// A size nobody could measure renders as nothing, which is exactly what an
+  /// unanswered one renders as — there is no state between them worth a user's
+  /// attention, and the button below works either way.
+  Future<void> _readCacheBytes() async {
+    final measure = widget.attachmentCacheBytes;
+    if (measure == null) return;
+    try {
+      final bytes = await measure();
+      if (!mounted) return;
+      setState(() => _cacheBytes = bytes);
+    } on Object catch (e) {
+      debugPrint('attachment cache size unavailable: $e');
+    }
   }
 
   void _onAboutMeChanged() => setState(() {});
@@ -697,6 +748,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             child: Text(_refreshing ? 'Refreshing…' : 'Refresh now'),
           ),
         ),
+        if (widget.onClearAttachmentCache != null) ..._clearCacheBlock(),
         if (widget.onSignOutAndClear != null) ..._signOutBlock(),
       ],
     );
@@ -717,6 +769,110 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       ],
     );
+  }
+
+  /// Emptying the attachment cache, in the same two clicks the wipe below
+  /// takes.
+  ///
+  /// A gentler action than that one and deliberately shaped identically: it
+  /// costs nothing but a re-download, but it is still a delete of files the
+  /// user can see the size of, and two destructive buttons on one section that
+  /// behaved differently would teach nobody anything.
+  List<Widget> _clearCacheBlock() {
+    return [
+      const SizedBox(height: BondSpacing.s24),
+      const Divider(height: 1, color: BondColors.border),
+      const SizedBox(height: BondSpacing.s12),
+      Text(
+        'Attachment cache',
+        style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+      ),
+      const SizedBox(height: BondSpacing.s4),
+      Text(
+        'Files opened from mail and chats are kept on this device so they '
+        'open again without a download.$_cacheSizeSuffix',
+        style: BondType.caption,
+      ),
+      const SizedBox(height: BondSpacing.s8),
+      if (!_confirmingCacheClear)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton(
+            key: SettingsScreen.clearCacheKey,
+            onPressed: () => setState(() => _confirmingCacheClear = true),
+            child: const Text('Clear attachment cache'),
+          ),
+        )
+      else
+        OverflowBar(
+          alignment: MainAxisAlignment.start,
+          spacing: BondSpacing.s8,
+          children: [
+            FilledButton(
+              key: SettingsScreen.clearCacheConfirmKey,
+              style: FilledButton.styleFrom(
+                backgroundColor: BondColors.error,
+                foregroundColor: BondColors.surface,
+              ),
+              onPressed:
+                  _clearingCache ? null : () => unawaited(_clearCache()),
+              child: const Text('Yes, clear the cache'),
+            ),
+            TextButton(
+              key: SettingsScreen.clearCacheKeepKey,
+              // Standing down drops the last failure with it, for the reason
+              // the wipe's Keep gives.
+              onPressed: _clearingCache
+                  ? null
+                  : () => setState(() {
+                      _confirmingCacheClear = false;
+                      _cacheClearError = null;
+                    }),
+              child: const Text('Keep'),
+            ),
+          ],
+        ),
+      if (_cacheClearError case final error?) ...[
+        const SizedBox(height: BondSpacing.s8),
+        InlineAlert(severity: InlineAlertSeverity.error, text: error),
+      ],
+    ];
+  }
+
+  /// What the cache line says about its size, including saying nothing.
+  ///
+  /// `formatBytes` renders zero as the empty string — it is written for a chip
+  /// where an unknown size must draw no characters — so an empty cache says so
+  /// in a word instead of reporting `0 B`.
+  String get _cacheSizeSuffix {
+    final bytes = _cacheBytes;
+    if (bytes == null) return '';
+    return bytes <= 0 ? ' Empty.' : ' Using ${formatBytes(bytes)}.';
+  }
+
+  /// Runs the host's clear, then re-reads the size so the line agrees with
+  /// what just happened.
+  Future<void> _clearCache() async {
+    setState(() {
+      _clearingCache = true;
+      _cacheClearError = null;
+    });
+    try {
+      await widget.onClearAttachmentCache!();
+      if (!mounted) return;
+      setState(() {
+        _clearingCache = false;
+        _confirmingCacheClear = false;
+        _cacheBytes = 0;
+      });
+      await _readCacheBytes();
+    } on Object {
+      if (!mounted) return;
+      setState(() {
+        _clearingCache = false;
+        _cacheClearError = 'The cache could not be cleared.';
+      });
+    }
   }
 
   /// Wiping this device, in two clicks that are not the same click twice.

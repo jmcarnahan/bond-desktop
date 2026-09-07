@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
@@ -80,7 +81,10 @@ class _RecordingMail implements MailBackend {
   }
 
   @override
-  Future<void> sendDraft(String draftId) async => calls.add('send:$draftId');
+  Future<SentDraft> sendDraft(String draftId) async {
+    calls.add('send:$draftId');
+    return SentDraft(draftId: draftId);
+  }
 
   @override
   Future<List<String>> markRead(

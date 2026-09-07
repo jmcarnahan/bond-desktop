@@ -1,4 +1,6 @@
+import '../../models/attachment_models.dart';
 import '../../models/message_models.dart';
+import '../attachments/attachment_markers.dart';
 
 /// Enough of a body for a model to judge intent. Past this it is quoted thread
 /// and signatures, which cost tokens and add nothing.
@@ -16,9 +18,17 @@ const int messageBlockBodyCap = 4000;
 /// The whole block is the sender's own text, headers included, which is why
 /// callers fence all of it rather than just the body.
 String buildMessageBlock(Message message) {
-  final body = message.bodyText?.isNotEmpty == true
+  final raw = message.bodyText?.isNotEmpty == true
       ? message.bodyText!
       : (message.bodyPreview ?? '');
+  // The markers come out before anything else looks at the body. `[[att:AAMk…]]`
+  // is a token this app minted, and a model shown one reasons about the token
+  // rather than about the message.
+  final stripped = stripAttachmentMarkers(raw);
+  // A chat message can be nothing BUT a shared file — somebody dropped a
+  // contract into a thread and typed no words with it — and an empty body
+  // tells the model the message said nothing, which is the opposite of true.
+  final body = stripped.isEmpty ? attachmentStandIn(message.attachments) : stripped;
   final clipped = body.length > messageBlockBodyCap
       ? body.substring(0, messageBlockBodyCap)
       : body;
@@ -28,6 +38,45 @@ String buildMessageBlock(Message message) {
       'Received: ${message.receivedAt ?? ''}\n'
       '\n'
       'Body:\n$clipped';
+}
+
+/// How many attachment names a stand-in sentence lists, and how much of a
+/// card it quotes.
+const int _standInNames = 3;
+const int _standInCardCap = 300;
+
+/// What a message with no words of its own says instead.
+///
+/// Reads from [AttachmentRef] rather than raw rows because [Message.attachments]
+/// is what every caller already has: [MessageStore.loadThread] hydrates it with
+/// one query per thread, so a prompt builder never has to go looking.
+///
+/// Three answers, in the order they are worth having. A rendered card IS the
+/// message — somebody sent a poll or an approval request and the card carries
+/// its text. Failing that, the names of the files say what arrived. Failing
+/// both, the message is an image and nothing more, which is worth saying
+/// exactly once rather than describing.
+///
+/// Inline rows are filtered out first: a signature logo is not what a message
+/// is about, and "Shared a file: image001.png" on a mail with an empty unique
+/// body would be a sentence about a footer.
+String attachmentStandIn(List<AttachmentRef> attachments) {
+  final shared = [for (final a in attachments) if (!a.isInline) a];
+  if (shared.isEmpty) return attachments.isEmpty ? '' : 'Shared an image';
+
+  for (final attachment in shared) {
+    final card = attachment.cardText?.trim() ?? '';
+    if (card.isEmpty) continue;
+    return card.length > _standInCardCap
+        ? card.substring(0, _standInCardCap)
+        : card;
+  }
+
+  final names = [
+    for (final attachment in shared.take(_standInNames))
+      (attachment.name ?? '').trim().isEmpty ? '(unnamed)' : attachment.name!,
+  ];
+  return 'Shared a file: ${names.join(', ')}';
 }
 
 /// Mail identifies a sender by address; a chat cannot. A chat's `from_address`

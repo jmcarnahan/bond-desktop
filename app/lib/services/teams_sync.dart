@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import '../data/message_store.dart';
 import 'activity_log.dart';
+import 'attachments/attachment_markers.dart';
+import 'attachments/attachment_policy.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'pipeline_progress.dart';
@@ -518,6 +520,47 @@ class TeamsSync {
 
         final ingested = await _store.upsertMessage(row);
 
+        // On EVERY sighting, not only the first: an edit can add a file to a
+        // message the store already has. The upsert preserves everything the
+        // handlers and the user wrote, so a re-sight costs a metadata update
+        // and nothing else.
+        //
+        // Chat has no detail step, so this is where the rows are written and
+        // the work is queued — the mail path does both inside its detail fetch.
+        // Sqlite only: `_ingestChat` runs inside a transaction, and Teams'
+        // terms forbid a background fetch, so nothing here reaches the network.
+        // The refusal write is one guarded UPDATE for the same reason.
+        final attachments = attachmentRows(message);
+        if (attachments.isNotEmpty) {
+          await _store.upsertAttachments(source, id, attachments);
+          final stored = await _store.getMessageRow(source, id);
+          if (stored != null) {
+            for (final attachment in await _store.attachmentsForMessage(
+              source,
+              id,
+            )) {
+              final (eligible, why) = attachmentTextPolicy(stored, attachment);
+              if (!eligible) {
+                await _store.recordAttachmentRefusal(
+                  source,
+                  id,
+                  attachment['attachment_id'] as String? ?? '',
+                  why ?? 'ineligible',
+                );
+                continue;
+              }
+              await _store.enqueueWork(
+                'attachment_text',
+                source,
+                attachmentEntityId(
+                  id,
+                  attachment['attachment_id'] as String? ?? '',
+                ),
+              );
+            }
+          }
+        }
+
         // Non-null only when the pipeline had never heard of this message, so
         // a chat read a second time announces nothing. Not awaited because
         // there is nothing to wait for: the tick is a publish onto a stream.
@@ -648,6 +691,11 @@ class TeamsSync {
 
     final (name, senderId, fromApplication) = _sender(message['from']);
     final bodyText = _bodyText(message['body']);
+    // The preview is what a list card and a recap line show, and a marker in
+    // either is a token nobody typed. `body_text` KEEPS its markers — the
+    // transcript draws a chip where the file sat, and every prompt strips them
+    // for itself.
+    final previewText = stripAttachmentMarkers(bodyText);
     // A bot never gets the model's time — a build notification has no urgency
     // and asks the reader for nothing — and everything else takes exactly the
     // rule mail takes.
@@ -687,9 +735,9 @@ class TeamsSync {
       // would put a sentence where every reader expects a title.
       'subject': null,
       'body_text': bodyText,
-      'body_preview': bodyText.length > _previewChars
-          ? bodyText.substring(0, _previewChars)
-          : bodyText,
+      'body_preview': previewText.length > _previewChars
+          ? previewText.substring(0, _previewChars)
+          : previewText,
       'received_at': message['createdDateTime'] as String?,
       'is_read': _isRead(
         message['createdDateTime'] as String?,
@@ -701,7 +749,57 @@ class TeamsSync {
       'triage_status': triageStatus,
       'gate_reason': gateReason,
       'addressed_me': addressedMe ? 1 : 0,
+      // Read from the same normalised list [attachmentRows] reads, so the flag
+      // on the row and the rows in the attachments table can never disagree.
+      'has_attachments':
+          (message['attachments'] as List?)?.isNotEmpty == true ? 1 : 0,
     };
+  }
+
+  /// One chat message's attachments as `attachments` rows.
+  ///
+  /// Separate from [messageRow] rather than a key inside it, because the two
+  /// have different callers: the composer's send path writes a message row and
+  /// has no attachments to write, and the store takes attachments through a
+  /// different method anyway.
+  ///
+  /// Both backends hand over the SAME flat entries — the MCP server sends them
+  /// that way and [GraphTeams.attachmentEntries] converts Graph's into it — so
+  /// this reads one shape.
+  ///
+  /// Three fields are decided here rather than taken from the wire. `size` is 0
+  /// because a chat attachment never states one; the upsert's `MAX()` lets a
+  /// later byte fetch raise it. `is_inline` is set for images, because an image
+  /// in a chat body IS inline by definition — it was pasted into the sentence.
+  /// `source_url` takes the entry's `content_url`, which for a shared file is
+  /// the OneDrive sharing link the bytes are fetched by.
+  static List<Map<String, Object?>> attachmentRows(
+    Map<String, dynamic> message,
+  ) {
+    final entries = message['attachments'];
+    if (entries is! List || entries.isEmpty) return const [];
+    final rows = <Map<String, Object?>>[];
+    for (var i = 0; i < entries.length; i++) {
+      final entry = entries[i];
+      if (entry is! Map) continue;
+      final id = entry['id'] as String? ?? '';
+      if (id.isEmpty) continue;
+      final kind = entry['kind'] as String? ?? 'other';
+      rows.add({
+        'attachment_id': id,
+        'ordinal': i,
+        'kind': kind,
+        'name': entry['name'] as String?,
+        'content_type': entry['content_type'] as String?,
+        'size': 0,
+        'is_inline': kind == 'image',
+        'content_id': null,
+        'source_url': entry['content_url'] as String?,
+        'thumbnail_url': entry['thumbnail_url'] as String?,
+        'card_text': entry['card_text'] as String?,
+      });
+    }
+    return rows;
   }
 
   /// Whether one chat message counts as already read.
@@ -952,6 +1050,13 @@ final RegExp _scriptOrStyle = RegExp(
   dotAll: true,
 );
 
+/// A shared file, as Teams writes it into the body: an empty `<attachment>`
+/// tag whose id names an entry in the message's own attachment list.
+final RegExp _attachmentTag = RegExp(
+  r'<attachment\s+id="([^"]*)"\s*>\s*</attachment\s*>',
+  caseSensitive: false,
+);
+
 /// A RUN of block boundaries, which is one line break however many tags it
 /// took to write.
 ///
@@ -991,6 +1096,20 @@ String stripChatHtml(String? html) {
   if (html == null || html.isEmpty) return '';
 
   var text = html.replaceAll(_scriptOrStyle, '');
+
+  // Markers FIRST, before any tag stripping, because both forms ARE tags and
+  // the strippers below would delete them — which is exactly what used to
+  // happen: a message whose whole content was a shared file stored as an empty
+  // body, and a pasted screenshot as nothing at all. The marker records where
+  // in the sentence the file sat, so the row can draw a chip there and every
+  // prompt can take it back out.
+  //
+  // Still before `_decodeEntities`, which runs last, so a literal `&lt;img …`
+  // a person typed cannot be decoded into a tag and then minted into a marker
+  // for a file that does not exist.
+  text = text.replaceAllMapped(_attachmentTag, (m) => '[[att:${m[1]}]]');
+  text = text.replaceAllMapped(hostedImageTag, (m) => '[[img:${m[1]}]]');
+
   text = text.replaceAll(_breakRun, '\n');
   text = text.replaceAll(_anyTag, '');
   text = _decodeEntities(text);

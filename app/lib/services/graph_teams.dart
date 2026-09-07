@@ -5,8 +5,10 @@ import 'dart:io';
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:http/http.dart' as http;
 
+import 'backend/backend_types.dart';
 import 'backend/teams_backend.dart';
 import 'graph_auth.dart';
+import 'attachments/attachment_markers.dart' show hostedContentIds;
 
 /// The Microsoft Graph chat reads this app makes: the chat list, one chat's
 /// members, and a chat's messages since a cursor. Nothing here touches sqlite —
@@ -199,6 +201,13 @@ class GraphTeams implements TeamsBackend {
       }
       final json = _decodeObject(response);
       final value = _values(json);
+      // Normalised HERE rather than in the sync, so `TeamsSync` reads one
+      // attachment shape whichever backend it is talking to. The MCP server
+      // already sends this shape; Graph does not, and converting at the point
+      // the sync reads would mean the sync knowing both.
+      for (final message in value) {
+        message['attachments'] = attachmentEntries(message);
+      }
       messages.addAll(value);
 
       // Descending order means the last item on a page is its oldest. Once
@@ -291,6 +300,141 @@ class GraphTeams implements TeamsBackend {
       );
     }
     return message;
+  }
+
+  /// Opens the chat holding exactly [userIds] plus the signed-in user.
+  ///
+  /// Graph has no "get or create": POSTing a `oneOnOne` chat with the same two
+  /// members returns the EXISTING one, while POSTing a `group` makes another
+  /// one every time. That asymmetry is the whole contract — see
+  /// [TeamsBackend.ensureChat] — and it is why the type is decided by the
+  /// member count here rather than passed in: one other person is a 1:1 by
+  /// definition, and calling it a group would create a second, nameless thread
+  /// beside the conversation they already have.
+  ///
+  /// The signed-in user goes in FIRST, because a chat is created on their
+  /// behalf and Graph refuses a member list without them in it. `roles:
+  /// ['owner']` on everybody is what a personal chat looks like; Teams has no
+  /// other role for one.
+  ///
+  /// **Dormant in SDK mode**, for the reason [markChatRead] gives.
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) async {
+    if (userIds.isEmpty) {
+      throw const GraphTeamsException('Pick at least one person.');
+    }
+    final me = await myUserId();
+    // The user is added once, by this method, whatever the caller passed:
+    // a pick that included them would otherwise turn a 1:1 into a two-member
+    // "group" beside the chat they already have, or list a member twice.
+    final others = {for (final id in userIds) if (id != me) id};
+    if (others.isEmpty) {
+      throw const GraphTeamsException('Pick somebody other than yourself.');
+    }
+    final isGroup = others.length > 1;
+
+    final response = await _request(
+      'POST',
+      Uri.parse('$_base/chats'),
+      jsonBody: {
+        'chatType': isGroup ? 'group' : 'oneOnOne',
+        if (isGroup && topic != null && topic.isNotEmpty) 'topic': topic,
+        'members': [
+          for (final id in [me, ...others]) _member(id),
+        ],
+      },
+    );
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw _describe(response, 'Could not open a Teams chat');
+    }
+
+    final chatId = _decodeObject(response)['id'] as String?;
+    if (chatId == null || chatId.isEmpty) {
+      throw const GraphTeamsException(
+        'Microsoft Graph opened a chat but returned no id for it.',
+      );
+    }
+    return EnsuredChat(chatId: chatId, isGroup: isGroup);
+  }
+
+  /// One member of a chat being created. The bind URL is Graph's way of
+  /// naming an existing user from inside a POST body; an id on its own is not
+  /// accepted.
+  static Map<String, dynamic> _member(String userId) => {
+        '@odata.type': '#microsoft.graph.aadUserConversationMember',
+        'roles': const ['owner'],
+        'user@odata.bind':
+            "https://graph.microsoft.com/v1.0/users('$userId')",
+      };
+
+  /// One Graph chat message's attachments, as the flat entries the sync reads.
+  ///
+  /// Two sources, in this order. Graph's own `attachments[]` carries the files
+  /// and cards somebody attached; the message's HTML body carries the images
+  /// somebody pasted, as `<img>` tags pointing at hosted content, and Graph
+  /// lists none of those as attachments. Both are things that came with the
+  /// message, so both become rows.
+  ///
+  /// The discriminator for the first group is `contentType`, not an
+  /// `@odata.type` — chat attachments have no subtypes, and the content type is
+  /// what says whether an entry is a shared file, a rendered card, or a quote
+  /// of another message. An unrecognised one is `other`, which the text policy
+  /// refuses by kind rather than fetching bytes it cannot read.
+  ///
+  /// `card_text` is always null: parsing an adaptive card's JSON into a
+  /// sentence is the server's job, and the desktop reads what the server
+  /// rendered rather than rendering a second, differently-wrong version.
+  static List<Map<String, Object?>> attachmentEntries(
+    Map<String, dynamic> message,
+  ) {
+    final entries = <Map<String, Object?>>[];
+    final raw = message['attachments'];
+    if (raw is List) {
+      for (final entry in raw) {
+        if (entry is! Map) continue;
+        final id = entry['id'] as String? ?? '';
+        if (id.isEmpty) continue;
+        final contentType = (entry['contentType'] as String? ?? '')
+            .toLowerCase();
+        entries.add({
+          'id': id,
+          'kind': switch (contentType) {
+            'reference' => 'file',
+            'application/vnd.microsoft.card.adaptive' => 'card',
+            'messagereference' => 'message_reference',
+            _ => 'other',
+          },
+          'name': entry['name'] as String?,
+          'content_type': entry['contentType'] as String?,
+          'content_url': entry['contentUrl'] as String?,
+          'thumbnail_url': entry['thumbnailUrl'] as String?,
+          'card_text': null,
+        });
+      }
+    }
+
+    // Only an HTML body can carry one: a `text` body is what a person typed
+    // and holds no markup at all.
+    for (final id in hostedContentIds(_bodyHtml(message))) {
+      entries.add({
+        'id': id,
+        'kind': 'image',
+        'name': null,
+        'content_type': null,
+        'content_url': null,
+        'thumbnail_url': null,
+        'card_text': null,
+      });
+    }
+    return entries;
+  }
+
+  /// A message's body when it is HTML, and nothing when it is not.
+  static String? _bodyHtml(Map<String, dynamic> message) {
+    final body = message['body'];
+    if (body is! Map) return null;
+    if (body['contentType'] != 'html') return null;
+    return body['content'] as String?;
   }
 
   /// Whether this page's oldest message is at or before the cursor.

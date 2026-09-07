@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/person.dart';
 import '../theme/tokens.dart';
 
 /// The one tinted-chip primitive. Tints come only from the central tone map
@@ -190,6 +191,90 @@ class BondFilterPillRow<T> extends StatelessWidget {
             onTap: () => onSelected(option),
           ),
       ],
+    );
+  }
+}
+
+/// One picked recipient: a [BondChip]-idiom pill with a remove affordance.
+///
+/// The tone carries the one distinction worth a glance — a typed address is
+/// neutral because nothing has verified it, while a directory or recent hit is
+/// a person the app actually knows. The tooltip carries the address, which the
+/// label usually does not.
+class RecipientChip extends StatelessWidget {
+  final Person person;
+  final VoidCallback onRemove;
+
+  const RecipientChip({
+    super.key,
+    required this.person,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final tone = person.source == PersonSource.typed
+        ? BondTone.neutral
+        : BondTone.primary;
+    final colors = bondToneColors[tone]!;
+    final label =
+        person.displayName.isNotEmpty ? person.displayName : person.address;
+    // A Teams-only recent has no address at all, so there is nothing truer to
+    // put in the tooltip than what it is.
+    final tooltip = person.address.isNotEmpty ? person.address : 'Teams user';
+
+    return Tooltip(
+      key: Key('recipient-chip-${person.id}'),
+      message: tooltip,
+      // The cap is also what bounds the row: a chip dropped into a Wrap is
+      // handed infinite width, and a Flexible label under that asserts.
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 240),
+        child: Container(
+          padding: const EdgeInsets.only(left: 10, right: 6, top: 3, bottom: 3),
+          decoration: BoxDecoration(
+            color: colors.background,
+            borderRadius: BondRadii.fullAll,
+            border: Border.all(color: colors.border),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  label,
+                  style: BondType.label.copyWith(
+                    letterSpacing: 0,
+                    color: colors.foreground,
+                    fontSize: 12,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              const SizedBox(width: 2),
+              Semantics(
+                label: 'Remove $label',
+                button: true,
+                child: InkWell(
+                  key: Key('recipient-chip-remove-${person.id}'),
+                  onTap: onRemove,
+                  borderRadius: BondRadii.fullAll,
+                  // An IconButton would drag its 48px hit box into a 22px
+                  // pill; this padding is the smallest target worth aiming at.
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: Icon(
+                      Icons.close,
+                      size: 14,
+                      color: colors.foreground,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

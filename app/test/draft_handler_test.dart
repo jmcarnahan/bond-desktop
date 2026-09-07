@@ -2,8 +2,11 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
+import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -48,6 +51,68 @@ Map<String, dynamic> decision({
   String reason = 'Sarah is waiting on a date.',
 }) =>
     {'needs_reply': needsReply, 'reason': reason};
+
+/// A retriever that answers from a fixture and records what it was asked.
+///
+/// A subclass rather than an interface, because the seam that matters is the
+/// one method: everything else about a retriever — its scope arithmetic, its
+/// budget — is what [attachment_retriever_test.dart] pins, and a second fake
+/// shape would let the two drift.
+class FakeRetriever extends AttachmentRetriever {
+  final List<AttachmentExcerpt> answer;
+  final Object? throws;
+
+  /// Every `pinnedFirst` it was handed, in order. The list's LENGTH is the
+  /// "one retrieval, two prompts" assertion.
+  final List<List<String>> pinnedSeen = [];
+  final List<List<String>?> threadIdsSeen = [];
+
+  FakeRetriever(MessageStore store, {this.answer = const [], this.throws})
+      : super(store, _neverDialled);
+
+  int get calls => pinnedSeen.length;
+
+  @override
+  Future<List<AttachmentExcerpt>> excerptsFor({
+    required String source,
+    required String conversationKey,
+    required String replyToId,
+    List<String>? threadMessageIds,
+    List<String> storylineIds = const [],
+    List<String> pinnedFirst = const [],
+    int budgetChars = 2500,
+    int perAttachment = 3,
+    int k = 6,
+  }) async {
+    pinnedSeen.add(pinnedFirst);
+    threadIdsSeen.add(threadMessageIds);
+    final failure = throws;
+    if (failure != null) throw failure;
+    return answer;
+  }
+}
+
+/// Never reached: [FakeRetriever] answers before any of it is used.
+final _neverDialled =
+    EmbeddingsClient(baseUrl: 'http://127.0.0.1:1/never-dialled');
+
+AttachmentExcerpt excerpt({
+  String name = 'Lease Addendum.pdf',
+  String text = 'The rent rises to 2,600 on 1 January.',
+  String attachmentId = 'a1',
+}) =>
+    AttachmentExcerpt(
+      name: name,
+      locator: 'part 2',
+      sender: 'Sarah',
+      date: '2026-08-28',
+      text: text,
+      ref: AttachmentRef(
+        source: 'email',
+        messageId: 'm2',
+        attachmentId: attachmentId,
+      ),
+    );
 
 Map<String, dynamic> answer({
   String evidence = 'Jordan is asking whether the launch still lands on Thursday.',
@@ -115,9 +180,11 @@ void main() {
     String key = 'chat-1',
     String receivedAt = '2026-08-29T10:00:00Z',
     String body = 'Any word on the CD?',
+    int hasAttachments = 0,
   }) async {
     await store.upsertMessage({
       'source': 'teams',
+      'has_attachments': hasAttachments,
       'source_message_id': id,
       'conversation_key': key,
       'direction': 'inbound',
@@ -357,9 +424,51 @@ void main() {
       expect(llm.userMessages.last, contains('This is an email thread.'));
       expect(llm.userMessages.last, contains('style_examples'));
     });
+
+    test('a tone sample carries no attachment marker', () async {
+      // A style example is a sample the model imitates, so a `[[att:…]]` in
+      // one is a token it would learn to write.
+      await seedOutbound(
+        body: 'Signed copy [[att:file-1]] attached — Jo',
+      );
+      await seedInbound();
+
+      final llm = FakeLlm([decision(), answer()]);
+      await runOne(DraftHandler(store, llm, progress: progress));
+
+      expect(llm.userMessages.last, isNot(contains('[[att:')));
+      expect(llm.userMessages.last, contains('Signed copy attached'));
+    });
   });
 
   group('a chat drafts through the same handler', () {
+    test('a file-only chat message reaches the model as what was shared',
+        () async {
+      // The reply-decision call is the one that matters: it is asked whether a
+      // message needs an answer, and a body that is nothing but a marker looks
+      // to it like a message that said nothing at all.
+      await seedChat(body: '[[att:a1]]', hasAttachments: 1);
+      await store.upsertAttachments('teams', 'chat-1-m1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Contract-v2.docx',
+          'size': 0,
+        },
+      ]);
+      final llm = FakeLlm([decision(), answer()]);
+
+      await runOne(
+        DraftHandler(store, llm, progress: progress),
+        id: 'chat-1-m1',
+        source: 'teams',
+      );
+
+      expect(llm.userMessages.first, contains('Shared a file: Contract-v2.docx'));
+      expect(llm.userMessages.first, isNot(contains('[[att:')));
+    });
+
     test('and gets the chat channel note, not the email one', () async {
       await seedChat();
       final llm = FakeLlm([
@@ -428,6 +537,111 @@ void main() {
 
       expect(llm.userMessages.last, contains('From: Sarah Whitfield'));
       expect(llm.userMessages.last, isNot(contains('teams:u1')));
+    });
+  });
+
+  group('the documents in the prompt', () {
+    test('one retrieval reaches both the decision and the draft', () async {
+      await seedInbound();
+      final llm = FakeLlm([decision(), answer()]);
+      final retriever = FakeRetriever(store, answer: [excerpt()]);
+
+      await runOne(DraftHandler(store, llm, attachments: retriever));
+
+      // ONE call, two prompts. A second pass would be a second embedding call
+      // for an answer that cannot come back different.
+      expect(retriever.calls, 1);
+      expect(llm.userMessages.length, 2);
+      for (final sent in llm.userMessages) {
+        expect(sent, contains('<untrusted_data source="attachment_excerpts">'));
+        expect(sent, contains('The rent rises to 2,600'));
+        expect(sent, contains('Lease Addendum.pdf'));
+      }
+    });
+
+    test('the thread it searches is the thread as of the message answered',
+        () async {
+      await seedInbound(id: 'm1', receivedAt: '2026-08-20T10:00:00Z');
+      await seedInbound(id: 'm2', receivedAt: '2026-08-29T10:00:00Z');
+      final retriever = FakeRetriever(store);
+
+      await runOne(
+        DraftHandler(store, FakeLlm([decision(), answer()]),
+            attachments: retriever),
+        id: 'm1',
+      );
+
+      // m2 landed after m1, so a document attached to m2 cannot be quoted in
+      // the reply to m1.
+      expect(retriever.threadIdsSeen.single, ['m1']);
+    });
+
+    test('a handler built with no retriever drafts exactly as before',
+        () async {
+      await seedInbound();
+      final llm = FakeLlm([decision(), answer()]);
+
+      await runOne(DraftHandler(store, llm));
+
+      expect((await store.getDraftForMessage('email', 'm2'))!['body'],
+          startsWith('Hi Sarah — Friday works.'));
+      for (final sent in llm.userMessages) {
+        expect(sent, isNot(contains('attachment_excerpts')));
+      }
+    });
+
+    test('Use in reply hands the named file to the retriever first', () async {
+      await seedInbound();
+      final retriever = FakeRetriever(store);
+
+      await DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        attachments: retriever,
+      ).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        'payload_json': jsonEncode({
+          'pinned_attachment_ids': ['att-survey'],
+        }),
+      });
+
+      expect(retriever.pinnedSeen.single, ['att-survey']);
+    });
+
+    test('a payload nobody can read costs the pinning, never the draft',
+        () async {
+      await seedInbound();
+      final retriever = FakeRetriever(store);
+
+      await DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        attachments: retriever,
+      ).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        'payload_json': '{not json at all',
+      });
+
+      expect(retriever.pinnedSeen.single, isEmpty);
+      expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
+    });
+
+    test('a retriever that throws costs no draft', () async {
+      await seedInbound();
+      final retriever =
+          FakeRetriever(store, throws: StateError('the index fell over'));
+
+      await runOne(
+        DraftHandler(store, FakeLlm([decision(), answer()]),
+            attachments: retriever),
+      );
+
+      // The draft is the product; the citations are what make it better.
+      expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
     });
   });
 

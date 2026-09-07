@@ -74,6 +74,9 @@ class _GraphStub {
   /// stored it.
   http.Response Function()? posted;
 
+  /// What a POST to `/chats` answers with — the chat Graph opened.
+  http.Response Function()? created;
+
   /// What `markChatReadForUser` answers with. Graph's own answer is a bare 204.
   http.Response Function() markRead = () => http.Response('', 204);
 
@@ -104,6 +107,9 @@ class _GraphStub {
 
         final path = request.url.path;
         if (path.endsWith('/me')) return _jsonOk({'id': 'me-1'});
+        if (path.endsWith('/chats') && request.method == 'POST') {
+          return (created ?? () => _jsonOk({'id': 'chat-9'}))();
+        }
         if (path.endsWith('/me/chats')) {
           if (chatPages.isEmpty) return _jsonOk({'value': const []});
           return chatPages.removeAt(0)();
@@ -460,6 +466,95 @@ void main() {
       await expectLater(
         build().sendChatMessage('chat-1', 'On it.'),
         throwsA(isA<GraphTeamsException>()),
+      );
+    });
+
+    test('one other person opens a oneOnOne, with the user first', () async {
+      // The member count decides the type, and it must: POSTing a `group` for
+      // two people would create a second, nameless thread beside the
+      // conversation they already have. `oneOnOne` returns the existing chat.
+      final chat = await build().ensureChat(['u1']);
+
+      final post = graph.to('/chats').single;
+      expect(post.method, 'POST');
+      expect(post.url.path, '/v1.0/chats');
+      expect(post.json['chatType'], 'oneOnOne');
+      expect(post.json.containsKey('topic'), isFalse,
+          reason: 'Teams does not let anybody name a 1:1');
+
+      final members = post.json['members'] as List;
+      expect(members, hasLength(2));
+      // Graph refuses a member list without the caller in it, and `/me` is
+      // where that id came from.
+      expect(members.first, {
+        '@odata.type': '#microsoft.graph.aadUserConversationMember',
+        'roles': ['owner'],
+        'user@odata.bind':
+            "https://graph.microsoft.com/v1.0/users('me-1')",
+      });
+      expect(
+        (members.last as Map)['user@odata.bind'],
+        "https://graph.microsoft.com/v1.0/users('u1')",
+      );
+
+      expect(chat.chatId, 'chat-9');
+      expect(chat.isGroup, isFalse);
+    });
+
+    test('two or more make a group, which a topic may name', () async {
+      final chat = await build().ensureChat(['u1', 'u2'], topic: 'Contracts');
+
+      final post = graph.to('/chats').single;
+      expect(post.json['chatType'], 'group');
+      expect(post.json['topic'], 'Contracts');
+      expect(post.json['members'], hasLength(3));
+      expect(chat.isGroup, isTrue);
+    });
+
+    test('and an empty topic is left off rather than sent blank', () async {
+      await build().ensureChat(['u1', 'u2']);
+
+      expect(graph.to('/chats').single.json.containsKey('topic'), isFalse);
+    });
+
+    test('nobody at all is refused without a request', () async {
+      await expectLater(
+        build().ensureChat(const []),
+        throwsA(isA<GraphTeamsException>()),
+      );
+      expect(graph.sent, isEmpty, reason: 'not even the /me lookup');
+    });
+
+    test('the user in their own pick is added once, and does not make a group',
+        () async {
+      final chat = await build().ensureChat(['me-1', 'u1', 'u1']);
+
+      final post = graph.to('/chats').single;
+      expect(post.json['chatType'], 'oneOnOne');
+      expect(post.json['members'], hasLength(2));
+      expect(chat.isGroup, isFalse);
+
+      await expectLater(
+        build().ensureChat(['me-1']),
+        throwsA(isA<GraphTeamsException>()),
+        reason: 'a chat with only the user in it is not a chat',
+      );
+    });
+
+    test('a refusal carries its status, and a chat with no id is a failure',
+        () async {
+      graph.created = () => http.Response('no consent', 403);
+      await expectLater(
+        build().ensureChat(['u1']),
+        throwsA(isA<GraphTeamsException>()
+            .having((e) => e.statusCode, 'statusCode', 403)),
+      );
+
+      graph.created = () => _jsonOk({'chatType': 'oneOnOne'});
+      await expectLater(
+        build().ensureChat(['u1']),
+        throwsA(isA<GraphTeamsException>()
+            .having((e) => e.message, 'message', contains('no id'))),
       );
     });
 

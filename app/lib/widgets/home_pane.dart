@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/home_models.dart';
 import '../theme/tokens.dart';
+import 'attachment_search_tile.dart';
 import 'chips.dart';
 import 'home_feed_row.dart';
 import 'home_metrics.dart';
@@ -328,6 +329,45 @@ class _HomePaneState extends State<HomePane> {
             ],
           ),
         ),
+        // Documents first, above the messages. A passage that ANSWERS the
+        // query is a better answer than a message that merely mentions it, and
+        // the reader who typed a phrase from inside a spreadsheet is looking
+        // for the spreadsheet.
+        //
+        // The header count above stays a count of MESSAGE hits: it labels the
+        // list under it, and a number that silently included documents would
+        // never match the rows a person can count on screen.
+        //
+        // A plain [Column], not a list: the store caps `documents` at six, so
+        // this is bounded by construction, and a scroller here would fight the
+        // one below it for the same gesture.
+        if (search.documents.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(
+              left: BondSpacing.s4,
+              right: BondSpacing.s4,
+              top: BondSpacing.s4,
+              bottom: BondSpacing.s8,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'In documents',
+                  style:
+                      BondType.caption.copyWith(color: BondColors.inkMuted),
+                ),
+                const SizedBox(height: BondSpacing.s4),
+                for (final hit in search.documents)
+                  AttachmentSearchTile(
+                    key: AttachmentSearchTile.keyFor(hit.ref),
+                    hit: hit,
+                    now: widget.now,
+                    onOpenThread: widget.onOpenThread,
+                  ),
+              ],
+            ),
+          ),
         if (search.hits.isEmpty)
           Expanded(
             child: Center(

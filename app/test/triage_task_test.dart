@@ -208,6 +208,170 @@ void main() {
     });
   });
 
+  group('attachments', () {
+    Map<String, Object?> attachment({
+      String id = 'att-1',
+      String? name = 'lease-addendum.pdf',
+      int size = 184320,
+      Object? isInline = 0,
+    }) =>
+        {
+          'attachment_id': id,
+          'name': name,
+          'size': size,
+          'is_inline': isInline,
+        };
+
+    test('the names and sizes are stated on their own line', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [attachment()],
+        ),
+      );
+
+      expect(user, contains('Attachments: '));
+      expect(user, contains('lease-addendum.pdf (180 KB)'));
+    });
+
+    test('a message with nothing attached says nothing about attachments', () {
+      final user = task.buildUserMessage(
+        TriageInput(email(), DateTime(2026, 8, 29)),
+      );
+
+      expect(user, isNot(contains('Attachments:')));
+      expect(user, isNot(contains('attachment_names')));
+    });
+
+    test('the sentence is ours and the names are theirs', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [attachment()],
+        ),
+      );
+
+      // The word `Attachments:` is the app speaking, so it sits outside every
+      // fence; a filename is as attacker-controlled as a body, so it rides
+      // inside one of its own.
+      expect(
+        user.indexOf('Attachments:'),
+        lessThan(user.indexOf('<untrusted_data')),
+      );
+      expect(
+        user,
+        contains('<untrusted_data source="attachment_names">'),
+      );
+    });
+
+    test('the line sits after the directness line and before the message', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [attachment()],
+        ),
+      );
+
+      expect(
+        user.indexOf('Addressed to:'),
+        lessThan(user.indexOf('Attachments:')),
+      );
+      expect(
+        user.indexOf('Attachments:'),
+        lessThan(user.indexOf('Judge ONLY this message:')),
+      );
+    });
+
+    test('an inline signature image is not something that came with it', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [
+            attachment(id: 'logo', name: 'logo.png', isInline: 1, size: 4096),
+          ],
+        ),
+      );
+
+      expect(user, isNot(contains('Attachments:')));
+    });
+
+    test('at most five names, whatever arrived', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [
+            for (var i = 0; i < 8; i++)
+              attachment(id: 'a$i', name: 'doc-$i.pdf', size: 0),
+          ],
+        ),
+      );
+
+      expect(user, contains('doc-4.pdf'));
+      expect(user, isNot(contains('doc-5.pdf')));
+    });
+
+    test('a size nobody stated is left unsaid rather than called zero', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [attachment(size: 0)],
+        ),
+      );
+
+      expect(user, contains('lease-addendum.pdf'));
+      expect(user, isNot(contains('(0 B)')));
+    });
+
+    test('a file nobody named is still named', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [attachment(name: null, size: 900)],
+        ),
+      );
+
+      expect(user, contains('a file (900 B)'));
+    });
+
+    test('one absurd filename cannot push the message down the prompt', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [attachment(name: 'z' * 400, size: 0)],
+        ),
+      );
+
+      final line = user
+          .split('\n')
+          .firstWhere((l) => l.startsWith('Attachments: '));
+      expect(line.length, lessThan(200));
+    });
+
+    test('the sizes read as one unit, never two', () {
+      final user = task.buildUserMessage(
+        TriageInput(
+          email(),
+          DateTime(2026, 8, 29),
+          attachments: [
+            attachment(id: 'a', name: 'big.mp4', size: 23 * 1024 * 1024),
+            attachment(id: 'b', name: 'mid.pdf', size: 1468006),
+          ],
+        ),
+      );
+
+      expect(user, contains('big.mp4 (23 MB)'));
+      expect(user, contains('mid.pdf (1.4 MB)'));
+    });
+  });
+
   group('thread tail', () {
     test('no thread means no thread fence at all', () {
       final user = task.buildUserMessage(

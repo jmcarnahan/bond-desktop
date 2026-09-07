@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/extract_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -126,8 +127,10 @@ void main() {
     String? gateReason,
     String body = 'Legal wants a look at the DPA.',
     String receivedAt = '2026-08-29T10:00:00Z',
+    int hasAttachments = 0,
   }) async {
     await store.upsertMessage({
+      'has_attachments': hasAttachments,
       'source': source,
       'source_message_id': id,
       'conversation_key': 'chat-1',
@@ -176,6 +179,108 @@ void main() {
       'reason': row['needs_you_reason'],
     };
   }
+
+  group('what the model is shown', () {
+    test('a file-only chat message reaches the model as what was shared',
+        () async {
+      // Below the floor, so the model is actually asked — and what it is asked
+      // about is a body that is nothing but a marker. `loadThread` hydrates a
+      // thread's attachments; the row this handler judges came from
+      // `getMessageRow` and has to ask for its own.
+      await seed(addressedMe: 0, body: '[[att:a1]]', hasAttachments: 1);
+      await store.upsertAttachments('teams', 't1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Contract-v2.docx',
+          'size': 0,
+        },
+      ]);
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm));
+
+      expect(llm.user, contains('Shared a file: Contract-v2.docx'));
+      expect(llm.user, isNot(contains('[[att:')));
+    });
+
+    test('a re-run reads the digests the first pass could not see', () async {
+      // The whole point of the digest handler's requeue. The first judgement
+      // ran while the file was still being read; this one is the same message
+      // with the record of it in front of the model.
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Lease Addendum.pdf',
+          'size': 4096,
+        },
+      ]);
+      await store.setAttachmentDigest(
+        'email',
+        'm1',
+        'a1',
+        status: 'done',
+        digestJson: jsonEncode(const AttachmentDigest(
+          evidence: 'A lease addendum sent for signature.',
+          kind: 'contract',
+          summary: 'The rent rises to 2,600 in January.',
+          asks: ['Sign and return by Thursday'],
+        ).toJson()),
+      );
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      expect(llm.user, contains('What the documents attached to this message '
+          'say:'));
+      expect(llm.user, contains('<untrusted_data source="attachment_digests">'));
+      expect(llm.user, contains('Lease Addendum.pdf: The rent rises to 2,600 '
+          'in January. Asks: Sign and return by Thursday'));
+    });
+
+    test('the digest fence sits before the message being judged', () async {
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {'attachment_id': 'a1', 'ordinal': 0, 'kind': 'file', 'name': 'A.pdf'},
+      ]);
+      await store.setAttachmentDigest(
+        'email',
+        'm1',
+        'a1',
+        status: 'done',
+        digestJson: jsonEncode(
+          const AttachmentDigest(summary: 'It rises.').toJson(),
+        ),
+      );
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      final sent = llm.user!;
+      expect(
+        sent.indexOf('source="attachment_digests"'),
+        lessThan(sent.indexOf('Judge ONLY this message:')),
+      );
+    });
+
+    test('a document nobody has read yet contributes no line', () async {
+      await seedAmbiguousMail(body: 'See attached.');
+      await store.upsertAttachments('email', 'm1', [
+        {'attachment_id': 'a1', 'ordinal': 0, 'kind': 'file', 'name': 'A.pdf'},
+      ]);
+      final llm = FakeLlm(needsYouYes);
+
+      await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
+
+      // "Not read yet" and "says nothing" are different states, and only the
+      // second is worth putting in front of a judgement.
+      expect(llm.user, isNot(contains('attachment_digests')));
+    });
+  });
 
   group('the deterministic floor', () {
     test('a direct chat is written down as a yes, with its reason', () async {

@@ -3,6 +3,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/storylines_provider.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
@@ -609,6 +610,65 @@ void main() {
     });
   });
 
+  group('the documents provider', () {
+    Future<List<String>> documentsOf(String storylineId) async {
+      final container = ProviderContainer(overrides: [
+        dbProvider.overrideWithValue(db),
+      ]);
+      addTearDown(container.dispose);
+      final documents =
+          await container.read(storylineDocumentsProvider(storylineId).future);
+      return [for (final document in documents) document.name ?? ''];
+    }
+
+    test('the shelf is every document on the storyline, pinned first',
+        () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedConversation('c1');
+      await seedConversation('c2');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await seedMessage('c2', 'm2', receivedAt: '2026-08-20T09:00:00Z');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+      await store.upsertAttachments('email', 'm1', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Old.pdf',
+          'content_type': 'application/pdf',
+          'size': 1024,
+        },
+      ]);
+      await store.upsertAttachments('email', 'm2', [
+        {
+          'attachment_id': 'a2',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'New.pdf',
+          'content_type': 'application/pdf',
+          'size': 1024,
+        },
+      ]);
+
+      // Newest message first while nothing is pinned.
+      expect(await documentsOf('sl-1'), ['New.pdf', 'Old.pdf']);
+
+      // A pin floats the older one over it, which is the whole point of one.
+      await store.setAttachmentPinned('email', 'm1', 'a1', 'sl-1');
+      expect(await documentsOf('sl-1'), ['Old.pdf', 'New.pdf']);
+    });
+
+    test('a storyline whose threads carry no files reads empty', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedConversation('c1');
+      await seedMessage('c1', 'm1', receivedAt: '2026-08-01T09:00:00Z');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+
+      expect(await documentsOf('sl-1'), isEmpty);
+    });
+  });
+
   group('provider wiring', () {
     test('the providers build against an overridden db', () async {
       await seedStoryline('sl-1', status: 'active');
@@ -620,6 +680,12 @@ void main() {
         dbProvider.overrideWithValue(db),
       ]);
       addTearDown(container.dispose);
+
+      // The AI worker behind this provider reaches the attachment backend, and
+      // that one is chosen by a stored preference — so building it starts a
+      // fire-and-forget read of `app_prefs`. Awaiting it here is what keeps
+      // that read inside the life of the database this test closes.
+      await container.read(appPrefsProvider.notifier).ready;
 
       await container.read(storylinesProvider.notifier).load();
       final state = container.read(storylinesProvider) as StorylinesLoaded;

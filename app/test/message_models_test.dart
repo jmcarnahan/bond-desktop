@@ -23,6 +23,23 @@ void main() {
     });
   });
 
+  group('Message.isLocalEcho', () {
+    Message withId(String id) => Message(id: id, outbound: true);
+
+    test('a local: id is the app\'s own optimistic row', () {
+      expect(withId('local:graph-draft-1').isLocalEcho, isTrue);
+    });
+
+    test('and a server id is not, however outbound it is', () {
+      // The Sent Items copy of the very same message: same thread, same body,
+      // an id Graph minted. It is the one that stays.
+      expect(withId('AAMkAGI2...').isLocalEcho, isFalse);
+      expect(withId('').isLocalEcho, isFalse);
+      // Not a prefix match anywhere but the front.
+      expect(withId('AAMk-local:1').isLocalEcho, isFalse);
+    });
+  });
+
   group('CtaUrgency.fromWire', () {
     test('maps the known tokens', () {
       expect(CtaUrgency.fromWire('low'), CtaUrgency.low);

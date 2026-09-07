@@ -20,6 +20,7 @@ Conversation _conv({
   String? cta,
   int pending = 2,
   String? lastMessageAt = _afterSince,
+  int attachmentCount = 0,
 }) {
   return Conversation(
     id: id,
@@ -30,6 +31,7 @@ Conversation _conv({
     lastMessagePreview: preview,
     lastMessageAt: lastMessageAt,
     aiPendingCount: pending,
+    attachmentCount: attachmentCount,
   );
 }
 
@@ -132,5 +134,25 @@ void main() {
     // renders a list could ever call pumpAndSettle again.
     expect(find.byType(CircularProgressIndicator), findsNothing);
     await tester.pumpAndSettle();
+  });
+
+  testWidgets('a thread carrying files says how many', (tester) async {
+    await tester.pumpWidget(_host(ConversationRow(
+      conversation: _conv(attachmentCount: 3),
+      selected: false,
+      onTap: () {},
+    )));
+
+    expect(find.text('📎 3'), findsOneWidget);
+  });
+
+  testWidgets('and one carrying none says nothing', (tester) async {
+    await tester.pumpWidget(_host(ConversationRow(
+      conversation: _conv(),
+      selected: false,
+      onTap: () {},
+    )));
+
+    expect(find.textContaining('📎'), findsNothing);
   });
 }

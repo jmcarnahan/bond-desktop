@@ -36,7 +36,8 @@ class GraphMail implements MailBackend {
   /// bodies stay behind [getMessageDetail] and are fetched only for threads
   /// the user actually opens.
   static const String _deltaSelect = 'id,internetMessageId,conversationId,'
-      'subject,from,toRecipients,receivedDateTime,isRead,isDraft,bodyPreview';
+      'subject,from,toRecipients,receivedDateTime,isRead,isDraft,bodyPreview,'
+      'hasAttachments';
 
   /// Tier two. `uniqueBody` is the part of the message that is NOT quoted
   /// thread — Graph computes it server-side, and with the Prefer header
@@ -44,6 +45,20 @@ class GraphMail implements MailBackend {
   /// entire reason this app never parses mail HTML itself.
   static const String _detailSelect =
       'id,uniqueBody,internetMessageHeaders,hasAttachments';
+
+  /// The attachment list, expanded onto the same detail request rather than
+  /// fetched separately: a message's attachments are part of what the detail
+  /// fetch is FOR, and a second round trip per message would double the cost
+  /// of opening a thread.
+  ///
+  /// `microsoft.graph.fileAttachment/contentId` is written in the cast form
+  /// because it has to be. A bare `contentId` in the `$select` is a Graph 400
+  /// — the property is declared on the fileAttachment subtype, not on the
+  /// attachment base type — and the error names no field, so it reads as a
+  /// broken request rather than as a wrong column.
+  static const String _detailExpand =
+      'attachments(\$select=id,name,contentType,size,isInline,'
+      'lastModifiedDateTime,microsoft.graph.fileAttachment/contentId)';
 
   static const Map<String, String> _plainTextBody = {
     'Prefer': 'outlook.body-content-type="text"',
@@ -101,13 +116,69 @@ class GraphMail implements MailBackend {
   @override
   Future<Map<String, dynamic>> getMessageDetail(String id) async {
     final uri = Uri.parse('$_base/me/messages/${Uri.encodeComponent(id)}')
-        .replace(query: '\$select=${Uri.encodeComponent(_detailSelect)}');
+        .replace(
+      query: '\$select=${Uri.encodeComponent(_detailSelect)}'
+          '&\$expand=${Uri.encodeComponent(_detailExpand)}',
+    );
 
     final response = await _send(uri, headers: _plainTextBody);
     if (response.statusCode != 200) {
       throw _describe(response, 'Could not read a message from Microsoft Graph');
     }
-    return _decodeObject(response);
+    final detail = _decodeObject(response);
+    // The one key that leaves this file in a shape Graph never sent. Every
+    // other field stays camelCase because the sync reads Graph's own names;
+    // attachments are flattened into the MCP server's snake_case summary
+    // shape, which is what the `attachments` columns are named after, so the
+    // sync reads ONE shape whichever backend it is talking to.
+    detail['attachments'] = _attachmentSummaries(detail['attachments']);
+    return detail;
+  }
+
+  /// Graph's expanded `attachments[]` as the flat summary both backends hand
+  /// over.
+  ///
+  /// `kind` comes from the `@odata.type` tail, which is the only thing that
+  /// distinguishes a file from a forwarded message from a OneDrive link.
+  ///
+  /// `source_url` is always null here, and that is a known hole rather than an
+  /// oversight: `sourceUrl` is declared on the referenceAttachment subtype and
+  /// is not selectable through this expand (the MCP server's own select list
+  /// omits it too). A link attachment therefore arrives with no url and the
+  /// text policy refuses it as `reference_no_url`. The path is built; turning
+  /// it on is one line in the server's select.
+  static List<Map<String, Object?>> _attachmentSummaries(Object? raw) {
+    if (raw is! List) return const [];
+    return [
+      for (final entry in raw)
+        if (entry is Map)
+          {
+            'id': entry['id'],
+            'name': entry['name'],
+            'content_type': entry['contentType'],
+            // Zero for unknown, never null — the column's own convention, and
+            // the server answers 0 for the same entry. A null here would be a
+            // second spelling of "no size" that only this path produces.
+            'size': entry['size'] ?? 0,
+            'is_inline': entry['isInline'] == true,
+            'content_id': entry['contentId'],
+            'kind': _attachmentKind(entry['@odata.type']),
+            'source_url': null,
+          },
+    ];
+  }
+
+  /// `#microsoft.graph.fileAttachment` → `file`. An unknown or absent type is
+  /// `unknown` rather than `file`: the text policy accepts files, and guessing
+  /// would send it after bytes nothing knows how to read.
+  static String _attachmentKind(Object? odataType) {
+    final tail = (odataType as String? ?? '').split('.').last.toLowerCase();
+    return switch (tail) {
+      'fileattachment' => 'file',
+      'itemattachment' => 'item',
+      'referenceattachment' => 'reference',
+      _ => 'unknown',
+    };
   }
 
   // ── Drafts and sending ───────────────────────────────────────────────
@@ -147,6 +218,59 @@ class GraphMail implements MailBackend {
     return _decodeObject(response);
   }
 
+  /// Creates a new draft in the user's Drafts folder.
+  ///
+  /// Unlike `/createReply` there is no message to build from, so the whole
+  /// draft is stated here — and stated as plain text, for [updateDraftBody]'s
+  /// reason. `ccRecipients` is OMITTED when there is no Cc rather than sent
+  /// empty: Graph treats an empty array as an instruction to clear the line,
+  /// which on a create is the same thing but says something different, and a
+  /// draft the user later edits in Outlook should read as one nobody Cc'd.
+  ///
+  /// The response is Graph's whole message resource, so `conversationId` and
+  /// `internetMessageId` arrive under their own names — the ids the draft
+  /// keeps once it is sent, which is what lets the caller thread and reconcile
+  /// the message without waiting for Sent Items.
+  @override
+  Future<Map<String, dynamic>> createDraft({
+    required List<String> to,
+    List<String> cc = const [],
+    required String subject,
+    required String body,
+  }) async {
+    final response = await _request(
+      'POST',
+      Uri.parse('$_base/me/messages'),
+      jsonBody: {
+        'subject': subject,
+        'body': {'contentType': 'text', 'content': body},
+        'toRecipients': [
+          for (final address in to)
+            {
+              'emailAddress': {'address': address},
+            },
+        ],
+        if (cc.isNotEmpty)
+          'ccRecipients': [
+            for (final address in cc)
+              {
+                'emailAddress': {'address': address},
+              },
+          ],
+      },
+    );
+    if (response.statusCode != 200 && response.statusCode != 201) {
+      throw _describe(response, 'Could not start a message in Microsoft Graph');
+    }
+    final draft = _decodeObject(response);
+    return {
+      'id': draft['id'],
+      'webLink': draft['webLink'],
+      'conversationId': draft['conversationId'],
+      'internetMessageId': draft['internetMessageId'],
+    };
+  }
+
   /// Replaces a draft's body with [text].
   ///
   /// Plain text, always: the composer is a plain-text field, and sending its
@@ -165,19 +289,76 @@ class GraphMail implements MailBackend {
     }
   }
 
-  /// Sends an existing draft. Graph answers 202 with no body.
+  /// Sends an existing draft and answers with what went out. Graph's own
+  /// `/send` answers 202 with no body.
+  ///
+  /// Which is why the draft is READ FIRST. A sent draft is gone: its id names
+  /// a message that has left Drafts and is not yet the copy in Sent Items, so
+  /// the ids that make the reply showable and reconcilable — the conversation
+  /// id and the internet message id — can only be learned while it still
+  /// exists. A failed GET therefore throws and NOTHING is sent: a send whose
+  /// record could not be written is worse than a send that did not happen,
+  /// because the user would see neither the reply nor a reason.
   ///
   /// Nothing in this app calls this except a Send button the user pressed.
   @override
-  Future<void> sendDraft(String draftId) async {
-    final response = await _request(
-      'POST',
-      Uri.parse('$_base/me/messages/${Uri.encodeComponent(draftId)}/send'),
+  Future<SentDraft> sendDraft(String draftId) async {
+    final id = Uri.encodeComponent(draftId);
+    final read = await _request(
+      'GET',
+      Uri.parse('$_base/me/messages/$id?\$select=$_sentSelect'),
     );
+    if (read.statusCode != 200) {
+      throw _describe(read, 'Microsoft Graph could not read the draft');
+    }
+    final draft = _decodeObject(read);
+
+    final response = await _request('POST', Uri.parse('$_base/me/messages/$id/send'));
     if (response.statusCode != 202 && response.statusCode != 200) {
       throw _describe(response, 'Microsoft Graph could not send the reply');
     }
+
+    return SentDraft(
+      draftId: draft['id'] as String? ?? draftId,
+      conversationId: draft['conversationId'] as String?,
+      internetMessageId: draft['internetMessageId'] as String?,
+      subject: draft['subject'] as String?,
+      to: _sentRecipients(draft['toRecipients']),
+      cc: _sentRecipients(draft['ccRecipients']),
+      // This machine's clock rather than the server's, which `/send` never
+      // reports. Close enough to order the thread by, and replaced outright
+      // when the Sent Items copy folds in with Graph's own stamp.
+      sentAt: _secondsZ(DateTime.now()),
+    );
   }
+
+  /// Everything a local echo row needs off a draft that is about to stop
+  /// existing.
+  static const String _sentSelect = 'id,conversationId,internetMessageId,'
+      'subject,toRecipients,ccRecipients';
+
+  /// Graph's `[{emailAddress:{name,address}}]`, with anything address-less
+  /// dropped: an entry naming nobody cannot be stored or replied to.
+  static List<Recipient> _sentRecipients(Object? raw) {
+    final people = <Recipient>[];
+    for (final entry in raw is List ? raw : const []) {
+      if (entry is! Map) continue;
+      final email = entry['emailAddress'];
+      if (email is! Map) continue;
+      final address = email['address'] as String? ?? '';
+      if (address.isEmpty) continue;
+      people.add(Recipient(name: email['name'] as String?, address: address));
+    }
+    return people;
+  }
+
+  /// `yyyy-MM-ddTHH:mm:ssZ`, the shape Graph prints `receivedDateTime` in.
+  ///
+  /// Hand-formatted rather than [DateTime.toIso8601String], which appends
+  /// fractional digits: this stamp lands in `received_at`, a column the fold
+  /// compares as a STRING, and `…:16.000Z` sorts after `…:17Z`.
+  static String _secondsZ(DateTime t) =>
+      '${t.toUtc().toIso8601String().split('.').first}Z';
 
   /// Marks each of [messageIds] read (or unread), one PATCH at a time, and
   /// returns the ids worth trying again.

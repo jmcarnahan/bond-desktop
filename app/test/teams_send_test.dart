@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart' show ConversationState;
 import 'package:bond_inbox/providers/draft_provider.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
+import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/graph_teams.dart';
@@ -99,6 +100,10 @@ class _FakeTeams implements TeamsBackend {
     stored.add(message);
     return message;
   }
+
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) =>
+      throw UnimplementedError();
 }
 
 /// A mail backend that would throw if a chat send ever reached it. It must not:
@@ -286,6 +291,36 @@ void main() {
       // chat it went into — which is why the send path passes none of the
       // params that decide the flag and still writes the right one.
       expect(reply['addressed_me'], 0);
+    });
+
+    test('a chat reply moves the thread to the top of the rail with its '
+        'preview', () async {
+      // Recounting alone left the chat sitting where it was, previewing the
+      // question the user had just answered — and it never healed, because the
+      // next pull skips this row as already seen.
+      await seedChat();
+      await store.upsertConversation({
+        'source': 'teams',
+        'conversation_key': 'chat-1',
+        'participants_json': '[{"name":"Sarah Whitfield","email":"teams:u1"}]',
+        'state': 'needs_reply',
+        'last_message_at': '2026-08-28T21:00:00Z',
+        'last_message_preview': 'Any word on the CD?',
+      });
+
+      await (await loaded()).send('Sending it over now.');
+
+      final row = await conversation();
+      expect(row['last_message_at'], '2026-08-28T22:00:00Z');
+      expect(row['last_outbound_at'], '2026-08-28T22:00:00Z');
+      expect(row['last_message_preview'], 'Sending it over now.');
+      expect(row['state'], 'waiting');
+      // `upsertConversation` overwrites the roster unconditionally, so a fold
+      // that failed to pass it back would wipe the chat's members on a send.
+      expect(
+        row['participants_json'],
+        '[{"name":"Sarah Whitfield","email":"teams:u1"}]',
+      );
     });
 
     test('a sent reply recaps the storyline it belongs to', () async {

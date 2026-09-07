@@ -147,16 +147,36 @@ void resetMcpLogFolding() {
 McpClientOptions buildClientOptions() =>
     const McpClientOptions(protocol: McpProtocol.legacy);
 
+/// The header that tells the Bond server this caller parses dicts.
+///
+/// Every dict-returning tool on the server goes through a format-negotiation
+/// middleware: a request carrying this header gets the tool's dict back as
+/// `structuredContent`, and any other request gets a compact TEXT rendering
+/// of the same dict — `key: value` lines, pipe-separated tables — meant for
+/// a model to read, with no `structuredContent` at all. [decodeToolResult]
+/// cannot read that text (it is not JSON), so without this header every tool
+/// call fails the moment the server renders compactly. The old tool names
+/// the app still calls are hidden aliases on that server and are rendered
+/// the same way, so the header is not optional for them either.
+///
+/// Sent unconditionally: a server that predates the middleware ignores an
+/// unknown request header, so this is safe against every server the app has
+/// ever talked to.
+const String desktopClientHeader = 'X-Bond-Client';
+const String desktopClientValue = 'desktop';
+
 /// The per-request headers a connection is opened with.
 ///
 /// `Accept` naming both types is mandatory — the server answers 406 without
 /// it, and tool results genuinely do arrive as SSE frames rather than JSON.
 /// A null [bearer] means the local dev server, which wants no `Authorization`
-/// header at all: sending an empty one is worse than sending none.
+/// header at all: sending an empty one is worse than sending none. The
+/// [desktopClientHeader] rides on every request, bearer or not.
 @visibleForTesting
 Map<String, dynamic> buildRequestInit(String? bearer) => {
       'headers': <String, dynamic>{
         'Accept': 'application/json, text/event-stream',
+        desktopClientHeader: desktopClientValue,
         if (bearer != null && bearer.isNotEmpty) 'Authorization': 'Bearer $bearer',
       },
     };

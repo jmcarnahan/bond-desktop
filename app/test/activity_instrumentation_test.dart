@@ -68,10 +68,20 @@ class FakeMail implements MailBackend {
   Future<Map<String, dynamic>> createReplyDraft(String messageId) async => {};
 
   @override
+  Future<Map<String, dynamic>> createDraft({
+    required List<String> to,
+    List<String> cc = const [],
+    required String subject,
+    required String body,
+  }) async =>
+      {};
+
+  @override
   Future<void> updateDraftBody(String draftId, String text) async {}
 
   @override
-  Future<void> sendDraft(String draftId) async {}
+  Future<SentDraft> sendDraft(String draftId) async =>
+      SentDraft(draftId: draftId);
 
   @override
   Future<List<String>> markRead(
@@ -128,6 +138,10 @@ class FakeTeams implements TeamsBackend {
 
   @override
   Future<Map<String, dynamic>> sendChatMessage(String chatId, String text) =>
+      throw UnimplementedError();
+
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) =>
       throw UnimplementedError();
 }
 

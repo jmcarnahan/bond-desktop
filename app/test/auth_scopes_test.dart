@@ -172,14 +172,41 @@ void main() {
           reason: 'the core set wants Mail.Read, and this grant covers it');
     });
 
-    test('and nothing else subsumes anything', () async {
+    test('the wider directory reads satisfy User.ReadBasic.All', () async {
+      // The same hierarchy one step further out, and the case that actually
+      // turns up: an admin grants User.Read.All (or Directory.Read.All)
+      // rather than the basic name this app asks for.
+      store.values['granted_scopes'] =
+          '$coreGrant https://graph.microsoft.com/User.Read.All';
+      expect(
+        await GraphAuth(store: store).hasScope('user.readbasic.all'),
+        isTrue,
+      );
+
+      store.values['granted_scopes'] =
+          '$coreGrant https://graph.microsoft.com/Directory.Read.All';
+      expect(
+        await GraphAuth(store: store).hasScope('user.readbasic.all'),
+        isTrue,
+      );
+    });
+
+    test('and no pair runs the other way', () async {
       store.values['granted_scopes'] = fullGrant;
       final auth = GraphAuth(store: store);
 
-      // Mail.Read does NOT stand in for Mail.ReadWrite, in either direction
-      // beyond the one pair above.
+      // Mail.Read does NOT stand in for Mail.ReadWrite: the map is read
+      // downward only, and nothing outside its entries subsumes anything.
       store.values['granted_scopes'] = coreGrant;
       expect(await auth.hasScope('mail.readwrite'), isFalse);
+
+      // Nor does the basic directory read stand in for the wider one.
+      store.values['granted_scopes'] =
+          '$coreGrant https://graph.microsoft.com/User.ReadBasic.All';
+      expect(
+        await GraphAuth(store: store).hasScope('user.read.all'),
+        isFalse,
+      );
     });
   });
 

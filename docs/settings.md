@@ -203,7 +203,7 @@ in `app_providers.dart` when the clients are constructed, and there is no
 per-call router anything can interrogate at runtime, so `pipelineStages` in
 `app/lib/services/llm/model_slots.dart` is the app telling the user what its own
 wiring is. `model_slots_test.dart` is what keeps that table honest against the
-handler list. Ten rows: four on the fast slot, five on prose, one on embeddings.
+handler list. Eleven rows: five on the fast slot, five on prose, one on embeddings.
 
 **Two editors, one per switchable slot.** `ModelSlotEditor`
 (`app/lib/widgets/model_slot_editor.dart`) is prop-only: it takes the effective
@@ -328,6 +328,26 @@ pair still up, because the user is about to press it again.
 It is wired to `_signOut`, the rail's own Sign out: the whole wipe. It is
 deliberately **not** `onSignOutOfServer`, which ends one server's session and
 keeps this device's copy of the mail.
+
+**Clear attachment cache** sits above it and takes the same two clicks, for the
+same reason: it is a smaller loss — files that come back on the next click — but
+two destructive buttons on one section that behaved differently would teach
+nobody anything. The line above it says what the cache is for and how much of
+this disk it is using; `formatBytes` renders zero as no characters at all, so an
+empty cache says **Empty.** rather than `0 B`, and a size nobody has answered yet
+says nothing. Failure renders as an `InlineAlert` with the pair still up, and a
+successful clear re-reads the size so the line agrees with what just happened.
+
+The store itself is content-addressed, under
+`<Application Support>/attachments/<sha[0:2]>/<sha>.<ext>`: the same file
+forwarded three times is one file on disk, and it keeps the name's extension
+because macOS decides what an unknown file is by its name. Clearing it here
+empties the tree and drops the four path columns off every `attachments` row
+(`MessageStore.clearAttachmentBlobs`) — the names, the extracted words, the
+digests and the pins all survive, because none of them is a copy of the file.
+The same tree is emptied by **Sign out and clear local data** and by an identity
+wipe (`IdentityGuard`), which starts the delete rather than waiting on it: the
+rows pointing at those files are already gone, so nothing can reach one.
 
 ## About
 

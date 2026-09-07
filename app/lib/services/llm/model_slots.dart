@@ -119,6 +119,12 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.fast,
   ),
   PipelineStageInfo(
+    id: 'attachment_digest',
+    label: 'Attachment digest',
+    description: 'What an attached document is, and what it asks for',
+    slot: ModelSlot.fast,
+  ),
+  PipelineStageInfo(
     id: 'storyline_membership',
     label: 'Storyline membership',
     description: 'Whether a thread belongs to a storyline',

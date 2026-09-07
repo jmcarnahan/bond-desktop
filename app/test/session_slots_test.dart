@@ -155,6 +155,10 @@ class _FakeTeams implements TeamsBackend {
   @override
   Future<Map<String, dynamic>> sendChatMessage(String chatId, String text) =>
       throw UnimplementedError();
+
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) =>
+      throw UnimplementedError();
 }
 
 /// Two endpoints that resolve without DNS and refuse instantly. The widget
@@ -181,7 +185,7 @@ MockClient _openServer() => MockClient((request) async =>
 McpAuthSession _sessionAt(String url, TokenStore store) => McpAuthSession(
       mcpUrl: Uri.parse(url),
       mcpClient: _FakeBondMcpClient({
-        'get_profile_json': {'error': 'not_connected', 'connect_url': null},
+        'get_profile': {'error': 'not_connected', 'connect_url': null},
       }),
       httpClient: _openServer(),
       store: store,

@@ -1,3 +1,5 @@
+import 'backend_types.dart';
+
 /// The Teams chats this app reads and writes: the chat list, one chat's
 /// members, a chat's messages since a cursor, the read viewpoint, and a reply.
 /// Nothing here touches sqlite — `TeamsSync` and `DraftNotifier` own the writes.
@@ -58,4 +60,20 @@ abstract class TeamsBackend {
   /// the one [chatMessagesSince] hands back, so the row built from it is the
   /// row a sync would have built.
   Future<Map<String, dynamic>> sendChatMessage(String chatId, String text);
+
+  /// Opens the chat holding exactly [userIds] plus the signed-in user, and
+  /// answers with its id. Graph ids, not addresses.
+  ///
+  /// The two cases are NOT the same promise, which is what [EnsuredChat.isGroup]
+  /// is for. Asking twice for a 1:1 returns the same chat, so a retry is free.
+  /// Asking twice for a group CREATES A SECOND GROUP — so a caller retrying a
+  /// send that failed after the chat opened must reuse the id it already has,
+  /// and never call this again.
+  ///
+  /// [topic] names a group chat and is ignored for a 1:1, which Teams does not
+  /// let anybody name.
+  ///
+  /// **Not to be called from a timer**, like everything else here — and more
+  /// so: this one creates something.
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic});
 }

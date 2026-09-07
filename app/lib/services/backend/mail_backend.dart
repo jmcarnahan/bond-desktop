@@ -34,7 +34,28 @@ abstract class MailBackend {
   /// of them are this app's to reconstruct. The response must carry `id` to
   /// fill in and send, and `webLink` to hand to Outlook when this app may only
   /// save drafts.
+  ///
+  /// It also carries `conversationId` and `internetMessageId`, both nullable:
+  /// the ids the draft will keep once it is sent, which is what lets a caller
+  /// thread and reconcile the reply without waiting for Sent Items.
   Future<Map<String, dynamic>> createReplyDraft(String messageId);
+
+  /// Creates a NEW draft — no message being replied to — and answers with the
+  /// same keys [createReplyDraft] does: `id`, `webLink`, `conversationId`,
+  /// `internetMessageId`.
+  ///
+  /// A draft rather than a one-shot send, and the shared key set is why: the
+  /// composer's whole capability ladder already runs on these fields, so an
+  /// account that may save drafts but not send them hands this `webLink` to
+  /// Outlook exactly as a reply does, and the local echo row a send writes is
+  /// built from the same ids. [body] is plain text; the composer holds what
+  /// somebody typed and sending it as HTML would turn a typed `<` into markup.
+  Future<Map<String, dynamic>> createDraft({
+    required List<String> to,
+    List<String> cc = const [],
+    required String subject,
+    required String body,
+  });
 
   /// Replaces a draft's body with [text].
   ///
@@ -42,9 +63,15 @@ abstract class MailBackend {
   /// contents as HTML would turn every `<` a person typed into markup.
   Future<void> updateDraftBody(String draftId, String text);
 
-  /// Sends an existing draft. Nothing in this app calls this except a Send
-  /// button the user pressed.
-  Future<void> sendDraft(String draftId);
+  /// Sends an existing draft, and answers with what went out. Nothing in this
+  /// app calls this except a Send button the user pressed.
+  ///
+  /// The return value is not a convenience: a sent draft is gone from Drafts
+  /// and not yet in Sent Items, so unless the fields come back HERE there is
+  /// nothing to write a local row from and the reply is invisible until the
+  /// next sync. [SentDraft.internetMessageId] in particular is what the Sent
+  /// Items copy is later matched against.
+  Future<SentDraft> sendDraft(String draftId);
 
   /// Marks messages read (or unread) on the server.
   ///

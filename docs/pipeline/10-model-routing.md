@@ -21,7 +21,8 @@ config in `local.mk` or a setting, not code (see `docs/model-bakeoff.md`).
 llama-server ignores the model name field, but MLX-style runtimes route on it
 — which is why each slot carries its own name (`model_slots.dart`).
 
-Assignment: triage, extraction, and storyline membership-confirm get the fast
+Assignment: triage, extraction, the attachment digest
+(`attachment_digest`), and storyline membership-confirm get the fast
 client; storyline naming (`storyline_name`), storyline refresh
 (`storyline_refresh`), storyline recap (`storyline_recap`), reply decision, and
 drafting get the 27B. Changing which slot serves a task is one line in

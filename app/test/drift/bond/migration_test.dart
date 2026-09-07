@@ -785,6 +785,73 @@ void main() {
     expect((await messageOf('m-news'))['gate_override'], 'user');
   });
 
+  test('v12 to v13 adds the three attachment tables, all empty', () async {
+    final schema = await verifier.schemaAt(12);
+    schema.rawDatabase.execute("""
+      INSERT INTO messages (source, source_message_id, conversation_key,
+        direction, subject, triage_status, has_attachments, created_at,
+        updated_at)
+      VALUES ('email', 'm-lease', 'c1', 'inbound', 'Lease addendum',
+        'triaged', 1, 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 13);
+    addTearDown(db.close);
+
+    // No backfill, and that is the design rather than an omission: an
+    // attachment is discovered by the detail fetch, so a stored message
+    // re-learns what came with it the next time its body is fetched. A
+    // migration guessing at history would be inventing rows.
+    for (final table in const [
+      'attachments',
+      'attachment_text',
+      'attachment_chunks',
+    ]) {
+      final rows = await db.customSelect('SELECT * FROM $table').get();
+      expect(rows, isEmpty, reason: table);
+    }
+
+    // The flag the message already carried survives: this step reads nothing.
+    final message = await db
+        .customSelect(
+            'SELECT * FROM messages WHERE source_message_id = ?',
+            variables: [Variable('m-lease')])
+        .getSingle();
+    expect(message.data['has_attachments'], 1);
+
+    // And the tables take a write, which a STRICT one would reject if the step
+    // had declared a column as the wrong type.
+    await db.customStatement(
+      "INSERT INTO attachments (source, source_message_id, attachment_id, "
+      "ordinal, kind, name, size, is_inline, created_at, updated_at) "
+      "VALUES ('email', 'm-lease', 'att-1', 0, 'file', 'addendum.pdf', "
+      "184320, 0, 't', 't')",
+    );
+    final stored = await db
+        .customSelect('SELECT * FROM attachments')
+        .getSingle();
+    expect(stored.data['text_status'], 'pending');
+    expect(stored.data['digest_status'], 'pending');
+    expect(stored.data['pinned_storyline_id'], null);
+  });
+
+  test('v13 migration creates no vec table for the chunks either', () async {
+    // The same guard the v8 test gives, for the second index: a `vec0` virtual
+    // table created inside a step needs an extension that may not be loaded,
+    // and `migrateAndValidate` diffs the whole of `sqlite_master`.
+    final schema = await verifier.schemaAt(12);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 13);
+    addTearDown(db.close);
+
+    final vecTables = await db
+        .customSelect(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'vec_%'")
+        .get();
+    expect(vecTables, isEmpty);
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

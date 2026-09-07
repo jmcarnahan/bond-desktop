@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:io' show Directory;
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
 // Storyline, …) whose names collide with the app's models.
@@ -10,24 +14,35 @@ import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
 import '../services/activity_log.dart';
 import '../services/ai_worker.dart';
+import '../services/attachments/attachment_bytes.dart';
+import '../services/attachments/attachment_cache.dart';
+import '../services/attachments/attachment_digest_handler.dart';
+import '../services/attachments/attachment_retriever.dart';
+import '../services/attachments/attachment_text_handler.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
+import '../services/backend/attachment_backend.dart';
 import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
+import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
 import '../services/extract_handler.dart';
+import '../services/graph_attachment_backend.dart';
 import '../services/graph_auth.dart';
 import '../services/graph_mail.dart';
+import '../services/graph_people.dart';
 import '../services/graph_teams.dart';
 import '../services/identity_guard.dart';
 import '../services/llm/embeddings_client.dart';
 import '../services/llm/llm_client.dart';
 import '../services/mcp/bond_mcp_client.dart';
+import '../services/mcp/mcp_attachment_backend.dart';
 import '../services/mcp/mcp_auth.dart';
 import '../services/mcp/mcp_mail_backend.dart';
+import '../services/mcp/mcp_people_backend.dart';
 import '../services/mcp/mcp_teams_backend.dart';
 import '../services/message_search.dart';
 import '../services/needs_you_handler.dart';
@@ -140,8 +155,29 @@ final messageStoreProvider =
 
 /// Enforces the one-identity-per-database rule at every completed sign-in.
 /// See [IdentityGuard] for why it is a guard rather than a convention.
+///
+/// The attachment cache is cleared alongside the rows, and has to be: it is a
+/// tree of somebody's documents under Application Support, and a wipe that left
+/// it standing would hand the next person to sign in the files whose rows it had
+/// just deleted.
 final identityGuardProvider = Provider<IdentityGuard>(
-  (ref) => IdentityGuard(ref.watch(messageStoreProvider)),
+  (ref) => IdentityGuard(
+    ref.watch(messageStoreProvider),
+    onWipe: () async {
+      // STARTED here, not awaited here. Emptying the cache is a recursive
+      // delete of up to two gigabytes, and the sign-in handover must not sit
+      // behind a disk. It is safe to let it run on: `wipeAll` has already
+      // deleted every row that pointed at those files, so nothing in the app
+      // can reach one — this is hygiene on disk rather than part of the
+      // one-identity invariant, and it reports its own failure.
+      unawaited(
+        ref.read(attachmentCacheProvider).clear().catchError(
+              (Object e) =>
+                  debugPrint('attachment cache not cleared on wipe: $e'),
+            ),
+      );
+    },
+  ),
 );
 
 /// One recorder for the app. It watches ONLY the store, so a backend switch —
@@ -200,6 +236,67 @@ final mailBackendProvider = Provider<MailBackend>((ref) {
       ? GraphMail(ref.watch(graphAuthProvider))
       : McpMailBackend(ref.watch(mcpStackProvider).client);
 });
+
+/// The organization's directory, behind whichever backend is selected.
+///
+/// The same switch as the two above it, and it follows the mode for the same
+/// reason: a session pointed at the Bond server must not be searching Graph
+/// directly with a token it does not hold.
+final peopleBackendProvider = Provider<PeopleBackend>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? GraphPeople(ref.watch(graphAuthProvider))
+      : McpPeopleBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// Attachment words and bytes, from whichever connector the app is on.
+///
+/// The third arm of the backend switch, and the one where the two
+/// implementations are genuinely different: the MCP server carries the document
+/// extractors, so a Word file comes back as text from it and as
+/// `skipped/no_extractor` from Graph. Bytes, inline images and OneDrive
+/// thumbnails are identical on both.
+final attachmentBackendProvider = Provider<AttachmentBackend>((ref) {
+  final mode = ref.watch(appPrefsProvider.select((p) => p.backendMode));
+  return mode == backendModeSdk
+      ? GraphAttachmentBackend(ref.watch(graphAuthProvider))
+      : McpAttachmentBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// Where fetched attachments live on this disk.
+///
+/// The root is a CLOSURE rather than a resolved path because
+/// `getApplicationSupportDirectory` is a platform channel with nobody on the
+/// other end in a widget test: resolved lazily, a screen that never opens an
+/// attachment never calls it. It watches nothing, so a backend switch leaves the
+/// cache — and every file already in it — exactly where it was.
+final attachmentCacheProvider = Provider<AttachmentCache>(
+  (ref) => AttachmentCache(
+    () async => Directory(
+      p.join((await getApplicationSupportDirectory()).path, 'attachments'),
+    ),
+  ),
+);
+
+/// How a PDF's first page becomes a picture — **null by default, deliberately**.
+///
+/// The only engine that can draw one is pdfrx, and pdfium must not be reachable
+/// from a provider build or from any test: `flutter test` has no native library
+/// behind it, and a default that reached for one would make every screen test
+/// that renders an attachment depend on a binary. `main.dart` overrides this at
+/// startup with the real implementation; everything else gets null and simply
+/// has no PDF thumbnail.
+final pdfThumbnailerProvider = Provider<PdfThumbnailer?>((_) => null);
+
+/// What the UI asks for a file: cache first, connector second, row updated.
+final attachmentBytesProvider = Provider<AttachmentBytes>(
+  (ref) => StoreAttachmentBytes(
+    store: ref.watch(messageStoreProvider),
+    backend: ref.watch(attachmentBackendProvider),
+    cache: ref.watch(attachmentCacheProvider),
+    pdfThumbnailer: ref.watch(pdfThumbnailerProvider),
+  ),
+);
 
 /// The operating system's notification centre, as this app reaches it.
 ///
@@ -432,6 +529,19 @@ final messageSearchProvider = Provider<MessageSearch>(
   ),
 );
 
+/// The passages of a thread's documents a reply may quote.
+///
+/// A plain `Provider` for [messageSearchProvider]'s reason and beside it on
+/// purpose: the two are the same pairing of store and embedding client, split
+/// only by scope — search asks the whole mailbox, this one asks a thread and
+/// can never be made to ask more.
+final attachmentRetrieverProvider = Provider<AttachmentRetriever>(
+  (ref) => AttachmentRetriever(
+    ref.watch(messageStoreProvider),
+    ref.watch(embeddingsClientProvider),
+  ),
+);
+
 /// Restoring one gate-dropped message.
 ///
 /// A plain `Provider` for [messageSearchProvider]'s reason: it holds nothing
@@ -458,7 +568,7 @@ final restoreServiceProvider = Provider<RestoreService>(
 ///
 /// Its handlers drain in list order, so the order here is the order the work
 /// happens in.
-final aiWorkerProvider = Provider<AiWorker>((ref) {
+final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
   final storylines = ref.watch(storylineServiceProvider);
   final worker = AiWorker(
     ref.watch(messageStoreProvider),
@@ -510,6 +620,36 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(embeddingsClientProvider),
         activityLog: ref.watch(activityLogProvider),
       ),
+      // Reading the documents, then understanding them — in that order,
+      // because the digest below has nothing to read until the words are
+      // stored. Both sit here, after the message embeddings and ahead of the
+      // storylines, so a recap written later in this same drain can see a
+      // digest that landed at the top of it. Neither is in the notification
+      // settle set: an attachment must never hold up a verdict about the
+      // message it came with.
+      //
+      // The text handler talks to no chat model, so a park here is a park on
+      // the embedding server and it parks only its own kind.
+      AttachmentTextHandler(
+        ref.watch(messageStoreProvider),
+        ref.watch(attachmentBackendProvider),
+        ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
+      ),
+      AttachmentDigestHandler(
+        ref.watch(messageStoreProvider),
+        // Bulk work: the fast server. See [fastLlmClientProvider].
+        ref.watch(fastLlmClientProvider),
+        ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
+        // The worker this handler runs inside, read at CALL time — the same
+        // shape as needs-you's owner lookup. A `watch` here would be a cycle
+        // through the provider being built; a `read` from inside a drain is a
+        // read of a worker that already exists. `pump` on a running drain only
+        // sets a flag and hands back that drain's future, which is why it is
+        // not awaited: see [AttachmentDigestHandler].
+        onRequeue: () => unawaited(ref.read(aiWorkerProvider).pump()),
+      ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
       // around.
@@ -550,6 +690,7 @@ final aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(messageStoreProvider),
         ref.watch(llmClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        attachments: ref.watch(attachmentRetrieverProvider),
         progress: ref.watch(pipelineProgressProvider),
       ),
     ],

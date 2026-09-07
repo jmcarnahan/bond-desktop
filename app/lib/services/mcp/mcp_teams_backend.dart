@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../backend/backend_types.dart';
@@ -69,7 +71,7 @@ class McpTeamsBackend implements TeamsBackend {
     final cached = _myUserId;
     if (cached != null) return cached;
 
-    final profile = await _call('get_profile_json', const {});
+    final profile = await _call('get_profile', const {});
     final id = profile['id'] as String?;
     if (id == null || id.isEmpty) {
       throw const GraphTeamsException(
@@ -94,7 +96,7 @@ class McpTeamsBackend implements TeamsBackend {
 
     for (var page = 0; page < maxPages && cursor != null; page++) {
       await _throttleChatList();
-      final result = await _call('list_chats_page', {
+      final result = await _call('list_chats', {
         'cursor': cursor,
         'top': _pageSize,
       });
@@ -115,7 +117,7 @@ class McpTeamsBackend implements TeamsBackend {
   @override
   Future<List<Map<String, dynamic>>> chatMembers(String chatId) async {
     await _throttleChat(chatId);
-    final result = await _call('get_chat_members_json', {'chat_id': chatId});
+    final result = await _call('get_chat_members', {'chat_id': chatId});
     final raw = result['members'];
     return [
       for (final member in raw is List ? raw : const [])
@@ -157,10 +159,16 @@ class McpTeamsBackend implements TeamsBackend {
 
     for (var page = 0; page < pages && cursor != null; page++) {
       await _throttleChat(chatId);
-      final result = await _call('list_chat_messages_page', {
+      // Page mode on every call, cursor or not. Without the option
+      // `read_teams_messages` is a different tool — it walks back to `since`
+      // on creation time — and this sync needs one page, newest first, with
+      // `since` on last-modified so an edited message resurfaces. A cursor
+      // implies the mode; saying it is cheaper than explaining the implication.
+      final result = await _call('read_teams_messages', {
         'chat_id': chatId,
         'since': firstRun ? '' : sinceIso,
         'cursor': cursor,
+        'options': jsonEncode({'page': true}),
       });
       final raw = result['messages'];
       final reshaped = [
@@ -199,7 +207,7 @@ class McpTeamsBackend implements TeamsBackend {
   @override
   Future<void> markChatRead(String chatId) async {
     await _throttleChat(chatId);
-    final result = await _call('mark_chat_read_json', {'chat_id': chatId});
+    final result = await _call('mark_chat_read', {'chat_id': chatId});
     if (result['ok'] != true) {
       throw GraphTeamsException(
         'Could not mark a Teams chat read: ${result['error'] ?? 'unknown'}',
@@ -223,17 +231,70 @@ class McpTeamsBackend implements TeamsBackend {
     String text,
   ) async {
     await _throttleChat(chatId);
-    final result = await _call('send_chat_message_json', {
+    final result = await _call('send_teams_message', {
       'chat_id': chatId,
-      'text': text,
+      'message': text,
     });
     final message = result['message'];
     if (message is! Map) {
+      // The server names a word and, when it has one, a sentence; both belong
+      // on the banner, because the word alone (`invalid_arguments`) does not
+      // tell the person what to change.
+      final reason = result['reason'];
       throw GraphTeamsException(
-        'Could not send your Teams message: ${result['error'] ?? 'unknown'}',
+        'Could not send your Teams message: ${result['error'] ?? 'unknown'}'
+        '${reason is String && reason.isNotEmpty ? ' — $reason' : ''}',
       );
     }
     return _messageShape(message);
+  }
+
+  /// Opens the chat holding exactly [userIds] plus the signed-in user.
+  ///
+  /// Every one of the server's permanent errors gets its own sentence here,
+  /// because each names a different thing the person in front of the screen
+  /// can do about it — pick somebody else, pick anybody, sign in again, or
+  /// give up on Teams for this account. The shared [_call] special-cases only
+  /// `not_connected`, so an unmapped error would otherwise arrive as a result
+  /// with no `chat_id` in it and be sent to as a null chat.
+  ///
+  /// The empty list is refused WITHOUT a call for the same reason a blank
+  /// directory query is: the answer is already known, and the round trip would
+  /// only spend a request to be told so.
+  @override
+  Future<EnsuredChat> ensureChat(List<String> userIds, {String? topic}) async {
+    if (userIds.isEmpty) {
+      throw const GraphTeamsException('Pick at least one person.');
+    }
+
+    final result = await _call('ensure_chat', {
+      'user_ids': userIds.join(','),
+      'topic': topic ?? '',
+    });
+
+    final error = result['error'];
+    if (error != null) {
+      throw GraphTeamsException(switch (error) {
+        'invalid_members' =>
+          'One of the people picked is not a Teams user in this organization.',
+        'no_members' => 'Pick at least one person.',
+        'no_identity' =>
+          'Your Teams identity could not be resolved. Sign in again.',
+        'teams_unavailable' => 'Teams is not available for this account.',
+        _ => 'Could not open a Teams chat: $error',
+      });
+    }
+
+    final chatId = result['chat_id'] as String?;
+    if (chatId == null || chatId.isEmpty) {
+      throw const GraphTeamsException(
+        'The Bond server opened a chat but returned no id for it.',
+      );
+    }
+    return EnsuredChat(
+      chatId: chatId,
+      isGroup: result['chat_type'] == 'group',
+    );
   }
 
   /// Whether this page's oldest message is at or before the cursor.
@@ -312,6 +373,19 @@ class McpTeamsBackend implements TeamsBackend {
             'user': {'id': userId, 'displayName': message['from_user_display']},
           },
       },
+      // The one key NOT re-nested into Graph's shape, and deliberately: the
+      // server's flat list is strictly richer than Graph's, because it has
+      // already merged the body's inline images into it. `GraphTeams` converts
+      // INTO this shape rather than this converting out of it.
+      //
+      // Absent stays absent, exactly like `mentions`: a server that does not
+      // send attachments yet must read as "none", which is what the parser
+      // already answers for a missing key.
+      if (message['attachments'] case final List attachments)
+        'attachments': [
+          for (final entry in attachments)
+            if (entry is Map) Map<String, Object?>.from(entry),
+        ],
       if (message['mentioned_user_ids'] case final List mentionedUserIds)
         'mentions': [
           for (final id in mentionedUserIds)

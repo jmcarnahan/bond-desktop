@@ -68,11 +68,20 @@ class _FakeMail implements MailBackend {
       throw UnimplementedError();
 
   @override
+  Future<Map<String, dynamic>> createDraft({
+    required List<String> to,
+    List<String> cc = const [],
+    required String subject,
+    required String body,
+  }) =>
+      throw UnimplementedError();
+
+  @override
   Future<void> updateDraftBody(String draftId, String text) =>
       throw UnimplementedError();
 
   @override
-  Future<void> sendDraft(String draftId) => throw UnimplementedError();
+  Future<SentDraft> sendDraft(String draftId) => throw UnimplementedError();
 }
 
 /// A [TeamsBackend] that records every chat it was told to mark read.
