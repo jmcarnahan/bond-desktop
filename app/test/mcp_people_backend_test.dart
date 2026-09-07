@@ -50,19 +50,19 @@ Map<String, dynamic> _people(List<Object> people) => {'people': people};
 void main() {
   group('the search', () {
     test('sends the trimmed query and the cap', () async {
-      final mcp = _FakeMcp({'search_people_json': [_people(const [])]});
+      final mcp = _FakeMcp({'search_people': [_people(const [])]});
 
       await McpPeopleBackend(mcp).searchPeople('  sarah  ', top: 5);
 
-      expect(mcp.argsFor('search_people_json'), {'query': 'sarah', 'top': 5});
+      expect(mcp.argsFor('search_people'), {'query': 'sarah', 'top': 5});
     });
 
     test('clamps a top the server would refuse', () async {
-      final mcp = _FakeMcp({'search_people_json': [_people(const [])]});
+      final mcp = _FakeMcp({'search_people': [_people(const [])]});
 
       await McpPeopleBackend(mcp).searchPeople('sarah', top: 500);
 
-      expect(mcp.argsFor('search_people_json')['top'], 50);
+      expect(mcp.argsFor('search_people')['top'], 50);
     });
 
     test('makes no call at all for a blank query', () async {
@@ -76,7 +76,7 @@ void main() {
     test('maps the wire onto the model the Graph twin also produces', () async {
       final people = await McpPeopleBackend(
         _FakeMcp({
-          'search_people_json': [
+          'search_people': [
             _people(const [
               {
                 'id': 'u1',
@@ -104,7 +104,7 @@ void main() {
       // empty row. Neither is worth putting in front of somebody.
       final people = await McpPeopleBackend(
         _FakeMcp({
-          'search_people_json': [
+          'search_people': [
             _people(const [
               {'display_name': 'No id here'},
               {'id': 'u2'},
@@ -126,7 +126,7 @@ void main() {
       await expectLater(
         McpPeopleBackend(
           _FakeMcp({
-            'search_people_json': [
+            'search_people': [
               {'error': 'directory_scope_missing'},
             ],
           }),
@@ -140,7 +140,7 @@ void main() {
       await expectLater(
         McpPeopleBackend(
           _FakeMcp({
-            'search_people_json': [
+            'search_people': [
               {'error': 'something_else'},
             ],
           }),
@@ -155,7 +155,7 @@ void main() {
       await expectLater(
         McpPeopleBackend(
           _FakeMcp({
-            'search_people_json': [
+            'search_people': [
               const McpToolException('Graph API error 429 (TooManyRequests)'),
             ],
           }),
@@ -169,7 +169,7 @@ void main() {
       await expectLater(
         McpPeopleBackend(
           _FakeMcp({
-            'search_people_json': [
+            'search_people': [
               const McpTransportException('connection closed'),
             ],
           }),
@@ -185,7 +185,7 @@ void main() {
       await expectLater(
         McpPeopleBackend(
           _FakeMcp({
-            'search_people_json': [
+            'search_people': [
               {'error': 'not_connected'},
             ],
           }),
@@ -198,7 +198,7 @@ void main() {
       await expectLater(
         McpPeopleBackend(
           _FakeMcp({
-            'search_people_json': [const NotSignedIn()],
+            'search_people': [const NotSignedIn()],
           }),
         ).searchPeople('sarah'),
         throwsA(isA<NotSignedIn>()),

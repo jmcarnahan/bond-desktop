@@ -21,10 +21,10 @@ import 'bond_mcp_client.dart';
 ///
 /// | ref | tool |
 /// |---|---|
-/// | mail `file`/`item`/`unknown` | `get_mail_attachment_json` |
-/// | mail `reference`, teams `file` text | `inspect_file_json`, by url |
-/// | mail `reference` bytes/thumbnail | `inspect_file`, by url |
-/// | teams `file`/`image` bytes | `get_chat_attachment_json` |
+/// | mail `file`/`item`/`unknown` | `get_mail_attachment`, `mode: text`/`bytes` |
+/// | mail `reference`, teams `file` text | `inspect_file`, by url, `mode: text` |
+/// | mail `reference` bytes/thumbnail | `inspect_file`, by url, `mode: bytes`/`thumbnail` |
+/// | teams `file`/`image` bytes/thumbnail | `get_teams_attachment`, `mode: bytes`/`thumbnail` |
 ///
 /// Failures follow `mcp_mail_backend.dart`'s policy exactly, including which
 /// banner they travel to: a mail attachment's transport failure is a
@@ -70,8 +70,8 @@ class McpAttachmentBackend implements AttachmentBackend {
 
   McpAttachmentBackend(this._mcp);
 
-  /// The server's own bytes-mode ceiling: `get_mail_attachment_json` and
-  /// `get_chat_attachment_json` both refuse above ten megabytes, because the
+  /// The server's own bytes-mode ceiling: `get_mail_attachment` and
+  /// `get_teams_attachment` both refuse above ten megabytes, because the
   /// payload comes back base64 inside one JSON reply and there is nowhere to
   /// put a larger one. A chunked bytes mode on bond-mcps would raise this,
   /// and is the only thing that would.
@@ -99,9 +99,12 @@ class McpAttachmentBackend implements AttachmentBackend {
         // chips on one fact.
         return const AttachmentText.skipped('reference_no_url');
       }
-      final result = await _call(ref, 'inspect_file_json', {
+      // `mode` and not `read_content`: an explicit mode wins over that older
+      // flag on the server, and the bytes and thumbnail branch of [fetchBytes]
+      // already speaks `mode:` — one tool, one argument style.
+      final result = await _call(ref, 'inspect_file', {
         'url': url,
-        'read_content': 'true',
+        'mode': 'text',
       });
       // The inspector is the only text call that describes the FILE: a row
       // reached by url was born knowing a name and an address and nothing
@@ -109,13 +112,23 @@ class McpAttachmentBackend implements AttachmentBackend {
       return _textFrom(result, learnsFile: true);
     }
 
-    final result = await _call(ref, 'get_mail_attachment_json', {
+    final result = await _call(ref, 'get_mail_attachment', {
       'message_id': ref.messageId,
       'attachment_id': ref.attachmentId,
       'mode': 'text',
     });
     return _textFrom(result);
   }
+
+  /// The mode pair every by-id or by-url fetch speaks: bytes, or a thumbnail
+  /// whose size rides `options` as JSON. One helper for the two tools that
+  /// take it (`inspect_file`, `get_teams_attachment`) so a size can never be
+  /// sent as a flat parameter at one site and as JSON at the other.
+  static Map<String, Object?> _modeArgs(String thumbnail) => {
+        'mode': thumbnail.isEmpty ? 'bytes' : 'thumbnail',
+        if (thumbnail.isNotEmpty)
+          'options': jsonEncode({'thumbnail': thumbnail}),
+      };
 
   @override
   Future<AttachmentBytesResult> fetchBytes(
@@ -126,9 +139,9 @@ class McpAttachmentBackend implements AttachmentBackend {
 
     // A mail link IS a file — it just lives in OneDrive or SharePoint rather
     // than on the message — so it is fetched by its url like a chat's shared
-    // file. `inspect_file` by its NEW name, because the modes exist only
-    // there: the `inspect_file_json` alias the text path above still calls
-    // keeps its old four arguments, and Round 3 renames the rest.
+    // file. The same `inspect_file` the text path above calls, one mode over:
+    // every mode of it answers the file's name, size and type, and only the
+    // payload key differs.
     if (ref.kind == 'reference') {
       final url = ref.contentUrl;
       if (url == null || url.isEmpty) {
@@ -136,14 +149,16 @@ class McpAttachmentBackend implements AttachmentBackend {
       }
       result = await _call(ref, 'inspect_file', {
         'url': url,
-        'mode': thumbnail.isEmpty ? 'bytes' : 'thumbnail',
-        if (thumbnail.isNotEmpty) 'options': jsonEncode({'thumbnail': thumbnail}),
+        ..._modeArgs(thumbnail),
       });
     } else if (ref.source == 'email') {
       if (!const {'file', 'item', 'unknown'}.contains(ref.kind)) {
         throw AttachmentUnavailable('kind_${ref.kind}');
       }
-      result = await _call(ref, 'get_mail_attachment_json', {
+      // `mode` is load-bearing here: the published tool defaults to text, so
+      // a call that forgot it would get extracted words where it wanted
+      // base64, and no error to say so.
+      result = await _call(ref, 'get_mail_attachment', {
         'message_id': ref.messageId,
         'attachment_id': ref.attachmentId,
         'mode': 'bytes',
@@ -160,11 +175,11 @@ class McpAttachmentBackend implements AttachmentBackend {
       if (chatId == null || chatId.isEmpty) {
         throw const AttachmentUnavailable('no_chat');
       }
-      result = await _call(ref, 'get_chat_attachment_json', {
-        'chat_id': chatId,
+      result = await _call(ref, 'get_teams_attachment', {
         'message_id': ref.messageId,
         'attachment_id': ref.attachmentId,
-        'thumbnail': thumbnail,
+        'chat_id': chatId,
+        ..._modeArgs(thumbnail),
       });
     }
 
@@ -213,7 +228,7 @@ class McpAttachmentBackend implements AttachmentBackend {
   ///
   /// [learnsFile] is true only for the inspector: `inspect_file`'s `size` and
   /// `content_type` describe the file itself, whereas
-  /// `get_mail_attachment_json`'s `size` is what the server moved to answer
+  /// `get_mail_attachment`'s `size` is what the server moved to answer
   /// and its type, when it states one, is the extractor's — and a mail
   /// attachment already knew both from its listing.
   static AttachmentText _textFrom(

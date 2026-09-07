@@ -185,7 +185,7 @@ MockClient _openServer() => MockClient((request) async =>
 McpAuthSession _sessionAt(String url, TokenStore store) => McpAuthSession(
       mcpUrl: Uri.parse(url),
       mcpClient: _FakeBondMcpClient({
-        'get_profile_json': {'error': 'not_connected', 'connect_url': null},
+        'get_profile': {'error': 'not_connected', 'connect_url': null},
       }),
       httpClient: _openServer(),
       store: store,

@@ -60,7 +60,7 @@ class McpMailBackend implements MailBackend {
     String? link,
     String? minReceivedIso,
   }) async {
-    final result = await _call('list_mail_delta', {
+    final result = await _call('sync_mail', {
       'folder': folder,
       'cursor': link ?? '',
       'min_received': minReceivedIso ?? '',
@@ -92,7 +92,20 @@ class McpMailBackend implements MailBackend {
   /// empty header is not the same claim as an absent one.
   @override
   Future<Map<String, dynamic>> getMessageDetail(String id) async {
-    final result = await _call('get_mail_detail', {'message_id': id});
+    final result = await _call('read_email', {'message_id': id});
+
+    // `external_sender` is the one permanent refusal this tool can answer with
+    // as data: the sender policy hides this message, and only this message.
+    // It is thrown as a 403 rather than a new exception type because the seam
+    // is shared with the Graph SDK backend, whose detail fetch answers a real
+    // 403 for a message the token may not read, and `SyncService` already
+    // treats that status as "this one message is refused; the rest of the
+    // thread must not pay for it".
+    final error = result['error'];
+    if (error is String && error.isNotEmpty) {
+      throw GraphMailException('The server refused this message: $error', 403);
+    }
+
     final headers = result['headers'];
     final attachments = result['attachments'];
     return {
@@ -131,14 +144,28 @@ class McpMailBackend implements MailBackend {
   /// `conversationId` and `internetMessageId` are renamed off the wire for the
   /// same reason `webLink` is: the callers read Graph's own key names, and a
   /// snake_case key would simply be absent to them.
+  ///
+  /// The guard on the way out is the one [createDraft] has, and it is here for
+  /// the same reason: `manage_draft` answers a refusal — `external_sender`, an
+  /// argument it could not read — as an ordinary result dict rather than an
+  /// exception, and a reply draft carrying a null id is the same disaster as a
+  /// new one, since the caller is about to fill in a body and send it.
   @override
   Future<Map<String, dynamic>> createReplyDraft(String messageId) async {
-    final result = await _call('create_reply_draft_json', {
+    final result = await _call('manage_draft', {
+      'action': 'reply',
       'message_id': messageId,
       'timezone': DateTime.now().timeZoneName,
     });
+    final id = result['id'] as String?;
+    if (result['error'] != null || id == null || id.isEmpty) {
+      throw GraphMailException(
+        'Microsoft Graph did not create the reply draft: '
+        '${result['error'] ?? 'unknown'}',
+      );
+    }
     return {
-      'id': result['id'],
+      'id': id,
       'webLink': result['web_link'],
       'conversationId': result['conversation_id'],
       'internetMessageId': result['internet_message_id'],
@@ -162,11 +189,14 @@ class McpMailBackend implements MailBackend {
     required String subject,
     required String body,
   }) async {
-    final result = await _call('create_draft_json', {
+    final result = await _call('manage_draft', {
+      'action': 'create',
       'to': to.join(','),
       'cc': cc.join(','),
       'subject': subject,
-      'body': body,
+      // The published tool calls the body `text`; the seam goes on calling it
+      // `body`, because that is the word both backends' callers use.
+      'text': body,
     });
     final id = result['id'] as String?;
     if (result['error'] != null || id == null || id.isEmpty) {
@@ -183,9 +213,25 @@ class McpMailBackend implements MailBackend {
     };
   }
 
+  /// Fills in the draft's body, and reads the verdict rather than discarding
+  /// it.
+  ///
+  /// The tool reports a refusal as an ordinary result dict, so a failed update
+  /// is silent unless someone looks. What follows this call is a send, and a
+  /// send after a silently failed update ships the empty draft.
   @override
   Future<void> updateDraftBody(String draftId, String text) async {
-    await _call('update_draft_body', {'draft_id': draftId, 'text': text});
+    final result = await _call('manage_draft', {
+      'action': 'update_body',
+      'draft_id': draftId,
+      'text': text,
+    });
+    if (result['ok'] != true) {
+      throw GraphMailException(
+        'Microsoft Graph did not update the draft: '
+        '${result['error'] ?? 'unknown'}',
+      );
+    }
   }
 
   /// Sends the draft and reshapes what the server says went out.
@@ -197,7 +243,10 @@ class McpMailBackend implements MailBackend {
   /// exception to catch — only this test.
   @override
   Future<SentDraft> sendDraft(String draftId) async {
-    final result = await _call('send_draft', {'draft_id': draftId});
+    final result = await _call('manage_draft', {
+      'action': 'send',
+      'draft_id': draftId,
+    });
     if (result['ok'] != true) {
       throw GraphMailException(
         'Microsoft Graph did not confirm the send: '
@@ -255,7 +304,7 @@ class McpMailBackend implements MailBackend {
     List<String> messageIds, {
     bool isRead = true,
   }) async {
-    final result = await _call('mark_mail_read_json', {
+    final result = await _call('mark_mail_read', {
       'message_ids': jsonEncode(messageIds),
       'is_read': isRead ? 'true' : 'false',
     });

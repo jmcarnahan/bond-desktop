@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../backend/backend_types.dart';
@@ -69,7 +71,7 @@ class McpTeamsBackend implements TeamsBackend {
     final cached = _myUserId;
     if (cached != null) return cached;
 
-    final profile = await _call('get_profile_json', const {});
+    final profile = await _call('get_profile', const {});
     final id = profile['id'] as String?;
     if (id == null || id.isEmpty) {
       throw const GraphTeamsException(
@@ -94,7 +96,7 @@ class McpTeamsBackend implements TeamsBackend {
 
     for (var page = 0; page < maxPages && cursor != null; page++) {
       await _throttleChatList();
-      final result = await _call('list_chats_page', {
+      final result = await _call('list_chats', {
         'cursor': cursor,
         'top': _pageSize,
       });
@@ -115,7 +117,7 @@ class McpTeamsBackend implements TeamsBackend {
   @override
   Future<List<Map<String, dynamic>>> chatMembers(String chatId) async {
     await _throttleChat(chatId);
-    final result = await _call('get_chat_members_json', {'chat_id': chatId});
+    final result = await _call('get_chat_members', {'chat_id': chatId});
     final raw = result['members'];
     return [
       for (final member in raw is List ? raw : const [])
@@ -155,10 +157,16 @@ class McpTeamsBackend implements TeamsBackend {
 
     for (var page = 0; page < pages && cursor != null; page++) {
       await _throttleChat(chatId);
-      final result = await _call('list_chat_messages_page', {
+      // Page mode on every call, cursor or not. Without the option
+      // `read_teams_messages` is a different tool — it walks back to `since`
+      // on creation time — and this sync needs one page, newest first, with
+      // `since` on last-modified so an edited message resurfaces. A cursor
+      // implies the mode; saying it is cheaper than explaining the implication.
+      final result = await _call('read_teams_messages', {
         'chat_id': chatId,
         'since': firstRun ? '' : sinceIso,
         'cursor': cursor,
+        'options': jsonEncode({'page': true}),
       });
       final raw = result['messages'];
       final reshaped = [
@@ -197,7 +205,7 @@ class McpTeamsBackend implements TeamsBackend {
   @override
   Future<void> markChatRead(String chatId) async {
     await _throttleChat(chatId);
-    final result = await _call('mark_chat_read_json', {'chat_id': chatId});
+    final result = await _call('mark_chat_read', {'chat_id': chatId});
     if (result['ok'] != true) {
       throw GraphTeamsException(
         'Could not mark a Teams chat read: ${result['error'] ?? 'unknown'}',
@@ -221,14 +229,19 @@ class McpTeamsBackend implements TeamsBackend {
     String text,
   ) async {
     await _throttleChat(chatId);
-    final result = await _call('send_chat_message_json', {
+    final result = await _call('send_teams_message', {
       'chat_id': chatId,
-      'text': text,
+      'message': text,
     });
     final message = result['message'];
     if (message is! Map) {
+      // The server names a word and, when it has one, a sentence; both belong
+      // on the banner, because the word alone (`invalid_arguments`) does not
+      // tell the person what to change.
+      final reason = result['reason'];
       throw GraphTeamsException(
-        'Could not send your Teams message: ${result['error'] ?? 'unknown'}',
+        'Could not send your Teams message: ${result['error'] ?? 'unknown'}'
+        '${reason is String && reason.isNotEmpty ? ' — $reason' : ''}',
       );
     }
     return _messageShape(message);
@@ -252,7 +265,7 @@ class McpTeamsBackend implements TeamsBackend {
       throw const GraphTeamsException('Pick at least one person.');
     }
 
-    final result = await _call('ensure_chat_json', {
+    final result = await _call('ensure_chat', {
       'user_ids': userIds.join(','),
       'topic': topic ?? '',
     });

@@ -793,7 +793,7 @@ class McpAuthSession implements AuthSession {
   Future<AccountInfo?> _profileAccount() async {
     final Map<String, dynamic> profile;
     try {
-      profile = await _mcp.callTool('get_profile_json', const {});
+      profile = await _mcp.callTool('get_profile', const {});
     } on McpToolException {
       return null;
     } on McpTransportException {

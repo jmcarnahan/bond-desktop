@@ -226,12 +226,32 @@ void main() {
           openBrowser: openBrowser,
         );
 
+    test('reads the profile by its published name', () async {
+      // The alias `get_profile_json` has a removal date, and the failure it
+      // would leave behind is silent: `_profileAccount` swallows a transport
+      // error and answers null, so a sign-in on the dead name still succeeds
+      // and just has nobody's name on it. Scripting ONLY the published name
+      // and insisting the account arrives is what catches that.
+      server.tokenReplies = [
+        _tokenOk(
+          accessToken: _liveJwt(email: 'ada@example.test'),
+          refreshToken: 'rt-1',
+        ),
+      ];
+
+      final account = await sessionWith(browser(), tools: {
+        'get_profile': {'display_name': 'Ada Lovelace', 'mail': 'ada@example.test'},
+      }).signIn();
+
+      expect(account.displayName, 'Ada Lovelace');
+    });
+
     test('walks discovery, authorizes, and exchanges the code', () async {
       server.tokenReplies = [
         _tokenOk(accessToken: _liveJwt(email: 'ada@example.test'), refreshToken: 'rt-1'),
       ];
       final auth = sessionWith(browser(), tools: {
-        'get_profile_json': {
+        'get_profile': {
           'id': 'u1',
           'display_name': 'Ada Lovelace',
           'mail': 'ada@example.test',
@@ -285,7 +305,7 @@ void main() {
       ];
 
       await sessionWith(browser(), tools: {
-        'get_profile_json': {'display_name': 'Ada', 'mail': 'ada@example.test'},
+        'get_profile': {'display_name': 'Ada', 'mail': 'ada@example.test'},
       }).signIn();
 
       expect(store.values['refresh_token'], 'graph-rt');
@@ -305,7 +325,7 @@ void main() {
           const {'state': 'wrong', 'code': 'attacker'},
         ]),
         tools: {
-          'get_profile_json': {'display_name': 'Ada', 'mail': 'ada@example.test'},
+          'get_profile': {'display_name': 'Ada', 'mail': 'ada@example.test'},
         },
       );
 
@@ -325,7 +345,7 @@ void main() {
       ];
 
       await sessionWith(browser(), tools: {
-        'get_profile_json': {'display_name': 'Ada', 'mail': 'ada@example.test'},
+        'get_profile': {'display_name': 'Ada', 'mail': 'ada@example.test'},
       }).signIn();
 
       expect(store.values.containsKey(_keys.localModeKey), isFalse);
@@ -377,7 +397,7 @@ void main() {
         _tokenOk(accessToken: _liveJwt(email: 'ada@example.test'), refreshToken: 'rt-1'),
       ];
       final auth = sessionWith(browser(), tools: {
-        'get_profile_json': {'error': 'not_connected', 'connect_url': null},
+        'get_profile': {'error': 'not_connected', 'connect_url': null},
       });
 
       final account = await auth.signIn();
@@ -393,7 +413,7 @@ void main() {
         _tokenOk(accessToken: _liveJwt(), refreshToken: 'rt-1'),
       ];
       final auth = sessionWith(browser(), tools: {
-        'get_profile_json': const McpTransportException('connection reset'),
+        'get_profile': const McpTransportException('connection reset'),
       });
 
       // No `email` claim, so the subject is the only name available.
@@ -424,7 +444,7 @@ void main() {
       final auth = McpAuthSession(
         mcpUrl: Uri.parse(_localMcp),
         mcpClient: _FakeBondMcpClient({
-          'get_profile_json': {'error': 'not_connected', 'connect_url': null},
+          'get_profile': {'error': 'not_connected', 'connect_url': null},
         }),
         httpClient: localServer(),
         store: store,
@@ -443,7 +463,7 @@ void main() {
       final auth = McpAuthSession(
         mcpUrl: Uri.parse(_localMcp),
         mcpClient: _FakeBondMcpClient({
-          'get_profile_json': {
+          'get_profile': {
             'display_name': 'Ada Lovelace',
             'mail': 'ada@example.test',
             'user_principal_name': 'ada@corp.example.test',
@@ -471,7 +491,7 @@ void main() {
       final auth = McpAuthSession(
         mcpUrl: Uri.parse(_localMcp),
         mcpClient: _FakeBondMcpClient({
-          'get_profile_json': {'error': 'not_connected', 'connect_url': null},
+          'get_profile': {'error': 'not_connected', 'connect_url': null},
         }),
         httpClient: localServer(),
         store: store,
