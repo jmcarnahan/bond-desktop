@@ -1761,9 +1761,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onExitSearch: () => ref.read(homeFeedProvider.notifier).exitSearch(),
       // Fire-and-forget, like Restore: the service swallows its own failures
       // and the row's next re-read is what reports whether anything moved.
-      onRetry: (source, id) => unawaited(
-        ref.read(pipelineRepairServiceProvider).retryOwed(source, id),
-      ),
+      // The one thing a re-read cannot say is that nothing was owed, because
+      // the row looks the same afterwards — so that answer is spoken.
+      onRetry: (source, id) => unawaited(() async {
+        final stages =
+            await ref.read(pipelineRepairServiceProvider).retryOwed(source, id);
+        if (!mounted || stages.isNotEmpty) return;
+        _toast('Nothing to retry — every stage has finished.');
+      }()),
       // Two doors on every row — the stage bar and the Result cell — because
       // those are the two places a reader looks when the sentence is not the
       // one they expected.

@@ -3,6 +3,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -616,7 +617,10 @@ void main() {
 
     test('an unfinished, unremarkable message is dropped when time runs out',
         () async {
-      await seedCandidate(attentionScore: null);
+      // Unfinished on the storyline stage and scored below the threshold. The
+      // score has to exist: a candidate with none at all is given one more
+      // deadline's grace, which is the case below this one.
+      await seedCandidate(attentionScore: 0.1, storylineState: 'pending');
       await sweep();
       now = armedAt.add(const Duration(minutes: 7));
       await sweep();
@@ -625,6 +629,26 @@ void main() {
       expect(row['state'], 'suppressed');
       expect(row['reason'], 'deadline');
       expect(emitted, isEmpty);
+    });
+
+    test('a candidate with no score waits out one more deadline', () async {
+      // Settling a scoreless candidate scores it zero and writes the chip off,
+      // and nothing revisits it. The attention sweep runs on every list load,
+      // so one more deadline's grace is a cheap way to let the score land.
+      await seedCandidate(attentionScore: null);
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      now = armedAt.add(const Duration(minutes: 13));
+      await sweep();
+
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'suppressed');
+      expect(row['reason'], 'deadline');
     });
   });
 
@@ -689,4 +713,93 @@ void main() {
       expect(emitted, hasLength(1));
     });
   });
+
+  /// What `message_progress` is left holding once the row settles — the value
+  /// the home screen's tile counts.
+  ///
+  /// These build their own coordinator, because the shared one runs with
+  /// progress writing disabled and the whole subject here is what it writes.
+  group('the settle snapshot', () {
+    Future<Map<String, Object?>> progressOf(String id) async {
+      final rows = await db.customSelect(
+        'SELECT * FROM message_progress WHERE source_message_id = ?',
+        variables: [Variable<String>(id)],
+      ).get();
+      return Map<String, Object?>.from(rows.single.data);
+    }
+
+    NotificationCoordinator recording(MessageStore over) {
+      final made = NotificationCoordinator(
+        over,
+        clock: () => now,
+        progress: PipelineProgress(over),
+      );
+      addTearDown(made.dispose);
+      made.noteSyncCompleted();
+      return made;
+    }
+
+    test('a verdict that lands mid-sweep is the one the snapshot takes',
+        () async {
+      // The candidates are captured at the top of the sweep and settled at the
+      // bottom of it. A verdict written in between used to be lost for good:
+      // the settle snapshotted the stale answer, and the correction refuses a
+      // row that was not settled yet when it ran.
+      final racing = _RacingStore(db);
+      final coordinator = recording(racing);
+
+      await seedCandidate(needsYouVerdict: false, replyExpected: false);
+      racing.onCandidatesRead = () => store.writeNeedsYouVerdict(
+            'email',
+            'm-1',
+            verdict: true,
+            reason: 'raced',
+          );
+
+      await coordinator.sweep();
+      await pumpEventQueue();
+
+      expect((await progressOf('m-1'))['needs_you'], 1);
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+    });
+
+    test('a gated settle never carries a chip', () async {
+      // The gate's answer beats the verdict: a dropped row is hidden from the
+      // feed, so a chip on it would only be a number nobody can open.
+      final coordinator = recording(store);
+      await seedCandidate(needsYouVerdict: true, triageStatus: 'pending');
+      await coordinator.sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      await store.writeTriage(
+        'email',
+        'm-1',
+        status: 'skipped',
+        gateReason: 'newsletter',
+      );
+      await coordinator.sweep();
+      await pumpEventQueue();
+
+      final row = await progressOf('m-1');
+      expect(row['needs_you'], 0);
+      expect(row['dropped'], 1);
+    });
+  });
+}
+
+/// A store that lets a test write to the database in the window between the
+/// sweep reading its candidates and settling them.
+class _RacingStore extends MessageStore {
+  _RacingStore(super.db);
+
+  Future<void> Function()? onCandidatesRead;
+
+  @override
+  Future<List<Map<String, Object?>>> openNotifyCandidates({
+    int limit = 50,
+  }) async {
+    final rows = await super.openNotifyCandidates(limit: limit);
+    await onCandidatesRead?.call();
+    return rows;
+  }
 }

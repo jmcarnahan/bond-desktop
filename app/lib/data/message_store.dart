@@ -1523,6 +1523,17 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
         gateReason: 'user',
       );
 
+      // And the notification row settles with it. It is an UPDATE guarded on
+      // `state = 'pending'`, so this is a no-op for a message that already
+      // settled — but a candidate still open would otherwise be re-decided by
+      // the next coordinator sweep, on a row the owner has just thrown out.
+      await settleNotify(
+        source,
+        sourceMessageId,
+        state: 'suppressed',
+        reason: 'gated',
+      );
+
       // The chips go and the VERDICT stays. `needs_you` is the snapshot the
       // rails and the digest read; `needs_you_verdict` is what the judge
       // decided about the words, and an Ignore is not the owner saying the
@@ -1536,7 +1547,7 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       // thread merely being opened.
       await recordFeedback(
         scope: 'message',
-        scopeKey: sourceMessageId,
+        scopeKey: '$source/$sourceMessageId',
         direction: 'down',
         origin: 'explicit',
       );
@@ -1704,6 +1715,14 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// actually carries are written: a status-only call (e.g. marking a message
   /// `gated`) leaves any previous result columns alone rather than nulling
   /// them.
+  ///
+  /// A message the owner has IGNORED is out of reach here. The triage queue
+  /// claims a row and hands it to the model, and the answer can land a minute
+  /// later — after an Ignore pressed in between, which would otherwise be
+  /// overwritten by a `triaged` status the owner never asked for. An Ignore is
+  /// the owner's own gate and it outranks the model's opinion of the same
+  /// message. It is only THIS gate that blocks: [restoreMessage] clears
+  /// `gate_reason`, so a restored row is written like any other.
   Future<void> writeTriage(
     String source,
     String sourceMessageId, {
@@ -1761,7 +1780,8 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     args.addAll([source, sourceMessageId]);
     await db.customUpdate(
       'UPDATE messages SET ${sets.join(', ')} '
-      'WHERE source = ? AND source_message_id = ?',
+      'WHERE source = ? AND source_message_id = ? '
+      "AND NOT (triage_status = 'skipped' AND gate_reason = 'user')",
       variables: _args(args),
     );
   }
@@ -2681,6 +2701,11 @@ RETURNING *
   /// keeps the one it had — and a thread must not be held out of Later by a
   /// question its owner has already dismissed. The `teams_source` tolerance
   /// is the usual one for chats stored before chats were triaged.
+  ///
+  /// Deliberately unbounded in time: an unanswered ask holds its thread out of
+  /// automatic Later for as long as it stays unanswered. The exits are a reply,
+  /// Done, or the owner's own Later, and nothing else — a question does not
+  /// stop being a question because a fortnight went by.
   static const String _openAskWhere = """
   m.direction = 'inbound'
   AND m.needs_you_verdict = 1
@@ -4760,12 +4785,20 @@ WHERE m.source = ? AND m.source_message_id = ?
   /// pointer is missing, or it would hide most of what is actually filed.
   ///
   /// Newest membership wins, because a thread is allowed to sit in several
-  /// and the last one it joined is the one the reader was told about.
+  /// and the last one it joined is the one the reader was told about. Ties on
+  /// `added_at` — two threads filed in the same pass share a stamp — break on
+  /// the id, so the answer is stable between reads rather than sqlite's whim.
+  ///
+  /// LIVE storylines only, the same rule [storylineIdsFor] applies. Member
+  /// rows survive a dismissal (D17), so without the join a suggestion the
+  /// owner threw away would go on naming every row of its threads.
   static const String _effectiveStorylineId = '''
 COALESCE(p.storyline_id, (
   SELECT x.storyline_id FROM storyline_members x
+  JOIN storylines sx ON sx.id = x.storyline_id
+                    AND sx.status IN ('suggested', 'active')
   WHERE x.source = p.source AND x.conversation_key = p.conversation_key
-  ORDER BY x.added_at DESC LIMIT 1))''';
+  ORDER BY x.added_at DESC, x.storyline_id DESC LIMIT 1))''';
 
   /// Everything a home-feed row needs, in one projection.
   ///
@@ -5316,12 +5349,16 @@ RETURNING source, source_message_id, received_at
   /// snapshot that never followed the verdict is a Needs You tile that
   /// disagrees with the verdict stored one table over.
   ///
-  /// Two guards, each doing its own work. `settle_state = 'done'` because an
+  /// Three guards, each doing its own work. `settle_state = 'done'` because an
   /// UNSETTLED row has no snapshot to correct — it will take one at settle,
   /// from the same predicate, and writing early would only race the settle.
-  /// `needs_you <> ?1` so the RETURNING carries only rows that CHANGED, the
-  /// same discipline [clearNeedsYou] keeps: the caller ticks the bus per row,
-  /// and a re-verdict that returned the same answer must not announce itself.
+  /// `dropped = 0` because a dropped row's chip is never raised: the feed hides
+  /// dropped rows and the tile sums the column, so a chip nobody can see would
+  /// only inflate the count. The one-shot backfill already guards this way, and
+  /// the two paths have to agree. `needs_you <> ?1` so the RETURNING carries
+  /// only rows that CHANGED, the same discipline [clearNeedsYou] keeps: the
+  /// caller ticks the bus per row, and a re-verdict that returned the same
+  /// answer must not announce itself.
   Future<String?> refreshNeedsYouFlag(
     String source,
     String sourceMessageId, {
@@ -5331,6 +5368,7 @@ RETURNING source, source_message_id, received_at
       '''
 UPDATE message_progress SET needs_you = ?1, updated_at = ?2
 WHERE source = ?3 AND source_message_id = ?4 AND settle_state = 'done'
+  AND dropped = 0
   AND needs_you <> ?1
 RETURNING received_at
 ''',
@@ -5415,6 +5453,12 @@ RETURNING source, source_message_id, received_at
   /// is BOUND rather than computed here so the tile and the rows under it are
   /// answering at the same instant — a tile that counted three and a list
   /// with two flags on it is a tile nobody believes twice.
+  ///
+  /// Term for term with the Dart predicate, down to the boundary: `<=` because
+  /// the row's own test is `difference(...) >= homeStalledAfter`, and the empty
+  /// stamp excluded because an unparseable clock answers FALSE there. A row
+  /// with no `updated_at` sorts before every cutoff, and counting it would
+  /// accuse the pipeline of a fault on the strength of a column nobody wrote.
   Future<HomeMetrics> homeMetrics({
     required String sinceIso,
     required String stalledBeforeIso,
@@ -5433,7 +5477,8 @@ SELECT
     AS storylined,
   COALESCE(SUM(CASE WHEN outcome = 'pending' THEN 1 ELSE 0 END), 0)
     AS in_flight,
-  COALESCE(SUM(CASE WHEN p.outcome = 'pending' AND p.updated_at < ?2
+  COALESCE(SUM(CASE WHEN p.outcome = 'pending' AND p.updated_at <= ?2
+                      AND p.updated_at <> ''
                       AND NOT $_openWorkExists THEN 1 ELSE 0 END), 0)
     AS stalled,
   COALESCE(SUM(CASE WHEN triage_state = 'error' OR extract_state = 'error'

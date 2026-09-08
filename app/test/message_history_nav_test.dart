@@ -10,6 +10,7 @@ import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
+import 'package:bond_inbox/widgets/storyline_pickers.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -159,6 +160,32 @@ void main() {
 
     expect(find.byType(MessageHistoryScreen), findsNothing);
     expect(find.byType(ThreadDetailPanel), findsOneWidget);
+  });
+
+  testWidgets('Add to storyline… opens the picker over the history, and Back '
+      'returns to it', (tester) async {
+    // The picker OVERLAYS this pane rather than replacing it, which is the
+    // whole reason its Back has somewhere to go: the history is still there
+    // underneath, on the message the question was asked about.
+    await seed();
+    await pumpInbox(tester);
+    await openHistory(tester);
+
+    await tester.tap(find.byKey(MessageHistoryScreen.addToStorylineKey));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    expect(find.byType(AddToStorylinePane), findsOneWidget);
+    expect(find.byType(MessageHistoryScreen), findsNothing);
+
+    await tester.tap(find.byTooltip('Back'));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    expect(find.byType(AddToStorylinePane), findsNothing);
+    expect(find.byType(MessageHistoryScreen), findsOneWidget);
   });
 
   testWidgets('the Home link lands on Home', (tester) async {

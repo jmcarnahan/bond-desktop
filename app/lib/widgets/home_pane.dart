@@ -431,6 +431,7 @@ class _HomePaneState extends State<HomePane> {
       itemBuilder: (context, index) {
         if (index == headingIndex) {
           return Padding(
+            key: const ValueKey('search-text-heading'),
             padding: const EdgeInsets.only(
               left: BondSpacing.s4,
               top: BondSpacing.s12,

@@ -202,24 +202,25 @@ chip and tile showing an answer the pipeline has changed its mind about. When,
 and only when, the stored verdict MOVES (`null`→0/1, 0↔1), `NeedsYouHandler`
 hands the message to `PipelineProgress.refreshNeedsYou`, which re-asks
 `notifyWorthy` and rewrites the flag through
-`MessageStore.refreshNeedsYouFlag`. Three rules make that safe. A re-verdict
+`MessageStore.refreshNeedsYouFlag`. Four rules make that safe. A re-verdict
 that returns the **same** answer writes nothing, so a chip cleared by a reply
 or by a Done stays cleared. Only a **settled** row is touched; an unsettled one
-takes its snapshot at settle from the same predicate. And the path adds an
+takes its snapshot at settle from the same predicate. A **dropped** row is left
+alone, because the feed hides it and the tile counts it. And the path adds an
 outbound guard `notifyWorthy` has no need of — the coordinator settles before
 any reply can exist — so a false→true re-verdict never re-chips a thread the
 user has already answered or marked done. Reading is deliberately *not* a
 clearing condition: a chip once earned survives being read.
 
-**The one-shot flag backfill.** Rows that settled before the v10 verdict column
+**The one-shot flag backfill.** Rows that settled before the v11 verdict column
 existed took a snapshot that never saw it, so a message later judged yes sits
 at `needs_you_verdict = 1` beside `needs_you = 0`.
 `MessageStore.backfillNeedsYouFromVerdicts` raises those chips once, behind the
 `needs_you_flag_backfill` pref in the mail sync, reported as
 `backfilled_needs_you` on the activity row (absent, not zero, when it did not
-run). Raise-only, and carrying the same guards as the live path plus
-`dropped = 0`, so a gate cascade — which also writes `settle_state = 'done'` —
-stays dropped.
+run). Raise-only, and carrying the same guards as the live path — both guard on
+`dropped = 0`, so a gate cascade, which also writes `settle_state = 'done'`,
+stays dropped either way.
 
 **Queueing.** `MessageStore.enqueueNeedsYouBacklog` is
 `enqueueExtractBacklog`'s twin — same filter, same caps, same `OR IGNORE`

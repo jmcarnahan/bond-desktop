@@ -93,7 +93,7 @@ class ActivityLogPanel extends StatefulWidget {
     'ignore': 'Ignore',
     'attachment_text': 'Read attachment',
     'attachment_digest': 'Attachment digest',
-    'needs_you': 'Needs you',
+    'needs_you': 'Needs You',
     'needs_you_rejudge': 'Needs You re-judge',
     'retry': 'Retry',
     'embed_message': 'Embed message',
@@ -116,6 +116,11 @@ class ActivityLogPanel extends StatefulWidget {
   };
 
   static String _label(String kind) => _kindLabels[kind] ?? kind;
+
+  /// The same names, for a screen that lists work items rather than activity
+  /// rows. Public so the two never drift into calling one kind two things —
+  /// `needs_you` on a queue and Needs You in the log is the same stage.
+  static String kindLabel(String kind) => _kindLabels[kind] ?? kind;
 
   static String _reason(Object? raw) {
     final reason = raw is String && raw.isNotEmpty ? raw : null;

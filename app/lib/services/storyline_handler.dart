@@ -43,10 +43,11 @@ class StorylineAssignHandler extends WorkHandler {
     if (key.isEmpty) return;
 
     final outcome = await _service.assignConversation(source, key);
-    // Four of the five outcomes end this stage: the thread was filed, or it
-    // was looked at and deliberately not filed. `noVector` is the exception —
-    // the queue parks on an embedding server that is not running, so the bar
-    // parks with it rather than claiming a verdict nobody reached.
+    // Every outcome ends this stage: the thread was filed, or it was looked at
+    // and deliberately not filed. A thread whose embedding cannot be written —
+    // the embedding server is not running — never reaches here at all; the
+    // pass throws [LlmUnavailableException] instead, and the queue parks with
+    // the bar still `pending` rather than claiming a verdict nobody reached.
     switch (outcome) {
       // `assigned` is noted by the service, with the storyline's NAME — the
       // handler only has the conversation key, which the row already carries.
@@ -70,8 +71,6 @@ class StorylineAssignHandler extends WorkHandler {
         _log
           ..noteStatus('skipped')
           ..note({'outcome': outcome.name});
-      case AssignOutcome.noVector:
-        break;
     }
   }
 }

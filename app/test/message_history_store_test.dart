@@ -1,5 +1,6 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -363,6 +364,15 @@ void main() {
   });
 
   group('dropMessage', () {
+    Future<String?> notifyState(String id, {String source = 'email'}) async {
+      final rows = await db.customSelect(
+        'SELECT state FROM message_notify '
+        'WHERE source = ? AND source_message_id = ?',
+        variables: [Variable<String>(source), Variable<String>(id)],
+      ).get();
+      return rows.isEmpty ? null : rows.single.data['state'] as String?;
+    }
+
     Future<int> feedbackCount() async =>
         (await db.customSelect('SELECT COUNT(*) AS n FROM feedback_events')
                 .getSingle())
@@ -455,7 +465,9 @@ void main() {
           await db.customSelect('SELECT * FROM feedback_events').get();
       expect(rows, hasLength(1));
       expect(rows.single.data['scope'], 'message');
-      expect(rows.single.data['scope_key'], 'm1');
+      // Connector-qualified: a message id is only unique inside the connector
+      // that issued it, and two sources may well hand out the same string.
+      expect(rows.single.data['scope_key'], 'email/m1');
       expect(rows.single.data['direction'], 'down');
       expect(rows.single.data['origin'], 'explicit');
     });
@@ -491,6 +503,49 @@ void main() {
       expect(progress['outcome'], 'pending');
       expect(progress['triage_state'], 'pending');
       expect(progress['extract_state'], 'pending');
+    });
+
+    test('a triage result that lands after an Ignore is discarded', () async {
+      // The queue claims a row and the model answers a minute later. An Ignore
+      // pressed in between is the owner's own gate, and the answer that lands
+      // afterwards must not reopen the message they just threw out.
+      await seed('m1');
+      await store.dropMessage('email', 'm1');
+
+      await store.writeTriage(
+        'email',
+        'm1',
+        status: 'triaged',
+        result: const TriageResult(
+          urgency: 'high',
+          category: 'work',
+          summary: 'asks for the DPA',
+          needsAction: true,
+          actionItems: [],
+          replyExpected: true,
+        ),
+      );
+
+      final message = await messageRow('m1');
+      expect(message['triage_status'], 'skipped');
+      expect(message['gate_reason'], 'user');
+      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+    });
+
+    test('an Ignore settles the pending notify row', () async {
+      // Otherwise the next coordinator sweep re-decides a row the owner has
+      // already thrown out — and every admitted row settles exactly once.
+      await seed('m1');
+      await store.admitNotifyCandidates(
+        armedAtIso: '2026-01-01T00:00:00.000000Z',
+        recencyFloorIso: '2026-08-01T00:00:00.000000Z',
+        deadlineIso: '2026-09-01T09:00:00.000000Z',
+      );
+      expect(await notifyState('m1'), 'pending');
+
+      await store.dropMessage('email', 'm1');
+
+      expect(await notifyState('m1'), 'suppressed');
     });
 
     test('a message the owner had already restored stays ignorable',

@@ -45,6 +45,14 @@ hands the rows the old rule stranded back to the queue.
 `needs_you` also joins the debounce's wake set, so a drain that finishes
 verdicts sweeps in 750 ms rather than waiting out the 30-second timer.
 
+The sweep re-reads the row it is about to settle, so a verdict that landed
+between the candidate capture and the settle is the one the snapshot takes.
+
+**Waiting on a score.** A deadline settle with no `attention_score` would score
+zero and never be revisited, so a scoreless candidate is held for one more
+deadline's grace before it settles on what it has. The score is stamped by the
+list load's attention sweep, which runs every minute the app is open.
+
 **Stamps.** `_isComplete` also holds a row open while `ai_updated_at` sorts
 before `message_updated_at` — a score older than the message is a verdict
 about an older version of it. Those are compared as **strings**, which only

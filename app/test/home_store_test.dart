@@ -637,6 +637,26 @@ void main() {
       expect(page.single.storylineEvidence, 'joined sl-2');
     });
 
+    test('a dismissed storyline is not where a row is filed', () async {
+      // Member rows survive a dismissal on purpose, so the join to a live
+      // status is the only thing keeping a thrown-away suggestion off the
+      // feed.
+      await seedStoryline('sl-1', status: 'dismissed');
+      await seed('m1');
+      await store.addStorylineMember(
+        'sl-1',
+        'email',
+        'c1',
+        addedBy: 'auto',
+        evidence: 'joined sl-1',
+      );
+
+      final row = (await store.pageHomeFeed()).single;
+
+      expect(row.storylineId, isNull);
+      expect(row.storylineTitle, isNull);
+    });
+
     test('the progress pointer still wins when it is set', () async {
       await seedStoryline('sl-1', title: 'Website redesign');
       await seedStoryline('sl-2', title: 'Tahoe trip');

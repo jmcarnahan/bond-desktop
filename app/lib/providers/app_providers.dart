@@ -589,6 +589,8 @@ final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
     progress: ref.watch(pipelineProgressProvider),
     pumpTriage: () => ref.read(triageQueueProvider).pump(),
     pumpWork: () => ref.read(aiWorkerProvider).pump(),
+    // For the settle backstop a Retry runs when a row owes no stage at all.
+    threshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
     activityLog: ref.watch(activityLogProvider),
   ),
 );

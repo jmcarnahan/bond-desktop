@@ -206,7 +206,9 @@ void main() {
       findsOneWidget,
     );
     expect(find.textContaining('vs threshold 0.50'), findsOneWidget);
-    expect(find.textContaining('needs_you · pending · attempt 1'),
+    // The work list speaks the log's names for the stages, not the queue's
+    // column values.
+    expect(find.textContaining('Needs You · pending · attempt 1'),
         findsOneWidget);
     expect(find.textContaining('you filed it'), findsOneWidget);
     expect(find.textContaining('filed by you'), findsWidgets);
@@ -300,6 +302,37 @@ void main() {
     expect(find.text('Ignore this message'), findsOneWidget);
   });
 
+  testWidgets('arming one question disarms the other', (tester) async {
+    // Two open questions on one screen is how a person answers the wrong one.
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        memberships: const [
+          {
+            'storyline_id': 's1',
+            'title': 'Website redesign',
+            'status': 'active',
+            'added_by': 'auto',
+            'evidence': 'shared thread',
+          },
+        ],
+      )),
+      onIgnore: () {},
+      onRemoveFromStoryline: (_) {},
+    );
+
+    await tester.tap(find.byKey(MessageHistoryScreen.ignoreKey));
+    await tester.pump();
+    expect(find.text('Really ignore?'), findsOneWidget);
+
+    await tester.tap(find.byKey(MessageHistoryScreen.removeKey('s1')));
+    await tester.pump();
+
+    expect(find.text('Really remove?'), findsOneWidget);
+    expect(find.text('Ignore this message'), findsOneWidget);
+    expect(find.text('Really ignore?'), findsNothing);
+  });
+
   testWidgets('Remove is two taps as well', (tester) async {
     final removed = <String>[];
     await _pump(
@@ -328,8 +361,8 @@ void main() {
     expect(removed, ['s1']);
   });
 
-  testWidgets("Allow again is the owner's block alone; Add back is both",
-      (tester) async {
+  testWidgets('both buttons are offered on every live block, whichever pass '
+      'wrote it', (tester) async {
     final allowed = <String>[];
     final added = <String>[];
     await _pump(
@@ -364,7 +397,12 @@ void main() {
       find.byKey(MessageHistoryScreen.allowAgainKey('s1')),
       findsOneWidget,
     );
-    expect(find.byKey(MessageHistoryScreen.allowAgainKey('s2')), findsNothing);
+    // The storyline's own About section offers both on both lists, and two
+    // doors onto one decision have to agree about what is on offer.
+    expect(
+      find.byKey(MessageHistoryScreen.allowAgainKey('s2')),
+      findsOneWidget,
+    );
     expect(find.byKey(MessageHistoryScreen.addBackKey('s1')), findsOneWidget);
     expect(find.byKey(MessageHistoryScreen.addBackKey('s2')), findsOneWidget);
 
@@ -372,6 +410,33 @@ void main() {
     await tester.tap(find.byKey(MessageHistoryScreen.addBackKey('s2')));
     expect(allowed, ['s1']);
     expect(added, ['s2']);
+  });
+
+  testWidgets('a block on a storyline that is no longer live offers nothing',
+      (tester) async {
+    await _pump(
+      tester,
+      AsyncValue.data(_history(
+        blocks: const [
+          {
+            'storyline_id': 's1',
+            'title': 'Website redesign',
+            'status': 'dismissed',
+            'blocked_by': 'user',
+            'evidence': 'you removed it',
+          },
+        ],
+      )),
+      onAllowAgain: (_) {},
+      onAddBack: (_) {},
+    );
+
+    // The sentence still stands: it is the record of what happened. What is
+    // gone are the two levers, because a dismissed storyline answers neither.
+    expect(find.textContaining('Removed by you from Website redesign'),
+        findsOneWidget);
+    expect(find.byKey(MessageHistoryScreen.allowAgainKey('s1')), findsNothing);
+    expect(find.byKey(MessageHistoryScreen.addBackKey('s1')), findsNothing);
   });
 
   testWidgets('the bucket decides which of Keep and Later is offered',

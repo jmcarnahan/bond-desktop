@@ -411,14 +411,17 @@ carries a **Storylines** section holding every `storyline_members` row this
 message's thread is in — with the storyline's title, the `evidence` behind the
 filing, *filed by you* where `added_by = 'user'`, and the storyline's own
 status where it is no longer live — and under them every `storyline_member_blocks`
-row, split the way the About block splits them, by `blocked_by`: *Removed by
-you* against *Removed by re-check*. The four buttons beside them — *Remove*
-(two taps, as it is in the About block), *Allow again* on the owner's own
-blocks alone, *Add back* on both kinds, and *Add to storyline…* which opens the
-same picker pane the thread view opens — all route through the same
-`StorylinesNotifier` methods the About block calls. Two doors onto one
-decision, never two decisions: a removal from here writes the same block, and
-teaches the model the same lesson.
+row. The blocks are ONE list here, each entry saying which pass removed it:
+*Removed by you* or *Removed by re-check*. The four buttons beside them —
+*Remove* (two taps, as it is in the About block), *Allow again* and *Add back*
+on every entry whose storyline is still live, whichever pass wrote the block,
+and *Add to storyline…* which opens the same picker pane the thread view opens
+— all route through the same `StorylinesNotifier` methods the About block
+calls. Two doors onto one decision, never two decisions: a removal from here
+writes the same block, teaches the model the same lesson, and offers the same
+way back. A storyline that is dismissed or gone offers no lever at all — not
+*Remove* on a filing, and neither button on a block — because there is nothing
+left to answer for it.
 
 Dismissing a storyline was the one storyline decision with no way back: the row
 left the rail, and nothing on screen remembered it. The rail now carries a fold

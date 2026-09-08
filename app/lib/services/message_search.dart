@@ -159,7 +159,7 @@ class MessageSearch {
     List<String> sources = const ['email', 'teams'],
   }) async {
     final text = query.trim();
-    final pass = await _semantic(
+    final pass = await _semanticOrNotice(
       text,
       limit: limit,
       includeDropped: includeDropped,
@@ -214,7 +214,7 @@ class MessageSearch {
     int limit = 50,
   }) async {
     final text = query.trim();
-    final pass = await _semantic(
+    final pass = await _semanticOrNotice(
       text,
       limit: limit,
       includeDropped: true,
@@ -236,6 +236,39 @@ class MessageSearch {
       ],
       pass.notice,
     );
+  }
+
+  /// [_semantic], with a THROW turned into the same narrowed answer a dead
+  /// embedding server gets.
+  ///
+  /// The index lives in a native extension over its own connection, and a read
+  /// of it can fail outright rather than answer null — the vec0 table missing
+  /// on this build, a connection that lost the extension. Both callers below
+  /// treat a semantic pass that produced nothing as "text matches only", and
+  /// that is the right answer here too: the word pass needs nothing but the
+  /// database, and a search box that threw would leave a reader with no result
+  /// at all over a half of the search they never asked for by name.
+  Future<_SemanticPass> _semanticOrNotice(
+    String text, {
+    required int limit,
+    required bool includeDropped,
+    required List<String> sources,
+  }) async {
+    try {
+      return await _semantic(
+        text,
+        limit: limit,
+        includeDropped: includeDropped,
+        sources: sources,
+      );
+    } catch (e) {
+      debugPrint('search: semantic pass failed: $e');
+      return const _SemanticPass(
+        null,
+        notice: 'Text matches only — the semantic index could not be read.',
+        reason: 'the semantic index could not be read',
+      );
+    }
   }
 
   /// Embeds the query and ranks both corpora with it, or explains why it could

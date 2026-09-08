@@ -231,10 +231,31 @@ class NotificationCoordinator {
     final nowIso = _iso(_clock());
 
     for (final row in rows) {
-      final decision = _decide(row, threshold: threshold, nowIso: nowIso);
+      var decision = _decide(row, threshold: threshold, nowIso: nowIso);
       if (decision == null) continue;
       final source = row['source'] as String? ?? '';
       final id = row['source_message_id'] as String? ?? '';
+      // Re-read the row we are about to settle. The candidates were captured
+      // when the sweep began, and a verdict written between that capture and
+      // this settle would otherwise be lost for good: the settle snapshots the
+      // stale answer, and [MessageStore.refreshNeedsYouFlag] refuses to correct
+      // a row that was not settled yet when it ran. One extra read per SETTLE,
+      // not per candidate — the sweep usually walks past everything it reads,
+      // and only the handful that are about to be decided pay for it.
+      Map<String, Object?>? fresh;
+      try {
+        fresh = await _store.notifyRowFor(source, id);
+      } catch (e) {
+        debugPrint('notify: re-reading $source/$id failed: $e');
+      }
+      // The fresh read carries what can move under a sweep — the verdict, the
+      // read flag, the triage status, the conversation state, the outbound
+      // stamp, the score and the bucket. The stage states and
+      // `needs_you_judged` stay from the capture, because those only ever move
+      // forward and a re-read could only agree with them.
+      final current = fresh == null ? row : {...row, ...fresh};
+      decision = _decide(current, threshold: threshold, nowIso: nowIso);
+      if (decision == null) continue;
       try {
         final settled = await _store.settleNotify(
           source,
@@ -243,20 +264,23 @@ class NotificationCoordinator {
           reason: decision.reason,
         );
         if (!settled) continue;
+        final droppedHere = decision.state == 'suppressed' &&
+            _dropReasons.contains(decision.reason);
         // The SAME verdict the decision was made on, not a second opinion:
         // `needs_you` is what the home screen's tile reads and the toast is
         // what the user saw, and two evaluations of one predicate would
-        // eventually disagree about one message.
+        // eventually disagree about one message. A dropped row never carries a
+        // chip either way — the feed hides it and the tile would still count
+        // it.
         await _pipeline.noteSettled(
           source,
           id,
-          needsYou: notifyWorthy(row, threshold: threshold),
+          needsYou: !droppedHere && notifyWorthy(current, threshold: threshold),
           reason: decision.reason,
-          dropped: decision.state == 'suppressed' &&
-              _dropReasons.contains(decision.reason),
+          dropped: droppedHere,
         );
         if (decision.state != 'notified') continue;
-        await _emit(row, decision);
+        await _emit(current, decision);
       } catch (e) {
         debugPrint('notify: settling $source/$id failed: $e');
       }
@@ -300,6 +324,20 @@ class NotificationCoordinator {
     }
     final deadline = row['deadline_at'] as String? ?? '';
     if (deadline.compareTo(nowIso) <= 0) {
+      // A deadline settle with no attention score scores zero, writes
+      // `needs_you = 0`, and nothing ever comes back to it. So hold once more:
+      // the score is stamped by the list load's attention sweep, which runs
+      // every minute the app is open, and one more deadline's grace is the same
+      // bound the deadline itself already asks the user to accept. Past that
+      // grace it settles on what it has, because a candidate held forever is
+      // worse than one judged on a missing score.
+      if (row['attention_score'] == null) {
+        final grace = DateTime.tryParse(deadline);
+        if (grace != null &&
+            nowIso.compareTo(_iso(grace.add(settleDeadline))) < 0) {
+          return null;
+        }
+      }
       return notifyWorthy(row, threshold: threshold)
           ? const _Decision('notified', 'deadline', onDeadline: true)
           : const _Decision('suppressed', 'deadline', onDeadline: true);

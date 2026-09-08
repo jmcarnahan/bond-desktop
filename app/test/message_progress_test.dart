@@ -901,6 +901,25 @@ void main() {
       );
       expect((await progressOf('m1'))['needs_you'], 0);
     });
+
+    test('a dropped row is never raised', () async {
+      // The feed hides dropped rows and the tile sums the column, so a chip
+      // raised here would be a count nobody can click through to.
+      await ingest('m1');
+      await progress.noteSettled(
+        'email',
+        'm1',
+        needsYou: false,
+        reason: 'not_worthy',
+        dropped: true,
+      );
+
+      expect(
+        await store.refreshNeedsYouFlag('email', 'm1', needsYou: true),
+        isNull,
+      );
+      expect((await progressOf('m1'))['needs_you'], 0);
+    });
   });
 
   // The one-shot for rows that settled before there was a verdict column to

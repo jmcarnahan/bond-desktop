@@ -97,15 +97,6 @@ enum AssignOutcome {
   /// The only storylines it could have joined are ones the user took it out
   /// of. Their "no" still holds.
   blocked,
-
-  /// Never returned: a thread with no comparable vector is not a thread that
-  /// failed, it is a thread whose embedding has not been written yet. The pass
-  /// first tries to write it — the card needs no model call, only the
-  /// conversation row and the facts already extracted — and only when that
-  /// attempt finds no server does it throw [LlmUnavailableException] to park
-  /// the queue rather than answering. Named here because it is the fifth thing
-  /// the pass can conclude and the park is where it went.
-  noVector,
 }
 
 /// What one storyline's membership looks like to the two comparison passes:
@@ -1144,7 +1135,18 @@ class StorylineService {
   /// unblocked, the recruit the refresh just woke would file it straight back.
   /// Idempotent: a run that removes nothing writes nothing and queues nothing;
   /// it still notes what it checked, the way the recruit notes a lap that
-  /// filed nothing.
+  /// filed nothing — and a pass that reached no model at all says nothing,
+  /// because `storyline_audit` is quiet-listed and every value it notes is
+  /// then a zero.
+  ///
+  /// Every removal carries its own bookkeeping, [recruit]'s recipe exactly:
+  /// the member hash, the recap pointer and the thread's own storyline stamp
+  /// are written with the removal that caused them rather than after the loop.
+  /// A model server that goes away mid-pass parks the whole item, and a
+  /// storyline whose hash still described members that are gone would be left
+  /// behind by that park. The two requeues at the end are the exception, and
+  /// they are safe to lose: the next sync's hash catch-up finds a storyline
+  /// whose members moved.
   Future<void> audit(String storylineId) async {
     final storyline = await _store.getStoryline(storylineId);
     // Dismissed between the removal and the drain. Re-judging it would spend a
@@ -1222,6 +1224,30 @@ class StorylineService {
         'subject': row['subject'],
         'evidence': result.evidence,
       });
+
+      // The bookkeeping belongs to THIS removal and rides with it, because the
+      // loop can be interrupted at any await — the next member's call finding
+      // no server parks the whole pass — and a storyline left describing
+      // members that are gone is worse than one that shrank halfway. The hash
+      // and the recap pointer are the storyline's own record; the stamp is the
+      // per-thread one the feed and the hot strip read, which know nothing
+      // about member rows and would otherwise still show the thread as filed.
+      await _store.updateStoryline(
+        storylineId,
+        memberHash: await _memberHashOf(storylineId),
+        // Cleared with the hash, for the reason spelled out in
+        // [assignConversation].
+        recapThrough: null,
+      );
+      _progress.noteStorylineLink(
+        member.source,
+        await _store.stampStorylineId(
+          member.source,
+          member.conversationKey,
+          clearingStorylineId: storylineId,
+        ),
+      );
+      await _stampPointer(member.source, member.conversationKey);
     }
 
     // Noted onto the worker's row rather than recorded as a row of its own,
@@ -1230,37 +1256,17 @@ class StorylineService {
     // the same item. `checked` is what keeps a "removed nothing" pass
     // visible — the model was consulted and said keep, which is an answer;
     // the kind is quiet-listed so a pass that reached no model says nothing.
-    _log.note({'checked': checked, 'removed': removed});
+    _log.note({'checked': checked, if (removed.isNotEmpty) 'removed': removed});
 
-    // Nothing moved, so nothing is written and nothing is queued. The common
-    // ending: a storyline the owner corrected once usually holds together.
+    // Nothing moved, so nothing is queued. The common ending: a storyline the
+    // owner corrected once usually holds together.
     if (removed.isEmpty) return;
 
-    await _store.updateStoryline(
-      storylineId,
-      memberHash: await _memberHashOf(storylineId),
-      // Cleared with the hash, for the reason spelled out in
-      // [assignConversation].
-      recapThrough: null,
-    );
-    // The same pointer work [removeThread] does, per thread: the feed and the
-    // hot strip read `message_progress.storyline_id` and know nothing about
-    // member rows, so a member removed here would otherwise still look filed
-    // everywhere the pipeline stamped it.
-    for (final thread in removed) {
-      final source = thread['source'] as String;
-      final key = thread['conversation_key'] as String;
-      _progress.noteStorylineLink(
-        source,
-        await _store.stampStorylineId(
-          source,
-          key,
-          clearingStorylineId: storylineId,
-        ),
-      );
-      await _stampPointer(source, key);
-    }
-    // What is left is a smaller group than the recap was written against.
+    // Both passes, and in this order. The title, the summary and the charter
+    // describe a group that is now smaller, so the refresh has to follow the
+    // members rather than wait for the next sync to notice the hash moved; the
+    // recap was written against the same larger group.
+    await _store.requeueWork('storyline_refresh', _workSource, storylineId);
     await _store.requeueWork('storyline_recap', _workSource, storylineId);
   }
 
@@ -2458,18 +2464,23 @@ class StorylineService {
   /// ONLY: an audit's rejection is a consequence of the owner's "no", not a
   /// second lesson, and feeding it back would let the model teach itself.
   /// Fetched once per pass and reused for every confirm in it.
+  ///
+  /// The count is taken AFTER the gone-thread filter, on both lists: a thread
+  /// the app no longer stores teaches nothing, and cutting the list to three
+  /// first would let three deleted threads crowd out the lessons that are
+  /// still there.
   Future<({List<String> kept, List<String> removed})> _examplesFor(
     String storylineId,
   ) async {
     final kept = <String>[];
-    for (final member
-        in (await _store.userMembersOf(storylineId)).take(_examplesEach)) {
+    for (final member in await _store.userMembersOf(storylineId)) {
+      if (kept.length == _examplesEach) break;
       final card = await _cardOf(member.source, member.conversationKey);
       if (card != null) kept.add(card);
     }
     final removed = <String>[];
-    for (final block in (await _store.blocksOf(storylineId, blockedBy: 'user'))
-        .take(_examplesEach)) {
+    for (final block in await _store.blocksOf(storylineId, blockedBy: 'user')) {
+      if (removed.length == _examplesEach) break;
       final card = await _cardOf(block.source, block.conversationKey);
       if (card != null) removed.add(card);
     }
@@ -2495,11 +2506,12 @@ class StorylineService {
   /// The owner's blocks only, for [_examplesFor]'s reason: an audit's block is
   /// a consequence of a lesson the owner already taught, and handing it back
   /// as grounds to narrow the charter would let one removal ratchet a
-  /// storyline shut.
+  /// storyline shut. The count is taken after the gone-thread filter, for
+  /// [_examplesFor]'s other reason.
   Future<List<String>> _removedCardsOf(String storylineId) async {
     final cards = <String>[];
-    for (final block in (await _store.blocksOf(storylineId, blockedBy: 'user'))
-        .take(_examplesEach)) {
+    for (final block in await _store.blocksOf(storylineId, blockedBy: 'user')) {
+      if (cards.length == _examplesEach) break;
       final row = await _store.getConversationRow(
         block.source,
         block.conversationKey,

@@ -387,17 +387,6 @@ void main() {
       expect((await progressOf('m1'))['storyline_state'], 'done');
     });
 
-    test('a thread with no vector yet parks with its queue', () async {
-      await seedMessage('m1');
-
-      await assign(AssignOutcome.noVector);
-
-      // The work row parks on an embedding server that is not running, and a
-      // bar that claimed `done` would be reporting a verdict nobody reached.
-      expect((await progressOf('m1'))['storyline_state'], 'pending');
-      expect(stagesOf('storyline'), isEmpty);
-    });
-
     test('a pass that dies for good is an error, said by the worker',
         () async {
       await seedMessage('m1');

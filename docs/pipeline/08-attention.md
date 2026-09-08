@@ -36,6 +36,9 @@ deferred. `MessageStore.openAskThreads` is where "open ask" is spelled — any
 inbound message with `needs_you_verdict = 1` received after the thread's last
 outbound message — and the sweep reads it once per pass, not once per thread.
 A person's standing rule still wins over it, and the threshold is untouched.
+The veto has no time bound, on purpose: an unanswered ask holds its thread out
+of automatic Later for as long as it stays unanswered, and the only exits are a
+reply, Done, or the owner's own Later.
 
 **Known documentation gap.** The code documents ownership rules well, but the
 scoring formula itself is under-commented — `recomputeAll` is the place to

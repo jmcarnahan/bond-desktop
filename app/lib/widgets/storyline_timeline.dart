@@ -171,6 +171,7 @@ class StorylineTimelinePanel extends StatefulWidget {
 
   static const Key documentsButtonKey = ValueKey('storyline-documents-button');
   static const Key documentsStripKey = ValueKey('storyline-documents-strip');
+
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
   /// that an ultrawide window does not turn every message into one line.
   static const double _maxContentWidth = 900;

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
 import 'activity_log.dart';
+import 'attention.dart';
 import 'pipeline_progress.dart';
 
 /// Every per-message lever that is not Restore: retry, ignore, re-judge.
@@ -35,11 +36,17 @@ class PipelineRepairService {
   final Future<void> Function()? _pumpWork;
   final ActivityLog _log;
 
+  /// The attention floor the settle backstop judges against, so a row this
+  /// service closes out is closed on the same number the coordinator would
+  /// have used.
+  final Future<double> Function()? _threshold;
+
   PipelineRepairService(
     this._store, {
     this._progress = const PipelineProgress.disabled(),
     this._pumpTriage,
     this._pumpWork,
+    this._threshold,
     ActivityLog? activityLog,
   }) : _log = activityLog ?? ActivityLog.disabled();
 
@@ -93,7 +100,10 @@ class PipelineRepairService {
         message['triage_status'] == 'error';
     if (triageErrored) {
       final moved = await _store.reviveTriageFor(source, sourceMessageId);
-      if (moved > 0 || row.triageState == 'error') stages.add('triage');
+      // Only what it MOVED. An error left on the progress row over a
+      // `triaged` message is history, not owed work, and claiming it would
+      // tell the owner a stage was retried that was never re-queued.
+      if (moved > 0) stages.add('triage');
     }
 
     if (row.extractState == 'pending' || row.extractState == 'error') {
@@ -135,6 +145,13 @@ class PipelineRepairService {
         count: stages.length,
         detail: {'stages': stages},
       );
+    } else if (row.outcome == 'pending') {
+      // Every stage is terminal and the row never closed out — it is stalled
+      // at the settle, which owns no queue and so appears in nothing above.
+      // The backstop sweep is what closes a row the coordinator was never
+      // going to settle, and running it here is the only thing Retry can
+      // honestly do about that state.
+      await _progress.sweepSettled(threshold: await _thresholdOrDefault());
     }
 
     // Fire-and-forget, and CHAINED rather than merely ordered — the same
@@ -239,6 +256,20 @@ class PipelineRepairService {
     if (before == 'pending' || before == 'processing') return;
     await _store.requeueWork(kind, source, entityId);
     stages.add(kind);
+  }
+
+  /// The settle machine's own reader, degraded the same way — see
+  /// `NotificationCoordinator._attentionThreshold`. A preference that cannot be
+  /// read is a default, never a failed repair.
+  Future<double> _thresholdOrDefault() async {
+    final read = _threshold;
+    if (read == null) return AttentionTuning.defaultThreshold;
+    try {
+      return await read();
+    } catch (e) {
+      debugPrint('retry: reading the attention threshold failed: $e');
+      return AttentionTuning.defaultThreshold;
+    }
   }
 
   /// Each half swallows its own failure: a triage drain parked on a dead

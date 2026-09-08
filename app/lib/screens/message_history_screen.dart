@@ -32,8 +32,10 @@ import '../widgets/time_format.dart';
 /// A null callback means the host cannot do that thing, and the button is not
 /// drawn — never drawn dead. The conditions beside them are this screen's own
 /// judgement about when an action would be a lie: Retry on a dropped row would
-/// re-run a pipeline that is going to refuse the message again, and Restore on
-/// a kept one would restore nothing.
+/// re-run a pipeline that is going to refuse the message again, Restore on a
+/// kept one would restore nothing, and a storyline that is dismissed or gone
+/// takes no membership levers at all — neither Remove on a filing nor Allow
+/// again and Add back on a block.
 class MessageHistoryScreen extends StatefulWidget {
   /// The story, as the provider has it: loading before the first read lands,
   /// an error only when no read has ever succeeded.
@@ -171,8 +173,29 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
 
   /// Which membership's Remove is armed, or null. One at a time on purpose:
   /// arming a second question while the first is open is how a person answers
-  /// the wrong one.
+  /// the wrong one — so each of the two arms disarms the other.
   String? _confirmingRemoveId;
+
+  /// A confirmation belongs to the message it was armed on, and this screen is
+  /// re-seated on a new target rather than rebuilt. Only a CHANGE of target
+  /// disarms: the story re-reads behind every progress tick, and a tick that
+  /// disarmed the question under the reader's second tap would be worse than
+  /// no confirmation at all.
+  @override
+  void didUpdateWidget(MessageHistoryScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final was = oldWidget.history.valueOrNull;
+    final now = widget.history.valueOrNull;
+    if (was == null || now == null) return;
+    if (was.source == now.source &&
+        was.sourceMessageId == now.sourceMessageId) {
+      return;
+    }
+    setState(() {
+      _confirmingIgnore = false;
+      _confirmingRemoveId = null;
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -425,14 +448,14 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     final gate = history.gateReason?.trim() ?? '';
     if (gate.isNotEmpty) {
       lines.add(
-        'Gate: $gate'
+        'Gate: ${homeDropLabel(gate)}'
         '${history.gateOverride == 'user' ? ' (restored by you)' : ''}',
       );
     }
 
     final error = history.triageError?.trim() ?? '';
     lines.add(
-      'Triage status: ${history.triageStatus}'
+      'Triage status: ${_triageStatusLabel(history.triageStatus)}'
       '${error.isEmpty ? '' : ' — $error'}',
     );
 
@@ -458,14 +481,24 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
       ]);
     }
 
+    // An armed Remove whose membership is no longer on the list is not armed
+    // at all: the removal landed, or the read came back without it. Resolved
+    // here rather than left on the field, so a thread that joins that same
+    // storyline again does not arrive with its button already asking.
+    final armed = _confirmingRemoveId;
+    final removeArmed = history.memberships
+            .any((membership) => membership.storylineId == armed)
+        ? armed
+        : null;
+
     return _section('Storylines', [
       for (final membership in history.memberships)
-        _membershipEntry(membership),
+        _membershipEntry(membership, armed: removeArmed),
       for (final block in history.blocks) _blockEntry(block),
     ]);
   }
 
-  Widget _membershipEntry(ThreadMembership membership) {
+  Widget _membershipEntry(ThreadMembership membership, {String? armed}) {
     final title = membership.title?.trim() ?? '';
     final evidence = membership.evidence?.trim() ?? '';
     final status = membership.status ?? '';
@@ -474,7 +507,8 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     // altogether — is history and offers no Remove.
     final live = status == 'active' || status == 'suggested';
     final remove = widget.onRemoveFromStoryline;
-    final confirming = _confirmingRemoveId == membership.storylineId;
+    final confirming = armed == membership.storylineId;
+
 
     return Padding(
       padding: const EdgeInsets.only(bottom: BondSpacing.s4),
@@ -505,9 +539,10 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
                   key: MessageHistoryScreen.removeKey(membership.storylineId),
                   onPressed: () {
                     if (!confirming) {
-                      setState(
-                        () => _confirmingRemoveId = membership.storylineId,
-                      );
+                      setState(() {
+                        _confirmingRemoveId = membership.storylineId;
+                        _confirmingIgnore = false;
+                      });
                       return;
                     }
                     setState(() => _confirmingRemoveId = null);
@@ -522,11 +557,29 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
     );
   }
 
+  /// The triage queue's own column names, in the words a reader would use.
+  /// Anything unmapped falls through as it is stored, so a status added later
+  /// reads awkwardly rather than disappearing.
+  static String _triageStatusLabel(String status) => switch (status) {
+        'triaged' => 'Triaged',
+        'pending' => 'Waiting',
+        'processing' => 'Running',
+        'skipped' => 'Skipped',
+        'error' => 'Failed',
+        'backlog' => 'Backlog',
+        _ => status,
+      };
+
   Widget _blockEntry(ThreadBlock block) {
     final title = block.title?.trim() ?? '';
     final evidence = block.evidence?.trim() ?? '';
     final allowAgain = widget.onAllowAgain;
     final addBack = widget.onAddBack;
+    // The storyline's own status, the same read [_membershipEntry] makes and
+    // for the same reason: a storyline that is dismissed or gone answers
+    // nothing, so the sentence stands on its own and neither button is drawn.
+    final status = block.status ?? '';
+    final live = status == 'active' || status == 'suggested';
 
     return Padding(
       padding: const EdgeInsets.only(bottom: BondSpacing.s4),
@@ -543,13 +596,17 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (allowAgain != null && block.blockedByUser)
+              // Both buttons on every live block, whichever pass wrote it. The
+              // storyline's own About section already offers both on both
+              // lists, and two doors onto one decision must agree about what
+              // is on offer.
+              if (allowAgain != null && live)
                 _quietButton(
                   'Allow again',
                   key: MessageHistoryScreen.allowAgainKey(block.storylineId),
                   onPressed: () => allowAgain(block.storylineId),
                 ),
-              if (addBack != null) ...[
+              if (addBack != null && live) ...[
                 const SizedBox(width: BondSpacing.s4),
                 _quietButton(
                   'Add back',
@@ -582,7 +639,8 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                '${item.kind} · ${item.status} · attempt ${item.attempts}',
+                '${ActivityLogPanel.kindLabel(item.kind)} · ${item.status}'
+                ' · attempt ${item.attempts}',
                 style: BondType.small,
               ),
               if (item.error?.isNotEmpty ?? false)
@@ -663,7 +721,10 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
           key: MessageHistoryScreen.ignoreKey,
           onPressed: () {
             if (!_confirmingIgnore) {
-              setState(() => _confirmingIgnore = true);
+              setState(() {
+                _confirmingIgnore = true;
+                _confirmingRemoveId = null;
+              });
               return;
             }
             setState(() => _confirmingIgnore = false);

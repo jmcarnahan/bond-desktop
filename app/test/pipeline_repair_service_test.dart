@@ -228,6 +228,38 @@ void main() {
       expect(await service.retryOwed('email', 'ghost'), isEmpty);
     });
 
+    test('a triage error on the progress row alone is not claimed', () async {
+      // The message itself is triaged; what is left is the record of an
+      // attempt that failed earlier. `reviveTriageFor` moves nothing there,
+      // and a stage nothing moved must not be named.
+      await seed(triageState: 'error', needsYouVerdict: 1);
+      final service =
+          PipelineRepairService(store, activityLog: ActivityLog(store));
+
+      expect(await service.retryOwed('email', 'm1'), isEmpty);
+      expect((await store.getMessageRow('email', 'm1'))!['triage_status'],
+          'triaged');
+    });
+
+    test('a row stalled at settle is settled by the retry', () async {
+      // Every stage terminal and the outcome still pending: the row is stuck
+      // at the settle, which owns no queue, so nothing above can be owed. The
+      // backstop sweep is the repair.
+      await seed(needsYouVerdict: 0);
+      await store.writeAttentionScore('email', 'c1', 0.9);
+      final service = PipelineRepairService(
+        store,
+        progress: PipelineProgress(store),
+        activityLog: ActivityLog(store),
+      );
+
+      expect(await service.retryOwed('email', 'm1'), isEmpty);
+
+      expect((await progressOf('m1'))['outcome'], 'done');
+      // Nothing was requeued, so nothing is claimed in the log either.
+      expect(await activity(), isEmpty);
+    });
+
     test('a service with no log and no pumps still works', () async {
       await seed(extractState: 'pending', needsYouVerdict: 1);
 

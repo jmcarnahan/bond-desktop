@@ -72,6 +72,11 @@ clears `triage_error`, and runs the SAME progress cascade a gate does through
 `dropped` under that reason, and a stage that already finished keeps what it
 did. It also clears the thread's needs-you chips and records a `down` /
 `explicit` row in `feedback_events`, because a button press is exactly that.
+The message's pending `message_notify` row is settled `suppressed`/`gated` in
+the same transaction, so a later coordinator sweep cannot re-decide a message
+the owner has already thrown out. And a triage answer that lands after the
+Ignore is discarded: `writeTriage` refuses a row that is `skipped` under
+`gate_reason = 'user'`.
 
 Nothing that was already queued has to be cancelled: the handlers all skip a
 gated row on their own, so whatever is on a queue for this message reads the
