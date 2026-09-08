@@ -136,6 +136,15 @@ void main() {
       expect(vectorRelevance(double.infinity), 0);
     });
 
+    test('a bm25 that is not a number scores nothing', () {
+      expect(keywordRelevance(bm25: double.nan, best: 2, coverage: 1), 0);
+      expect(keywordRelevance(bm25: 1, best: double.nan, coverage: 1), 0);
+      expect(
+        keywordRelevance(bm25: double.infinity, best: 2, coverage: 1),
+        0,
+      );
+    });
+
     test('doubles a quote inside a term rather than ending the string', () {
       expect(quoteTerm('say"what'), '"say""what"');
     });

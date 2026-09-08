@@ -31,7 +31,7 @@
 library;
 
 import 'package:drift/drift.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, visibleForTesting;
 
 import 'database.dart';
 
@@ -63,7 +63,7 @@ class KeywordRow {
 abstract class _FtsIndex {
   final BondDatabase? _db;
 
-  _FtsIndex(this._db);
+  _FtsIndex(this._db, {this.batch = 500});
 
   /// The virtual table's name. Also its identity: [_prepare] recognises a
   /// table built by an older build by comparing the DDL stored under this name
@@ -167,8 +167,9 @@ abstract class _FtsIndex {
   ///
   /// `MessageVectorIndex.backfill`'s number, and it is the same trade: a page
   /// caps what is live in memory, and a page that fails has still left the
-  /// pages before it filed.
-  static const int batch = 500;
+  /// pages before it filed. A test hands in a small one so three rows can
+  /// cross a page boundary.
+  final int batch;
 
   /// Files whatever the index has not seen, and returns how many rows it
   /// wrote.
@@ -281,7 +282,7 @@ class MessageKeywordIndex extends _FtsIndex {
       'subject, sender, summary, body, '
       "tokenize='porter unicode61 remove_diacritics 2')";
 
-  MessageKeywordIndex(BondDatabase super.db);
+  MessageKeywordIndex(BondDatabase super.db, {super.batch});
 
   /// An index that holds nothing and finds nothing — the seam a test uses to
   /// ask what a search says when the words are unavailable.
@@ -319,11 +320,21 @@ class MessageKeywordIndex extends _FtsIndex {
   /// No body text crosses into Dart. The worklist is rowids; the filing is one
   /// `INSERT … SELECT` per page, inside SQLite, where the text already is.
   ///
-  /// Paged by `rowid` rather than by re-asking the watermark, because the
-  /// watermark row itself is re-filed every pass (see `>=` below) — a loop that
-  /// re-ran the same query would be handed the same page forever.
+  /// Paged in WATERMARK order — `(updated_at, rowid)`, keyset style — and not
+  /// by rowid alone, because the resume point is `MAX(indexed_updated_at)`.
+  /// Pages filed in any other order would leave a pass that stopped early (the
+  /// app quit mid-build, a failure on page two) holding a mark ABOVE rows it
+  /// never reached, and `>=` below would then exclude them on every later
+  /// pass: a mailbox with a permanent hole and nothing to heal it. In this
+  /// order every prefix of the work is a valid index, whatever page it ends
+  /// on. The cursor carries the rowid beside the stamp because the watermark
+  /// row itself is re-filed every pass (see `>=`), so a loop keyed on the
+  /// stamp alone would be handed the same page forever.
+  ///
+  /// [pages] is a test's way of stopping a pass partway; production never
+  /// passes it.
   @override
-  Future<int> backfill() async {
+  Future<int> backfill({@visibleForTesting int? pages}) async {
     if (!await ensureReady()) return 0;
     final db = _db!;
     var filed = 0;
@@ -337,23 +348,30 @@ class MessageKeywordIndex extends _FtsIndex {
       // search, which is nothing next to being wrong.
       final since = mark.data['w'] as String? ?? '';
 
-      var last = 0;
-      while (true) {
+      var lastStamp = since;
+      var lastRowid = 0;
+      var pagesDone = 0;
+      while (pages == null || pagesDone < pages) {
         final rows = await db
             .customSelect(
-              'SELECT m.rowid AS message_rowid FROM messages m '
-              'WHERE m.updated_at >= ? AND m.rowid > ? '
-              'ORDER BY m.rowid LIMIT ?',
+              'SELECT m.rowid AS message_rowid, m.updated_at AS stamp '
+              'FROM messages m '
+              'WHERE m.updated_at > ? '
+              '   OR (m.updated_at = ? AND m.rowid > ?) '
+              'ORDER BY m.updated_at, m.rowid LIMIT ?',
               variables: [
-                Variable<String>(since),
-                Variable<int>(last),
-                Variable<int>(_FtsIndex.batch),
+                Variable<String>(lastStamp),
+                Variable<String>(lastStamp),
+                Variable<int>(lastRowid),
+                Variable<int>(batch),
               ],
             )
             .get();
         if (rows.isEmpty) break;
         final ids = [for (final row in rows) row.data['message_rowid'] as int];
-        last = ids.last;
+        lastStamp = rows.last.data['stamp'] as String;
+        lastRowid = ids.last;
+        pagesDone += 1;
         final holes = List.filled(ids.length, '?').join(', ');
 
         await db.transaction(() async {
@@ -377,7 +395,7 @@ class MessageKeywordIndex extends _FtsIndex {
         });
         filed += ids.length;
         // A short page is the last page.
-        if (ids.length < _FtsIndex.batch) break;
+        if (ids.length < batch) break;
       }
 
       // The other direction: a message deleted since the last pass leaves a
@@ -499,7 +517,7 @@ ORDER BY c.id LIMIT ?
 ''',
               variables: [
                 Variable<int>(last),
-                Variable<int>(_FtsIndex.batch),
+                Variable<int>(batch),
               ],
             )
             .get();
@@ -528,7 +546,7 @@ ORDER BY c.id LIMIT ?
         });
         filed += ids.length;
         // A short page is the last page.
-        if (ids.length < _FtsIndex.batch) break;
+        if (ids.length < batch) break;
       }
 
       // `replaceChunks` is a delete and an insert, so a re-chunked document

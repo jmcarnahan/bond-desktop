@@ -98,9 +98,14 @@ pass ABSENT, not the search broken.
   time and none accepts a stamp from outside, so the column only moves forward
   and a row below the mark is a row already filed. The one door a past value
   could come through is `upsertMessage`'s `row['updated_at']`, which must never
-  be handed one. Filing is paged at 500 rowids, one transaction per page, one
-  `INSERT … SELECT` inside SQLite — no body text crosses into Dart, and a first
-  pass over a whole mailbox that dies partway has still made progress.
+  be handed one. Filing is paged at 500 rows in watermark order (`updated_at`,
+  then `rowid`, keyset style), one transaction per page, one `INSERT … SELECT`
+  inside SQLite — no body text crosses into Dart, and a first pass over a
+  whole mailbox that dies partway has still made progress. The order is what
+  makes that true: a pass that stops early leaves a prefix whose highest stamp
+  is below every row it never reached, so the next pass resumes exactly there.
+  Paged by rowid alone, an interrupted first build would set the mark to the
+  newest stamp among the rows it did file and exclude the rest forever.
   `messages.rowid` is not stable across a `VACUUM`; the app never runs one, and
   `rebuild()` is the fix if a tool ever does.
 - `fts_attachment_chunks` has `rowid = attachment_chunks.id`, which IS stable

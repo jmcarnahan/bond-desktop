@@ -248,7 +248,9 @@ double keywordRelevance({
   required double best,
   required double coverage,
 }) {
-  if (best <= 0) return 0;
+  // The non-finite guard is `vectorRelevance`'s: `bm25()` never produces one,
+  // and a NaN that reached the sort would sit on top of the list.
+  if (best <= 0 || !best.isFinite || !bm25.isFinite) return 0;
   return ((bm25 / best) * math.sqrt(coverage.clamp(0.0, 1.0)))
       .clamp(0.0, 1.0);
 }

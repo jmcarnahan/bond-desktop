@@ -153,6 +153,47 @@ void main() {
     expect(await tableExists(MessageKeywordIndex.table), isFalse);
   });
 
+  test('a pass cut short resumes without skipping a row', () async {
+    // Three messages whose stamps run AGAINST their rowids: the first row
+    // written is the newest. Stamps are set by hand because every store
+    // writer stamps "now", and the trap needs the two orders to disagree.
+    await seed('m1', subject: 'Invoice 4471 is overdue');
+    await seed('m2', subject: 'Invoice 4472 is overdue');
+    await seed('m3', subject: 'Invoice 4473 is overdue');
+    for (final (id, stamp) in [
+      ('m1', '2026-09-03T00:00:00Z'),
+      ('m2', '2026-09-01T00:00:00Z'),
+      ('m3', '2026-09-02T00:00:00Z'),
+    ]) {
+      await db.customStatement(
+        'UPDATE messages SET updated_at = ? WHERE source_message_id = ?',
+        [stamp, id],
+      );
+    }
+
+    // A first build that dies after one page of two. Paged in rowid order it
+    // would have filed m1 and m2, and the mark — m1's stamp, the newest —
+    // would then exclude m3 on every later pass, forever.
+    final index = MessageKeywordIndex(db, batch: 2);
+    expect(await index.backfill(pages: 1), 2);
+    final mark = (await db
+            .customSelect(
+              'SELECT MAX(indexed_updated_at) AS w FROM ${MessageKeywordIndex.table}',
+            )
+            .getSingle())
+        .data['w'];
+    // The prefix left behind is in watermark order, so the mark sits BELOW
+    // every row the pass never reached.
+    expect(mark, '2026-09-02T00:00:00Z');
+    expect(await rowCount(MessageKeywordIndex.table), 2);
+
+    // The next pass finishes the job: m1, plus the watermark row itself,
+    // which `>=` re-files on every pass by design.
+    expect(await index.backfill(), 2);
+    expect(await rowCount(MessageKeywordIndex.table), 3);
+    expect(await find('invoice'), containsAll(['m1', 'm2', 'm3']));
+  });
+
   group('the chunk index', () {
     Future<void> attach(
       String messageId,
