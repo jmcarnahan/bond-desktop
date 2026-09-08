@@ -2619,6 +2619,29 @@ void main() {
           'sl-1');
     });
 
+    test('an audit removal clears the recap too', () async {
+      await seedMixed();
+      await store.updateStoryline('sl-1',
+          recapText: 'The a2 thread is where the launch date came from.',
+          recapThrough: '2026-08-03T00:00:00Z');
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(belongs: false, evidence: 'no'),
+        ],
+      });
+
+      await StorylineService(store, llm).audit('sl-1');
+
+      // The re-check is a removal like the owner's own, and the recap it
+      // queues has to be written from the members that are left: the stored
+      // paragraph was derived from a2 as much as from anything else, and no
+      // rewrite carrying it forward could tell which half to drop.
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.recapText, isNull);
+      expect(storyline.recapThrough, isNull);
+    });
+
     test('and the recruit cannot put back what the audit took out', () async {
       await seedMixed();
       final llm = FakeLlm({
@@ -4357,6 +4380,13 @@ void main() {
       // The one membership change that adds no message anywhere: nothing new
       // was said, so nothing but the clear can make the recap stale.
       await service.removeThread('sl-1', 'email', 'c2');
+
+      // Blanked on the way out, before anything has run. The paragraph was
+      // written about a member set this storyline no longer has, and there is
+      // no rewrite that can tell which of its sentences the departed thread
+      // paid for.
+      expect((await store.getStoryline('sl-1'))!.recapText, isNull);
+
       expect(await drainRefresh(service), 'sl-1');
       expect(await drainRecap(service), 'sl-1');
 
@@ -4366,6 +4396,13 @@ void main() {
       expect(storyline.recapText, 'The venue is somebody else.');
       expect(storyline.recapThrough, '2026-08-01T11:00:00Z');
       expect(llm.userMessages.last, isNot(contains('the venue is booked')));
+      // And the old recap was not handed to the model to carry forward: the
+      // line renders as the bare label an absent previous recap always gets,
+      // which is what keeps Dana's venue out of the next paragraph.
+      expect(llm.userMessages.last,
+          isNot(contains('Previous recap: Dana has the venue booked.')));
+      expect(llm.userMessages.last,
+          contains('Previous recap: \n</untrusted_data>'));
     });
 
     test('a hand-added thread recaps the storyline', () async {

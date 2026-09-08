@@ -1238,6 +1238,13 @@ class StorylineService {
         // Cleared with the hash, for the reason spelled out in
         // [assignConversation].
         recapThrough: null,
+        // The recap goes too, for the reason [removeThread] spells out: the
+        // recap pass carries the previous recap forward and cannot tell which
+        // of its sentences came from the member this pass just took out. Only
+        // a removal does this — an addition leaves the recap standing.
+        recapText: null,
+        recapOpenJson: null,
+        recapDecisionsJson: null,
       );
       _progress.noteStorylineLink(
         member.source,
@@ -2150,7 +2157,9 @@ class StorylineService {
   /// It is also the one membership change that adds no message anywhere, which
   /// is why clearing the recap watermark matters most here: the recap the
   /// refresh tail queues has no new mail to make it stale, and would return at
-  /// its own gate still describing a thread that is gone.
+  /// its own gate still describing a thread that is gone. The stored recap is
+  /// cleared with the watermark, so the recap this queues starts from the
+  /// remaining threads rather than carrying the departed one forward.
   ///
   /// And it queues an [audit] as well as the refresh. A removal is the owner
   /// saying the model got this group wrong, and the threads the same reasoning
@@ -2176,6 +2185,17 @@ class StorylineService {
       // Cleared with the hash, for the reason spelled out in
       // [assignConversation].
       recapThrough: null,
+      // And the recap itself goes with the members, which is what makes a
+      // removal different from every other membership change. The recap pass
+      // is handed the previous recap and told to carry forward what is still
+      // true, and it has no way to know which sentence came from the thread
+      // that just left — so a paragraph naming that thread would survive every
+      // rewrite. Cleared, the recap this removal queues is written from the
+      // remaining threads alone. An addition clears nothing: new mail adds
+      // facts, it never invalidates the ones already written.
+      recapText: null,
+      recapOpenJson: null,
+      recapDecisionsJson: null,
     );
     _progress.noteStorylineLink(
       source,

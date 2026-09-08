@@ -287,6 +287,13 @@ void main() {
       // unqualified, a shared name reads as the requirement.
       expect(confirm.systemPrompt, contains('context, not a requirement'));
       expect(confirm.systemPrompt, contains('same KIND of thing'));
+      // Shape alone recruited a Thursday meeting into a storyline about a
+      // meeting on a named day: two threads can be the same kind of thing AND
+      // about the same kind of occasion and still be different occasions.
+      expect(confirm.systemPrompt,
+          contains('a different date or a different occasion'));
+      expect(confirm.systemPrompt,
+          contains('Another meeting is not this meeting.'));
       expect(confirm.systemPrompt, contains('low|medium|high'));
       expect(confirm.systemPrompt, contains('Return ONLY valid JSON.'));
       expect(confirm.systemPrompt,

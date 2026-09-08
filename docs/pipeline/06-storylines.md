@@ -289,11 +289,13 @@ indexed question per sync replaces it.
 
 `removeThread` is absent where the refresh table has it because it needs no row
 of its own: the refresh it queues re-queues the recap from its own tail. What
-makes that reach the model is the watermark clear above, and a removal is the
-case it was most needed for — it is the one membership change that adds no
-message anywhere, so nothing else could ever make the recap stale. Before the
-clear, a recap went on narrating a thread the user had just filed out until
-something new was said in the threads that remain; the catch-up could not close
+makes that reach the model is the watermark clear above — and the recap text is
+cleared with it, so the pass rewrites rather than carries forward; see *The
+recap goes with the members* under *Removing a thread*. A removal is the case
+the watermark clear was most needed for — it is the one membership change that
+adds no message anywhere, so nothing else could ever make the recap stale.
+Before the clear, a recap went on narrating a thread the user had just filed
+out until something new was said in the threads that remain; the catch-up could not close
 it either, since its `EXISTS` asks whether a member thread holds a message
 *newer than the watermark* and a removal leaves that answer no.
 
@@ -523,6 +525,16 @@ model got this group wrong, and the threads the same reasoning filed here are
 still sitting in it — so `removeThread` queues a `storyline_audit` alongside
 its refresh. What that pass does is under *The six passes* above.
 
+**The recap goes with the members.** A removal — the owner's own, or one the
+re-check makes — clears the stored recap text and both of its lists along with
+the watermark, so the recap the same removal queues is written from the
+remaining threads alone rather than carried forward from a paragraph that still
+narrates the thread that left. The recap pass is handed the previous recap and
+told to carry forward what is still true, and it has no way to know which
+sentence came from which thread, so nothing short of the clear could get the
+departed thread out of it. An addition clears nothing: new mail adds facts, it
+never invalidates the ones already written, and continuity is the point there.
+
 **Audit blocks are never shown to the model, and only the owner lifts them.**
 They stay out of both example fences, and no pass clears them; a thread the
 re-check took out stays out until a person says otherwise, which is what stops
@@ -652,7 +664,10 @@ one candidate thread: an evidence sentence first, a boolean `belongs`, and a
 low/medium/high confidence — **low is treated as a no**. The prompt's real
 work is what *not* to weigh: two threads of the same kind (two invoices, two
 trips) do not belong together, and the participant list is context, not a
-requirement.
+requirement. Dates are the same rule one step finer: a storyline about a
+specific dated occasion — a meeting on a named day, a trip, a deadline — admits
+only threads about *that* occasion, because another meeting is not this
+meeting.
 
 Four fences, in the order `storyline`, `kept_by_owner`, `removed_by_owner`,
 `candidate_thread`. The two example fences are what the owner has taught this

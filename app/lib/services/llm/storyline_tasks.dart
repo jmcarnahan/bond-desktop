@@ -33,6 +33,7 @@ You are an assistant grouping a person's message threads into storylines. A stor
 Rules:
 - evidence: ONE sentence naming what the candidate thread and the storyline do or do not have in common. Write it first and write it plainly — the answer below should follow from it.
 - belongs: true only when the candidate concerns the SAME specific event, project, or topic the storyline's charter describes. Two threads that are merely the same KIND of thing — two different invoices, two unrelated trips — do NOT belong together.
+- When the storyline is about a specific dated occasion — a meeting on a named day, a trip, a deadline — a candidate about a different date or a different occasion does NOT belong, however similar its shape. Another meeting is not this meeting.
 - The people listed on the storyline are context, not a requirement: a thread from a person the storyline has not seen before still belongs when it concerns the same specific event, project, or topic — new participants joining is normal.
 - confidence: one of low|medium|high. How sure you are of the answer above. Use low when the shared subject could just as easily be a coincidence of vocabulary.
 - kept_by_owner lists threads the owner filed into this storyline by hand. They are membership by the owner's hand: a candidate about the same specific thing as one of them belongs.
