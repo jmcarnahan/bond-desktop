@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -15,6 +16,7 @@ import '../providers/app_providers.dart';
 import '../providers/archive_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
+import '../providers/drafts_inbox_provider.dart';
 import '../providers/home_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
@@ -39,12 +41,17 @@ import '../widgets/activity_log_panel.dart';
 import '../widgets/app_rail.dart';
 import '../widgets/archive_pane.dart';
 import '../widgets/attachment_format.dart';
+import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
+import '../widgets/drafts_pane.dart';
+import '../widgets/find_field.dart';
+import '../widgets/find_filter.dart';
 import '../widgets/bond_avatar.dart' show AvatarStack;
 import '../widgets/home_pane.dart';
 import '../widgets/icon_rail.dart';
 import '../widgets/inline_alert.dart';
+import '../widgets/needs_you_tabs.dart';
 import '../widgets/people_rooms.dart';
 import '../widgets/notification_ribbon.dart';
 import '../widgets/pane_surface.dart';
@@ -160,6 +167,35 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Which pile Archive is showing. Kept here rather than in the pane so the
   /// tab survives every rebuild the sixty-second poll causes.
   ArchiveTab _archiveTab = ArchiveTab.later;
+
+  /// Which lens the Needs You overview is showing. Here for [_archiveTab]'s
+  /// reason, and it survives a trip into a thread and back for the same one:
+  /// coming back lands on the tab the reader left.
+  NeedsYouTab _needsYouTab = NeedsYouTab.all;
+
+  /// The Find field's text, and the two objects behind it.
+  ///
+  /// The controller and the node live on the SCREEN rather than in
+  /// [FindField]: ⌘K has to reach the node from a binding wrapped around
+  /// the whole `Scaffold`, and a field rebuilt on every keystroke could not
+  /// own either without losing the cursor.
+  final TextEditingController _findText = TextEditingController();
+  final FocusNode _findFocus = FocusNode(debugLabel: 'find');
+  String _find = '';
+
+  /// Whether the list column is showing only rows with something unread.
+  /// Never touches a badge — see [AppRail.unreadOnly].
+  bool _unreadOnly = false;
+
+  /// The rows and rooms THIS build handed the rail, so Enter in the Find field
+  /// can walk exactly what the reader is looking at.
+  ///
+  /// Plain fields written during `build` rather than state: they are derived
+  /// from the conversation list every frame, and setState-ing them would be
+  /// setState-ing inside build. Nothing renders them — [_submitFind] reads
+  /// them, once, in response to a keystroke.
+  List<Conversation> _rows = const [];
+  List<PersonRoom> _rooms = const [];
 
   /// Whether the main pane is showing the activity log. Exclusive with the
   /// three selections above for the same reason they are exclusive with each
@@ -381,6 +417,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _probe.close();
     _mainComposerFocus.dispose();
     _sideComposerFocus.dispose();
+    _findText.dispose();
+    _findFocus.dispose();
     super.dispose();
   }
 
@@ -436,6 +474,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           )
           .load();
     }
+    // Two indexed reads, on the same tick that brought the mail in. The sync
+    // deletes suggestions whose thread received new mail and the queue writes
+    // fresh ones, so a pane left alone for a minute would be listing work that
+    // is already gone.
+    ref.read(draftsInboxProvider.notifier).load();
     await _reloadOpenThread();
   }
 
@@ -719,6 +762,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (section == RailSection.archive && _archiveTab == ArchiveTab.dropped) {
       ref.read(archiveProvider.notifier).refreshDropped();
     }
+    // Same rule for Drafts & sent: the two lists have no bus behind them — the
+    // model writes a suggestion while the reader is elsewhere — so arriving is
+    // the moment they are worth being current.
+    if (section == RailSection.drafts) {
+      ref.read(draftsInboxProvider.notifier).load();
+    }
     setState(() {
       _clearOverlays();
       _section = section;
@@ -827,6 +876,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           if (previous == null || !mounted) return;
           if (next.sendEpoch > previous.sendEpoch) {
             unawaited(_reloadOpenThread());
+            // The suggestion this thread was holding has just been sent, so it
+            // belongs in the other half of the Drafts & sent pane. Cheap
+            // enough to run whether or not that pane is up: two indexed reads.
+            ref.read(draftsInboxProvider.notifier).load();
           }
         },
       );
@@ -845,6 +898,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         if (previous == null || !mounted) return;
         if (next.sendEpoch > previous.sendEpoch) {
           setState(() => _announceSendsFor.remove(target));
+          // A queued reply leaves on a timer with nothing awaiting it, so this
+          // is the only place its send can move the Drafts & sent lists.
+          ref.read(draftsInboxProvider.notifier).load();
           _toast('Reply sent.');
           return;
         }
@@ -885,20 +941,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final state = ref.watch(conversationsProvider);
 
     return Scaffold(
-      body: SafeArea(
-        child: Stack(
-          // Expand, or the stack takes its size from the ribbon layer — which
-          // is nothing at all until something settles, and the inbox under it
-          // would lay out at zero.
-          fit: StackFit.expand,
-          children: [
-            Positioned.fill(child: _body(state)),
-            // A sibling ABOVE the body rather than something inside it: the
-            // pane swaps out from under every selection, and a ribbon mounted
-            // in there would be unmounted mid-announcement — and the narrow
-            // layout's rail overlay would cover it.
-            _ribbonLayer(),
-          ],
+      // ⌘K from anywhere on the screen. `CallbackShortcuts` only sees keys
+      // while focus is somewhere inside its subtree, and on a freshly built
+      // screen nothing has focus at all — so the `Focus(autofocus: true)`
+      // wrapper is what makes the binding global. It takes focus once, at the
+      // top, and hands it over the moment anything below asks: a composer or a
+      // search box the reader clicks into still gets its keystrokes.
+      //
+      // The control variant is for a runner that is not a Mac. Second binding
+      // in the app; the first is `HomeSearchField`'s Escape.
+      body: CallbackShortcuts(
+        bindings: {
+          const SingleActivator(LogicalKeyboardKey.keyK, meta: true):
+              _focusFind,
+          const SingleActivator(LogicalKeyboardKey.keyK, control: true):
+              _focusFind,
+        },
+        child: Focus(
+          autofocus: true,
+          child: SafeArea(
+            child: Stack(
+              // Expand, or the stack takes its size from the ribbon layer —
+              // which is nothing at all until something settles, and the inbox
+              // under it would lay out at zero.
+              fit: StackFit.expand,
+              children: [
+                Positioned.fill(child: _body(state)),
+                // A sibling ABOVE the body rather than something inside it:
+                // the pane swaps out from under every selection, and a ribbon
+                // mounted in there would be unmounted mid-announcement — and
+                // the narrow layout's rail overlay would cover it.
+                _ribbonLayer(),
+              ],
+            ),
+          ),
         ),
       ),
     );
@@ -1002,6 +1078,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           owner: _ownerRecord,
           threshold: ref.watch(appPrefsProvider).attentionThreshold,
         );
+        // Kept for [_submitFind], which needs exactly what the rail was
+        // handed and runs long after this build has finished. Plain writes,
+        // not setState: they are derived from the list above, so they change
+        // when it changes and never on their own.
+        _rows = rows;
+        _rooms = rooms;
         return LayoutBuilder(
           builder: (context, constraints) =>
               constraints.maxWidth >= _twoPaneBreakpoint
@@ -1223,7 +1305,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The 56px strip of stops, and the account's face at the foot of it.
   Widget _iconRail(List<Conversation> conversations) {
     return IconRail(
-      selected: _highlightedSection,
+      // Drafts & sent is a ROW in the Home stack, not a stop, so the strip
+      // lights the stack it belongs to. Anything else would leave every icon
+      // dark while a pane is up, which reads as "you are nowhere".
+      selected: _highlightedSection == RailSection.drafts
+          ? RailSection.home
+          : _highlightedSection,
       // The same count the list column's own badge shows, at the same
       // threshold: two numbers for one pile is one number too many.
       needsYouCount: needsYouRows(
@@ -1264,6 +1351,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // while they read: a thread opened from People must not drop the column
       // back to the Home stack under them.
       scope: _section ?? RailSection.home,
+      find: _find,
+      unreadOnly: _unreadOnly,
+      // Counted off the SOURCE-FILTERED rows, the same list the pane is built
+      // from, so the badge and the pane never disagree about how much is
+      // waiting.
+      pendingDraftCount:
+          conversations.where((c) => c.pendingDraftCount > 0).length,
       rooms: rooms,
       selectedRoomKey: _selectedRoomKey,
       onSelectRoom: _selectRoom,
@@ -1295,8 +1389,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// Everything the footer used to carry that belonged to the MAIL is here;
   /// everything that belonged to the app went to the avatar menu on the icon
-  /// rail (D8). What is left is three lines: which pile this is beside the two
-  /// verbs that act on it, the source chips, and the triage caption.
+  /// rail (D8). What is left is four lines: which pile this is beside the
+  /// controls that act on it, the Find field, the source chips, and the triage
+  /// caption.
   ///
   /// The Teams freshness caption is gone as a line and lives in the refresh
   /// button's tooltip: it is a fact ABOUT that button — chats do not arrive on
@@ -1325,6 +1420,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               ),
               // Writing to somebody is the one control here that starts
               // something rather than adjusting what is already on screen.
+              _unreadToggle(),
               _railAction(
                 Icons.edit_outlined,
                 'New message',
@@ -1332,6 +1428,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               ),
               _refreshAction(),
             ],
+          ),
+          const SizedBox(height: BondSpacing.s8),
+          FindField(
+            controller: _findText,
+            focusNode: _findFocus,
+            onChanged: (value) => setState(() => _find = value),
+            onSubmit: (_) => _submitFind(),
+            onClear: _clearFind,
           ),
           const SizedBox(height: BondSpacing.s8),
           _sourceFilterBar(),
@@ -1720,6 +1824,104 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
+  /// Unread only, on or off.
+  ///
+  /// A toggle in the caption row rather than a fourth pill under the source
+  /// chips, which is where the plan put it: three source pills already fill
+  /// 236px, and a fourth would wrap onto a line of its own for one word. It
+  /// keeps [_railAction]'s size and density so the caption row reads as one
+  /// set of controls rather than as a button beside two others.
+  Widget _unreadToggle() {
+    return IconButton(
+      key: const Key('unread-toggle'),
+      onPressed: () => setState(() => _unreadOnly = !_unreadOnly),
+      isSelected: _unreadOnly,
+      icon: const Icon(Icons.mark_email_unread_outlined),
+      selectedIcon: const Icon(Icons.mark_email_unread),
+      iconSize: 18,
+      color: _unreadOnly ? BondColors.railAccent : BondColors.onDarkSecondary,
+      tooltip: _unreadOnly ? 'Show everything' : 'Unread only',
+      padding: const EdgeInsets.all(BondSpacing.s4),
+      constraints: const BoxConstraints(),
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
+  /// Empties the Find field and puts every row back. Both the controller and
+  /// the mirror, because the box is a view of the first and the rail reads the
+  /// second.
+  void _clearFind() {
+    _findText.clear();
+    setState(() => _find = '');
+  }
+
+  /// Puts the cursor in the Find field, from anywhere — what ⌘K does.
+  ///
+  /// At narrow widths the column is an overlay, so it is opened first: a
+  /// binding that focused a field nobody can see would be one that swallowed
+  /// the keystroke.
+  ///
+  /// The focus request waits a frame, because the field may only exist once
+  /// the overlay this same call opened has been laid out. The selection goes
+  /// with it: ⌘K on a box that already holds a needle should let the reader
+  /// type straight over it, which is what every switcher does.
+  void _focusFind() {
+    setState(() {
+      if (MediaQuery.sizeOf(context).width < _twoPaneBreakpoint) {
+        _railOpen = true;
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _findFocus.requestFocus();
+      _findText.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: _findText.text.length,
+      );
+    });
+  }
+
+  /// Enter in the Find field: open the first row the column is still drawing.
+  ///
+  /// [firstFindTarget] is the ONE place that order lives — the rail draws it
+  /// and this walks it — so the row that opens is the row under the reader's
+  /// eyes rather than a second opinion about which one came first.
+  ///
+  /// Nothing matched and there IS a needle: the question goes to Home's search
+  /// instead. That is the honest escalation — Find only ever looked at what is
+  /// on the rail, search looks at the whole index — and it is what keeps a
+  /// needle nothing on the rail answers from being a dead end.
+  void _submitFind() {
+    final target = firstFindTarget(
+      scope: _section ?? RailSection.home,
+      conversations: _rows,
+      storylines: _storylines(),
+      rooms: _rooms,
+      find: _find,
+      unreadOnly: _unreadOnly,
+      threshold: ref.read(appPrefsProvider).attentionThreshold,
+    );
+    switch (target) {
+      case FindThread(:final source, :final conversationKey):
+        _select(conversationKey, source: source);
+      case FindStoryline(:final id):
+        _selectStoryline(id);
+      case FindRoom(:final key):
+        _selectRoom(key);
+      case null:
+        final text = _find.trim();
+        if (text.isEmpty) return;
+        _selectSection(RailSection.home);
+        ref.read(homeFeedProvider.notifier).submitSearch(text);
+        return;
+    }
+    // The switcher closes on a pick, as Slack's does: the needle answered its
+    // question, and leaving it up would leave the column filtered around a
+    // thread the reader has already opened.
+    _clearFind();
+    _findFocus.unfocus();
+  }
+
   Widget _railAction(IconData icon, String tooltip, VoidCallback onPressed) {
     return IconButton(
       onPressed: onPressed,
@@ -1853,6 +2055,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }
     }
 
+    // Drafts & sent sits directly above Home because it is a row IN the Home
+    // stack: the reader is still standing on Home's column, and the pane in
+    // front of them is one of the things that column offered.
+    if (_section == RailSection.drafts) return _drafts();
+
     // The last rung before the section overviews, so every selection above
     // still outranks it: a thread opened from the feed shows the thread, and
     // Home is what is left when nothing else is selected. A Later day is not a
@@ -1874,6 +2081,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
 
     return _overview(conversations, loadError);
+  }
+
+  /// Every suggestion still waiting, and everything already sent.
+  ///
+  /// Both halves open BESIDE rather than in the main pane, which is the whole
+  /// point of the pane: the docked composer in a side thread already holds the
+  /// suggested body, so a reader can work down the list — read, send, next —
+  /// without the list going away underneath them.
+  Widget _drafts() {
+    final inbox = ref.watch(draftsInboxProvider);
+    return DraftsPane(
+      drafts: inbox.drafts,
+      sent: inbox.sent,
+      loaded: inbox.loaded,
+      error: inbox.error,
+      now: DateTime.now(),
+      onOpenDraft: (draft) =>
+          _openThreadBeside(draft.source, draft.conversationKey),
+      onOpenSent: (row) => _openThreadBeside(row.source, row.conversationKey),
+      onDismiss: (draft) async {
+        await ref
+            .read(draftsInboxProvider.notifier)
+            .dismiss(draft.source, draft.replyToMessageId);
+        if (!mounted) return;
+        // Two more reloads, and both earn their keep. The thread's own draft
+        // notifier is what a composer open BESIDE this pane is reading, and it
+        // would still be holding the suggestion that was just thrown away; the
+        // conversation list carries `pending_draft_count`, which is the rail's
+        // badge. Without them the pane, the composer and the badge would all
+        // be saying different things about the same row.
+        ref.read(draftProvider(draft.target).notifier).load();
+        ref.read(conversationsProvider.notifier).load(syncFirst: false);
+      },
+    );
   }
 
   /// The pipeline, as a table. Everything it renders is a prop — see
@@ -3121,6 +3362,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // may have replaced it, and this is what shows that swap.
         await _reloadOpenThread();
         if (!mounted) return;
+        // The reply just crossed from one half of the Drafts & sent pane to
+        // the other. It may be open beside the send that fired this.
+        ref.read(draftsInboxProvider.notifier).load();
         _toast('Reply sent.');
       case SendOutcome.savedToOutlook:
         _toast('Saved to your Outlook drafts.');
@@ -3278,20 +3522,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       );
     }
 
+    if (section == RailSection.needsYou) return _needsYouOverview(conversations);
+
     final sections = switch (section) {
-      // Same threshold and the same ordering as the rail, so the "+N more" row
-      // opens the list it promised rather than a longer one. Anything the
-      // threshold cut is still in Conversations below — that is what makes the
-      // slider safe to turn all the way down.
-      RailSection.needsYou => [
-          (
-            'NEEDS YOU',
-            needsYouRows(
-              conversations,
-              threshold: ref.watch(appPrefsProvider).attentionThreshold,
-            ),
-          ),
-        ],
       // The People OVERVIEW is the flat list of everything nobody has claimed
       // — the same rows the rail groups into rooms, ungrouped. A room is one
       // person; this is all of them, and it is what the stop lands on before
@@ -3305,12 +3538,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ),
         ],
-      // Unreachable: [_main] routes Home and AI to their own panes, and the
-      // two above return before this switch. The arms exist so the analyzer
-      // keeps this exhaustive when a stop is added.
+      // Unreachable: [_main] routes Home, Drafts & sent and AI to their own
+      // panes, and the three arms above return before this switch. The cases
+      // exist so the analyzer keeps this exhaustive when a stop is added.
       RailSection.home ||
+      RailSection.drafts ||
       RailSection.archive ||
       RailSection.storylines ||
+      RailSection.needsYou ||
       RailSection.ai =>
         const <(String, List<Conversation>)>[],
     };
@@ -3324,6 +3559,66 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onSelect: (source, id) => _select(id, source: source),
       sectionsOverride: sections,
       processingSince: ref.watch(sessionStartProvider),
+    );
+  }
+
+  /// Needs You, under five lenses.
+  ///
+  /// [NeedsYouTab.all] is the list the rail's badge counts, in the rail's own
+  /// order and at the rail's own threshold — so the `+N more` row opens the
+  /// list it promised. The other four filter that same list rather than
+  /// re-deriving one: the ranking was decided once, and a tab that re-read the
+  /// store would eventually rank differently from the column beside it.
+  ///
+  /// Its own method rather than an arm of the switch below, on the archive
+  /// arm's precedent: the pills sit ABOVE the list, so this returns a column
+  /// and not a `(label, rows)` pair.
+  Widget _needsYouOverview(List<Conversation> conversations) {
+    final tab = _needsYouTab;
+    final rows = needsYouTabRows(
+      tab,
+      needsYouRows(
+        conversations,
+        threshold: ref.watch(appPrefsProvider).attentionThreshold,
+      ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        BondFilterPillRow<NeedsYouTab>(
+          key: const Key('needs-you-tabs'),
+          options: NeedsYouTab.values,
+          selected: tab,
+          labelOf: (t) => t.label,
+          onSelected: (t) => setState(() => _needsYouTab = t),
+        ),
+        const SizedBox(height: BondSpacing.s12),
+        Expanded(
+          child: ConversationListPane(
+            sources: _sources,
+            filter: InboxFilter.open,
+            conversations: conversations,
+            selectedId: _selectedId,
+            selectedSource: _selectedSource,
+            onSelect: (source, id) => _select(id, source: source),
+            sectionsOverride: [
+              (
+                tab == NeedsYouTab.all
+                    ? 'NEEDS YOU'
+                    : tab.label.toUpperCase(),
+                rows,
+              ),
+            ],
+            // On a list the reader picked BECAUSE every row has a date on it,
+            // the date in the sender's own words is worth more than another
+            // copy of the ask — which the row's title already carries.
+            captionFor: tab == NeedsYouTab.deadlines
+                ? (c) => 'Deadline · ${c.latestDeadline}'
+                : null,
+            processingSince: ref.watch(sessionStartProvider),
+          ),
+        ),
+      ],
     );
   }
 

@@ -104,6 +104,66 @@ reply is possible on, from the moment the thread opens — see
 [../shell.md](../shell.md#room-anatomy). Every ask on the pane, the banner and
 each message's own line, puts the cursor in that box rather than opening one.
 
+## Drafts & sent
+
+Every suggestion still waiting, and everything already sent, on one pane —
+reached from the **Drafts & sent** row in the Home stack (see
+[../shell.md](../shell.md#the-stops)). The two halves belong together because
+they are two ends of one question: what have I said, and what has something
+offered to say for me. Slack has a Drafts & sent view for the first half; this
+one has a second half because the drafts here were not written by the user.
+
+**What the suggested half lists** is `MessageStore.pendingDrafts`, and three
+narrowings make it work rather than a dump of the table:
+
+- **status** `suggested` or `edited` only. `sent` is history, and `dismissed` is
+  a row kept alive purely so the enqueue does not write the identical
+  suggestion straight back.
+- **the newest-inbound rule** — the `reply_to_message_id` subselect is the one
+  `getDraft` uses, character for character. A suggestion against an older
+  message is still stored and still readable in its thread, but it is not what
+  the composer would offer, so listing it would send the reader to a thread with
+  an empty box. `loadConversations`' `pending_draft_count` column keys off the
+  same subselect, which is what makes the rail's badge and this list the same
+  set of threads by construction.
+- **done threads** are excluded. A suggestion sitting against a closed thread is
+  the model having written something before the user decided the conversation
+  was over.
+
+**The sent half** is `MessageStore.recentOutbound` — there is no `sent` table
+and there does not need to be, because a send writes an outbound row into
+`messages`. Echo rows are included rather than filtered out: the user watched
+the reply leave, and a list that hid it until the Sent Items copy synced would
+disagree with what they just did. `SentRow.echo` (the `local:` id prefix) is
+what puts `· syncing` in the row's time caption. The order is
+`COALESCE(received_at, created_at)`, because an echo has no `received_at` until
+the server's copy lands and a sort on the null would put the newest thing last.
+
+**Both halves open BESIDE**, never in the main pane. That is the point of the
+pane: the docked composer in a side thread already holds the suggested body, so
+a reader can work down the list — read, send, next — without the list going away
+underneath them.
+
+**Dismiss** is `updateDraftStatus(status: 'dismissed')`, keyed on the message
+like every other draft write, and it is followed by **two more reloads**. The
+thread's own `draftProvider` is what a composer open beside the pane is reading,
+and it would still be holding the suggestion just thrown away; the conversation
+list carries `pending_draft_count`, which is the rail's badge. Without them the
+pane, the composer and the badge would each be saying something different about
+one row.
+
+**When it refreshes**: arriving on the stop (`_selectSection`), every
+sixty-second `_refresh` — two indexed reads on the tick that brought the mail in
+— the end of `_send`, and both `sendEpoch` listeners, which is the only place a
+QUEUED reply's send can be noticed at all. A re-read that fails leaves the rows
+already on screen where they are and says so in an `InlineAlert` over them
+(`DraftsInboxState.error` → `DraftsPane.error`): a pane that blanked on a failed
+re-read would throw away a list that is still perfectly true.
+
+A sent row with nobody in `to` is titled by its subject alone. That is the
+ordinary shape of a chat — the Teams connector stores no recipients on a
+message, because the chat's own subject already names everyone in it.
+
 ## Composing a new message
 
 `ComposeNotifier.send` (`app/lib/providers/compose_provider.dart`) is the

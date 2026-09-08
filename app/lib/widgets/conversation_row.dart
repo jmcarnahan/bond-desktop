@@ -20,12 +20,23 @@ class ConversationRow extends StatelessWidget {
   /// not a flag.
   final DateTime? processingSince;
 
+  /// One line that REPLACES the row's usual second line — the CTA, or the
+  /// last-message preview — when the list has something more specific to say
+  /// about this row than the row can say about itself.
+  ///
+  /// The Deadlines tab is what it exists for: on a list the reader chose
+  /// BECAUSE every row has a date on it, the date in the sender's own words is
+  /// worth more than another copy of the ask, which the title already carries.
+  /// Null everywhere else, which is the ordinary row.
+  final String? caption;
+
   const ConversationRow({
     super.key,
     required this.conversation,
     required this.selected,
     required this.onTap,
     this.processingSince,
+    this.caption,
   });
 
   /// Urgent needs-reply is error, needs-reply is attention, waiting is
@@ -56,7 +67,7 @@ class ConversationRow extends StatelessWidget {
     final c = conversation;
     final cta = c.ctaText;
     final hasCta = cta != null && cta.isNotEmpty;
-    final secondary = hasCta ? cta : c.lastMessagePreview;
+    final secondary = caption ?? (hasCta ? cta : c.lastMessagePreview);
     final who = c.primaryParticipant?.display ?? '(no sender)';
     final time = formatTimestamp(c.lastMessageAt);
     final processing = showsProcessing(c, since: processingSince);

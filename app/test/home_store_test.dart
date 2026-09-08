@@ -42,6 +42,7 @@ void main() {
     String triageState = 'done',
     String extractState = 'done',
     String storylineState = 'done',
+    bool hasAttachments = false,
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -54,6 +55,7 @@ void main() {
       'received_at': receivedAt,
       'created_at': receivedAt,
       'updated_at': receivedAt,
+      'has_attachments': hasAttachments ? 1 : 0,
     });
     await db.customUpdate(
       'UPDATE message_progress SET outcome = ?, dropped = ?, drop_reason = ?, '
@@ -477,6 +479,23 @@ void main() {
       );
 
       expect(hot.map((s) => s.id), ['sl-9', 'sl-8', 'sl-7']);
+    });
+  });
+
+  group('has_attachments rides the shared projection', () {
+    test('a feed row says whether its message carried anything', () async {
+      await seed('plain');
+      await seed('attached', receivedAt: '2026-09-02T10:00:00Z', hasAttachments: true);
+
+      final rows = await store.pageHomeFeed();
+
+      // The column is on `_homeFeedColumns`, which every read of this shape
+      // shares — so `has:file` can be answered off a hit without a second
+      // query per row.
+      expect(
+        {for (final row in rows) row.sourceMessageId: row.hasAttachments},
+        {'attached': true, 'plain': false},
+      );
     });
   });
 }

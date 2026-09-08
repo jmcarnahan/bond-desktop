@@ -221,6 +221,43 @@ needs-you has no stage column, so an arm there would write nothing. The generic
 parking above those ladders still applies: a fast server that is not running
 parks the whole kind rather than burning attempts on it.
 
+## Activity tabs on the overview
+
+The Needs You overview is five lenses on one pile, as a
+`BondFilterPillRow<NeedsYouTab>` (`Key('needs-you-tabs')`) above the list:
+**All · Asked of me · Waiting on others · Deadlines · Suggested drafts**.
+
+`All` leads and is the default, so arriving at the stop shows exactly what the
+stop always showed — the ranked list, at the same threshold as the rail, so the
+`+N more` row opens the list it promised. The other four are **filters over that
+same list** (`needsYouTabRows`, pure, in
+`app/lib/widgets/needs_you_tabs.dart`), never a second query: the ranking was
+decided once, and a tab that re-read the store would eventually rank differently
+from the column beside it. The order survives every tab, so the third row on
+Deadlines is the same thread it was on All.
+
+Asked of me and Waiting on others are **complements of one predicate**
+(`isWaitingRow`), the same way Needs You itself partitions the inbox — every row
+is on exactly one of the two, and their counts add back up to All.
+
+The other two read **two read-time columns on `loadConversations`**, and no
+schema changed for either:
+
+- `latest_deadline` — the newest inbound message's `deadline`, in the sender's
+  own words. The newest one's and nobody else's: a date named three replies ago
+  has already been answered or overtaken.
+- `pending_draft_count` — suggestions in `('suggested','edited')` against that
+  same newest inbound message. The subselect is `getDraft`'s, so a thread this
+  counts and a thread whose composer is full are the same thread.
+
+Both are null/zero on any read that does not run the subqueries, which reads as
+"no date named" and "nothing suggested" rather than inventing either.
+
+On the Deadlines tab each row's second line becomes `Deadline · <the text>`
+(`ConversationListPane.captionFor` → `ConversationRow.caption`), replacing the
+ask. On a list the reader picked BECAUSE every row has a date on it, the date is
+worth more than another copy of an ask the row's title already carries.
+
 ## What the documents on a message say
 
 `NeedsYouInput.attachmentDigests` is one line per digested document on **this

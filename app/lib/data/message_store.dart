@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:drift/drift.dart';
 
 import '../models/attachment_models.dart';
+import '../models/drafts_models.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../models/person.dart';
@@ -801,6 +802,14 @@ WHERE source = ? AND conversation_key = ?
   /// Both are counted at read time and both default to zero where the columns
   /// are absent, because a read that cannot say must never claim the model is
   /// busy — an indicator that lies in that direction never turns off.
+  ///
+  /// `latest_deadline` and `pending_draft_count` are read-time for the same
+  /// reason and answer the two Needs You tabs that cannot be decided from a
+  /// thread's own row. Both key off the thread's NEWEST INBOUND message, which
+  /// is the message the thread is waiting on: [getDraft] resolves the
+  /// composer's suggestion by exactly that subselect, so a thread the drafts
+  /// tab claims and a thread whose composer is full are the same set of
+  /// threads by construction rather than by coincidence.
   Future<List<Conversation>> loadConversations({
     List<String> sources = const ['email'],
     ConversationState? state,
@@ -839,7 +848,31 @@ WHERE source = ? AND conversation_key = ?
           '     AND m2.source_message_id = a.source_message_id '
           '   WHERE a.source = c.source '
           '     AND m2.conversation_key = c.conversation_key '
-          '     AND a.is_inline = 0) AS attachment_count '
+          '     AND a.is_inline = 0) AS attachment_count, '
+          // The newest inbound message's deadline, in the sender's own words.
+          // The newest one's and nobody else's: a date somebody named three
+          // replies ago is history, and a Deadlines tab that surfaced it would
+          // be listing threads whose deadline has already been answered.
+          '  (SELECT m4.deadline FROM messages m4 '
+          '   WHERE m4.source = c.source AND m4.conversation_key = c.conversation_key '
+          "     AND m4.direction = 'inbound' "
+          '   ORDER BY m4.received_at DESC, m4.source_message_id DESC LIMIT 1'
+          '  ) AS latest_deadline, '
+          // How many suggestions are waiting on this thread — and the
+          // subselect is the SAME newest-inbound rule [getDraft] uses, on
+          // purpose. A pending draft is the one the thread would actually
+          // show; a suggestion left against an older message is history, not
+          // work, and counting it would put a badge on a thread whose composer
+          // is empty.
+          '  (SELECT COUNT(*) FROM drafts d '
+          '   WHERE d.source = c.source AND d.conversation_key = c.conversation_key '
+          "     AND d.status IN ('suggested','edited') "
+          '     AND d.reply_to_message_id = ('
+          '       SELECT m3.source_message_id FROM messages m3 '
+          '        WHERE m3.source = c.source AND m3.conversation_key = c.conversation_key '
+          "          AND m3.direction = 'inbound' "
+          '        ORDER BY m3.received_at DESC, m3.source_message_id DESC LIMIT 1'
+          '     )) AS pending_draft_count '
           'FROM conversations c '
           'LEFT JOIN conversation_ai ai '
           '  ON ai.source = c.source AND ai.conversation_key = c.conversation_key '
@@ -3658,6 +3691,91 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
     return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
+  /// Every suggestion still waiting, across the whole mailbox, newest first.
+  ///
+  /// The pane behind this is the model's outbox: what it has written and
+  /// nobody has agreed to yet. Three narrowings make it that rather than a
+  /// dump of the `drafts` table.
+  ///
+  /// **Statuses.** `suggested` and `edited` only. `sent` is history and
+  /// `dismissed` is a row kept alive purely so the enqueue does not write the
+  /// same suggestion straight back — see [updateDraftStatus].
+  ///
+  /// **The newest inbound rule.** The `reply_to_message_id` subselect is the
+  /// one [getDraft] uses, character for character. A suggestion written
+  /// against an older message is still stored and still readable in its
+  /// thread, but it is not what the composer would offer, so listing it here
+  /// would send the reader to a thread whose box is empty.
+  ///
+  /// **Done threads.** A closed thread is finished. A suggestion still sitting
+  /// against it is the model having written something before the user decided
+  /// the conversation was over, and a list that kept asking about it would be
+  /// asking the user to re-close it once a day.
+  Future<List<PendingDraft>> pendingDrafts({
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (sources.isEmpty) return const [];
+    final result = await db
+        .customSelect(
+          'SELECT d.source, d.conversation_key, d.reply_to_message_id, '
+          '       d.body, d.status, d.updated_at, '
+          '       c.subject AS subject, '
+          '       m.from_name AS from_name, m.from_address AS from_address '
+          'FROM drafts d '
+          'JOIN conversations c '
+          '  ON c.source = d.source AND c.conversation_key = d.conversation_key '
+          'LEFT JOIN messages m '
+          '  ON m.source = d.source AND m.source_message_id = d.reply_to_message_id '
+          "WHERE d.status IN ('suggested','edited') "
+          '  AND d.source IN (${_placeholders(sources.length)}) '
+          '  AND c.state != ? '
+          '  AND d.reply_to_message_id = ('
+          '    SELECT m2.source_message_id FROM messages m2 '
+          '     WHERE m2.source = d.source '
+          '       AND m2.conversation_key = d.conversation_key '
+          "       AND m2.direction = 'inbound' "
+          '     ORDER BY m2.received_at DESC, m2.source_message_id DESC LIMIT 1'
+          '  ) '
+          'ORDER BY d.updated_at DESC',
+          variables: _args([...sources, ConversationState.done.wire]),
+        )
+        .get();
+    return [for (final row in result) PendingDraft.fromRow(row.data)];
+  }
+
+  /// What the user has sent, newest first — mail and chat together.
+  ///
+  /// There is no `sent` table: a send writes an outbound row into `messages`,
+  /// so this column IS the Sent list. Echo rows are included rather than
+  /// filtered out, and deliberately — the user watched the reply leave, and a
+  /// list that hid it until the Sent Items copy synced would be a list that
+  /// disagreed with what they just did. `SentRow.echo` is how the pane says
+  /// which ones are still provisional.
+  ///
+  /// Ordered on `COALESCE(received_at, created_at)` because an echo has no
+  /// `received_at` until the server's copy lands, and a sort on the null would
+  /// put the newest thing at the bottom.
+  Future<List<SentRow>> recentOutbound({
+    List<String> sources = const ['email', 'teams'],
+    int limit = 50,
+  }) async {
+    if (sources.isEmpty) return const [];
+    final result = await db
+        .customSelect(
+          'SELECT m.source, m.source_message_id, m.conversation_key, '
+          '       m.subject, m.to_json, m.body_preview, m.body_text, '
+          '       COALESCE(m.received_at, m.created_at) AS sent_at '
+          'FROM messages m '
+          "WHERE m.direction = 'outbound' "
+          '  AND m.source IN (${_placeholders(sources.length)}) '
+          'ORDER BY sent_at DESC, m.source_message_id DESC '
+          'LIMIT ?',
+          variables: _args([...sources, limit]),
+        )
+        .get();
+    return [for (final row in result) SentRow.fromRow(row.data)];
+  }
+
   /// The suggestion a THREAD would show: the one answering its newest inbound
   /// message, and only that one.
   ///
@@ -4117,14 +4235,15 @@ LIMIT ?
   /// rows with rows that have holes in them.
   /// The column list alone, so a read that needs the same row shape over a
   /// DIFFERENT set of joins — [semanticSearch] comes in through
-  /// `message_vectors` — can have it without copying nineteen column names
+  /// `message_vectors` — can have it without copying twenty column names
   /// that [HomeFeedRow.fromRow] then has to keep agreeing with.
   static const String _homeFeedColumns = '''
 p.source, p.source_message_id, p.conversation_key, p.received_at,
   p.triage_state, p.extract_state, p.storyline_state, p.draft_state,
   p.settle_state,
   p.outcome, p.dropped, p.drop_reason, p.storyline_id, p.needs_you, p.urgency,
-  m.subject, m.from_name, m.from_address, s.title AS storyline_title''';
+  m.subject, m.from_name, m.from_address, m.has_attachments,
+  s.title AS storyline_title''';
 
   static const String _homeFeedSelect = '''
 SELECT $_homeFeedColumns

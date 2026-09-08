@@ -54,10 +54,21 @@ transcript's own 420 minimum, with nothing to catch it.
 | Later | `schedule` | one row per deferred day | `ArchivePane` — Later · Done · Dropped |
 | AI | `auto_awesome` | one line: 'Models, rules and the log' | `SettingsScreen(scope: ai)`, titled 'AI' |
 
+**Drafts & sent is a row in the Home stack, not a stop.** It sits between Needs
+You and Storylines with a badge counting the suggestions waiting. What it holds
+is the model's unsent work rather than a pile of mail, and a seventh icon for a
+list that is usually empty would cost a permanent stop for an occasional one.
+While its pane is up the icon rail lights **Home** — the stack the row belongs
+to — and the list column keeps that whole stack with the row highlighted: the
+reader has not gone anywhere, they have opened one of the things the column was
+already offering. The row has nothing under it, because the pane IS the list and
+a column repeating it would be a second copy always a beat behind.
+
 `RailSection` is the vocabulary for all of this
-(`{ home, needsYou, storylines, people, archive, ai }`). `archive` keeps its
-enum name and is **labelled 'Later'**: the column the store reads is
+(`{ home, needsYou, drafts, storylines, people, archive, ai }`). `archive` keeps
+its enum name and is **labelled 'Later'**: the column the store reads is
 `bucket = 'later'`, and renaming the constant would rename it everywhere.
+`IconRail.stops` is an explicit ordered list and does NOT contain `drafts`.
 
 On Home the column is the whole stack and every section collapses. On any other
 stop it is that one section, expanded, with its header row and **no chevron** —
@@ -78,8 +89,96 @@ conversation in it is being read.
 
 `_main()`'s ladder is the priority order, top rung first: compose → Settings →
 activity log → add-thread picker → pick-storyline picker → full file viewer →
-thread → storyline → **room** → Home → AI → section overview. A pane outranks
-what it was opened from because it is the newer thing the user asked for.
+thread → storyline → **room** → **Drafts & sent** → Home → AI → section
+overview. A pane outranks what it was opened from because it is the newer thing
+the user asked for. Drafts & sent sits directly above Home because its row lives
+in the Home stack.
+
+---
+
+## Finding things
+
+Slack opens a palette over the app for its quick switcher. The house rule is
+that nothing opens over anything, so Find is a **field in the column it
+filters** — `FindField`, in the list-column header above the source chips. That
+turns out to be the better shape: the rows narrow under the reader's eyes as
+they type, so "the top match" is something they can see rather than a promise
+about a list the app is hiding.
+
+**What it matches**, per row kind (`app/lib/widgets/find_filter.dart`, all pure):
+
+| Row | Matched against |
+|---|---|
+| thread | the ask (`needsYouTitleFor`), the person (`railTitleFor`), the subject, and every participant name and address |
+| storyline | its title |
+| person room | its title, which is the people in it |
+| Later day | nothing — a day has no title, so the day rows come off entirely while a needle is up |
+
+Find is **not search**. It narrows rows already on the rail, live, on every
+keystroke, and never looks in a message body — the rail does not hold one and
+could not honestly claim to have looked. An empty needle matches everything,
+which is what makes an empty box the unfiltered rail.
+
+**Badges never shrink under a filter.** Needs You still counts the whole pile
+while the column shows one row of it. A filter changes what you can see, never
+what you owe, and a badge that moved as the reader typed would let them hide
+their own work by mistyping a name. The rail filters BEFORE it truncates to
+`AttentionTuning.topCount`, which is also what makes the next rule true.
+
+**Enter opens the first row still drawn.** `firstFindTarget` is the one place
+that order lives — the rail draws it and the screen walks it — so the row that
+opens is the row under the reader's eyes rather than a second opinion about
+which came first. It walks the scope's own sections: Home and Drafts walk
+threads, then storylines, then rooms; a single-section scope walks only its own;
+Later and AI answer null. `find_filter_test` and `app_rail_test` pin the two
+halves of that agreement against each other.
+
+**Nothing matched is not a dead end.** With a needle still in the box, Enter
+falls through to Home's search: `_selectSection(home)` then
+`submitSearch(text)`. That is the honest escalation — Find only ever looked at
+the rail, and search looks at the whole index. On any pick the field clears and
+gives up focus, the way Slack's switcher closes.
+
+**⌘K** focuses the field from anywhere (and `Ctrl+K`, for a runner that is not a
+Mac). The binding is a `CallbackShortcuts` around the whole `Scaffold` body,
+wrapped in `Focus(autofocus: true)` — and that wrapper is load-bearing:
+`CallbackShortcuts` only sees keys while focus is somewhere inside its subtree,
+and on a freshly built screen nothing has focus at all. It takes focus once, at
+the top, and hands it over the moment anything below asks, so a composer or a
+search box the reader clicks into still gets its keystrokes. At narrow widths
+⌘K opens the rail overlay first, then requests focus in a post-frame callback —
+the field may only exist once that overlay has been laid out. Escape clears, and
+is bound inside `FindField` so it only fires while the box holds focus.
+
+**Unread only** is a toggle in the caption row (`Key('unread-toggle')`), not a
+pill under the source chips: three source pills already fill 236px, and a fourth
+would wrap onto a line of its own for one word. It hides read threads and read
+rooms and leaves storylines alone — a storyline is not read or unread, and
+hiding one under a filter about mail would make the toggle mean two things. Its
+tooltip names what pressing it would do, so it flips: `Unread only` ↔ `Show
+everything`.
+
+**The search grammar** belongs to Home's own box, not to Find. See
+`parseSearchQuery` (`app/lib/services/search_grammar.dart`); the hint on
+`HomeSearchField` names it, because there is nowhere else to put a legend.
+
+| Facet | Takes | Runs |
+|---|---|---|
+| `from:` | a name or address fragment, quotable | client-side, over the hits |
+| `in:` | `mail`/`email`/`outlook`, or `teams`/`chat` | **server-side**, as `sources` down to `semanticSearch` and `searchAttachmentChunks` |
+| `has:` | `file`/`files`/`attachment`/`attachments` | client-side, on `HomeFeedRow.hasAttachments` |
+| `before:` / `after:` | `YYYY-MM-DD` only | client-side; `before` is strictly earlier, `after` includes the day |
+
+Anything unrecognised **stays text** — an unknown facet, a value the facet does
+not take, an empty one. There is no error channel between the box and the
+reader, so the only honest thing to do with `re:` or `in:junk` is search for it.
+Facets with no sentence left under them do not reach the index at all: the state
+gets `'Add a word or two to search for — the filters alone are not a question.'`
+rather than an embedding call on the empty string. Results are labelled with the
+RAW query the reader typed, facets and all, because that is what the box still
+shows. Documents are **not** facet-filtered: `in:` already narrowed them in SQL,
+`has:file` is trivially true of every one of them, and sender and date live on
+the message a chunk came from.
 
 ---
 
@@ -220,9 +319,11 @@ menu hanging off the control that opened it takes nothing over.
 inside the same `Material` — the screen builds it and hands it down as
 `AppRail.header`:
 
-1. the scope's name in caps, then ✎ **New message** and ⟳ **Refresh**;
-2. the three source chips (`SourceFilterBar`, already `onDark`);
-3. the triage caption, when the model still has mail to look at.
+1. the scope's name in caps, then the **Unread only** toggle, ✎ **New
+   message** and ⟳ **Refresh**;
+2. the **Find** field (`FindField`, hint `Find… ⌘K`);
+3. the three source chips (`SourceFilterBar`, already `onDark`);
+4. the triage caption, when the model still has mail to look at.
 
 Teams freshness is now the refresh button's **tooltip** — `Refresh` before the
 first pull, `Refresh · Teams updated 4m ago` after. It is a fact about that
@@ -301,3 +402,19 @@ the person room's header `AvatarStack`.
   same pair runs the closing one out after picking an item. A panel-only test
   with no `InboxScreen` under it can use `pumpAndSettle` instead.
 - **Tabs** are selected by `find.byKey(RoomHeader.tabKey(StorylineTab.files))`.
+- **Find** is reached by `find.byKey(FindField.fieldKey)`. `enterText` then
+  `pump()` narrows the column; `tester.testTextInput.receiveAction(
+  TextInputAction.search)` is Enter. ⌘K is four events —
+  `sendKeyDownEvent(metaLeft)`, `sendKeyDownEvent(keyK)`, `sendKeyUpEvent(keyK)`,
+  `sendKeyUpEvent(metaLeft)` — then `pump()`.
+- `Key('unread-toggle')` is the Unread only button; find it by that, not by
+  tooltip, because the tooltip flips with the state.
+- `Key('needs-you-tabs')` is the Needs You pill row. **Scope pill finders to
+  it**: the source chips carry an `All` pill of their own.
+- `DraftsPane.draftKeyFor(source, messageId)` / `dismissKeyFor(...)` /
+  `sentKeyFor(source, messageId)` reach the Drafts & sent rows. The list column
+  row is `find.text('DRAFTS & SENT')`, scoped to `AppRail`.
+- A screen test about which rows reach the rail should write
+  `attentionThresholdKey` to `'0'` before reading prefs. The scoring pass lands
+  a few pumps in, and the default 0.5 slider will cut a quiet row out from under
+  an assertion that was true on the first frame.

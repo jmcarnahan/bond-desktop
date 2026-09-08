@@ -63,6 +63,12 @@ class ConversationListPane extends StatelessWidget {
   /// thread is an action with nothing to undo.
   final void Function(String source, String conversationKey)? onReopen;
 
+  /// A second line for one row, in place of the one it would draw for itself —
+  /// see [ConversationRow.caption]. Null, the default, leaves every row saying
+  /// what it always says; a builder that answers null for a given row does the
+  /// same for that one.
+  final String? Function(Conversation)? captionFor;
+
   const ConversationListPane({
     super.key,
     required this.sources,
@@ -74,6 +80,7 @@ class ConversationListPane extends StatelessWidget {
     this.sectionsOverride,
     this.processingSince,
     this.onReopen,
+    this.captionFor,
   });
 
   List<Conversation> _inState(ConversationState state) => [
@@ -186,6 +193,7 @@ class ConversationListPane extends StatelessWidget {
           (selectedSource == null || selectedSource == c.source),
       onTap: () => onSelect(c.source, c.id),
       processingSince: processingSince,
+      caption: captionFor?.call(c),
     );
     if (!_showReopen) return row;
 

@@ -58,6 +58,7 @@ class _FakeSearch implements MessageSearch {
     String query, {
     int limit = 50,
     bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
   }) async {
     final rows = await store.pageHomeFeed(
       limit: limit,

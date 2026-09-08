@@ -28,6 +28,7 @@ void main() {
     InboxFilter filter = InboxFilter.done,
     List<(String, List<Conversation>)>? sectionsOverride,
     void Function(String, String)? onReopen,
+    String? Function(Conversation)? captionFor,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -41,6 +42,7 @@ void main() {
           onSelect: (_, _) {},
           sectionsOverride: sectionsOverride,
           onReopen: onReopen,
+          captionFor: captionFor,
         ),
       ),
     ));
@@ -102,6 +104,35 @@ void main() {
 
       expect(find.text('DONE'), findsOneWidget);
       expect(find.text('Reopen'), findsNothing);
+    });
+  });
+
+  group('captionFor', () {
+    testWidgets('reaches the row, per row', (tester) async {
+      final rows = [_conv(id: 'a'), _conv(id: 'b')];
+
+      await pump(
+        tester,
+        conversations: rows,
+        sectionsOverride: [('NEEDS YOU', rows)],
+        // A builder that answers null for a row leaves that one saying what it
+        // always says.
+        captionFor: (c) => c.id == 'a' ? 'Deadline · by Friday' : null,
+      );
+
+      expect(find.text('Deadline · by Friday'), findsOneWidget);
+    });
+
+    testWidgets('and no builder leaves every row alone', (tester) async {
+      final rows = [_conv(id: 'a')];
+
+      await pump(
+        tester,
+        conversations: rows,
+        sectionsOverride: [('NEEDS YOU', rows)],
+      );
+
+      expect(find.textContaining('Deadline'), findsNothing);
     });
   });
 }

@@ -83,6 +83,16 @@ class HomeFeedRow {
   final String? fromName;
   final String? fromAddress;
 
+  /// Whether the message carried anything attached, straight off
+  /// `messages.has_attachments`. False on any read that did not select the
+  /// column — which reads as "nothing attached" rather than as a paperclip on
+  /// a message that has none.
+  ///
+  /// It is here so `has:file` can be answered without a second query per hit:
+  /// a search returns fifty rows and a per-row attachment lookup would be
+  /// fifty reads to decide which ones to throw away.
+  final bool hasAttachments;
+
   const HomeFeedRow({
     required this.source,
     required this.sourceMessageId,
@@ -103,6 +113,7 @@ class HomeFeedRow {
     this.subject,
     this.fromName,
     this.fromAddress,
+    this.hasAttachments = false,
   });
 
   factory HomeFeedRow.fromRow(Map<String, Object?> row) => HomeFeedRow(
@@ -125,6 +136,7 @@ class HomeFeedRow {
         subject: row['subject'] as String?,
         fromName: row['from_name'] as String?,
         fromAddress: row['from_address'] as String?,
+        hasAttachments: (row['has_attachments'] as num?)?.toInt() == 1,
       );
 
   /// The pair the feed is keyed and cursored by. A message id is only unique
@@ -170,6 +182,7 @@ class HomeFeedRow {
         subject: subject,
         fromName: fromName,
         fromAddress: fromAddress,
+        hasAttachments: hasAttachments,
       );
 }
 

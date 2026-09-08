@@ -65,6 +65,21 @@ void main() {
       }
     });
 
+    testWidgets('and Drafts & sent is deliberately not one of them',
+        (tester) async {
+      await pumpRail(tester);
+
+      // It is a ROW in the Home stack, not a stop: what it holds is the
+      // model's unsent work rather than a pile of mail, and a seventh icon for
+      // a list that is usually empty would cost a permanent stop for an
+      // occasional one. `stops` is an explicit list so this cannot drift.
+      expect(
+        [for (final (section, _) in IconRail.stops) section],
+        isNot(contains(RailSection.drafts)),
+      );
+      expect(find.text('Drafts & sent'), findsNothing);
+    });
+
     testWidgets('the selected stop is tinted and the rest are not',
         (tester) async {
       await pumpRail(tester, selected: RailSection.storylines);

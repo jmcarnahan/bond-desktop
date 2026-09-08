@@ -6,6 +6,7 @@ import '../services/attention.dart';
 import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
 import 'bond_avatar.dart';
+import 'find_filter.dart';
 import 'people_rooms.dart';
 import 'processing_hint.dart';
 import 'source_glyph.dart';
@@ -21,12 +22,21 @@ import 'time_format.dart';
 /// [RailSection.archive] keeps its enum name and is LABELLED 'Later': the
 /// column it reads is `bucket = 'later'`, and renaming the constant would
 /// rename it everywhere the store spells it.
-enum RailSection { home, needsYou, storylines, people, archive, ai }
+///
+/// [RailSection.drafts] is the one destination that is NOT a stop on the icon
+/// rail. It is a row in the Home stack — see `IconRail.stops`, which is an
+/// explicit list and does not contain it — because what it holds is the
+/// model's unsent work rather than a pile of mail, and a seventh icon for a
+/// list that is usually empty would cost a permanent stop for an occasional
+/// one. While its pane is up the icon rail lights Home, which is the stack the
+/// row lives in.
+enum RailSection { home, needsYou, drafts, storylines, people, archive, ai }
 
 extension RailSectionLabel on RailSection {
   String get label => switch (this) {
         RailSection.home => 'Home',
         RailSection.needsYou => 'Needs You',
+        RailSection.drafts => 'Drafts & sent',
         RailSection.storylines => 'Storylines',
         RailSection.people => 'People',
         RailSection.archive => 'Later',
@@ -339,6 +349,27 @@ class AppRail extends StatefulWidget {
   /// no directory behind it wants.
   final ProfilePhotos? photos;
 
+  /// The Find needle, live off the header's field. Empty — the default — shows
+  /// the whole column.
+  ///
+  /// It narrows what is DRAWN and never what is COUNTED: the Needs You badge
+  /// still reads the whole pile. A filter changes what you can see, never what
+  /// you owe, and a badge that shrank while the reader typed would let them
+  /// hide their own work by mistyping a name.
+  final String find;
+
+  /// Whether to draw only rows with something unread on them. Threads and
+  /// rooms answer to it; storylines do not — a storyline is not read or
+  /// unread, and hiding one under a filter about mail would make the toggle
+  /// mean two things.
+  final bool unreadOnly;
+
+  /// How many threads carry a suggestion waiting to be sent — the badge on the
+  /// Drafts & sent row. Zero hides it. Passed in rather than counted here for
+  /// the reason [laterCount] is: the pane and the badge must be counting the
+  /// same list, and the screen is what holds it.
+  final int pendingDraftCount;
+
   const AppRail({
     super.key,
     required this.conversations,
@@ -364,6 +395,9 @@ class AppRail extends StatefulWidget {
     required this.onSelectRoom,
     this.selectedRoomKey,
     this.photos,
+    this.find = '',
+    this.unreadOnly = false,
+    this.pendingDraftCount = 0,
   });
 
   /// Fixed: the rail is a landmark, not a resizable pane.
@@ -418,8 +452,14 @@ class _AppRailState extends State<AppRail> {
   List<Widget> _stack() {
     switch (widget.scope) {
       case RailSection.home:
+      // Drafts & sent is a ROW in the Home stack rather than a stop of its
+      // own, so standing on it keeps the whole stack in the column with its
+      // header highlighted — the reader has not gone anywhere, they have
+      // opened one of the things that was already in front of them.
+      case RailSection.drafts:
         return [
           ..._needsYouSection(),
+          ..._draftsSection(),
           ..._storylinesSection(),
           ..._peopleSection(),
           ..._laterSection(),
@@ -450,13 +490,28 @@ class _AppRailState extends State<AppRail> {
       threshold: widget.attentionThreshold,
     );
 
-    // The badge counts everything that qualified, the list shows the top
-    // handful. A badge that agreed with the truncated list would understate
-    // the work, which is the one number in the rail that must not be flattering.
-    final shown = needsYou.length > AttentionTuning.topCount
-        ? needsYou.sublist(0, AttentionTuning.topCount)
-        : needsYou;
-    final overflow = needsYou.length - shown.length;
+    // Filtered BEFORE the truncation, and the order matters twice over. It is
+    // what makes Find useful at all — cutting to five and then filtering would
+    // search the top five rather than the pile — and it is the whole reason
+    // `firstFindTarget` can promise Enter opens the row under the reader's
+    // eyes.
+    final needle = normalizeFind(widget.find);
+    final matching = [
+      for (final c in needsYou)
+        if (conversationMatches(c, needle) &&
+            (!widget.unreadOnly || c.hasUnread))
+          c,
+    ];
+
+    // The badge counts everything that qualified — UNFILTERED — and the list
+    // shows the top handful of what survived. A badge that agreed with the
+    // truncated list would understate the work, which is the one number in the
+    // rail that must not be flattering; a badge that shrank as the reader
+    // typed would let them hide their own work by mistyping a name.
+    final shown = matching.length > AttentionTuning.topCount
+        ? matching.sublist(0, AttentionTuning.topCount)
+        : matching;
+    final overflow = matching.length - shown.length;
 
     return _section(
       RailSection.needsYou,
@@ -479,28 +534,66 @@ class _AppRailState extends State<AppRail> {
     );
   }
 
-  List<Widget> _storylinesSection({bool collapsible = true}) => _section(
-        RailSection.storylines,
-        collapsible: collapsible,
-        rows: [
-          for (final s in storylineRows(widget.storylines)) _storylineItem(s),
-        ],
-        placeholder: 'Suggestions arrive after processing',
+  /// A header row and nothing under it: the PANE is the list of drafts, and a
+  /// column that repeated it would be a second copy of the same list, one of
+  /// them always a beat behind the other. So this section is a link — with a
+  /// count on it, which is the one thing a link can usefully say.
+  ///
+  /// Neither Find nor the unread toggle touches it. There is nothing here to
+  /// narrow, and a row that vanished while the reader typed a colleague's name
+  /// would take the way into the pane with it.
+  List<Widget> _draftsSection() => _section(
+        RailSection.drafts,
+        collapsible: false,
+        rows: const [],
+        badge: widget.pendingDraftCount == 0
+            ? null
+            : _badge(widget.pendingDraftCount, attention: false),
       );
 
-  List<Widget> _peopleSection({bool collapsible = true}) => _section(
-        RailSection.people,
-        collapsible: collapsible,
-        rows: [for (final room in widget.rooms) _roomItem(room)],
-        placeholder: 'Nobody is waiting on anything',
-      );
+  List<Widget> _storylinesSection({bool collapsible = true}) {
+    final needle = normalizeFind(widget.find);
+    return _section(
+      RailSection.storylines,
+      collapsible: collapsible,
+      rows: [
+        for (final s in storylineRows(widget.storylines))
+          if (storylineMatches(s, needle)) _storylineItem(s),
+      ],
+      placeholder: 'Suggestions arrive after processing',
+    );
+  }
 
+  List<Widget> _peopleSection({bool collapsible = true}) {
+    final needle = normalizeFind(widget.find);
+    return _section(
+      RailSection.people,
+      collapsible: collapsible,
+      rows: [
+        for (final room in widget.rooms)
+          if (roomMatches(room, needle) &&
+              (!widget.unreadOnly || room.unread > 0))
+            _roomItem(room),
+      ],
+      placeholder: 'Nobody is waiting on anything',
+    );
+  }
+
+  /// Later's day rows, unless the reader is finding something.
+  ///
+  /// A day is not findable: it has no title to match, and leaving the rows
+  /// there under a needle nothing in them answers would be the one section
+  /// that ignored the filter. The header and its badge stay — the pile is
+  /// still there, and saying how much is deferred is not a search result.
+  /// The unread toggle leaves it alone: deferred mail is deferred whether or
+  /// not it has been read.
   List<Widget> _laterSection({bool collapsible = true}) => _section(
         RailSection.archive,
         collapsible: collapsible,
         rows: [
-          for (final (dayKey, count) in widget.laterDays)
-            _laterDayItem(dayKey, count),
+          if (normalizeFind(widget.find).isEmpty)
+            for (final (dayKey, count) in widget.laterDays)
+              _laterDayItem(dayKey, count),
         ],
         // Deferred mail only, though the section now holds done threads too:
         // a done pile grows without bound and asks nothing of anyone, and
@@ -508,9 +601,14 @@ class _AppRailState extends State<AppRail> {
         badge: widget.laterCount == 0
             ? null
             : _badge(widget.laterCount, attention: false),
-        // Only when there is genuinely nothing deferred. A pile with no day
-        // breakdown must not read as an empty one.
-        placeholder: widget.laterCount == 0 ? 'Nothing deferred yet' : null,
+        // Only when there is genuinely nothing deferred, and never while a
+        // needle is up: a pile with no day breakdown must not read as an empty
+        // one, and neither must a pile whose rows are merely being filtered
+        // past.
+        placeholder:
+            widget.laterCount == 0 && normalizeFind(widget.find).isEmpty
+                ? 'Nothing deferred yet'
+                : null,
       );
 
   List<Widget> _section(

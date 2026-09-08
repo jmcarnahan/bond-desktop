@@ -82,10 +82,15 @@ class MessageSearch {
   /// actually looking for.
   static const int _documentLimit = 6;
 
+  /// [sources] narrows BOTH corpora to a set of connectors — the `in:` facet,
+  /// honoured in SQL because the source is a column on every row either read
+  /// touches. Filtering it after the fact would spend the index's whole budget
+  /// on hits from the connector the reader excluded.
   Future<MessageSearchResult> search(
     String query, {
     int limit = 50,
     bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
   }) async {
     final text = query.trim();
 
@@ -114,6 +119,7 @@ class MessageSearch {
       embedModel: EmbeddingsClient.documentModelTag,
       limit: limit,
       includeDropped: includeDropped,
+      sources: sources,
     );
     // Null and not empty: the native index is missing on this build, which is
     // a different sentence from "no message matches".
@@ -130,6 +136,7 @@ class MessageSearch {
       embedModel: EmbeddingsClient.documentModelTag,
       limit: _documentLimit,
       includeDropped: includeDropped,
+      sources: sources,
     );
     return MessageSearchHits(text, hits, documents: chunks ?? const []);
   }

@@ -73,3 +73,15 @@ comments in `embed_handler.dart` document the queue's contract.
 **Search degradation.** The search UI distinguishes "nothing matches" from
 "the index is off" — an unavailable embed server degrades honestly rather
 than pretending an empty result.
+
+**Search grammar.** Home's box takes facets — `from:`, `in:`, `has:file`,
+`before:`, `after:` — parsed by `parseSearchQuery`
+(`app/lib/services/search_grammar.dart`) before anything is embedded. Only
+`in:` reaches this layer: it travels down as `sources` to `semanticSearch` and
+`searchAttachmentChunks`, because the connector is a column on every row either
+read touches and narrowing there stops the index spending its whole budget on
+hits the reader excluded. Everything else filters the hits afterwards. A query
+of nothing but facets is refused before the embed call — there is no sentence,
+and embedding the empty string would rank the whole mailbox by its distance from
+nothing at all. The facet table and the client-side half are in
+[../shell.md](../shell.md#finding-things).

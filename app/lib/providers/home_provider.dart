@@ -7,6 +7,7 @@ import '../data/message_store.dart';
 import '../models/home_models.dart';
 import '../services/message_search.dart';
 import '../services/progress_bus.dart';
+import '../services/search_grammar.dart';
 import 'app_providers.dart';
 import 'prefs_provider.dart';
 
@@ -54,6 +55,7 @@ String homeRowKey(HomeFeedRow row) => row.feedKey;
 typedef HomeSearchRunner = Future<MessageSearchResult> Function(
   String query, {
   bool includeDropped,
+  List<String> sources,
 });
 
 @immutable
@@ -398,13 +400,32 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     final runner = _searchRunner;
     if (runner == null) return;
 
+    // The facets come off first, and what is left is the question. A query of
+    // nothing but filters is not one: there is no sentence to embed, and
+    // embedding the empty string would rank the whole mailbox by its distance
+    // from nothing at all.
+    final parsed = parseSearchQuery(text);
+    if (parsed.text.isEmpty) {
+      state = state.copyWith(
+        searching: false,
+        searchNotice:
+            'Add a word or two to search for — the filters alone are not a '
+            'question.',
+      );
+      return;
+    }
+
     final seq = ++_searchSeq;
     _inFlightQuery = text;
     state = state.copyWith(searching: true, clearSearchNotice: true);
 
     final MessageSearchResult result;
     try {
-      result = await runner(text, includeDropped: state.includeDropped);
+      result = await runner(
+        parsed.text,
+        includeDropped: state.includeDropped,
+        sources: parsed.sources,
+      );
     } catch (e) {
       // [MessageSearch] answers rather than throws, by contract — but the
       // runner crosses the database on its way there, and a screen left
@@ -425,8 +446,16 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
       case MessageSearchHits():
         state = state.copyWith(
           search: HomeSearch(
-            result.query,
-            result.hits,
+            // The RAW query, facets and all — it is what the reader typed and
+            // what the box still shows, and labelling the results with the
+            // stripped sentence would make them look like an answer to a
+            // question nobody asked.
+            text,
+            filterHits(parsed, result.hits),
+            // Documents are NOT facet-filtered. `in:` already narrowed them in
+            // SQL, and `has:file` is trivially true of every one of them — a
+            // passage out of an attachment IS a file. Sender and date live on
+            // the message a chunk came from, which this list does not carry.
             documents: result.documents,
           ),
           searching: false,
@@ -796,9 +825,16 @@ final homeFeedProvider =
     // Read inside the closure, so the search stack — the embedding client and
     // everything it holds — is built the first time somebody actually asks a
     // question rather than every time the feed loads.
-    searchRunner: (query, {includeDropped = false}) => ref
-        .read(messageSearchProvider)
-        .search(query, includeDropped: includeDropped),
+    searchRunner: (
+      query, {
+      includeDropped = false,
+      sources = const ['email', 'teams'],
+    }) =>
+        ref.read(messageSearchProvider).search(
+              query,
+              includeDropped: includeDropped,
+              sources: sources,
+            ),
     bus: ref.watch(progressBusProvider),
   );
 });

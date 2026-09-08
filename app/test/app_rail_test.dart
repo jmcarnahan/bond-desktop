@@ -3,6 +3,7 @@ import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/bond_avatar.dart';
+import 'package:bond_inbox/widgets/find_filter.dart';
 import 'package:bond_inbox/widgets/people_rooms.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -437,6 +438,7 @@ void main() {
       await pumpRail(tester);
 
       expect(find.text('NEEDS YOU'), findsOneWidget);
+      expect(find.text('DRAFTS & SENT'), findsOneWidget);
       expect(find.text('STORYLINES'), findsOneWidget);
       expect(find.text('PEOPLE'), findsOneWidget);
       expect(find.text('LATER'), findsOneWidget);
@@ -450,7 +452,8 @@ void main() {
 
       double topOf(String label) => tester.getTopLeft(find.text(label)).dy;
 
-      expect(topOf('NEEDS YOU'), lessThan(topOf('STORYLINES')));
+      expect(topOf('NEEDS YOU'), lessThan(topOf('DRAFTS & SENT')));
+      expect(topOf('DRAFTS & SENT'), lessThan(topOf('STORYLINES')));
       expect(topOf('STORYLINES'), lessThan(topOf('PEOPLE')));
       expect(topOf('PEOPLE'), lessThan(topOf('LATER')));
     });
@@ -1296,6 +1299,20 @@ void main() {
       expect(find.text('Models, rules and the log'), findsOneWidget);
       expect(find.text('NEEDS YOU'), findsNothing);
     });
+
+    testWidgets('Drafts & sent keeps the whole Home stack in the column',
+        (tester) async {
+      await pumpRail(tester, RailSection.drafts);
+
+      // It is a ROW in the stack, not a stop, so standing on it must not empty
+      // the column around it — the reader has opened one of the things that
+      // stack offered, not gone somewhere else.
+      expect(find.text('NEEDS YOU'), findsOneWidget);
+      expect(find.text('DRAFTS & SENT'), findsOneWidget);
+      expect(find.text('STORYLINES'), findsOneWidget);
+      expect(find.text('PEOPLE'), findsOneWidget);
+      expect(find.text('LATER'), findsOneWidget);
+    });
   });
 
   group('storylineRows', () {
@@ -1415,6 +1432,234 @@ void main() {
       await pumpRail(tester, storylines: [_storyline(id: 'sl-1', title: '')]);
 
       expect(find.text('(untitled)'), findsOneWidget);
+    });
+  });
+
+  group('AppRail Drafts & sent', () {
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      int pendingDraftCount = 0,
+      RailSection? selectedSection,
+      void Function(RailSection)? onSelectSection,
+      RailSection scope = RailSection.home,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: const [],
+        onSelectRoom: (_) {},
+        conversations: const [],
+        selectedId: null,
+        selectedSection: selectedSection,
+        pendingDraftCount: pendingDraftCount,
+        onSelectConversation: (_, _) {},
+        onSelectSection: onSelectSection ?? (_) {},
+      )));
+    }
+
+    testWidgets('the badge counts what is waiting, and hides at zero',
+        (tester) async {
+      await pumpRail(tester, pendingDraftCount: 3);
+      expect(find.text('3'), findsOneWidget);
+
+      await pumpRail(tester);
+      expect(find.text('0'), findsNothing);
+    });
+
+    testWidgets('the row has nothing under it — the pane IS the list',
+        (tester) async {
+      await pumpRail(tester, pendingDraftCount: 2);
+
+      // A column that repeated the pane would be a second copy of one list,
+      // one of them always a beat behind the other.
+      expect(find.text('No suggested replies waiting.'), findsNothing);
+    });
+
+    testWidgets('tapping it asks for the drafts pane', (tester) async {
+      final picked = <RailSection>[];
+      await pumpRail(tester, onSelectSection: picked.add);
+
+      await tester.tap(find.text('DRAFTS & SENT'));
+
+      expect(picked, [RailSection.drafts]);
+    });
+
+    testWidgets('and it is highlighted while that pane is up', (tester) async {
+      await pumpRail(
+        tester,
+        selectedSection: RailSection.drafts,
+        scope: RailSection.drafts,
+      );
+
+      final material = tester.widget<Material>(find.ancestor(
+        of: find.text('DRAFTS & SENT'),
+        matching: find.byType(Material),
+      ).first);
+      expect(material.color, BondColors.onDarkTint);
+    });
+  });
+
+  group('AppRail Find and Unread', () {
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      String find = '',
+      bool unreadOnly = false,
+      List<Conversation>? conversations,
+      List<Storyline>? storylines,
+      List<PersonRoom>? rooms,
+      List<(String, int)> laterDays = const [],
+      int laterCount = 0,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: RailSection.home,
+        rooms: rooms ?? const [],
+        onSelectRoom: (_) {},
+        conversations: conversations ?? const [],
+        storylines: storylines ?? const [],
+        laterDays: laterDays,
+        laterCount: laterCount,
+        selectedId: null,
+        selectedSection: null,
+        find: find,
+        unreadOnly: unreadOnly,
+        onSelectConversation: (_, _) {},
+        onSelectSection: (_) {},
+        onSelectStoryline: (_) {},
+      )));
+    }
+
+    List<Conversation> twoAsks() => [
+          _conv(
+            id: 'a',
+            who: 'Eric Vance',
+            cta: 'Confirm the launch date',
+            state: ConversationState.needsReply,
+            unread: 1,
+          ),
+          _conv(
+            id: 'b',
+            who: 'Priya Raman',
+            cta: 'Sign the invoice',
+            state: ConversationState.needsReply,
+          ),
+        ];
+
+    testWidgets('a needle narrows the rows and leaves the badge alone',
+        (tester) async {
+      await pumpRail(tester, conversations: twoAsks(), find: 'launch');
+
+      expect(find.text('Confirm the launch date · Eric Vance'), findsOneWidget);
+      expect(find.text('Sign the invoice · Priya Raman'), findsNothing);
+      // A filter changes what you can SEE, never what you OWE. A badge that
+      // shrank as the reader typed would let them hide their own work by
+      // mistyping a name.
+      expect(find.text('2'), findsOneWidget);
+    });
+
+    testWidgets('it matches a participant nobody put in the title',
+        (tester) async {
+      await pumpRail(tester, conversations: twoAsks(), find: 'priya');
+
+      expect(find.text('Sign the invoice · Priya Raman'), findsOneWidget);
+      expect(find.text('Confirm the launch date · Eric Vance'), findsNothing);
+    });
+
+    testWidgets('it narrows storylines and rooms too', (tester) async {
+      final rows = [
+        _conv(id: 'q', who: 'Priya Raman', lastMessageAt: '2026-09-01T09:00:00Z'),
+      ];
+      await pumpRail(
+        tester,
+        conversations: rows,
+        rooms: peopleRooms(rows, owner: _owner),
+        storylines: [
+          _storyline(id: 'sl-1', title: 'Website redesign'),
+          _storyline(id: 'sl-2', title: 'Invoices'),
+        ],
+        find: 'redesign',
+      );
+
+      expect(find.text('Website redesign'), findsOneWidget);
+      expect(find.text('Invoices'), findsNothing);
+      expect(find.text('Priya Raman'), findsNothing);
+    });
+
+    testWidgets('a Later day is not findable, but the pile still says how big',
+        (tester) async {
+      await pumpRail(
+        tester,
+        laterDays: const [('2026-09-01', 3)],
+        laterCount: 3,
+        find: 'launch',
+      );
+
+      expect(find.text('LATER'), findsOneWidget);
+      expect(find.text('3'), findsOneWidget);
+      // No day rows, and no 'Nothing deferred yet' either: a pile being
+      // filtered past must not read as an empty one.
+      expect(find.textContaining('— 3'), findsNothing);
+      expect(find.text('Nothing deferred yet'), findsNothing);
+    });
+
+    testWidgets('unreadOnly hides read threads and read rooms', (tester) async {
+      final rows = [
+        _conv(
+          id: 'a',
+          who: 'Eric Vance',
+          cta: 'Confirm the launch date',
+          state: ConversationState.needsReply,
+          unread: 1,
+        ),
+        _conv(
+          id: 'b',
+          who: 'Priya Raman',
+          cta: 'Sign the invoice',
+          state: ConversationState.needsReply,
+        ),
+        _conv(id: 'q', who: 'Tom Ashby', lastMessageAt: '2026-09-01T09:00:00Z'),
+      ];
+      await pumpRail(
+        tester,
+        conversations: rows,
+        rooms: peopleRooms(rows, owner: _owner),
+        storylines: [_storyline(id: 'sl-1', title: 'Website redesign')],
+        unreadOnly: true,
+      );
+
+      expect(find.text('Confirm the launch date · Eric Vance'), findsOneWidget);
+      expect(find.text('Sign the invoice · Priya Raman'), findsNothing);
+      expect(find.text('Tom Ashby'), findsNothing);
+      // A storyline is not read or unread. Hiding one under a filter about
+      // mail would make the toggle mean two things.
+      expect(find.text('Website redesign'), findsOneWidget);
+    });
+
+    testWidgets('the first row it draws is the row firstFindTarget opens',
+        (tester) async {
+      final rows = twoAsks();
+      await pumpRail(tester, conversations: rows, find: 'invoice');
+
+      final target = firstFindTarget(
+        scope: RailSection.home,
+        conversations: rows,
+        storylines: const [],
+        rooms: const [],
+        find: 'invoice',
+        unreadOnly: false,
+        threshold: 0,
+      );
+
+      // The agreement Enter's whole promise rests on: the rail draws this row
+      // first, so opening the "top match" opens what is under the reader's
+      // eyes. `find_filter_test` holds the other half.
+      expect((target as FindThread).conversationKey, 'b');
+      expect(find.text('Sign the invoice · Priya Raman'), findsOneWidget);
+      expect(find.text('Confirm the launch date · Eric Vance'), findsNothing);
     });
   });
 }
