@@ -79,11 +79,11 @@ void main() {
 
     test('falls back to the address when a party has no name', () {
       final key = roomKeyFor(
-        _conv(id: 'a', people: const [Participant(email: 'Noreply@Bank.com')]),
+        _conv(id: 'a', people: const [Participant(email: 'Noreply@Bank.example')]),
         owner: _owner,
       );
 
-      expect(key, 'noreply@bank.com');
+      expect(key, 'noreply@bank.example');
     });
 
     test('nobody but the owner files under (no sender)', () {

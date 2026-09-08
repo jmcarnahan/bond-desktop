@@ -209,7 +209,7 @@ class WhyPanelBody extends StatelessWidget {
         'Urgency ${_words(m.urgency!)}',
       if ((m.category?.trim() ?? '').isNotEmpty)
         'Category ${_words(m.category!)}',
-      if ((m.label?.trim() ?? '').isNotEmpty) 'Label ${m.label!.trim()}',
+      if ((m.label?.trim() ?? '').isNotEmpty) 'Label ${_words(m.label!)}',
     ];
     if (parts.isNotEmpty) lines.add(parts.join(' · '));
     if (lines.isEmpty) lines.add('Triage read nothing worth labelling.');
@@ -265,7 +265,12 @@ class WhyPanelBody extends StatelessWidget {
     if (bucket == 'later') {
       lines.add('In Later — ${_becauseOf(reason)}.');
     } else if (bucket == null && reason == 'user') {
-      lines.add('Kept in your inbox by you.');
+      // The same pair of columns is written by Keep in inbox AND by a Later
+      // date coming due, and nothing on the row says which. One sentence that
+      // is true either way, rather than a confident one that is wrong half
+      // the time.
+      lines.add('In your inbox on your say-so — kept here, or back from Later '
+          'on its date.');
     }
 
     final until = untilLabel(row?['snoozed_until'] as String?, now);

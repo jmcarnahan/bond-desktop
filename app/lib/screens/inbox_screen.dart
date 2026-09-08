@@ -2124,16 +2124,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (picking != null) return _pickStorylinePane(picking);
 
     final side = _side;
-    // A viewer whose thread vanished falls through — never setState in build;
-    // the next selection clears it. BOTH arms matter: a file can be expanded
-    // from a thread or from a storyline, and dropping either leaves a blank
-    // pane where one of them used to be.
-    final viewerStorylineId = _selectedStorylineId;
-    if (side is FilePanel &&
-        _sideFull &&
-        (_selected(conversations) != null ||
-            (viewerStorylineId != null &&
-                _storylineById(viewerStorylineId) != null))) {
+    // The full viewer stands wherever the file was opened from — a thread, a
+    // storyline's shelf, a room, the Files stop, a person's files — as long as
+    // the thread it rode in on still exists. A viewer whose thread vanished
+    // falls through instead — never setState in build; the next selection
+    // clears it. A file with no thread behind it (a shelf's) has nothing to
+    // vanish, so it stands until something else is selected.
+    if (side is FilePanel && _sideFull && _viewerOriginExists(side)) {
       return _attachmentViewer(side);
     }
 
@@ -2640,6 +2637,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               focusNode: _mainComposerFocus,
               hint: 'Message ${room.title}…',
             ),
+          ] else if (target != null) ...[
+            // A chat with nowhere to write from here says where to write,
+            // exactly as a chat thread does — a room that offered nothing at
+            // all would read as a room with nobody in it.
+            const SizedBox(height: BondSpacing.s12),
+            _replyElsewhere(),
           ],
         ],
       ),
@@ -3043,7 +3046,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         loaded: mine && facts.loaded,
         now: DateTime.now(),
         photos: ref.read(profilePhotosProvider),
-        thumbnailFor: _thumbnailFor,
         onOpenThread: _openThreadBeside,
         // A main selection, which clears the side panel on its way — the
         // storyline IS the next thing the reader asked for, and leaving the
@@ -3206,6 +3208,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// Unfiltered, for the reason [_selected] reads the unfiltered list: an
   /// explicit click outranks whichever source pill happens to be down.
+  /// Whether the thread a file was opened from is still in the mailbox.
+  ///
+  /// The viewer rung's guard. A file off a storyline's shelf carries no
+  /// thread, and the shelf is not a thing that vanishes under a reader mid-
+  /// look; a file opened from a thread belongs to that thread, and a wipe, a
+  /// mark-done or a sync that moved it takes the viewer with it.
+  bool _viewerOriginExists(FilePanel side) {
+    final from = side.from;
+    if (from == null) return true;
+    return _conversationFor(from.source, from.conversationKey) != null;
+  }
+
   Conversation? _conversationFor(String source, String key) {
     final state = ref.watch(conversationsProvider);
     if (state is ConversationsLoaded) {

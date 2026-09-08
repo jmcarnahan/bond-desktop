@@ -121,7 +121,7 @@ class PersonFactsNotifier extends StateNotifier<PersonFactsState> {
       error = 'Could not read everything about them.';
     }
 
-    if (seq != _seq) return;
+    if (seq != _seq || !mounted) return;
     state = PersonFactsState(
       roomKey: room.key,
       storylineIds: storylineIds,

@@ -122,6 +122,39 @@ void main() {
       expect((await ai('c1'))?['bucket'], 'later');
     });
 
+    test('a sender rule\'s thread is never handed back by a date', () async {
+      // Deferred by hand with a date, then the sender was muted: the rule
+      // owns the row now, and the date it inherited must not pull the thread
+      // out from under the rule — and stamp it `user`, which the sweep never
+      // touches again.
+      await seedThread('c1');
+      await defer('c1', '2026-09-01T09:00:00.000Z');
+      await store.setConversationBucket(
+        'email',
+        'c1',
+        bucket: 'later',
+        reason: 'sender_pref',
+      );
+
+      expect(await store.resurfaceDue('2026-09-06T08:00:00.000Z'), 0);
+      final row = await ai('c1');
+      expect(row?['bucket'], 'later');
+      expect(row?['bucket_reason'], 'sender_pref');
+    });
+
+    test('a sender rule drops the date in both directions', () async {
+      await seedThread('c1');
+      await defer('c1', '2026-09-01T09:00:00.000Z');
+
+      await store.rebucketSender('dana@example.test', bucket: 'later');
+      expect((await ai('c1'))?['snoozed_until'], isNull);
+
+      await store.setSnoozedUntil('email', 'c1', '2026-09-01T09:00:00.000Z');
+      await store.rebucketSender('dana@example.test', bucket: null);
+      expect((await ai('c1'))?['snoozed_until'], isNull);
+      expect((await ai('c1'))?['bucket'], isNull);
+    });
+
     test('a thread that is not in Later keeps its own reason', () async {
       await seedThread('c1');
       await store.setConversationBucket(

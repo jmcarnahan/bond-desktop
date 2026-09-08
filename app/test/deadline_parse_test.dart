@@ -38,6 +38,19 @@ void main() {
       expect(parse('Jan 5'), DateTime(2027, 1, 5));
     });
 
+    test('a day the month does not have is no date at all', () {
+      // DateTime would roll February 30 into March 2, and _resolveYear would
+      // then find March 2 already past and push it a whole year out.
+      expect(parse('February 30'), isNull);
+      expect(parse('30 Feb'), isNull);
+      expect(parse('2026-02-31'), isNull);
+      expect(parse('2/31'), isNull);
+      expect(parse('April 31, 2026'), isNull);
+      // The forward window is one year, and neither 2026 nor 2027 has one.
+      expect(parse('Feb 29'), isNull);
+      expect(parse('Feb 29 2028'), DateTime(2028, 2, 29));
+    });
+
     test('a year the sender gave is taken as given', () {
       expect(parse('5 Jan 2027'), DateTime(2027, 1, 5));
     });

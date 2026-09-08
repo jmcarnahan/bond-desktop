@@ -247,11 +247,18 @@ void main() {
       }
     });
 
-    testWidgets('a thread kept in the inbox by hand says who kept it',
-        (tester) async {
+    testWidgets('a thread in the inbox on the reader\'s say-so names both ways '
+        'it got there', (tester) async {
+      // Keep in inbox and a Later date coming due write the same two columns,
+      // and the row cannot say which happened — so the sentence must not
+      // claim one of them.
       await pump(tester, ai: const {'bucket': null, 'bucket_reason': 'user'});
 
-      expect(find.text('Kept in your inbox by you.'), findsOneWidget);
+      expect(
+        find.text('In your inbox on your say-so — kept here, or back from '
+            'Later on its date.'),
+        findsOneWidget,
+      );
     });
 
     testWidgets('a deferral with a date says when it comes back',
@@ -354,6 +361,12 @@ void main() {
         addressedMe: true,
         actionItems: const ['Send the survey'],
         gateReason: 'teams_source',
+        // Snake_case on purpose, in every field that takes a stored word:
+        // the sweep below is only a sweep if a token that slipped through
+        // unworded would trip it.
+        urgency: 'very_high',
+        category: 'work_request',
+        label: 'survey_chase',
       ),
       conversation: const Conversation(id: 'c1', attentionScore: 1.4),
       ai: const {'bucket': 'later', 'bucket_reason': 'low_value'},

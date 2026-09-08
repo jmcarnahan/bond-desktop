@@ -192,15 +192,25 @@ class FilesNotifier extends StateNotifier<FilesState> {
   Future<void> loadMore({required List<String> sources}) async {
     if (state.loadingMore || state.atEnd || !state.loaded) return;
     final seq = _seq;
+    final offset = state.rows.length;
     state = state.copyWith(loadingMore: true);
     try {
       final more = await _store.recentAttachments(
         sources: sources,
         kind: state.kind,
         limit: pageSize,
-        offset: state.rows.length,
+        offset: offset,
       );
       if (seq != _seq || !mounted) return;
+      // A page is only the NEXT page of the list it was asked against. A kind
+      // change that was already in flight when this started shares its
+      // sequence number and shortens the list under it; appending rows 200
+      // onward to a list that now ends at 100 would leave a hole nobody could
+      // see.
+      if (state.rows.length != offset) {
+        state = state.copyWith(loadingMore: false);
+        return;
+      }
       state = state.copyWith(
         rows: [...state.rows, ...more],
         loadingMore: false,

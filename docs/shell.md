@@ -15,7 +15,7 @@ router and no `Navigator`; every move is a `setState`), plus
 
 | Slot | Width | Widget | What it is |
 |---|---|---|---|
-| Icon rail | 56 | `IconRail` | Six stops and the account's face. Never scrolls, never changes. |
+| Icon rail | 56 | `IconRail` | Seven stops and the account's face. Never scrolls, never changes. |
 | List column | 260 | `AppRail` | What is inside the stop that is lit. Scrolls. |
 | Main | the rest | `_main()`'s ladder | The one thing being read. |
 | Side panel | 45 %, 360–640 for a file, 420–640 for a thread | `SidePanelHost` | A thread or a file read BESIDE the main pane. |
@@ -47,7 +47,7 @@ transcript's own 420 minimum, with nothing to catch it.
 
 | Stop | Icon | The list column shows | Main shows |
 |---|---|---|---|
-| Home | `bolt` | the whole stack: Needs You · Storylines · People · Later, each collapsible | `HomePane` — the pipeline as a table |
+| Home | `bolt` | the whole stack: Needs You · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row | `HomePane` — the pipeline as a table |
 | Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count | the Needs You overview |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
 | People | `people_outline` | one row per person room | the flat list of live threads nobody has claimed, or the open room |
@@ -156,7 +156,7 @@ that order lives — the rail draws it and the screen walks it — so the row th
 opens is the row under the reader's eyes rather than a second opinion about
 which came first. It walks the scope's own sections: Home and Drafts walk
 threads, then storylines, then rooms; a single-section scope walks only its own;
-Later and AI answer null. `find_filter_test` and `app_rail_test` pin the two
+Files, Later and AI answer null. `find_filter_test` and `app_rail_test` pin the two
 halves of that agreement against each other.
 
 **Nothing matched is not a dead end.** With a needle still in the box, Enter

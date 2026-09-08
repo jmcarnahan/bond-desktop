@@ -882,7 +882,8 @@ Inline images are excluded and nothing else is — there is **no byte-size rule*
 because `inlineImageMinBytes` is about inline pictures, which are already gone.
 
 The kind runs **in SQL**, as `FilesKind { all, documents, images, links }`:
-images are `kind = 'image' OR lower(content_type) LIKE 'image/%'`, links are the
+images are `kind = 'image' OR lower(content_type) LIKE 'image/%'` (minus the
+three link kinds — a link to a picture is a link), links are the
 three link kinds, documents are everything else. It has to be SQL because the
 read is paged, and a page plus a client-side filter cannot both be honest. The
 edge that buys: a `.png` Graph reported as `application/octet-stream` files

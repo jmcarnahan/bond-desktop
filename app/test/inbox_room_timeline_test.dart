@@ -309,8 +309,11 @@ void main() {
     }
 
     // There is no drafts folder behind a Teams message, so a box that could
-    // not send would be a lie.
+    // not send would be a lie — and a room with nothing under it at all would
+    // read as a room with nobody in it, so the line says where to write.
     expect(find.byType(Composer), findsNothing);
+    expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
+    expect(find.byKey(PersonRoomPane.messageButtonKey), findsNothing);
     await settleQueues(tester);
   });
 

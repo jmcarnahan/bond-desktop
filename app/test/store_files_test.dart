@@ -208,6 +208,41 @@ void main() {
       expect(links.map((f) => f.ref.attachmentId), ['link', 'card']);
     });
 
+    test('a link to a picture is a link, and the three shelves partition the '
+        'whole one', () async {
+      await seedOneOfEach();
+      await seedMessage('m2');
+      await store.upsertAttachments('email', 'm2', [
+        row('drive-shot', kind: 'reference', contentType: 'image/png'),
+      ]);
+
+      final all = await store.recentAttachments();
+      final parts = [
+        for (final kind in [
+          FilesKind.images,
+          FilesKind.links,
+          FilesKind.documents,
+        ])
+          ...await store.recentAttachments(kind: kind),
+      ];
+
+      expect(
+        (await store.recentAttachments(kind: FilesKind.links))
+            .map((f) => f.ref.attachmentId),
+        contains('drive-shot'),
+      );
+      expect(
+        (await store.recentAttachments(kind: FilesKind.images))
+            .map((f) => f.ref.attachmentId),
+        isNot(contains('drive-shot')),
+      );
+      expect(
+        parts.map((f) => f.ref.attachmentId).toSet(),
+        all.map((f) => f.ref.attachmentId).toSet(),
+      );
+      expect(parts.length, all.length);
+    });
+
     test('Documents is everything that is neither', () async {
       await seedOneOfEach();
 

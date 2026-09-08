@@ -163,6 +163,37 @@ void main() {
     });
   });
 
+  group('paging against a kind change', () {
+    test('a page asked for before the kind changed is not appended to the '
+        'shorter list', () async {
+      final files = notifier();
+      final load = files.load(sources: sources);
+      store.pending[0].complete(
+        List.generate(FilesNotifier.pageSize, (i) => _row('all-$i')),
+      );
+      await load;
+      expect(files.state.atEnd, isFalse);
+
+      // The kind changes, and before its first page lands the reader taps
+      // Load more: that read shares the new sequence number, so only the
+      // offset it was asked against can tell it apart.
+      final narrowed = files.setKind(FilesKind.documents, sources: sources);
+      final more = files.loadMore(sources: sources);
+      expect(store.asked.last.offset, FilesNotifier.pageSize);
+
+      store.pending[1].complete([_row('doc-a'), _row('doc-b'), _row('doc-c')]);
+      await narrowed;
+      store.pending[2].complete([_row('doc-far-1'), _row('doc-far-2')]);
+      await more;
+
+      expect(
+        files.state.rows.map((r) => r.ref.attachmentId),
+        ['doc-a', 'doc-b', 'doc-c'],
+      );
+      expect(files.state.loadingMore, isFalse);
+    });
+  });
+
   group('searching the shelf', () {
     AttachmentChunkHit hit(String id) => AttachmentChunkHit(
           ref: ref(attachmentId: id, name: '$id.pdf'),

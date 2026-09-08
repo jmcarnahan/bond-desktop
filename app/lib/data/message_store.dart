@@ -2515,8 +2515,13 @@ RETURNING *
       'UPDATE conversation_ai '
       "SET bucket = NULL, bucket_reason = 'user', snoozed_until = NULL, "
       '    updated_at = ? '
-      "WHERE bucket = 'later' AND snoozed_until IS NOT NULL "
-      '  AND snoozed_until <= ?',
+      // The reason is part of the match: only a deferral the user made for
+      // THIS thread has a date that means anything. A sender rule owns its
+      // threads until the rule goes, and a row that inherited a stale date
+      // from an earlier hand-deferral must not be handed back — and stamped
+      // `user`, which the sweep never touches — behind the rule's back.
+      "WHERE bucket = 'later' AND bucket_reason = 'user' "
+      '  AND snoozed_until IS NOT NULL AND snoozed_until <= ?',
       variables: _args([_nowIso(), nowIso]),
     );
   }
@@ -2714,8 +2719,13 @@ SELECT conversation_key FROM (
         'SELECT ?, conversation_key, ? FROM ($owned)',
         variables: _args([source, now, source, lowered]),
       );
+      // The date goes too, in both directions: a sender rule has no "when",
+      // and a thread it releases has no deferral left for a date to belong to.
+      // Left standing, a stale date would draw a `Back <when>` the rule would
+      // never honour.
       return db.customUpdate(
-        'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, updated_at = ? '
+        'UPDATE conversation_ai SET bucket = ?, bucket_reason = ?, '
+        '  snoozed_until = NULL, updated_at = ? '
         'WHERE source = ? AND conversation_key IN ($owned)',
         variables: _args([
           bucket,
@@ -5867,8 +5877,13 @@ LIMIT ?
   /// calls everything `file`. Nothing here reads the NAME, unlike
   /// `isImageAttachment` in the widget layer — a `LIKE '%.png'` is a scan, and
   /// this query is paged.
+  ///
+  /// A link is never a picture, whatever content type rides on it: a
+  /// `reference` to a `.png` on a drive points somewhere else, and it files
+  /// under Links alone. The three shelves partition the whole one.
   static const String _kindClauseImages =
-      "AND (a.kind = 'image' OR lower(a.content_type) LIKE 'image/%') ";
+      "AND (a.kind = 'image' OR (lower(a.content_type) LIKE 'image/%' "
+      "  AND a.kind NOT IN ('reference','message_reference','card'))) ";
 
   /// The three kinds that point somewhere else rather than carrying bytes.
   static const String _kindClauseLinks =

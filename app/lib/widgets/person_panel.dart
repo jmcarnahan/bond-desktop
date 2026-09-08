@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../models/attachment_models.dart';
 import '../models/files_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
@@ -44,7 +43,6 @@ class PersonPanelBody extends StatelessWidget {
 
   final DateTime now;
   final ProfilePhotos? photos;
-  final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
 
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
@@ -58,7 +56,6 @@ class PersonPanelBody extends StatelessWidget {
     required this.loaded,
     required this.now,
     required this.photos,
-    required this.thumbnailFor,
     required this.onOpenThread,
     required this.onOpenStoryline,
     required this.onOpenFile,
@@ -216,8 +213,11 @@ class PersonPanelBody extends StatelessWidget {
             AttachmentCard(
               key: fileKeyFor(row),
               attachment: row.ref,
+              // Compact on purpose, and so no picture is asked for: a
+              // compact card never paints one, and a thumbnail fetched for
+              // every file a person ever sent would be thirty round trips for
+              // nothing.
               compact: true,
-              image: thumbnailFor?.call(row.ref),
               onTap: () => onOpenFile(row),
             ),
         ],

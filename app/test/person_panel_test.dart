@@ -81,7 +81,6 @@ void main() {
           loaded: loaded,
           now: now,
           photos: const NoProfilePhotos(),
-          thumbnailFor: null,
           onOpenThread: onOpenThread ?? (_, _) {},
           onOpenStoryline: onOpenStoryline ?? (_) {},
           onOpenFile: onOpenFile ?? (_) {},

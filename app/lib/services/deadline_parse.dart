@@ -76,10 +76,24 @@ DateTime _startOfDay(DateTime now) => DateTime(now.year, now.month, now.day);
 /// The forward reading is the only useful one. A deadline is something the
 /// sender is waiting on, so "Jan 5" written in March means the January that is
 /// coming rather than the one two months behind.
-DateTime _resolveYear(int month, int day, DateTime now) {
-  final thisYear = DateTime(now.year, month, day);
-  if (!thisYear.isBefore(_startOfDay(now))) return thisYear;
-  return DateTime(now.year + 1, month, day);
+DateTime? _resolveYear(int month, int day, DateTime now) {
+  final thisYear = _civil(now.year, month, day);
+  if (thisYear != null && !thisYear.isBefore(_startOfDay(now))) {
+    return thisYear;
+  }
+  return _civil(now.year + 1, month, day);
+}
+
+/// The calendar day, or null when there is no such day.
+///
+/// `DateTime` rolls an impossible day forward — February 30 becomes March 2 —
+/// and a deadline that quietly moved a month, then a year once the rolled
+/// day was found to be past, is worse than no deadline at all. A day the
+/// month does not have is not a date.
+DateTime? _civil(int year, int month, int day) {
+  if (day < 1 || day > 31) return null;
+  final date = DateTime(year, month, day);
+  return date.month == month ? date : null;
 }
 
 /// The last day of the month [anchor] falls in.
@@ -143,8 +157,9 @@ DateTime? parseDeadline(String text, {required DateTime now}) {
     final year = int.parse(iso.group(1)!);
     final month = int.parse(iso.group(2)!);
     final day = int.parse(iso.group(3)!);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-      return DateTime(year, month, day);
+    if (month >= 1 && month <= 12) {
+      final date = _civil(year, month, day);
+      if (date != null) return date;
     }
   }
 
@@ -152,33 +167,34 @@ DateTime? parseDeadline(String text, {required DateTime now}) {
     final month = _monthOf(match.group(2)!);
     if (month == null) continue;
     final day = int.parse(match.group(1)!);
-    if (day < 1 || day > 31) continue;
     final year = match.group(3);
-    return year == null
+    final date = year == null
         ? _resolveYear(month, day, now)
-        : DateTime(int.parse(year), month, day);
+        : _civil(int.parse(year), month, day);
+    if (date != null) return date;
   }
 
   for (final match in _monthFirst.allMatches(lower)) {
     final month = _monthOf(match.group(1)!);
     if (month == null) continue;
     final day = int.parse(match.group(2)!);
-    if (day < 1 || day > 31) continue;
     final year = match.group(3);
-    return year == null
+    final date = year == null
         ? _resolveYear(month, day, now)
-        : DateTime(int.parse(year), month, day);
+        : _civil(int.parse(year), month, day);
+    if (date != null) return date;
   }
 
   final slash = _slashDate.firstMatch(lower);
   if (slash != null) {
     final month = int.parse(slash.group(1)!);
     final day = int.parse(slash.group(2)!);
-    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+    if (month >= 1 && month <= 12) {
       final year = slash.group(3);
-      return year == null
+      final date = year == null
           ? _resolveYear(month, day, now)
-          : DateTime(int.parse(year), month, day);
+          : _civil(int.parse(year), month, day);
+      if (date != null) return date;
     }
   }
 

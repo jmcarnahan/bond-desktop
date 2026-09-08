@@ -224,6 +224,25 @@ void main() {
       expect(used, ['a1']);
     });
 
+    testWidgets('files that go away take the tab with them, and the reader '
+        'lands back on the transcript', (tester) async {
+      await pump(tester, messages: withTwoFiles());
+      await tester.tap(find.byKey(RoomHeader.tabKey(ThreadTab.files)));
+      await tester.pump();
+      expect(find.text('Body of a.'), findsNothing);
+
+      // The same panel, re-read without its files: no tab row is drawn, so
+      // a pane still showing "No files" would have no pill to leave by.
+      await pump(tester, messages: [
+        _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+        _msg(id: 'b', receivedAt: '2026-08-26T09:00:00'),
+      ]);
+
+      expect(find.byKey(RoomHeader.tabKey(ThreadTab.files)), findsNothing);
+      expect(find.text('No files on this thread.'), findsNothing);
+      expect(find.text('Body of a.'), findsOneWidget);
+    });
+
     testWidgets('going back to Messages brings the transcript back',
         (tester) async {
       await pump(tester, messages: withTwoFiles());

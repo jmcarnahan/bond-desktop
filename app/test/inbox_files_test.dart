@@ -18,6 +18,7 @@ import 'package:bond_inbox/widgets/files_pane.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
+import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
 import 'package:bond_inbox/widgets/preview/preview_engines.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
@@ -238,6 +239,40 @@ void main() {
     );
     // The list does not go away underneath the reader.
     expect(find.byType(FilesPane), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('Expand on a shelf file fills the pane, and Back returns to the '
+      'shelf with the file still beside it', (tester) async {
+    // The full viewer used to stand only over a thread or a storyline; a file
+    // off the shelf, a room or a person's files reached its ⤢ and vanished.
+    await seedThread();
+    await pumpInbox(tester);
+    await openFiles(tester);
+    await tester.tap(find.byType(AttachmentCard));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(AttachmentViewerPane), findsOneWidget);
+    expect(find.byType(FilesPane), findsNothing);
+
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(AttachmentViewerPane), findsNothing);
+    expect(find.byType(FilesPane), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(AttachmentPreviewPanel),
+      ),
+      findsOneWidget,
+    );
     await settleQueues(tester);
   });
 

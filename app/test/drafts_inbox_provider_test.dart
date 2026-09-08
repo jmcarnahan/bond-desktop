@@ -1,11 +1,49 @@
 // `show BondDatabase`: drift generates row classes whose names collide with
 // the app's own models.
+import 'dart:async';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/drafts_models.dart';
 import 'package:bond_inbox/providers/drafts_inbox_provider.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
+
+/// A store whose draft reads the test completes by hand, so two reads can be
+/// made to land in the wrong order.
+class _SlowStore extends MessageStore {
+  final List<Completer<List<PendingDraft>>> pending = [];
+
+  _SlowStore(super.db);
+
+  @override
+  Future<List<PendingDraft>> pendingDrafts({
+    List<String> sources = const ['email', 'teams'],
+  }) {
+    final completer = Completer<List<PendingDraft>>();
+    pending.add(completer);
+    return completer.future;
+  }
+
+  @override
+  Future<List<SentRow>> recentOutbound({
+    List<String> sources = const ['email', 'teams'],
+    int limit = 50,
+  }) async =>
+      const [];
+}
+
+PendingDraft _draft(String body) => PendingDraft(
+      source: 'email',
+      conversationKey: 'c1',
+      replyToMessageId: 'm1',
+      body: body,
+      status: 'suggested',
+      updatedAt: '2026-09-03T10:00:00Z',
+      subject: 'Homepage copy',
+      who: 'Dana Whitfield',
+    );
 
 /// The notifier behind the Drafts & sent pane: what a read puts in the state,
 /// what a dismiss writes through, and what a failure does NOT do to the list
@@ -150,4 +188,24 @@ void main() {
     expect(notifier.state.drafts, isEmpty);
     expect(notifier.state.sent, isEmpty);
   });
+
+  test('a slow first read never overwrites a fast second one', () async {
+    // Five call sites reload this list — a section change, the tick, the end
+    // of a send, both send-epoch listeners — so a read that was already out
+    // when a newer one started is the ordinary case, not the odd one.
+    final slow = _SlowStore(db);
+    final notifier = DraftsInboxNotifier(slow, sources: const ['email']);
+    final first = notifier.load();
+    final second = notifier.load();
+
+    slow.pending[1].complete([_draft('After the send.')]);
+    await second;
+    slow.pending[0].complete([_draft('Before the send.')]);
+    await first;
+
+    expect(notifier.state.drafts.map((d) => d.body), ['After the send.']);
+    expect(notifier.state.loaded, isTrue);
+    expect(notifier.state.error, isNull);
+  });
+
 }

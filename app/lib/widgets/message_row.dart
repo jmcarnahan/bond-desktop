@@ -66,7 +66,7 @@ final RegExp _blankRun = RegExp(r'\n{3,}');
 /// can BUILD: a `reference` previews like the drive file it points at, but it
 /// still arrived as a link and it still has a site the reader needs told. So
 /// the row draws all three as unfurls and everything else as a card.
-const Set<String> _linkKinds = {'reference', 'message_reference', 'card'};
+const Set<String> _linkKinds = linkAttachmentKinds;
 
 /// Under this an inline image is furniture — a signature logo, a social icon,
 /// a tracking pixel — and is stripped from the body and left out of the chips

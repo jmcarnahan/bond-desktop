@@ -101,6 +101,21 @@ void main() {
       expect(find.byType(AvatarStack), findsOneWidget);
     });
 
+    testWidgets('a narrow header takes the faces off rather than crowding them',
+        (tester) async {
+      await pumpHeader(tester, people: const [
+        (name: 'Eric Vance', address: 'eric@example.com', photoKey: null),
+      ]);
+      expect(find.byType(AvatarStack), findsOneWidget);
+
+      // Under the width the header measures for itself, the same people are
+      // still on the thread — they are just not drawn beside its title.
+      await tester.binding.setSurfaceSize(const Size(480, 400));
+      await tester.pump();
+      expect(find.byType(AvatarStack), findsNothing);
+      expect(find.text('Launch date'), findsOneWidget);
+    });
+
     testWidgets('the faces open the person when the host has one to show',
         (tester) async {
       var opened = 0;

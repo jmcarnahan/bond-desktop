@@ -21,7 +21,7 @@ enum ThreadTab { messages, files }
 
 /// The kinds that live somewhere else rather than on the message — drawn as
 /// unfurls on the Files tab exactly as they are in the transcript.
-const Set<String> _linkKinds = {'reference', 'message_reference', 'card'};
+const Set<String> _linkKinds = linkAttachmentKinds;
 
 /// Every file this thread carried, newest message first.
 ///
@@ -372,6 +372,11 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     // count on the tab and the list under it are the same answer, so they can
     // never disagree about how many files a thread has.
     final files = threadFiles(widget.messages);
+    // The tab the pane is on, not the tab the reader last chose: a thread
+    // whose files went away between two reads draws no tab row, and a
+    // reader parked on Files with no pill to leave by would be stranded on
+    // "No files on this thread."
+    final tab = files.isEmpty ? ThreadTab.messages : _tab;
     final cta = widget.conversation.ctaText;
     final showCta = widget.conversation.state == ConversationState.needsReply &&
         cta != null &&
@@ -397,7 +402,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _header(files),
+          _header(files, tab),
           const Divider(height: 1, color: BondColors.border),
           if (showCta)
             Padding(
@@ -420,7 +425,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
               ),
             ),
           Expanded(
-            child: _tab == ThreadTab.files
+            child: tab == ThreadTab.files
                 ? _filesBody(files)
                 : widget.messages.isEmpty
                 ? Center(
@@ -570,7 +575,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
   /// The storyline half is one item that opens a pane. Listing every storyline
   /// in the menu would put the whole choice in a popup, and the house rule is a
   /// screen with a way back.
-  Widget _header(List<AttachmentRef> files) {
+  Widget _header(List<AttachmentRef> files, ThreadTab tab) {
     final participants = widget.conversation.participants
         .map((p) => p.display)
         .where((d) => d.isNotEmpty)
@@ -584,7 +589,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       // files draws no tab row at all — see `RoomHeader`'s own rule. That is
       // what keeps a fileless thread looking exactly as it always did.
       tabs: files.isEmpty ? const [ThreadTab.messages] : ThreadTab.values,
-      selectedTab: _tab,
+      selectedTab: tab,
       tabLabel: (tab) => switch (tab) {
         ThreadTab.messages => 'Messages',
         ThreadTab.files => 'Files (${files.length})',

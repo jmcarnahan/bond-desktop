@@ -81,7 +81,12 @@ of a list the reader is working down, and no dialogs.
 
 **Resurfacing is the user's own decision.** `MessageStore.resurfaceDue(nowIso)`
 sets `bucket = NULL, bucket_reason = 'user', snoozed_until = NULL` on every
-`later` row whose date has arrived, and returns how many moved. The reason is
+`later` row **the user deferred by hand** (`bucket_reason = 'user'`) whose date
+has arrived, and returns how many moved. The reason is part of the match: a
+thread a sender rule owns is the rule's until the rule goes, and a date it
+inherited from an earlier hand-deferral must not hand it back behind the
+rule's back — so `rebucketSender` also clears `snoozed_until`, in both
+directions. The reason it writes is
 `'user'` and not a word of its own **because `_sweepBucket` above re-files any
 thread whose reason is not `'user'`** — a `'due'` or a NULL would send a
 resurfaced thread straight back to Later on the very next pass, and the date

@@ -306,8 +306,7 @@ class FilesPane extends StatelessWidget {
     );
   }
 
-  bool _isLink(AttachmentRef ref) =>
-      const {'reference', 'message_reference', 'card'}.contains(ref.kind);
+  bool _isLink(AttachmentRef ref) => linkAttachmentKinds.contains(ref.kind);
 
   /// A picture for a photograph or for a document this build might render —
   /// the same narrowing the transcript applies. Asking for one of a
