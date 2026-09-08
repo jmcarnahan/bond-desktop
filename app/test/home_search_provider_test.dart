@@ -63,7 +63,15 @@ HomeFeedRow _row(String id, {String subject = 'Subject'}) => HomeFeedRow(
 
 MessageSearchHits _hits(String query, List<String> ids) => MessageSearchHits(
       query,
-      [for (final id in ids) SemanticHit(_row(id), 0.1)],
+      [
+        for (final id in ids)
+          SearchHit(
+            row: _row(id),
+            score: 0.9,
+            distance: 0.1,
+            matchedBy: MatchedBy.meaning,
+          ),
+      ],
     );
 
 void main() {
@@ -154,16 +162,22 @@ void main() {
     expect(notifier.state.searching, isFalse);
   });
 
-  test('the text half and its notice ride along to the state', () async {
+  test('the notice rides along to the state', () async {
     final notifier = build();
     final search = notifier.submitSearch('invoice');
     runner.answer(
       0,
       MessageSearchHits(
         'invoice',
-        const [],
-        textRows: [_row('gated', subject: 'Invoice 4471 is overdue')],
-        notice: 'Text matches only — the semantic index is unavailable.',
+        [
+          SearchHit(
+            row: _row('gated', subject: 'Invoice 4471 is overdue'),
+            score: 0.4,
+            bm25: 3.2,
+            matchedBy: MatchedBy.words,
+          ),
+        ],
+        notice: 'Words only — the semantic index is unavailable.',
       ),
     );
     await search;
@@ -173,9 +187,10 @@ void main() {
     // the body the way any other answer does — the sentence explaining the
     // narrowness travels ON it rather than in `searchNotice`, which is for a
     // search that did not happen.
-    expect(notifier.state.search!.textRows, hasLength(1));
-    expect(notifier.state.search!.textRows.single.sourceMessageId, 'gated');
-    expect(notifier.state.search!.notice, startsWith('Text matches only'));
+    expect(notifier.state.search!.hits, hasLength(1));
+    expect(notifier.state.search!.hits.single.row.sourceMessageId, 'gated');
+    expect(notifier.state.search!.hits.single.matchedBy, MatchedBy.words);
+    expect(notifier.state.search!.notice, startsWith('Words only'));
     expect(notifier.state.searchNotice, isNull);
     expect(notifier.state.searching, isFalse);
   });

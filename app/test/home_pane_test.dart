@@ -35,6 +35,35 @@ HomeFeedRow _row(int index) => HomeFeedRow(
       fromName: 'Sender $index',
     );
 
+/// A search result over [_row], found by meaning unless told otherwise.
+///
+/// The pane reads nothing but the row, so the numbers here are only plausible
+/// — what they pin is that ONE list of them renders as one list.
+SearchHit _hit(
+  int index, {
+  double score = 0.9,
+  double? distance = 0.1,
+  double? bm25,
+  MatchedBy matchedBy = MatchedBy.meaning,
+}) =>
+    SearchHit(
+      row: _row(index),
+      score: score,
+      distance: distance,
+      bm25: bm25,
+      matchedBy: matchedBy,
+    );
+
+/// A result only the words found: no vector, which is how gate-dropped mail
+/// arrives.
+SearchHit _wordHit(int index) => _hit(
+      index,
+      score: 0.4,
+      distance: null,
+      bm25: 3.2,
+      matchedBy: MatchedBy.words,
+    );
+
 AttachmentChunkHit _doc({
   String name = 'Q3 forecast.xlsx',
   String locator = 'Sheet Revenue rows 1-40',
@@ -533,10 +562,7 @@ void main() {
         tester,
         rows: [_row(1)],
         pendingNewCount: 3,
-        search: HomeSearch('invoice', [
-          SemanticHit(_row(7), 0.1),
-          SemanticHit(_row(8), 0.2),
-        ]),
+        search: HomeSearch('invoice', [_hit(7), _hit(8, score: 0.7)]),
       );
       await swap(tester);
 
@@ -560,7 +586,7 @@ void main() {
     testWidgets('one result is singular', (tester) async {
       await _pump(
         tester,
-        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+        search: HomeSearch('invoice', [_hit(7)]),
       );
       await swap(tester);
 
@@ -579,7 +605,7 @@ void main() {
       var left = 0;
       await _pump(
         tester,
-        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+        search: HomeSearch('invoice', [_hit(7)]),
         onExitSearch: () => left++,
       );
       await swap(tester);
@@ -616,7 +642,7 @@ void main() {
         tester,
         search: HomeSearch(
           'renewal',
-          [SemanticHit(_row(7), 0.1)],
+          [_hit(7)],
           documents: [_doc()],
         ),
       );
@@ -652,7 +678,7 @@ void main() {
     testWidgets('no documents means no documents heading', (tester) async {
       await _pump(
         tester,
-        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+        search: HomeSearch('invoice', [_hit(7)]),
       );
       await swap(tester);
 
@@ -661,8 +687,8 @@ void main() {
     });
 
     testWidgets(
-        'a document answering where no message did shows both the document '
-        'and the empty answer', (tester) async {
+        'a document answering where no message did narrows the empty answer '
+        'to the messages', (tester) async {
       await _pump(
         tester,
         search: HomeSearch('renewal', const [], documents: [_doc()]),
@@ -670,43 +696,53 @@ void main() {
       await swap(tester);
 
       expect(find.byType(AttachmentSearchTile), findsOneWidget);
-      expect(find.text('Nothing matches that.'), findsOneWidget);
+      // The count is a count of MESSAGES, so it stays 0 — but the screen must
+      // not also claim nothing matches while it is naming the file that does.
+      expect(find.text('No messages match that.'), findsOneWidget);
+      expect(find.text('Nothing matches that.'), findsNothing);
       expect(find.text('0 results for “renewal”'), findsOneWidget);
     });
 
     testWidgets(
-        'text matches follow the ranked rows, under their own heading',
+        'every result is one list under one count, with no headings inside it',
         (tester) async {
       await _pump(
         tester,
         search: HomeSearch(
           'invoice',
-          [SemanticHit(_row(7), 0.1)],
-          textRows: [_row(8)],
-          notice: 'Text matches only — the semantic index is unavailable',
+          [_hit(7), _wordHit(8), _hit(9, score: 0.5)],
+          notice: 'Words only — the semantic index is unavailable.',
         ),
       );
       await swap(tester);
 
-      // Both halves counted: a reader can count the rows on screen.
-      expect(find.text('2 results for “invoice”'), findsOneWidget);
+      // The count is the rows, because the rows are one ranking: a reader can
+      // count what is on screen and land on the number over it.
+      expect(find.text('3 results for “invoice”'), findsOneWidget);
+      expect(find.text('Subject 7'), findsOneWidget);
+      expect(find.text('Subject 8'), findsOneWidget);
+      expect(find.text('Subject 9'), findsOneWidget);
       expect(
-        find.text('Text matches only — the semantic index is unavailable'),
+        find.text('Words only — the semantic index is unavailable.'),
         findsOneWidget,
       );
-      expect(find.text('Text matches'), findsOneWidget);
+      expect(
+        find.text('Text matches'),
+        findsNothing,
+        reason: 'the two lists were fused into one; nothing splits them',
+      );
 
-      final heading = tester.getTopLeft(find.text('Text matches'));
+      // Score order, whichever half found each row.
       expect(tester.getTopLeft(find.text('Subject 7')).dy,
-          lessThan(heading.dy));
+          lessThan(tester.getTopLeft(find.text('Subject 8')).dy));
       expect(tester.getTopLeft(find.text('Subject 8')).dy,
-          greaterThan(heading.dy));
+          lessThan(tester.getTopLeft(find.text('Subject 9')).dy));
     });
 
     testWidgets('words alone are still an answer', (tester) async {
       await _pump(
         tester,
-        search: HomeSearch('invoice', const [], textRows: [_row(8)]),
+        search: HomeSearch('invoice', [_wordHit(8)]),
       );
       await swap(tester);
 
@@ -719,21 +755,11 @@ void main() {
       );
     });
 
-    testWidgets('no text matches means no sub-heading', (tester) async {
-      await _pump(
-        tester,
-        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
-      );
-      await swap(tester);
-
-      expect(find.text('Text matches'), findsNothing);
-    });
-
     testWidgets('a result row opens its history', (tester) async {
       final opened = <(String, String)>[];
       await _pump(
         tester,
-        search: HomeSearch('invoice', const [], textRows: [_row(8)]),
+        search: HomeSearch('invoice', [_wordHit(8)]),
         onOpenHistory: (source, id) => opened.add((source, id)),
       );
       await swap(tester);
@@ -746,7 +772,7 @@ void main() {
       var left = 0;
       await _pump(
         tester,
-        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+        search: HomeSearch('invoice', [_hit(7)]),
         onExitSearch: () => left++,
       );
       await swap(tester);

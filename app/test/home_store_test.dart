@@ -558,10 +558,10 @@ void main() {
       );
     });
 
-    test('the text search carries them', () async {
+    test('the keyword search carries them', () async {
       await seedExplained();
 
-      expectExplained((await store.textSearchMessages('Launch')).single);
+      expectExplained((await store.keywordSearchMessages('Launch'))!.single.row);
     });
 
     test('a message nothing has judged reads null rather than false',

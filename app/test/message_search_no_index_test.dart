@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/message_search.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -84,9 +85,9 @@ void main() {
     // their mailbox, made on the strength of a feature being switched off. The
     // words still answer, and the notice says the ranking did not.
     final hits = result as MessageSearchHits;
-    expect(hits.hits, isEmpty);
-    expect([for (final row in hits.textRows) row.sourceMessageId], ['gated']);
-    expect(hits.notice, startsWith('Text matches only'));
+    expect([for (final hit in hits.hits) hit.row.sourceMessageId], ['gated']);
+    expect(hits.hits.single.matchedBy, MatchedBy.words);
+    expect(hits.notice, startsWith('Words only'));
     expect(hits.notice, contains('index'));
 
     // The archive over the same missing index: still an answer, because the
@@ -97,7 +98,7 @@ void main() {
         await MessageSearch(store, workingServer()).searchArchive('invoice');
 
     expect([for (final row in archive.rows) row.sourceMessageId], ['gated']);
-    expect(archive.notice, startsWith('Text matches only'));
+    expect(archive.notice, startsWith('Words only'));
     expect(archive.notice, contains('index'));
   });
 }

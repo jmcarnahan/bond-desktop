@@ -20,9 +20,16 @@ import '../services/chat_roster.dart';
 // copy of the "an outbound may go quiet, but never off `done`" asymmetry is
 // exactly how a send would start disagreeing with the sync about a thread.
 import '../services/conversation_state.dart';
+// The third, on the same licence as the two above: `search_fusion.dart` is
+// arithmetic and string work over the models with no I/O. The keyword reads
+// need the query BUILT — quoted, stopworded, capped — and a second copy of
+// that here would be the coverage count and the search itself disagreeing
+// about what a term is.
+import '../services/search_fusion.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
+import 'keyword_index.dart';
 import 'progress_sql.dart';
 import 'vec_index.dart';
 
@@ -157,7 +164,18 @@ typedef PipelineHealth = ({
 class MessageStore {
   final BondDatabase db;
 
-  MessageStore(this.db);
+  /// [keywordSearch] is the seam for "the word index is not available on this
+  /// build" — the one state a test cannot reach any other way, because FTS5 is
+  /// compiled into every SQLite this suite can open. Off, the two keyword
+  /// reads answer null and a search narrows to meaning alone, which is exactly
+  /// what a SQLite without FTS5 would produce.
+  /// The field it sets is private and the parameter is not, so an
+  /// initializing formal cannot spell both.
+  MessageStore(this.db, {bool keywordSearch = true})
+      // ignore: prefer_initializing_formals
+      : _keywordSearch = keywordSearch;
+
+  final bool _keywordSearch;
 
   /// The nearest-neighbour index over `message_vectors`, owned here.
   ///
@@ -183,6 +201,17 @@ class MessageStore {
   /// a fifty-chunk contract into either of the others would crowd out the
   /// messages they exist to rank.
   late final AttachmentChunkIndex _chunkIndex = AttachmentChunkIndex(db);
+
+  /// The word index over `messages`, owned here for [_vecIndex]'s reasons
+  /// exactly: it is derived from this connection's rows and its readiness is
+  /// memoized per connection.
+  late final MessageKeywordIndex _keywordIndex =
+      _keywordSearch ? MessageKeywordIndex(db) : MessageKeywordIndex.disabled();
+
+  /// The word index over `attachment_chunks`, the second corpus a search asks
+  /// about and therefore a second table, on [_chunkIndex]'s argument.
+  late final ChunkKeywordIndex _chunkKeywordIndex =
+      _keywordSearch ? ChunkKeywordIndex(db) : ChunkKeywordIndex.disabled();
 
   static String _nowIso() => isoStamp(DateTime.now());
 
@@ -257,6 +286,12 @@ class MessageStore {
   /// every replay a delta feed makes. Non-null is what a live screen turns
   /// into its ingest tick: a message the gate throws out at ingest is finished
   /// by the time this returns, and no later stage will ever announce it.
+  ///
+  /// `row['updated_at']` must never be a PAST value. It is the escape hatch on
+  /// a column the word index treats as a watermark, and a row filed under a
+  /// stamp it then backdates is text `MessageKeywordIndex.backfill` would go on
+  /// serving stale forever. Every caller today omits it and takes the `now`
+  /// below, which is the shape to keep.
   Future<String?> upsertMessage(Map<String, Object?> row) async {
     final now = _nowIso();
     final source = row['source'] ?? 'email';
@@ -2424,6 +2459,12 @@ RETURNING *
     // has just been emptied, and the floats vec0 holds in its shadow tables do
     // not go with a DELETE.
     await _chunkIndex.rebuild();
+    // The two word indexes, for the same reason once more: an FTS5 table is a
+    // virtual table, the DELETEs above do not reach inside one, and the
+    // previous mailbox's subject lines would otherwise stay findable in the
+    // shadow tables long after the mail they came from was gone.
+    await _keywordIndex.rebuild();
+    await _chunkKeywordIndex.rebuild();
   }
 
   // ── per-message AI output ────────────────────────────────────────────
@@ -5861,6 +5902,15 @@ $where
     return ranked;
   }
 
+  /// The most rowids either word read will carry back into Dart.
+  ///
+  /// `semanticSearch` caps its `k` at the same number and for the same reason:
+  /// every id in the page is bound as a parameter by the read that hydrates it,
+  /// and SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 999. No caller passes
+  /// a bigger limit, but `limit` is public on both and a ceiling is cheaper
+  /// than a caller who discovers the ceiling.
+  static const int _keywordCap = 400;
+
   /// Escapes what LIKE would otherwise read as a wildcard. The escape
   /// character goes first, or the backslashes the other two rules write would
   /// themselves be escaped a moment later.
@@ -5869,69 +5919,180 @@ $where
       .replaceAll('%', r'\%')
       .replaceAll('_', r'\_');
 
-  /// Feed rows whose subject or body contains every word of [query], newest
-  /// first.
+  /// Feed rows the WORDS of [query] match, best first, or null when the word
+  /// index could not be built.
   ///
-  /// The text fallback that makes gate-dropped mail findable. A message the
-  /// gate threw out never reached the embedder, so no vector was ever written
-  /// for it and [semanticSearch] cannot see it however well it matches — which
-  /// leaves the one pile a person is most likely to come looking for
-  /// unsearchable by the only search there is.
+  /// The other half of a search, and the only half that can see a gate-dropped
+  /// message: one the gate threw out never reached the embedder, so no vector
+  /// was ever written for it and [semanticSearch] cannot find it however well
+  /// it matches — which leaves the one pile a person is most likely to come
+  /// looking for unreachable by meaning.
   ///
-  /// [includeDropped] defaults to TRUE, which is the archive's meaning of the
-  /// word: its selling point is "I know I got that email", and a search that
-  /// quietly skipped the pile the gate threw out would answer that sentence
-  /// with silence. Home passes its own "Show dropped" toggle instead, so the
-  /// text half of a home search obeys the same filter the table under it does.
+  /// Null and `const []` are different answers, exactly as [semanticSearch]
+  /// separates them: null is "there is nothing to search WITH" (a SQLite built
+  /// without FTS5, or the `keywordSearch: false` seam), and an empty list is a
+  /// statement about the mailbox.
   ///
-  /// Deliberately LIKE and not FTS — the corpus is one person's history and a
-  /// scan of it is cheap at that size. Revisit if it gets slow; an FTS5 table
-  /// is a migration and a write path, not a change to this signature.
-  Future<List<HomeFeedRow>> textSearchMessages(
+  /// [includeDropped] defaults to FALSE — the home table's meaning, since the
+  /// results sit where that table was and a search that widened the filter
+  /// under them would answer a question nobody asked. The archive passes true.
+  ///
+  /// Ranked by bm25 with the column weights the index declares (a subject
+  /// match beats a body match), and carrying [KeywordHit.coverage] so the
+  /// fusion above can discount a row that matched one word of eight.
+  Future<List<KeywordHit>?> keywordSearchMessages(
     String query, {
-    int limit = 50,
+    int limit = SearchTuning.keywordFetch,
+    bool includeDropped = false,
     List<String> sources = const ['email', 'teams'],
-    bool includeDropped = true,
   }) async {
+    if (!await _keywordIndex.ensureReady()) return null;
     if (sources.isEmpty) return const [];
-    final terms = query.trim().toLowerCase().split(RegExp(r'\s+'))
-      ..removeWhere((term) => term.isEmpty);
-    if (terms.isEmpty) return const [];
+    final fts = buildFtsQuery(query);
+    // No words in it at all. A blank box must never return the mailbox.
+    if (fts == null) return const [];
 
-    // AND across terms, OR across columns: a two-word query is a narrowing,
-    // and the two words are allowed to sit in different columns of the same
-    // message — a subject and a body are one text as far as the reader who
-    // typed them is concerned.
-    final where = StringBuffer();
-    final args = <Object?>[];
-    for (final term in terms) {
-      final pattern = '%${_escapeLike(term)}%';
-      if (where.isNotEmpty) where.write(' AND ');
-      // Three bindings of the same pattern rather than one named parameter:
-      // every statement here is written against positional `?`.
-      where.write(
-        "(LOWER(m.subject) LIKE ? ESCAPE '\\' "
-        "OR LOWER(COALESCE(m.body_preview, '')) LIKE ? ESCAPE '\\' "
-        "OR LOWER(COALESCE(m.body_text, '')) LIKE ? ESCAPE '\\')",
-      );
-      args.addAll([pattern, pattern, pattern]);
+    // Heal before asking, for [semanticSearch]'s reason: the index is derived,
+    // and a message written since the last search is filed by the watermark
+    // pass rather than by whoever wrote it.
+    await _keywordIndex.backfill();
+
+    // Capped for [semanticSearch]'s reason: every rowid this returns is bound
+    // as a parameter twice over — once by the hydrating read, once by each
+    // coverage read — and SQLite's default parameter ceiling is 999.
+    final matches = await _keywordIndex.match(
+      fts.match,
+      limit: math.min(limit, _keywordCap),
+    );
+    if (matches.isEmpty) return const [];
+
+    final ids = [for (final match in matches) match.rowid];
+
+    // One rowid query per term, over THIS page. Coverage is the fraction of
+    // the query a row actually contains, and it cannot be read off a bm25
+    // score — that number rewards rarity, not completeness.
+    final matched = <int, int>{};
+    for (final term in fts.terms) {
+      for (final rowid in await _keywordIndex.rowidsMatching(
+        quoteTerm(term),
+        among: ids,
+      )) {
+        matched[rowid] = (matched[rowid] ?? 0) + 1;
+      }
     }
+
+    final where = StringBuffer('WHERE m.rowid IN (${_placeholders(ids.length)})');
+    final args = <Object?>[...ids];
+    if (!includeDropped) where.write(' AND p.dropped = 0');
     where.write(' AND p.source IN (${_placeholders(sources.length)})');
     args.addAll(sources);
-    if (!includeDropped) where.write(' AND p.dropped = 0');
 
+    // [_homeFeedSelect]'s columns over [_homeFeedSelect]'s joins, plus the
+    // rowid — spelled out here rather than by widening that constant, because
+    // it is the only reader that has a rowid to map back to and the other four
+    // would carry a column [HomeFeedRow.fromRow] has no field for.
     final result = await db
         .customSelect(
           '''
-$_homeFeedSelect
-WHERE $where
-ORDER BY p.received_at DESC, p.source_message_id DESC
-LIMIT ?
+SELECT m.rowid AS message_rowid, $_homeFeedColumns
+FROM message_progress p
+$_homeFeedJoins
+$where
 ''',
-          variables: _args([...args, limit]),
+          variables: _args(args),
         )
         .get();
-    return [for (final row in result) HomeFeedRow.fromRow(row.data)];
+
+    final byRowid = <int, HomeFeedRow>{
+      for (final row in result)
+        row.data['message_rowid'] as int: HomeFeedRow.fromRow(row.data),
+    };
+
+    // Back into the index's order. SQL returned a set; the ranking lives in
+    // [matches] and nowhere else.
+    return [
+      for (final match in matches)
+        if (byRowid[match.rowid] case final row?)
+          KeywordHit(
+            row,
+            bm25: match.bm25,
+            coverage: fts.terms.isEmpty
+                ? 0
+                : (matched[match.rowid] ?? 0) / fts.terms.length,
+          ),
+    ];
+  }
+
+  /// Document passages the WORDS of [query] match, best first, or null when
+  /// the word index could not be built.
+  ///
+  /// [keywordSearchMessages] over the second corpus, and it earns its place
+  /// beside the vector read for the same reason the message one does: an
+  /// invoice number or a person's name is exactly the kind of thing an
+  /// embedding is worst at and a word index is best at.
+  ///
+  /// The digest passage is excluded here rather than at file time, which is
+  /// the rule [searchAttachmentChunks] already follows: a search result
+  /// promises the document's OWN words, and a digest is a model's summary of
+  /// them.
+  Future<List<AttachmentChunkHit>?> keywordSearchChunks(
+    String query, {
+    int limit = SearchTuning.keywordFetch,
+    bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (!await _chunkKeywordIndex.ensureReady()) return null;
+    if (sources.isEmpty) return const [];
+    final fts = buildFtsQuery(query);
+    if (fts == null) return const [];
+
+    await _chunkKeywordIndex.backfill();
+
+    final capped = math.min(limit, _keywordCap);
+    final matches = await _chunkKeywordIndex.match(fts.match, limit: capped);
+    if (matches.isEmpty) return const [];
+
+    final ids = [for (final match in matches) match.rowid];
+
+    final matched = <int, int>{};
+    for (final term in fts.terms) {
+      for (final id in await _chunkKeywordIndex.rowidsMatching(
+        quoteTerm(term),
+        among: ids,
+      )) {
+        matched[id] = (matched[id] ?? 0) + 1;
+      }
+    }
+
+    final where = StringBuffer('AND c.source IN (${_placeholders(sources.length)})');
+    final args = <Object?>[...sources];
+    where.write(" AND c.locator != 'digest'");
+    if (!includeDropped) where.write(' AND COALESCE(p.dropped, 0) = 0');
+
+    return _hydrateChunkHits(
+      [
+        for (final match in matches)
+          (
+            id: match.rowid,
+            distance: null,
+            bm25: match.bm25,
+            coverage: fts.terms.isEmpty
+                ? 0.0
+                : (matched[match.rowid] ?? 0) / fts.terms.length,
+          ),
+      ],
+      // No model tag: a passage the words found need never have been embedded,
+      // and filtering on the tag of an embedding it does not have would hide
+      // exactly the documents this pass exists to reach.
+      embedModel: null,
+      extraWhere: where.toString(),
+      extraArgs: args,
+      limit: capped,
+      // The per-file collapse happens in the fusion, over both passes at once.
+      // Doing it here as well would throw away the passage the OTHER pass
+      // ranked highest for the same file.
+      onePerAttachment: false,
+    );
   }
 
   /// The storylines the window was busiest with, most messages first.
@@ -6745,28 +6906,40 @@ LIMIT ?
     return (row.data['n'] as num?)?.toInt() ?? 0;
   }
 
-  /// Turns index hits into passages with their documents attached, back in
-  /// KNN order.
+  /// Turns ranked chunk ids into passages with their documents attached, back
+  /// in the order they were ranked.
   ///
-  /// Shared by the two reads below because the ranking rule is the same and
-  /// only the scope differs. The LEFT JOIN onto `message_progress` is
+  /// Shared by three reads because the hydration is the same and only the
+  /// scope and the ranking differ. The LEFT JOIN onto `message_progress` is
   /// unconditional so [extraWhere] can carry a dropped filter without a second
   /// shape of query; the LEFT JOIN onto `messages` is left because a pinned
   /// document outlives the message it came on.
+  ///
+  /// [ranked] carries whatever numbers the pass that produced it has —
+  /// a distance from the vector index, a bm25 and a coverage from the word
+  /// index, and both when the fusion merges them later. A record rather than
+  /// `VecHit` because two of the three callers have no distance to report and
+  /// a placeholder distance is a number that would still sort.
+  ///
+  /// [embedModel] is nullable for that same reason. The vector passes MUST
+  /// filter on it — a distance measured against a vector written under another
+  /// tag is meaningless and would still rank — where the word pass must not:
+  /// a passage the words found need never have been embedded at all.
   ///
   /// Ids that hydrate to nothing are skipped rather than counted: that is
   /// exactly what an orphaned vec0 rowid looks like, and it is how
   /// [replaceChunks] gets away with leaving them behind.
   Future<List<AttachmentChunkHit>> _hydrateChunkHits(
-    List<VecHit> hits, {
-    required String embedModel,
+    List<({int id, double? distance, double? bm25, double? coverage})> ranked, {
+    required String? embedModel,
     String extraWhere = '',
     List<Object?> extraArgs = const [],
     required int limit,
     bool onePerAttachment = false,
   }) async {
-    if (hits.isEmpty) return const [];
-    final ids = [for (final hit in hits) hit.id];
+    if (ranked.isEmpty) return const [];
+    final ids = [for (final hit in ranked) hit.id];
+    final modelWhere = embedModel == null ? '' : 'AND c.embed_model = ?';
     final result = await db
         .customSelect(
           '''
@@ -6782,9 +6955,13 @@ LEFT JOIN messages m ON m.source = c.source
   AND m.source_message_id = c.source_message_id
 LEFT JOIN message_progress p ON p.source = c.source
   AND p.source_message_id = c.source_message_id
-WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
+WHERE c.id IN (${_placeholders(ids.length)}) $modelWhere $extraWhere
 ''',
-          variables: _args([...ids, embedModel, ...extraArgs]),
+          variables: _args([
+            ...ids,
+            ?embedModel,
+            ...extraArgs,
+          ]),
         )
         .get();
 
@@ -6795,9 +6972,9 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
 
     // Back into the index's order. SQL returned a set; the ranking lives in
     // [hits] and nowhere else.
-    final ranked = <AttachmentChunkHit>[];
+    final hits = <AttachmentChunkHit>[];
     final seenDocuments = <String>{};
-    for (final hit in hits) {
+    for (final hit in ranked) {
       final row = byChunk[hit.id];
       if (row == null) continue;
       if (onePerAttachment) {
@@ -6808,7 +6985,7 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
             '|${row['attachment_id']}';
         if (!seenDocuments.add(document)) continue;
       }
-      ranked.add(
+      hits.add(
         AttachmentChunkHit(
           ref: AttachmentRef.fromRow(row),
           chunkId: hit.id,
@@ -6819,11 +6996,13 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
           outbound: row['direction'] == 'outbound',
           receivedAt: row['received_at'] as String?,
           distance: hit.distance,
+          bm25: hit.bm25,
+          coverage: hit.coverage,
         ),
       );
-      if (ranked.length == limit) break;
+      if (hits.length == limit) break;
     }
-    return ranked;
+    return hits;
   }
 
   /// The passages nearest [query] WITHIN a named scope — a thread's messages,
@@ -6885,7 +7064,10 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
       prefix: 'c.',
     );
     return _hydrateChunkHits(
-      hits,
+      [
+        for (final hit in hits)
+          (id: hit.id, distance: hit.distance, bm25: null, coverage: null),
+      ],
       embedModel: embedModel,
       extraWhere: 'AND $rowScope',
       extraArgs: rowArgs,
@@ -6999,7 +7181,10 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
     if (!includeDropped) where.write(' AND COALESCE(p.dropped, 0) = 0');
 
     return _hydrateChunkHits(
-      hits,
+      [
+        for (final hit in hits)
+          (id: hit.id, distance: hit.distance, bm25: null, coverage: null),
+      ],
       embedModel: embedModel,
       extraWhere: where.toString(),
       extraArgs: args,

@@ -320,7 +320,20 @@ class AttachmentChunkHit {
   final String? receivedAt;
 
   /// Cosine distance: 0 is identical, 1 orthogonal, 2 opposed.
-  final double distance;
+  ///
+  /// Nullable since search became two passes: a passage the WORDS found need
+  /// never have been embedded, so it has no distance to report, and inventing
+  /// one would put a number that means nothing into a ranking.
+  final double? distance;
+
+  /// The word pass's score for this passage, already flipped so that bigger is
+  /// better. Null when only the index found it.
+  final double? bm25;
+
+  /// What fraction of the query's terms this passage actually contains, 0 to
+  /// 1. Rides with [bm25] because it is meaningless without it — the two are
+  /// read together or not at all.
+  final double? coverage;
 
   const AttachmentChunkHit({
     required this.ref,
@@ -331,8 +344,35 @@ class AttachmentChunkHit {
     this.senderName,
     required this.outbound,
     this.receivedAt,
-    required this.distance,
+    this.distance,
+    this.bm25,
+    this.coverage,
   });
+
+  /// The same passage with another pass's numbers written on it.
+  ///
+  /// Only ever ADDS: a null argument leaves the field it names alone. That is
+  /// what the fusion needs and all it needs — one passage found by both halves
+  /// of a search is one hit carrying both scores, and neither half is ever
+  /// entitled to erase the other's.
+  AttachmentChunkHit withSignals({
+    double? distance,
+    double? bm25,
+    double? coverage,
+  }) =>
+      AttachmentChunkHit(
+        ref: ref,
+        chunkId: chunkId,
+        seq: seq,
+        locator: locator,
+        text: text,
+        senderName: senderName,
+        outbound: outbound,
+        receivedAt: receivedAt,
+        distance: distance ?? this.distance,
+        bm25: bm25 ?? this.bm25,
+        coverage: coverage ?? this.coverage,
+      );
 
   String? get name => ref.name;
 

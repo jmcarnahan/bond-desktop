@@ -70,6 +70,123 @@ dropping storyline work (PR #9): stranded claims are released, heartbeated,
 and reclaimed, and terminal errors get one bounded revival a day. The header
 comments in `embed_handler.dart` document the queue's contract.
 
+## Search
+
+**Two corpora, and each of them is indexed twice.** The document corpus
+(messages) and the passage corpus (attachment chunks) each have a `vec0` index
+for meaning and an FTS5 index for words: `vec_messages` beside `fts_messages`,
+`vec_attachment_chunks` beside `fts_attachment_chunks`. A search runs both
+halves over both corpora and fuses the four rankings into two lists — messages
+and documents.
+
+**The keyword indexes are FTS5 with the porter tokenizer**
+(`app/lib/data/keyword_index.dart`), never LIKE: substring matching has no
+ranking, so there is nothing to fuse a LIKE result INTO. They obey the vec
+indexes' rules, for the vec indexes' reasons — created lazily on first read,
+never in `schema.drift` and never in a migration (drift's `SchemaVerifier`
+diffs the whole of `sqlite_master`), derived and therefore dropped and rebuilt
+by `wipeAll`, and failing soft: a table that will not create makes the word
+pass ABSENT, not the search broken.
+
+- `fts_messages` has `rowid = messages.rowid` and columns `source UNINDEXED,
+  source_message_id UNINDEXED, indexed_updated_at UNINDEXED, subject, sender,
+  summary, body`. `sender` is the name and the address in one column, so a
+  search for a domain finds it. The watermark IS `indexed_updated_at`: a
+  backfill re-files every message whose `updated_at` is at or past the highest
+  one filed — every writer that touches text (`upsertMessage`,
+  `updateMessageDetail`, `writeTriage`) stamps `updated_at` with the current
+  time and none accepts a stamp from outside, so the column only moves forward
+  and a row below the mark is a row already filed. The one door a past value
+  could come through is `upsertMessage`'s `row['updated_at']`, which must never
+  be handed one. Filing is paged at 500 rowids, one transaction per page, one
+  `INSERT … SELECT` inside SQLite — no body text crosses into Dart, and a first
+  pass over a whole mailbox that dies partway has still made progress.
+  `messages.rowid` is not stable across a `VACUUM`; the app never runs one, and
+  `rebuild()` is the fix if a tool ever does.
+- `fts_attachment_chunks` has `rowid = attachment_chunks.id`, which IS stable
+  (`INTEGER PRIMARY KEY`), and columns `name, body, chars UNINDEXED`. It is
+  filed by a TEXT DIFF, not by presence: `replaceChunks` deletes a document's
+  passages and SQLite hands the replacement the id just vacated, so a presence
+  test would serve the old text forever. The diff is a join over every stored
+  passage and it runs on every search, so it is fenced behind three numbers
+  read from each side — row count, highest id, and total `chars`. That is what
+  `chars` is in the index for. All three agreeing means no work, and the
+  residual it accepts is a re-chunk landing on the same ids at the same total
+  length with different words: `rebuild()` is the fix. Past the fence the
+  filing is paged at 500 like the message index. Digest chunks are excluded at
+  READ time, the vec pass's rule, so filing stays a straight copy.
+- Both sweeps for rows whose source has been deleted run only when the two
+  tables disagree about how many rows they hold — a scan each, skipped on
+  almost every search.
+
+**The FTS query is built, never passed through** (`buildFtsQuery` in
+`app/lib/services/search_fusion.dart`). Tokens are `[\p{L}\p{N}']+`
+lowercased; a const stopword list of English function words plus
+`message/messages/email/mail` is removed unless that empties the query
+("how are you" is a real query for someone who remembers those words); at most
+8 terms survive; each is double-quoted with `"` doubled inside it; they are
+joined with `OR`, because `AND` finds nothing for a question-shaped query. The
+quoting is what keeps `retool -test`, `crm:login` and `NOT` from being read as
+FTS5 syntax. The embedding still sees the whole untouched query.
+
+**One score, from both halves.** Per candidate:
+
+- `vr = clamp((0.80 − d) / (0.80 − 0.45), 0, 1)` over cosine distance `d`. A
+  ramp and not `1 − d`, because the useful range is narrow: measured on the
+  live mailbox, true hits sit at 0.43–0.64, noise starts around 0.65, and the
+  best row for a query the mailbox contains nothing about was 0.77.
+- `kr = (bm25 / the best bm25 this query found) × sqrt(matched content terms /
+  content terms)`. bm25 is FTS5's score negated so bigger is better, and it has
+  no absolute scale — only a scale against this query. The coverage factor is
+  what stops a row that matched only "12" from scoring 1.0.
+- `score = 0.5·vr + 0.5·kr`, a missing signal counting 0. Keep `score ≥ 0.25`;
+  order by score descending, then `received_at` descending.
+
+A row strong in both outranks a row strong in one; a row strong in one alone
+still shows, in proportion. bm25 column weights are `subject 4, sender 2,
+summary 2, body 1` for messages and `name 2, body 1` for chunks — passed
+positionally against EVERY declared column, UNINDEXED ones included, which is
+the trap in `bm25()`. Documents use the same formula over passages, but the
+passages are grouped per FILE (`blobSha256 ?? '<name>|<size>'` — the same PDF
+is attached to two messages) BEFORE anything is scored: a file's numbers are
+the nearest distance and the strongest bm25 any of its passages reached, the
+score is computed once from those, and the passage shown is the one behind
+whichever half scored higher. Grouping after scoring would have left a file the
+two halves found in different passages as two single-signal entries, each
+earning half a score — so a file both halves matched moderately could fall
+under a floor a message in the identical position clears. Kept at `≥ 0.25`, and
+capped at 6. Every constant lives in `SearchTuning`; RRF was tried and
+rejected, because a mediocre row in both lists beat the rows only words could
+find.
+
+**What the floor can and cannot suppress.** Only the VECTOR half. `kr` is
+normalised against the best bm25 in this query, so the top keyword row always
+scores `1 × sqrt(coverage)` — for a single-term query that is 0.5, twice the
+floor. A literal word match therefore always shows, whatever `minScore` is set
+to, and `invoice → 0` in the table below reflects a mailbox in which no message
+contains the word rather than a floor that cut them. Anyone re-tuning
+`minScore` is tuning the meaning half alone.
+
+**What the floor bought** (probe, 2026-09-08; every query used to return 49–50
+messages, whatever it asked):
+
+| Query | Messages kept | Documents |
+|---|---|---|
+| lunch | 4 | — |
+| what messages are about lunch plans | 9 | — |
+| invoice | 0 | the order-confirmation PDF at 0.67 |
+| notion workspace invite | 6, the two invites on top by words alone | — |
+| september 12 meeting | 13, the three real threads at 0.84–0.93 | 0 (8 before coverage) |
+| pub crawl tickets | 3 | the PDF once, was 4 copies |
+| retool | 3 | — |
+| sparrow kidney | 1 | the paper once, was 41 chunks |
+| crm login problems | 12 | — |
+
 **Search degradation.** The search UI distinguishes "nothing matches" from
-"the index is off" — an unavailable embed server degrades honestly rather
-than pretending an empty result.
+"half the search could not run" — the floor above is what makes the first of
+those a real answer. Both halves failing is `MessageSearchUnavailable`, which
+never swaps the feed away. One half failing is a result with a notice ON it,
+and there are exactly two sentences: *Words only — …* when the embedding
+server or the vector index is down (the sentence names which), and *Meaning
+only — the keyword index could not be built.* when FTS is unavailable. They
+never coexist; that pair is the unavailable case.

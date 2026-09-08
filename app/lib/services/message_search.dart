@@ -4,6 +4,7 @@ import '../data/message_store.dart';
 import '../models/attachment_models.dart';
 import '../models/home_models.dart';
 import 'llm/embeddings_client.dart';
+import 'search_fusion.dart';
 
 /// What a search came back with — hits, or a reason there are none.
 ///
@@ -12,10 +13,10 @@ import 'llm/embeddings_client.dart';
 /// is not running" are the two sentences a search screen must never confuse.
 /// One is an answer; the other is an instruction to go and start a server.
 ///
-/// The unavailable case is narrow, and narrower than it once was: BOTH passes
-/// have to have failed. A search runs the index and a text scan, and the scan
-/// needs nothing but the database — so a dead embedding server narrows the
-/// answer rather than removing it, and says so in [MessageSearchHits.notice].
+/// The unavailable case is narrow: BOTH passes have to have failed. A search
+/// asks the meaning index and the word index, and the word index needs nothing
+/// but the database — so a dead embedding server narrows the answer rather
+/// than removing it, and says so in [MessageSearchHits.notice].
 sealed class MessageSearchResult {
   const MessageSearchResult();
 }
@@ -26,33 +27,32 @@ class MessageSearchHits extends MessageSearchResult {
   /// a result set that arrived after the box was typed into again.
   final String query;
 
-  final List<SemanticHit> hits;
+  /// One list, ranked once.
+  ///
+  /// The two passes are merged before they get here rather than shown one
+  /// under the other. Two lists meant a reader saw their mailbox twice under
+  /// two headings, with the message BOTH passes found leading one and buried
+  /// in the other — and it meant a header count that had to add up two
+  /// numbers. A row that only the words could reach (a gate-dropped message
+  /// was never embedded) still appears, at the proportion of the score it was
+  /// able to earn.
+  final List<SearchHit> hits;
 
-  /// The passages of attached documents that answer the same query, nearest
-  /// one per document.
+  /// The passages of attached documents that answer the same query, one per
+  /// file.
   ///
   /// A separate list rather than more [hits], because a document hit is not a
   /// message: it is a fragment of a file, and it has to be shown with the file
   /// name and the place in it. Empty is the ordinary answer for a mailbox
-  /// nobody has attached anything to, and for one whose chunk index is not
-  /// built on this platform — neither is worth a third case here, because the
-  /// message hits are an answer either way.
+  /// nobody has attached anything to, and for one whose passages are all
+  /// further from the query than the floor allows.
   final List<AttachmentChunkHit> documents;
 
-  /// Messages the words match that the index did not already return, in date
-  /// order behind the ranked [hits].
+  /// Non-null when only ONE of the two passes contributed — the sentence to
+  /// show over a set of results that is narrower than it looks.
   ///
-  /// The text pass runs on EVERY search and not only as a rescue, the same way
-  /// the archive's does. A gate-dropped message never reached the embedder, so
-  /// no vector was ever written for it and no amount of a healthy embedding
-  /// server will make it findable by meaning — and it is exactly the pile a
-  /// person comes to a search box looking for. Separate from [hits] because
-  /// only those carry a distance: a shape that insisted on one would have to
-  /// invent it.
-  final List<HomeFeedRow> textRows;
-
-  /// Non-null when ONLY the text pass contributed — the sentence to show over
-  /// a set of results that is narrower than it looks.
+  /// Never two sentences: both passes failing is the unavailable case, not a
+  /// doubly-noticed one.
   ///
   /// A fact about THIS result set rather than a standing condition of the
   /// screen, which is why it travels with the rows.
@@ -62,7 +62,6 @@ class MessageSearchHits extends MessageSearchResult {
     this.query,
     this.hits, {
     this.documents = const [],
-    this.textRows = const [],
     this.notice,
   });
 }
@@ -74,22 +73,23 @@ class MessageSearchUnavailable extends MessageSearchResult {
   const MessageSearchUnavailable(this.reason);
 }
 
-/// What a search of the archive came back with: rows, and a sentence when the
-/// semantic half of it could not run.
+/// What a search of the archive came back with: rows, and a sentence when one
+/// half of it could not run.
 ///
 /// Plain rather than part of [MessageSearchResult]'s sealed pair, because the
-/// archive's search still ANSWERS when the embedding server is down — the text
+/// archive's search still ANSWERS when the embedding server is down — the word
 /// pass runs either way. So unavailability here is a notice ON a result, where
 /// above it is a case INSTEAD of one.
 class ArchiveSearchResult {
   /// The query as it was searched, trimmed.
   final String query;
 
-  /// Semantic matches first in rank order, then the text matches the index did
-  /// not already return.
+  /// The fused ranking's rows, best first. Score order rather than date order:
+  /// the archive asks the same question the home search does and deserves the
+  /// same answer.
   final List<HomeFeedRow> rows;
 
-  /// Non-null when only the text pass contributed.
+  /// Non-null when only one pass contributed.
   final String? notice;
 
   const ArchiveSearchResult(this.query, this.rows, this.notice);
@@ -104,13 +104,32 @@ class ArchiveSearchResult {
 /// on the one path where nothing is left to show.
 class _SemanticPass {
   final List<SemanticHit>? hits;
-  final List<AttachmentChunkHit> documents;
+  final List<AttachmentChunkHit>? documents;
   final String? notice;
   final String? reason;
 
   const _SemanticPass(
     this.hits, {
-    this.documents = const [],
+    this.documents,
+    this.notice,
+    this.reason,
+  });
+}
+
+/// One keyword pass, in [_SemanticPass]'s shape and for its reasons.
+///
+/// The two are separate classes rather than one because their failures are
+/// separate facts — a mailbox can lose either index without losing the other —
+/// and the whole point of the pair is that the caller can tell which.
+class _KeywordPass {
+  final List<KeywordHit>? hits;
+  final List<AttachmentChunkHit>? documents;
+  final String? notice;
+  final String? reason;
+
+  const _KeywordPass(
+    this.hits, {
+    this.documents,
     this.notice,
     this.reason,
   });
@@ -125,33 +144,27 @@ class _SemanticPass {
 /// under [EmbeddingsClient.documentPrefix] — and that pairing is the kind of
 /// fact that survives exactly as long as it lives in one place.
 ///
-/// Every search is two passes, and both public methods run them through the
-/// same two private helpers. That is deliberate rather than tidy: the two used
-/// to spell the pair out separately, and a corpus rule added to one and not
-/// the other is a search that answers a different question depending on which
-/// screen asked it.
+/// Every search is two passes fused into one ranking, and both public methods
+/// run them through the same two private helpers. That is deliberate rather
+/// than tidy: the two used to spell the pair out separately, and a corpus rule
+/// added to one and not the other is a search that answers a different
+/// question depending on which screen asked it.
 class MessageSearch {
   final MessageStore _store;
   final EmbeddingsClient _embeddings;
 
   MessageSearch(this._store, this._embeddings);
 
-  /// How many documents a search names. Small on purpose: they sit under the
-  /// message hits, and a page of passages would bury the thing most people are
-  /// actually looking for.
-  static const int _documentLimit = 6;
-
-  /// The home screen's search: ranked by meaning, filled in by words.
+  /// The home screen's search: meaning and words, scored together.
   ///
   /// [MessageSearchUnavailable] is what comes back only when BOTH passes
-  /// failed, which in practice means the database itself is unreadable — an
-  /// embedding server that is off leaves the text pass standing, and a text
-  /// pass that throws under a healthy index leaves the ranking standing.
+  /// failed — an embedding server that is off leaves the word index standing,
+  /// and a SQLite without FTS5 leaves the ranking standing.
   ///
   /// [sources] narrows BOTH corpora to a set of connectors — the `in:` facet,
   /// honoured in SQL because the source is a column on every row either read
-  /// touches. Filtering it after the fact would spend the index's whole budget
-  /// on hits from the connector the reader excluded.
+  /// touches. Filtering it after the fact would spend each index's whole
+  /// budget on hits from the connector the reader excluded.
   Future<MessageSearchResult> search(
     String query, {
     int limit = 50,
@@ -159,82 +172,86 @@ class MessageSearch {
     List<String> sources = const ['email', 'teams'],
   }) async {
     final text = query.trim();
-    final pass = await _semanticOrNotice(
+    final semantic = await _semanticOrNotice(
       text,
       limit: limit,
       includeDropped: includeDropped,
       sources: sources,
     );
+    final keywords = await _keywordsOrNotice(
+      text,
+      includeDropped: includeDropped,
+      sources: sources,
+    );
 
-    List<HomeFeedRow> textRows;
-    try {
-      textRows = await _textBehind(
-        text,
-        pass.hits ?? const [],
-        limit: limit,
-        includeDropped: includeDropped,
-        sources: sources,
+    // Nothing left to show, so the sealed case earns itself: the reader is
+    // owed the instruction rather than an empty list that reads as an answer
+    // about their mailbox.
+    if (semantic.hits == null && keywords.hits == null) {
+      return MessageSearchUnavailable(
+        semantic.reason ?? keywords.reason ?? 'the search could not run',
       );
-    } catch (e) {
-      // Nothing left to show, so the sealed case earns itself: the reader is
-      // owed the instruction rather than an empty list that reads as an answer
-      // about their mailbox.
-      if (pass.hits == null) {
-        return MessageSearchUnavailable(
-          pass.reason ?? 'the search could not run',
-        );
-      }
-      // Ranked hits survive a text pass that fell over, and a reader looking
-      // at them is not owed a sentence about the half that was only ever going
-      // to widen the list.
-      debugPrint('search: text pass failed: $e');
-      textRows = const [];
     }
 
     return MessageSearchHits(
       text,
-      pass.hits ?? const [],
-      documents: pass.documents,
-      textRows: textRows,
-      notice: pass.notice,
+      fuseMessages(
+        semantic: semantic.hits,
+        keywords: keywords.hits,
+        limit: limit,
+      ),
+      documents: fuseDocuments(
+        semantic: semantic.documents,
+        keywords: keywords.documents,
+      ),
+      // At most one of the two is set here — the both-failed case returned
+      // above — so whichever is non-null is the sentence.
+      notice: semantic.notice ?? keywords.notice,
     );
   }
 
-  /// The same question asked of the whole history, both ways at once.
+  /// The same question asked of the whole history.
   ///
   /// Scope is ALL of it, dropped rows included, because the archive's selling
   /// point is "I know I got that email" — a search that quietly skipped the
   /// pile the gate threw out would answer that sentence with silence.
   ///
-  /// The one difference from [search]: the two lists arrive flattened into one
-  /// set of rows, because the archive ranks by date under the hits anyway and
-  /// has no use for the seam.
+  /// The one difference from [search]: the hits arrive flattened into rows,
+  /// because the archive renders feed rows and has no place to put a score.
   Future<ArchiveSearchResult> searchArchive(
     String query, {
     int limit = 50,
   }) async {
     final text = query.trim();
-    final pass = await _semanticOrNotice(
+    const sources = ['email', 'teams'];
+    // No passages: the archive renders feed rows, and a document read whose
+    // answer has nowhere to go is two queries and a chunk backfill spent on
+    // nothing.
+    final semantic = await _semanticOrNotice(
       text,
       limit: limit,
       includeDropped: true,
-      sources: const ['email', 'teams'],
+      sources: sources,
+      withDocuments: false,
     );
-    final semantic = pass.hits ?? const <SemanticHit>[];
+    final keywords = await _keywordsOrNotice(
+      text,
+      includeDropped: true,
+      sources: sources,
+      withDocuments: false,
+    );
 
     return ArchiveSearchResult(
       text,
       [
-        for (final hit in semantic) hit.row,
-        ...await _textBehind(
-          text,
-          semantic,
+        for (final hit in fuseMessages(
+          semantic: semantic.hits,
+          keywords: keywords.hits,
           limit: limit,
-          includeDropped: true,
-          sources: const ['email', 'teams'],
-        ),
+        ))
+          hit.row,
       ],
-      pass.notice,
+      semantic.notice ?? keywords.notice,
     );
   }
 
@@ -243,16 +260,20 @@ class MessageSearch {
   ///
   /// The index lives in a native extension over its own connection, and a read
   /// of it can fail outright rather than answer null — the vec0 table missing
-  /// on this build, a connection that lost the extension. Both callers below
-  /// treat a semantic pass that produced nothing as "text matches only", and
-  /// that is the right answer here too: the word pass needs nothing but the
-  /// database, and a search box that threw would leave a reader with no result
-  /// at all over a half of the search they never asked for by name.
+  /// on this build, a connection that lost the extension. The word pass needs
+  /// nothing but the database, so it still has an answer, and a search box
+  /// that threw would leave a reader with no result at all over a half of the
+  /// search they never asked for by name.
+  ///
+  /// [withDocuments] off is the archive's shape: [ArchiveSearchResult] has
+  /// nowhere to put a passage, so asking for one is two reads whose answers
+  /// are thrown away.
   Future<_SemanticPass> _semanticOrNotice(
     String text, {
     required int limit,
     required bool includeDropped,
     required List<String> sources,
+    bool withDocuments = true,
   }) async {
     try {
       return await _semantic(
@@ -260,12 +281,13 @@ class MessageSearch {
         limit: limit,
         includeDropped: includeDropped,
         sources: sources,
+        withDocuments: withDocuments,
       );
     } catch (e) {
       debugPrint('search: semantic pass failed: $e');
       return const _SemanticPass(
         null,
-        notice: 'Text matches only — the semantic index could not be read.',
+        notice: 'Words only — the semantic index could not be read.',
         reason: 'the semantic index could not be read',
       );
     }
@@ -278,6 +300,7 @@ class MessageSearch {
     required int limit,
     required bool includeDropped,
     required List<String> sources,
+    bool withDocuments = true,
   }) async {
     final result = await _embeddings.embedResult(
       text,
@@ -298,7 +321,7 @@ class MessageSearch {
           'the embedding server ${result.reason ?? 'did not answer'}';
       return _SemanticPass(
         null,
-        notice: 'Text matches only — $subject.',
+        notice: 'Words only — $subject.',
         reason: subject,
       );
     }
@@ -315,44 +338,77 @@ class MessageSearch {
     if (hits == null) {
       return const _SemanticPass(
         null,
-        notice: 'Text matches only — the semantic index is unavailable.',
+        notice: 'Words only — the semantic index is unavailable.',
         reason: 'the semantic index is unavailable',
       );
     }
     // The same query vector against the second corpus. It runs only after the
     // message search has an answer, so a document search can never be the
     // reason a search reports itself unavailable.
+    //
+    // Four times the page: the fusion collapses passages to one per FILE, and
+    // a single long spreadsheet can occupy a whole page of neighbours on its
+    // own and still be one answer.
+    if (!withDocuments) return _SemanticPass(hits);
     final chunks = await _store.searchAttachmentChunks(
       encodeEmbedding(vector),
       embedModel: EmbeddingsClient.documentModelTag,
-      limit: _documentLimit,
+      limit: SearchTuning.documentLimit * 4,
       includeDropped: includeDropped,
       sources: sources,
     );
-    return _SemanticPass(hits, documents: chunks ?? const []);
+    return _SemanticPass(hits, documents: chunks);
   }
 
-  /// The word pass, minus whatever the index already ranked.
+  /// The word pass over both corpora, with a missing index and a throw
+  /// answering the same way.
   ///
-  /// Deduplicated on [HomeFeedRow.feedKey] rather than on the message id: an
-  /// id is only unique within its connector, and a set keyed on half of a key
-  /// would drop a Teams message because an email happened to share its id.
-  Future<List<HomeFeedRow>> _textBehind(
-    String text,
-    List<SemanticHit> semantic, {
-    required int limit,
+  /// Null hits rather than empty when the index could not be built, on
+  /// [_semanticOrNotice]'s distinction: "there is nothing to search with" is
+  /// not "nothing matched", and only the first is worth a sentence.
+  ///
+  /// [withDocuments] carries [_semanticOrNotice]'s meaning: the archive does
+  /// not show passages, so it does not pay for them.
+  Future<_KeywordPass> _keywordsOrNotice(
+    String text, {
     required bool includeDropped,
     required List<String> sources,
+    bool withDocuments = true,
   }) async {
-    final seen = {for (final hit in semantic) hit.row.feedKey};
-    return [
-      for (final row in await _store.textSearchMessages(
+    try {
+      final hits = await _store.keywordSearchMessages(
         text,
-        limit: limit,
         includeDropped: includeDropped,
         sources: sources,
-      ))
-        if (seen.add(row.feedKey)) row,
-    ];
+      );
+      if (hits == null) {
+        return const _KeywordPass(
+          null,
+          notice: _noWords,
+          reason: _noWordsReason,
+        );
+      }
+      if (!withDocuments) return _KeywordPass(hits);
+      final documents = await _store.keywordSearchChunks(
+        text,
+        includeDropped: includeDropped,
+        sources: sources,
+      );
+      return _KeywordPass(hits, documents: documents);
+    } catch (e) {
+      debugPrint('search: keyword pass failed: $e');
+      return const _KeywordPass(
+        null,
+        notice: _noWords,
+        reason: _noWordsReason,
+      );
+    }
   }
+
+  /// The sentence for a mailbox whose word index could not be built — a
+  /// SQLite compiled without FTS5, or a database that cannot be written to.
+  static const String _noWords =
+      'Meaning only — the keyword index could not be built.';
+
+  static const String _noWordsReason = 'the keyword index could not be built';
 }

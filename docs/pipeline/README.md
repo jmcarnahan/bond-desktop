@@ -130,12 +130,12 @@ source_message_id)` pair:
   than one, because those are the two places a reader looks when the sentence
   is not the one they expected. They nest inside the row's own tap and outside
   the storyline link and Retry, so each gesture fires exactly one thing.
-- **A home search result.** Home search now always runs the text pass behind
-  the semantic one, so a query answers with the ranked hits first and the
-  plain word matches under a *Text matches* heading — including the
-  gate-dropped mail that has no vector at all and is unreachable by meaning,
-  whenever *Show dropped* is on. A notice above the rows says when only the
-  words ran.
+- **A home search result.** Home search runs a meaning pass and a word pass
+  and fuses them into ONE ranking, best first — no *Text matches* heading, and
+  one count that is the rows on screen. Gate-dropped mail has no vector at all
+  and is unreachable by meaning, so the words are the only way it is ever
+  found, whenever *Show dropped* is on. A notice above the rows says when only
+  one of the two halves ran. See [05-embeddings.md](05-embeddings.md).
 - **An Archive row**, in the Dropped pile or in an archive search.
 - **"What happened" on a message in a thread**, on the header of each message
   in the transcript. Per message and not per thread: the pipeline decides one

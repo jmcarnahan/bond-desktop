@@ -296,6 +296,77 @@ class SemanticHit {
   const SemanticHit(this.row, this.distance);
 }
 
+/// One keyword-search result: a feed row, how well the words scored, and how
+/// much of the query it actually contained.
+///
+/// [SemanticHit]'s opposite number, and shaped like it for the same reason —
+/// the store hands back a ranking plus the number the ranking was made from,
+/// and the fusion above needs both.
+@immutable
+class KeywordHit {
+  final HomeFeedRow row;
+
+  /// FTS5's bm25 score, already NEGATED at the index so that bigger is better.
+  /// It has no absolute scale; it is only meaningful against the best score
+  /// the same query found.
+  final double bm25;
+
+  /// The fraction of the query's terms this row contains, 0 to 1.
+  ///
+  /// The correction bm25 needs. An OR query lets a row that matched one rare
+  /// word top the ranking on that word's rarity alone, and without this the
+  /// message containing only "12" would outrank the one that answers the
+  /// question.
+  final double coverage;
+
+  const KeywordHit(this.row, {required this.bm25, required this.coverage});
+}
+
+/// Which half of a search found a row.
+///
+/// Not a display label — nothing prints it yet. It is the fact a later "why
+/// this result?" surface will be built from, and recording it at the moment
+/// the two rankings are merged is far cheaper than reconstructing it after.
+enum MatchedBy { meaning, words, both }
+
+/// One search result, whichever way it was found.
+///
+/// Replaces the ranked-hits-plus-text-rows pair the search used to hand back.
+/// Two lists meant a reader saw the same mailbox twice under two headings,
+/// with the row that BOTH passes found sitting at the top of one and buried in
+/// the other; one list with one score puts it where it belongs.
+///
+/// The numbers ride along rather than being discarded after the sort. Nothing
+/// shows them today; they are what a per-row explanation would need, and a
+/// score with no evidence behind it is the kind of thing nobody can debug.
+@immutable
+class SearchHit {
+  final HomeFeedRow row;
+
+  /// The fused relevance, 0 to 1. Everything below `SearchTuning.minScore` was
+  /// dropped before this list was built, so a hit that is here earned it.
+  final double score;
+
+  /// Cosine distance from the query, or null when the index did not find this
+  /// row — a gate-dropped message was never embedded and can only ever arrive
+  /// by words.
+  final double? distance;
+
+  /// The word pass's score, bigger-is-better, or null when only meaning found
+  /// it.
+  final double? bm25;
+
+  final MatchedBy matchedBy;
+
+  const SearchHit({
+    required this.row,
+    required this.score,
+    this.distance,
+    this.bm25,
+    required this.matchedBy,
+  });
+}
+
 /// The search results a reader is looking at, in place of the live feed.
 ///
 /// Down here beside [SemanticHit] rather than up in the feed's notifier,
@@ -308,26 +379,24 @@ class HomeSearch {
   /// rather than by what is on screen.
   final String query;
 
-  /// Never null: an empty list is a real answer — nothing indexed matches —
-  /// and the state where there is no answer at all is no [HomeSearch] at all.
-  final List<SemanticHit> hits;
+  /// ONE ranking, meaning and words together, best first.
+  ///
+  /// Never null: an empty list is a real answer — nothing matches — and the
+  /// state where there is no answer at all is no [HomeSearch] at all.
+  ///
+  /// Each [SearchHit] carries the numbers `search_fusion.dart` ranked it by,
+  /// so a row found both ways sits above the rows found one way instead of
+  /// appearing twice under two headings. Gate-dropped mail was never embedded
+  /// and can only ever arrive here by its words, which is what makes it
+  /// findable at all when *Show dropped* is on.
+  final List<SearchHit> hits;
 
   /// The passages of attached documents that answer the same query. Never
   /// null, for [hits]' reason: an empty list is a real answer.
   final List<AttachmentChunkHit> documents;
 
-  /// Messages the words match that the index did not already rank, in date
-  /// order behind [hits].
-  ///
-  /// Kept apart from [hits] rather than merged into them because only those
-  /// carry a distance, and because the two answer differently: the ranked list
-  /// is "about this", and these are "contains these words" — including the
-  /// gate-dropped messages that have no vector at all and are therefore
-  /// unreachable by meaning.
-  final List<HomeFeedRow> textRows;
-
-  /// Non-null when only the words found anything — the semantic half could not
-  /// run, and this set of results is narrower than it looks.
+  /// Non-null when only one half of the search ran — the meaning pass or the
+  /// word pass could not — and this set of results is narrower than it looks.
   ///
   /// Travels with the rows for [ArchiveSearch.notice]'s reason: it is a fact
   /// about this answer, not a standing condition of the screen.
@@ -337,7 +406,6 @@ class HomeSearch {
     this.query,
     this.hits, {
     this.documents = const [],
-    this.textRows = const [],
     this.notice,
   });
 }
@@ -345,13 +413,13 @@ class HomeSearch {
 /// The archive pane's result set: what a search of the whole history came back
 /// with, and whether half of it was missing.
 ///
-/// Rows and not hits, because only some of them have a distance to carry — the
-/// rest arrive from a text match, which ranks by date and knows nothing about
-/// meaning. A shape that insisted on a distance would have to invent one.
+/// Rows and not hits, because the archive renders feed rows and has nowhere to
+/// put a score: the fused ranking still decides the ORDER, and then it is
+/// flattened. A shape that carried the numbers would carry them for nobody.
 ///
 /// [notice] travels WITH the results rather than beside them on the screen:
-/// "these came from text only" is a fact about THIS result set — the answer is
-/// narrower than it looks — and not a standing condition of the pane.
+/// "only one half of the search ran" is a fact about THIS result set — the
+/// answer is narrower than it looks — and not a standing condition of the pane.
 ///
 /// Down here beside [HomeSearch] for its reason: the pane renders this and the
 /// pane reads no providers.
@@ -361,11 +429,12 @@ class ArchiveSearch {
   /// was typed into again is labelled by what it is.
   final String query;
 
-  /// Semantic matches first, in rank order, then text matches the index did
-  /// not already return. Never null: empty is a real answer.
+  /// One fused ranking, best first, meaning and words together. Never null:
+  /// empty is a real answer.
   final List<HomeFeedRow> rows;
 
-  /// Non-null when the semantic half could not run and text answered alone.
+  /// Non-null when only one half of the search ran and the other answered
+  /// alone.
   final String? notice;
 
   const ArchiveSearch(this.query, this.rows, this.notice);

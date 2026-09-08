@@ -429,7 +429,6 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
             result.query,
             result.hits,
             documents: result.documents,
-            textRows: result.textRows,
             notice: result.notice,
           ),
           searching: false,

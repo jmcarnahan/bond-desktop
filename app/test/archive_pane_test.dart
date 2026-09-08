@@ -347,18 +347,18 @@ void main() {
       expect(left, 1);
     });
 
-    testWidgets('a text-only answer says so over its own rows', (tester) async {
+    testWidgets('a half-answer says so over its own rows', (tester) async {
       await pump(
         tester,
         conversations: const [],
         search: results(
           [_dropped(id: 'd1', subject: 'Invoice 4471')],
-          notice: 'Text matches only — the embedding server is not reachable.',
+          notice: 'Words only — the embedding server is not reachable.',
         ),
       );
 
       expect(
-        find.text('Text matches only — the embedding server is not reachable.'),
+        find.text('Words only — the embedding server is not reachable.'),
         findsOneWidget,
       );
       expect(find.text('Invoice 4471'), findsOneWidget,

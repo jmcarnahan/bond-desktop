@@ -220,7 +220,7 @@ void main() {
       (tester) async {
     // No embedding server answers in a widget test, which is the case worth
     // pinning rather than one to work around: the semantic half fails, the
-    // text half runs anyway, and a message the gate threw out — which never
+    // word half runs anyway, and a message the gate threw out — which never
     // had a vector to be found by — is still the answer.
     await seedDropped('Vendor invoice 4471');
     await pumpScreen(tester);

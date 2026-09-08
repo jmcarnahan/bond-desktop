@@ -16,7 +16,7 @@ import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 import 'fixtures/test_db.dart';
 import 'fixtures/vec_test_db.dart';
 
-/// What a search HAND BACK, as against how it ranks.
+/// What a search HANDS BACK, as against how it ranks.
 ///
 /// Two questions that happen to share a door: the row a hit carries is the
 /// same row the home feed renders, joins and all, and the connector filter
@@ -158,27 +158,27 @@ void main() {
     /// The ids the word pass found, with the server down so the ranking pass
     /// contributes nothing and every row on screen came through the filter
     /// under test.
-    Future<List<String>> textIds(List<String>? sources) async {
+    Future<List<String>> wordIds(List<String>? sources) async {
       final search = MessageSearch(store, downServer());
       final result = sources == null
           ? await search.search('invoice')
           : await search.search('invoice', sources: sources);
       return [
-        for (final row in (result as MessageSearchHits).textRows)
-          row.sourceMessageId,
+        for (final hit in (result as MessageSearchHits).hits)
+          hit.row.sourceMessageId,
       ];
     }
 
-    test('sources narrows the text pass', () async {
+    test('sources narrows the keyword pass', () async {
       await seed('email', 'mail-1');
       await seed('teams', 'chat-1');
 
-      expect(await textIds(const ['teams']), ['chat-1']);
-      expect(await textIds(const ['email']), ['mail-1']);
+      expect(await wordIds(const ['teams']), ['chat-1']);
+      expect(await wordIds(const ['email']), ['mail-1']);
       // The default is every connector, which is what makes the facet an
       // opt-in narrowing rather than something a caller has to remember.
       expect(
-        (await textIds(null))..sort(),
+        (await wordIds(null))..sort(),
         ['chat-1', 'mail-1'],
       );
     });
@@ -212,13 +212,13 @@ void main() {
           await MessageSearch(store, flatServer()).search('invoice');
 
       final hits = result as MessageSearchHits;
-      expect(hits.hits, isEmpty);
       expect(
-        [for (final row in hits.textRows) row.sourceMessageId],
+        [for (final hit in hits.hits) hit.row.sourceMessageId],
         ['mail-1'],
       );
+      expect(hits.hits.single.matchedBy, MatchedBy.words);
       expect(hits.notice,
-          'Text matches only — the semantic index could not be read.');
+          'Words only — the semantic index could not be read.');
     });
   });
 }

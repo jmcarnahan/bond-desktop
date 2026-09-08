@@ -331,7 +331,7 @@ void main() {
     });
   });
 
-  group('textSearchMessages and the dropped filter', () {
+  group('keywordSearchMessages and the dropped filter', () {
     setUp(() async {
       await seed('kept', subject: 'Invoice 4471 is overdue');
       await seed(
@@ -348,18 +348,26 @@ void main() {
       );
     });
 
-    test('the archive keeps its meaning by default', () async {
-      final rows = await store.textSearchMessages('invoice');
+    test('the archive asks for dropped mail, which is why the read exists',
+        () async {
+      final hits =
+          (await store.keywordSearchMessages('invoice', includeDropped: true))!;
 
-      // "I know I got that email" is the whole reason the read exists.
-      expect({for (final row in rows) row.sourceMessageId}, {'kept', 'gone'});
+      // "I know I got that email" is the whole reason the archive spells the
+      // flag out: a gate-dropped message has no vector and is reachable by
+      // nothing else.
+      expect(
+        {for (final hit in hits) hit.row.sourceMessageId},
+        {'kept', 'gone'},
+      );
     });
 
-    test('and Home can ask for the same filter its table is under', () async {
-      final rows =
-          await store.textSearchMessages('invoice', includeDropped: false);
+    test('and Home gets its table\'s filter without asking', () async {
+      final hits = (await store.keywordSearchMessages('invoice'))!;
 
-      expect([for (final row in rows) row.sourceMessageId], ['kept']);
+      // The default is the home table's meaning, because that is where the
+      // results are drawn.
+      expect([for (final hit in hits) hit.row.sourceMessageId], ['kept']);
     });
   });
 
