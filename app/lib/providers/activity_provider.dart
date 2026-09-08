@@ -8,6 +8,7 @@ import '../data/message_store.dart'
         activityLastSyncTeamsKey;
 import '../models/message_models.dart';
 import '../services/activity_log.dart';
+import '../services/sync_service.dart' show mailLastReconcileKey;
 import 'app_providers.dart';
 import 'conversations_provider.dart' show inboxSources;
 
@@ -63,10 +64,21 @@ class SyncStamps {
   final String? teamsIso;
   final String? sweepIso;
 
-  const SyncStamps({this.mailIso, this.teamsIso, this.sweepIso});
+  /// When the mail reconcile last finished. Its own stamp rather than a fact
+  /// derived from [mailIso], because it runs on a cadence of its own: a mail
+  /// sync a minute old sits beside a reconcile up to ten minutes old, and a
+  /// reader checking whether the safety net is alive needs the second number.
+  final String? reconcileIso;
+
+  const SyncStamps({
+    this.mailIso,
+    this.teamsIso,
+    this.sweepIso,
+    this.reconcileIso,
+  });
 }
 
-/// The three freshness stamps alone, for anything that only wants to say
+/// The four freshness stamps alone, for anything that only wants to say
 /// "when did this last run".
 ///
 /// Split from [activitySnapshotProvider] because that one pays for the whole
@@ -74,7 +86,9 @@ class SyncStamps {
 /// recorded event, and the settings screen's Sync & data section needs three
 /// preference reads. Kept live the same way: watching [activityEventsProvider]
 /// re-reads it after every event, and the sync passes stamp their preference
-/// before they record, so the re-read always sees the new time.
+/// before they record, so the re-read always sees the new time. The reconcile
+/// stamp rides along for the same reason and by the same mechanism: the mail
+/// pass writes it before recording `sync_mail`.
 final syncStampsProvider = FutureProvider.autoDispose<SyncStamps>((ref) async {
   ref.watch(activityEventsProvider);
   final store = ref.watch(messageStoreProvider);
@@ -82,7 +96,24 @@ final syncStampsProvider = FutureProvider.autoDispose<SyncStamps>((ref) async {
     mailIso: await store.getPref(activityLastSyncMailKey),
     teamsIso: await store.getPref(activityLastSyncTeamsKey),
     sweepIso: await store.getPref(activityLastSweepKey),
+    reconcileIso: await store.getPref(mailLastReconcileKey),
   );
+});
+
+/// Needs-you judgements still queued, re-read on every recorded event so the
+/// Settings summary counts down as the re-judge the owner started drains.
+///
+/// Watching [activityEventsProvider] is the whole liveness mechanism, the same
+/// one [syncStampsProvider] uses: every stage that finishes records something,
+/// so the number moves without a timer of its own.
+final needsYouPendingProvider = FutureProvider.autoDispose<int>((ref) async {
+  ref.watch(activityEventsProvider);
+  final store = ref.watch(messageStoreProvider);
+  final counts = await store.workCounts('needs_you', sources: inboxSources);
+  // Both statuses, because a claimed item is still an answer the owner is
+  // waiting for — a countdown that skipped the one being worked on would sit
+  // at "1 message" and then jump to nothing.
+  return (counts['pending'] ?? 0) + (counts['processing'] ?? 0);
 });
 
 /// The activity pane's read model, re-read on every recorded event.

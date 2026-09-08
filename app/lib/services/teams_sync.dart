@@ -319,6 +319,14 @@ class TeamsSync {
         olderThanIso: terminalBefore,
       );
 
+      // The rows the settle race left owing a storyline stage, exactly as the
+      // mail sync heals them (`sync_service.dart`). Needed here on its own
+      // terms: a Teams-only session runs no mail sync, and the race is not
+      // mail-specific — this pass enqueues after its chat loop too.
+      final revivedStoryline = await _store.reviveOwedStorylineStages(
+        sources: const [source],
+      );
+
       // Extraction, for the chat messages a person actually wrote. `OR IGNORE`
       // makes it idempotent, so it both picks up what just arrived and refills
       // a queue a crash left short.
@@ -380,6 +388,7 @@ class TeamsSync {
             'revived_terminal_work': revivedTerminalWork,
           if (repended > 0) 'repended_triage': repended,
           if (rejudged > 0) 'rejudged_triage': rejudged,
+          if (revivedStoryline > 0) 'revived_storyline': revivedStoryline,
           'backfilled_addressed_me': ?backfilled,
         },
       );

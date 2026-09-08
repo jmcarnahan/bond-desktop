@@ -228,7 +228,10 @@ void main() {
           deltaCursor('inbox', 'final'));
 
       final inboxRequests = graph.requestsFor('inbox');
-      expect(inboxRequests.length, 3);
+      // Three pages, then the reconcile — which follows every drain on a
+      // mailbox that has never run one, and asks a from-scratch request of its
+      // own. The cursor assertion above is what says its page went nowhere.
+      expect(inboxRequests.length, 4);
       // A drain that starts from scratch asks for a floored window, and the
       // opaque links after it are fetched verbatim.
       expect(inboxRequests.first.queryParameters[r'$filter'],
@@ -271,7 +274,8 @@ void main() {
       ]);
       await sync.syncNow();
 
-      final select = graph.requestsFor('inbox').single.queryParameters[r'$select']!;
+      // First, not single: the reconcile behind it makes a request of its own.
+      final select = graph.requestsFor('inbox').first.queryParameters[r'$select']!;
       expect(select.split(','), [
         'id',
         'internetMessageId',
@@ -378,7 +382,8 @@ void main() {
       final after = midnightFloor();
 
       final inboxRequests = graph.requestsFor('inbox');
-      expect(inboxRequests.length, 2);
+      // The dead cursor, the restart, and the reconcile behind them both.
+      expect(inboxRequests.length, 3);
 
       final filter = inboxRequests[1].queryParameters[r'$filter']!;
       expect(
@@ -418,7 +423,8 @@ void main() {
 
       await sync.syncNow();
 
-      expect(graph.requestsFor('inbox').length, 2);
+      // The throttled attempt, the retry, and the reconcile behind them.
+      expect(graph.requestsFor('inbox').length, 3);
       expect((await messageRows()).length, 1);
     });
 

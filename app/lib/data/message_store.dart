@@ -20,9 +20,16 @@ import '../services/chat_roster.dart';
 // copy of the "an outbound may go quiet, but never off `done`" asymmetry is
 // exactly how a send would start disagreeing with the sync about a thread.
 import '../services/conversation_state.dart';
+// The third, on the same licence as the two above: `search_fusion.dart` is
+// arithmetic and string work over the models with no I/O. The keyword reads
+// need the query BUILT — quoted, stopworded, capped — and a second copy of
+// that here would be the coverage count and the search itself disagreeing
+// about what a term is.
+import '../services/search_fusion.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
+import 'keyword_index.dart';
 import 'progress_sql.dart';
 import 'vec_index.dart';
 
@@ -157,7 +164,18 @@ typedef PipelineHealth = ({
 class MessageStore {
   final BondDatabase db;
 
-  MessageStore(this.db);
+  /// [keywordSearch] is the seam for "the word index is not available on this
+  /// build" — the one state a test cannot reach any other way, because FTS5 is
+  /// compiled into every SQLite this suite can open. Off, the two keyword
+  /// reads answer null and a search narrows to meaning alone, which is exactly
+  /// what a SQLite without FTS5 would produce.
+  /// The field it sets is private and the parameter is not, so an
+  /// initializing formal cannot spell both.
+  MessageStore(this.db, {bool keywordSearch = true})
+      // ignore: prefer_initializing_formals
+      : _keywordSearch = keywordSearch;
+
+  final bool _keywordSearch;
 
   /// The nearest-neighbour index over `message_vectors`, owned here.
   ///
@@ -183,6 +201,17 @@ class MessageStore {
   /// a fifty-chunk contract into either of the others would crowd out the
   /// messages they exist to rank.
   late final AttachmentChunkIndex _chunkIndex = AttachmentChunkIndex(db);
+
+  /// The word index over `messages`, owned here for [_vecIndex]'s reasons
+  /// exactly: it is derived from this connection's rows and its readiness is
+  /// memoized per connection.
+  late final MessageKeywordIndex _keywordIndex =
+      _keywordSearch ? MessageKeywordIndex(db) : MessageKeywordIndex.disabled();
+
+  /// The word index over `attachment_chunks`, the second corpus a search asks
+  /// about and therefore a second table, on [_chunkIndex]'s argument.
+  late final ChunkKeywordIndex _chunkKeywordIndex =
+      _keywordSearch ? ChunkKeywordIndex(db) : ChunkKeywordIndex.disabled();
 
   static String _nowIso() => isoStamp(DateTime.now());
 
@@ -257,6 +286,12 @@ class MessageStore {
   /// every replay a delta feed makes. Non-null is what a live screen turns
   /// into its ingest tick: a message the gate throws out at ingest is finished
   /// by the time this returns, and no later stage will ever announce it.
+  ///
+  /// `row['updated_at']` must never be a PAST value. It is the escape hatch on
+  /// a column the word index treats as a watermark, and a row filed under a
+  /// stamp it then backdates is text `MessageKeywordIndex.backfill` would go on
+  /// serving stale forever. Every caller today omits it and takes the `now`
+  /// below, which is the shape to keep.
   Future<String?> upsertMessage(Map<String, Object?> row) async {
     final now = _nowIso();
     final source = row['source'] ?? 'email';
@@ -1426,19 +1461,36 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// triage has finished with. Scoped to [sinceIso] so a retired gate cannot
   /// hand the model a year of archive, and self-exhausting — once no code
   /// writes [gateReason], the second call matches nothing.
+  ///
+  /// The progress rows go back with the messages, in one transaction, because
+  /// a re-pended message is about to be triaged again and its row has to read
+  /// that way. The gate cascade [writeTriageProgress] wrote — every stage
+  /// `skipped`, `settle_state = 'done'`, `outcome = 'dropped'` — would
+  /// otherwise stay behind, and the settle machine reads that stale cascade as
+  /// a finished pipeline: the message settles again on stages that never ran,
+  /// and [reviveOwedStorylineStages] cannot heal it either, since its
+  /// `dropped = 0` guard correctly refuses a row that says it was dropped.
   Future<int> rependGatedTriage({
     required String source,
     required String gateReason,
     required String sinceIso,
   }) {
-    return db.customUpdate(
-      "UPDATE messages SET triage_status = 'pending', gate_reason = NULL, "
-      'updated_at = ? '
-      "WHERE source = ? AND direction = 'inbound' "
-      "AND triage_status = 'skipped' AND gate_reason = ? "
-      'AND received_at >= ?',
-      variables: _args([_nowIso(), source, gateReason, sinceIso]),
-    );
+    return db.transaction(() async {
+      final rows = await db.customWriteReturning(
+        "UPDATE messages SET triage_status = 'pending', gate_reason = NULL, "
+        'updated_at = ? '
+        "WHERE source = ? AND direction = 'inbound' "
+        "AND triage_status = 'skipped' AND gate_reason = ? "
+        'AND received_at >= ? '
+        'RETURNING source_message_id',
+        variables: _args([_nowIso(), source, gateReason, sinceIso]),
+      );
+      final ids = [
+        for (final row in rows) row.data['source_message_id'] as String? ?? '',
+      ];
+      await _resetProgressRows(source, ids);
+      return ids.length;
+    });
   }
 
   /// The owner pulling one message back past the gates.
@@ -1462,6 +1514,80 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
       'WHERE source = ? AND source_message_id = ?',
       variables: _args([_nowIso(), source, sourceMessageId]),
     );
+  }
+
+  /// Ignore: the owner throwing one message out by hand.
+  ///
+  /// The mirror of [restoreMessage] and written so that one is the way back.
+  /// What it deliberately does NOT touch is `gate_override`: `triage_status`
+  /// is the column every handler actually reads, so a message the owner once
+  /// restored and has since changed their mind about stays out, and Restore
+  /// still works — it re-stamps the override and re-pends the row.
+  ///
+  /// One transaction, because a half-ignored message is worse than an
+  /// un-ignored one: a row skipped on `messages` while its thread still
+  /// carries a Needs You chip would go on interrupting the person who just
+  /// dismissed it.
+  ///
+  /// Queue rows are left exactly where they are. The extract and needs-you
+  /// handlers already refuse a `skipped` row whose gate reason is not
+  /// `teams_source`, so whatever is queued drains as a skip rather than as
+  /// work — and deleting the rows would only lose the record that they ran.
+  ///
+  /// False when nothing is stored under the keys, having written nothing.
+  Future<bool> dropMessage(String source, String sourceMessageId) {
+    return db.transaction(() async {
+      final rows = await db.customWriteReturning(
+        "UPDATE messages SET triage_status = 'skipped', "
+        "gate_reason = 'user', triage_error = NULL, updated_at = ? "
+        'WHERE source = ? AND source_message_id = ? '
+        'RETURNING conversation_key',
+        variables: _args([_nowIso(), source, sourceMessageId]),
+      );
+      if (rows.isEmpty) return false;
+      final conversationKey =
+          rows.first.data['conversation_key'] as String? ?? '';
+
+      // The same cascade a gate writes, through the same writer: pending
+      // stages close as skipped, the row settles dropped under this reason,
+      // and a stage that already finished keeps what it did.
+      await writeTriageProgress(
+        source,
+        sourceMessageId,
+        state: 'skipped',
+        gateReason: 'user',
+      );
+
+      // And the notification row settles with it. It is an UPDATE guarded on
+      // `state = 'pending'`, so this is a no-op for a message that already
+      // settled — but a candidate still open would otherwise be re-decided by
+      // the next coordinator sweep, on a row the owner has just thrown out.
+      await settleNotify(
+        source,
+        sourceMessageId,
+        state: 'suppressed',
+        reason: 'gated',
+      );
+
+      // The chips go and the VERDICT stays. `needs_you` is the snapshot the
+      // rails and the digest read; `needs_you_verdict` is what the judge
+      // decided about the words, and an Ignore is not the owner saying the
+      // judge misread them. The open-ask predicate excludes gated rows on its
+      // own, so the thread stops holding an ask on the strength of the write
+      // above rather than of a verdict rewritten here.
+      await clearNeedsYou(source, conversationKey);
+
+      // `explicit`, because a button is exactly that. Anything that learns
+      // from these has to be able to tell it from the implicit signal of a
+      // thread merely being opened.
+      await recordFeedback(
+        scope: 'message',
+        scopeKey: '$source/$sourceMessageId',
+        direction: 'down',
+        origin: 'explicit',
+      );
+      return true;
+    });
   }
 
   /// Puts the newest inbound message of each conversation back in the triage
@@ -1624,6 +1750,14 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
   /// actually carries are written: a status-only call (e.g. marking a message
   /// `gated`) leaves any previous result columns alone rather than nulling
   /// them.
+  ///
+  /// A message the owner has IGNORED is out of reach here. The triage queue
+  /// claims a row and hands it to the model, and the answer can land a minute
+  /// later — after an Ignore pressed in between, which would otherwise be
+  /// overwritten by a `triaged` status the owner never asked for. An Ignore is
+  /// the owner's own gate and it outranks the model's opinion of the same
+  /// message. It is only THIS gate that blocks: [restoreMessage] clears
+  /// `gate_reason`, so a restored row is written like any other.
   Future<void> writeTriage(
     String source,
     String sourceMessageId, {
@@ -1681,7 +1815,8 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     args.addAll([source, sourceMessageId]);
     await db.customUpdate(
       'UPDATE messages SET ${sets.join(', ')} '
-      'WHERE source = ? AND source_message_id = ?',
+      'WHERE source = ? AND source_message_id = ? '
+      "AND NOT (triage_status = 'skipped' AND gate_reason = 'user')",
       variables: _args(args),
     );
   }
@@ -2023,6 +2158,81 @@ RETURNING *
     );
   }
 
+  /// [reviveErroredTriage] for ONE message, with no attempts ceiling.
+  ///
+  /// The ceiling is deliberately absent, and the difference matters: the bulk
+  /// revival is the pipeline healing itself and has to stop somewhere, while
+  /// this is the owner's own hand on one row — and a row past the ceiling is
+  /// precisely the row they are asking about. Attempts are not reset either,
+  /// so a message that fails again lands back in `error` honestly rather than
+  /// looking untried.
+  ///
+  /// Returns how many rows moved: zero when the message was never errored,
+  /// which is how the caller knows there was nothing to retry here.
+  Future<int> reviveTriageFor(String source, String sourceMessageId) {
+    return db.customUpdate(
+      "UPDATE messages SET triage_status = 'pending', updated_at = ? "
+      "WHERE source = ? AND source_message_id = ? AND triage_status = 'error'",
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+  }
+
+  /// One work row's status, or null when the queue has never held it.
+  ///
+  /// Read before a requeue so a caller can tell what it actually did:
+  /// [requeueWork] deliberately leaves a `pending` or `processing` row where
+  /// it is, and a retry that named that stage anyway would be claiming credit
+  /// for work that was already under way.
+  Future<String?> workStatusOf(
+    String kind,
+    String source,
+    String entityId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT status FROM work_items '
+          'WHERE task_kind = ? AND source = ? AND entity_id = ?',
+          variables: _args([kind, source, entityId]),
+        )
+        .get();
+    return rows.isEmpty ? null : rows.first.data['status'] as String?;
+  }
+
+  /// Every queue row behind one message: its own, its thread's storyline row,
+  /// and its attachments'.
+  ///
+  /// Three shapes of `entity_id` because three grains file here — a message
+  /// id, a conversation key (`storyline` is a question about a thread), and
+  /// `'<message id>|<attachment id>'` for the attachment work. The LIKE is
+  /// escaped, so an id carrying a `%` or a `_` matches its own attachments and
+  /// nobody else's.
+  ///
+  /// Source-filtered, where [activityForEntity] is not: `work_items` keys on
+  /// it, and a second connector's message with the same id is a different item
+  /// of work rather than the same one seen twice.
+  Future<List<Map<String, Object?>>> workItemsFor(
+    String source,
+    String sourceMessageId,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT task_kind, source, entity_id, status, attempts, error, '
+          'created_at, updated_at FROM work_items '
+          'WHERE source = ?1 AND (entity_id = ?2 OR entity_id = ?3 '
+          "OR entity_id LIKE ?4 ESCAPE '\\') "
+          'ORDER BY updated_at DESC, task_kind ASC',
+          variables: _args([
+            source,
+            sourceMessageId,
+            conversationKey,
+            '${_escapeLike(sourceMessageId)}|%',
+          ]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
   /// [touchTriage] for the work queue, and for the same reason: only
   /// `updated_at` moves, so a heartbeat can never overwrite the result the
   /// worker is mid-way through producing.
@@ -2167,7 +2377,7 @@ RETURNING *
   /// delta cursors that would otherwise resume the OLD account's sync
   /// position against the new account's mailbox.
   ///
-  /// `app_prefs` SURVIVES, with five exceptions. What this method isolates is
+  /// `app_prefs` SURVIVES, with eight exceptions. What this method isolates is
   /// one person's presence: which backend the app talks through, which server
   /// it points at, and where the slider sits are the machine's configuration,
   /// not the previous account's data, and wiping them turned every account
@@ -2180,8 +2390,12 @@ RETURNING *
   /// them) — and the two bootstrap-floor markers, [mailBootstrapFloorKey] and
   /// [teamsBootstrapFloorKey], which describe how far back THIS account's
   /// mail was drained and would otherwise tell the next account's first
-  /// bootstrap that its window had already been covered. Both callers depend
-  /// on the first: sign-out leaves the database unclaimed, and `IdentityGuard`
+  /// bootstrap that its window had already been covered — and the three
+  /// one-shot markers, which say a catch-up has already run over rows this
+  /// method is deleting: left behind, they would tell the next account's first
+  /// sync that its mailbox had been reconciled and its verdicts backfilled
+  /// when nothing had read a single row of it. Both callers depend on the
+  /// first: sign-out leaves the database unclaimed, and `IdentityGuard`
   /// writes the new owner immediately after.
   Future<void> wipeAll() async {
     const tables = [
@@ -2210,13 +2424,21 @@ RETURNING *
         await db.customUpdate('DELETE FROM $table');
       }
       await db.customUpdate(
-        'DELETE FROM app_prefs WHERE key IN (?, ?, ?, ?, ?)',
+        'DELETE FROM app_prefs WHERE key IN (?, ?, ?, ?, ?, ?, ?, ?)',
         variables: _args([
           dbOwnerKey,
           aboutMeKey,
           needsYouRulesKey,
           mailBootstrapFloorKey,
           teamsBootstrapFloorKey,
+          // The one-shot markers. Each says "this catch-up has already run
+          // over these rows" — and the rows are about to be deleted, so on
+          // the next account they would be a claim about a mailbox that was
+          // never read. The catch-ups are cheap and self-exhausting; a
+          // marker that outlived its data is not.
+          'needs_you_flag_backfill',
+          'needs_you_model_revive',
+          'mail_last_reconcile',
         ]),
       );
     });
@@ -2237,6 +2459,12 @@ RETURNING *
     // has just been emptied, and the floats vec0 holds in its shadow tables do
     // not go with a DELETE.
     await _chunkIndex.rebuild();
+    // The two word indexes, for the same reason once more: an FTS5 table is a
+    // virtual table, the DELETEs above do not reach inside one, and the
+    // previous mailbox's subject lines would otherwise stay findable in the
+    // shadow tables long after the mail they came from was gone.
+    await _keywordIndex.rebuild();
+    await _chunkKeywordIndex.rebuild();
   }
 
   // ── per-message AI output ────────────────────────────────────────────
@@ -2494,6 +2722,96 @@ RETURNING *
     };
   }
 
+  /// The one spelling of "this thread holds an open ask", shared by
+  /// [openAskThreads] and [hasOpenAsk] so a sweep and a single filing can
+  /// never answer it differently.
+  ///
+  /// Thread-level rather than message-level on purpose: the newest message on
+  /// a thread can be a quiet FYI while an older one is still an unanswered
+  /// question, and the thread is the unit being filed. "Unanswered" is the
+  /// thread's last outbound message — anything the owner sent after the ask
+  /// closes it, whether or not it was a reply to that particular message.
+  ///
+  /// `COALESCE(c.last_outbound_at, '')` reads a thread the owner has never
+  /// written on as one whose asks are all still open, which is the whole
+  /// shape this exists to catch.
+  ///
+  /// The triage clause is the same admission every other reader of a kept
+  /// message uses: a gated row is not an ask, whatever verdict it carries. No
+  /// gate writes a verdict today, but a message the owner throws out by hand
+  /// keeps the one it had — and a thread must not be held out of Later by a
+  /// question its owner has already dismissed. The `teams_source` tolerance
+  /// is the usual one for chats stored before chats were triaged.
+  ///
+  /// Deliberately unbounded in time: an unanswered ask holds its thread out of
+  /// automatic Later for as long as it stays unanswered. The exits are a reply,
+  /// Done, or the owner's own Later, and nothing else — a question does not
+  /// stop being a question because a fortnight went by.
+  static const String _openAskWhere = """
+  m.direction = 'inbound'
+  AND m.needs_you_verdict = 1
+  AND (m.triage_status <> 'skipped' OR m.gate_reason = 'teams_source')
+  AND m.received_at > COALESCE(c.last_outbound_at, '')""";
+
+  /// Every thread holding an open ask: an inbound message the needs-you stage
+  /// judged yes, received after the thread's last outbound message (or with no
+  /// outbound at all). Keys are `'$source\n$conversationKey'`.
+  ///
+  /// The newline separator is spelled here rather than by the caller because
+  /// every caller has to build the same key to look one up — a source and a
+  /// conversation key, joined by a character neither of them can contain.
+  ///
+  /// One read for the whole mailbox, because the attention sweep runs on every
+  /// list load and a query per thread would be hundreds of round trips per
+  /// keystroke.
+  Future<Set<String>> openAskThreads({
+    List<String> sources = const ['email'],
+  }) async {
+    if (sources.isEmpty) return const {};
+    final result = await db
+        .customSelect(
+          'SELECT DISTINCT m.source AS source, '
+          '  m.conversation_key AS conversation_key '
+          'FROM messages m '
+          'LEFT JOIN conversations c '
+          '  ON c.source = m.source AND c.conversation_key = m.conversation_key '
+          'WHERE $_openAskWhere '
+          '  AND m.source IN (${_placeholders(sources.length)})',
+          variables: _args([...sources]),
+        )
+        .get();
+    return {
+      for (final row in result)
+        openAskKey(
+          row.data['source'] as String? ?? '',
+          row.data['conversation_key'] as String? ?? '',
+        ),
+    };
+  }
+
+  /// The key [openAskThreads] returns, for a caller holding a thread.
+  static String openAskKey(String source, String conversationKey) =>
+      '$source\n$conversationKey';
+
+  /// Whether one thread holds an open ask — see [openAskThreads].
+  ///
+  /// The single-thread path, for the extraction handler, which is filing one
+  /// thread and has no use for the whole mailbox's set.
+  Future<bool> hasOpenAsk(String source, String conversationKey) async {
+    final result = await db
+        .customSelect(
+          'SELECT 1 FROM messages m '
+          'LEFT JOIN conversations c '
+          '  ON c.source = m.source AND c.conversation_key = m.conversation_key '
+          'WHERE $_openAskWhere '
+          '  AND m.source = ? AND m.conversation_key = ? '
+          'LIMIT 1',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return result.isNotEmpty;
+  }
+
   /// How often each sender gets answered, as a 0..1 fraction.
   ///
   /// A cheap approximation, and deliberately so: "replied" means the thread
@@ -2691,6 +3009,40 @@ SELECT conversation_key FROM (
               variables: _args([sinceIso, limit]),
             )
             .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// Everything the log holds about one message: its own events, its thread's,
+  /// and its attachments'.
+  ///
+  /// The same three grains [workItemsFor] reads, and the same escaped LIKE for
+  /// the attachment ids.
+  ///
+  /// No `source` filter, deliberately, and this is where the two reads part.
+  /// An event's `source` column is sometimes the WORK's source rather than the
+  /// message's — the storyline kinds record under their own — so filtering on
+  /// it would drop rows that are genuinely about this message. The ids on
+  /// either side are opaque server ids that do not collide across connectors,
+  /// so nothing is bought by the filter anyway.
+  Future<List<Map<String, Object?>>> activityForEntity({
+    required String sourceMessageId,
+    required String conversationKey,
+    int limit = 100,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM activity_events '
+          'WHERE entity_id = ?1 OR entity_id = ?2 '
+          "OR entity_id LIKE ?3 ESCAPE '\\' "
+          'ORDER BY id DESC LIMIT ?4',
+          variables: _args([
+            sourceMessageId,
+            conversationKey,
+            '${_escapeLike(sourceMessageId)}|%',
+            limit,
+          ]),
+        )
+        .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
@@ -3106,14 +3458,31 @@ FROM storylines s''';
     });
   }
 
-  /// Takes a thread out of a storyline. [block] records that the user meant
+  /// Takes a thread out of a storyline. [block] records that someone meant
   /// it, so the next clustering pass cannot put it straight back — the model
   /// is not allowed to overrule a person by being confident twice.
+  ///
+  /// [blockedBy] says WHOSE "no" this is. `'user'` is the owner's own hand and
+  /// is the only kind the confirm prompt ever learns from; `'audit'` is the
+  /// re-check pass acting on a lesson the owner already taught, and feeding
+  /// that back would let the model teach itself.
+  ///
+  /// [evidence] defaults to the MEMBER's own evidence — the sentence that put
+  /// the thread here — read inside the same transaction that deletes it. That
+  /// is what makes a negative example say what the model thought at the time.
+  /// An explicit value wins, which is how the audit records its own reason.
+  ///
+  /// The block insert stays `INSERT OR IGNORE`: a thread already blocked here
+  /// keeps its ORIGINAL provenance and evidence. The first "no" is the one
+  /// that was reasoned about, and an audit re-blocking what the owner already
+  /// removed must not overwrite the owner's word with its own.
   Future<void> removeStorylineMember(
     String storylineId,
     String source,
     String conversationKey, {
     required bool block,
+    String blockedBy = 'user',
+    String? evidence,
   }) async {
     if (!block) {
       await db.customUpdate(
@@ -3127,6 +3496,20 @@ FROM storylines s''';
     // removal that landed without its block would let the next sweep put the
     // thread straight back.
     await db.transaction(() async {
+      // Read before the delete, and only when the caller named nothing: the
+      // member row is about to be gone, and it is the only place the
+      // membership's reason was ever written.
+      var reason = evidence;
+      if (reason == null) {
+        final rows = await db
+            .customSelect(
+              'SELECT evidence FROM storyline_members '
+              'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+              variables: _args([storylineId, source, conversationKey]),
+            )
+            .get();
+        if (rows.isNotEmpty) reason = rows.first.data['evidence'] as String?;
+      }
       await db.customUpdate(
         'DELETE FROM storyline_members '
         'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
@@ -3134,11 +3517,35 @@ FROM storylines s''';
       );
       await db.customUpdate(
         'INSERT OR IGNORE INTO storyline_member_blocks '
-        '(storyline_id, source, conversation_key, blocked_at) '
-        'VALUES (?, ?, ?, ?)',
-        variables: _args([storylineId, source, conversationKey, _nowIso()]),
+        '(storyline_id, source, conversation_key, blocked_at, blocked_by, '
+        'evidence) VALUES (?, ?, ?, ?, ?, ?)',
+        variables: _args([
+          storylineId,
+          source,
+          conversationKey,
+          _nowIso(),
+          blockedBy,
+          reason,
+        ]),
       );
     });
+  }
+
+  /// Lifts a block, and does nothing else — the thread is NOT re-added.
+  ///
+  /// What "Allow again" means: the owner is not filing the thread back, they
+  /// are withdrawing the veto. Whether it belongs is a question the model may
+  /// now answer on its own judgement, the next time a pass considers it.
+  Future<void> unblockStorylineMember(
+    String storylineId,
+    String source,
+    String conversationKey,
+  ) async {
+    await db.customUpdate(
+      'DELETE FROM storyline_member_blocks '
+      'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+      variables: _args([storylineId, source, conversationKey]),
+    );
   }
 
   Future<bool> isMemberBlocked(
@@ -3207,6 +3614,101 @@ FROM storylines s''';
         )
         .get();
     return [for (final row in result) StorylineMember.fromRow(row.data)];
+  }
+
+  /// The threads the OWNER filed into [storylineId] by hand, newest first.
+  ///
+  /// Newest first, unlike [membersOf], because these are read as examples: the
+  /// owner's latest word about what belongs here is the one worth showing a
+  /// model, and the caller takes the first few.
+  Future<List<StorylineMember>> userMembersOf(String storylineId) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM storyline_members WHERE storyline_id = ? '
+          "AND added_by = 'user' "
+          'ORDER BY added_at DESC, conversation_key ASC',
+          variables: _args([storylineId]),
+        )
+        .get();
+    return [for (final row in result) StorylineMember.fromRow(row.data)];
+  }
+
+  /// The blocks on [storylineId], newest first, optionally only those written
+  /// by [blockedBy] — `'user'` for the owner's own removals, `'audit'` for the
+  /// re-check pass's.
+  ///
+  /// The subject rides along on a LEFT JOIN, so a block whose conversation row
+  /// is gone still comes back: the block is the record, and it outlives the
+  /// thread it was written about.
+  Future<List<StorylineBlock>> blocksOf(
+    String storylineId, {
+    String? blockedBy,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT b.*, c.subject AS subject FROM storyline_member_blocks b '
+          'LEFT JOIN conversations c ON c.source = b.source '
+          'AND c.conversation_key = b.conversation_key '
+          'WHERE b.storyline_id = ?'
+          '${blockedBy == null ? '' : ' AND b.blocked_by = ?'} '
+          'ORDER BY b.blocked_at DESC, b.conversation_key ASC',
+          variables: _args([storylineId, ?blockedBy]),
+        )
+        .get();
+    return [for (final row in result) StorylineBlock.fromRow(row.data)];
+  }
+
+  /// Every storyline one THREAD has been filed into, newest first, each with
+  /// its storyline's title and status beside it.
+  ///
+  /// Thread-keyed where [membersOf] is storyline-keyed, because the caller is
+  /// standing on one message and asking what became of the thread it is on.
+  ///
+  /// Every status rather than only the live ones, and a LEFT JOIN so a
+  /// membership outlives the storyline row it names. A filing that has since
+  /// been dismissed still HAPPENED; a history that showed only the decisions
+  /// still standing would be a history of the present.
+  Future<List<Map<String, Object?>>> membershipsForThread(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.storyline_id AS storyline_id, m.added_by AS added_by, '
+          'm.evidence AS evidence, m.added_at AS added_at, '
+          's.title AS title, s.status AS status '
+          'FROM storyline_members m '
+          'LEFT JOIN storylines s ON s.id = m.storyline_id '
+          'WHERE m.source = ? AND m.conversation_key = ? '
+          'ORDER BY m.added_at DESC, m.storyline_id ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// The other half of [membershipsForThread]: every storyline this thread was
+  /// kept OUT of, newest first, with who wrote the block and what they thought.
+  ///
+  /// Same shape and same LEFT JOIN for the same reason — a block is a record,
+  /// and it outlives both the thread and the storyline it was written about.
+  Future<List<Map<String, Object?>>> blocksForThread(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT b.storyline_id AS storyline_id, '
+          'b.blocked_by AS blocked_by, b.evidence AS evidence, '
+          'b.blocked_at AS blocked_at, s.title AS title, s.status AS status '
+          'FROM storyline_member_blocks b '
+          'LEFT JOIN storylines s ON s.id = b.storyline_id '
+          'WHERE b.source = ? AND b.conversation_key = ? '
+          'ORDER BY b.blocked_at DESC, b.storyline_id ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
   /// Everything the comparison passes need about the members of
@@ -3551,6 +4053,118 @@ FROM storylines s''';
       'AND m.needs_you_verdict IS NULL)',
       variables: _args([_nowIso()]),
     );
+  }
+
+  /// Puts the needs-you verdict of every recent inbound message back on the
+  /// queue, newest first, and returns how many rows that touched.
+  ///
+  /// The rules-save trigger: the owner has just rewritten the prompt every
+  /// below-the-floor judgement reads, so the verdicts that prompt produced in
+  /// the recent window are re-asked against the new one. Older verdicts are
+  /// history rather than mistakes — the rules were what they were when those
+  /// messages landed — so [sinceIso] bounds what is re-asked, and [cap] bounds
+  /// the model bill a single Save can run up. The chip and the tile follow
+  /// each new verdict through `NeedsYouHandler`'s own tail, so nothing here
+  /// touches `message_progress`.
+  ///
+  /// The triage filter is the same admission the first judgement had:
+  /// `triaged` is the status of a message the pipeline kept, and the
+  /// `teams_source` tolerance carries the chat rows stored `skipped` before
+  /// chats were triaged at all — re-judging on a rules change must not be the
+  /// one pass that decides they never existed.
+  ///
+  /// The count is of rows SELECTED, not of work rows written, and that is the
+  /// number the owner is shown: [requeueWork] inserts when a message has never
+  /// been judged and revives a `done` or `error` row, but leaves a row already
+  /// `pending` or `processing` in its place in the queue. Such a message is
+  /// still going to be judged under the new rules, so counting it is honest.
+  Future<int> requeueNeedsYouRejudge({
+    required String sinceIso,
+    List<String> sources = const ['email', 'teams'],
+    int cap = 200,
+  }) async {
+    if (sources.isEmpty) return 0;
+    final rows = await db
+        .customSelect(
+          'SELECT source, source_message_id FROM messages '
+          "WHERE direction = 'inbound' "
+          '  AND received_at >= ? '
+          '  AND source IN (${_placeholders(sources.length)}) '
+          "  AND (triage_status = 'triaged' OR gate_reason = 'teams_source') "
+          'ORDER BY received_at DESC, source_message_id DESC '
+          'LIMIT ?',
+          variables: _args([sinceIso, ...sources, cap]),
+        )
+        .get();
+    // One transaction for the whole batch: two hundred separate writes on a
+    // Save is two hundred fsyncs, and the queue is only meaningful once every
+    // row in the window is on it.
+    await db.transaction(() async {
+      for (final row in rows) {
+        await requeueWork(
+          'needs_you',
+          row.data['source'] as String? ?? '',
+          row.data['source_message_id'] as String? ?? '',
+        );
+      }
+    });
+    return rows.length;
+  }
+
+  /// Puts the storyline pass back on the queue for every conversation the
+  /// settle race left owing one, and returns how many that was.
+  ///
+  /// The shape it heals: the coordinator settled a message in the middle of a
+  /// sync, before its storyline work was enqueued, so the row carries
+  /// `settle_state = 'done'` with `storyline_state` still `pending` — and
+  /// `outcome` stuck at `pending` behind it, because both
+  /// [writeDraftProgress] and [sweepSettledProgress] wait for a terminal
+  /// storyline stage. With [writeStorylineProgress]'s owed-stage arm the pass
+  /// this queues now lands, which is what makes this a heal rather than a
+  /// retry loop: self-exhausting, because a row it fixes no longer matches.
+  ///
+  /// `dropped = 0` is load-bearing and not defensive. A gate cascade writes
+  /// `settle_state = 'done'` too, with every stage `skipped` — but a gated row
+  /// whose stages were left `pending` by an older write must stay dropped, and
+  /// requeueing the model for mail the gate threw out is exactly what the gate
+  /// exists to prevent.
+  ///
+  /// The NOT EXISTS keeps this off a conversation the queue is already going
+  /// to reach: [requeueWork] would revive a `done` row under a drain that has
+  /// not written its result yet, and one pass per stuck thread is the point.
+  Future<int> reviveOwedStorylineStages({
+    required List<String> sources,
+  }) async {
+    if (sources.isEmpty) return 0;
+    final rows = await db
+        .customSelect(
+          '''
+SELECT DISTINCT source, conversation_key
+FROM message_progress
+WHERE source IN (${_placeholders(sources.length)})
+  AND settle_state = 'done'
+  AND outcome = 'pending'
+  AND storyline_state = 'pending'
+  AND dropped = 0
+  AND NOT EXISTS (
+    SELECT 1 FROM work_items w
+     WHERE w.task_kind = 'storyline'
+       AND w.source = message_progress.source
+       AND w.entity_id = message_progress.conversation_key
+       AND w.status IN ('pending', 'processing')
+  )
+''',
+          variables: _args(sources),
+        )
+        .get();
+    for (final row in rows) {
+      await requeueWork(
+        'storyline',
+        row.data['source'] as String? ?? '',
+        row.data['conversation_key'] as String? ?? '',
+      );
+    }
+    return rows.length;
   }
 
   // ── drafts ───────────────────────────────────────────────────────────
@@ -3987,16 +4601,35 @@ RETURNING source_message_id
   /// The joins to `conversations` and `conversation_ai` are LEFT on purpose: a
   /// message can outrun its own conversation row, and a candidate with no
   /// attention score yet is not a candidate to drop — it is one to keep
-  /// waiting on.
+  /// waiting on. `message_progress` is LEFT for a harder reason:
+  /// [admitNotifyCandidates] selects from `messages` alone, so a candidate
+  /// whose progress row is missing is still an admitted candidate, and an
+  /// inner join would drop it out of the sweep entirely — a row that never
+  /// settles at all, which is worse than one that settles on the deadline.
   ///
-  /// `storyline_open` is keyed by CONVERSATION rather than by message, which
-  /// over-waits when a sibling thread queued the work. That is the intended
-  /// trade: announcing a message under the wrong storyline is worse than
-  /// announcing it a few seconds late, and the deadline bounds how late.
+  /// Completeness reads the PIPELINE'S OWN RECORD, not the queue.
+  /// `extract_state` and `storyline_state` are what those stages write when
+  /// they finish. The work rows behind them are enqueued after BOTH drains of
+  /// a sync, while triage claims `messages.triage_status = 'pending'` the
+  /// instant a page commits — so in the seconds between there is a freshly
+  /// triaged message with no work rows at all, which the EXISTS flags this
+  /// replaced read as "nothing left to do". The sweep settled it, and
+  /// [writeStorylineProgress] then refused the stamp that arrived a minute
+  /// later, freezing the row at `storyline_state = 'pending'` forever.
   ///
-  /// `needs_you_open` is keyed by MESSAGE, like `extract_open`, and is waited
-  /// on the same way: a verdict that is still being decided is one the settle
-  /// would otherwise announce without.
+  /// Needs-you has no stage column by design — its handler writes two columns
+  /// on `messages` and no progress stage — so "judged" is spelled out here
+  /// instead: a verdict actually written, or a `needs_you` work row that
+  /// reached `done` or `error`. The second arm is not redundant. The handler
+  /// finishes an item `done` WITHOUT a verdict on every one of its guards
+  /// (deleted, outbound, gated), and waiting past that would be waiting on
+  /// nobody.
+  ///
+  /// `storyline_state` is a CONVERSATION-grained stage, so it over-waits when
+  /// what the pass is still working on is a sibling message of the thread.
+  /// That is the intended trade, unchanged from the flag it replaces:
+  /// announcing a message under the wrong storyline is worse than announcing
+  /// it a few seconds late, and the deadline bounds how late.
   Future<List<Map<String, Object?>>> openNotifyCandidates({
     int limit = 50,
   }) async {
@@ -4010,22 +4643,19 @@ SELECT n.source, n.source_message_id, n.conversation_key, n.deadline_at,
   m.updated_at AS message_updated_at,
   c.cta_text, c.cta_urgency, c.state AS conversation_state,
   ai.attention_score, ai.bucket, ai.updated_at AS ai_updated_at,
-  EXISTS (SELECT 1 FROM work_items w
-          WHERE w.task_kind = 'needs_you' AND w.source = n.source
-            AND w.entity_id = n.source_message_id
-            AND w.status IN ('pending','processing')) AS needs_you_open,
-  EXISTS (SELECT 1 FROM work_items w
-          WHERE w.task_kind = 'extract' AND w.source = n.source
-            AND w.entity_id = n.source_message_id
-            AND w.status IN ('pending','processing')) AS extract_open,
-  EXISTS (SELECT 1 FROM work_items w
-          WHERE w.task_kind = 'storyline' AND w.source = n.source
-            AND w.entity_id = n.conversation_key
-            AND w.status IN ('pending','processing')) AS storyline_open
+  p.extract_state, p.storyline_state,
+  CASE WHEN m.needs_you_verdict IS NOT NULL THEN 1
+       WHEN EXISTS (SELECT 1 FROM work_items w
+                    WHERE w.task_kind = 'needs_you' AND w.source = n.source
+                      AND w.entity_id = n.source_message_id
+                      AND w.status IN ('done', 'error')) THEN 1
+       ELSE 0 END AS needs_you_judged
 FROM message_notify n
 JOIN messages m ON m.source = n.source AND m.source_message_id = n.source_message_id
 LEFT JOIN conversations c ON c.source = n.source AND c.conversation_key = n.conversation_key
 LEFT JOIN conversation_ai ai ON ai.source = n.source AND ai.conversation_key = n.conversation_key
+LEFT JOIN message_progress p
+       ON p.source = n.source AND p.source_message_id = n.source_message_id
 WHERE n.state = 'pending'
 ORDER BY n.deadline_at ASC
 LIMIT ?
@@ -4034,6 +4664,47 @@ LIMIT ?
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// One message in the shape [openNotifyCandidates] hands the sweep, for a
+  /// caller that has a message id rather than a candidate row.
+  ///
+  /// It exists for the needs-you re-verdict, which has to answer the sweep's
+  /// own question — `notifyWorthy` — about a message whose `message_notify`
+  /// row settled long ago and is no longer selected by anything. Projecting
+  /// the same column NAMES is the whole contract: the predicate reads a map,
+  /// so a column renamed on one path and not the other would read null and
+  /// quietly answer no.
+  ///
+  /// `received_at` rides along for the caller's own guard rather than for the
+  /// predicate: `notifyWorthy` has no outbound clause, and a re-verdict has to
+  /// know whether the user has already answered this thread.
+  ///
+  /// Null when the message is gone — queued, then deleted.
+  Future<Map<String, Object?>?> notifyRowFor(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          '''
+SELECT m.subject, m.from_name, m.summary, m.urgency, m.deadline,
+  m.needs_action, m.reply_expected, m.needs_you_verdict, m.is_read,
+  m.triage_status, m.received_at,
+  c.cta_text, c.cta_urgency, c.state AS conversation_state,
+  c.last_outbound_at,
+  ai.attention_score, ai.bucket
+FROM messages m
+LEFT JOIN conversations c
+       ON c.source = m.source AND c.conversation_key = m.conversation_key
+LEFT JOIN conversation_ai ai
+       ON ai.source = m.source AND ai.conversation_key = m.conversation_key
+WHERE m.source = ? AND m.source_message_id = ?
+''',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    return rows.isEmpty ? null : Map<String, Object?>.from(rows.first.data);
   }
 
   /// Moves one candidate out of `pending`, and reports whether THIS call is
@@ -4110,6 +4781,66 @@ LIMIT ?
   /// for it would wait forever.
   static const String _terminalStates = "('done', 'skipped', 'error')";
 
+  /// True when the message or its thread has work queued or running.
+  ///
+  /// Three arms because one message's work is filed under three different
+  /// entity ids: its own id for the per-message stages, its conversation key
+  /// for storyline assignment, and `'<message id>|<attachment id>'` for every
+  /// document hanging off it (see `attachmentEntityId`). `substr` rather than
+  /// LIKE on that last arm: a Graph message id can contain `_`, which LIKE
+  /// reads as a wildcard, and the prefix test would then match ids that are
+  /// not this message's at all.
+  ///
+  /// Triage is the fourth arm, and it is read off `messages` because triage
+  /// has no work row: the queue claims `triage_status = 'pending'` directly.
+  /// Without it every untriaged row of a large drain would read as stalled
+  /// fifteen minutes in — the queue is working, just not on this row yet —
+  /// and the In flight tile would go red on every big sync. The price is
+  /// that a triage queue parked on a dead session never reads as stalled
+  /// per row; that condition is global, and the activity log names it.
+  ///
+  /// It is what tells a row that has stopped from a row nobody has got to
+  /// yet, so [HomeFeedRow.isStalled] and the stalled tile both stand on it.
+  static const String _openWorkExists = '''
+(EXISTS (
+  SELECT 1 FROM work_items w
+  WHERE w.source = p.source
+    AND w.status IN ('pending', 'processing')
+    AND (w.entity_id = p.source_message_id
+         OR w.entity_id = p.conversation_key
+         OR substr(w.entity_id, 1, length(p.source_message_id) + 1)
+            = p.source_message_id || '|'))
+ OR EXISTS (
+  SELECT 1 FROM messages mt
+  WHERE mt.source = p.source
+    AND mt.source_message_id = p.source_message_id
+    AND mt.triage_status IN ('pending', 'processing')))''';
+
+  /// Which storyline the row is really filed in.
+  ///
+  /// `message_progress.storyline_id` is a pointer stamped when THIS row's own
+  /// storyline pass ran, so it is null for a message that arrived on a thread
+  /// already in a storyline, and null for a thread a person filed by hand
+  /// afterwards — in both cases the thread is a member and the row says
+  /// nothing. The feed's "Filed in" has to read the membership when the
+  /// pointer is missing, or it would hide most of what is actually filed.
+  ///
+  /// Newest membership wins, because a thread is allowed to sit in several
+  /// and the last one it joined is the one the reader was told about. Ties on
+  /// `added_at` — two threads filed in the same pass share a stamp — break on
+  /// the id, so the answer is stable between reads rather than sqlite's whim.
+  ///
+  /// LIVE storylines only, the same rule [storylineIdsFor] applies. Member
+  /// rows survive a dismissal (D17), so without the join a suggestion the
+  /// owner threw away would go on naming every row of its threads.
+  static const String _effectiveStorylineId = '''
+COALESCE(p.storyline_id, (
+  SELECT x.storyline_id FROM storyline_members x
+  JOIN storylines sx ON sx.id = x.storyline_id
+                    AND sx.status IN ('suggested', 'active')
+  WHERE x.source = p.source AND x.conversation_key = p.conversation_key
+  ORDER BY x.added_at DESC, x.storyline_id DESC LIMIT 1))''';
+
   /// Everything a home-feed row needs, in one projection.
   ///
   /// Shared by the two paging reads and the live patch read on purpose: they
@@ -4117,21 +4848,78 @@ LIMIT ?
   /// rows with rows that have holes in them.
   /// The column list alone, so a read that needs the same row shape over a
   /// DIFFERENT set of joins — [semanticSearch] comes in through
-  /// `message_vectors` — can have it without copying nineteen column names
-  /// that [HomeFeedRow.fromRow] then has to keep agreeing with.
+  /// `message_vectors` — can have it without copying the column list that
+  /// [HomeFeedRow.fromRow] then has to keep agreeing with.
+  ///
+  /// The reason columns are here rather than behind a second read because
+  /// they are what a row has to be able to explain itself with: why the gate
+  /// let it through, why the verdict went the way it did, which bucket the
+  /// sweep put the thread in. They are read live rather than snapshotted —
+  /// they are the pipeline's own record, and it is allowed to change its
+  /// mind.
+  ///
+  /// The two membership fields are SCALAR SUBQUERIES and not a join, and that
+  /// is load-bearing: a thread can be in several storylines, a join would
+  /// return one feed row per membership, and the list is keyed by row — two
+  /// rows under one key is a crash, not a duplicate.
   static const String _homeFeedColumns = '''
 p.source, p.source_message_id, p.conversation_key, p.received_at,
   p.triage_state, p.extract_state, p.storyline_state, p.draft_state,
   p.settle_state,
-  p.outcome, p.dropped, p.drop_reason, p.storyline_id, p.needs_you, p.urgency,
-  m.subject, m.from_name, m.from_address, s.title AS storyline_title''';
+  p.outcome, p.dropped, p.drop_reason, p.needs_you, p.urgency, p.updated_at,
+  $_effectiveStorylineId AS storyline_id,
+  m.subject, m.from_name, m.from_address,
+  m.needs_you_verdict, m.needs_you_reason, m.gate_reason,
+  s.title AS storyline_title,
+  ai.bucket, ai.bucket_reason, ai.attention_score,
+  (SELECT sm.evidence FROM storyline_members sm
+     WHERE sm.storyline_id = s.id AND sm.source = p.source
+       AND sm.conversation_key = p.conversation_key) AS storyline_evidence,
+  (SELECT sm.added_by FROM storyline_members sm
+     WHERE sm.storyline_id = s.id AND sm.source = p.source
+       AND sm.conversation_key = p.conversation_key) AS storyline_added_by,
+  $_openWorkExists AS work_open''';
+
+  /// The joins [_homeFeedColumns] is written against, so the four readers
+  /// cannot drift apart: a column present on one path and missing on another
+  /// is a hole [HomeFeedRow.fromRow] reads as null on that path alone.
+  ///
+  /// `conversation_ai`'s primary key is `(source, conversation_key)`, so its
+  /// LEFT JOIN cannot multiply a row — unlike the memberships above, which is
+  /// why those stayed subqueries.
+  static const String _homeFeedJoins = '''
+JOIN messages m
+  ON m.source = p.source AND m.source_message_id = p.source_message_id
+LEFT JOIN storylines s ON s.id = $_effectiveStorylineId
+LEFT JOIN conversation_ai ai
+  ON ai.source = p.source AND ai.conversation_key = p.conversation_key''';
 
   static const String _homeFeedSelect = '''
 SELECT $_homeFeedColumns
 FROM message_progress p
-JOIN messages m
-  ON m.source = p.source AND m.source_message_id = p.source_message_id
-LEFT JOIN storylines s ON s.id = p.storyline_id''';
+$_homeFeedJoins''';
+
+  /// One `message_progress` row exactly as stored, or null.
+  ///
+  /// The raw row, where [progressRowsFor] hands back the joined feed shape.
+  /// A caller explaining one message needs both: the feed row for everything
+  /// the rails already know how to say, and this for the five `*_at` stamps,
+  /// which are joined onto nothing and are the only record of WHEN each stage
+  /// finished.
+  Future<Map<String, Object?>?> getProgressRow(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM message_progress '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.data);
+  }
 
   /// Records where triage got to, and returns the message's `received_at` so
   /// the caller can tick a live listener without a second read. Null when
@@ -4206,21 +4994,66 @@ RETURNING received_at
   /// dropped for. A restored row must not carry the old reason forward.
   Future<String?> restoreProgress(String source, String sourceMessageId) async {
     final rows = await db.customWriteReturning(
-      '''
-UPDATE message_progress SET
+      'UPDATE message_progress SET\n$_resetProgressSet\n'
+      'WHERE source = ?2 AND source_message_id = ?3\n'
+      'RETURNING received_at',
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// Moves one progress row's clock, and nothing else.
+  ///
+  /// A retry is a progress write even when no stage state changes: it
+  /// restarts the stalled clock, so the row stops accusing the pipeline of
+  /// having given up on it, and the returned `received_at` gives the live
+  /// screen a tick to re-read behind. Null when there is no progress row,
+  /// which costs the tick and nothing else.
+  Future<String?> touchProgress(String source, String sourceMessageId) async {
+    final rows = await db.customWriteReturning(
+      'UPDATE message_progress SET updated_at = ?1 '
+      'WHERE source = ?2 AND source_message_id = ?3 '
+      'RETURNING received_at',
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// The SET list every re-open shares, so the one-row path and the bulk path
+  /// cannot drift into resetting different columns. `?1` is the stamp; each
+  /// caller numbers its own WHERE from `?2`.
+  static const String _resetProgressSet = '''
   triage_state = 'pending', extract_state = 'pending',
   storyline_state = 'pending', draft_state = 'pending',
   settle_state = 'pending',
   triage_at = NULL, extract_at = NULL, storyline_at = NULL,
   draft_at = NULL, settle_at = NULL,
   outcome = 'pending', dropped = 0, drop_reason = NULL,
-  updated_at = ?1
-WHERE source = ?2 AND source_message_id = ?3
-RETURNING received_at
-''',
-      variables: _args([_nowIso(), source, sourceMessageId]),
-    );
-    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  updated_at = ?1''';
+
+  /// How many ids one reset statement carries. Well under SQLite's variable
+  /// ceiling, and the same chunking [attachmentRefsFor] does for the same
+  /// reason: a retired gate can match a whole window at once.
+  static const int _resetProgressChunk = 200;
+
+  /// [restoreProgress] for a list of messages, without the RETURNING — the
+  /// bulk callers re-pend rows the user is not watching, and the tick per row
+  /// would say nothing the next stage write does not say better.
+  Future<void> _resetProgressRows(String source, List<String> ids) async {
+    for (var start = 0; start < ids.length; start += _resetProgressChunk) {
+      final chunk = ids.sublist(
+        start,
+        math.min(start + _resetProgressChunk, ids.length),
+      );
+      final slots = [
+        for (var i = 0; i < chunk.length; i++) '?${i + 3}',
+      ].join(', ');
+      await db.customUpdate(
+        'UPDATE message_progress SET\n$_resetProgressSet\n'
+        'WHERE source = ?2 AND source_message_id IN ($slots)',
+        variables: _args([_nowIso(), source, ...chunk]),
+      );
+    }
   }
 
   /// Records where extraction got to. Same return contract as
@@ -4291,10 +5124,21 @@ RETURNING received_at
   /// assignment decides for the whole thread, so writing it per message would
   /// mean a read to find them and a statement each.
   ///
-  /// Bounded by `settle_state <> 'done'`, which is what keeps a thread that
-  /// keeps growing from rewriting the history above it — a message the user
-  /// was told about last week must not gain a storyline column today, because
-  /// the row they are scrolling past is a record of what they were told.
+  /// Bounded by `(settle_state <> 'done' OR storyline_state = 'pending')`,
+  /// which is what keeps a thread that keeps growing from rewriting the
+  /// history above it — a message the user was told about last week must not
+  /// gain a storyline column today, because the row they are scrolling past is
+  /// a record of what they were told.
+  ///
+  /// The second arm is what "history" actually means here, and the first arm
+  /// alone got it wrong. A stage that was already TERMINAL when the row
+  /// settled is frozen: that pass had its answer and the user was told it. A
+  /// stage still `pending` at settle was OWED — the settle machine can land in
+  /// the middle of a sync, before the storyline work is even enqueued — and
+  /// owed work finishes normally. Without this arm such a row is stuck
+  /// forever: `storyline_state` never leaves `pending`, and both
+  /// [writeDraftProgress] and [sweepSettledProgress] require a terminal
+  /// storyline stage before they will close the `outcome`.
   ///
   /// [storylineId] null leaves whatever is stored alone: `noCandidate` and
   /// `rejected` are outcomes about this pass, not retractions of an earlier
@@ -4314,7 +5158,8 @@ UPDATE message_progress SET
     CASE WHEN ?1 IN $_terminalStates THEN ?2 ELSE storyline_at END,
   storyline_id = COALESCE(?3, storyline_id),
   updated_at = ?2
-WHERE source = ?4 AND conversation_key = ?5 AND settle_state <> 'done'
+WHERE source = ?4 AND conversation_key = ?5
+  AND (settle_state <> 'done' OR storyline_state = 'pending')
 RETURNING source_message_id, received_at
 ''',
       variables: _args([state, _nowIso(), storylineId, source, conversationKey]),
@@ -4536,12 +5381,129 @@ RETURNING source, source_message_id, received_at
     ];
   }
 
+  /// Moves one SETTLED row's Needs You snapshot to a value the caller has
+  /// recomputed, and hands back its `received_at` when it actually moved.
+  ///
+  /// `message_progress.needs_you` is a snapshot taken at settle time, and the
+  /// verdict it copies can move afterwards — the needs-you pass re-judging a
+  /// message after a document landed, or the owner editing their rules. A
+  /// snapshot that never followed the verdict is a Needs You tile that
+  /// disagrees with the verdict stored one table over.
+  ///
+  /// Three guards, each doing its own work. `settle_state = 'done'` because an
+  /// UNSETTLED row has no snapshot to correct — it will take one at settle,
+  /// from the same predicate, and writing early would only race the settle.
+  /// `dropped = 0` because a dropped row's chip is never raised: the feed hides
+  /// dropped rows and the tile sums the column, so a chip nobody can see would
+  /// only inflate the count. The one-shot backfill already guards this way, and
+  /// the two paths have to agree. `needs_you <> ?1` so the RETURNING carries
+  /// only rows that CHANGED, the same discipline [clearNeedsYou] keeps: the
+  /// caller ticks the bus per row, and a re-verdict that returned the same
+  /// answer must not announce itself.
+  Future<String?> refreshNeedsYouFlag(
+    String source,
+    String sourceMessageId, {
+    required bool needsYou,
+  }) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET needs_you = ?1, updated_at = ?2
+WHERE source = ?3 AND source_message_id = ?4 AND settle_state = 'done'
+  AND dropped = 0
+  AND needs_you <> ?1
+RETURNING received_at
+''',
+      variables: _args([
+        needsYou ? 1 : 0,
+        _nowIso(),
+        source,
+        sourceMessageId,
+      ]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// The one-shot catch-up for rows that settled before there was a verdict to
+  /// read, and returns the ones it flagged.
+  ///
+  /// The `needs_you_verdict` column arrived in schema v10 and the settle
+  /// snapshot predates it, so every row settled before then took its snapshot
+  /// from asks that did not include the verdict — a message the needs-you pass
+  /// later judged yes has `needs_you_verdict = 1` and `needs_you = 0`, and
+  /// nothing in the app would ever reconcile them. Raise-only: this never
+  /// clears a chip, because a 0 here can mean the coordinator decided against
+  /// it on grounds this statement cannot see.
+  ///
+  /// The guards past the verdict are the ones `notifyWorthy` carries plus one
+  /// it does not. Thread `done`, the `later` bucket and the attention floor are
+  /// the user's loudness control and gate a judged yes like any other ask. The
+  /// extra one is the outbound clause: the coordinator settles before any reply
+  /// can exist, so `notifyWorthy` never needed it — but a chip raised months
+  /// after the fact must not land on a thread the user already answered.
+  /// `dropped = 0` keeps a gate cascade out of it: a gated row also carries
+  /// `settle_state = 'done'`, and it is dropped, not owed.
+  Future<List<({String source, String sourceMessageId, String receivedAt})>>
+      backfillNeedsYouFromVerdicts({required double threshold}) async {
+    final rows = await db.customWriteReturning(
+      '''
+UPDATE message_progress SET needs_you = 1, updated_at = ?1
+WHERE settle_state = 'done' AND needs_you = 0 AND dropped = 0
+  AND EXISTS (SELECT 1 FROM messages m
+              WHERE m.source = message_progress.source
+                AND m.source_message_id = message_progress.source_message_id
+                AND m.direction = 'inbound' AND m.needs_you_verdict = 1)
+  AND COALESCE((SELECT c.state FROM conversations c
+                WHERE c.source = message_progress.source
+                  AND c.conversation_key = message_progress.conversation_key),
+               '') <> 'done'
+  AND COALESCE((SELECT c.last_outbound_at FROM conversations c
+                WHERE c.source = message_progress.source
+                  AND c.conversation_key = message_progress.conversation_key),
+               '') < message_progress.received_at
+  AND COALESCE((SELECT ai.bucket FROM conversation_ai ai
+                WHERE ai.source = message_progress.source
+                  AND ai.conversation_key = message_progress.conversation_key),
+               '') <> 'later'
+  AND COALESCE((SELECT ai.attention_score FROM conversation_ai ai
+                WHERE ai.source = message_progress.source
+                  AND ai.conversation_key = message_progress.conversation_key),
+               0) >= ?2
+RETURNING source, source_message_id, received_at
+''',
+      variables: _args([_nowIso(), threshold]),
+    );
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? '',
+          sourceMessageId: row.data['source_message_id'] as String? ?? '',
+          receivedAt: row.data['received_at'] as String? ?? '',
+        ),
+    ];
+  }
+
   /// The home screen's tiles, over everything received since [sinceIso].
   ///
   /// ONE statement, which is the whole point: read separately, a message
   /// settling between two queries would land in one number and not the other,
   /// and the tiles would disagree until something reloaded them.
-  Future<HomeMetrics> homeMetrics({required String sinceIso}) async {
+  ///
+  /// `stalled` is the same three facts [HomeFeedRow.isStalled] reads, spelled
+  /// in SQL: still `pending`, nothing queued or running for the message or
+  /// its thread, and no progress write since [stalledBeforeIso]. The cutoff
+  /// is BOUND rather than computed here so the tile and the rows under it are
+  /// answering at the same instant — a tile that counted three and a list
+  /// with two flags on it is a tile nobody believes twice.
+  ///
+  /// Term for term with the Dart predicate, down to the boundary: `<=` because
+  /// the row's own test is `difference(...) >= homeStalledAfter`, and the empty
+  /// stamp excluded because an unparseable clock answers FALSE there. A row
+  /// with no `updated_at` sorts before every cutoff, and counting it would
+  /// accuse the pipeline of a fault on the strength of a column nobody wrote.
+  Future<HomeMetrics> homeMetrics({
+    required String sinceIso,
+    required String stalledBeforeIso,
+  }) async {
     final row = await db
         .customSelect(
           '''
@@ -4556,14 +5518,18 @@ SELECT
     AS storylined,
   COALESCE(SUM(CASE WHEN outcome = 'pending' THEN 1 ELSE 0 END), 0)
     AS in_flight,
+  COALESCE(SUM(CASE WHEN p.outcome = 'pending' AND p.updated_at <= ?2
+                      AND p.updated_at <> ''
+                      AND NOT $_openWorkExists THEN 1 ELSE 0 END), 0)
+    AS stalled,
   COALESCE(SUM(CASE WHEN triage_state = 'error' OR extract_state = 'error'
                       OR storyline_state = 'error' THEN 1 ELSE 0 END), 0)
     AS errored,
   COUNT(*) AS total
-FROM message_progress
-WHERE received_at >= ?
+FROM message_progress p
+WHERE received_at >= ?1
 ''',
-          variables: _args([sinceIso]),
+          variables: _args([sinceIso, stalledBeforeIso]),
         )
         .getSingle();
     return HomeMetrics.fromRow(row.data);
@@ -4908,9 +5874,7 @@ SELECT v.id AS vector_id, $_homeFeedColumns
 FROM message_vectors v
 JOIN message_progress p
   ON p.source = v.source AND p.source_message_id = v.source_message_id
-JOIN messages m
-  ON m.source = p.source AND m.source_message_id = p.source_message_id
-LEFT JOIN storylines s ON s.id = p.storyline_id
+$_homeFeedJoins
 $where
 ''',
           variables: _args(args),
@@ -4938,6 +5902,15 @@ $where
     return ranked;
   }
 
+  /// The most rowids either word read will carry back into Dart.
+  ///
+  /// `semanticSearch` caps its `k` at the same number and for the same reason:
+  /// every id in the page is bound as a parameter by the read that hydrates it,
+  /// and SQLite's default `SQLITE_MAX_VARIABLE_NUMBER` is 999. No caller passes
+  /// a bigger limit, but `limit` is public on both and a ceiling is cheaper
+  /// than a caller who discovers the ceiling.
+  static const int _keywordCap = 400;
+
   /// Escapes what LIKE would otherwise read as a wildcard. The escape
   /// character goes first, or the backslashes the other two rules write would
   /// themselves be escaped a moment later.
@@ -4946,65 +5919,180 @@ $where
       .replaceAll('%', r'\%')
       .replaceAll('_', r'\_');
 
-  /// Feed rows whose subject or body contains every word of [query], newest
-  /// first.
+  /// Feed rows the WORDS of [query] match, best first, or null when the word
+  /// index could not be built.
   ///
-  /// The text fallback that makes gate-dropped mail findable. A message the
-  /// gate threw out never reached the embedder, so no vector was ever written
-  /// for it and [semanticSearch] cannot see it however well it matches — which
-  /// leaves the one pile a person is most likely to come looking for
-  /// unsearchable by the only search there is.
+  /// The other half of a search, and the only half that can see a gate-dropped
+  /// message: one the gate threw out never reached the embedder, so no vector
+  /// was ever written for it and [semanticSearch] cannot find it however well
+  /// it matches — which leaves the one pile a person is most likely to come
+  /// looking for unreachable by meaning.
   ///
-  /// Dropped rows are included ALWAYS rather than behind a flag: the archive
-  /// is this read's only caller, and hiding them here would remove the reason
-  /// it exists.
+  /// Null and `const []` are different answers, exactly as [semanticSearch]
+  /// separates them: null is "there is nothing to search WITH" (a SQLite built
+  /// without FTS5, or the `keywordSearch: false` seam), and an empty list is a
+  /// statement about the mailbox.
   ///
-  /// Deliberately LIKE and not FTS — the corpus is one person's history and a
-  /// scan of it is cheap at that size. Revisit if it gets slow; an FTS5 table
-  /// is a migration and a write path, not a change to this signature.
-  Future<List<HomeFeedRow>> textSearchMessages(
+  /// [includeDropped] defaults to FALSE — the home table's meaning, since the
+  /// results sit where that table was and a search that widened the filter
+  /// under them would answer a question nobody asked. The archive passes true.
+  ///
+  /// Ranked by bm25 with the column weights the index declares (a subject
+  /// match beats a body match), and carrying [KeywordHit.coverage] so the
+  /// fusion above can discount a row that matched one word of eight.
+  Future<List<KeywordHit>?> keywordSearchMessages(
     String query, {
-    int limit = 50,
+    int limit = SearchTuning.keywordFetch,
+    bool includeDropped = false,
     List<String> sources = const ['email', 'teams'],
   }) async {
+    if (!await _keywordIndex.ensureReady()) return null;
     if (sources.isEmpty) return const [];
-    final terms = query.trim().toLowerCase().split(RegExp(r'\s+'))
-      ..removeWhere((term) => term.isEmpty);
-    if (terms.isEmpty) return const [];
+    final fts = buildFtsQuery(query);
+    // No words in it at all. A blank box must never return the mailbox.
+    if (fts == null) return const [];
 
-    // AND across terms, OR across columns: a two-word query is a narrowing,
-    // and the two words are allowed to sit in different columns of the same
-    // message — a subject and a body are one text as far as the reader who
-    // typed them is concerned.
-    final where = StringBuffer();
-    final args = <Object?>[];
-    for (final term in terms) {
-      final pattern = '%${_escapeLike(term)}%';
-      if (where.isNotEmpty) where.write(' AND ');
-      // Three bindings of the same pattern rather than one named parameter:
-      // every statement here is written against positional `?`.
-      where.write(
-        "(LOWER(m.subject) LIKE ? ESCAPE '\\' "
-        "OR LOWER(COALESCE(m.body_preview, '')) LIKE ? ESCAPE '\\' "
-        "OR LOWER(COALESCE(m.body_text, '')) LIKE ? ESCAPE '\\')",
-      );
-      args.addAll([pattern, pattern, pattern]);
+    // Heal before asking, for [semanticSearch]'s reason: the index is derived,
+    // and a message written since the last search is filed by the watermark
+    // pass rather than by whoever wrote it.
+    await _keywordIndex.backfill();
+
+    // Capped for [semanticSearch]'s reason: every rowid this returns is bound
+    // as a parameter twice over — once by the hydrating read, once by each
+    // coverage read — and SQLite's default parameter ceiling is 999.
+    final matches = await _keywordIndex.match(
+      fts.match,
+      limit: math.min(limit, _keywordCap),
+    );
+    if (matches.isEmpty) return const [];
+
+    final ids = [for (final match in matches) match.rowid];
+
+    // One rowid query per term, over THIS page. Coverage is the fraction of
+    // the query a row actually contains, and it cannot be read off a bm25
+    // score — that number rewards rarity, not completeness.
+    final matched = <int, int>{};
+    for (final term in fts.terms) {
+      for (final rowid in await _keywordIndex.rowidsMatching(
+        quoteTerm(term),
+        among: ids,
+      )) {
+        matched[rowid] = (matched[rowid] ?? 0) + 1;
+      }
     }
+
+    final where = StringBuffer('WHERE m.rowid IN (${_placeholders(ids.length)})');
+    final args = <Object?>[...ids];
+    if (!includeDropped) where.write(' AND p.dropped = 0');
     where.write(' AND p.source IN (${_placeholders(sources.length)})');
     args.addAll(sources);
 
+    // [_homeFeedSelect]'s columns over [_homeFeedSelect]'s joins, plus the
+    // rowid — spelled out here rather than by widening that constant, because
+    // it is the only reader that has a rowid to map back to and the other four
+    // would carry a column [HomeFeedRow.fromRow] has no field for.
     final result = await db
         .customSelect(
           '''
-$_homeFeedSelect
-WHERE $where
-ORDER BY p.received_at DESC, p.source_message_id DESC
-LIMIT ?
+SELECT m.rowid AS message_rowid, $_homeFeedColumns
+FROM message_progress p
+$_homeFeedJoins
+$where
 ''',
-          variables: _args([...args, limit]),
+          variables: _args(args),
         )
         .get();
-    return [for (final row in result) HomeFeedRow.fromRow(row.data)];
+
+    final byRowid = <int, HomeFeedRow>{
+      for (final row in result)
+        row.data['message_rowid'] as int: HomeFeedRow.fromRow(row.data),
+    };
+
+    // Back into the index's order. SQL returned a set; the ranking lives in
+    // [matches] and nowhere else.
+    return [
+      for (final match in matches)
+        if (byRowid[match.rowid] case final row?)
+          KeywordHit(
+            row,
+            bm25: match.bm25,
+            coverage: fts.terms.isEmpty
+                ? 0
+                : (matched[match.rowid] ?? 0) / fts.terms.length,
+          ),
+    ];
+  }
+
+  /// Document passages the WORDS of [query] match, best first, or null when
+  /// the word index could not be built.
+  ///
+  /// [keywordSearchMessages] over the second corpus, and it earns its place
+  /// beside the vector read for the same reason the message one does: an
+  /// invoice number or a person's name is exactly the kind of thing an
+  /// embedding is worst at and a word index is best at.
+  ///
+  /// The digest passage is excluded here rather than at file time, which is
+  /// the rule [searchAttachmentChunks] already follows: a search result
+  /// promises the document's OWN words, and a digest is a model's summary of
+  /// them.
+  Future<List<AttachmentChunkHit>?> keywordSearchChunks(
+    String query, {
+    int limit = SearchTuning.keywordFetch,
+    bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (!await _chunkKeywordIndex.ensureReady()) return null;
+    if (sources.isEmpty) return const [];
+    final fts = buildFtsQuery(query);
+    if (fts == null) return const [];
+
+    await _chunkKeywordIndex.backfill();
+
+    final capped = math.min(limit, _keywordCap);
+    final matches = await _chunkKeywordIndex.match(fts.match, limit: capped);
+    if (matches.isEmpty) return const [];
+
+    final ids = [for (final match in matches) match.rowid];
+
+    final matched = <int, int>{};
+    for (final term in fts.terms) {
+      for (final id in await _chunkKeywordIndex.rowidsMatching(
+        quoteTerm(term),
+        among: ids,
+      )) {
+        matched[id] = (matched[id] ?? 0) + 1;
+      }
+    }
+
+    final where = StringBuffer('AND c.source IN (${_placeholders(sources.length)})');
+    final args = <Object?>[...sources];
+    where.write(" AND c.locator != 'digest'");
+    if (!includeDropped) where.write(' AND COALESCE(p.dropped, 0) = 0');
+
+    return _hydrateChunkHits(
+      [
+        for (final match in matches)
+          (
+            id: match.rowid,
+            distance: null,
+            bm25: match.bm25,
+            coverage: fts.terms.isEmpty
+                ? 0.0
+                : (matched[match.rowid] ?? 0) / fts.terms.length,
+          ),
+      ],
+      // No model tag: a passage the words found need never have been embedded,
+      // and filtering on the tag of an embedding it does not have would hide
+      // exactly the documents this pass exists to reach.
+      embedModel: null,
+      extraWhere: where.toString(),
+      extraArgs: args,
+      limit: capped,
+      // The per-file collapse happens in the fusion, over both passes at once.
+      // Doing it here as well would throw away the passage the OTHER pass
+      // ranked highest for the same file.
+      onePerAttachment: false,
+    );
   }
 
   /// The storylines the window was busiest with, most messages first.
@@ -5818,28 +6906,40 @@ LIMIT ?
     return (row.data['n'] as num?)?.toInt() ?? 0;
   }
 
-  /// Turns index hits into passages with their documents attached, back in
-  /// KNN order.
+  /// Turns ranked chunk ids into passages with their documents attached, back
+  /// in the order they were ranked.
   ///
-  /// Shared by the two reads below because the ranking rule is the same and
-  /// only the scope differs. The LEFT JOIN onto `message_progress` is
+  /// Shared by three reads because the hydration is the same and only the
+  /// scope and the ranking differ. The LEFT JOIN onto `message_progress` is
   /// unconditional so [extraWhere] can carry a dropped filter without a second
   /// shape of query; the LEFT JOIN onto `messages` is left because a pinned
   /// document outlives the message it came on.
+  ///
+  /// [ranked] carries whatever numbers the pass that produced it has —
+  /// a distance from the vector index, a bm25 and a coverage from the word
+  /// index, and both when the fusion merges them later. A record rather than
+  /// `VecHit` because two of the three callers have no distance to report and
+  /// a placeholder distance is a number that would still sort.
+  ///
+  /// [embedModel] is nullable for that same reason. The vector passes MUST
+  /// filter on it — a distance measured against a vector written under another
+  /// tag is meaningless and would still rank — where the word pass must not:
+  /// a passage the words found need never have been embedded at all.
   ///
   /// Ids that hydrate to nothing are skipped rather than counted: that is
   /// exactly what an orphaned vec0 rowid looks like, and it is how
   /// [replaceChunks] gets away with leaving them behind.
   Future<List<AttachmentChunkHit>> _hydrateChunkHits(
-    List<VecHit> hits, {
-    required String embedModel,
+    List<({int id, double? distance, double? bm25, double? coverage})> ranked, {
+    required String? embedModel,
     String extraWhere = '',
     List<Object?> extraArgs = const [],
     required int limit,
     bool onePerAttachment = false,
   }) async {
-    if (hits.isEmpty) return const [];
-    final ids = [for (final hit in hits) hit.id];
+    if (ranked.isEmpty) return const [];
+    final ids = [for (final hit in ranked) hit.id];
+    final modelWhere = embedModel == null ? '' : 'AND c.embed_model = ?';
     final result = await db
         .customSelect(
           '''
@@ -5855,9 +6955,13 @@ LEFT JOIN messages m ON m.source = c.source
   AND m.source_message_id = c.source_message_id
 LEFT JOIN message_progress p ON p.source = c.source
   AND p.source_message_id = c.source_message_id
-WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
+WHERE c.id IN (${_placeholders(ids.length)}) $modelWhere $extraWhere
 ''',
-          variables: _args([...ids, embedModel, ...extraArgs]),
+          variables: _args([
+            ...ids,
+            ?embedModel,
+            ...extraArgs,
+          ]),
         )
         .get();
 
@@ -5868,9 +6972,9 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
 
     // Back into the index's order. SQL returned a set; the ranking lives in
     // [hits] and nowhere else.
-    final ranked = <AttachmentChunkHit>[];
+    final hits = <AttachmentChunkHit>[];
     final seenDocuments = <String>{};
-    for (final hit in hits) {
+    for (final hit in ranked) {
       final row = byChunk[hit.id];
       if (row == null) continue;
       if (onePerAttachment) {
@@ -5881,7 +6985,7 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
             '|${row['attachment_id']}';
         if (!seenDocuments.add(document)) continue;
       }
-      ranked.add(
+      hits.add(
         AttachmentChunkHit(
           ref: AttachmentRef.fromRow(row),
           chunkId: hit.id,
@@ -5892,11 +6996,13 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
           outbound: row['direction'] == 'outbound',
           receivedAt: row['received_at'] as String?,
           distance: hit.distance,
+          bm25: hit.bm25,
+          coverage: hit.coverage,
         ),
       );
-      if (ranked.length == limit) break;
+      if (hits.length == limit) break;
     }
-    return ranked;
+    return hits;
   }
 
   /// The passages nearest [query] WITHIN a named scope — a thread's messages,
@@ -5958,7 +7064,10 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
       prefix: 'c.',
     );
     return _hydrateChunkHits(
-      hits,
+      [
+        for (final hit in hits)
+          (id: hit.id, distance: hit.distance, bm25: null, coverage: null),
+      ],
       embedModel: embedModel,
       extraWhere: 'AND $rowScope',
       extraArgs: rowArgs,
@@ -6072,7 +7181,10 @@ WHERE c.id IN (${_placeholders(ids.length)}) AND c.embed_model = ? $extraWhere
     if (!includeDropped) where.write(' AND COALESCE(p.dropped, 0) = 0');
 
     return _hydrateChunkHits(
-      hits,
+      [
+        for (final hit in hits)
+          (id: hit.id, distance: hit.distance, bm25: null, coverage: null),
+      ],
       embedModel: embedModel,
       extraWhere: where.toString(),
       extraArgs: args,

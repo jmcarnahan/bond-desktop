@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/embed_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -97,12 +98,54 @@ void main() {
 
     tearDown(() async => db.close());
 
-    test('an unreachable embedding server is not an empty result', () async {
+    Future<void> seedGated() => store.upsertMessage({
+          'source': 'email',
+          'source_message_id': 'gated',
+          'conversation_key': 'c-gated',
+          'direction': 'inbound',
+          'subject': 'Invoice 4471 is overdue',
+          'received_at': '2026-08-29T10:00:00Z',
+        });
+
+    test('an unreachable embedding server narrows the answer rather than '
+        'removing it', () async {
+      await seedGated();
+
       final result = await MessageSearch(store, downServer()).search('invoice');
 
-      // The distinction the whole sealed type exists for: an empty list would
-      // tell the reader their mail contains nothing about invoices, which is a
-      // lie about their mailbox rather than a fact about the machine.
+      // A dead embedding server costs the MEANING half and not the answer. An
+      // empty list with no sentence on it would tell the reader their mail
+      // contains nothing about invoices — a lie about their mailbox, told on
+      // the strength of a server being off.
+      final hits = result as MessageSearchHits;
+      expect([for (final hit in hits.hits) hit.row.sourceMessageId], ['gated']);
+      expect(hits.hits.single.matchedBy, MatchedBy.words);
+      expect(hits.hits.single.distance, isNull);
+      expect(hits.notice, startsWith('Words only'));
+      expect(hits.notice, contains('make embed'));
+    });
+
+    test('a server that answers badly narrows it the same way — the reader '
+        'can do nothing different about either', () async {
+      await seedGated();
+
+      final result =
+          await MessageSearch(store, rejectingServer()).search('invoice');
+
+      final hits = result as MessageSearchHits;
+      expect([for (final hit in hits.hits) hit.row.sourceMessageId], ['gated']);
+      expect(hits.notice, isNotNull);
+    });
+
+    test('only BOTH passes failing is unavailable', () async {
+      await seedGated();
+      // The database out from under the text pass, which is the one shape
+      // that leaves nothing to show: the embedding server is already down, so
+      // neither half can answer and the sealed case earns itself.
+      await db.close();
+
+      final result = await MessageSearch(store, downServer()).search('invoice');
+
       expect(result, isA<MessageSearchUnavailable>());
       expect(
         (result as MessageSearchUnavailable).reason,
@@ -110,13 +153,41 @@ void main() {
       );
     });
 
-    test('a server that answers badly is also unavailable — the reader can '
-        'do nothing different about it', () async {
-      final result =
-          await MessageSearch(store, rejectingServer()).search('invoice');
+    group('the dropped filter reaches the word pass too', () {
+      Future<void> seedDropped() async {
+        await seedGated();
+        await store.writeSettledProgress(
+          'email',
+          'gated',
+          needsYou: false,
+          reason: 'newsletter',
+          dropped: true,
+        );
+      }
 
-      expect(result, isA<MessageSearchUnavailable>());
-      expect((result as MessageSearchUnavailable).reason, isNotEmpty);
+      test('a dropped message is out of a home search by default', () async {
+        await seedDropped();
+
+        final result =
+            await MessageSearch(store, downServer()).search('invoice');
+
+        // The table under the results hides dropped rows, and a search that
+        // did not would answer a question the reader is not asking.
+        expect((result as MessageSearchHits).hits, isEmpty);
+      });
+
+      test('and comes back when the toggle asks for it', () async {
+        await seedDropped();
+
+        final result = await MessageSearch(store, downServer())
+            .search('invoice', includeDropped: true);
+
+        expect(
+          [for (final hit in (result as MessageSearchHits).hits)
+            hit.row.sourceMessageId],
+          ['gated'],
+        );
+      });
     });
 
     test('the archive still answers with what text can find', () async {
@@ -136,7 +207,7 @@ void main() {
       // type is not the sealed one: a down server narrows this answer, where
       // on Home it replaces it.
       expect([for (final row in result.rows) row.sourceMessageId], ['gated']);
-      expect(result.notice, startsWith('Text matches only'));
+      expect(result.notice, startsWith('Words only'));
       expect(result.query, 'invoice');
     });
   });
@@ -212,7 +283,8 @@ void main() {
             hit.row.sourceMessageId,
         ];
 
-    test('ranks the nearest message first', () async {
+    test('the message both passes find leads, and one list holds them all',
+        () async {
       if (!available) return;
       await seedCorpus();
 
@@ -221,9 +293,14 @@ void main() {
 
       expect(idsOf(result), ['inv', 'park', 'launch']);
       final hits = (result as MessageSearchHits).hits;
-      // Cosine distance, so smaller is nearer and the list is ascending.
-      expect(hits.first.distance, lessThan(hits.last.distance));
+      // `inv` is the nearest vector AND the only literal word match, so it
+      // scores on both halves where the other two score on one.
+      expect(hits.first.matchedBy, MatchedBy.both);
+      expect(hits.first.score, greaterThan(hits[1].score));
+      expect(hits[1].matchedBy, MatchedBy.meaning);
+      // The numbers ride along for a later "why this result".
       expect(hits.first.distance, closeTo(0, 0.001));
+      expect(hits.first.bm25, isNotNull);
       expect(result.query, 'the invoice');
     });
 
@@ -259,15 +336,16 @@ void main() {
       await embed('inv');
 
       // The fake server puts an unmatched query on its own axis, orthogonal
-      // to everything seeded — the KNN still returns the row, at distance 1.
+      // to everything seeded, so the KNN still returns the row — at distance
+      // 1, which is past the far end of the ramp — and the words match
+      // nothing. The floor is the only reason this is empty rather than the
+      // whole mailbox.
       final result =
           await MessageSearch(store, server.client).search('something else');
 
       expect(result, isA<MessageSearchHits>());
-      expect(
-        (result as MessageSearchHits).hits.first.distance,
-        closeTo(1, 0.001),
-      );
+      expect((result as MessageSearchHits).hits, isEmpty);
+      expect(result.notice, isNull, reason: 'both passes ran');
     });
 
     group('dropped rows', () {
@@ -311,7 +389,10 @@ void main() {
       // between the two are numbers with no meaning, and a number with no
       // meaning still sorts, so the tag filter is the only thing keeping it
       // off the top of the list.
-      await seed(id: 'ghost', subject: 'Invoice ghost');
+      // Its subject shares no word with the query: this test is about the
+      // model tag, and a row the WORDS could legitimately find would prove
+      // nothing about it.
+      await seed(id: 'ghost', subject: 'Nothing to see here');
       await store.upsertMessageVector(
         source: 'email',
         sourceMessageId: 'ghost',
@@ -370,9 +451,11 @@ void main() {
 
     group('the archive searches both ways at once', () {
       /// A message the gate threw out: stored, never embedded, so the index
-      /// has no way of knowing it exists.
+      /// has no way of knowing it exists. Its subject carries a word no other
+      /// message and no axis of the fake server knows about, so finding it is
+      /// unambiguously the work of the word pass.
       Future<void> seedGated() async {
-        await seed(id: 'gated', subject: 'Invoice from the newsletter');
+        await seed(id: 'gated', subject: 'Escrow paperwork from the newsletter');
         await store.writeSettledProgress(
           'email',
           'gated',
@@ -382,20 +465,18 @@ void main() {
         );
       }
 
-      test('meaning ranks first and text fills in behind it', () async {
+      test('a message with no vector at all is found by its words', () async {
         if (!available) return;
         await seedCorpus();
         await seedGated();
 
         final result =
-            await MessageSearch(store, server.client).searchArchive('invoice');
+            await MessageSearch(store, server.client).searchArchive('escrow');
 
-        final ids = [for (final row in result.rows) row.sourceMessageId];
-        expect(ids.first, 'inv', reason: 'the nearest message is still first');
-        // Behind everything the index ranked, because it has no rank of its
-        // own — but present, which is the point.
-        expect(ids.indexOf('gated'), greaterThan(ids.indexOf('inv')));
-        expect(ids, contains('gated'));
+        // Every embedded message sits an axis away from this query, so the
+        // ranking half contributes nothing above the floor. "I know I got
+        // that email" is answered entirely by the words.
+        expect([for (final row in result.rows) row.sourceMessageId], ['gated']);
         expect(result.notice, isNull, reason: 'both halves ran');
       });
 
@@ -406,7 +487,7 @@ void main() {
         final result =
             await MessageSearch(store, server.client).searchArchive('invoice');
 
-        // `inv` is the top semantic hit AND a literal text match; the merge
+        // `inv` is the top semantic hit AND a literal word match; the fusion
         // keys on the feed key, so it arrives once.
         final keys = {for (final row in result.rows) row.feedKey};
         expect(keys, hasLength(result.rows.length));
@@ -422,7 +503,8 @@ void main() {
         () async {
       if (!available) return;
       await seedCorpus();
-      await seed(id: 'short', subject: 'Invoice truncated');
+      // No shared word with the query, for the ghost's reason above.
+      await seed(id: 'short', subject: 'Truncated payload');
       await store.upsertMessageVector(
         source: 'email',
         sourceMessageId: 'short',
@@ -437,6 +519,50 @@ void main() {
           await MessageSearch(store, server.client).search('the invoice');
 
       expect(idsOf(result), ['inv', 'park', 'launch']);
+    });
+
+    group('the word index is not there', () {
+      /// The same database, read through a store that was built without the
+      /// word half. FTS5 is compiled into every SQLite this suite can open,
+      /// so the seam is the only way to reach the state a build without it
+      /// would be in.
+      MessageStore quiet() => MessageStore(db, keywordSearch: false);
+
+      test('meaning still answers, and the notice says what is missing',
+          () async {
+        if (!available) return;
+        await seedCorpus();
+
+        final result =
+            await MessageSearch(quiet(), server.client).search('the invoice');
+
+        final hits = result as MessageSearchHits;
+        expect(idsOf(result), ['inv', 'park', 'launch']);
+        expect(hits.hits.first.matchedBy, MatchedBy.meaning);
+        expect(hits.hits.first.bm25, isNull);
+        expect(
+          hits.notice,
+          'Meaning only — the keyword index could not be built.',
+        );
+      });
+
+      test('and with the embedding server down as well, there is nothing left '
+          'to show', () async {
+        if (!available) return;
+        await seedCorpus();
+
+        final result =
+            await MessageSearch(quiet(), downServer()).search('the invoice');
+
+        // Both passes gone is the one shape that earns the sealed case: the
+        // reader is owed an instruction, not an empty list that reads as an
+        // answer about their mailbox.
+        expect(result, isA<MessageSearchUnavailable>());
+        expect(
+          (result as MessageSearchUnavailable).reason,
+          contains('make embed'),
+        );
+      });
     });
 
     group('the documents beside the messages', () {
@@ -495,6 +621,8 @@ void main() {
         expect(documents.single.locator, 'part 1');
         expect(documents.single.text, contains('escalator'));
         expect(documents.single.distance, closeTo(0, 0.001));
+        expect(documents.single.bm25, isNotNull,
+            reason: 'the words found the same passage');
         expect(documents.single.ref.messageId, 'inv');
         expect(documents.single.senderName, 'Sarah');
         expect(documents.single.outbound, isFalse);
@@ -575,7 +703,54 @@ void main() {
         expect((result as MessageSearchHits).documents, isEmpty);
       });
 
-      test('the archive search is untouched by any of it', () async {
+      test('a passage further off than the floor is not an answer', () async {
+        if (!available) return;
+        await seedCorpus();
+        await attach(
+          'inv',
+          'a1',
+          name: 'Rent Roll.xlsx',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        final result =
+            await MessageSearch(store, server.client).search('the invoice');
+
+        // The passage is an axis away from the query and shares no word with
+        // it. Before the floor this list always had six passages in it,
+        // whatever they were about.
+        expect((result as MessageSearchHits).documents, isEmpty);
+      });
+
+      test('the same file attached twice is one answer', () async {
+        if (!available) return;
+        await seedCorpus();
+        // Two `attachments` rows, one document — the shape a PDF forwarded
+        // round an office takes. Nothing has fetched the bytes, so the name
+        // and the size are the only identity available.
+        await attach(
+          'inv',
+          'a1',
+          name: 'Pub crawl.pdf',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+        await attach(
+          'park',
+          'a1',
+          name: 'Pub crawl.pdf',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        final result = await MessageSearch(store, server.client)
+            .search('the escalator clause');
+
+        final documents = (result as MessageSearchHits).documents;
+        expect(documents, hasLength(1));
+        expect(documents.single.name, 'Pub crawl.pdf');
+      });
+
+      test('the archive answers about messages and never about a passage',
+          () async {
         if (!available) return;
         await seedCorpus();
         await attach(
@@ -586,11 +761,12 @@ void main() {
         );
 
         // The archive answers with feed ROWS — a shape that has no place to
-        // put a passage — and its selling point is "I know I got that email".
+        // put a passage. No message says "escalator", so the document that
+        // does is simply not an answer here.
         final archive = await MessageSearch(store, server.client)
             .searchArchive('the escalator clause');
 
-        expect(archive.rows, isNotEmpty);
+        expect(archive.rows, isEmpty);
         expect(archive.notice, isNull);
       });
     });

@@ -177,6 +177,10 @@ void main() {
     void Function(AttachmentRef attachment)? onOpenAttachment,
     AttachmentRef? selectedAttachment,
     ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
+    List<StorylineBlock> blocks = const [],
+    void Function(String source, String key)? onUnblockThread,
+    void Function(String source, String key)? onAddBackThread,
+    VoidCallback? onAudit,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -208,6 +212,10 @@ void main() {
           onOpenAttachment: onOpenAttachment,
           selectedAttachment: selectedAttachment,
           thumbnailFor: thumbnailFor,
+          blocks: blocks,
+          onUnblockThread: onUnblockThread,
+          onAddBackThread: onAddBackThread,
+          onAudit: onAudit,
         ),
       ),
     ));
@@ -854,7 +862,7 @@ void main() {
       expect(find.text('Both concern the website redesign.'), findsOneWidget);
       // A thread a person filed has no model reasoning to show, and inventing
       // one would be worse than saying who did it.
-      expect(find.text('You added this.'), findsOneWidget);
+      expect(find.text('Filed by you'), findsOneWidget);
       expect(find.text('Homepage copy'), findsOneWidget);
       expect(find.text('Launch date'), findsOneWidget);
       // The explanation is the strip itself now. Nothing here opens a popup.
@@ -1242,6 +1250,55 @@ void main() {
       expect(find.byType(TextField), findsOneWidget);
       expect(find.text('SUGGESTED UPDATE'), findsNothing);
       expect(find.text('Use this'), findsNothing);
+    });
+  });
+
+  group('removed threads in About', () {
+    final userBlock = StorylineBlock(
+      storylineId: 'sl-1',
+      conversationKey: 'c9',
+      blockedBy: 'user',
+      evidence: 'Both concern the website redesign.',
+      subject: 'Office move',
+      blockedAt: '2026-09-02T10:00:00Z',
+    );
+    final auditBlock = StorylineBlock(
+      storylineId: 'sl-1',
+      source: 'teams',
+      conversationKey: 'c8',
+      blockedBy: 'audit',
+      evidence: 'The charter is about the homepage, this is hiring.',
+      subject: 'Interview loop',
+      blockedAt: '2026-09-01T10:00:00Z',
+    );
+
+    testWidgets('nothing shows until About is opened', (tester) async {
+      await pumpPanel(tester, blocks: [userBlock]);
+
+      expect(find.text('REMOVED BY YOU'), findsNothing);
+      expect(find.text('Office move'), findsNothing);
+      expect(find.text('Re-check members'), findsNothing);
+    });
+
+    testWidgets('both lists render under headings of their own',
+        (tester) async {
+      await pumpPanel(tester, blocks: [userBlock, auditBlock]);
+
+      await tester.tap(find.text('About'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('REMOVED BY YOU'), findsOneWidget);
+      expect(find.text('REMOVED BY RE-CHECK'), findsOneWidget);
+      expect(find.text('Office move'), findsOneWidget);
+      expect(find.text('Interview loop'), findsOneWidget);
+      expect(find.text('Both concern the website redesign.'), findsOneWidget);
+      expect(
+        find.text('The charter is about the homepage, this is hiring.'),
+        findsOneWidget,
+      );
+      // Inline, like every other explanation on this panel.
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byType(Dialog), findsNothing);
     });
   });
 

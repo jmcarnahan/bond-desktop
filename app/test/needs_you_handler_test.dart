@@ -10,6 +10,9 @@ import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart'
     show NeedsYouTask, needsYouDefaultRules, needsYouOutputContract;
 import 'package:bond_inbox/services/needs_you_handler.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
+import 'package:bond_inbox/services/progress_bus.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -618,6 +621,134 @@ void main() {
       await runOne(NeedsYouHandler(store, llm), source: 'email', id: 'm1');
 
       expect(llm.user, isNot(contains('The owner of this inbox is')));
+    });
+  });
+
+  // The verdict is not the only thing a moved answer has to reach. The Needs
+  // You chip on the home screen is a snapshot taken at settle time, and
+  // nothing else in the app would ever reconcile it with a verdict written
+  // afterwards.
+  group('the chip that follows the verdict', () {
+    late ProgressBus bus;
+    late PipelineProgress progress;
+    late List<ProgressTick> ticks;
+
+    setUp(() {
+      bus = ProgressBus();
+      progress = PipelineProgress(store, bus: bus);
+      ticks = [];
+      bus.ticks.listen(ticks.add);
+    });
+
+    tearDown(() => bus.dispose());
+
+    /// A message the coordinator already settled as needing nobody, on a loud
+    /// thread the user has not answered — the shape a re-verdict has to move.
+    Future<void> seedSettled({
+      String source = 'teams',
+      String id = 't1',
+      int addressedMe = 1,
+      String? lastOutboundAt,
+    }) async {
+      await store.upsertConversation({
+        'source': source,
+        'conversation_key': 'chat-1',
+        'subject': 'The DPA',
+        'state': 'needs_reply',
+        'last_message_at': '2026-08-29T10:00:00Z',
+        'last_outbound_at': lastOutboundAt,
+      });
+      await seed(source: source, id: id, addressedMe: addressedMe);
+      await progress.noteSettled(
+        source,
+        id,
+        needsYou: false,
+        reason: 'not_worthy',
+        dropped: false,
+      );
+      await store.writeAttentionScore(source, 'chat-1', 0.9);
+    }
+
+    Future<Object?> flagOf(String source, String id) async => (await db
+            .customSelect(
+              'SELECT needs_you FROM message_progress '
+              'WHERE source = ? AND source_message_id = ?',
+              variables: [Variable(source), Variable(id)],
+            )
+            .getSingle())
+        .data['needs_you'];
+
+    test('a model yes on a settled row raises the chip and says so', () async {
+      await seedSettled(source: 'email', id: 'm1', addressedMe: 1);
+      ticks.clear();
+
+      await runOne(
+        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+        source: 'email',
+        id: 'm1',
+      );
+
+      expect(await flagOf('email', 'm1'), 1);
+      await pumpEventQueue();
+      expect(ticks.single.sourceMessageId, 'm1');
+      expect(ticks.single.stage, 'settle');
+    });
+
+    test('the deterministic floor moves it too', () async {
+      // The floor short-circuits the model, but it writes a verdict all the
+      // same — and a verdict that moved is a verdict that moved.
+      await seedSettled();
+
+      await runOne(
+        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+      );
+
+      expect(await verdictOf('teams', 't1'),
+          {'verdict': 1, 'reason': 'teams_direct'});
+      expect(await flagOf('teams', 't1'), 1);
+    });
+
+    test('the same answer twice writes nothing the second time', () async {
+      // The whole guard against a chip the user cleared coming back: a
+      // re-judge that agrees with itself must be silent.
+      await seedSettled();
+      await runOne(
+        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+      );
+      await pumpEventQueue();
+      ticks.clear();
+
+      await runOne(
+        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+      );
+
+      await pumpEventQueue();
+      expect(ticks, isEmpty);
+      expect(await flagOf('teams', 't1'), 1);
+    });
+
+    test('a thread the user already answered is not re-chipped', () async {
+      // `notifyWorthy` has no outbound clause — the coordinator settles before
+      // any reply can exist — so this path carries the guard itself.
+      await seedSettled(lastOutboundAt: '2026-08-29T12:00:00Z');
+
+      await runOne(
+        NeedsYouHandler(store, FakeLlm(needsYouYes), progress: progress),
+      );
+
+      expect(await verdictOf('teams', 't1'),
+          {'verdict': 1, 'reason': 'teams_direct'});
+      expect(await flagOf('teams', 't1'), 0);
+    });
+
+    test('and a handler with no recorder judges exactly as before', () async {
+      await seedSettled();
+
+      await runOne(NeedsYouHandler(store, FakeLlm(needsYouYes)));
+
+      expect(await verdictOf('teams', 't1'),
+          {'verdict': 1, 'reason': 'teams_direct'});
+      expect(await flagOf('teams', 't1'), 0);
     });
   });
 

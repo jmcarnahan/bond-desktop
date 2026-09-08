@@ -43,6 +43,10 @@ class AttentionService {
     final meta = await _store.latestInboundMeta(sources: sources);
     final prefs = await _store.allSenderPrefs();
     final reasons = await _store.bucketReasons(sources: sources);
+    // One set for the whole mailbox rather than a query per thread: this pass
+    // runs on every list load, and the open-ask question would otherwise be
+    // hundreds of round trips behind each one.
+    final openAsks = await _store.openAskThreads(sources: sources);
     // One rate map, built from a call per source rather than one merged query:
     // each source's denominator stays its own, so a mailbox the user answers
     // and a chat backlog they do not cannot average into a middling nudge for
@@ -87,6 +91,9 @@ class AttentionService {
         senderPref: senderPref,
         extraction: extraction,
         reason: reasons[conversation.id],
+        hasOpenAsk: openAsks.contains(
+          MessageStore.openAskKey(conversation.source, conversation.id),
+        ),
       );
     }
     return scored;
@@ -104,11 +111,16 @@ class AttentionService {
   ///   rule itself, so removing the rule removes the bucket.
   /// - `low_value` — this pass's own guess, and the only bucket it will clear
   ///   on the strength of a new guess.
+  ///
+  /// [hasOpenAsk] changes none of that ownership. It reaches only the
+  /// `low_value` decision, where an unanswered ask on the thread is what stops
+  /// the quiet-FYI rule from deferring it — see [bucketFor].
   Future<void> _sweepBucket(
     Conversation conversation, {
     required String? senderPref,
     required ExtractionResult? extraction,
     required String? reason,
+    required bool hasOpenAsk,
   }) async {
     if (reason == 'user') return;
 
@@ -129,6 +141,7 @@ class AttentionService {
             intent: extraction.intent,
             importance: extraction.importance,
             needsReply: conversation.state == ConversationState.needsReply,
+            needsYouVerdict: hasOpenAsk,
           );
 
     if (bucket != null) {

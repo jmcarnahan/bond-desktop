@@ -259,9 +259,12 @@ void main() {
 
       // Silence is not "never drained anything": reading it that way would
       // make the first sync after every upgrade re-drain for nothing.
-      expect(graph.requestsFor('inbox').single.toString(),
+      // First, not single: the reconcile asks a from-scratch request of its
+      // own behind each folder's drain. What matters is that the drain itself
+      // still went out on the stored cursor.
+      expect(graph.requestsFor('inbox').first.toString(),
           deltaCursor('inbox', 'pre'));
-      expect(graph.requestsFor('sentitems').single.toString(),
+      expect(graph.requestsFor('sentitems').first.toString(),
           deltaCursor('sentitems', 'pre'));
       expect(await store.getPref(mailBootstrapFloorKey), anyOf(before, after));
     });
@@ -279,7 +282,8 @@ void main() {
       await syncReaching(() => 14).syncNow();
       final after = midnightDaysAgo(14);
 
-      expect(graph.requestsFor('inbox').single.toString(),
+      // First, not single, for the reason above: the reconcile follows.
+      expect(graph.requestsFor('inbox').first.toString(),
           deltaCursor('inbox', 'pre'),
           reason: 'adoption, not a widen: the cursor is still what drains');
       expect(await store.getPref(mailBootstrapFloorKey), anyOf(before, after));

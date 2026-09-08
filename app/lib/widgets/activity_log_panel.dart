@@ -77,6 +77,7 @@ class ActivityLogPanel extends StatefulWidget {
   static const Map<String, String> _kindLabels = {
     'sync_mail': 'Mail sync',
     'sync_teams': 'Teams sync',
+    'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
     'draft': 'Draft',
@@ -85,10 +86,19 @@ class ActivityLogPanel extends StatefulWidget {
     'storyline': 'Storylines',
     'storyline_sweep': 'Storyline sweep',
     'storyline_recruit': 'Storyline recruit',
+    'storyline_audit': 'Storyline re-check',
+    'storyline_unblock': 'Storyline allow again',
     'embed_fail': 'Embeddings',
     'restore': 'Restore',
+    'ignore': 'Ignore',
     'attachment_text': 'Read attachment',
     'attachment_digest': 'Attachment digest',
+    'needs_you': 'Needs You',
+    'needs_you_rejudge': 'Needs You re-judge',
+    'retry': 'Retry',
+    'embed_message': 'Embed message',
+    'storyline_refresh': 'Storyline refresh',
+    'storyline_recap': 'Storyline recap',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -106,6 +116,11 @@ class ActivityLogPanel extends StatefulWidget {
   };
 
   static String _label(String kind) => _kindLabels[kind] ?? kind;
+
+  /// The same names, for a screen that lists work items rather than activity
+  /// rows. Public so the two never drift into calling one kind two things —
+  /// `needs_you` on a queue and Needs You in the log is the same stage.
+  static String kindLabel(String kind) => _kindLabels[kind] ?? kind;
 
   static String _reason(Object? raw) {
     final reason = raw is String && raw.isNotEmpty ? raw : null;
@@ -162,6 +177,14 @@ class ActivityLogPanel extends StatefulWidget {
       case 'sync_teams':
         final count = e.count ?? 0;
         return count == 0 ? '$label — nothing new' : '$label — $count new';
+      // Only ever recorded when it found something — a reconcile that found
+      // nothing is the normal state and writes no row — so the sentence names
+      // what the delta feed had skipped rather than how much was checked.
+      case 'sync_reconcile':
+        final count = e.count ?? 0;
+        return count == 1
+            ? '$label — 1 message the delta feed skipped'
+            : '$label — $count messages the delta feed skipped';
       case 'triage':
         final parts = _parts([detail['urgency'], detail['category']]);
         return parts.isEmpty ? label : '$label — $parts';
@@ -182,6 +205,14 @@ class ActivityLogPanel extends StatefulWidget {
         return count == 1
             ? '$label — 1 message'
             : '$label — $count messages';
+      // The count IS the row here: a rules save that queued nothing writes no
+      // row at all, so the only thing this sentence has to say is how much
+      // work the owner's edit started.
+      case 'needs_you_rejudge':
+        final count = e.count ?? 0;
+        return count == 1
+            ? '$label — 1 message'
+            : '$label — $count messages';
       case 'compose':
         // The channel and how many people, and deliberately not who: the
         // panel is a record of what the app did, not a copy of the address
@@ -196,6 +227,8 @@ class ActivityLogPanel extends StatefulWidget {
         return 'Storylines updated';
       case 'restore':
         return 'Restored a filtered message';
+      case 'ignore':
+        return 'Ignored a message';
       case 'storyline_sweep':
         final proposed = detail['proposed'];
         final confirmed = detail['confirmed'];
@@ -227,6 +260,23 @@ class ActivityLogPanel extends StatefulWidget {
       case 'attachment_digest':
         final kind = detail['kind'];
         return kind is String && kind.isNotEmpty ? '$label — $kind' : label;
+      case 'storyline_audit':
+        final checked = detail['checked'];
+        final removed = detail['removed'];
+        if (checked is! num) return label;
+        return 'Re-checked ${checked.toInt()} '
+            '${checked == 1 ? 'thread' : 'threads'}, removed '
+            '${removed is List ? removed.length : 0}';
+      case 'storyline_unblock':
+        return 'Allowed a thread back into consideration';
+      // Names the stages rather than counting them: the whole question a
+      // person has after pressing Retry is WHICH work went back on a queue,
+      // and "3 stages" does not answer it.
+      case 'retry':
+        final stages = detail['stages'];
+        return stages is List && stages.isNotEmpty
+            ? 'Retried ${stages.join(', ')}'
+            : 'Retried owed stages';
       case 'storyline_recruit':
         final recruited = detail['recruited'];
         final considered = detail['considered'];

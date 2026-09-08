@@ -29,7 +29,16 @@ the boost, so NULL (never judged) and 0 (judged no) move **nothing** and score
 exactly as they did before the stage existed. And the verdict deliberately does
 not touch the **threshold** — it raises the score through the same arithmetic
 every other signal uses, and the user's slider still gates what reaches the
-rail. There is no bypass.
+rail. The one thing it does bypass is **Later**: an open ask on the thread
+vetoes the automatic low-value filing in `bucketFor`, between the sender rules
+and the quiet-FYI rule, so a thread nobody has answered cannot be quietly
+deferred. `MessageStore.openAskThreads` is where "open ask" is spelled — any
+inbound message with `needs_you_verdict = 1` received after the thread's last
+outbound message — and the sweep reads it once per pass, not once per thread.
+A person's standing rule still wins over it, and the threshold is untouched.
+The veto has no time bound, on purpose: an unanswered ask holds its thread out
+of automatic Later for as long as it stays unanswered, and the only exits are a
+reply, Done, or the owner's own Later.
 
 **Known documentation gap.** The code documents ownership rules well, but the
 scoring formula itself is under-commented — `recomputeAll` is the place to

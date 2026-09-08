@@ -219,7 +219,9 @@ void main() {
     await syncReaching(() => syncFloorDays).syncNow();
 
     final inbox = graph.requestsFor('inbox');
-    expect(inbox.length, 2);
+    // The dead cursor, the restart, and the reconcile behind them both — it
+    // runs on every pass of a mailbox that has never stamped one.
+    expect(inbox.length, 3);
     // The trap this test exists for: the 410 handler clears the cursor with
     // `setDeltaLink(folder, null)`, which stamps `synced_at` with now. A floor
     // recomputed here — rather than carried down from the top of the pass —

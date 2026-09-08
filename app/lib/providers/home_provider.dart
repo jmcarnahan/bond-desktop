@@ -54,6 +54,7 @@ String homeRowKey(HomeFeedRow row) => row.feedKey;
 typedef HomeSearchRunner = Future<MessageSearchResult> Function(
   String query, {
   bool includeDropped,
+  List<String> sources,
 });
 
 @immutable
@@ -428,6 +429,7 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
             result.query,
             result.hits,
             documents: result.documents,
+            notice: result.notice,
           ),
           searching: false,
         );
@@ -796,9 +798,16 @@ final homeFeedProvider =
     // Read inside the closure, so the search stack — the embedding client and
     // everything it holds — is built the first time somebody actually asks a
     // question rather than every time the feed loads.
-    searchRunner: (query, {includeDropped = false}) => ref
-        .read(messageSearchProvider)
-        .search(query, includeDropped: includeDropped),
+    searchRunner: (
+      query, {
+      includeDropped = false,
+      sources = const ['email', 'teams'],
+    }) =>
+        ref.read(messageSearchProvider).search(
+              query,
+              includeDropped: includeDropped,
+              sources: sources,
+            ),
     bus: ref.watch(progressBusProvider),
   );
 });
@@ -807,8 +816,13 @@ final homeFeedProvider =
 /// they answer is "what has the app been doing today".
 const Duration homeMetricsWindow = Duration(hours: 24);
 
+/// Through the store's own stamp helper, never `toIso8601String` — the cutoff
+/// is compared against `message_progress.updated_at` as a STRING, and Dart
+/// prints three fractional digits when the microseconds are zero and six
+/// otherwise. Two widths do not sort against each other; see
+/// [MessageStore.isoStamp].
 String _windowStart() =>
-    DateTime.now().toUtc().subtract(homeMetricsWindow).toIso8601String();
+    MessageStore.isoStamp(DateTime.now().subtract(homeMetricsWindow));
 
 /// The six numbers over the feed. autoDispose because they are cheap to
 /// re-read and stale the moment the pane is closed.
@@ -817,7 +831,15 @@ final homeMetricsProvider = FutureProvider.autoDispose<HomeMetrics>((ref) {
   // carries the previous value through the rebuild, so the numbers change
   // without the tiles ever blinking blank.
   ref.watch(homeFeedProvider.select((s) => s.metricsEpoch));
-  return ref.watch(messageStoreProvider).homeMetrics(sinceIso: _windowStart());
+  return ref.watch(messageStoreProvider).homeMetrics(
+        sinceIso: _windowStart(),
+        // Computed here and bound once, so every row the tile is counting is
+        // measured against the same instant the rows themselves are. Through
+        // `isoStamp` for [_windowStart]'s reason: this one is compared against
+        // a stored stamp.
+        stalledBeforeIso:
+            MessageStore.isoStamp(DateTime.now().subtract(homeStalledAfter)),
+      );
 });
 
 final hotStorylinesProvider =

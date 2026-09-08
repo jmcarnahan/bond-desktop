@@ -3,6 +3,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/notify/settled_event.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -49,6 +50,12 @@ void main() {
   /// has finished with AND that is worth announcing. Each argument below turns
   /// exactly one of those facts off, so a test names the single thing it is
   /// about and inherits the rest.
+  ///
+  /// The three pipeline arguments say what the RECORD says, not what the queue
+  /// holds: completeness now reads `message_progress` stages and a written
+  /// verdict, so a candidate the pipeline has finished with is one whose
+  /// stages are terminal and whose verdict exists — which is what the defaults
+  /// here spell out.
   Future<void> seedCandidate({
     String id = 'm-1',
     String key = 'conv-1',
@@ -64,6 +71,9 @@ void main() {
     bool replyExpected = true,
     String urgency = 'normal',
     String deadline = '',
+    bool? needsYouVerdict = false,
+    String extractState = 'done',
+    String storylineState = 'done',
   }) async {
     await store.upsertConversation({
       'source': source,
@@ -84,6 +94,18 @@ void main() {
       'is_read': isRead,
       'created_at': '2026-09-02T12:01:00.000Z',
     });
+    // The verdict before triage, because writing one stamps the message's
+    // `updated_at` too and the score has to end up newer than every write to
+    // the row. `null` leaves the message unjudged, which under the new
+    // completeness rule holds the candidate open.
+    if (needsYouVerdict != null) {
+      await store.writeNeedsYouVerdict(
+        source,
+        id,
+        verdict: needsYouVerdict,
+        reason: 'seeded',
+      );
+    }
     // Triage second, so the message's `updated_at` is the newer of the two by
     // the time the score is written — the order the completeness check wants.
     await store.writeTriage(
@@ -102,6 +124,10 @@ void main() {
             )
           : null,
     );
+    // The stages, on `message_progress` rather than on `messages`, so neither
+    // write disturbs the stamp ordering above.
+    await store.writeExtractProgress(source, id, state: extractState);
+    await store.writeStorylineProgress(source, key, state: storylineState);
     if (bucket != null) {
       await store.setConversationBucket(source, key, bucket: bucket);
     }
@@ -202,36 +228,50 @@ void main() {
       expect(emitted, isEmpty);
     });
 
-    test('an open extract work row holds the row open', () async {
+    test('a pending extract stage holds the row open, work row or not',
+        () async {
+      // The stage, not the queue. A message triaged mid-sync has no work rows
+      // at all — they are enqueued after both drains — and reading that as
+      // "finished" is what froze rows at `outcome = 'pending'` for good.
+      await seedCandidate(extractState: 'pending');
+      await sweep();
+
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      await store.writeExtractProgress('email', 'm-1', state: 'done');
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+    });
+
+    test('an open extract work row over a finished stage holds nothing',
+        () async {
+      // The other direction of the same rule: the queue is no longer
+      // consulted, so a stale or re-queued work row cannot hold a row whose
+      // stage has already been written.
       await seedCandidate();
       await store.enqueueWork('extract', 'email', 'm-1');
       await sweep();
 
-      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+    });
 
-      await store.writeWork('extract', 'email', 'm-1', status: 'done');
+    test('a stage the pipeline skipped counts as finished', () async {
+      // `skipped` is a real end state: a message the extractor was never going
+      // to look at is not one to keep waiting on.
+      await seedCandidate(extractState: 'skipped');
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
 
-    test('an absent extract row counts as finished, not as pending', () async {
-      // Never-queued is a real end state: a message the extractor was never
-      // going to look at is not one to keep waiting on.
-      await seedCandidate();
-      await sweep();
-      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
-    });
-
-    test("a sibling thread's open storyline work holds the row open", () async {
+    test('a pending storyline stage holds the row open', () async {
       // Keyed by conversation, deliberately: announcing a message under the
       // wrong storyline is worse than announcing it a few seconds late.
-      await seedCandidate();
-      await store.enqueueWork('storyline', 'email', 'conv-1');
+      await seedCandidate(storylineState: 'pending');
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
-      await store.writeWork('storyline', 'email', 'conv-1', status: 'done');
+      await store.writeStorylineProgress('email', 'conv-1', state: 'done');
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
@@ -258,29 +298,54 @@ void main() {
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
 
-    test('an open needs-you work row holds the row open', () async {
-      // Waited on exactly like extraction: the verdict it is about to write is
-      // an ask this settle reads, so settling first would announce — or stay
-      // silent about — a message on an answer that had not arrived.
-      await seedCandidate();
-      await store.enqueueWork('needs_you', 'email', 'm-1');
+    test('an unjudged message holds the row open until a verdict is written',
+        () async {
+      // Needs-you has no stage column, so the verdict itself is the record.
+      // Settling before it lands would announce — or stay silent about — a
+      // message on an answer that had not arrived.
+      await seedCandidate(needsYouVerdict: null);
       await sweep();
 
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
-      await store.writeWork('needs_you', 'email', 'm-1', status: 'done');
+      await store.writeNeedsYouVerdict('email', 'm-1',
+          verdict: false, reason: 'model says so');
+      await store.writeAttentionScore('email', 'conv-1', 0.9);
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
     });
 
-    test('an absent needs-you row counts as finished, not as pending',
+    test('a finished needs-you work row counts as judged with no verdict',
         () async {
-      // The gated and beyond-cap rows are never queued for this pass at all,
-      // and a row that waits for work nothing will ever enqueue would sit open
-      // until the deadline forced it.
-      await seedCandidate();
+      // The handler ends an item `done` on every one of its own guards —
+      // deleted, outbound, gated — without writing a verdict. Waiting past
+      // that would be waiting on nobody.
+      await seedCandidate(needsYouVerdict: null);
+      await store.enqueueWork('needs_you', 'email', 'm-1');
+      await store.writeWork('needs_you', 'email', 'm-1', status: 'done');
       await sweep();
+
       expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+    });
+
+    test('an unjudged message with no work row settles on the deadline',
+        () async {
+      // The accepted price of reading the record instead of the queue: a
+      // message past the 150-per-pass backlog cap has nothing enqueued for it
+      // yet, so it waits out the deadline rather than settling at once. A
+      // re-drain is not news.
+      await seedCandidate(needsYouVerdict: null);
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      now = armedAt
+          .add(NotificationCoordinator.settleDeadline)
+          .add(const Duration(seconds: 1));
+      await sweep();
+
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'notified');
+      expect(row['reason'], 'deadline');
     });
   });
 
@@ -406,14 +471,15 @@ void main() {
     /// the pipeline does in real life, and here it keeps these tests about
     /// worthiness rather than about completeness.
     Future<void> seedJudged(bool? verdict) async {
-      await seedCandidate(replyExpected: false);
-      if (verdict != null) {
-        await store.writeNeedsYouVerdict(
-          'email',
-          'm-1',
-          verdict: verdict,
-          reason: 'model says so',
-        );
+      await seedCandidate(replyExpected: false, needsYouVerdict: verdict);
+      if (verdict == null) {
+        // Unjudged is not a settled row on its own any more — completeness
+        // holds it open for the verdict. A finished work row is the other way
+        // a message counts as judged, and it is what the handler leaves behind
+        // when its own guards end the item without writing one, so these
+        // worthiness tests stay about worthiness.
+        await store.enqueueWork('needs_you', 'email', 'm-1');
+        await store.writeWork('needs_you', 'email', 'm-1', status: 'done');
       }
       await store.writeAttentionScore('email', 'conv-1', 0.9);
     }
@@ -482,10 +548,9 @@ void main() {
     test('an unfinished but worthy message is announced when time runs out',
         () async {
       // Complete and worthy on its own terms — what holds it open is the
-      // storyline pass, which is also what makes the null storyline below mean
-      // "not known yet" rather than "no storyline".
-      await seedCandidate();
-      await store.enqueueWork('storyline', 'email', 'conv-1');
+      // storyline stage, which is also what makes the null storyline below
+      // mean "not known yet" rather than "no storyline".
+      await seedCandidate(storylineState: 'pending');
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
@@ -508,10 +573,13 @@ void main() {
     test("a CTA this message's own triage wrote is still an ask at the deadline",
         () async {
       // Triaged, so the thread's CTA is this message's own words. What holds
-      // it open is the storyline pass, and the deadline settle quotes the ask
+      // it open is the storyline stage, and the deadline settle quotes the ask
       // it earned.
-      await seedCandidate(replyExpected: false, ctaText: 'Send the appraisal');
-      await store.enqueueWork('storyline', 'email', 'conv-1');
+      await seedCandidate(
+        replyExpected: false,
+        ctaText: 'Send the appraisal',
+        storylineState: 'pending',
+      );
       await sweep();
       expect(await notifyRow('m-1'), containsPair('state', 'pending'));
 
@@ -549,7 +617,10 @@ void main() {
 
     test('an unfinished, unremarkable message is dropped when time runs out',
         () async {
-      await seedCandidate(attentionScore: null);
+      // Unfinished on the storyline stage and scored below the threshold. The
+      // score has to exist: a candidate with none at all is given one more
+      // deadline's grace, which is the case below this one.
+      await seedCandidate(attentionScore: 0.1, storylineState: 'pending');
       await sweep();
       now = armedAt.add(const Duration(minutes: 7));
       await sweep();
@@ -558,6 +629,26 @@ void main() {
       expect(row['state'], 'suppressed');
       expect(row['reason'], 'deadline');
       expect(emitted, isEmpty);
+    });
+
+    test('a candidate with no score waits out one more deadline', () async {
+      // Settling a scoreless candidate scores it zero and writes the chip off,
+      // and nothing revisits it. The attention sweep runs on every list load,
+      // so one more deadline's grace is a cheap way to let the score land.
+      await seedCandidate(attentionScore: null);
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      now = armedAt.add(const Duration(minutes: 7));
+      await sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      now = armedAt.add(const Duration(minutes: 13));
+      await sweep();
+
+      final row = await notifyRow('m-1');
+      expect(row['state'], 'suppressed');
+      expect(row['reason'], 'deadline');
     });
   });
 
@@ -592,6 +683,8 @@ void main() {
         'received_at': '2026-09-02T11:55:00.000Z',
         'created_at': '2026-09-02T12:01:00.000Z',
       });
+      await store.writeNeedsYouVerdict('email', 'm-1',
+          verdict: false, reason: 'seeded');
       await store.writeTriage('email', 'm-1',
           status: 'triaged',
           result: const TriageResult(
@@ -601,6 +694,10 @@ void main() {
             needsAction: false,
             actionItems: [],
           ));
+      // The stages the pipeline would have written. Hand-seeded here because
+      // this row is built column by column rather than through `seedCandidate`.
+      await store.writeExtractProgress('email', 'm-1', state: 'done');
+      await store.writeStorylineProgress('email', 'conv-1', state: 'done');
       await store.writeAttentionScore('email', 'conv-1', 0.9);
       await sweep();
 
@@ -616,4 +713,93 @@ void main() {
       expect(emitted, hasLength(1));
     });
   });
+
+  /// What `message_progress` is left holding once the row settles — the value
+  /// the home screen's tile counts.
+  ///
+  /// These build their own coordinator, because the shared one runs with
+  /// progress writing disabled and the whole subject here is what it writes.
+  group('the settle snapshot', () {
+    Future<Map<String, Object?>> progressOf(String id) async {
+      final rows = await db.customSelect(
+        'SELECT * FROM message_progress WHERE source_message_id = ?',
+        variables: [Variable<String>(id)],
+      ).get();
+      return Map<String, Object?>.from(rows.single.data);
+    }
+
+    NotificationCoordinator recording(MessageStore over) {
+      final made = NotificationCoordinator(
+        over,
+        clock: () => now,
+        progress: PipelineProgress(over),
+      );
+      addTearDown(made.dispose);
+      made.noteSyncCompleted();
+      return made;
+    }
+
+    test('a verdict that lands mid-sweep is the one the snapshot takes',
+        () async {
+      // The candidates are captured at the top of the sweep and settled at the
+      // bottom of it. A verdict written in between used to be lost for good:
+      // the settle snapshotted the stale answer, and the correction refuses a
+      // row that was not settled yet when it ran.
+      final racing = _RacingStore(db);
+      final coordinator = recording(racing);
+
+      await seedCandidate(needsYouVerdict: false, replyExpected: false);
+      racing.onCandidatesRead = () => store.writeNeedsYouVerdict(
+            'email',
+            'm-1',
+            verdict: true,
+            reason: 'raced',
+          );
+
+      await coordinator.sweep();
+      await pumpEventQueue();
+
+      expect((await progressOf('m-1'))['needs_you'], 1);
+      expect(await notifyRow('m-1'), containsPair('state', 'notified'));
+    });
+
+    test('a gated settle never carries a chip', () async {
+      // The gate's answer beats the verdict: a dropped row is hidden from the
+      // feed, so a chip on it would only be a number nobody can open.
+      final coordinator = recording(store);
+      await seedCandidate(needsYouVerdict: true, triageStatus: 'pending');
+      await coordinator.sweep();
+      expect(await notifyRow('m-1'), containsPair('state', 'pending'));
+
+      await store.writeTriage(
+        'email',
+        'm-1',
+        status: 'skipped',
+        gateReason: 'newsletter',
+      );
+      await coordinator.sweep();
+      await pumpEventQueue();
+
+      final row = await progressOf('m-1');
+      expect(row['needs_you'], 0);
+      expect(row['dropped'], 1);
+    });
+  });
+}
+
+/// A store that lets a test write to the database in the window between the
+/// sweep reading its candidates and settling them.
+class _RacingStore extends MessageStore {
+  _RacingStore(super.db);
+
+  Future<void> Function()? onCandidatesRead;
+
+  @override
+  Future<List<Map<String, Object?>>> openNotifyCandidates({
+    int limit = 50,
+  }) async {
+    final rows = await super.openNotifyCandidates(limit: limit);
+    await onCandidatesRead?.call();
+    return rows;
+  }
 }

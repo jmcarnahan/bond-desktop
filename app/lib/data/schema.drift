@@ -226,6 +226,14 @@ CREATE TABLE storyline_member_blocks (
   source TEXT NOT NULL DEFAULT 'email',
   conversation_key TEXT NOT NULL,
   blocked_at TEXT NOT NULL,
+  -- Who wrote the block and what they (or the model) thought at the time.
+  -- 'user' is the owner's own "no"; 'audit' is the re-check pass that runs
+  -- after a removal (see StorylineService.audit). Only the owner's blocks
+  -- teach the confirm prompt; the audit's are a consequence, not a lesson.
+  blocked_by TEXT NOT NULL DEFAULT 'user',
+  -- The member's evidence at removal time (the owner's removal) or the
+  -- audit's own reason — so a negative example says what the model thought.
+  evidence TEXT,
   PRIMARY KEY (storyline_id, source, conversation_key)
 ) STRICT;
 

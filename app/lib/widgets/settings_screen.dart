@@ -119,6 +119,18 @@ class SettingsScreen extends StatefulWidget {
   /// [needsYouDefaultRules] are in force.
   final String needsYouRules;
 
+  /// How many needs-you judgements are queued right now — the whole queue,
+  /// not only what the last Save put there.
+  ///
+  /// The section's summary says so while the re-judge a Save started is still
+  /// running, which is the only feedback the owner gets that editing the rules
+  /// did anything at all: the verdicts move minutes later, on a queue this
+  /// screen does not show. The wording is "judging", not "re-judging", because
+  /// the count cannot tell a Save's rows from a sync's, and a summary that
+  /// called a fresh backlog a re-judge would be claiming an edit that never
+  /// happened.
+  final int needsYouRejudging;
+
   final String needsYouDefaultRules;
   final String needsYouFixedTail;
   final int needsYouRulesMaxLength;
@@ -174,6 +186,13 @@ class SettingsScreen extends StatefulWidget {
   final String? lastMailSyncIso;
   final String? lastTeamsSyncIso;
   final String? lastSweepIso;
+
+  /// When the mail reconcile — the re-enumeration that catches what the delta
+  /// feed skipped — last finished. Its own row because it runs on its own
+  /// cadence: a mail sync minutes fresher than this one is the normal state,
+  /// and a reader asking whether the safety net is alive cannot tell from the
+  /// sync stamp above.
+  final String? lastReconcileIso;
 
   /// The clock the relative times are measured against. Passed rather than
   /// read from [DateTime.now] so a test can pin it and assert an exact string.
@@ -252,6 +271,7 @@ class SettingsScreen extends StatefulWidget {
     this.onSignIn,
     this.onSignOutOfServer,
     this.needsYouRules = '',
+    this.needsYouRejudging = 0,
     this.needsYouDefaultRules = '',
     this.needsYouFixedTail = '',
     this.needsYouRulesMaxLength = 4000,
@@ -274,6 +294,7 @@ class SettingsScreen extends StatefulWidget {
     this.lastMailSyncIso,
     this.lastTeamsSyncIso,
     this.lastSweepIso,
+    this.lastReconcileIso,
     this.now = DateTime.now,
     this.onRefreshNow,
     this.mailLookbackDays = 14,
@@ -737,6 +758,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: BondSpacing.s12),
         ],
         _stampRow('Mail', widget.lastMailSyncIso, now),
+        // Directly under the mail stamp, because it is a fact about that pull
+        // and reads as a qualification of it.
+        _stampRow('Mail reconcile', widget.lastReconcileIso, now),
         _stampRow('Teams', widget.lastTeamsSyncIso, now),
         _stampRow('Storyline sweep', widget.lastSweepIso, now),
         const SizedBox(height: BondSpacing.s12),
@@ -1032,7 +1056,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         : _rulesAreCustom
         ? ' · custom rules'
         : ' · default rules';
-    return '${_thresholdWording()}$rules';
+    // Last, after what the rules ARE, because it is the transient half: the
+    // rules are the state, this is a queue draining behind them.
+    final count = widget.needsYouRejudging;
+    final rejudging = count == 0
+        ? ''
+        : ' · judging $count ${count == 1 ? 'message' : 'messages'}';
+    return '${_thresholdWording()}$rules$rejudging';
   }
 
   Widget _needsYouBody() {

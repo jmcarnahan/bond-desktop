@@ -61,7 +61,7 @@ class ArchiveState {
   final bool searching;
 
   /// Only ever the sentence for a search that could not be RUN. A search that
-  /// ran on text alone carries its own notice on [ArchiveSearch] instead,
+  /// ran on one half alone carries its own notice on [ArchiveSearch] instead,
   /// because that one is a fact about the results underneath it.
   final String? searchNotice;
 
@@ -212,7 +212,7 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
   ///
   /// Unlike Home, a result ALWAYS swaps the body in. Home refuses when the
   /// index is down because it would be trading a working feed for an empty
-  /// list; here the search still ran — the text pass answered — so a result
+  /// list; here the search still ran — the other half answered — so a result
   /// carrying a notice is still a result, and the notice rides on it.
   /// [ArchiveState.searchNotice] is left for the one case that is not an
   /// answer at all: the runner throwing.

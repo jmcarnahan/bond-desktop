@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../data/message_store.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
@@ -5,8 +7,10 @@ import 'attachments/attachment_digest_lines.dart';
 import 'ai_worker.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
+import 'attention.dart';
 import 'llm/needs_you_task.dart';
 import 'needs_you.dart';
+import 'pipeline_progress.dart';
 
 /// Who the owner is, asked lazily. A record rather than two arguments so
 /// "the app does not know yet" is one null rather than two — a keychain that
@@ -47,6 +51,16 @@ typedef OwnerLookup = Future<({String? name, String? address})?> Function();
 /// stage column, so an arm here would write nothing and read as an oversight
 /// to the next person who "fixes" it. The generic parking above those ladders
 /// still applies: a model that is not running parks the whole kind.
+///
+/// It does move ONE `message_progress` column, and it is not a stage. The
+/// `needs_you` flag on a settled row is a snapshot of the verdict taken at
+/// settle time, so a verdict this pass CHANGES leaves the chip beside it
+/// showing the old answer — a home screen disagreeing with the row it reads
+/// from. When, and only when, the stored verdict moves, the tail below hands
+/// the message to [PipelineProgress.refreshNeedsYou], which re-asks
+/// `notifyWorthy` and rewrites the flag. A re-verdict that returns the SAME
+/// answer writes nothing, which is what keeps a chip cleared by a reply or by
+/// a Done from coming back.
 class NeedsYouHandler extends WorkHandler {
   static const String _source = 'email';
 
@@ -76,13 +90,28 @@ class NeedsYouHandler extends WorkHandler {
   String? _rulesText;
   NeedsYouTask _task = const NeedsYouTask();
 
+  /// Where a changed verdict goes. Defaulted to the disabled recorder, like
+  /// every instrumented constructor in this app, so the tests that only care
+  /// about the verdict build this handler unchanged.
+  final PipelineProgress _pipeline;
+
+  /// The user's attention floor, read the same way the settle machine reads
+  /// it. A callback rather than a value because the slider moves under a
+  /// handler that is built once, and the flag this writes has to mean what the
+  /// tiles elsewhere mean.
+  final Future<double> Function()? _threshold;
+
   NeedsYouHandler(
     this._store,
     this._client, {
     ActivityLog? activityLog,
     OwnerLookup? owner,
+    PipelineProgress progress = const PipelineProgress.disabled(),
+    Future<double> Function()? attentionThreshold,
   })  : _log = activityLog ?? ActivityLog.disabled(),
-        _owner = owner ?? (() async => null);
+        _owner = owner ?? (() async => null),
+        _pipeline = progress,
+        _threshold = attentionThreshold;
 
   @override
   String get kind => 'needs_you';
@@ -131,6 +160,12 @@ class NeedsYouHandler extends WorkHandler {
       return;
     }
 
+    // Read BEFORE either branch writes, because "did the verdict move" is the
+    // whole condition on the chip rewrite below and there is no other record
+    // of what it was. Stored shape, not Dart's: 0, 1 or null, where null is
+    // "never judged" and differs from both.
+    final previous = _int(row['needs_you_verdict']);
+
     if (needsYouFloor(row)) {
       await _store.writeNeedsYouVerdict(
         source,
@@ -139,6 +174,7 @@ class NeedsYouHandler extends WorkHandler {
         reason: 'teams_direct',
       );
       _log.note({'verdict': true, 'reason': 'teams_direct'});
+      await _followChip(source, id, previous: previous, verdict: true);
       return;
     }
 
@@ -212,7 +248,51 @@ class NeedsYouHandler extends WorkHandler {
       reason: result.evidence,
     );
     _log.note({'verdict': verdict, 'confidence': result.confidence});
+    await _followChip(source, id, previous: previous, verdict: verdict);
   }
+
+  /// Moves the settled row's Needs You chip when — and only when — this pass
+  /// changed the answer.
+  ///
+  /// The comparison is against the STORED shape, so a first verdict (`null` →
+  /// 0 or 1) counts as a change and a repeat of either answer does not. That
+  /// asymmetry is the point: a repeat must write nothing, or a chip the user
+  /// cleared by replying would come back every time the row was re-judged.
+  ///
+  /// Nothing here can fail the item. The recorder swallows its own errors, and
+  /// the threshold read below degrades to the default: a chip that did not
+  /// follow is a stale square on the home screen, and re-running a model call
+  /// over it would be the more expensive mistake.
+  Future<void> _followChip(
+    String source,
+    String id, {
+    required int? previous,
+    required bool verdict,
+  }) async {
+    if (previous == (verdict ? 1 : 0)) return;
+    await _pipeline.refreshNeedsYou(
+      source,
+      id,
+      threshold: await _thresholdOrDefault(),
+    );
+  }
+
+  /// The settle machine's own reader, degraded the settle machine's way — see
+  /// `NotificationCoordinator._attentionThreshold`. A preference that cannot
+  /// be read is a default, never a failed item.
+  Future<double> _thresholdOrDefault() async {
+    final read = _threshold;
+    if (read == null) return AttentionTuning.defaultThreshold;
+    try {
+      return await read();
+    } catch (e) {
+      debugPrint('needs_you: reading the attention threshold failed: $e');
+      return AttentionTuning.defaultThreshold;
+    }
+  }
+
+  /// The stored verdict as it sits on the row: 0, 1, or null for never judged.
+  static int? _int(Object? value) => (value as num?)?.toInt();
 
   /// The task for one pref reading, built at most once per distinct text.
   ///

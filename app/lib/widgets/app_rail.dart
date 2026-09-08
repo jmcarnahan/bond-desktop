@@ -4,6 +4,7 @@ import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../theme/tokens.dart';
+import 'dismissed_storylines_fold.dart';
 import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
@@ -157,8 +158,10 @@ String laterDayLabel(String dayKey, int count) {
 /// already sorts proposals newest-first and live ones by recent activity, and
 /// re-sorting here would be a second opinion about the same thing.
 ///
-/// Dismissed and archived storylines never reach the rail; the store's default
-/// query does not return them.
+/// Archived storylines never reach the rail and dismissed ones never reach
+/// THIS list; the store's default query returns neither. Dismissed storylines
+/// arrive separately, as [AppRail.dismissed], and the rail shows them only
+/// under a fold of their own.
 List<Storyline> storylineRows(List<Storyline> all) => [
       for (final s in all)
         if (s.isSuggested) s,
@@ -208,6 +211,14 @@ class AppRail extends StatefulWidget {
   /// the normal state before the clustering pass has run, and the section
   /// says so rather than going blank.
   final List<Storyline> storylines;
+
+  /// The storylines the user said no to, folded away under the live ones.
+  ///
+  /// Dismissing was the one storyline decision that had no way back: the row
+  /// left the rail and nothing on screen remembered it. The list is folded
+  /// because it is history rather than a queue — nothing here is asking for
+  /// anything — but it is reachable, and every row in it can be restored.
+  final List<Storyline> dismissed;
 
   /// The open thread, when one is open.
   final String? selectedId;
@@ -266,6 +277,10 @@ class AppRail extends StatefulWidget {
   final void Function(String storylineId)? onKeepSuggestion;
   final void Function(String storylineId)? onDismissSuggestion;
 
+  /// Puts a dismissed storyline back as a suggestion. Null leaves the fold's
+  /// Restore buttons inert.
+  final void Function(String storylineId)? onRestoreStoryline;
+
   /// Account block, refresh, sign-out — built by the screen, pinned to the
   /// bottom by the rail.
   final Widget? footer;
@@ -279,6 +294,7 @@ class AppRail extends StatefulWidget {
     required this.onSelectConversation,
     required this.onSelectSection,
     this.storylines = const [],
+    this.dismissed = const [],
     this.selectedStorylineId,
     this.selectedLaterDay,
     this.laterCount = 0,
@@ -289,6 +305,7 @@ class AppRail extends StatefulWidget {
     this.onSelectLaterDay,
     this.onKeepSuggestion,
     this.onDismissSuggestion,
+    this.onRestoreStoryline,
     this.footer,
   });
 
@@ -368,6 +385,14 @@ class _AppRailState extends State<AppRail> {
                     rows: [
                       for (final s in storylineRows(widget.storylines))
                         _storylineItem(s),
+                      // Under the live rows, and behind a fold: what the user
+                      // already said no to must not compete with what is
+                      // still asking.
+                      if (widget.dismissed.isNotEmpty)
+                        DismissedStorylinesFold(
+                          dismissed: widget.dismissed,
+                          onRestore: widget.onRestoreStoryline,
+                        ),
                     ],
                     placeholder: 'Suggestions arrive after processing',
                   ),

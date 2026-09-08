@@ -247,6 +247,132 @@ void main() {
       expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isTrue);
     });
 
+    test("a removal copies the member's evidence onto the block", () async {
+      await seedStoryline('sl-1');
+      await store.addStorylineMember('sl-1', 'email', 'c1',
+          addedBy: 'auto', evidence: 'Both concern the website redesign.');
+
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+
+      // The member row is gone, so the block is the only surviving record of
+      // what the model thought when it filed the thread.
+      final block = (await store.blocksOf('sl-1')).single;
+      expect(block.conversationKey, 'c1');
+      expect(block.blockedBy, 'user');
+      expect(block.blockedByUser, isTrue);
+      expect(block.evidence, 'Both concern the website redesign.');
+      expect(block.blockedAt, isNotEmpty);
+    });
+
+    test('an explicit evidence beats the copy, and the provenance rides along',
+        () async {
+      await seedStoryline('sl-1');
+      await store.addStorylineMember('sl-1', 'email', 'c1',
+          addedBy: 'auto', evidence: 'Both concern the website redesign.');
+
+      await store.removeStorylineMember('sl-1', 'email', 'c1',
+          block: true, blockedBy: 'audit', evidence: 'Different launch.');
+
+      final block = (await store.blocksOf('sl-1')).single;
+      expect(block.blockedBy, 'audit');
+      expect(block.blockedByUser, isFalse);
+      expect(block.evidence, 'Different launch.');
+    });
+
+    test('a member with no evidence blocks with none, never "null"', () async {
+      await seedStoryline('sl-1');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'user');
+
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+
+      expect((await store.blocksOf('sl-1')).single.evidence, isNull);
+    });
+
+    test('a second block keeps the first provenance', () async {
+      await seedStoryline('sl-1');
+      await store.addStorylineMember('sl-1', 'email', 'c1',
+          addedBy: 'auto', evidence: 'the owner took this out');
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+
+      await store.removeStorylineMember('sl-1', 'email', 'c1',
+          block: true, blockedBy: 'audit', evidence: 'the audit says no');
+
+      // INSERT OR IGNORE: the first "no" is the one that was reasoned about,
+      // and an audit must not overwrite the owner's word with its own.
+      final block = (await store.blocksOf('sl-1')).single;
+      expect(block.blockedBy, 'user');
+      expect(block.evidence, 'the owner took this out');
+    });
+
+    test('unblocking deletes the block and leaves the members alone', () async {
+      await seedStoryline('sl-1');
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'c2', addedBy: 'auto');
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+
+      await store.unblockStorylineMember('sl-1', 'email', 'c1');
+
+      expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
+      expect(await store.blocksOf('sl-1'), isEmpty);
+      // NOT re-added: lifting a veto is not making a membership.
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['c2']);
+    });
+
+    test('blocksOf reads newest first, carries the subject, and filters',
+        () async {
+      await seedStoryline('sl-1');
+      await seedConversation('c1', subject: 'Homepage copy');
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      await store.removeStorylineMember('sl-1', 'email', 'c2',
+          block: true, blockedBy: 'audit');
+      // Written at millisecond resolution, so the order is pinned rather than
+      // trusted to two writes landing in different milliseconds.
+      await db.customUpdate(
+        "UPDATE storyline_member_blocks SET blocked_at = "
+        "CASE conversation_key WHEN 'c1' THEN '2026-09-01T10:00:00Z' "
+        "ELSE '2026-09-02T10:00:00Z' END",
+      );
+
+      final all = await store.blocksOf('sl-1');
+      expect(all.map((b) => b.conversationKey), ['c2', 'c1']);
+      // The subject rides along, and is null when the conversation row was
+      // never written — the block outlives the thread.
+      expect(all.last.subject, 'Homepage copy');
+      expect(all.first.subject, isNull);
+
+      expect(
+        (await store.blocksOf('sl-1', blockedBy: 'user'))
+            .map((b) => b.conversationKey),
+        ['c1'],
+      );
+      expect(
+        (await store.blocksOf('sl-1', blockedBy: 'audit'))
+            .map((b) => b.conversationKey),
+        ['c2'],
+      );
+      expect(await store.blocksOf('sl-2'), isEmpty);
+    });
+
+    test('userMembersOf is the hand-filed threads, newest first', () async {
+      await seedStoryline('sl-1');
+      await store.addStorylineMember('sl-1', 'email', 'auto1', addedBy: 'auto');
+      await store.addStorylineMember('sl-1', 'email', 'u1', addedBy: 'user');
+      await store.addStorylineMember('sl-1', 'email', 'u2', addedBy: 'user');
+      await db.customUpdate(
+        "UPDATE storyline_members SET added_at = "
+        "CASE conversation_key WHEN 'u1' THEN '2026-09-01T10:00:00Z' "
+        "ELSE '2026-09-02T10:00:00Z' END",
+      );
+
+      expect(
+        (await store.userMembersOf('sl-1')).map((m) => m.conversationKey),
+        ['u2', 'u1'],
+      );
+      // The automatic members are still members, and still read by membersOf.
+      expect(await store.membersOf('sl-1'), hasLength(3));
+    });
+
     test('removing without block records nothing', () async {
       await seedStoryline('sl-1');
       await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');

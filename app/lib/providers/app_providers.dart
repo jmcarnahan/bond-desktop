@@ -49,6 +49,7 @@ import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
 import '../services/pipeline_progress.dart';
+import '../services/pipeline_repair_service.dart';
 import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
@@ -209,6 +210,21 @@ final pipelineProgressProvider = Provider<PipelineProgress>(
   ),
 );
 
+/// The user's attention floor, read fresh on every call.
+///
+/// A shared closure rather than three copies of the same four lines, because
+/// three things now judge against this number and they have to judge against
+/// the SAME one: the settle machine deciding whether to interrupt, the
+/// needs-you handler moving a chip after a re-verdict, and the sync's one-shot
+/// backfill raising chips over history. A slider read differently by any of
+/// them is a tile disagreeing with the toast it came from.
+Future<double> Function() attentionThresholdReader(MessageStore store) =>
+    () async {
+      final raw = await store.getPref(attentionThresholdKey);
+      return (raw == null ? null : double.tryParse(raw)) ??
+          AttentionTuning.defaultThreshold;
+    };
+
 /// The settle machine. Watches ONLY the store and the log, so a backend
 /// switch — which rebuilds the session, both backends, the sync service and
 /// the queues — leaves it standing: rebuilding it would reset the arm and
@@ -219,11 +235,7 @@ final notificationCoordinatorProvider = Provider<NotificationCoordinator>((ref) 
     store,
     activityLog: ref.watch(activityLogProvider),
     progress: ref.watch(pipelineProgressProvider),
-    attentionThreshold: () async {
-      final raw = await store.getPref(attentionThresholdKey);
-      return (raw == null ? null : double.tryParse(raw)) ??
-          AttentionTuning.defaultThreshold;
-    },
+    attentionThreshold: attentionThresholdReader(store),
   );
   unawaited(coordinator.start());
   ref.onDispose(coordinator.dispose);
@@ -356,6 +368,9 @@ final syncServiceProvider = Provider<MailSync>(
     userAddress: () => ref.read(authSessionProvider).storedAccount.then(
           (account) => account?.mail ?? account?.userPrincipalName,
         ),
+    // For the one-shot needs-you backfill, which judges history against the
+    // same floor the settle machine judges live mail against.
+    attentionThreshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
     // `ref.read` inside the closure, never `watch`: watching would rebuild
     // this provider — and abort the drain running on it — the moment someone
     // moved the setting, the same hazard [llmClientProvider] documents below.
@@ -563,6 +578,23 @@ final restoreServiceProvider = Provider<RestoreService>(
   ),
 );
 
+/// Retrying the stages one stalled message still owes.
+///
+/// A plain `Provider` and `read` inside the pump closures, both for
+/// [restoreServiceProvider]'s reasons — see its comment; this is the same
+/// wiring over the same two drains, for the rows Restore is not about.
+final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
+  (ref) => PipelineRepairService(
+    ref.watch(messageStoreProvider),
+    progress: ref.watch(pipelineProgressProvider),
+    pumpTriage: () => ref.read(triageQueueProvider).pump(),
+    pumpWork: () => ref.read(aiWorkerProvider).pump(),
+    // For the settle backstop a Retry runs when a row owes no stage at all.
+    threshold: attentionThresholdReader(ref.watch(messageStoreProvider)),
+    activityLog: ref.watch(activityLogProvider),
+  ),
+);
+
 /// The AI work queue. One for the whole app, for the same reason there is one
 /// [triageQueueProvider]: it is one queue over shared rows.
 ///
@@ -584,6 +616,12 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // Bulk work: the fast server. See [fastLlmClientProvider].
         ref.watch(fastLlmClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        // A verdict this pass CHANGES has to move the chip beside it, and
+        // moving it means re-asking `notifyWorthy` — which needs the recorder
+        // to write through and the same floor the settle machine used.
+        progress: ref.watch(pipelineProgressProvider),
+        attentionThreshold:
+            attentionThresholdReader(ref.watch(messageStoreProvider)),
         // A callback, not a value: the account is a keychain read, and this
         // provider is built by plenty that never drains. The handler asks
         // once, on the first message that reaches the model; until the answer
@@ -666,6 +704,14 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // recruit that files threads queues a refresh for the next pump rather
       // than this one, which is what keeps the two from chasing each other.
       StorylineRefreshHandler(storylines),
+      // Between the refresh and the recruit, and both halves are the point.
+      // After the refresh, so a removal's audit judges against the charter the
+      // refresh has just narrowed rather than the one that admitted the thread
+      // the user threw out. Before the recruit, so the blocks the audit writes
+      // already exist when the recruit excludes blocked threads — an audit
+      // removal the recruit could not see would be filed straight back in this
+      // same drain.
+      StorylineAuditHandler(storylines),
       // After the sweep and before drafts: a recruit is rare — it only exists
       // when a charter was just saved, or a refresh moved one — and the
       // threads it files are exactly what the draft below should know about.

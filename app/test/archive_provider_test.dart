@@ -279,13 +279,13 @@ void main() {
       expect(notifier.state.searching, false);
     });
 
-    test('a result that only text could answer still lands as results',
+    test('a result that only the words could answer still lands as results',
         () async {
       final notifier = notifierWith(
         (query) async => ArchiveSearchResult(
           query,
           [row('a')],
-          'Text matches only — the embedding server is not reachable.',
+          'Words only — the embedding server is not reachable.',
         ),
       );
 
@@ -294,7 +294,7 @@ void main() {
       // The difference from Home: the search RAN, so the body swaps and the
       // sentence rides on the rows rather than in place of them.
       expect(notifier.state.search, isNotNull);
-      expect(notifier.state.search?.notice, startsWith('Text matches only'));
+      expect(notifier.state.search?.notice, startsWith('Words only'));
       expect(notifier.state.searchNotice, null);
     });
 
