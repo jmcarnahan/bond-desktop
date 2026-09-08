@@ -135,6 +135,9 @@ void main() {
     expect(find.text('Renewal paperwork'), findsOneWidget);
   });
 
+  // The widget's contract with its chrome, not a route the shell takes: the
+  // inbox seats this host with `chrome: false` inside a side panel, whose ✕
+  // is the only way out. A second host with chrome would rely on this.
   testWidgets('Back is the host\'s, not the pane\'s', (tester) async {
     await seed();
     var backs = 0;

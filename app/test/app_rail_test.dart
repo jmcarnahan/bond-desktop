@@ -4,6 +4,7 @@ import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/bond_avatar.dart';
+import 'package:bond_inbox/widgets/dismissed_storylines_fold.dart';
 import 'package:bond_inbox/widgets/find_filter.dart';
 import 'package:bond_inbox/widgets/people_rooms.dart';
 import 'package:flutter/material.dart';
@@ -1465,6 +1466,27 @@ void main() {
       expect(find.byIcon(Icons.restore), findsOneWidget);
       // The only badge on the section is the live row's open count.
       expect(find.text('3'), findsOneWidget);
+    });
+
+    testWidgets('the fold is painted with the rail\'s own fill', (tester) async {
+      // The fold defaults to the ink the old rail wore; inside the burgundy
+      // column it has to be told. A revert to the default would paint a dark
+      // green patch in the rail with nothing else failing.
+      await pumpRail(
+        tester,
+        storylines: const [],
+        dismissed: [
+          _storyline(id: 'sl-9', title: 'Office move', status: 'dismissed'),
+        ],
+      );
+
+      final material = tester.widget<Material>(find
+          .ancestor(
+            of: find.byKey(DismissedStorylinesFold.headerKey),
+            matching: find.byType(Material),
+          )
+          .first);
+      expect(material.color, BondColors.rail);
     });
   });
 

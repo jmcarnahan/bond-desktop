@@ -436,7 +436,11 @@ void main() {
         0,
         MessageSearchHits('invoice', [
           SearchHit(row: _row('a'), score: 0.5, matchedBy: MatchedBy.meaning),
-          SearchHit(row: _row('b', fromName: 'Eric Vance'), score: 0.5, matchedBy: MatchedBy.meaning),
+          SearchHit(
+            row: _row('b', fromName: 'Eric Vance'),
+            score: 0.5,
+            matchedBy: MatchedBy.meaning,
+          ),
         ]),
       );
       await search;
@@ -454,7 +458,11 @@ void main() {
         0,
         MessageSearchHits('invoice', [
           SearchHit(row: _row('plain'), score: 0.5, matchedBy: MatchedBy.meaning),
-          SearchHit(row: _row('attached', hasAttachments: true), score: 0.5, matchedBy: MatchedBy.meaning),
+          SearchHit(
+            row: _row('attached', hasAttachments: true),
+            score: 0.5,
+            matchedBy: MatchedBy.meaning,
+          ),
         ]),
       );
       await search;

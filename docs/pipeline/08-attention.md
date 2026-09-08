@@ -107,4 +107,20 @@ It is called from **one** place: `ConversationsNotifier.load()`, immediately
 before `recomputeAll` and so immediately before the read that renders the rows.
 Every path that refreshes the list runs `load()` — the sixty-second poll, the
 refresh button, every Later action — so one call site covers them all, and the
-sweep that follows sees the `'user'` reason and leaves the row alone.
+sweep that follows sees the `'user'` reason and leaves the row alone. It
+returns the `(source, conversation_key)` pairs it moved rather than a count,
+because the caller has one more thing to do with them.
+
+**The chips come back with the thread.** `message_progress.needs_you` is a
+snapshot taken at settle, and a message that settles while its thread sits in
+Later takes a 0 on the strength of the bucket alone — `notifyWorthy`'s Later
+clause. Afterwards the snapshot follows the *verdict* only (see
+[11-needs-you.md](11-needs-you.md#the-chip-follows-the-verdict)), and lifting
+a bucket moves no verdict. So both ways out of Later for one thread — a date
+that arrived, and Keep in inbox — run
+`PipelineProgress.raiseNeedsYouForThread`, which is the one-shot backfill's
+own raise-only statement scoped to that thread, under the same guards (the
+thread's `done`, its last reply, the attention floor), ticking each row it
+raises. Without it a message judged yes came back to the inbox with no chip,
+for good. A sender rule lifting (`restoreSenderPref`) does not yet do this —
+recorded as a follow-up.

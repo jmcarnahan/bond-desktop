@@ -73,7 +73,7 @@ body has the same shape in `settings_models_body.dart`.
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
 | Models | `onSlotTargetChanged` wired | `Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` |
-| Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired |
+| Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
 | Home & feed | `onHomeShowDroppedChanged` wired | `Dropped messages shown` / `Dropped messages hidden` |
@@ -322,13 +322,18 @@ behind it, paced by the backlog caps rather than truncated by them — see
 a second clause about the window would make the summary two reports instead of
 one, and the table above is pinned verbatim by tests either way.
 
-The three stamps come from `syncStampsProvider`
-(`app/lib/providers/activity_provider.dart`), which `_settings()` **watches** —
-it re-reads on every recorded event, so a sync landing behind an open Settings
-pane moves the numbers in it. It is split from `activitySnapshotProvider` on
-purpose: the snapshot pays for the whole activity pane (three hundred events
-and every conversation subject) per event, and this section needs three
-preference reads. `sync_stamps_provider_test.dart` pins it. Times are relative
+The four stamps — `Mail`, `Mail reconcile`, `Teams`, `Storyline sweep` — come
+from `syncStampsProvider` (`app/lib/providers/activity_provider.dart`), which
+`_settings()` **watches** — it re-reads on every recorded event, so a sync
+landing behind an open Settings pane moves the numbers in it. `Mail reconcile`
+sits directly under `Mail` because it qualifies it: the 24-hour re-enumeration
+that catches what the delta feed skipped runs on its own cadence, and a mail
+sync minutes fresher than it is the normal state (see
+[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md)). The provider is
+split from `activitySnapshotProvider` on purpose: the snapshot pays for the
+whole activity pane (three hundred events and every conversation subject) per
+event, and this section needs four preference reads.
+`sync_stamps_provider_test.dart` pins it. Times are relative
 and in one unit (`relativeTime` in `app/lib/widgets/time_format.dart`), and
 `null` reads as `never` in the rows. The clock is a `now` parameter rather than
 a call to `DateTime.now`, so a test can pin it and assert an exact string.

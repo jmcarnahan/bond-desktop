@@ -52,6 +52,10 @@ List<String> recipientsFromJson(Object? raw) =>
 
 /// sqlite has no bool: STRICT columns hold 0/1 integers. Null stays null —
 /// "not triaged yet" is not the same as "no action needed".
+///
+/// `HomeFeedRow.fromRow` reads `needs_you_verdict` with the stricter `== 1`;
+/// the store writes only 0/1/NULL, so the two readings agree on every stored
+/// value. Keep them agreeing if either moves.
 bool? _boolFromInt(Object? raw) => raw == null ? null : raw != 0;
 
 /// Where a conversation sits in the reply lifecycle. An unrecognized value

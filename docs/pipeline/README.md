@@ -123,7 +123,7 @@ is the one place that provider is read and every lever below is wired; the
 screen itself is prop-driven. The shell seats it BESIDE the main pane, as the
 `HistoryPanel` kind of side panel inside a `SidePanelHost` (`chrome: false`, the
 host draws the header), so whatever the question was asked from — the home
-table, a thread, a storyline — stays on screen, and the storyline picker its
+table, a thread, the archive — stays on screen, and the storyline picker its
 `Add to storyline…` opens draws in the main pane while the story stays beside.
 See [../shell.md](../shell.md#what-opens-where).
 

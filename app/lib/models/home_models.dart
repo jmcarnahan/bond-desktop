@@ -202,7 +202,10 @@ class HomeFeedRow {
         hasAttachments: (row['has_attachments'] as num?)?.toInt() == 1,
         updatedAt: row['updated_at'] as String? ?? '',
         // Three-valued on purpose: null stays null, and only a stored 1 is a
-        // yes. Anything else the column could hold is a no.
+        // yes. Anything else the column could hold is a no. `Message.fromRow`
+        // reads the same column through its `_boolFromInt` (non-zero is a
+        // yes); the store normalises the column to 0/1/NULL, so the two agree
+        // on every value it can hold — keep them agreeing if either moves.
         needsYouVerdict: switch (row['needs_you_verdict'] as num?) {
           null => null,
           final n => n.toInt() == 1,

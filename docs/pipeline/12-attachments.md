@@ -656,7 +656,8 @@ was only one of its seven answers.
 A chip is a tap target. Tapping it puts the file **beside** whatever the reader
 was looking at, because a preview is read against the message that carried it.
 The panel is the shell's now, not the thread pane's: `_side` holds one
-`SidePanel` — a `FilePanel` or a `ThreadPanel` — and `_wide()` renders it as
+`SidePanel` — a `FilePanel` here; the five kinds are tabled in
+[../shell.md](../shell.md#what-opens-where) — and `_wide()` renders it as
 the last column of the shell's `Row`, so a file opens beside a thread, beside a
 storyline's spine, and beside a thread that is itself in the side panel (where
 it REPLACES that thread, one thing at a time on that side of the seam).
@@ -1129,9 +1130,10 @@ a regenerate whose spinner is off screen is not visible feedback.
 - `app/lib/widgets/attachment_search_tile.dart` — one document hit on Home
   search; `app/lib/widgets/home_pane.dart` — the `In documents` block above
   the message table.
-- `app/lib/widgets/message_row.dart` — the per-file `AI:` digest line under
-  the chip row; `app/lib/widgets/activity_log_panel.dart` — the labels and
-  sentences for `attachment_text` and `attachment_digest`.
+- `app/lib/widgets/attachment_card.dart` — the per-file `AI:` digest line on
+  the file's own card (and on `LinkUnfurl`), keyed `attachmentKey('digest',
+  ref)`; `app/lib/widgets/activity_log_panel.dart` — the labels and sentences
+  for `attachment_text` and `attachment_digest`.
 - `app/lib/services/attachments/attachment_retriever.dart` —
   `AttachmentExcerpt`, `AttachmentRetriever.excerptsFor` and
   `renderAttachmentExcerpts`;

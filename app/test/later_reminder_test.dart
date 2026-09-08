@@ -2,8 +2,12 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/providers/conversations_provider.dart';
+import 'package:bond_inbox/providers/prefs_provider.dart'
+    show attentionThresholdKey;
 import 'package:bond_inbox/services/attention_service.dart';
+import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -82,6 +86,37 @@ void main() {
 
   ConversationsNotifier notifier() =>
       ConversationsNotifier(store, sync, attention: AttentionService(store));
+
+  /// The Needs You snapshot on one message's progress row.
+  Future<int?> chipOf(String messageId) async {
+    final rows = await db
+        .customSelect(
+          'SELECT needs_you FROM message_progress '
+          "WHERE source = 'email' AND source_message_id = ?",
+          variables: [Variable(messageId)],
+        )
+        .get();
+    return rows.isEmpty ? null : rows.single.data['needs_you'] as int?;
+  }
+
+  /// A message judged a yes that settled WHILE its thread sat in Later, and
+  /// so took a chip of 0 on the strength of the bucket alone.
+  Future<void> settleJudgedInLater(String key) async {
+    await store.writeNeedsYouVerdict(
+      'email',
+      '$key-m1',
+      verdict: true,
+      reason: 'asks the owner to confirm',
+    );
+    await PipelineProgress(store).noteSettled(
+      'email',
+      '$key-m1',
+      needsYou: false,
+      reason: 'not_worthy',
+      dropped: false,
+    );
+    expect(await chipOf('$key-m1'), 0);
+  }
 
   Future<Map<String, Object?>?> ai(String key) =>
       store.getConversationAi('email', key);
@@ -192,6 +227,49 @@ void main() {
     expect(rowFor(n, 'c1').bucket, isNull);
     expect(rowFor(n, 'c1').snoozedUntil, isNull);
     expect((await ai('c1'))?['bucket_reason'], 'user');
+  });
+
+  test('a thread that comes back on its date gets its chips back too',
+      () async {
+    // The snapshot follows the verdict, and no verdict moves when a bucket
+    // lifts: without the raise the message would be back in the inbox with a
+    // judged yes one table over and no chip, for good.
+    await store.setPref(attentionThresholdKey, '0');
+    await seed('c1');
+    final n = ConversationsNotifier(
+      store,
+      sync,
+      attention: AttentionService(store),
+      progress: PipelineProgress(store),
+    );
+    await n.load();
+    await n.sendThreadToLater('email', 'c1');
+    await settleJudgedInLater('c1');
+    await store.setSnoozedUntil('email', 'c1', '2020-01-01T09:00:00.000000Z');
+
+    await n.load(syncFirst: false);
+
+    expect(rowFor(n, 'c1').bucket, isNull);
+    expect(await chipOf('c1-m1'), 1);
+  });
+
+  test('Keep in inbox gives the chips back the same way', () async {
+    await store.setPref(attentionThresholdKey, '0');
+    await seed('c1');
+    final n = ConversationsNotifier(
+      store,
+      sync,
+      attention: AttentionService(store),
+      progress: PipelineProgress(store),
+    );
+    await n.load();
+    await n.sendThreadToLater('email', 'c1');
+    await settleJudgedInLater('c1');
+
+    await n.keepThreadInInbox('email', 'c1');
+
+    expect(rowFor(n, 'c1').bucket, isNull);
+    expect(await chipOf('c1-m1'), 1);
   });
 
   test('a deferral still ahead of its date survives a load', () async {

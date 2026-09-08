@@ -244,6 +244,66 @@ void main() {
     expect(find.byType(HomePane), findsOneWidget);
   });
 
+  testWidgets('picking a storyline files the thread and the story says so',
+      (tester) async {
+    // The panel stays mounted under the picker, so nothing unmounts and
+    // re-creates its provider the way the full-pane rung used to; the pick
+    // has to re-read it, or the story keeps saying "Not in any storyline."
+    await seed();
+    await store.insertStoryline(
+      id: 'sl-1',
+      title: 'Renewals',
+      status: 'active',
+      createdBy: 'user',
+    );
+    await pumpInbox(tester);
+    await openHistory(tester);
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.text('Not in any storyline.'),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.scrollUntilVisible(
+      find.byKey(MessageHistoryScreen.addToStorylineKey),
+      200,
+      scrollable: find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(Scrollable),
+      ),
+    );
+    await tester.tap(find.byKey(MessageHistoryScreen.addToStorylineKey));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+    await tester.tap(find.descendant(
+      of: find.byType(AddToStorylinePane),
+      matching: find.text('Renewals'),
+    ));
+    for (var i = 0; i < 6; i++) {
+      await tester.pump();
+    }
+
+    expect(find.byType(AddToStorylinePane), findsNothing);
+    expect(_historyBeside, findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.text('Not in any storyline.'),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.textContaining('Renewals'),
+      ),
+      findsWidgets,
+    );
+  });
+
   testWidgets('moving to another stop closes it', (tester) async {
     await seed();
     await pumpInbox(tester);

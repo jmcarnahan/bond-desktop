@@ -94,7 +94,9 @@ void main() {
 
       final moved = await store.resurfaceDue('2026-09-06T08:00:00.000Z');
 
-      expect(moved, 1);
+      // The keys come back so the caller can raise the chips the thread's
+      // messages lost while it was away.
+      expect(moved, [(source: 'email', conversationKey: 'c1')]);
       final row = await ai('c1');
       expect(row?['bucket'], isNull);
       // Not 'due', not 'low_value': the sweep re-files anything that is not
@@ -107,7 +109,7 @@ void main() {
       await seedThread('c1');
       await defer('c1', '2026-09-20T09:00:00.000Z');
 
-      expect(await store.resurfaceDue('2026-09-06T08:00:00.000Z'), 0);
+      expect(await store.resurfaceDue('2026-09-06T08:00:00.000Z'), isEmpty);
       final row = await ai('c1');
       expect(row?['bucket'], 'later');
       expect(row?['snoozed_until'], '2026-09-20T09:00:00.000Z');
@@ -118,7 +120,7 @@ void main() {
       await seedThread('c1');
       await defer('c1', null);
 
-      expect(await store.resurfaceDue('2027-01-01T00:00:00.000Z'), 0);
+      expect(await store.resurfaceDue('2027-01-01T00:00:00.000Z'), isEmpty);
       expect((await ai('c1'))?['bucket'], 'later');
     });
 
@@ -136,7 +138,7 @@ void main() {
         reason: 'sender_pref',
       );
 
-      expect(await store.resurfaceDue('2026-09-06T08:00:00.000Z'), 0);
+      expect(await store.resurfaceDue('2026-09-06T08:00:00.000Z'), isEmpty);
       final row = await ai('c1');
       expect(row?['bucket'], 'later');
       expect(row?['bucket_reason'], 'sender_pref');
@@ -165,11 +167,11 @@ void main() {
       );
       await store.setSnoozedUntil('email', 'c1', '2026-09-01T09:00:00.000Z');
 
-      expect(await store.resurfaceDue('2026-09-06T08:00:00.000Z'), 0);
+      expect(await store.resurfaceDue('2026-09-06T08:00:00.000Z'), isEmpty);
       expect((await ai('c1'))?['bucket_reason'], 'low_value');
     });
 
-    test('several due rows all move, and the count says how many', () async {
+    test('several due rows all move, and the keys say which', () async {
       await seedThread('c1');
       await seedThread('c2', subject: 'The survey');
       await seedThread('c3', subject: 'The plat');
@@ -177,7 +179,11 @@ void main() {
       await defer('c2', '2026-09-02T09:00:00.000Z');
       await defer('c3', '2026-12-01T09:00:00.000Z');
 
-      expect(await store.resurfaceDue('2026-09-06T08:00:00.000Z'), 2);
+      final moved = await store.resurfaceDue('2026-09-06T08:00:00.000Z');
+      expect(
+        moved.map((k) => k.conversationKey).toSet(),
+        {'c1', 'c2'},
+      );
       expect((await ai('c3'))?['bucket'], 'later');
     });
   });

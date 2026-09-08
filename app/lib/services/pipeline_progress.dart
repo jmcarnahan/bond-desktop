@@ -376,24 +376,57 @@ class PipelineProgress {
     final store = _store;
     if (store == null) return 0;
     try {
-      final raised =
-          await store.backfillNeedsYouFromVerdicts(threshold: threshold);
-      for (final row in raised) {
-        _bus.publish(
-          ProgressTick(
-            source: row.source,
-            sourceMessageId: row.sourceMessageId,
-            stage: 'settle',
-            state: 'done',
-            receivedAt: row.receivedAt,
-          ),
-        );
-      }
-      return raised.length;
+      return _tickRaised(
+        await store.backfillNeedsYouFromVerdicts(threshold: threshold),
+      );
     } catch (e) {
       debugPrint('progress: needs-you backfill failed: $e');
       return 0;
     }
+  }
+
+  /// Raises the chips one thread's messages lost while it sat in Later, and
+  /// ticks each row so the live screen re-reads it. Returns how many.
+  ///
+  /// Called by whatever lifts the bucket — the user's Keep in inbox, a
+  /// deferral whose date arrived — because the chip otherwise follows the
+  /// verdict only, and no verdict moves when a thread comes back.
+  Future<int> raiseNeedsYouForThread(
+    String source,
+    String conversationKey, {
+    required double threshold,
+  }) async {
+    final store = _store;
+    if (store == null) return 0;
+    try {
+      return _tickRaised(await store.raiseNeedsYouForThread(
+        source,
+        conversationKey,
+        threshold: threshold,
+      ));
+    } catch (e) {
+      debugPrint(
+        'progress: needs-you raise $source/$conversationKey failed: $e',
+      );
+      return 0;
+    }
+  }
+
+  int _tickRaised(
+    List<({String source, String sourceMessageId, String receivedAt})> raised,
+  ) {
+    for (final row in raised) {
+      _bus.publish(
+        ProgressTick(
+          source: row.source,
+          sourceMessageId: row.sourceMessageId,
+          stage: 'settle',
+          state: 'done',
+          receivedAt: row.receivedAt,
+        ),
+      );
+    }
+    return raised.length;
   }
 
   /// Closes out every row the coordinator was never going to settle. Returns

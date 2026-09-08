@@ -2738,8 +2738,10 @@ RETURNING *
   /// The comparison is lexicographic over the UTC stamps [isoStamp] writes,
   /// which is chronological at that one shape — the same promise every other
   /// timestamp comparison in this store runs on.
-  Future<int> resurfaceDue(String nowIso) async {
-    return db.customUpdate(
+  Future<List<({String source, String conversationKey})>> resurfaceDue(
+    String nowIso,
+  ) async {
+    final rows = await db.customWriteReturning(
       'UPDATE conversation_ai '
       "SET bucket = NULL, bucket_reason = 'user', snoozed_until = NULL, "
       '    updated_at = ? '
@@ -2749,9 +2751,20 @@ RETURNING *
       // from an earlier hand-deferral must not be handed back — and stamped
       // `user`, which the sweep never touches — behind the rule's back.
       "WHERE bucket = 'later' AND bucket_reason = 'user' "
-      '  AND snoozed_until IS NOT NULL AND snoozed_until <= ?',
+      '  AND snoozed_until IS NOT NULL AND snoozed_until <= ? '
+      // The keys and not a count: the caller has to raise the Needs You
+      // chips a thread's messages lost while it sat in Later, and it can
+      // only do that for the threads that actually moved.
+      'RETURNING source, conversation_key',
       variables: _args([_nowIso(), nowIso]),
     );
+    return [
+      for (final row in rows)
+        (
+          source: row.data['source'] as String? ?? '',
+          conversationKey: row.data['conversation_key'] as String? ?? '',
+        ),
+    ];
   }
 
   /// Stores one thread's ranking score. Same targeted insert-then-update as
@@ -5673,11 +5686,44 @@ RETURNING received_at
   /// `dropped = 0` keeps a gate cascade out of it: a gated row also carries
   /// `settle_state = 'done'`, and it is dropped, not owed.
   Future<List<({String source, String sourceMessageId, String receivedAt})>>
-      backfillNeedsYouFromVerdicts({required double threshold}) async {
+      backfillNeedsYouFromVerdicts({required double threshold}) =>
+          _raiseNeedsYouFromVerdicts(threshold: threshold);
+
+  /// The same raise as [backfillNeedsYouFromVerdicts], for ONE thread — the
+  /// thread that has just come out of Later.
+  ///
+  /// A message that settles while its thread is deferred takes a snapshot of
+  /// 0 on the strength of the bucket alone (`notifyWorthy`'s Later clause),
+  /// and the snapshot moves afterwards only when the VERDICT moves. Lifting
+  /// the bucket moves no verdict, so without this the message comes back to
+  /// the inbox with a judged yes one table over and no chip, for good. Same
+  /// statement and same guards as the backfill — the thread's own `done`,
+  /// its last reply, the floor — so the two paths cannot disagree about what
+  /// earns a chip; the `later` clause is still in it and is simply true now.
+  Future<List<({String source, String sourceMessageId, String receivedAt})>>
+      raiseNeedsYouForThread(
+    String source,
+    String conversationKey, {
+    required double threshold,
+  }) =>
+          _raiseNeedsYouFromVerdicts(
+            threshold: threshold,
+            source: source,
+            conversationKey: conversationKey,
+          );
+
+  Future<List<({String source, String sourceMessageId, String receivedAt})>>
+      _raiseNeedsYouFromVerdicts({
+    required double threshold,
+    String? source,
+    String? conversationKey,
+  }) async {
+    final oneThread = source != null && conversationKey != null;
     final rows = await db.customWriteReturning(
       '''
 UPDATE message_progress SET needs_you = 1, updated_at = ?1
 WHERE settle_state = 'done' AND needs_you = 0 AND dropped = 0
+  ${oneThread ? 'AND source = ?3 AND conversation_key = ?4' : ''}
   AND EXISTS (SELECT 1 FROM messages m
               WHERE m.source = message_progress.source
                 AND m.source_message_id = message_progress.source_message_id
@@ -5700,7 +5746,12 @@ WHERE settle_state = 'done' AND needs_you = 0 AND dropped = 0
                0) >= ?2
 RETURNING source, source_message_id, received_at
 ''',
-      variables: _args([_nowIso(), threshold]),
+      variables: _args([
+        _nowIso(),
+        threshold,
+        if (oneThread) source,
+        if (oneThread) conversationKey,
+      ]),
     );
     return [
       for (final row in rows)

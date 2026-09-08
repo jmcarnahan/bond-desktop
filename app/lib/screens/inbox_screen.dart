@@ -25,6 +25,7 @@ import '../providers/person_facts_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/notify_routing.dart';
 import '../providers/prefs_provider.dart';
+import '../providers/message_history_provider.dart';
 import '../providers/recipient_search_provider.dart';
 import '../providers/storylines_provider.dart';
 import '../providers/why_provider.dart';
@@ -2371,11 +2372,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onClose: _closeSide,
       child: MessageHistoryHost(
         target: (source: side.source, id: side.id),
-        // The host draws the header; the story renders bare inside it.
+        // The host draws the header; the story renders bare inside it — so
+        // its own Back and Home are never drawn, and the ✕ above is the one
+        // way out. Both are still the widget's required API, and both are
+        // given the answer they would have: leaving the panel leaves whatever
+        // was underneath exactly where it was.
         chrome: false,
-        // Back only closes the panel. Whatever was underneath — the thread,
-        // the archive, the home table — was never cleared, so it is still
-        // there.
         onBack: _closeSide,
         onHome: () => _selectSection(RailSection.home),
         onOpenThread: (threadSource, conversationKey) =>
@@ -2498,6 +2500,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           if (!mounted) return;
           setState(() => _pickingStorylineForThread = null);
           ref.read(storylineTimelineProvider(id).notifier).load();
+          _reloadHistoryBeside();
         },
         onCreate: (title) async {
           final id = await ref.read(storylinesProvider.notifier).create(
@@ -2508,9 +2511,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           if (!mounted) return;
           setState(() => _pickingStorylineForThread = null);
           ref.read(storylineTimelineProvider(id).notifier).load();
+          _reloadHistoryBeside();
         },
       ),
     );
+  }
+
+  /// Re-reads the history beside the main pane after a write made on its
+  /// behalf from OUTSIDE it — the storyline picker's pick or create.
+  ///
+  /// Every lever on the history itself chains its own reload; the picker is
+  /// the one that lives in the main pane, and the panel stays mounted while it
+  /// is up, so nothing else would re-read. Filing a thread moves no stage, so
+  /// the progress bus the notifier listens to says nothing either. When the
+  /// picker was opened from somewhere else there is no history beside, and
+  /// this does nothing.
+  void _reloadHistoryBeside() {
+    final side = _side;
+    if (side is! HistoryPanel) return;
+    unawaited(ref
+        .read(messageHistoryProvider((source: side.source, id: side.id))
+            .notifier)
+        .reload());
   }
 
   Widget _storyline(Storyline storyline) {
@@ -3009,7 +3031,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           canReply ? (a) => _useAttachmentInReply(target, a) : null,
       onOpenLink: (url) => unawaited(_launchExternal(url)),
       // Per MESSAGE, not per thread: the pipeline decides one message at a
-      // time, and the row's own header is where the question is asked.
+      // time, and the row's hover strip is where the question is asked — the
+      // fourth button, after Why.
       onWhatHappened: (message) => _openHistory(message.source, message.id),
     );
 

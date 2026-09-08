@@ -222,6 +222,15 @@ run). Raise-only, and carrying the same guards as the live path — both guard o
 `dropped = 0`, so a gate cascade, which also writes `settle_state = 'done'`,
 stays dropped either way.
 
+**The chip follows the thread out of Later, too.** The verdict rule above has
+a hole the two rules before it cannot see: a message that settles while its
+thread sits in Later takes a 0 on the strength of the bucket alone, and
+lifting the bucket moves no verdict, so nothing would ever re-ask. Both ways
+out of Later for one thread — a deferral whose date arrived, and Keep in inbox
+— run `PipelineProgress.raiseNeedsYouForThread`, the backfill's statement
+scoped to that thread, ticking each row it raises. See
+[08-attention.md](08-attention.md) for the resurfacing itself.
+
 **Queueing.** `MessageStore.enqueueNeedsYouBacklog` is
 `enqueueExtractBacklog`'s twin — same filter, same caps, same `OR IGNORE`
 idempotence, one shared private statement — and both syncs call the two side
@@ -424,5 +433,5 @@ stage, judgement and queue row behind it, with the levers — see
 [README.md](README.md#finding-out-what-happened-to-a-message). The two read the
 same rows (`needs_you_verdict`, `needs_you_reason`, the extraction, the
 attention row) through their own reads, by decision: `whyFactsProvider` is
-three store calls and `messageHistoryProvider` is eight, and the smaller one
-is what makes Why cheap enough to open from a hover.
+three store calls and `messageHistoryProvider` is nine (over eight tables),
+and the smaller one is what makes Why cheap enough to open from a hover.

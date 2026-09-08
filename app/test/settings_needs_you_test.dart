@@ -115,7 +115,7 @@ void main() {
     await expand(tester, 'Needs You');
   }
 
-  testWidgets('the gear lands on Settings with every section collapsed',
+  testWidgets('the avatar menu lands on Settings with every section collapsed',
       (tester) async {
     await openSettings(tester);
 

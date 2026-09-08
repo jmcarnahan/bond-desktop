@@ -325,7 +325,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
   }
 
   /// What the pointer offers on one inbound row. Empty when the host wired
-  /// neither callback, which is what turns the wrapper back into the bare row.
+  /// none of the four, which is what turns the wrapper back into the bare row.
   List<HoverAction> _hoverActionsFor(Message message) {
     final reply = widget.onReplyTo;
     final suggest = widget.onSuggestFor;
@@ -346,8 +346,8 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
           onTap: () => suggest(message),
           key: HoverActions.suggestKeyFor(message.id),
         ),
-      // Last, because it is the only one that does not act on the mail: the
-      // two before it write a reply, this one explains the row.
+      // After the two that write a reply, because this one and the next only
+      // explain the row: the verdict first, then everything behind it.
       if (why != null)
         HoverAction(
           icon: Icons.help_outline,
