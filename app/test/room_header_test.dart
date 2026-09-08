@@ -22,6 +22,7 @@ void main() {
     List<AvatarPerson> people = const [],
     Widget? stateChip,
     VoidCallback? onBack,
+    VoidCallback? onPeopleTap,
     List<RoomAction> actions = const [],
     List<RoomMenuItem> moreItems = const [],
     List<_Tab> tabs = const [],
@@ -39,6 +40,7 @@ void main() {
           people: people,
           stateChip: stateChip,
           onBack: onBack,
+          onPeopleTap: onPeopleTap,
           actions: actions,
           moreItems: moreItems,
           tabs: tabs,
@@ -97,6 +99,33 @@ void main() {
         (name: 'Eric Vance', address: 'eric@example.com', photoKey: null),
       ]);
       expect(find.byType(AvatarStack), findsOneWidget);
+    });
+
+    testWidgets('the faces open the person when the host has one to show',
+        (tester) async {
+      var opened = 0;
+      await pumpHeader(
+        tester,
+        people: const [
+          (name: 'Eric Vance', address: 'eric@example.com', photoKey: null),
+        ],
+        onPeopleTap: () => opened++,
+      );
+
+      await tester.tap(find.byKey(RoomHeader.peopleKey));
+      await tester.pump();
+      expect(opened, 1);
+    });
+
+    testWidgets('and stay a picture when there is nowhere to send the tap',
+        (tester) async {
+      // Not a dead InkWell: a control that answers nothing must not look
+      // like one.
+      await pumpHeader(tester, people: const [
+        (name: 'Eric Vance', address: 'eric@example.com', photoKey: null),
+      ]);
+
+      expect(find.byKey(RoomHeader.peopleKey), findsNothing);
     });
   });
 

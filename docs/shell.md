@@ -99,6 +99,20 @@ affordance that lied.
 That is Slack's rule, and it is what keeps the room on screen while one
 conversation in it is being read.
 
+`SidePanel` has four kinds, and the panel shows exactly one of them:
+
+| Kind | What it holds | Opened by |
+|---|---|---|
+| `ThreadPanel` | a conversation | a storyline episode card, a person room's card or `Open chat ›`, a Drafts & sent row |
+| `FilePanel` | one file | any card, chip, unfurl or shelf row |
+| `WhyPanel` | why one message got its verdict | the hover **Why** on an inbound row, and the CTA banner |
+| `PersonPanel` | one person | the room header's **Profile**, and tapping the faces on a room or a thread |
+
+Why and Person follow the file rule: opened from a thread that is itself
+beside, they REPLACE it. One panel, never two stacked. The Why panel carries no
+⤢ — it is a paragraph about one message, and a paragraph does not improve by
+being given the whole window.
+
 `_main()`'s ladder is the priority order, top rung first: compose → Settings →
 activity log → add-thread picker → pick-storyline picker → full file viewer →
 thread → storyline → **room** → **Drafts & sent** → Home → AI → section
@@ -234,12 +248,21 @@ second answer to one question, with a loading state the transcript beside it
 never has. The CTA banner stays above both tabs — what a thread wants does not
 stop being true because somebody went looking for an attachment.
 
-**The hover strip** (`app/lib/widgets/hover_actions.dart`) puts **Reply** and
-**Suggest a reply** at an inbound row's top-right while the mouse is over it.
-It is a WRAPPER around `MessageRow`, not a change to it: the row seeds its
-collapsed state once, and hover is a per-frame fact about the pointer. Touch
-never enters a `MouseRegion`, so nothing may live only here — both buttons have
-a home the pointer is not needed for.
+**The hover strip** (`app/lib/widgets/hover_actions.dart`) puts **Reply**,
+**Suggest a reply** and **Why** at an inbound row's top-right while the mouse
+is over it. It is a WRAPPER around `MessageRow`, not a change to it: the row
+seeds its collapsed state once, and hover is a per-frame fact about the
+pointer. Touch never enters a `MouseRegion`, so nothing may live only here —
+all three buttons have a home the pointer is not needed for. Why is last,
+because it is the only one that does not act on the mail: the two before it
+write a reply, this one explains the row.
+
+**The CTA banner explains, it no longer opens the box.** Tapping it opens
+**Why** on the newest inbound message. The composer is docked and always
+visible, so "put the cursor in it" was a click nobody needed help with, while
+"where did this ask come from" had no answer anywhere. With no Why wired, or on
+a thread with nothing inbound in it, it falls back to focusing the composer as
+it always did — and every per-message ask line still focuses the box.
 
 **The composer is docked.** Whenever a reply is possible the box is under the
 transcript from the moment the thread opens, placeholder `Reply to <who>…`.
@@ -313,12 +336,48 @@ it came from one connector — a colleague on both would otherwise be marked as
 whichever arrived last. Its badge is the room's needs-you count in
 `railBadge`, or the thread count in grey when nothing is owed, never both.
 
-Tapping a room opens `_room()`: a `PaneSurface` titled by the person, an
-`AvatarStack` of the other parties in its trailing slot, and a
-`ConversationListPane` split into NEEDS YOU and THREADS. Back goes to the People
-overview — the room IS the People stop, and dropping the user somewhere else
-would make the way out depend on how they got in. Phase 6 replaces the body
-with a merged timeline.
+Tapping a room opens `_room()`, and what it opens is **one timeline** — goal
+one of this round, literally. A `RoomHeader` titled by the person, subtitled
+`N threads · mail and Teams`, and under it a `PersonRoomPane`
+(`app/lib/widgets/person_room_pane.dart`) holding everything live with them in
+the order it happened.
+
+- **Chats read as messages, mail reads as cards.** The newest `roomChatCap`
+  (five) Teams threads have their transcripts drawn inline as `MessageRow`s;
+  every mail thread is a `RootMessageCard` — who, subject, last line, the CTA,
+  `N messages · last <relative>`, `open ›`. A chat has no subject and no shape
+  to summarise, so a card standing for one would say nothing; a mail thread has
+  both.
+- **A chat whose transcript has not arrived is a card until it does**, and so
+  is every chat past the cap. The room never has a hole where a conversation
+  should be.
+- **Interleaved by time, oldest at the top, newest at the bottom.** The list is
+  `reverse: true` over the reversed items, so the newest row is on screen the
+  moment the room opens, with `DayDivider`s where the calendar turns over. A
+  chat heading (`💬 <name>` plus `Open chat ›`) is drawn before every RUN of
+  chat messages, not once per chat: a mail card dated between two chat messages
+  lands between them, and a run resuming under somebody else's heading would be
+  misread.
+- **Opening the room marks its inline chats read** — `noteThreadOpened` +
+  `markRead` + a transcript load, the `_openThreadBeside` pair — because they
+  ARE on screen, the way a Slack DM is read when it is opened. Mail cards stay
+  unread until somebody opens one: a card is a summary, not the mail.
+- **One way to write, never two.** A room with exactly one person and a Teams
+  thread gets the docked composer on that chat, placeholder
+  `Message <name>…`, and only on the `Chat.ReadWrite` rung. Otherwise, if there
+  is mail, a `Message <name>` button
+  (`PersonRoomPane.messageButtonKey`) opens a new message to them. A group room
+  with no mail gets neither: a group chat is not a place a sentence typed under
+  a room heading obviously belongs.
+- **Profile, and the faces**, both open `PersonPanel` beside — name and
+  writable addresses (a `teams:` id is a Graph id and is hidden), the counts
+  `N threads · M mail · K chats · J need you`, `Last seen`, the storylines
+  their threads are in, every live thread as a line, and the files they sent.
+  Its lists say which state they are in: `Loading…` while the read is out, and
+  a sentence when the answer is genuinely nothing.
+
+Back goes to the People overview — the room IS the People stop, and dropping
+the user somewhere else would make the way out depend on how they got in.
 
 ---
 
@@ -416,7 +475,7 @@ the person room's header `AvatarStack`.
 - **Hover** needs a real mouse: `tester.createGesture(kind:
   PointerDeviceKind.mouse)`, then `addPointer(location: Offset.zero)`, then
   `moveTo(tester.getCenter(rowFor(id)))`, then `pump()`. The buttons are
-  `HoverActions.replyKeyFor(id)` / `suggestKeyFor(id)`.
+  `HoverActions.replyKeyFor(id)` / `suggestKeyFor(id)` / `whyKeyFor(id)`.
 - **A ⋯ menu is a route.** Tap `RoomHeader.moreKey`, then `pump()` and
   `pump(Duration(milliseconds: 400))` to run the opening animation out; the
   same pair runs the closing one out after picking an item. A panel-only test
@@ -452,3 +511,27 @@ the person room's header `AvatarStack`.
   `attentionThresholdKey` to `'0'` before reading prefs. The scoring pass lands
   a few pumps in, and the default 0.5 slider will cut a quiet row out from under
   an assertion that was true on the first frame.
+- **A person's room**: `PersonRoomPane` is the pane,
+  `RootMessageCard.keyFor(source, id)` is a mail card,
+  `PersonRoomPane.openChatKeyFor(key)` is a chat's way in,
+  `messageButtonKey` the compose button and `emptyKey` the empty room. The
+  header is a `RoomHeader<ThreadTab>`, so scope Back to it rather than to
+  `PaneSurface` — the room stopped being one in Phase 6.
+  `inbox_room_timeline_test.dart` is the harness, and it fakes the send grant
+  with an `implements AuthSession` whose `hasScope` answers from a set, which
+  is far less machinery than the full SDK stack `inbox_teams_test` stands up.
+- **The Why panel**: `WhyPanelBody` inside a `SidePanelHost`, with
+  `verdictKey` / `triageKey` / `asksKey` / `attentionKey` / `extractionKey` per
+  block and `whatHappenedKey` for the history door. `inbox_why_test.dart`
+  covers the seam (which gesture, which pane); `why_panel_test.dart` owns the
+  wording. A Needs You rail row is titled by its ASK and carries a dimmed
+  `· who` suffix, which makes it a `Text.rich` — use `find.textContaining`,
+  not `find.text`.
+- **The Person panel**: `PersonPanelBody`, with
+  `threadKeyFor(source, id)` / `storylineKeyFor(id)` / `fileKeyFor(row)`. A
+  room's face comes off its NEWEST thread, so a person whose newest thread is a
+  chat shows a `teams:` address the panel deliberately hides — assert on the
+  counts line instead.
+- **Later reminders**: `LaterDigestPanel.backKeyFor(source, id)` is the
+  `Back <when>` caption, `snoozeTomorrowKeyFor` / `snoozeNextWeekKeyFor` the two
+  pills. `ArchivePane` now requires `onSnooze` as well as `now`.

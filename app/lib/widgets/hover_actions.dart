@@ -45,6 +45,9 @@ class HoverActions extends StatefulWidget {
   static Key suggestKeyFor(String messageId) =>
       ValueKey('hover-suggest-$messageId');
 
+  /// The third button: why this message got the verdict it did.
+  static Key whyKeyFor(String messageId) => ValueKey('hover-why-$messageId');
+
   @override
   State<HoverActions> createState() => _HoverActionsState();
 }

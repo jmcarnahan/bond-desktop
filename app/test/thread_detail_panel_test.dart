@@ -69,6 +69,7 @@ void main() {
     ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
     void Function(Message message)? onReplyTo,
     void Function(Message message)? onSuggestFor,
+    void Function(Message message)? onWhy,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -92,6 +93,7 @@ void main() {
           thumbnailFor: thumbnailFor,
           onReplyTo: onReplyTo,
           onSuggestFor: onSuggestFor,
+          onWhy: onWhy,
         ),
       ),
     ));
@@ -182,7 +184,36 @@ void main() {
   });
 
   group('an ask is a call to action', () {
-    testWidgets('the banner opens the reply', (tester) async {
+    testWidgets('the banner explains the newest inbound ask', (tester) async {
+      // Rewritten in Phase 6: the composer is docked and always visible, so
+      // "put the cursor in the box" is a click nobody needed help with, while
+      // "where did this ask come from" had no answer anywhere.
+      final asked = <String>[];
+      var opened = 0;
+      await pump(
+        tester,
+        onOpenReply: () => opened++,
+        onWhy: (m) => asked.add(m.id),
+        messages: [
+          _msg(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            needsAction: true,
+            actionItems: const ['Send the deck'],
+          ),
+          _msg(id: 'b', receivedAt: '2026-08-25T11:00:00'),
+        ],
+      );
+
+      await tester.tap(find.text('Reply to Dana'));
+      await tester.pump();
+
+      expect(asked, ['b']);
+      expect(opened, 0);
+    });
+
+    testWidgets('with no Why to open, the banner still opens the reply',
+        (tester) async {
       var opened = 0;
       await pump(
         tester,
@@ -194,6 +225,26 @@ void main() {
             needsAction: true,
             actionItems: const ['Send the deck'],
           ),
+        ],
+      );
+
+      await tester.tap(find.text('Reply to Dana'));
+      await tester.pump();
+
+      expect(opened, 1);
+    });
+
+    testWidgets('a thread with nothing inbound falls back to the reply',
+        (tester) async {
+      // Nothing to explain: the banner's ask is about a message somebody sent
+      // the reader, and there is none.
+      var opened = 0;
+      await pump(
+        tester,
+        onOpenReply: () => opened++,
+        onWhy: (_) => fail('there is no inbound message to explain'),
+        messages: [
+          _msg(id: 'mine', outbound: true, receivedAt: '2026-08-25T09:00:00'),
         ],
       );
 
@@ -709,8 +760,42 @@ void main() {
       // pins that there is not even a MouseRegion left behind.
       expect(find.byKey(HoverActions.replyKeyFor('a')), findsNothing);
       expect(find.byKey(HoverActions.suggestKeyFor('a')), findsNothing);
+      expect(find.byKey(HoverActions.whyKeyFor('a')), findsNothing);
       expect(find.byIcon(Icons.reply_outlined), findsNothing);
       expect(find.text('Body of a.'), findsOneWidget);
+    });
+
+    testWidgets('Why joins the strip, on the row under the pointer',
+        (tester) async {
+      final asked = <String>[];
+      await pump(tester, messages: two, onWhy: (m) => asked.add(m.id));
+
+      expect(find.byKey(HoverActions.whyKeyFor('a')), findsNothing);
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.whyKeyFor('a')), findsOneWidget);
+      expect(find.byKey(HoverActions.whyKeyFor('b')), findsNothing);
+
+      await tester.tap(find.byKey(HoverActions.whyKeyFor('a')));
+      await tester.pump();
+
+      expect(asked, ['a']);
+    });
+
+    testWidgets('an outbound row is not explained either', (tester) async {
+      await pump(
+        tester,
+        messages: [
+          _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+          _msg(id: 'mine', outbound: true, receivedAt: '2026-08-25T16:00:00'),
+        ],
+        onWhy: (_) {},
+      );
+
+      await hover(tester, 'mine');
+
+      expect(find.byKey(HoverActions.whyKeyFor('mine')), findsNothing);
     });
   });
 }

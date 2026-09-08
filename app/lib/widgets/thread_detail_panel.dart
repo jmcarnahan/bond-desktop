@@ -133,6 +133,15 @@ class ThreadDetailPanel extends StatefulWidget {
   /// Null leaves the button off the strip.
   final void Function(Message message)? onSuggestFor;
 
+  /// The hover strip's **Why**, and what the CTA banner opens: explain this
+  /// message's verdict beside the transcript. Null leaves the button off the
+  /// strip and hands the banner back to [onOpenReply].
+  final void Function(Message message)? onWhy;
+
+  /// Opens the person beside the thread — what the header's faces do. Null
+  /// leaves the stack a picture.
+  final VoidCallback? onPeople;
+
   /// Opens a new message to this thread's people. What that means is the
   /// host's business — a chat is addressed as itself, a mail thread as its
   /// participants — and the panel neither knows nor asks. Null hides the
@@ -180,6 +189,8 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onOpenReply,
     this.onReplyTo,
     this.onSuggestFor,
+    this.onWhy,
+    this.onPeople,
     this.onCompose,
     this.onOpenAttachment,
     this.selectedAttachment,
@@ -312,6 +323,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
   List<HoverAction> _hoverActionsFor(Message message) {
     final reply = widget.onReplyTo;
     final suggest = widget.onSuggestFor;
+    final why = widget.onWhy;
     return [
       if (reply != null)
         HoverAction(
@@ -327,7 +339,28 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
           onTap: () => suggest(message),
           key: HoverActions.suggestKeyFor(message.id),
         ),
+      // Last, because it is the only one that does not act on the mail: the
+      // two before it write a reply, this one explains the row.
+      if (why != null)
+        HoverAction(
+          icon: Icons.help_outline,
+          tooltip: 'Why',
+          onTap: () => why(message),
+          key: HoverActions.whyKeyFor(message.id),
+        ),
     ];
+  }
+
+  /// The newest inbound message in the transcript — what the banner's ask is
+  /// actually about, and so what the banner explains.
+  ///
+  /// The optimistic bubble is outbound and cannot be it. A thread with nothing
+  /// inbound in it has no ask to explain, and the banner falls back.
+  Message? get _newestInbound {
+    for (final message in widget.messages.reversed) {
+      if (message.inbound && !message.pendingSend) return message;
+    }
+    return null;
   }
 
   /// [MessageRow]'s avatar diameter (36) plus the gutter it puts beside it.
@@ -489,9 +522,19 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     return widget.thumbnailFor?.call(file);
   }
 
-  /// The ask above the transcript. It is the largest statement on the pane of
-  /// what this thread wants, so it is also the shortest way to answer it: with
-  /// a reply to open, the whole banner is the click.
+  /// The ask above the transcript, and the shortest way to find out where it
+  /// came from: the whole banner is the click.
+  ///
+  /// It opens **Why** on the newest inbound message, not the composer. The
+  /// composer is docked under this panel and always visible, so "put the
+  /// cursor in the box" is a click the reader does not need help with — while
+  /// "where did this ask come from" had no answer anywhere until now. Every
+  /// per-message ask line below still focuses the box, which is the affordance
+  /// that wanted one.
+  ///
+  /// With no Why to open — a host that cannot show one, or a thread with
+  /// nothing inbound in it — it falls back to focusing the composer, which is
+  /// what it always did.
   ///
   /// Its own transparent Material, because ink paints on the nearest Material
   /// ANCESTOR — which here is behind the pane's opaque surface, where no hover
@@ -502,7 +545,11 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       text: text,
       maxLines: 2,
     );
-    final onTap = widget.onOpenReply;
+    final why = widget.onWhy;
+    final newest = _newestInbound;
+    final onTap = (why != null && newest != null)
+        ? () => why(newest)
+        : widget.onOpenReply;
     if (onTap == null) return alert;
     return Material(
       type: MaterialType.transparency,
@@ -562,6 +609,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
             ),
       ],
       photos: widget.photos,
+      onPeopleTap: widget.onPeople,
       stateChip: BondChip.semantic(
         _stateLabel(widget.conversation.state),
         _stateTone(widget.conversation.state),

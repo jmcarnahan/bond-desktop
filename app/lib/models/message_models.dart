@@ -187,6 +187,17 @@ class Conversation {
   /// never as a badge over a thread whose composer is empty.
   final int pendingDraftCount;
 
+  /// When a thread the user deferred should come back, as a UTC ISO stamp in
+  /// [MessageStore.isoStamp]'s exact shape. Null means no date was set, which
+  /// is every thread a SENDER rule filed: a standing rule about a person has
+  /// no "when", and resurfacing its threads one at a time would quietly exempt
+  /// them from the rule that had just been made.
+  ///
+  /// A read-time column off `conversation_ai`, so it is null on every read
+  /// that does not join it — which reads as "no date", never as a date that
+  /// has passed.
+  final String? snoozedUntil;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -209,6 +220,7 @@ class Conversation {
     this.attachmentCount = 0,
     this.latestDeadline,
     this.pendingDraftCount = 0,
+    this.snoozedUntil,
   });
 
   /// First participant — the row's primary sender. Null when a conversation
@@ -251,6 +263,7 @@ class Conversation {
       attachmentCount: attachmentCount,
       latestDeadline: latestDeadline,
       pendingDraftCount: pendingDraftCount,
+      snoozedUntil: snoozedUntil,
     );
   }
 
@@ -281,6 +294,7 @@ class Conversation {
       attachmentCount: attachmentCount,
       latestDeadline: latestDeadline,
       pendingDraftCount: pendingDraftCount,
+      snoozedUntil: snoozedUntil,
     );
   }
 
@@ -349,6 +363,9 @@ class Conversation {
       // as a deadline or a badge on a thread carrying neither.
       latestDeadline: row['latest_deadline'] as String?,
       pendingDraftCount: (row['pending_draft_count'] as num?)?.toInt() ?? 0,
+      // From the same LEFT JOIN the bucket comes from, and null on every read
+      // that does not run it — which reads as "no date set".
+      snoozedUntil: row['snoozed_until'] as String?,
     );
   }
 }
@@ -416,6 +433,17 @@ class Message {
   /// words ("Friday", "before the 15th"). Null when the message named none.
   final String? deadline;
 
+  /// The needs-you pass's verdict on this message, tri-state: true = it wants
+  /// the owner, false = judged not to, null = never judged. Null is NOT false —
+  /// the unjudged rows are the pass's worklist — so nothing here may collapse
+  /// it into a bool.
+  final bool? needsYouVerdict;
+
+  /// Why the pass answered as it did: `'teams_direct'` from the deterministic
+  /// floor, or the model's own evidence sentence. Null when nothing has judged
+  /// the message, which is not the same as a verdict with no reason given.
+  final String? needsYouReason;
+
   /// Local-only optimistic bubble.
   final bool pendingSend;
 
@@ -455,6 +483,8 @@ class Message {
     this.addressedMe = false,
     this.replyExpected,
     this.deadline,
+    this.needsYouVerdict,
+    this.needsYouReason,
     this.pendingSend = false,
     this.attachments = const [],
   });
@@ -500,6 +530,8 @@ class Message {
         addressedMe: addressedMe,
         replyExpected: replyExpected,
         deadline: deadline,
+        needsYouVerdict: needsYouVerdict,
+        needsYouReason: needsYouReason,
         pendingSend: pendingSend,
         attachments: attachments,
       );
@@ -560,6 +592,8 @@ class Message {
       addressedMe: json['addressed_me'] as bool? ?? false,
       replyExpected: json['reply_expected'] as bool?,
       deadline: json['deadline'] as String?,
+      needsYouVerdict: json['needs_you_verdict'] as bool?,
+      needsYouReason: json['needs_you_reason'] as String?,
     );
   }
 
@@ -597,6 +631,11 @@ class Message {
       // it judged "no".
       replyExpected: _boolFromInt(row['reply_expected']),
       deadline: row['deadline'] as String?,
+      // Tri-state, exactly as `reply_expected` above: a row the needs-you pass
+      // has never reached is not a row it judged "no", and the Why panel says
+      // which of the two it is looking at.
+      needsYouVerdict: _boolFromInt(row['needs_you_verdict']),
+      needsYouReason: row['needs_you_reason'] as String?,
     );
   }
 }

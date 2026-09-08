@@ -14,6 +14,7 @@ import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/composer.dart' show Composer;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/hover_actions.dart';
+import 'package:bond_inbox/widgets/why_panel.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -347,8 +348,11 @@ void main() {
     );
   });
 
-  testWidgets('the ask banner puts the cursor in the box rather than opening it',
+  testWidgets('the ask banner explains the ask rather than opening the box',
       (tester) async {
+    // Rewritten in Phase 6. The box is docked and visible, so "put the cursor
+    // in it" is a click nobody needed help with; where the ask came from had
+    // no answer anywhere until the Why panel.
     await seedThread();
     await pumpScreen(tester);
     await openThread(tester, 'Eric Vance');
@@ -356,16 +360,15 @@ void main() {
     expect(tester.widget<TextField>(composerField()).focusNode?.hasFocus,
         isFalse);
 
-    // The banner is the largest statement on the pane of what this thread
-    // wants, so it is also the shortest way to answer it — and with the box
-    // docked, answering it means putting the cursor there.
     await tester.tap(find.text('Confirm the Friday date'));
-    await tester.pump();
-    await tester.pump();
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
 
+    expect(find.byType(WhyPanelBody), findsOneWidget);
     expect(
       tester.widget<TextField>(composerField()).focusNode?.hasFocus,
-      isTrue,
+      isFalse,
     );
   });
 

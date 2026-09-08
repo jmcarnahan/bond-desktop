@@ -13,8 +13,8 @@ import 'icon_rail.dart' show IconRail;
 /// second nullable field per kind is how the file preview and the full viewer
 /// drifted apart — one could be set while the other said something else.
 ///
-/// Phase 5/6 add `AboutPanel(storylineId)`, `PersonPanel(roomKey)` and
-/// `WhyPanel(source, messageId)` here.
+/// Four kinds: a thread, a file, a person and the reasoning behind one
+/// message's verdict.
 sealed class SidePanel {
   const SidePanel();
 }
@@ -40,6 +40,35 @@ final class FilePanel extends SidePanel {
   final DraftTarget? from;
 
   const FilePanel({required this.attachment, this.from});
+}
+
+/// One person, read beside their room or beside a thread they are on.
+///
+/// Keyed by the ROOM and not by an address, because a room is what the app
+/// knows a person as: the grouping is derived from the live list on every
+/// build, and there is no stored identity behind it to name instead.
+final class PersonPanel extends SidePanel {
+  final String roomKey;
+
+  const PersonPanel({required this.roomKey});
+}
+
+/// Why one message got the verdict it did — read beside its transcript.
+///
+/// The conversation key rides along with the message id because the panel
+/// answers about the message AND about the thread it sits in: the verdict and
+/// the extraction are the message's, the attention score and the bucket are
+/// the thread's, and one of the two alone explains nothing.
+final class WhyPanel extends SidePanel {
+  final String source;
+  final String conversationKey;
+  final String messageId;
+
+  const WhyPanel({
+    required this.source,
+    required this.conversationKey,
+    required this.messageId,
+  });
 }
 
 /// The chrome around whatever is open beside the main pane: a title, the way

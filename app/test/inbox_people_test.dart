@@ -10,9 +10,9 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
-import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
-import 'package:bond_inbox/widgets/pane_surface.dart';
+import 'package:bond_inbox/widgets/person_room_pane.dart';
+import 'package:bond_inbox/widgets/room_header.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
@@ -204,12 +204,14 @@ void main() {
     await pumpInbox(tester);
     await openRoom(tester, 'Dana Whitfield');
 
-    final pane = find.byType(PaneSurface);
+    // Rewritten in Phase 6: the room is a merged timeline, not a list pane.
+    final pane = find.byType(PersonRoomPane);
     expect(pane, findsOneWidget);
-    expect(
-      find.descendant(of: pane, matching: find.text('Dana Whitfield')),
-      findsWidgets,
-    );
+    expect(find.descendant(
+      of: find.byType(RoomHeader<ThreadTab>),
+      matching: find.text('Dana Whitfield'),
+    ), findsOneWidget);
+    expect(find.text('2 threads · mail and Teams'), findsOneWidget);
     expect(find.text('💬 Launch date'), findsOneWidget);
     expect(find.text('Homepage copy'), findsOneWidget);
     // Deferred mail is in Later, and in no room at all.
@@ -217,22 +219,20 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('a thread in the room opens in the MAIN pane', (tester) async {
+  testWidgets('a mail thread in the room opens BESIDE it', (tester) async {
     await seedPerson();
     await pumpInbox(tester);
     await openRoom(tester, 'Dana Whitfield');
 
-    await tester.tap(find.descendant(
-      of: find.byType(ConversationListPane),
-      matching: find.text('Homepage copy'),
-    ));
+    await tester.tap(find.byKey(RootMessageCard.keyFor('email', 'c1')));
     await tester.pump();
     await tester.pump();
     await tester.pump();
 
-    // The list column click rule (D3): main, not beside.
-    expect(find.byType(ThreadDetailPanel), findsOneWidget);
-    expect(find.byType(SidePanelHost), findsNothing);
+    // D3: a thread reached from INSIDE a room opens beside, so the history
+    // the reader came from stays on screen.
+    expect(find.byType(SidePanelHost), findsOneWidget);
+    expect(find.byType(PersonRoomPane), findsOneWidget);
     expect(
       tester.widget<ThreadDetailPanel>(find.byType(ThreadDetailPanel))
           .conversation
@@ -249,13 +249,13 @@ void main() {
     await openRoom(tester, 'Dana Whitfield');
 
     await tester.tap(find.descendant(
-      of: find.byType(PaneSurface),
+      of: find.byType(RoomHeader<ThreadTab>),
       matching: find.byTooltip('Back'),
     ));
     await tester.pump();
     await tester.pump();
 
-    expect(find.byType(PaneSurface), findsNothing);
+    expect(find.byType(PersonRoomPane), findsNothing);
     expect(find.text('People'), findsWidgets);
     await settleQueues(tester);
   });
@@ -264,11 +264,11 @@ void main() {
     await seedPerson();
     await pumpInbox(tester);
     await openRoom(tester, 'Dana Whitfield');
-    expect(find.byType(PaneSurface), findsOneWidget);
+    expect(find.byType(PersonRoomPane), findsOneWidget);
 
     await tapStop(tester, 'Home');
 
-    expect(find.byType(PaneSurface), findsNothing);
+    expect(find.byType(PersonRoomPane), findsNothing);
     await settleQueues(tester);
   });
 

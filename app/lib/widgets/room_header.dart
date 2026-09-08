@@ -85,12 +85,20 @@ class RoomHeader<T> extends StatelessWidget {
   /// is a control that answers nothing.
   final List<RoomMenuItem> moreItems;
 
+  /// What tapping the faces does — open the person beside the room, the way
+  /// tapping a face does in every chat app the reader already has. Null leaves
+  /// the stack a picture, with no `InkWell` in the tree at all: a control that
+  /// answers nothing must not look like one.
+  final VoidCallback? onPeopleTap;
+
   final List<T> tabs;
   final T? selectedTab;
   final String Function(T)? tabLabel;
   final ValueChanged<T>? onTab;
 
   static const Key moreKey = ValueKey('room-header-more');
+
+  static const Key peopleKey = ValueKey('room-header-people');
 
   static Key tabKey(Object value) => ValueKey('room-tab-$value');
 
@@ -112,6 +120,7 @@ class RoomHeader<T> extends StatelessWidget {
     this.photos,
     this.stateChip,
     this.onBack,
+    this.onPeopleTap,
     this.actions = const [],
     this.moreItems = const [],
     this.tabs = const [],
@@ -180,13 +189,33 @@ class RoomHeader<T> extends StatelessWidget {
         ),
         const SizedBox(width: BondSpacing.s12),
         if (showFaces && people.isNotEmpty) ...[
-          AvatarStack(people: people, photos: photos),
+          _faces(),
           const SizedBox(width: BondSpacing.s8),
         ],
         ?stateChip,
         for (final action in actions) _action(action),
         if (moreItems.isNotEmpty) _more(),
       ],
+    );
+  }
+
+  /// The stack, tappable when the host gave it somewhere to go.
+  ///
+  /// Its own transparent `Material`, because ink paints on the nearest
+  /// ancestor — which here is behind the pane's opaque surface, where no
+  /// splash could ever show.
+  Widget _faces() {
+    final stack = AvatarStack(people: people, photos: photos);
+    final onTap = onPeopleTap;
+    if (onTap == null) return stack;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        key: peopleKey,
+        onTap: onTap,
+        borderRadius: BondRadii.fullAll,
+        child: Padding(padding: const EdgeInsets.all(2), child: stack),
+      ),
     );
   }
 

@@ -22,6 +22,12 @@ import '../services/chat_roster.dart';
 // copy of the "an outbound may go quiet, but never off `done`" asymmetry is
 // exactly how a send would start disagreeing with the sync about a thread.
 import '../services/conversation_state.dart';
+// The third read out of `services/`, on the same licence as the two above:
+// `extract_task.dart` imports `models/` and nothing else, and [extractionFor]
+// needs `ExtractionResult.fromJson` to be the same decoder the handler wrote
+// through — a second copy of it here is how a stored blob and its reader come
+// to disagree about a field name.
+import '../services/llm/extract_task.dart' show ExtractionResult;
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
@@ -826,6 +832,7 @@ WHERE source = ? AND conversation_key = ?
     final result = await db
         .customSelect(
           'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score, '
+          '  ai.snoozed_until AS snoozed_until, '
           '  (SELECT COUNT(*) FROM messages m '
           '   WHERE m.source = c.source AND m.conversation_key = c.conversation_key '
           "     AND m.direction = 'inbound' AND m.is_read = 0) AS unread_count, "
@@ -2309,6 +2316,45 @@ RETURNING *
     return result.first.data['extraction_json'] as String?;
   }
 
+  /// One message by its key, or null when the row is gone.
+  ///
+  /// [Message.fromRow] alone, with no attachment hydration: the callers are
+  /// panels asking about ONE message, and a second query for files nobody
+  /// draws is a cost paid on every open.
+  Future<Message?> messageById(String source, String sourceMessageId) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM messages '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return Message.fromRow(result.first.data);
+  }
+
+  /// What the model pulled out of one message, decoded — or null when there is
+  /// none stored and when what is stored does not parse.
+  ///
+  /// The catch is the point. This is read by a panel the user opened, and the
+  /// blob is schemaless on purpose: a row written by an older shape of
+  /// [ExtractionResult] must cost that panel one absent section, never the
+  /// render around it.
+  Future<ExtractionResult?> extractionFor(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final raw = await getExtraction(source, sourceMessageId);
+    if (raw == null || raw.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return null;
+      return ExtractionResult.fromJson(Map<String, dynamic>.from(decoded));
+    } on Object {
+      return null;
+    }
+  }
+
   // ── per-conversation AI state ────────────────────────────────────────
 
   /// Writes only the AI columns this call actually names, inserting the row
@@ -2418,6 +2464,61 @@ RETURNING *
         variables: _args([bucket, reason, now, source, conversationKey]),
       );
     });
+  }
+
+  /// When a deferred thread should come back, or null to clear the date.
+  ///
+  /// Insert-then-update like [setConversationBucket] and for its reason: a
+  /// thread the embedder has never reached has no `conversation_ai` row, and a
+  /// date the user set must not depend on whether some other task got there
+  /// first.
+  ///
+  /// Written by PER-THREAD deferrals only. A sender rule is a standing
+  /// instruction with no "when" in it, and giving its threads dates would hand
+  /// them back one by one in defiance of the rule that filed them.
+  Future<void> setSnoozedUntil(
+    String source,
+    String conversationKey,
+    String? iso,
+  ) async {
+    final now = _nowIso();
+    await db.transaction(() async {
+      await db.customUpdate(
+        'INSERT INTO conversation_ai (source, conversation_key, updated_at) '
+        'VALUES (?, ?, ?) '
+        'ON CONFLICT(source, conversation_key) DO NOTHING',
+        variables: _args([source, conversationKey, now]),
+      );
+      await db.customUpdate(
+        'UPDATE conversation_ai SET snoozed_until = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: _args([iso, now, source, conversationKey]),
+      );
+    });
+  }
+
+  /// Every deferred thread whose date has arrived, back in the inbox. Returns
+  /// how many moved.
+  ///
+  /// The reason it writes is `'user'` and not a word of its own, deliberately.
+  /// `AttentionService._sweepBucket` re-files any thread whose reason is not
+  /// `'user'`, so a resurfaced thread carrying anything else would be swept
+  /// straight back to Later on the next pass and the date would look ignored.
+  /// A date the user set IS the user's instruction, and when it fires the
+  /// result is exactly what "keep this thread in my inbox" writes.
+  ///
+  /// The comparison is lexicographic over the UTC stamps [isoStamp] writes,
+  /// which is chronological at that one shape — the same promise every other
+  /// timestamp comparison in this store runs on.
+  Future<int> resurfaceDue(String nowIso) async {
+    return db.customUpdate(
+      'UPDATE conversation_ai '
+      "SET bucket = NULL, bucket_reason = 'user', snoozed_until = NULL, "
+      '    updated_at = ? '
+      "WHERE bucket = 'later' AND snoozed_until IS NOT NULL "
+      '  AND snoozed_until <= ?',
+      variables: _args([_nowIso(), nowIso]),
+    );
   }
 
   /// Stores one thread's ranking score. Same targeted insert-then-update as

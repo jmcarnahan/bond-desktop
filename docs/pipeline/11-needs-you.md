@@ -319,3 +319,59 @@ The activity row for the digest notes `requeued: needs_you`
 This was deferred out of Phase 3 on purpose: a re-verdict before the
 `attachment_digests` fence existed would have spent a model call on a
 re-judgement that could not see what changed.
+
+## The Why panel
+
+This section supersedes the position this file took until now, that
+`needs_you_reason` was stored against a future reader: it has one. The Why
+panel (`lib/widgets/why_panel.dart`, `WhyPanelBody`) is the explanation beside
+a message, and the reason is the first thing on it.
+
+**What it reads.** Five blocks, in this order.
+
+| Block | Source |
+|---|---|
+| Verdict | `Message.needsYouVerdict` / `needsYouReason`, now parsed in `Message.fromRow`; `gateReason` when the gate took the message |
+| Triage | the message's `triageStatus`, `summary`, `urgency`, `category`, `label` |
+| Asks | `needsAction`, `replyExpected`, `deadline`, `addressedMe`, `actionItems` |
+| Attention | the thread's `attentionScore` against the reader's own threshold, then `conversation_ai`'s `bucket`, `bucket_reason` and `snoozed_until` |
+| What it is about | `MessageStore.extractionFor(source, messageId)` — `getExtraction` decoded through `ExtractionResult.fromJson`, and null on a blob that will not parse |
+
+The facts come from `whyFactsProvider` (`lib/providers/why_provider.dart`), a
+`FutureProvider.autoDispose.family` keyed by the record
+`({source, conversationKey, messageId})`. Deliberately not a slice of the open
+thread: the panel has to work for a message whose transcript is not the one
+loaded — opened from a side thread, from a room — and a provider that depended
+on the thread provider would show an empty panel exactly then.
+
+**The tri-state survives into the copy.** `true` reads *Needs you*, `false`
+reads *Not flagged*, and NULL reads *Not judged yet* with the line "The
+needs-you pass has not reached this message." Three answers, never two: a panel
+that rendered NULL as "not flagged" would be claiming a judgement the pass has
+not made, which is exactly the confusion the tri-state column exists to
+prevent.
+
+**How it opens.** Two gestures, both in `ThreadDetailPanel`. Hovering an
+inbound transcript row gives a third button on the strip, **Why**
+(`HoverActions.whyKeyFor(messageId)`), beside Reply and Suggest. And the CTA
+banner above the transcript now opens Why on the **newest inbound** message
+rather than focusing the composer — the box is docked and always visible, so
+"put the cursor in it" was a click nobody needed help with, while "where did
+this ask come from" had no answer anywhere. With no Why wired, or on a thread
+with nothing inbound in it, the banner falls back to focusing the composer as
+it always did. Every per-message ask line still focuses the box.
+
+**What it never does.** It feeds nothing back. This reads model OUTPUT that
+has already been through the untrusted-data fence upstream; it writes nothing,
+sends nothing and prompts nothing, so there is no second fence here. And it
+renders sentences, never stored shapes — no JSON, no enum names dressed as
+prose, no field names. `teams_direct` reads "A direct message to you on
+Teams."; `sender_pref` reads "a rule about the sender". `why_panel_test`
+asserts no brace and no underscore ever reaches the screen.
+
+**The door to the history.** `WhyPanelBody.onWhatHappened` draws one final
+quiet `What happened ›` button (`WhyPanelBody.whatHappenedKey`) when it is set,
+and nothing at all when it is null — a dead link to a screen a build does not
+have is worse than no link. The shell passes null on this branch; the "What
+happened" screen arrives from `feat/ingestion-truth`, and wiring the two
+together is a merge step, not a second answer.
