@@ -89,6 +89,8 @@ class ActivityLogPanel extends StatefulWidget {
     'restore': 'Restore',
     'attachment_text': 'Read attachment',
     'attachment_digest': 'Attachment digest',
+    'needs_you': 'Needs you',
+    'needs_you_rejudge': 'Needs You re-judge',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -178,6 +180,14 @@ class ActivityLogPanel extends StatefulWidget {
             ? 'Draft written — ${chars.toInt()} chars'
             : 'Draft written';
       case 'mark_read':
+        final count = e.count ?? 0;
+        return count == 1
+            ? '$label — 1 message'
+            : '$label — $count messages';
+      // The count IS the row here: a rules save that queued nothing writes no
+      // row at all, so the only thing this sentence has to say is how much
+      // work the owner's edit started.
+      case 'needs_you_rejudge':
         final count = e.count ?? 0;
         return count == 1
             ? '$label — 1 message'

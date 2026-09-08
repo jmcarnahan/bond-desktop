@@ -476,6 +476,17 @@ void main() {
       );
     });
 
+    test('a re-judge says how much the rules edit queued', () {
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'needs_you_rejudge', count: 12)),
+        'Needs You re-judge — 12 messages',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'needs_you_rejudge', count: 1)),
+        'Needs You re-judge — 1 message',
+      );
+    });
+
     test('a Teams sync counts its own messages', () {
       expect(
         ActivityLogPanel.describe(_event(kind: 'sync_teams', count: 2)),

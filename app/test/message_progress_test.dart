@@ -1100,6 +1100,125 @@ void main() {
     });
   });
 
+  group('re-judging the recent window', () {
+    /// The work rows for one kind, as `entity_id` → status.
+    Future<Map<String, String>> workRows(String kind) async {
+      final rows = await db
+          .customSelect(
+            'SELECT entity_id, status FROM work_items WHERE task_kind = ?',
+            variables: [Variable(kind)],
+          )
+          .get();
+      return {
+        for (final row in rows)
+          row.data['entity_id'] as String: row.data['status'] as String,
+      };
+    }
+
+    test('a finished judgement inside the window goes back on the queue',
+        () async {
+      await ingest('m1', triageStatus: 'triaged');
+      await store.enqueueWork('needs_you', 'email', 'm1');
+      await store.writeWork('needs_you', 'email', 'm1', status: 'done');
+
+      final n = await store.requeueNeedsYouRejudge(
+        sinceIso: '2026-08-25T00:00:00Z',
+      );
+
+      expect(n, 1);
+      expect(await workRows('needs_you'), {'m1': 'pending'});
+    });
+
+    test('and a message that was never judged gets its first row', () async {
+      // `requeueWork` inserts when there is nothing to revive, which is what
+      // reaches a message the first pass never got to.
+      await ingest('m1', triageStatus: 'triaged');
+
+      expect(
+        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
+        1,
+      );
+      expect(await workRows('needs_you'), {'m1': 'pending'});
+    });
+
+    test('a message older than the window is left alone', () async {
+      // Those rules were the rules when it landed. History, not a mistake.
+      await ingest('m1',
+          triageStatus: 'triaged', receivedAt: '2026-08-01T10:00:00Z');
+
+      expect(
+        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
+        0,
+      );
+      expect(await workRows('needs_you'), isEmpty);
+    });
+
+    test('a gated message is left alone unless it is a legacy chat row',
+        () async {
+      // The same admission the first judgement had: the pipeline threw the
+      // newsletter out, and a rules edit is not a reason to pay a model for it.
+      await ingest('m-gated',
+          triageStatus: 'skipped', gateReason: 'newsletter');
+      await ingest('m-chat',
+          triageStatus: 'skipped',
+          gateReason: 'teams_source',
+          source: 'teams');
+
+      expect(
+        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
+        1,
+      );
+      expect(await workRows('needs_you'), {'m-chat': 'pending'});
+    });
+
+    test('the cap takes the newest and stops', () async {
+      await ingest('m-old',
+          triageStatus: 'triaged', receivedAt: '2026-09-01T08:00:00Z');
+      await ingest('m-mid',
+          triageStatus: 'triaged', receivedAt: '2026-09-01T09:00:00Z');
+      await ingest('m-new',
+          triageStatus: 'triaged', receivedAt: '2026-09-01T11:00:00Z');
+
+      expect(
+        await store.requeueNeedsYouRejudge(
+          sinceIso: '2026-08-25T00:00:00Z',
+          cap: 2,
+        ),
+        2,
+      );
+      expect(
+        (await workRows('needs_you')).keys,
+        unorderedEquals(['m-new', 'm-mid']),
+      );
+    });
+
+    test('an item a drain is already holding keeps its claim and its place',
+        () async {
+      // `requeueWork` refuses to reset a `processing` row — handing an item a
+      // worker holds to a second drain is worse than judging it a moment late.
+      // It is still counted: it is still going to be judged.
+      await ingest('m1', triageStatus: 'triaged');
+      await store.enqueueWork('needs_you', 'email', 'm1');
+      await store.writeWork('needs_you', 'email', 'm1', status: 'processing');
+
+      expect(
+        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
+        1,
+      );
+      expect(await workRows('needs_you'), {'m1': 'processing'});
+    });
+
+    test('the owner\'s own messages are never re-judged', () async {
+      await ingest('m-out', direction: 'outbound', triageStatus: 'triaged');
+
+      expect(
+        await store.requeueNeedsYouRejudge(sinceIso: '2026-08-25T00:00:00Z'),
+        0,
+      );
+      expect(await workRows('needs_you'), isEmpty);
+    });
+  });
+
   group('the recorder itself', () {
     test('every write ticks the bus once, with the message it was about',
         () async {

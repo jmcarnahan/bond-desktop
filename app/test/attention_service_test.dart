@@ -600,6 +600,108 @@ void main() {
           reason: "the newsletter no longer owns a thread Dana replied on");
     });
 
+    test('an open ask keeps a quiet FYI thread in the inbox', () async {
+      // The shape Later used to hide: the model read the newest message as a
+      // low-value FYI, but the needs-you stage judged it a real ask and nobody
+      // has answered it.
+      await seed('c1', intent: 'fyi', importance: 'low');
+      await store.writeNeedsYouVerdict('email', 'c1-m1',
+          verdict: true, reason: 'asks the owner to pick a date');
+
+      await service.recomputeAll(now: now);
+
+      expect(await bucketOf('c1'), isNull);
+      expect(await reasonOf('c1'), isNull);
+    });
+
+    test('and lets it defer once the owner has answered', () async {
+      // The ask closes on the thread's last outbound message, whatever it was
+      // a reply to. After that the thread is quiet again.
+      await seed('c1', intent: 'fyi', importance: 'low');
+      await store.writeNeedsYouVerdict('email', 'c1-m1',
+          verdict: true, reason: 'asks the owner to pick a date');
+      const answeredAt = '2026-08-29T11:30:00Z';
+      await store.upsertMessage({
+        'source_message_id': 'c1-out',
+        'conversation_key': 'c1',
+        'direction': 'outbound',
+        'from_address': 'me@x.com',
+        'received_at': answeredAt,
+      });
+      // `upsertMessage` does not stamp the thread's outbound watermark — only
+      // the folded conversation row carries it, so the seed writes it here.
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'state': 'waiting',
+        'last_outbound_at': answeredAt,
+        'last_message_at': answeredAt,
+      });
+
+      await service.recomputeAll(now: now);
+
+      expect(await bucketOf('c1'), 'later');
+      expect(await reasonOf('c1'), 'low_value');
+    });
+
+    test('an older unanswered ask under a newer quiet FYI still holds',
+        () async {
+      // The thread-level case, and the reason the filing does not just read
+      // the newest message's own verdict: the question is two messages back.
+      await seed('c1', intent: 'fyi', importance: 'low');
+      await store.upsertMessage({
+        'source_message_id': 'c1-ask',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'from_address': 'eric@x.com',
+        'received_at': '2026-08-28T09:00:00Z',
+      });
+      await store.writeNeedsYouVerdict('email', 'c1-ask',
+          verdict: true, reason: 'asks the owner to approve the spend');
+
+      await service.recomputeAll(now: now);
+
+      expect(await bucketOf('c1'), isNull);
+    });
+
+    test('and a hand-deferred thread is untouched by an open ask', () async {
+      // `user` is still the most specific instruction anyone gave. An ask does
+      // not overrule someone who deferred this one thread on purpose.
+      await seed('c1', intent: 'fyi', importance: 'low');
+      await store.writeNeedsYouVerdict('email', 'c1-m1',
+          verdict: true, reason: 'asks the owner to pick a date');
+      await store.setConversationBucket('email', 'c1',
+          bucket: 'later', reason: 'user');
+
+      await service.recomputeAll(now: now);
+
+      expect(await bucketOf('c1'), 'later');
+      expect(await reasonOf('c1'), 'user');
+    });
+
+    test('a verdict on a gated message holds nothing open', () async {
+      // The ask the owner threw out by hand keeps its verdict on the row, and
+      // a thread must not be kept out of Later by a question its owner has
+      // already dismissed. Same admission as every other reader of a kept
+      // message.
+      await seed('c1', intent: 'fyi', importance: 'low');
+      await store.upsertMessage({
+        'source_message_id': 'c1-ask',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'from_address': 'eric@x.com',
+        'received_at': '2026-08-28T09:00:00Z',
+        'triage_status': 'skipped',
+        'gate_reason': 'user',
+      });
+      await store.writeNeedsYouVerdict('email', 'c1-ask',
+          verdict: true, reason: 'asks the owner to approve the spend');
+
+      await service.recomputeAll(now: now);
+
+      expect(await bucketOf('c1'), 'later');
+      expect(await reasonOf('c1'), 'low_value');
+    });
+
     test('a done thread is swept but not scored', () async {
       await seed('c1', state: 'done', intent: 'fyi', importance: 'low');
 

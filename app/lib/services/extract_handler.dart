@@ -280,11 +280,24 @@ class ExtractHandler extends WorkHandler {
 
     final senderPref =
         await _store.getSenderPref(row['from_address'] as String? ?? '');
+    // Asked about the THREAD, not about this row's own verdict: the message
+    // being filed on can be a quiet FYI while an older message in the same
+    // thread is still an unanswered ask, and the thread is the unit being
+    // filed.
+    //
+    // Needs-you drains ahead of extract in the same pass (see the handler
+    // order in `app_providers.dart`), so this message's own verdict is
+    // normally already written by the time this runs. When it is not — a
+    // needs-you row that parked on an unreachable server, say — the attention
+    // sweep on the next list load asks the same question again and corrects
+    // the bucket.
+    final openAsk = await _store.hasOpenAsk(source, key);
     final bucket = bucketFor(
       senderPref: senderPref,
       intent: result.intent,
       importance: result.importance,
       needsReply: (conversation['state'] as String?) == 'needs_reply',
+      needsYouVerdict: openAsk,
     );
 
     if (bucket != null) {

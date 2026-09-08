@@ -10,6 +10,12 @@ sweep's backstop writes the same `message_progress.needs_you`; and
 threshold, the `later` bucket and the `done` state gate a judged yes exactly as
 they gate every other ask.
 
+**Bucket filing** reads it too. A thread holding an unanswered judged yes is
+never filed to Later by the automatic rule, in either writer — see
+[08-attention.md](08-attention.md). That is what keeps the `later` gate above
+honest: the only Later a judged yes can now sit behind is one a person asked
+for.
+
 **Attention scoring** reads it too — see [08-attention.md](08-attention.md).
 `attentionScore` takes the newest inbound message's verdict off the
 `latestInboundMeta` row: a judged yes breaks the quiet-FYI temper and earns the
@@ -270,6 +276,17 @@ for*, which is one sentence. The file's own words are the retriever's business
 is about. The system prompt does not change.
 
 ## The re-verdict
+
+**Saving the Needs You rules is a trigger.** The editor replaces the whole
+prompt body, so every verdict on disk was written under words the owner has
+just replaced. `MessageStore.requeueNeedsYouRejudge` therefore re-queues the
+last **7 days** of kept inbound messages — newest first, capped at **200** —
+through the ordinary `needs_you` work kind, and the chip follows each new
+verdict per **The chip follows the verdict** above. Older verdicts stay as they
+are: those rules were the rules when those messages landed, so they are history
+rather than mistakes. Saving text identical to what is stored queues nothing.
+The Settings section's summary reads "judging N messages" while the queue
+drains, and one `needs_you_rejudge` activity row records the count.
 
 A document that asks for a signature can change whether its message wants the
 owner — and the first needs-you pass ran before anything had read it. Whatever

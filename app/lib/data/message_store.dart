@@ -2523,6 +2523,91 @@ RETURNING *
     };
   }
 
+  /// The one spelling of "this thread holds an open ask", shared by
+  /// [openAskThreads] and [hasOpenAsk] so a sweep and a single filing can
+  /// never answer it differently.
+  ///
+  /// Thread-level rather than message-level on purpose: the newest message on
+  /// a thread can be a quiet FYI while an older one is still an unanswered
+  /// question, and the thread is the unit being filed. "Unanswered" is the
+  /// thread's last outbound message — anything the owner sent after the ask
+  /// closes it, whether or not it was a reply to that particular message.
+  ///
+  /// `COALESCE(c.last_outbound_at, '')` reads a thread the owner has never
+  /// written on as one whose asks are all still open, which is the whole
+  /// shape this exists to catch.
+  ///
+  /// The triage clause is the same admission every other reader of a kept
+  /// message uses: a gated row is not an ask, whatever verdict it carries. No
+  /// gate writes a verdict today, but a message the owner throws out by hand
+  /// keeps the one it had — and a thread must not be held out of Later by a
+  /// question its owner has already dismissed. The `teams_source` tolerance
+  /// is the usual one for chats stored before chats were triaged.
+  static const String _openAskWhere = """
+  m.direction = 'inbound'
+  AND m.needs_you_verdict = 1
+  AND (m.triage_status <> 'skipped' OR m.gate_reason = 'teams_source')
+  AND m.received_at > COALESCE(c.last_outbound_at, '')""";
+
+  /// Every thread holding an open ask: an inbound message the needs-you stage
+  /// judged yes, received after the thread's last outbound message (or with no
+  /// outbound at all). Keys are `'$source\n$conversationKey'`.
+  ///
+  /// The newline separator is spelled here rather than by the caller because
+  /// every caller has to build the same key to look one up — a source and a
+  /// conversation key, joined by a character neither of them can contain.
+  ///
+  /// One read for the whole mailbox, because the attention sweep runs on every
+  /// list load and a query per thread would be hundreds of round trips per
+  /// keystroke.
+  Future<Set<String>> openAskThreads({
+    List<String> sources = const ['email'],
+  }) async {
+    if (sources.isEmpty) return const {};
+    final result = await db
+        .customSelect(
+          'SELECT DISTINCT m.source AS source, '
+          '  m.conversation_key AS conversation_key '
+          'FROM messages m '
+          'LEFT JOIN conversations c '
+          '  ON c.source = m.source AND c.conversation_key = m.conversation_key '
+          'WHERE $_openAskWhere '
+          '  AND m.source IN (${_placeholders(sources.length)})',
+          variables: _args([...sources]),
+        )
+        .get();
+    return {
+      for (final row in result)
+        openAskKey(
+          row.data['source'] as String? ?? '',
+          row.data['conversation_key'] as String? ?? '',
+        ),
+    };
+  }
+
+  /// The key [openAskThreads] returns, for a caller holding a thread.
+  static String openAskKey(String source, String conversationKey) =>
+      '$source\n$conversationKey';
+
+  /// Whether one thread holds an open ask — see [openAskThreads].
+  ///
+  /// The single-thread path, for the extraction handler, which is filing one
+  /// thread and has no use for the whole mailbox's set.
+  Future<bool> hasOpenAsk(String source, String conversationKey) async {
+    final result = await db
+        .customSelect(
+          'SELECT 1 FROM messages m '
+          'LEFT JOIN conversations c '
+          '  ON c.source = m.source AND c.conversation_key = m.conversation_key '
+          'WHERE $_openAskWhere '
+          '  AND m.source = ? AND m.conversation_key = ? '
+          'LIMIT 1',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return result.isNotEmpty;
+  }
+
   /// How often each sender gets answered, as a 0..1 fraction.
   ///
   /// A cheap approximation, and deliberately so: "replied" means the thread
@@ -3580,6 +3665,62 @@ FROM storylines s''';
       'AND m.needs_you_verdict IS NULL)',
       variables: _args([_nowIso()]),
     );
+  }
+
+  /// Puts the needs-you verdict of every recent inbound message back on the
+  /// queue, newest first, and returns how many rows that touched.
+  ///
+  /// The rules-save trigger: the owner has just rewritten the prompt every
+  /// below-the-floor judgement reads, so the verdicts that prompt produced in
+  /// the recent window are re-asked against the new one. Older verdicts are
+  /// history rather than mistakes — the rules were what they were when those
+  /// messages landed — so [sinceIso] bounds what is re-asked, and [cap] bounds
+  /// the model bill a single Save can run up. The chip and the tile follow
+  /// each new verdict through `NeedsYouHandler`'s own tail, so nothing here
+  /// touches `message_progress`.
+  ///
+  /// The triage filter is the same admission the first judgement had:
+  /// `triaged` is the status of a message the pipeline kept, and the
+  /// `teams_source` tolerance carries the chat rows stored `skipped` before
+  /// chats were triaged at all — re-judging on a rules change must not be the
+  /// one pass that decides they never existed.
+  ///
+  /// The count is of rows SELECTED, not of work rows written, and that is the
+  /// number the owner is shown: [requeueWork] inserts when a message has never
+  /// been judged and revives a `done` or `error` row, but leaves a row already
+  /// `pending` or `processing` in its place in the queue. Such a message is
+  /// still going to be judged under the new rules, so counting it is honest.
+  Future<int> requeueNeedsYouRejudge({
+    required String sinceIso,
+    List<String> sources = const ['email', 'teams'],
+    int cap = 200,
+  }) async {
+    if (sources.isEmpty) return 0;
+    final rows = await db
+        .customSelect(
+          'SELECT source, source_message_id FROM messages '
+          "WHERE direction = 'inbound' "
+          '  AND received_at >= ? '
+          '  AND source IN (${_placeholders(sources.length)}) '
+          "  AND (triage_status = 'triaged' OR gate_reason = 'teams_source') "
+          'ORDER BY received_at DESC, source_message_id DESC '
+          'LIMIT ?',
+          variables: _args([sinceIso, ...sources, cap]),
+        )
+        .get();
+    // One transaction for the whole batch: two hundred separate writes on a
+    // Save is two hundred fsyncs, and the queue is only meaningful once every
+    // row in the window is on it.
+    await db.transaction(() async {
+      for (final row in rows) {
+        await requeueWork(
+          'needs_you',
+          row.data['source'] as String? ?? '',
+          row.data['source_message_id'] as String? ?? '',
+        );
+      }
+    });
+    return rows.length;
   }
 
   /// Puts the storyline pass back on the queue for every conversation the

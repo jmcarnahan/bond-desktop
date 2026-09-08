@@ -7,7 +7,10 @@ facts out of each message, then fans out three cheap follow-ons:
 1. **Bucket filing** (`_fileBucket`) — the extraction's read of the message
    files low-value mail into Later, unless a standing per-sender rule or an
    explicit "keep this in my inbox" overrides it. Nothing automatic overturns
-   a person.
+   a person. A thread holding an **open ask** — an unanswered message the
+   needs-you stage judged yes, anywhere in the thread, not only the newest one
+   — is never filed to Later by this rule either (see
+   [08-attention.md](08-attention.md)).
 2. **Conversation card + clustering embedding** (`_refreshCard`) — builds the
    thread card, hash-guards it against no-op rewrites, embeds it under the
    clustering prefix, and requeues `storyline` work for the conversation.

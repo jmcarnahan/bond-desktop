@@ -85,6 +85,22 @@ final syncStampsProvider = FutureProvider.autoDispose<SyncStamps>((ref) async {
   );
 });
 
+/// Needs-you judgements still queued, re-read on every recorded event so the
+/// Settings summary counts down as the re-judge the owner started drains.
+///
+/// Watching [activityEventsProvider] is the whole liveness mechanism, the same
+/// one [syncStampsProvider] uses: every stage that finishes records something,
+/// so the number moves without a timer of its own.
+final needsYouPendingProvider = FutureProvider.autoDispose<int>((ref) async {
+  ref.watch(activityEventsProvider);
+  final store = ref.watch(messageStoreProvider);
+  final counts = await store.workCounts('needs_you', sources: inboxSources);
+  // Both statuses, because a claimed item is still an answer the owner is
+  // waiting for — a countdown that skipped the one being worked on would sit
+  // at "1 message" and then jump to nothing.
+  return (counts['pending'] ?? 0) + (counts['processing'] ?? 0);
+});
+
 /// The activity pane's read model, re-read on every recorded event.
 ///
 /// Watching [activityEventsProvider] is what keeps it live: each event is a new

@@ -820,6 +820,54 @@ void main() {
       expect(await store.getExtraction('email', 'm1'), isNotNull);
     });
 
+    test('an open ask on the thread keeps it out of Later', () async {
+      // The older message is the ask; the one being filed on is a quiet FYI.
+      // The thread is the unit being filed, so the ask still counts.
+      await seedCurrentConversation();
+      await seedMessage();
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm-ask',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'from_address': 'sarah@x.com',
+        'received_at': '2026-08-28T09:00:00Z',
+      });
+      await store.writeNeedsYouVerdict('email', 'm-ask',
+          verdict: true, reason: 'asks whether Thursday still holds');
+
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+      expect(await bucketOf(), isNull);
+    });
+
+    test('and defers once that ask has been answered', () async {
+      await seedCurrentConversation();
+      await seedMessage();
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': 'm-ask',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'from_address': 'sarah@x.com',
+        'received_at': '2026-08-28T09:00:00Z',
+      });
+      await store.writeNeedsYouVerdict('email', 'm-ask',
+          verdict: true, reason: 'asks whether Thursday still holds');
+      // The outbound watermark lives on the conversation row, and it is what
+      // closes the ask.
+      await store.upsertConversation({
+        'conversation_key': 'conv-1',
+        'state': 'waiting',
+        'last_outbound_at': '2026-08-28T17:00:00Z',
+      });
+
+      await runOne(handlerFor(answer(intent: 'fyi', importance: 'low')));
+
+      expect(await bucketOf(), 'later');
+      expect(await reasonOf(), 'low_value');
+    });
+
     test('a message with no conversation row files nothing', () async {
       await seedMessage(conversationKey: 'orphan');
 

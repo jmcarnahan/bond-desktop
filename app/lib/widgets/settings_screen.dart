@@ -119,6 +119,18 @@ class SettingsScreen extends StatefulWidget {
   /// [needsYouDefaultRules] are in force.
   final String needsYouRules;
 
+  /// How many needs-you judgements are queued right now — the whole queue,
+  /// not only what the last Save put there.
+  ///
+  /// The section's summary says so while the re-judge a Save started is still
+  /// running, which is the only feedback the owner gets that editing the rules
+  /// did anything at all: the verdicts move minutes later, on a queue this
+  /// screen does not show. The wording is "judging", not "re-judging", because
+  /// the count cannot tell a Save's rows from a sync's, and a summary that
+  /// called a fresh backlog a re-judge would be claiming an edit that never
+  /// happened.
+  final int needsYouRejudging;
+
   final String needsYouDefaultRules;
   final String needsYouFixedTail;
   final int needsYouRulesMaxLength;
@@ -252,6 +264,7 @@ class SettingsScreen extends StatefulWidget {
     this.onSignIn,
     this.onSignOutOfServer,
     this.needsYouRules = '',
+    this.needsYouRejudging = 0,
     this.needsYouDefaultRules = '',
     this.needsYouFixedTail = '',
     this.needsYouRulesMaxLength = 4000,
@@ -1032,7 +1045,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
         : _rulesAreCustom
         ? ' · custom rules'
         : ' · default rules';
-    return '${_thresholdWording()}$rules';
+    // Last, after what the rules ARE, because it is the transient half: the
+    // rules are the state, this is a queue draining behind them.
+    final count = widget.needsYouRejudging;
+    final rejudging = count == 0
+        ? ''
+        : ' · judging $count ${count == 1 ? 'message' : 'messages'}';
+    return '${_thresholdWording()}$rules$rejudging';
   }
 
   Widget _needsYouBody() {

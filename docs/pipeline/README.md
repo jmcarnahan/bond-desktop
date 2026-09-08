@@ -23,7 +23,7 @@ is always the authority when they disagree.
 | 5 | **Triage** — urgency, category, summary, action items | **yes** | [03-triage.md](03-triage.md) |
 | 6 | **Needs-you verdict** — does this message want the owner | **yes**† | [11-needs-you.md](11-needs-you.md) |
 | 7 | **Extraction** — evidence, topics, people, intent, importance | **yes** | [04-extraction.md](04-extraction.md) |
-| 8 | Bucket filing — low-value mail to Later | no | [04-extraction.md](04-extraction.md) |
+| 8 | Bucket filing — low-value mail to Later, unless the thread holds an open ask | no | [04-extraction.md](04-extraction.md) |
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
 | 11 | **Storylines** — assign, sweep, refresh, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |

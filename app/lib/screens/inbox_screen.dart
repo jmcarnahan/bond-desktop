@@ -1178,6 +1178,55 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   void _closeSettings() => setState(() => _showingSettings = false);
 
+  /// Saves the Needs You rules and re-asks the recent window under them.
+  ///
+  /// The editor replaces the WHOLE prompt body, so a Save changes how every
+  /// message is judged — and every verdict already on disk was written under
+  /// the words the owner has just replaced. The last week is re-asked so the
+  /// chip and the tile follow what the new rules say (the needs-you handler's
+  /// tail rewrites the flag when a verdict moves); anything older is history
+  /// rather than a mistake, because those rules were the rules at the time.
+  ///
+  /// It lives here rather than on [AppPrefsNotifier] because the notifier
+  /// holds a store and nothing else: the activity log and the worker pump are
+  /// this host's, and a pref writer that reached for them would be a pref
+  /// writer that could not be tested without them.
+  Future<void> _saveNeedsYouRules(String text) async {
+    // The editor already stores default-equal text as the empty string, so the
+    // two strings compared here are in the same normal form and an unchanged
+    // Save re-judges nothing.
+    final before = ref.read(appPrefsProvider).needsYouRules;
+    final notifier = ref.read(appPrefsProvider.notifier);
+    unawaited(notifier.setNeedsYouRules(text));
+    if (text == before) return;
+
+    // Everything the rest of this needs is read BEFORE the first await, so a
+    // Settings pane closed while the requeue is on disk still gets its log
+    // row and its wake — the work is queued by then, and a queue nobody
+    // pumped would sit until the next sync. Nothing below touches `ref`.
+    final store = ref.read(messageStoreProvider);
+    final log = ref.read(activityLogProvider);
+    final worker = ref.read(aiWorkerProvider);
+    final since = DateTime.now()
+        .toUtc()
+        .subtract(const Duration(days: 7))
+        .toIso8601String();
+    final queued = await store.requeueNeedsYouRejudge(
+      sinceIso: since,
+      sources: inboxSources,
+    );
+    if (queued == 0) return;
+    await log.record(
+      'needs_you_rejudge',
+      count: queued,
+      detail: {'since': since},
+    );
+    // The same wake the attachment digest's requeue relies on: on a running
+    // drain this only sets the re-pump flag, and the future it returns is that
+    // drain's.
+    unawaited(worker.pump());
+  }
+
   /// Opens the New message screen. A pane and not a section, like Settings and
   /// the log, and it clears the same things they do — including the reply
   /// window, which belongs to a thread that is no longer on screen.
@@ -1270,7 +1319,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       needsYouDefaultRules: needsYouDefaultRules,
       needsYouFixedTail: needsYouOutputContract,
       needsYouRulesMaxLength: needsYouRulesCap,
-      onNeedsYouRulesSaved: (text) => unawaited(notifier.setNeedsYouRules(text)),
+      onNeedsYouRulesSaved: (text) => unawaited(_saveNeedsYouRules(text)),
+      needsYouRejudging: ref.watch(needsYouPendingProvider).valueOrNull ?? 0,
       showActivityLog: prefs.showActivityLog,
       onShowActivityLogChanged: (on) =>
           unawaited(notifier.setShowActivityLog(on)),
