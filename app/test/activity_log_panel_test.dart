@@ -487,6 +487,19 @@ void main() {
       );
     });
 
+    test('a reconcile names what the delta feed skipped', () {
+      // The row exists only because it found something, so the sentence has no
+      // "nothing new" form to write — it says what was missing instead.
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'sync_reconcile', count: 1)),
+        'Mail reconcile — 1 message the delta feed skipped',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'sync_reconcile', count: 3)),
+        'Mail reconcile — 3 messages the delta feed skipped',
+      );
+    });
+
     test('a Teams sync counts its own messages', () {
       expect(
         ActivityLogPanel.describe(_event(kind: 'sync_teams', count: 2)),

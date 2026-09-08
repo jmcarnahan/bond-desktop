@@ -1445,6 +1445,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       lastMailSyncIso: stamps?.mailIso,
       lastTeamsSyncIso: stamps?.teamsIso,
       lastSweepIso: stamps?.sweepIso,
+      lastReconcileIso: stamps?.reconcileIso,
       // Handed over as the future it is, so the section's button can hold
       // 'Refreshing…' until both pulls are back.
       onRefreshNow: _refreshAll,

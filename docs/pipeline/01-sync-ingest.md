@@ -13,7 +13,9 @@ Microsoft data; everything after it runs against local rows.
 
 **Code.**
 - `app/lib/services/sync_service.dart` — mail delta, window choice, the
-  enqueue block at the end of a pass.
+  enqueue block at the end of a pass, and the reconcile
+  (`_reconcileIfDue` / `_reconcileFolder`, and the `persistCursor` flag on
+  `_drain` that keeps it off the cursor).
 - `app/lib/services/teams_sync.dart` — the Teams twin of the same sequence.
 - `app/lib/data/message_store.dart` — `enqueueWork`, `enqueueExtractBacklog`,
   `requeueWork` and the doc comments distinguishing them (why storylines need
@@ -64,6 +66,38 @@ existed. It reports `backfilled_needs_you` (see
 gate — now resets the progress rows it re-pends in the same transaction. A
 re-pended message is about to be triaged again, and the gate cascade left on
 its row would otherwise read as a finished pipeline.
+
+**Reconcile.** The delta feed is trusted for position, and has still been
+seen to skip a message: on one day two of nine inbound messages never appeared
+on any page, and a fresh enumeration hours later found both. Nobody has a cause
+for it, so this is a safety net rather than a fix. Every `reconcileEvery`
+(10 minutes) the mail pass re-enumerates the last `reconcileWindow` (24 hours)
+of `inbox` and `sentitems` from scratch — no cursor, a `receivedDateTime ge`
+filter, walking `nextLink` itself — and ingests through the same idempotent
+page path, so anything already stored is neither counted nor re-folded.
+
+What it never does is the point. It never calls `setDeltaLink`, so the folder's
+delta position, its `synced_at` and the vacation rule that reads that stamp are
+all untouched — storing the deltaLink such a walk returns would rewind the
+cursor to now and skip every change behind it. It never runs more than once per
+ten minutes, on a `mail_last_reconcile` preference that is stamped after the
+attempt whether it succeeded or failed, so a persistently failing reconcile
+retries on the cadence rather than on every sixty-second poll. And it never
+takes the sync down: a 410 or a network failure inside it is caught, logged as
+`reconcile_error` on the (still `ok`) `sync_mail` event, and the pass carries
+on to its enqueues.
+
+What it reports is nothing at all when it finds nothing, which is the normal
+state. When it does find something, `reconciled: k` rides on the `sync_mail`
+event and a `sync_reconcile` event names the subjects (at most ten). Settings →
+Sync & data carries a **Mail reconcile** row beside the mail stamp, so a reader
+can see the net is alive even on the passes it writes no row for.
+
+Reconciled messages take the ordinary path: `pending` triage (or `backlog`
+below the floor), and their `extract` / `needs_you` / `embed` rows filed by the
+backlog enqueue in this same pass. Because that enqueue runs after the drains,
+they settle on the notification coordinator's deadline like any other message
+rather than immediately.
 
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never

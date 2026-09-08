@@ -187,6 +187,13 @@ class SettingsScreen extends StatefulWidget {
   final String? lastTeamsSyncIso;
   final String? lastSweepIso;
 
+  /// When the mail reconcile — the re-enumeration that catches what the delta
+  /// feed skipped — last finished. Its own row because it runs on its own
+  /// cadence: a mail sync minutes fresher than this one is the normal state,
+  /// and a reader asking whether the safety net is alive cannot tell from the
+  /// sync stamp above.
+  final String? lastReconcileIso;
+
   /// The clock the relative times are measured against. Passed rather than
   /// read from [DateTime.now] so a test can pin it and assert an exact string.
   final DateTime Function() now;
@@ -287,6 +294,7 @@ class SettingsScreen extends StatefulWidget {
     this.lastMailSyncIso,
     this.lastTeamsSyncIso,
     this.lastSweepIso,
+    this.lastReconcileIso,
     this.now = DateTime.now,
     this.onRefreshNow,
     this.mailLookbackDays = 14,
@@ -750,6 +758,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
           const SizedBox(height: BondSpacing.s12),
         ],
         _stampRow('Mail', widget.lastMailSyncIso, now),
+        // Directly under the mail stamp, because it is a fact about that pull
+        // and reads as a qualification of it.
+        _stampRow('Mail reconcile', widget.lastReconcileIso, now),
         _stampRow('Teams', widget.lastTeamsSyncIso, now),
         _stampRow('Storyline sweep', widget.lastSweepIso, now),
         const SizedBox(height: BondSpacing.s12),

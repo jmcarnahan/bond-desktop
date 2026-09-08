@@ -77,6 +77,7 @@ class ActivityLogPanel extends StatefulWidget {
   static const Map<String, String> _kindLabels = {
     'sync_mail': 'Mail sync',
     'sync_teams': 'Teams sync',
+    'sync_reconcile': 'Mail reconcile',
     'triage': 'Triage',
     'extract': 'Extract',
     'draft': 'Draft',
@@ -164,6 +165,14 @@ class ActivityLogPanel extends StatefulWidget {
       case 'sync_teams':
         final count = e.count ?? 0;
         return count == 0 ? '$label — nothing new' : '$label — $count new';
+      // Only ever recorded when it found something — a reconcile that found
+      // nothing is the normal state and writes no row — so the sentence names
+      // what the delta feed had skipped rather than how much was checked.
+      case 'sync_reconcile':
+        final count = e.count ?? 0;
+        return count == 1
+            ? '$label — 1 message the delta feed skipped'
+            : '$label — $count messages the delta feed skipped';
       case 'triage':
         final parts = _parts([detail['urgency'], detail['category']]);
         return parts.isEmpty ? label : '$label — $parts';
