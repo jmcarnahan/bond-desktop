@@ -94,6 +94,10 @@ class ActivityLogPanel extends StatefulWidget {
     'attachment_digest': 'Attachment digest',
     'needs_you': 'Needs you',
     'needs_you_rejudge': 'Needs You re-judge',
+    'retry': 'Retry',
+    'embed_message': 'Embed message',
+    'storyline_refresh': 'Storyline refresh',
+    'storyline_recap': 'Storyline recap',
   };
 
   /// The machine-readable reasons the pipeline records, in the words the user
@@ -257,6 +261,14 @@ class ActivityLogPanel extends StatefulWidget {
             '${removed is List ? removed.length : 0}';
       case 'storyline_unblock':
         return 'Allowed a thread back into consideration';
+      // Names the stages rather than counting them: the whole question a
+      // person has after pressing Retry is WHICH work went back on a queue,
+      // and "3 stages" does not answer it.
+      case 'retry':
+        final stages = detail['stages'];
+        return stages is List && stages.isNotEmpty
+            ? 'Retried ${stages.join(', ')}'
+            : 'Retried owed stages';
       case 'storyline_recruit':
         final recruited = detail['recruited'];
         final considered = detail['considered'];

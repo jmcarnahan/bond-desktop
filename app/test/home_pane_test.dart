@@ -86,6 +86,7 @@ Future<void> _pump(
   String? searchNotice,
   void Function(String)? onSearch,
   VoidCallback? onExitSearch,
+  void Function(String, String)? onRetry,
 }) async {
   await tester.binding.setSurfaceSize(const Size(1400, 900));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -116,6 +117,7 @@ Future<void> _pump(
         searchNotice: searchNotice,
         onSearch: onSearch,
         onExitSearch: onExitSearch,
+        onRetry: onRetry,
       ),
     ),
   ));
@@ -123,7 +125,7 @@ Future<void> _pump(
 
 void main() {
   group('the tiles', () {
-    testWidgets('show all six figures, processed net of what is in flight',
+    testWidgets('show all eight figures, processed net of what is in flight',
         (tester) async {
       await _pump(
         tester,
@@ -134,6 +136,7 @@ void main() {
           dropped: 12,
           needsYou: 5,
           inFlight: 8,
+          errored: 2,
           total: 48,
         ),
       );
@@ -150,6 +153,61 @@ void main() {
       expect(find.text('12'), findsOneWidget);
       expect(find.text('Urgent'), findsOneWidget);
       expect(find.text('3'), findsOneWidget);
+      expect(find.text('In flight'), findsOneWidget);
+      expect(find.text('8'), findsOneWidget);
+      expect(find.text('Errors'), findsOneWidget);
+      expect(find.text('2'), findsOneWidget);
+    });
+
+    testWidgets('In flight carries the stalled count only when there is one',
+        (tester) async {
+      await _pump(
+        tester,
+        metrics: const HomeMetrics(inFlight: 11, stalled: 3, total: 20),
+      );
+      expect(find.text('3 stalled'), findsOneWidget);
+      expect(
+        tester
+            .widgetList<BondStatTile>(find.byType(BondStatTile))
+            .firstWhere((tile) => tile.label == 'In flight')
+            .valueColor,
+        BondColors.error,
+      );
+
+      // Eleven in flight and none of them stuck is the healthy shape, and it
+      // must not read as an alarm.
+      await _pump(
+        tester,
+        metrics: const HomeMetrics(inFlight: 11, total: 20),
+      );
+      expect(find.textContaining('stalled'), findsNothing);
+      expect(
+        tester
+            .widgetList<BondStatTile>(find.byType(BondStatTile))
+            .firstWhere((tile) => tile.label == 'In flight')
+            .valueColor,
+        isNull,
+      );
+    });
+
+    testWidgets('Errors is coloured only when non-zero', (tester) async {
+      await _pump(tester, metrics: const HomeMetrics(errored: 2, total: 9));
+      expect(
+        tester
+            .widgetList<BondStatTile>(find.byType(BondStatTile))
+            .firstWhere((tile) => tile.label == 'Errors')
+            .valueColor,
+        BondColors.error,
+      );
+
+      await _pump(tester, metrics: const HomeMetrics(total: 9));
+      expect(
+        tester
+            .widgetList<BondStatTile>(find.byType(BondStatTile))
+            .firstWhere((tile) => tile.label == 'Errors')
+            .valueColor,
+        isNull,
+      );
     });
 
     testWidgets('colour Urgent only when there is something urgent',
@@ -224,6 +282,37 @@ void main() {
         tester.getTopLeft(find.text('From')).dx,
         tester.getTopLeft(find.text('Sender 1')).dx,
       );
+    });
+
+    testWidgets('a Retry on a row reaches the handler the pane was given',
+        (tester) async {
+      final retries = <(String, String)>[];
+      // Pending, nothing queued, and no progress write for half an hour —
+      // the one shape that earns a Retry link.
+      final stalled = HomeFeedRow(
+        source: 'email',
+        sourceMessageId: 'm42',
+        conversationKey: 'c42',
+        receivedAt: '2026-09-03T09:00:00Z',
+        triageState: 'done',
+        extractState: 'pending',
+        storylineState: 'pending',
+        draftState: 'pending',
+        settleState: 'pending',
+        outcome: 'pending',
+        dropped: false,
+        subject: 'Stuck one',
+        fromName: 'Sender 42',
+        updatedAt: '2026-09-03T11:30:00Z',
+      );
+      await _pump(
+        tester,
+        rows: [stalled],
+        onRetry: (source, id) => retries.add((source, id)),
+      );
+
+      await tester.tap(find.byKey(HomeFeedRowTile.retryKey(stalled)));
+      expect(retries, [('email', 'm42')]);
     });
 
     testWidgets('says so when there is nothing in it yet', (tester) async {

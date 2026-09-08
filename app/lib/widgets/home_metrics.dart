@@ -17,6 +17,12 @@ class BondStatTile extends StatelessWidget {
   /// about the absence of a problem.
   final Color? valueColor;
 
+  /// A second line under the label, for the part of the number that is worse
+  /// than the rest of it — "3 stalled" inside eleven in flight. Null is the
+  /// ordinary case and draws nothing: a caption that said "0 stalled" would
+  /// be the same false alarm as a red nought.
+  final String? caption;
+
   static const Duration switchDuration = Duration(milliseconds: 180);
 
   const BondStatTile({
@@ -24,6 +30,7 @@ class BondStatTile extends StatelessWidget {
     required this.value,
     required this.label,
     this.valueColor,
+    this.caption,
   });
 
   @override
@@ -55,6 +62,11 @@ class BondStatTile extends StatelessWidget {
           ),
           const SizedBox(height: 2),
           Text(label, style: BondType.caption),
+          if (caption != null)
+            Text(
+              caption!,
+              style: BondType.caption.copyWith(color: BondColors.inkMuted),
+            ),
         ],
       ),
     );
@@ -63,8 +75,13 @@ class BondStatTile extends StatelessWidget {
 
 /// The numbers over the feed, all from one read so they agree with each other.
 ///
-/// A [Wrap] rather than a Row: six tiles do not fit a narrow pane, and a tile
-/// that has wrapped still reads correctly while a squeezed one does not.
+/// A [Wrap] rather than a Row: eight tiles do not fit a narrow pane, and a
+/// tile that has wrapped still reads correctly while a squeezed one does not.
+///
+/// The last three are the ones a reader is looking for when something is
+/// wrong: what is still moving, how much of that has stopped moving, and what
+/// failed outright. Each is coloured only when it is non-zero — a red nought
+/// is an alarm about the absence of a problem.
 class HomeMetricsBar extends StatelessWidget {
   final HomeMetrics metrics;
 
@@ -88,6 +105,17 @@ class HomeMetricsBar extends StatelessWidget {
           value: '${metrics.urgent}',
           label: 'Urgent',
           valueColor: metrics.urgent > 0 ? BondColors.error : null,
+        ),
+        BondStatTile(
+          value: '${metrics.inFlight}',
+          label: 'In flight',
+          valueColor: metrics.stalled > 0 ? BondColors.error : null,
+          caption: metrics.stalled > 0 ? '${metrics.stalled} stalled' : null,
+        ),
+        BondStatTile(
+          value: '${metrics.errored}',
+          label: 'Errors',
+          valueColor: metrics.errored > 0 ? BondColors.error : null,
         ),
       ],
     );

@@ -4540,17 +4540,30 @@ WHERE m.source = ? AND m.source_message_id = ?
   /// reads as a wildcard, and the prefix test would then match ids that are
   /// not this message's at all.
   ///
+  /// Triage is the fourth arm, and it is read off `messages` because triage
+  /// has no work row: the queue claims `triage_status = 'pending'` directly.
+  /// Without it every untriaged row of a large drain would read as stalled
+  /// fifteen minutes in — the queue is working, just not on this row yet —
+  /// and the In flight tile would go red on every big sync. The price is
+  /// that a triage queue parked on a dead session never reads as stalled
+  /// per row; that condition is global, and the activity log names it.
+  ///
   /// It is what tells a row that has stopped from a row nobody has got to
   /// yet, so [HomeFeedRow.isStalled] and the stalled tile both stand on it.
   static const String _openWorkExists = '''
-EXISTS (
+(EXISTS (
   SELECT 1 FROM work_items w
   WHERE w.source = p.source
     AND w.status IN ('pending', 'processing')
     AND (w.entity_id = p.source_message_id
          OR w.entity_id = p.conversation_key
          OR substr(w.entity_id, 1, length(p.source_message_id) + 1)
-            = p.source_message_id || '|'))''';
+            = p.source_message_id || '|'))
+ OR EXISTS (
+  SELECT 1 FROM messages mt
+  WHERE mt.source = p.source
+    AND mt.source_message_id = p.source_message_id
+    AND mt.triage_status IN ('pending', 'processing')))''';
 
   /// Which storyline the row is really filed in.
   ///

@@ -100,10 +100,18 @@ void main() {
       'received_at': receivedAt,
       'created_at': receivedAt,
       'updated_at': receivedAt,
+      // Gated AT INGEST, which is what a newsletter actually is: the store's
+      // own gated path writes the finished progress row, and — the part this
+      // fixture needs — the triage drain never claims a message that arrived
+      // already skipped. Seeding the drop with raw SQL alone left triage
+      // pending, and a triage that then failed against no model server put an
+      // `error` on a row this pile is supposed to be showing the DROP for.
+      'triage_status': 'skipped',
+      'gate_reason': 'newsletter',
     });
     await db.customUpdate(
       "UPDATE message_progress SET dropped = 1, drop_reason = 'newsletter', "
-      "outcome = 'dropped', triage_state = 'done', settle_state = 'done' "
+      "outcome = 'dropped', triage_state = 'skipped', settle_state = 'done' "
       "WHERE source = 'email' AND source_message_id = 'email-$id'",
     );
   }

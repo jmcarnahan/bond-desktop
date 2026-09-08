@@ -44,6 +44,11 @@ void main() {
     String extractState = 'done',
     String storylineState = 'done',
     String? updatedAt,
+    // Triaged by default: `work_open` reads a pending triage as work in
+    // flight (the queue claims `messages.triage_status` directly, there is
+    // no work row), so a seed that left the column at its default would make
+    // every row here look busy.
+    String triageStatus = 'triaged',
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -56,6 +61,7 @@ void main() {
       'received_at': receivedAt,
       'created_at': receivedAt,
       'updated_at': receivedAt,
+      'triage_status': triageStatus,
     });
     await db.customUpdate(
       'UPDATE message_progress SET outcome = ?, dropped = ?, drop_reason = ?, '
@@ -661,6 +667,38 @@ void main() {
       };
 
       expect(open, {'m1': true, 'm2': true, 'm3': true, 'm4': false});
+    });
+
+    test('a message the triage queue has not reached yet is work in flight',
+        () async {
+      // Triage has no work row — the queue claims `triage_status` directly —
+      // so this is the arm that keeps a large drain from reading as a
+      // hundred stalled rows fifteen minutes in.
+      await seed('m1', conversationKey: 'c1', triageStatus: 'pending');
+      await seed('m2', conversationKey: 'c2', triageStatus: 'processing');
+      await seed('m3', conversationKey: 'c3', triageStatus: 'error');
+
+      final rows = await store.pageHomeFeed();
+      final open = {for (final row in rows) row.sourceMessageId: row.workOpen};
+      expect(open, {'m1': true, 'm2': true, 'm3': false});
+    });
+
+    test('an untriaged row is slow, never stalled', () async {
+      await seed(
+        'm1',
+        outcome: 'pending',
+        triageState: 'pending',
+        triageStatus: 'pending',
+        updatedAt: '2026-09-01T09:00:00Z',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: '2026-09-01T09:45:00Z',
+      );
+
+      expect(metrics.inFlight, 1);
+      expect(metrics.stalled, 0);
     });
 
     test('another message whose id is a prefix of this one is not this one',

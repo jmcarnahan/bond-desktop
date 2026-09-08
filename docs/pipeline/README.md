@@ -87,3 +87,26 @@ above does not change. See
 The home screen's five-segment stage bar (triage · extract · storyline ·
 draft · settle) is this pipeline rendered per row; `pipeline_progress.dart`
 records the transitions it draws.
+
+## What the home screen shows
+
+Every row's Result cell is one sentence with the reason in it, and every
+reason is a column this pipeline already writes. `resultLine` in
+`app/lib/widgets/home_result.dart` picks the first sentence that matches, in
+this order:
+
+| Sentence | Columns behind it |
+|----------|-------------------|
+| `Filtered — …`, `Newsletter`, `Nothing to do — …` | `message_progress.drop_reason`, plus `messages.gate_reason` for a gated drop; for `not_worthy` the judge's `needs_you_reason` when the verdict was a no, or "the thread is in Later" / "below the attention threshold" when it was a yes |
+| `Failed at <stage>` | the first `message_progress.<stage>_state` that is `error` |
+| `Stalled — waiting on <stage>` | `message_progress.outcome = 'pending'`, no open `work_items` for the message, its thread or its documents, `messages.triage_status` not pending, and `message_progress.updated_at` older than 15 minutes |
+| `Triaging…` / `Waiting on <stage>` | the five stage states, and whether any `work_items` row is open ("not queued yet" when none is) |
+| `Needs you — …` | `message_progress.needs_you` with `messages.needs_you_reason` |
+| `Filed in <storyline>` | the row's storyline pointer, or the thread's newest `storyline_members` row, with its `evidence` — or "filed by you" when `added_by = 'user'` |
+| `Later — …` | `conversation_ai.bucket` with `conversation_ai.bucket_reason` |
+| `Draft ready` | `message_progress.draft_state = 'done'` |
+| `Nothing to do` | nothing above matched; the tooltip carries `needs_you_reason` when the verdict was a no |
+
+The eight tiles above the table read the same columns over the last 24 hours,
+and Retry (`PipelineRepairService`) puts back exactly the stages a row still
+owes — never one that finished, and never a dropped row, which is Restore's.

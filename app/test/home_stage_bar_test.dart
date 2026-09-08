@@ -16,6 +16,7 @@ HomeFeedRow _row({
   String draft = 'pending',
   String settle = 'pending',
   String outcome = 'pending',
+  bool workOpen = false,
 }) =>
     HomeFeedRow(
       source: 'email',
@@ -29,6 +30,7 @@ HomeFeedRow _row({
       settleState: settle,
       outcome: outcome,
       dropped: false,
+      workOpen: workOpen,
     );
 
 Widget _host(Widget child) => MaterialApp(
@@ -166,6 +168,35 @@ void main() {
     });
   });
 
+  group('tooltipFor', () {
+    test('a state names itself', () {
+      expect(
+        HomeStageBar.tooltipFor('extract', 'done', workOpen: false),
+        'extract: done',
+      );
+      expect(
+        HomeStageBar.tooltipFor('draft', 'skipped', workOpen: true),
+        'draft: skipped',
+      );
+    });
+
+    test('pending with work behind it is merely next', () {
+      expect(
+        HomeStageBar.tooltipFor('extract', 'pending', workOpen: true),
+        'extract: pending',
+      );
+    });
+
+    test('pending with nothing queued says nobody has got to it', () {
+      // The whole point of the tooltip: the two segments look identical and
+      // mean opposite things.
+      expect(
+        HomeStageBar.tooltipFor('extract', 'pending', workOpen: false),
+        'extract: not queued yet',
+      );
+    });
+  });
+
   group('the widget', () {
     test('the stages are the pipeline, in the order it runs them', () {
       expect(
@@ -243,6 +274,37 @@ void main() {
             .opacity,
         HomeStageBar.mutedOpacity,
       );
+    });
+
+    testWidgets('a segment explains itself on hover', (tester) async {
+      await tester.pumpWidget(
+        _host(HomeStageBar.forRow(_row(triage: 'done'))),
+      );
+
+      expect(find.byTooltip('triage: done'), findsOneWidget);
+      expect(find.byTooltip('extract: not queued yet'), findsOneWidget);
+    });
+
+    testWidgets('a row with work open says pending rather than unqueued',
+        (tester) async {
+      await tester.pumpWidget(
+        _host(HomeStageBar.forRow(_row(triage: 'done', workOpen: true))),
+      );
+
+      expect(find.byTooltip('extract: pending'), findsOneWidget);
+      expect(find.byTooltip('extract: not queued yet'), findsNothing);
+    });
+
+    testWidgets('a muted bar keeps its tooltips — history explains too',
+        (tester) async {
+      await tester.pumpWidget(_host(
+        HomeStageBar.forRow(
+          _row(triage: 'done', draft: 'skipped'),
+          muted: true,
+        ),
+      ));
+
+      expect(find.byTooltip('draft: skipped'), findsOneWidget);
     });
 
     testWidgets('a running fill does not creep — it is the same half a second later',

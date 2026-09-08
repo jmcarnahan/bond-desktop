@@ -500,6 +500,34 @@ void main() {
       );
     });
 
+    test('a retry names the stages it put back', () {
+      // Which work was requeued is the whole question a person has after
+      // pressing Retry; a count of stages does not answer it.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'retry',
+          count: 2,
+          detail: const {
+            'stages': ['triage', 'extract'],
+          },
+        )),
+        'Retried triage, extract',
+      );
+    });
+
+    test('a retry with no stages recorded still reads as one', () {
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'retry')),
+        'Retried owed stages',
+      );
+      expect(
+        ActivityLogPanel.describe(
+          _event(kind: 'retry', detail: const {'stages': []}),
+        ),
+        'Retried owed stages',
+      );
+    });
+
     test('a Teams sync counts its own messages', () {
       expect(
         ActivityLogPanel.describe(_event(kind: 'sync_teams', count: 2)),

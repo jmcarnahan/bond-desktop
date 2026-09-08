@@ -362,6 +362,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (!mounted) return;
     final mail = ref.read(conversationsProvider.notifier).load();
     ref.read(storylinesProvider.notifier).load();
+    // The tiles otherwise re-read only behind a pipeline tick, and a row
+    // crosses the stalled threshold by NOT ticking. This poll is the clock
+    // that lets the In flight tile catch up with the rows under it, which
+    // re-evaluate on every rebuild. A no-op when nobody is watching them.
+    ref.invalidate(homeMetricsProvider);
     await mail;
     if (!mounted) return;
     final selected = _selectedId;
@@ -1717,6 +1722,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onSearch: (query) =>
           ref.read(homeFeedProvider.notifier).submitSearch(query),
       onExitSearch: () => ref.read(homeFeedProvider.notifier).exitSearch(),
+      // Fire-and-forget, like Restore: the service swallows its own failures
+      // and the row's next re-read is what reports whether anything moved.
+      onRetry: (source, id) => unawaited(
+        ref.read(pipelineRepairServiceProvider).retryOwed(source, id),
+      ),
     );
   }
 

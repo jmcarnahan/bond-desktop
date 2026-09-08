@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/home_models.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
+import 'home_result.dart';
 import 'source_glyph.dart';
 import 'stage_bar.dart';
 import 'time_format.dart';
@@ -17,6 +18,13 @@ import 'time_format.dart';
 /// carries the separation. The widths live here as consts and
 /// [HomeFeedHeaderRow] reads the same ones, which is the only thing keeping
 /// the header honest.
+///
+/// The Result cell is a SENTENCE with the reason in it — [resultLine] decides
+/// which one — rather than a chip that names a verdict and leaves the reader
+/// to guess what stood behind it. Three gestures nest inside it, and the
+/// innermost wins the arena in this order: the row itself opens the thread,
+/// the storyline name opens the storyline, and Retry requeues what the row
+/// still owes.
 class HomeFeedRowTile extends StatefulWidget {
   static const double glyphWidth = 20;
   static const double fromWidth = 160;
@@ -34,27 +42,22 @@ class HomeFeedRowTile extends StatefulWidget {
   /// read as leaving, solid enough to still read.
   static const double dropFadeOpacity = 0.35;
 
-  /// The machine-readable drop reasons in the words a person would use.
-  /// Anything unmapped falls back to the raw reason with its underscores
-  /// opened up — a reason a newer build introduced reads awkwardly rather than
-  /// rendering an empty chip.
-  static const Map<String, String> dropLabels = {
-    'fyi': 'FYI',
-    'newsletter': 'Newsletter',
-    'auto_generated': 'Automated',
-    'no_reply': 'No reply needed',
-    'not_worthy': 'Nothing to do',
-    'outbound': 'Outbound',
-    'self': 'Your own',
-    'empty': 'Empty',
-    'backlog': 'Backlog',
-    'gated': 'Filtered',
-  };
+  /// The drop vocabulary, which lives in `home_result.dart` with the rest of
+  /// the narration. Kept here as an alias because callers and tests reach for
+  /// it through the widget, and two copies of a label map is how a screen and
+  /// its tooltip come to disagree.
+  static const Map<String, String> dropLabels = homeDropLabels;
 
-  static String dropLabel(String? reason) {
-    if (reason == null || reason.isEmpty) return 'Dropped';
-    return dropLabels[reason] ?? reason.replaceAll('_', ' ');
-  }
+  static String dropLabel(String? reason) => homeDropLabel(reason);
+
+  /// The sentence's key, so a test can read the Result cell without matching
+  /// on its words. On a filed row it sits on the opening clause, because that
+  /// sentence is built from three pieces around a tappable name.
+  static ValueKey<String> resultTextKey(HomeFeedRow row) =>
+      ValueKey('result-${row.feedKey}');
+
+  static ValueKey<String> retryKey(HomeFeedRow row) =>
+      ValueKey('retry-${row.feedKey}');
 
   final HomeFeedRow row;
 
@@ -82,6 +85,12 @@ class HomeFeedRowTile extends StatefulWidget {
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
 
+  /// Puts the stages the row still owes back on their queues. Optional, and
+  /// null is what the archive pane passes: a dropped row is Restore's
+  /// business, and a Retry there would offer to re-run a pipeline that is
+  /// going to refuse the message again at the first gate.
+  final void Function(String source, String sourceMessageId)? onRetry;
+
   const HomeFeedRowTile({
     super.key,
     required this.row,
@@ -92,6 +101,7 @@ class HomeFeedRowTile extends StatefulWidget {
     this.fading = false,
     this.collapsing = false,
     this.muteBar = false,
+    this.onRetry,
   });
 
   @override
@@ -237,49 +247,121 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
     );
   }
 
-  /// What the app decided, in priority order.
+  /// What the app decided, as a sentence with its reason.
   ///
   /// A dropped row shows its reason and NOTHING else: it is behind the toggle
   /// precisely because the app judged it did not need the user, and a "Needs
   /// You" chip beside "Newsletter" would be the app arguing with itself.
   /// Everything else can co-occur — a thread can be both the user's to answer
-  /// and part of a storyline, and both facts are worth a glance.
+  /// and part of a storyline — so a sentence that is not about the filing
+  /// still carries the storyline link after it.
+  ///
+  /// Which sentence is [resultLine]'s judgement, not this widget's. All that
+  /// happens here is the dressing.
   Widget _result(HomeFeedRow row) {
-    if (row.dropped) {
-      return Wrap(
-        spacing: BondSpacing.s8,
-        runSpacing: BondSpacing.s4,
-        children: [
+    final result = resultLine(row, now: widget.now);
+    final storylineId = row.storylineId;
+    final storylineTitle = row.storylineTitle;
+    final linked = storylineId != null && (storylineTitle?.isNotEmpty ?? false);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        if (row.needsYou && !row.dropped) ...[
           BondChip.semantic(
-            HomeFeedRowTile.dropLabel(row.dropReason),
-            BondTone.neutral,
+            'Needs You',
+            row.urgency == 'urgent' ? BondTone.error : BondTone.attention,
           ),
+          const SizedBox(width: BondSpacing.s8),
         ],
+        Expanded(child: _sentence(result, row)),
+        // Already inside the sentence when the sentence IS the filing.
+        if (!row.dropped &&
+            linked &&
+            result.kind != HomeResultKind.filed) ...[
+          const SizedBox(width: BondSpacing.s8),
+          Flexible(child: _storylineLink(storylineId, storylineTitle!)),
+        ],
+        if (result.retryable && widget.onRetry != null) ...[
+          const SizedBox(width: BondSpacing.s8),
+          _retryLink(row),
+        ],
+      ],
+    );
+  }
+
+  /// The sentence itself, under a tooltip carrying the whole of it — the cell
+  /// is two flexible columns wide and most reasons are longer than that.
+  ///
+  /// A filed row is built from three pieces rather than one string, because
+  /// the storyline's name in the middle has to stay tappable; the words either
+  /// side of it are the same sentence [resultLine] already composed.
+  Widget _sentence(HomeResult result, HomeFeedRow row) {
+    final style = BondType.small.copyWith(
+      color: bondToneColors[result.tone]!.foreground,
+    );
+    if (result.kind == HomeResultKind.filed) {
+      final evidence = homeFiledEvidence(row);
+      return Tooltip(
+        message: result.tooltip,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Text(
+              'Filed in ',
+              key: HomeFeedRowTile.resultTextKey(row),
+              style: style,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            Flexible(
+              child: _storylineLink(row.storylineId!, row.storylineTitle!),
+            ),
+            if (evidence != null)
+              Flexible(
+                child: Text(
+                  ' — $evidence',
+                  style: style,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+          ],
+        ),
       );
     }
 
-    final storylineId = row.storylineId;
-    final storylineTitle = row.storylineTitle;
-    final chips = <Widget>[
-      if (row.needsYou)
-        BondChip.semantic(
-          'Needs You',
-          row.urgency == 'urgent' ? BondTone.error : BondTone.attention,
+    return Tooltip(
+      message: result.tooltip,
+      child: Text(
+        result.text,
+        key: HomeFeedRowTile.resultTextKey(row),
+        style: style,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+
+  /// Requeue what the row still owes.
+  ///
+  /// Its own [InkWell] inside the row's, for [_storylineLink]'s reason: the
+  /// innermost gesture wins the arena, so pressing Retry does not also open
+  /// the thread underneath it.
+  Widget _retryLink(HomeFeedRow row) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        key: HomeFeedRowTile.retryKey(row),
+        onTap: () => widget.onRetry!(row.source, row.sourceMessageId),
+        borderRadius: BondRadii.smAll,
+        child: Text(
+          'Retry',
+          style: BondType.small.copyWith(
+            fontWeight: FontWeight.w600,
+            color: BondColors.primary,
+          ),
         ),
-      // Both halves, because the tap needs the id and the reader needs the
-      // name: a title with no id behind it would be a link to nowhere.
-      if (storylineId != null && (storylineTitle?.isNotEmpty ?? false))
-        _storylineLink(storylineId, storylineTitle!),
-    ];
-
-    // Nothing decided yet, or nothing to say about it. A dash rather than a
-    // blank: an empty cell in a table reads as missing data.
-    if (chips.isEmpty) return Text('—', style: BondType.caption);
-
-    return Wrap(
-      spacing: BondSpacing.s8,
-      runSpacing: BondSpacing.s4,
-      children: chips,
+      ),
     );
   }
 

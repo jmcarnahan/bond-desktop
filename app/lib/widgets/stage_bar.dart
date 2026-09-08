@@ -58,6 +58,12 @@ class HomeStageBar extends StatelessWidget {
   /// there is nothing in progress to narrate.
   final bool muted;
 
+  /// Whether anything is queued or running for the row behind this bar. Only
+  /// the tooltips read it, and only to tell "next in line" apart from "nobody
+  /// has got to this yet" — two states that draw the same empty segment and
+  /// mean opposite things.
+  final bool workOpen;
+
   const HomeStageBar({
     super.key,
     required this.triageState,
@@ -66,6 +72,7 @@ class HomeStageBar extends StatelessWidget {
     required this.draftState,
     required this.settleState,
     this.muted = false,
+    this.workOpen = false,
   });
 
   HomeStageBar.forRow(
@@ -76,7 +83,8 @@ class HomeStageBar extends StatelessWidget {
         extractState = row.extractState,
         storylineState = row.storylineState,
         draftState = row.draftState,
-        settleState = row.settleState;
+        settleState = row.settleState,
+        workOpen = row.workOpen;
 
   /// The five states by stage name — what [captionFor] reads.
   static Map<String, String> statesOf(HomeFeedRow row) => {
@@ -145,6 +153,18 @@ class HomeStageBar extends StatelessWidget {
   /// "not yet".
   static bool isSkipped(String state) => state == 'skipped';
 
+  /// What a segment says on hover. `<stage>: <state>`, except a pending stage
+  /// with nothing queued behind it, which says so — that is the difference
+  /// between "next" and "nobody has got to this yet".
+  static String tooltipFor(
+    String stage,
+    String state, {
+    required bool workOpen,
+  }) {
+    if (state == 'pending' && !workOpen) return '$stage: not queued yet';
+    return '$stage: $state';
+  }
+
   static ValueKey<String> segmentKey(String stage) => ValueKey('stage-$stage');
 
   @override
@@ -165,7 +185,7 @@ class HomeStageBar extends StatelessWidget {
         children: [
           for (final stage in stages) ...[
             if (stage != stages.first) const SizedBox(width: segmentGap),
-            Expanded(child: _segment(stage, states[stage] ?? 'pending')),
+            Expanded(child: _tipped(stage, states[stage] ?? 'pending')),
           ],
         ],
       ),
@@ -188,6 +208,14 @@ class HomeStageBar extends StatelessWidget {
       ],
     );
   }
+
+  /// A segment under its explanation. Muted bars keep theirs: history is
+  /// worth explaining too, and a skipped stage is the one most people ask
+  /// about.
+  Widget _tipped(String stage, String state) => Tooltip(
+        message: tooltipFor(stage, state, workOpen: workOpen),
+        child: _segment(stage, state),
+      );
 
   /// One segment. Implicit animations only, both finite: the colour crosses
   /// when a stage changes state, and the fill grows to whatever [fillFor] says

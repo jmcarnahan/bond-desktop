@@ -78,6 +78,11 @@ class HomePane extends StatefulWidget {
   final ValueChanged<String>? onSearch;
   final VoidCallback? onExitSearch;
 
+  /// Requeues the stages a stalled or failed row still owes. Null hides the
+  /// Retry link on every row — the pane is dumb about whether a repair is
+  /// wired up, it just does not offer one.
+  final void Function(String source, String sourceMessageId)? onRetry;
+
   const HomePane({
     super.key,
     required this.rows,
@@ -104,6 +109,7 @@ class HomePane extends StatefulWidget {
     this.searchNotice,
     this.onSearch,
     this.onExitSearch,
+    this.onRetry,
   });
 
   /// How close to the bottom the viewport has to get before the next page is
@@ -392,6 +398,7 @@ class _HomePaneState extends State<HomePane> {
                   muteBar: true,
                   onOpenThread: widget.onOpenThread,
                   onOpenStoryline: widget.onOpenStoryline,
+                  onRetry: widget.onRetry,
                 );
               },
             ),
@@ -440,6 +447,7 @@ class _HomePaneState extends State<HomePane> {
                     collapsing: widget.collapsing.contains(key),
                     onOpenThread: widget.onOpenThread,
                     onOpenStoryline: widget.onOpenStoryline,
+                    onRetry: widget.onRetry,
                   );
                 },
               ),
