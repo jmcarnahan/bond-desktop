@@ -18,6 +18,7 @@ import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
 import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
 import 'package:bond_inbox/widgets/preview/preview_engines.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
+import 'package:bond_inbox/widgets/room_header.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/services/attachments/xlsx_reader.dart';
 import 'package:flutter/material.dart';
@@ -202,7 +203,7 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+    await tester.tap(find.byKey(RoomHeader.tabKey(StorylineTab.files)));
     await tester.pump();
     await tester.pump();
   }
@@ -224,7 +225,7 @@ void main() {
 
     // Nobody pinned Brief.pdf and it is on the shelf all the same: membership
     // is the ordinary way a document gets here.
-    expect(find.text('2 documents'), findsOneWidget);
+    expect(find.text('Files (2)'), findsOneWidget);
     expect(find.text('📌 📕 Quote.pdf'), findsOneWidget);
     expect(find.text('📕 Brief.pdf'), findsOneWidget);
 
@@ -308,7 +309,8 @@ void main() {
 
     await openShelf(tester);
 
-    expect(find.text('Documents'), findsOneWidget);
+    // The bare label, because there is no count to give.
+    expect(find.text('Files'), findsOneWidget);
     expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsOneWidget);
     await settleQueues(tester);
   });
@@ -353,7 +355,7 @@ void main() {
     await seedStoryline(pinned: 'c1/a1');
 
     await openShelf(tester);
-    expect(find.text('1 document'), findsOneWidget);
+    expect(find.text('Files (1)'), findsOneWidget);
 
     await tester.tap(find.text('Remove'));
     await tester.pump();
@@ -369,7 +371,7 @@ void main() {
 
     // What leaves is the PIN, not the file: the thread is still a member, so
     // the document is still on the shelf — just no longer floated to the top.
-    expect(find.text('1 document'), findsOneWidget);
+    expect(find.text('Files (1)'), findsOneWidget);
     expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsNothing);
     expect(find.text('📕 Quote.pdf'), findsOneWidget);
     expect(

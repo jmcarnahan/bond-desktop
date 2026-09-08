@@ -346,16 +346,20 @@ void main() {
     );
   });
 
-  testWidgets('the bar under the transcript keeps the way into the composer',
-      (tester) async {
-    // The cards moved to the messages; `Reply…` is about the thread and stays
-    // where it was, once, at the bottom.
+  testWidgets('the composer is docked under the transcript', (tester) async {
+    // No doorway to walk through: a thread that can be answered opens with the
+    // box already under it, addressed to whoever is being answered.
     await seedThread();
     await pumpScreen(tester);
 
     await openThread(tester);
 
-    expect(find.text('Reply…'), findsOneWidget);
+    expect(find.byType(Composer), findsOneWidget);
+    expect(find.text('Reply…'), findsNothing);
+    expect(
+      tester.widget<Composer>(find.byType(Composer)).hint,
+      'Reply to Eric Vance…',
+    );
   });
 
   testWidgets('without a send grant a card opens the composer instead',

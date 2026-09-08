@@ -1,7 +1,9 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/hover_actions.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -65,6 +67,8 @@ void main() {
     void Function(AttachmentRef attachment)? onOpenAttachment,
     AttachmentRef? selectedAttachment,
     ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
+    void Function(Message message)? onReplyTo,
+    void Function(Message message)? onSuggestFor,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -86,6 +90,8 @@ void main() {
           onOpenAttachment: onOpenAttachment,
           selectedAttachment: selectedAttachment,
           thumbnailFor: thumbnailFor,
+          onReplyTo: onReplyTo,
+          onSuggestFor: onSuggestFor,
         ),
       ),
     ));
@@ -600,6 +606,111 @@ void main() {
         tester.widget<AttachmentChip>(find.byType(AttachmentChip)).onTap,
         isNull,
       );
+    });
+  });
+
+  /// The strip that appears at a row's top-right under the mouse.
+  ///
+  /// It is an accelerator and never the only way to do a thing, which is why
+  /// every assertion here is about WHICH message a button carries: a Reply
+  /// that fired for its neighbour would answer Thursday's mail with Monday's
+  /// words.
+  group('the hover strip', () {
+    /// Puts a MOUSE over one row. Touch never enters a `MouseRegion`.
+    Future<void> hover(WidgetTester tester, String id) async {
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await gesture.moveTo(tester.getCenter(rowFor(id)));
+      await tester.pump();
+    }
+
+    final two = [
+      _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+      _msg(id: 'b', receivedAt: '2026-08-25T15:00:00'),
+    ];
+
+    testWidgets('offers Reply and Suggest on the message under the pointer',
+        (tester) async {
+      final replied = <String>[];
+      final suggested = <String>[];
+      await pump(
+        tester,
+        messages: two,
+        onReplyTo: (m) => replied.add(m.id),
+        onSuggestFor: (m) => suggested.add(m.id),
+      );
+
+      // Nothing until a pointer arrives.
+      expect(find.byKey(HoverActions.replyKeyFor('a')), findsNothing);
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.replyKeyFor('a')), findsOneWidget);
+      // One row at a time: the strip belongs to the message under the mouse.
+      expect(find.byKey(HoverActions.replyKeyFor('b')), findsNothing);
+
+      await tester.tap(find.byKey(HoverActions.replyKeyFor('a')));
+      await tester.pump();
+      await tester.tap(find.byKey(HoverActions.suggestKeyFor('a')));
+      await tester.pump();
+
+      expect(replied, ['a']);
+      expect(suggested, ['a']);
+    });
+
+    testWidgets('and reports the OLDER message when that is the one hovered',
+        (tester) async {
+      final replied = <String>[];
+      await pump(tester, messages: two, onReplyTo: (m) => replied.add(m.id));
+
+      await hover(tester, 'b');
+      await tester.tap(find.byKey(HoverActions.replyKeyFor('b')));
+      await tester.pump();
+
+      expect(replied, ['b']);
+    });
+
+    testWidgets('an outbound row wears nothing', (tester) async {
+      // There is nothing to reply to on the user's own message, and nothing to
+      // draft an answer to either.
+      await pump(
+        tester,
+        messages: [
+          _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+          _msg(id: 'mine', outbound: true, receivedAt: '2026-08-25T16:00:00'),
+        ],
+        onReplyTo: (_) {},
+        onSuggestFor: (_) {},
+      );
+
+      await hover(tester, 'mine');
+
+      expect(find.byKey(HoverActions.replyKeyFor('mine')), findsNothing);
+      expect(find.byKey(HoverActions.suggestKeyFor('mine')), findsNothing);
+    });
+
+    testWidgets('one callback draws one button', (tester) async {
+      await pump(tester, messages: two, onReplyTo: (_) {});
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.replyKeyFor('a')), findsOneWidget);
+      expect(find.byKey(HoverActions.suggestKeyFor('a')), findsNothing);
+    });
+
+    testWidgets('a panel wired with neither wraps nothing at all',
+        (tester) async {
+      await pump(tester, messages: two);
+
+      await hover(tester, 'a');
+
+      // The wrapper hands the row straight through — `hover_actions_test`
+      // pins that there is not even a MouseRegion left behind.
+      expect(find.byKey(HoverActions.replyKeyFor('a')), findsNothing);
+      expect(find.byKey(HoverActions.suggestKeyFor('a')), findsNothing);
+      expect(find.byIcon(Icons.reply_outlined), findsNothing);
+      expect(find.text('Body of a.'), findsOneWidget);
     });
   });
 }

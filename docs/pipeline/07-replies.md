@@ -87,6 +87,23 @@ Until the stored row is on screen, `DraftState.inFlightBody` keeps the
 optimistic bubble up; the screen's `_reloadOpenThread` is what swaps it for the
 row, on the send path and after each poll's sync.
 
+### Reply-to from the transcript
+
+`DraftNotifier.send` takes an optional `replyTo`, and the shell's hover
+**Reply** is what fills it: naming a message in the transcript writes a
+`Replying to <who>` caption over the docked composer, and the next send goes
+out as `send(body, replyTo: <that message id>)`. The caption clears on any
+outcome but a failure, so a name can never outlive the send it was written for.
+
+Unnamed is the ordinary case and the **fallback order is unchanged**: the
+message an inline card belongs to, else the stored draft's `reply_to_message_id`
+row, else the thread's newest inbound message.
+
+There is no reply window any more. The composer is docked under every thread a
+reply is possible on, from the moment the thread opens — see
+[../shell.md](../shell.md#room-anatomy). Every ask on the pane, the banner and
+each message's own line, puts the cursor in that box rather than opening one.
+
 ## Composing a new message
 
 `ComposeNotifier.send` (`app/lib/providers/compose_provider.dart`) is the

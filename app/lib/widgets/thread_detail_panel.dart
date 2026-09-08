@@ -6,8 +6,10 @@ import '../models/open_asks.dart';
 import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
+import 'hover_actions.dart';
 import 'inline_alert.dart';
 import 'message_row.dart';
+import 'room_header.dart';
 import 'time_format.dart';
 
 /// The thread view: the main pane's whole content once a thread is open.
@@ -16,7 +18,9 @@ import 'time_format.dart';
 /// messages, runs collapsed under one header — rather than as a chat of
 /// facing bubbles.
 ///
-/// No composer yet — this phase reads mail, it does not send it.
+/// It renders a transcript and a header, and nothing else: the composer is
+/// docked UNDER this panel by the host, which is what keeps the panel ignorant
+/// of drafts and sending.
 class ThreadDetailPanel extends StatelessWidget {
   final Conversation conversation;
   final List<Message> messages;
@@ -69,11 +73,20 @@ class ThreadDetailPanel extends StatelessWidget {
   /// asks the host per message and places whatever comes back.
   final Widget? Function(Message message)? suggestionFor;
 
-  /// Opens the reply window. Every ask on this pane — the banner and each
-  /// message's own line — is a call to action, so each one takes the reader
-  /// there. Null leaves them all as statements, for a host with no reply to
-  /// open.
+  /// Brings the composer forward. The box is always docked under a thread that
+  /// can be answered, so this is a focus rather than an opening — but every ask
+  /// on this pane, the banner and each message's own line, is still a call to
+  /// action, and each one has to put the cursor where the answer goes. Null
+  /// leaves them all as statements, for a host with no box under it.
   final VoidCallback? onOpenReply;
+
+  /// The hover strip's **Reply**: this message is the one being answered. Null
+  /// leaves the button off the strip, for a host that cannot reply here.
+  final void Function(Message message)? onReplyTo;
+
+  /// The hover strip's **Suggest a reply**: draft an answer to this message.
+  /// Null leaves the button off the strip.
+  final void Function(Message message)? onSuggestFor;
 
   /// Opens a new message to this thread's people. What that means is the
   /// host's business — a chat is addressed as itself, a mail thread as its
@@ -111,6 +124,8 @@ class ThreadDetailPanel extends StatelessWidget {
     this.afterTranscript,
     this.suggestionFor,
     this.onOpenReply,
+    this.onReplyTo,
+    this.onSuggestFor,
     this.onCompose,
     this.onOpenAttachment,
     this.selectedAttachment,
@@ -179,7 +194,7 @@ class ThreadDetailPanel extends StatelessWidget {
       // last message is what the thread is about — a transcript that opens with
       // its point folded away has answered the wrong question.
       final collapsible = header && standalone && !isLast;
-      items.add(MessageRow(
+      final row = MessageRow(
         key: ValueKey(message.id),
         message: message,
         showHeader: header,
@@ -196,6 +211,13 @@ class ThreadDetailPanel extends StatelessWidget {
         selectedAttachment: selectedAttachment,
         thumbnailFor: thumbnailFor,
         photos: photos,
+      );
+      // Only what is being ANSWERED wears the strip. There is nothing to reply
+      // to on the user's own message, and nothing to draft an answer to either.
+      items.add(HoverActions(
+        key: ValueKey('hover-${message.id}'),
+        actions: message.inbound ? _hoverActionsFor(message) : const [],
+        child: row,
       ));
       previous = message;
     }
@@ -214,6 +236,29 @@ class ThreadDetailPanel extends StatelessWidget {
       ));
     }
     return items;
+  }
+
+  /// What the pointer offers on one inbound row. Empty when the host wired
+  /// neither callback, which is what turns the wrapper back into the bare row.
+  List<HoverAction> _hoverActionsFor(Message message) {
+    final reply = onReplyTo;
+    final suggest = onSuggestFor;
+    return [
+      if (reply != null)
+        HoverAction(
+          icon: Icons.reply_outlined,
+          tooltip: 'Reply',
+          onTap: () => reply(message),
+          key: HoverActions.replyKeyFor(message.id),
+        ),
+      if (suggest != null)
+        HoverAction(
+          icon: Icons.auto_awesome,
+          tooltip: 'Suggest a reply',
+          onTap: () => suggest(message),
+          key: HoverActions.suggestKeyFor(message.id),
+        ),
+    ];
   }
 
   /// [MessageRow]'s avatar diameter (36) plus the gutter it puts beside it.
@@ -322,155 +367,90 @@ class ThreadDetailPanel extends StatelessWidget {
     );
   }
 
+  /// The room this thread is: what it is about, who is on it, where it stands,
+  /// and the few things that can be done to the whole conversation. Filing it —
+  /// into a storyline, or out of the inbox — sits behind the ⋯, because those
+  /// are corrections rather than part of reading mail, and the automatic passes
+  /// are supposed to get them right without being asked.
+  ///
+  /// The storyline half is one item that opens a pane. Listing every storyline
+  /// in the menu would put the whole choice in a popup, and the house rule is a
+  /// screen with a way back.
   Widget _header() {
     final participants = conversation.participants
         .map((p) => p.display)
         .where((d) => d.isNotEmpty)
         .join(', ');
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: BondSpacing.s16,
-        vertical: BondSpacing.s12,
-      ),
-      child: Row(
-        children: [
-          if (onBack != null) ...[
-            IconButton(
-              onPressed: onBack,
-              icon: const Icon(Icons.arrow_back),
-              iconSize: 20,
-              tooltip: 'Back',
-            ),
-            const SizedBox(width: BondSpacing.s4),
-          ],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  conversation.subject?.isNotEmpty == true
-                      ? conversation.subject!
-                      : '(no subject)',
-                  style: BondType.titleSm,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                if (participants.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    participants,
-                    style: BondType.caption,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(width: BondSpacing.s12),
-          // Before the state chip, because writing to these people is
-          // something to DO with the thread, while the chip and the buttons
-          // after it are about the thread's own state. An icon like Back and
-          // More rather than a labelled button: this header shares its width
-          // with the attachment preview in the split, and the title is the
-          // one child that can give, so every label here comes out of it.
-          if (onCompose != null) ...[
-            IconButton(
-              key: const Key('thread-compose'),
-              onPressed: onCompose,
-              icon: const Icon(Icons.edit_outlined),
-              iconSize: 20,
-              tooltip: 'Message',
-            ),
-            const SizedBox(width: BondSpacing.s4),
-          ],
-          BondChip.semantic(
-            _stateLabel(conversation.state),
-            _stateTone(conversation.state),
-          ),
-          if (conversation.state != ConversationState.done) ...[
-            const SizedBox(width: BondSpacing.s4),
-            TextButton(
-              onPressed: onMarkDone,
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: BondSpacing.s8,
-                ),
-                minimumSize: const Size(0, 32),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              child: const Text('Mark done'),
-            ),
-          ] else if (onReopen != null) ...[
-            const SizedBox(width: BondSpacing.s4),
-            TextButton(
-              onPressed: onReopen,
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: BondSpacing.s8,
-                ),
-                minimumSize: const Size(0, 32),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              child: const Text('Reopen'),
-            ),
-          ],
-          ?_overflowMenu(),
-        ],
-      ),
-    );
-  }
-
-  /// Filing this thread — into a storyline, or out of the inbox. An overflow
-  /// menu rather than visible controls: these are corrections, not part of
-  /// reading mail, and the automatic passes are supposed to get them right
-  /// without being asked.
-  ///
-  /// The storyline half is one item that opens a pane. Listing every storyline
-  /// here would put the whole choice in a popup, and the house rule is a screen
-  /// with a way back.
-  Widget? _overflowMenu() {
     final bucketed = conversation.bucket != null;
     final showKeep = onKeepInInbox != null && bucketed;
-    if (onAddToStoryline == null && onSendToLater == null && !showKeep) {
-      return null;
-    }
 
-    return PopupMenuButton<String>(
-      icon: const Icon(Icons.more_horiz),
-      iconSize: 20,
-      tooltip: 'More',
-      itemBuilder: (context) => [
-        if (onAddToStoryline != null)
-          const PopupMenuItem<String>(
-            value: _addToStorylineValue,
-            child: Text('Add to storyline…'),
+    return RoomHeader(
+      title: Text(
+        conversation.subject?.isNotEmpty == true
+            ? conversation.subject!
+            : '(no subject)',
+        style: BondType.titleSm,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: participants.isEmpty ? null : participants,
+      people: [
+        for (final p in conversation.participants)
+          if (p.display.isNotEmpty)
+            (
+              name: p.display,
+              address: p.email,
+              photoKey: photoKeyFor(address: p.email),
+            ),
+      ],
+      photos: photos,
+      stateChip: BondChip.semantic(
+        _stateLabel(conversation.state),
+        _stateTone(conversation.state),
+      ),
+      onBack: onBack,
+      actions: [
+        // Before the state chip's neighbours, because writing to these people
+        // is something to DO with the thread. An icon rather than a labelled
+        // button: this header shares its width with the attachment preview in
+        // the split, and every label here comes out of the title.
+        if (onCompose != null)
+          RoomAction(
+            icon: Icons.edit_outlined,
+            label: 'Message',
+            onTap: onCompose,
+            key: const Key('thread-compose'),
           ),
-        if (onAddToStoryline != null && (onSendToLater != null || showKeep))
-          const PopupMenuDivider(),
+        // The same button in the same place saying the opposite thing, because
+        // a thread closed by mistake is reopened from here.
+        if (conversation.state != ConversationState.done)
+          RoomAction(label: 'Mark done', onTap: onMarkDone)
+        else if (onReopen != null)
+          RoomAction(label: 'Reopen', onTap: onReopen),
+      ],
+      moreItems: [
+        if (onAddToStoryline != null)
+          RoomMenuItem(
+            value: _addToStorylineValue,
+            label: 'Add to storyline…',
+            onTap: onAddToStoryline,
+          ),
         if (onSendToLater != null)
-          const PopupMenuItem<String>(
+          RoomMenuItem(
             value: _sendToLaterValue,
-            child: Text('Send to Later'),
+            label: 'Send to Later',
+            onTap: onSendToLater,
+            dividerBefore: onAddToStoryline != null,
           ),
         if (showKeep)
-          const PopupMenuItem<String>(
+          RoomMenuItem(
             value: _keepInInboxValue,
-            child: Text('Keep in inbox'),
+            label: 'Keep in inbox',
+            onTap: onKeepInInbox,
+            dividerBefore: onAddToStoryline != null && onSendToLater == null,
           ),
       ],
-      onSelected: (value) {
-        switch (value) {
-          case _addToStorylineValue:
-            onAddToStoryline?.call();
-          case _sendToLaterValue:
-            onSendToLater?.call();
-          case _keepInInboxValue:
-            onKeepInInbox?.call();
-        }
-      },
     );
   }
 

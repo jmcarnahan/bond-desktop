@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
@@ -7,8 +9,16 @@ import '../models/storyline_models.dart';
 import '../theme/tokens.dart';
 import 'attachment_documents_strip.dart';
 import 'inline_alert.dart';
+import 'pinned_documents_bar.dart';
+import 'room_header.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
+
+/// What the storyline's body is showing. Three tabs and not three folds: the
+/// old header opened each of them ON TOP of the spine, so a user reading the
+/// files was also, still, looking at the episodes — and every fold pushed the
+/// thing they came for further down the pane.
+enum StorylineTab { messages, files, about }
 
 /// One storyline as a spine of thread episodes, newest at the bottom.
 ///
@@ -129,7 +139,6 @@ class StorylineTimelinePanel extends StatefulWidget {
     this.onUnpinDocument,
   });
 
-  static const Key documentsButtonKey = ValueKey('storyline-documents-button');
   static const Key documentsStripKey = ValueKey('storyline-documents-strip');
 
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
@@ -145,14 +154,14 @@ class StorylineTimelinePanel extends StatefulWidget {
 }
 
 class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
-  bool _showMembers = false;
-  bool _showAbout = false;
+  /// Messages is where a storyline opens: the catch-up and the spine are what
+  /// the user came for, and the other two tabs are reference.
+  StorylineTab _tab = StorylineTab.messages;
 
-  /// Whether the documents shelf is unfolded. Folded by default like the other
-  /// two: the button's own count is the signal that there is anything there,
-  /// and a storyline with six files should not push its spine off the screen
-  /// to say so.
-  bool _showDocuments = false;
+  /// Whether the recap paragraph is showing all of itself. Clamped by default
+  /// because it is a pinned topic and not the reading — a six-line catch-up
+  /// above the spine is a header nobody scrolls past.
+  bool _recapExpanded = false;
 
   /// Whether each of the recap's two lists is unfolded. Both start folded, and
   /// they fold independently: a storyline can carry half a dozen open items
@@ -251,36 +260,150 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _header(),
-          if (_showAbout) _aboutBlock(),
-          if (_showMembers) _memberStrip(),
-          if (_showDocuments) _documentsStrip(),
+          if (_confirmingDismiss) _dismissRow(),
           const Divider(height: 1, color: BondColors.border),
           Expanded(
-            child: widget.episodes.isEmpty
-                ? Center(
-                    child: Text('No messages in this storyline.',
-                        style: BondType.small),
-                  )
-                : Align(
-                    alignment: Alignment.topCenter,
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(
-                        maxWidth: StorylineTimelinePanel._maxContentWidth,
-                      ),
-                      child: ListView(
-                        padding: const EdgeInsets.fromLTRB(
-                          BondSpacing.s24,
-                          BondSpacing.s12,
-                          BondSpacing.s24,
-                          BondSpacing.s24,
-                        ),
-                        children: [
-                          for (final episode in displayed)
-                            _episodeCard(episode),
-                        ],
-                      ),
-                    ),
-                  ),
+            child: switch (_tab) {
+              StorylineTab.messages => _messagesTab(displayed),
+              StorylineTab.files => _filesTab(),
+              StorylineTab.about => _aboutTab(),
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// The catch-up, what has been pinned, and the spine — in that order,
+  /// because that is the order a colleague would answer "where are we" in.
+  ///
+  /// The recap and the pins scroll WITH the episodes rather than sitting above
+  /// them in fixed chrome: they are the top of the reading, not a lid on it.
+  Widget _messagesTab(List<StorylineEpisode> displayed) {
+    final storyline = widget.storyline;
+    final summary = storyline.summary ?? '';
+    final recap = storyline.recapText ?? '';
+    final pinned = [
+      for (final document in widget.documents)
+        if (document.pinnedStorylineId == storyline.id) document,
+    ];
+
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(
+          maxWidth: StorylineTimelinePanel._maxContentWidth,
+        ),
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(
+            BondSpacing.s24,
+            BondSpacing.s12,
+            BondSpacing.s24,
+            BondSpacing.s24,
+          ),
+          children: [
+            // The recap REPLACES the one-line summary rather than stacking over
+            // it: they answer the same question at different lengths, and the
+            // long answer is what this screen is for. The summary is still what
+            // the rail and the overview cards show, and it is what stands here
+            // until the recap pass has written one.
+            if (recap.isNotEmpty)
+              _recapBlock(storyline, recap)
+            else if (summary.isNotEmpty)
+              Text(
+                summary,
+                style: BondType.caption,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+            if (pinned.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: BondSpacing.s8),
+                child: PinnedDocumentsBar(
+                  documents: pinned,
+                  onOpen: widget.onOpenDocument,
+                ),
+              ),
+            const SizedBox(height: BondSpacing.s12),
+            for (final episode in displayed) _episodeCard(episode),
+            // Last rather than instead: a storyline whose threads were all
+            // removed still has a recap and its pins, and saying "no messages"
+            // by hiding them would be answering a different question.
+            if (widget.episodes.isEmpty)
+              Center(
+                child: Text('No messages in this storyline.',
+                    style: BondType.small),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Every file on the storyline, pinned or not — the shelf, whole.
+  Widget _filesTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(BondSpacing.s16),
+      child: AttachmentDocumentsStrip(
+        key: StorylineTimelinePanel.documentsStripKey,
+        documents: widget.documents,
+        // The storyline's own id rides in so an entry can tell a pin to THIS
+        // storyline from a pin to another one.
+        storylineId: widget.storyline.id,
+        onOpen: (attachment) => widget.onOpenDocument?.call(attachment),
+        onPin: widget.onPinDocument,
+        onUnpin: widget.onUnpinDocument,
+      ),
+    );
+  }
+
+  /// What this storyline is for, and which threads are in it because of that.
+  /// The two belong on one tab: the charter is the membership rule and the
+  /// member list is what the rule caught, and a user who cannot read them
+  /// together has no way to tell a good group from a bad one.
+  Widget _aboutTab() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s16,
+        BondSpacing.s12,
+        BondSpacing.s16,
+        BondSpacing.s24,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _aboutBlock(),
+          const SizedBox(height: BondSpacing.s12),
+          Text('THREADS \u00b7 ${widget.members.length}', style: BondType.label),
+          const SizedBox(height: BondSpacing.s4),
+          _memberStrip(),
+        ],
+      ),
+    );
+  }
+
+  /// The question the Dismiss menu item asks, and both answers. It stands
+  /// under the header rather than inside the menu: a two-step that lived in a
+  /// popup would ask its second question somewhere the first answer is no
+  /// longer visible.
+  Widget _dismissRow() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        BondSpacing.s16,
+        0,
+        BondSpacing.s16,
+        BondSpacing.s12,
+      ),
+      child: Row(
+        children: [
+          Flexible(
+            child: Text('Dismiss this storyline?', style: BondType.caption),
+          ),
+          _quietButton('Dismiss storyline', widget.onDismiss),
+          _quietButton(
+            'Cancel',
+            () => setState(() => _confirmingDismiss = false),
           ),
         ],
       ),
@@ -496,117 +619,73 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         .trim();
   }
 
+  /// The storyline's identity and what can be done to it. Everything that used
+  /// to be a quiet button in a two-line Wrap is now a tab (what the body is
+  /// showing), a header action (Add thread) or a ⋯ item (sort, sync, dismiss).
+  ///
+  /// The recap left the header with the folds: it is the Messages tab's first
+  /// block now, the pinned topic at the top of the reading rather than a
+  /// paragraph wedged between a title and a row of buttons.
   Widget _header() {
-    final storyline = widget.storyline;
-    final summary = storyline.summary ?? '';
-    final recap = storyline.recapText ?? '';
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: BondSpacing.s16,
-        vertical: BondSpacing.s12,
+    final members = widget.members.length;
+    return RoomHeader<StorylineTab>(
+      leading: Text(
+        '#',
+        style: BondType.titleSm.copyWith(color: BondColors.inkMuted),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (widget.onBack != null) ...[
-            IconButton(
-              onPressed: widget.onBack,
-              icon: const Icon(Icons.arrow_back),
-              iconSize: 20,
-              tooltip: 'Back',
-            ),
-            const SizedBox(width: BondSpacing.s4),
-          ],
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _titleField(storyline),
-                // The recap REPLACES the one-line summary here rather than
-                // stacking over it: they answer the same question at
-                // different lengths, and the long answer is what this screen
-                // is for. The summary is still what the rail and the overview
-                // cards show, and it is the header's text until the recap
-                // pass has written one.
-                if (recap.isNotEmpty)
-                  _recapBlock(storyline, recap)
-                else if (summary.isNotEmpty) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    summary,
-                    style: BondType.caption,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-                // A Wrap and not a Row: seven quiet buttons is more than
-                // the header has room for once a thread is open beside the
-                // spine, and a second line of them beats a clipped Sync.
-                Wrap(
-                  spacing: BondSpacing.s4,
-                  runSpacing: BondSpacing.s4,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    _quietButton(
-                      '${widget.members.length} '
-                      '${widget.members.length == 1 ? 'thread' : 'threads'}',
-                      () => setState(() => _showMembers = !_showMembers),
-                    ),
-                    _quietButton(
-                      'About',
-                      () => setState(() => _showAbout = !_showAbout),
-                    ),
-                    // The count is the label, the way the threads button
-                    // reads: a storyline with no documents on it should not
-                    // need a tap to find that out.
-                    _quietButton(
-                      widget.documents.isEmpty
-                          ? 'Documents'
-                          : '${widget.documents.length} '
-                              '${widget.documents.length == 1 ? 'document' : 'documents'}',
-                      () => setState(() => _showDocuments = !_showDocuments),
-                      key: StorylineTimelinePanel.documentsButtonKey,
-                    ),
-                    _quietButton('Add thread', widget.onAddThread),
-                    // The label names the order the spine is in; tapping it
-                    // flips to the other one.
-                    _quietButton(
-                      widget.newestFirst ? 'Newest first' : 'Oldest first',
-                      widget.onToggleSort,
-                    ),
-                    // The two-step stands where a confirm dialog would: the
-                    // first tap asks, the second retires the storyline.
-                    if (!_confirmingDismiss)
-                      _quietButton(
-                        'Dismiss',
-                        () => setState(() => _confirmingDismiss = true),
-                      )
-                    else ...[
-                      _quietButton('Dismiss storyline', widget.onDismiss),
-                      _quietButton(
-                        'Cancel',
-                        () => setState(() => _confirmingDismiss = false),
-                      ),
-                    ],
-                    // Last in the row: it is the only button here that is not
-                    // about this storyline in particular. A running pull says
-                    // so and takes no second tap — the screen holds the flag,
-                    // so the label is the same one the overview shows.
-                    _quietButton(
-                      widget.syncing ? 'Syncing…' : 'Sync',
-                      widget.syncing ? null : widget.onSync,
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+      title: _titleField(widget.storyline),
+      subtitle: '$members ${members == 1 ? 'thread' : 'threads'} \u00b7 '
+          '${widget.storyline.openCount} open',
+      onBack: widget.onBack,
+      actions: [
+        RoomAction(
+          icon: Icons.add,
+          label: 'Add thread',
+          onTap: widget.onAddThread,
+        ),
+      ],
+      moreItems: [
+        // A menu item says what it DOES; the old button named the order the
+        // spine was already in, which read as a statement you could not act on.
+        RoomMenuItem(
+          value: 'sort',
+          label: widget.newestFirst ? 'Oldest first' : 'Newest first',
+          onTap: widget.onToggleSort,
+        ),
+        // The only item here that is not about this storyline in particular. A
+        // running pull says so and takes no second tap — the screen holds the
+        // flag, so the label is the one the overview is already showing.
+        RoomMenuItem(
+          value: 'sync',
+          label: widget.syncing ? 'Syncing…' : 'Sync',
+          onTap: widget.syncing ? null : () => unawaited(widget.onSync()),
+        ),
+        RoomMenuItem(
+          value: 'dismiss',
+          label: 'Dismiss…',
+          onTap: () => setState(() => _confirmingDismiss = true),
+          dividerBefore: true,
+        ),
+      ],
+      tabs: StorylineTab.values,
+      selectedTab: _tab,
+      tabLabel: (tab) => switch (tab) {
+        StorylineTab.messages => 'Messages',
+        // The count is the label, the way the threads subtitle reads: a
+        // storyline with no documents should not need a tap to find that out.
+        StorylineTab.files => widget.documents.isEmpty
+            ? 'Files'
+            : 'Files (${widget.documents.length})',
+        StorylineTab.about => 'About',
+      },
+      onTab: (tab) => setState(() => _tab = tab),
     );
   }
+
+  /// Roughly what two lines of body type hold at this pane's width. A
+  /// character count and not a measured overflow: the toggle has to be there
+  /// on the first frame, before anything has been laid out.
+  static const int _recapClampChars = 160;
 
   /// Where the storyline stands, in the recap pass's words — the catch-up a
   /// colleague would give, so the reader need not open every card below it.
@@ -636,7 +715,28 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(recap, style: BondType.body),
+            Text(
+              recap,
+              style: BondType.body,
+              maxLines: _recapExpanded ? null : 2,
+              overflow: _recapExpanded ? null : TextOverflow.ellipsis,
+            ),
+            // Only where there is something behind the clamp. The idiom is the
+            // counted headings' — a tappable line of label type — and not a
+            // button, because unfolding a paragraph is reading rather than an
+            // action on the storyline.
+            if (recap.length > _recapClampChars || recap.contains('\n'))
+              InkWell(
+                onTap: () => setState(() => _recapExpanded = !_recapExpanded),
+                borderRadius: BondRadii.smAll,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Text(
+                    _recapExpanded ? 'Show less' : 'Show more',
+                    style: BondType.label,
+                  ),
+                ),
+              ),
             ..._recapList(
               'OPEN',
               open,
@@ -754,26 +854,20 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     final charter = widget.storyline.charter ?? '';
     final suggestion = widget.storyline.charterSuggestion ?? '';
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        BondSpacing.s16,
-        0,
-        BondSpacing.s16,
-        BondSpacing.s12,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _editingCharter ? _charterField() : _charterText(charter),
-          // Not while the field is open: offering to replace a sentence the
-          // user is in the middle of writing is offering to throw their work
-          // away, and the field is where they would be typing the answer to
-          // this suggestion anyway.
-          if (!_editingCharter && suggestion.isNotEmpty)
-            _suggestionBlock(suggestion),
-        ],
-      ),
+    // No padding of its own: the About tab spends the margins, and a block that
+    // also spent them would inset twice.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _editingCharter ? _charterField() : _charterText(charter),
+        // Not while the field is open: offering to replace a sentence the user
+        // is in the middle of writing is offering to throw their work away, and
+        // the field is where they would be typing the answer to this suggestion
+        // anyway.
+        if (!_editingCharter && suggestion.isNotEmpty)
+          _suggestionBlock(suggestion),
+      ],
     );
   }
 
@@ -899,24 +993,16 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
   /// threads were put together has no way to tell a good group from a bad one,
   /// and a feature that cannot be checked is a feature that gets turned off.
   Widget _memberStrip() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        BondSpacing.s16,
-        0,
-        BondSpacing.s16,
-        BondSpacing.s12,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          for (final member in widget.members)
-            Padding(
-              padding: const EdgeInsets.only(bottom: BondSpacing.s4),
-              child: _memberEntry(member),
-            ),
-        ],
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final member in widget.members)
+          Padding(
+            padding: const EdgeInsets.only(bottom: BondSpacing.s4),
+            child: _memberEntry(member),
+          ),
+      ],
     );
   }
 
@@ -953,35 +1039,6 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
             style: BondType.caption,
           ),
         ],
-      ),
-    );
-  }
-
-  /// The storyline's files, on a shelf shaped like the member strip above it.
-  ///
-  /// A strip and not a column down the spine for the same reason the members
-  /// are one: this is a shelf you reach for, not part of the reading. It sits
-  /// under the header where the other two folds sit, so a storyline never has
-  /// more than one thing unfolded above its divider that you did not ask for.
-  ///
-  /// The storyline's own id rides in so an entry can tell a pin to THIS
-  /// storyline from a pin to another one — the panel already holds it, so
-  /// there is nothing for the host to pass.
-  Widget _documentsStrip() {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        BondSpacing.s16,
-        0,
-        BondSpacing.s16,
-        BondSpacing.s12,
-      ),
-      child: AttachmentDocumentsStrip(
-        key: StorylineTimelinePanel.documentsStripKey,
-        documents: widget.documents,
-        storylineId: widget.storyline.id,
-        onOpen: (attachment) => widget.onOpenDocument?.call(attachment),
-        onPin: widget.onPinDocument,
-        onUnpin: widget.onUnpinDocument,
       ),
     );
   }

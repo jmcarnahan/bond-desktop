@@ -195,21 +195,33 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The thread the add-to-storyline pane is filing. Same overlay contract.
   ({String source, String id})? _pickingStorylineForThread;
 
-  /// The conversation whose reply window is open, if any. Collapsed is the
-  /// DEFAULT: a thread opens as something to read, and the composer appears
-  /// when the user says they are writing. Cleared wherever the selection moves
-  /// — a window opened on one thread must not be open on the next.
+  /// The message the docked composer is answering, if the user named one.
   ///
-  /// A [DraftTarget] and not a bare key, because a thread can be open in the
-  /// main pane and ANOTHER one beside it: each pane compares this against its
-  /// own target, and one string could not say which of the two boxes is open.
-  DraftTarget? _replyOpenFor;
+  /// Unnamed is the DEFAULT and the ordinary case: a send with no target
+  /// resolves its own the way it always did — the stored draft's row, then the
+  /// thread's newest inbound. This is the override the hover **Reply** writes,
+  /// and it carries the [DraftTarget] with it because a thread can be open in
+  /// the main pane and ANOTHER one beside it: each box compares this against
+  /// its own target, and one message id could not say which of the two is
+  /// being answered.
+  ///
+  /// `who` is stored rather than looked up: the caption names the sender of a
+  /// message that may have scrolled away, and re-deriving it every frame would
+  /// mean holding the transcript to draw one line.
+  ({DraftTarget target, String messageId, String who})? _replyTo;
+
+  /// Where each pane's composer takes its cursor from. The nodes live HERE and
+  /// not in the composers: a `Composer` is rebuilt with a new key on every send
+  /// epoch and on every change of thread, so a node it owned would be disposed
+  /// exactly when the focus is meant to survive.
+  final FocusNode _mainComposerFocus = FocusNode(debugLabel: 'main composer');
+  final FocusNode _sideComposerFocus = FocusNode(debugLabel: 'side composer');
 
   /// What is open beside the main pane, if anything: a file, or a thread
   /// reached from inside a storyline. An overlay ON what the main pane is
   /// showing rather than a peer of it — a file is read against the message
   /// that carried it, and a thread against the storyline it belongs to.
-  /// Cleared wherever the selection moves, exactly like [_replyOpenFor].
+  /// Cleared wherever the selection moves, exactly like [_replyTo].
   SidePanel? _side;
 
   /// Whether that panel has the whole main pane. Only ever true of a
@@ -367,6 +379,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _poll?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     _probe.close();
+    _mainComposerFocus.dispose();
+    _sideComposerFocus.dispose();
     super.dispose();
   }
 
@@ -573,7 +587,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _addingToStorylineId = null;
     _pickingStorylineForThread = null;
     _railOpen = false;
-    _replyOpenFor = null;
+    _replyTo = null;
     _showingActivityLog = false;
     _showingSettings = false;
     _showingCompose = false;
@@ -585,12 +599,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _openBeside(SidePanel panel) => setState(() {
         _side = panel;
         _sideFull = false;
+        _dropSideReplyTarget();
       });
 
   void _closeSide() => setState(() {
         _side = null;
         _sideFull = false;
+        _dropSideReplyTarget();
       });
+
+  /// A side thread that goes away takes its reply target with it. The caption
+  /// belongs to a box that is no longer on screen, and a send into the thread
+  /// that comes back next must not inherit somebody else's message id.
+  ///
+  /// Called from inside the caller's own `setState`.
+  void _dropSideReplyTarget() {
+    final replyTo = _replyTo;
+    if (replyTo != null && !_isMainThread(replyTo.target)) _replyTo = null;
+  }
 
   /// Opens a conversation BESIDE whatever is in the main pane — a storyline's
   /// episode card, and in later phases a person room's root message.
@@ -2284,6 +2310,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final canReply = selected.source == 'email' ||
         draft.capability == SendCapability.send;
 
+    // One node per PANE and not per thread: the main pane and the side panel
+    // each hold exactly one box, and which conversation is in it changes under
+    // the same cursor.
+    final composerFocus = inSidePanel ? _sideComposerFocus : _mainComposerFocus;
+
     // Computed from the STORED transcript, before the optimistic bubble is
     // appended: a queued reply must not hide the bar that is offering to take
     // it back.
@@ -2337,21 +2368,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }
       final armed = draft.capability == SendCapability.send;
       return QuickReplyBar(
-        showReplyRow: false,
         options: options,
         armed: armed,
         onPick: (option) {
           // The same honest split `_pickQuickReply` makes: without a send grant
-          // a tap opens the box with the words in it rather than appearing to
-          // send them.
+          // a tap puts the words in the box rather than appearing to send them.
+          // The box is already there, so all this owes the user is the cursor.
           if (!armed) {
-            setState(() => _replyOpenFor = target);
+            composerFocus.requestFocus();
             unawaited(notifier.markEdited(option.body));
             return;
           }
           unawaited(_queueQuickReply(target, option.body, replyTo: m.id));
         },
-        onReply: () => setState(() => _replyOpenFor = target),
         onDismiss: () => unawaited(notifier.dismissOptionsFor(m.id)),
       );
     }
@@ -2387,10 +2416,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       afterTranscript: canReply && (answersSomebody || pendingBody != null)
           ? _quickReplies(selected, target, draft)
           : null,
-      // Every ask on the pane is a call to action, so every one of them opens
-      // the box — the banner included. Null where there is no box to open.
-      onOpenReply:
-          canReply ? () => setState(() => _replyOpenFor = target) : null,
+      // Every ask on the pane is a call to action, so every one of them puts
+      // the cursor in the box — the banner included. Null where there is no box
+      // under the thread at all.
+      onOpenReply: canReply ? composerFocus.requestFocus : null,
+      // The hover strip. Reply names the message the send will answer; Suggest
+      // asks the queue for a fresh pair, which is the same thing the bar at the
+      // end of the transcript asks for — offered here per message, where the
+      // reader already is.
+      onReplyTo: canReply
+          ? (message) => _replyToMessage(target, message, composerFocus)
+          : null,
+      onSuggestFor: canReply && draft.suggestable
+          ? (_) => unawaited(notifier.generate())
+          : null,
       onAddToStoryline: () => setState(() {
         _clearOverlays();
         _pickingStorylineForThread = (source: selected.source, id: selected.id);
@@ -2446,16 +2485,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             const SizedBox(height: BondSpacing.s12),
           ],
           Expanded(child: panel),
-          // Collapsed is the default: the box appears when the user says they
-          // are writing, and until then the transcript has the pane to itself.
-          // Compared against this pane's OWN target, so a box opened on the
-          // thread beside does not open one here too.
-          if (canReply && _replyOpenFor == target) ...[
+          // Docked, always: a thread that can be answered says where the answer
+          // goes without being asked, the way every chat app the user already
+          // has does. The transcript keeps the reader's attention anyway,
+          // because the box is quiet until somebody types in it.
+          if (canReply) ...[
             const SizedBox(height: BondSpacing.s12),
-            _replyHeader(selected),
-            const SizedBox(height: BondSpacing.s4),
-            _composer(target),
-          ] else if (!canReply) ...[
+            _composer(
+              target,
+              focusNode: composerFocus,
+              hint: 'Reply to ${_replyWhoFor(selected)}…',
+            ),
+          ] else ...[
             const SizedBox(height: BondSpacing.s12),
             _replyElsewhere(),
           ],
@@ -2520,13 +2561,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onUseInReply: canReply
             ? () {
                 setState(() {
-                  _replyOpenFor = from;
-                  // The box the draft lands in has to be on screen. A file
-                  // opened from the MAIN thread leaves that thread where it
-                  // is; one opened from the thread beside REPLACED it, so the
-                  // thread comes back and the file goes — the draft is what
-                  // was asked for, and a draft written off screen is nothing
-                  // happening.
+                  // The box is always there; what has to be on screen is the
+                  // THREAD. A file opened from the MAIN thread leaves that
+                  // thread where it is; one opened from the thread beside
+                  // REPLACED it, so the thread comes back and the file goes —
+                  // the draft is what was asked for, and a draft written off
+                  // screen is nothing happening.
                   if (!_isMainThread(from)) {
                     _side = ThreadPanel(
                       source: from.source,
@@ -2538,6 +2578,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                 unawaited(ref.read(draftProvider(from).notifier).generate(
                       pinnedAttachmentIds: [attachment.attachmentId],
                     ));
+                // The cursor goes where the draft will land, so the user is
+                // already in the box the words appear in.
+                (_isMainThread(from) ? _mainComposerFocus : _sideComposerFocus)
+                    .requestFocus();
               }
             : null,
         // Nowhere to pin is not a disabled button, it is no button: a thread in
@@ -2838,51 +2882,44 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
   }
 
-  /// Who the open reply window is answering, and the way out of it.
+  /// Who the docked box is addressed to, for its placeholder.
   ///
-  /// The sender's name where there is one, the subject where there is not:
-  /// "Reply to (no subject)" is a poor line, but it is still an answer to
-  /// "which thread am I typing into", which is what this row is for.
-  Widget _replyHeader(Conversation selected) {
-    final named = [
-      for (final p in selected.participants)
-        if (p.display.isNotEmpty) p.display,
-    ];
-    final who = named.isNotEmpty
-        ? named.first
-        : (selected.subject?.isNotEmpty == true
-            ? selected.subject!
-            : 'this thread');
-
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            'Reply to $who',
-            style: BondType.caption,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ),
-        IconButton(
-          onPressed: () => setState(() => _replyOpenFor = null),
-          icon: const Icon(Icons.close),
-          iconSize: 16,
-          tooltip: 'Close reply',
-          padding: const EdgeInsets.all(BondSpacing.s4),
-          constraints: const BoxConstraints(),
-          visualDensity: VisualDensity.compact,
-        ),
-      ],
-    );
+  /// The first participant's name where there is one, the subject where there
+  /// is not: "Reply to (no subject)…" is a poor line, but it is still an answer
+  /// to "which thread am I typing into", which is what the placeholder is for.
+  String _replyWhoFor(Conversation selected) {
+    for (final p in selected.participants) {
+      if (p.display.isNotEmpty) return p.display;
+    }
+    if (selected.subject?.isNotEmpty == true) return selected.subject!;
+    return 'this thread';
   }
 
-  /// The bar under the transcript: the composer's doorway, the way to ask for a
-  /// suggestion, and the undo row while a send is queued.
+  /// The hover strip's **Reply**: this message, and not the newest one, is what
+  /// the next send answers.
+  ///
+  /// The cursor goes with it. Naming a message and then leaving the user to
+  /// find the box would be two gestures for one intention — and the caption the
+  /// name draws is above that box, so the eye is being sent there anyway.
+  void _replyToMessage(DraftTarget target, Message message, FocusNode focus) {
+    final who = message.fromName?.isNotEmpty == true
+        ? message.fromName!
+        : (message.fromAddress?.isNotEmpty == true
+            ? message.fromAddress!
+            : 'this message');
+    setState(() {
+      _replyTo = (target: target, messageId: message.id, who: who);
+    });
+    focus.requestFocus();
+  }
+
+  /// The bar under the transcript: the way to ask for a suggestion, and the
+  /// undo row while a send is queued.
   ///
   /// It carries no cards any more — a suggestion answers one message, and it is
-  /// drawn under that message. What is left here is what belongs to the THREAD
-  /// rather than to any message in it.
+  /// drawn under that message. Nor is it a doorway: the composer is docked
+  /// under every thread that can be answered. What is left here is what belongs
+  /// to the THREAD rather than to any message in it.
   Widget _quickReplies(
     Conversation selected,
     DraftTarget target,
@@ -2893,7 +2930,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       options: const [],
       armed: draft.capability == SendCapability.send,
       onPick: (option) => unawaited(_pickQuickReply(selected, option)),
-      onReply: () => setState(() => _replyOpenFor = target),
       pending: draft.pending,
       onUndo: () => _cancelQueuedSend(target),
       // The way back from the ×, and the way in for a thread the queue never
@@ -2918,14 +2954,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// A card was tapped.
   ///
   /// Under a real send grant this queues the reply and says so, with an undo
-  /// for as long as the send is still cancellable. Without one it opens the
-  /// reply window with the text already in it — the honest version of the same
-  /// gesture, since nothing in this build could put that mail in front of
+  /// for as long as the send is still cancellable. Without one it puts the text
+  /// in the docked box and takes the cursor there — the honest version of the
+  /// same gesture, since nothing in this build could put that mail in front of
   /// anyone anyway.
   Future<void> _pickQuickReply(Conversation c, DraftOption option) async {
     final target = (source: c.source, conversationKey: c.id);
     if (ref.read(draftProvider(target)).capability != SendCapability.send) {
-      setState(() => _replyOpenFor = target);
+      (_isMainThread(target) ? _mainComposerFocus : _sideComposerFocus)
+          .requestFocus();
       await ref.read(draftProvider(target).notifier).markEdited(option.body);
       return;
     }
@@ -2980,7 +3017,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// Every argument that can reach a send is a callback the user's own click
   /// invokes. Nothing on this path runs on a timer or on a state change.
-  Widget _composer(DraftTarget target) {
+  Widget _composer(
+    DraftTarget target, {
+    required FocusNode focusNode,
+    required String hint,
+  }) {
     final conversationKey = target.conversationKey;
     final draft = ref.watch(draftProvider(target));
     final notifier = ref.read(draftProvider(target).notifier);
@@ -3004,6 +3045,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onGenerate: notifier.generate,
       onDismiss: notifier.dismiss,
       onEdited: notifier.markEdited,
+      hint: hint,
+      focusNode: focusNode,
     );
 
     final evidence = draft.evidence;
@@ -3019,6 +3062,34 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ),
           const SizedBox(height: BondSpacing.s8),
         ],
+        // Only when the user named a message. The caption is the whole of what
+        // makes an override visible — a send that quietly answered something
+        // other than the newest message would be indistinguishable from a bug.
+        if (_replyTo?.target == target) ...[
+          Row(
+            key: const Key('replying-to'),
+            children: [
+              Expanded(
+                child: Text(
+                  'Replying to ${_replyTo!.who}',
+                  style: BondType.caption,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              IconButton(
+                onPressed: () => setState(() => _replyTo = null),
+                icon: const Icon(Icons.close),
+                iconSize: 16,
+                tooltip: 'Cancel reply',
+                padding: const EdgeInsets.all(BondSpacing.s4),
+                constraints: const BoxConstraints(),
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
+          ),
+          const SizedBox(height: BondSpacing.s4),
+        ],
         if (evidence == null)
           composer
         else
@@ -3030,8 +3101,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The one place a click becomes a send. It says what happened, including
   /// when what happened was a copy.
   Future<void> _send(DraftTarget target, String body) async {
-    final outcome = await ref.read(draftProvider(target).notifier).send(body);
+    // Only this pane's own override. A message named in the thread beside must
+    // not steer a send from the main pane.
+    final replyTo = _replyTo?.target == target ? _replyTo!.messageId : null;
+    final outcome = await ref
+        .read(draftProvider(target).notifier)
+        .send(body, replyTo: replyTo);
     if (!mounted) return;
+    // Anything but a failure means the named message has been answered, and a
+    // caption that outlived its send would steer the NEXT one. A failure keeps
+    // it: the retry is the same reply to the same message.
+    if (outcome != SendOutcome.failed && _replyTo?.target == target) {
+      setState(() => _replyTo = null);
+    }
     switch (outcome) {
       case SendOutcome.sent:
         // A second read, after the sync `send` runs on its way out. The epoch

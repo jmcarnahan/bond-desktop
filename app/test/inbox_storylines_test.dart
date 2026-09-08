@@ -17,6 +17,7 @@ import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/storyline_pickers.dart';
+import 'package:bond_inbox/widgets/room_header.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
@@ -213,7 +214,7 @@ void main() {
 
     await openStoryline(tester, 'Website redesign');
 
-    expect(find.text('2 threads'), findsOneWidget);
+    expect(find.textContaining('2 threads · '), findsOneWidget);
     await settleQueues(tester);
   });
 
@@ -229,7 +230,7 @@ void main() {
     await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
 
     await openStoryline(tester, 'Website redesign');
-    expect(find.text('1 thread'), findsOneWidget);
+    expect(find.textContaining('1 thread · '), findsOneWidget);
 
     // The strip is read through a cache. What drops it is the list load every
     // one of these actions ends with — without that, the count below stays at
@@ -240,7 +241,7 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('2 threads'), findsOneWidget);
+    expect(find.textContaining('2 threads · '), findsOneWidget);
     await settleQueues(tester);
   });
 
@@ -317,7 +318,7 @@ void main() {
 
     await openStoryline(tester, 'Website redesign');
 
-    await tester.tap(find.text('Add thread'));
+    await tester.tap(find.byTooltip('Add thread'));
     await tester.pump();
     await tester.pump();
 
@@ -362,7 +363,7 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    await tester.tap(find.text('Add thread'));
+    await tester.tap(find.byTooltip('Add thread'));
     await tester.pump();
     await tester.pump();
 
@@ -439,9 +440,16 @@ void main() {
     await openStoryline(tester, 'Website redesign');
 
     // A kept storyline could only be dismissed while it was still a suggestion
-    // in the rail. The panel is where a user is when they decide it is done.
-    await tester.tap(find.text('Dismiss'));
+    // in the rail. The panel is where a user is when they decide it is done,
+    // and retiring one is a correction, so it lives behind the ⋯.
+    // A menu is a route, so it needs its opening and closing animations run
+    // out. A settle would never come back — the screen owns a periodic timer.
+    await tester.tap(find.byKey(RoomHeader.moreKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.text('Dismiss…'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.text('Dismiss storyline'));
     await tester.pump();
     await tester.pump();
@@ -635,12 +643,21 @@ void main() {
       );
       final before = sync.syncs;
 
+      await tester.tap(find.byKey(RoomHeader.moreKey));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       await tester.tap(find.text('Sync'));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
 
       expect(sync.syncs, before + 1);
 
       await settleQueues(tester);
+      // And the item is offering the pull again rather than stuck on
+      // 'Syncing…'.
+      await tester.tap(find.byKey(RoomHeader.moreKey));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       expect(find.text('Sync'), findsOneWidget);
     });
   });

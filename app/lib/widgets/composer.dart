@@ -70,6 +70,18 @@ class Composer extends StatefulWidget {
   /// spinner, so a second click cannot send the same reply twice.
   final bool sending;
 
+  /// The empty field's placeholder. The default is generic; a host that knows
+  /// who is being answered says so instead, which is the difference between a
+  /// box and a box addressed to somebody.
+  final String hint;
+
+  /// The HOST's focus node, never one of ours. This widget is rebuilt with a
+  /// new key on every send epoch and on every change of thread, so a node owned
+  /// here would be thrown away exactly when the cursor is meant to survive —
+  /// after a send, or when a hover Reply asks for the box. Never disposed here
+  /// for the same reason: it belongs to whoever passed it.
+  final FocusNode? focusNode;
+
   const Composer({
     super.key,
     this.suggestedBody,
@@ -81,6 +93,8 @@ class Composer extends StatefulWidget {
     this.onDismiss,
     this.onEdited,
     this.sending = false,
+    this.hint = 'Write a reply…',
+    this.focusNode,
   });
 
   /// Long enough that a normal typing rhythm does not write to sqlite between
@@ -211,6 +225,7 @@ class _ComposerState extends State<Composer> {
   Widget _field() {
     final field = TextField(
       controller: _body,
+      focusNode: widget.focusNode,
       onChanged: _onChanged,
       minLines: 3,
       maxLines: 10,
@@ -219,8 +234,8 @@ class _ComposerState extends State<Composer> {
               color: BondColors.ink.withValues(alpha: Composer.suggestedOpacity),
             )
           : BondType.body,
-      decoration: const InputDecoration(
-        hintText: 'Write a reply…',
+      decoration: InputDecoration(
+        hintText: widget.hint,
         border: InputBorder.none,
       ),
     );

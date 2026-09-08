@@ -28,13 +28,11 @@ void main() {
     List<DraftOption> options = const [_confirm, _propose],
     bool armed = true,
     void Function(DraftOption)? onPick,
-    VoidCallback? onReply,
     VoidCallback? onDismiss,
     PendingSend? pending,
     VoidCallback? onUndo,
     VoidCallback? onSuggest,
     bool suggesting = false,
-    bool showReplyRow = true,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -44,13 +42,11 @@ void main() {
           options: options,
           armed: armed,
           onPick: onPick ?? (_) {},
-          onReply: onReply ?? () {},
           onDismiss: onDismiss,
           pending: pending,
           onUndo: onUndo,
           onSuggest: onSuggest,
           suggesting: suggesting,
-          showReplyRow: showReplyRow,
         ),
       ),
     ));
@@ -172,37 +168,7 @@ void main() {
     });
   });
 
-  group('the way into the composer', () {
-    testWidgets('Reply… is there beside the cards', (tester) async {
-      var replies = 0;
-      await pumpBar(tester, onReply: () => replies++);
-
-      await tester.tap(find.text('Reply…'));
-      await tester.pump();
-
-      expect(replies, 1);
-    });
-
-    testWidgets('with no options, the bar is the Reply… affordance alone',
-        (tester) async {
-      // The bar is also how a thread the model wrote nothing for reaches the
-      // composer.
-      var replies = 0;
-      await pumpBar(
-        tester,
-        options: const [],
-        onDismiss: () {},
-        onReply: () => replies++,
-      );
-
-      expect(find.text('Reply…'), findsOneWidget);
-      expect(find.byIcon(Icons.close), findsNothing);
-
-      await tester.tap(find.text('Reply…'));
-      await tester.pump();
-      expect(replies, 1);
-    });
-
+  group('closing the suggestions', () {
     testWidgets('the × asks before it closes the suggestions', (tester) async {
       var dismissed = 0;
       await pumpBar(tester, onDismiss: () => dismissed++);
@@ -302,29 +268,32 @@ void main() {
     });
   });
 
-  /// The same bar drawn under one MESSAGE rather than under the transcript.
-  /// The way into the composer belongs to the thread and sits once, at the
-  /// bottom; an inline card carries the cards and the × that closes them.
-  group('an inline card', () {
-    testWidgets('carries no Reply… beside the cards', (tester) async {
-      await pumpBar(tester, showReplyRow: false, onSuggest: () {});
+  /// The bar is drawn under one MESSAGE and again at the end of the
+  /// transcript, and it is the same widget both times. There is no doorway on
+  /// it any more: the composer is docked under every thread that can be
+  /// answered, so what is left is the cards, the × and the ask.
+  group('no doorway anywhere', () {
+    testWidgets('the cards carry no Reply… of their own', (tester) async {
+      await pumpBar(tester, onSuggest: () {});
 
       expect(find.text('Confirm Friday'), findsOneWidget);
       expect(find.text('Reply…'), findsNothing);
+      // Never beside cards that are already there: the composer's Regenerate
+      // is where a different pair comes from.
       expect(find.text('Suggest a reply'), findsNothing);
     });
 
-    testWidgets('and the bar under the transcript still does', (tester) async {
-      await pumpBar(tester);
+    testWidgets('nor does a bar with no cards at all', (tester) async {
+      await pumpBar(tester, options: const [], onSuggest: () {});
 
-      expect(find.text('Reply…'), findsOneWidget);
+      expect(find.text('Reply…'), findsNothing);
+      expect(find.text('Suggest a reply'), findsOneWidget);
     });
 
     testWidgets('keeps the × — it closes THESE cards', (tester) async {
       var dismissed = 0;
       await pumpBar(
         tester,
-        showReplyRow: false,
         onDismiss: () => dismissed++,
       );
 
@@ -340,14 +309,12 @@ void main() {
 
     testWidgets('with nothing to offer it draws nothing at all',
         (tester) async {
-      // Not an empty state: a card with no options is a card that should not
-      // be on screen, and the bottom of the transcript owns the empty case.
+      // No cards, and nothing to ask with: a bar in that state is one that
+      // should not be on screen at all.
       await pumpBar(
         tester,
         options: const [],
-        showReplyRow: false,
         onDismiss: () {},
-        onSuggest: () {},
       );
 
       expect(find.byType(TextButton), findsNothing);
@@ -376,7 +343,6 @@ void main() {
     testWidgets('is absent when the host cannot ask for one', (tester) async {
       await pumpBar(tester, options: const []);
 
-      expect(find.text('Reply…'), findsOneWidget);
       expect(find.text('Suggest a reply'), findsNothing);
       expect(find.byIcon(Icons.auto_awesome), findsNothing);
     });
@@ -467,7 +433,7 @@ void main() {
       );
 
       expect(find.text('Sending…'), findsOneWidget);
-      expect(find.text('Reply…'), findsNothing);
+      expect(find.text('Undo'), findsOneWidget);
     });
   });
 }

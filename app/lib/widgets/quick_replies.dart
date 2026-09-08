@@ -8,12 +8,15 @@ import 'composer.dart' show Composer;
 /// The short answers to one message: at most two cards, each one a reply that
 /// could go as it stands.
 ///
-/// Drawn twice over, from the same widget. Under the transcript it is the
-/// composer's doorway and the undo row; inline, under each message that still
-/// has a live suggestion, it is the cards alone — [showReplyRow] hides the
-/// trailing row there, because the `Reply…`/`Suggest a reply` affordance is
-/// about the THREAD and belongs once, at the bottom, rather than repeated under
-/// every message the model answered.
+/// Drawn twice over, from the same widget: inline under each message that
+/// still has a live suggestion, and once at the end of the transcript, where it
+/// is the way to ask for a suggestion on a thread that has none and the undo
+/// row while a send is queued.
+///
+/// It is no longer anybody's doorway. The composer is docked under every thread
+/// that can be answered, so there is nothing left here to open — what remains
+/// is the cards, the × that closes them, and the button that asks for a fresh
+/// pair.
 ///
 /// Machine-written text reads the same everywhere in this app — the accent rule
 /// down the left is the composer's, and it means the same thing here: these
@@ -23,11 +26,11 @@ import 'composer.dart' show Composer;
 /// anyway.
 ///
 /// Tapping a card SENDS only when [armed]. Without a send grant the same tap
-/// opens the reply window with the text in it, because a card that appeared to
-/// send and quietly did not would be worse than one that never offered.
+/// puts the text in the docked composer instead, because a card that appeared
+/// to send and quietly did not would be worse than one that never offered.
 class QuickReplyBar extends StatefulWidget {
-  /// Zero, one or two. Zero renders the `Reply…` affordance alone — this bar
-  /// is also how a thread with no suggestions reaches the composer.
+  /// Zero, one or two. Zero leaves the ask-for-a-suggestion button alone, or
+  /// nothing at all where there is nothing to ask.
   final List<DraftOption> options;
 
   /// Whether a tap on a card sends. False means it prefills instead, and the
@@ -37,9 +40,6 @@ class QuickReplyBar extends StatefulWidget {
   /// A card was tapped. What that means is the host's decision, not this
   /// widget's.
   final void Function(DraftOption option) onPick;
-
-  /// Opens the reply window.
-  final VoidCallback onReply;
 
   /// Closes the suggestions. Null hides the ×.
   final VoidCallback? onDismiss;
@@ -60,23 +60,16 @@ class QuickReplyBar extends StatefulWidget {
   /// A suggestion is being written right now.
   final bool suggesting;
 
-  /// Whether the trailing `Reply…` row is drawn. False on an inline card, where
-  /// the way into the composer already sits at the end of the transcript — and
-  /// where a bar with no options has nothing left to draw at all.
-  final bool showReplyRow;
-
   const QuickReplyBar({
     super.key,
     this.options = const [],
     this.armed = false,
     required this.onPick,
-    required this.onReply,
     this.onDismiss,
     this.pending,
     this.onUndo,
     this.onSuggest,
     this.suggesting = false,
-    this.showReplyRow = true,
   });
 
   @override
@@ -126,8 +119,8 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
   Widget build(BuildContext context) {
     final queued = widget.pending;
     if (queued != null) return _tile(_pendingRow(queued));
-    // Nothing to offer and no row to offer it in: an inline card with no
-    // options is not an empty state, it is a card that should not be there.
+    // Nothing to offer and nothing to ask with: an inline card with no options
+    // is not an empty state, it is a card that should not be there.
     if (widget.options.isEmpty) return _replyRow() ?? const SizedBox.shrink();
     return _tile(
       Column(
@@ -289,42 +282,30 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
     );
   }
 
-  /// The way into the composer, plus the × when there is something to close.
-  /// Quiet on purpose: writing your own reply is the normal case, and it is one
-  /// click either way.
+  /// The ask-for-a-suggestion button, plus the × when there is something to
+  /// close. Null when there is neither.
   ///
-  /// Asking for a suggestion sits beside it, and only where there is nothing to
-  /// suggest yet — that is what makes a dismissal reversible: the × takes the
-  /// cards away, and this button is how they come back.
-  ///
-  /// Null when there is nothing left to draw. Without [showReplyRow] the two
-  /// buttons are gone — they are about the thread, and an inline card is about
-  /// one message — but the × stays: it closes THESE cards, and it is the only
-  /// thing on the row that belongs to them.
+  /// Asking is offered only where there is nothing to suggest yet — that is
+  /// what makes a dismissal reversible: the × takes the cards away, and this
+  /// button is how they come back. The composer's Regenerate is where a
+  /// DIFFERENT pair comes from.
   Widget? _replyRow() {
     final suggest = widget.onSuggest;
     final canDismiss = widget.options.isNotEmpty && widget.onDismiss != null;
-    if (!widget.showReplyRow && !canDismiss) return null;
+    final canSuggest = suggest != null && widget.options.isEmpty;
+    if (!canSuggest && !canDismiss) return null;
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        // A Wrap where a Spacer used to be: the two labelled buttons do not
-        // both fit beside a thread read in the side panel, and a second line
-        // of them beats a clipped one. It still pushes the × to the right.
+        // A Wrap where a Spacer used to be: a labelled button does not always
+        // fit beside a thread read in the side panel, and a second line beats
+        // a clipped one. It still pushes the × to the right.
         Expanded(
           child: Wrap(
             runSpacing: BondSpacing.s4,
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
-              if (widget.showReplyRow)
-                TextButton.icon(
-                  onPressed: widget.onReply,
-                  icon: const Icon(Icons.reply_outlined, size: 16),
-                  label: const Text('Reply…'),
-                ),
-              if (widget.showReplyRow &&
-                  suggest != null &&
-                  widget.options.isEmpty)
+              if (canSuggest)
                 TextButton.icon(
                   onPressed: widget.suggesting ? null : suggest,
                   icon: const Icon(Icons.auto_awesome, size: 16),

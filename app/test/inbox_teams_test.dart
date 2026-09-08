@@ -354,26 +354,19 @@ void main() {
 
       expect(find.byType(Composer), findsNothing,
           reason: 'a reply box that cannot send is worse than none');
-      expect(find.text('Reply…'), findsNothing);
       expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
     });
 
     testWidgets('with it, the chat gets the same reply surface mail does',
         (tester) async {
-      // Nothing drafted for this one yet, so the bar is the `Reply…`
-      // affordance alone, and it opens the same collapsed composer a mail
-      // thread's does.
+      // The same DOCKED box a mail thread gets, on open and without a tap: a
+      // thread that can be answered says where the answer goes.
       await seedChat('chat-1');
       await pumpScreen(tester, grantedScopes: _withChatWrite);
 
       await openChat(tester);
 
       expect(find.text('Reply in Microsoft Teams'), findsNothing);
-      expect(find.byType(Composer), findsNothing, reason: 'collapsed by default');
-
-      await tester.tap(find.text('Reply…'));
-      await tester.pump();
-
       expect(find.byType(Composer), findsOneWidget);
       // A chat drafts through the same queue and the same system prompt a mail
       // does — only the channel's style rules differ, and those ride in the
@@ -441,7 +434,8 @@ void main() {
       expect(find.text('Ask for a deadline'), findsOneWidget);
     });
 
-    testWidgets('a mail thread reaches one through Reply…', (tester) async {
+    testWidgets('a mail thread opens with its box already under it',
+        (tester) async {
       await seedMail('c1');
       await pumpScreen(tester);
 
@@ -449,31 +443,15 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      // Collapsed is the DEFAULT: a thread opens as something to read.
-      expect(find.byType(Composer), findsNothing);
-      expect(find.text('Reply in Microsoft Teams'), findsNothing);
-
-      await tester.tap(find.text('Reply…'));
-      await tester.pump();
-
+      // Docked, always: there is no window to open and none to close, and the
+      // placeholder says who is being answered.
       expect(find.byType(Composer), findsOneWidget);
-    });
-
-    testWidgets('and the reply window closes again on its ×', (tester) async {
-      await seedMail('c1');
-      await pumpScreen(tester);
-
-      await tester.tap(find.text('Eric Vance').first);
-      await tester.pump();
-      await tester.pump();
-      await tester.tap(find.text('Reply…'));
-      await tester.pump();
-
-      await tester.tap(find.byTooltip('Close reply'));
-      await tester.pump();
-
-      expect(find.byType(Composer), findsNothing);
-      expect(find.text('Reply…'), findsOneWidget);
+      expect(find.text('Reply in Microsoft Teams'), findsNothing);
+      expect(find.text('Reply…'), findsNothing);
+      expect(
+        tester.widget<Composer>(find.byType(Composer)).hint,
+        'Reply to Eric Vance…',
+      );
     });
   });
 
@@ -541,7 +519,6 @@ void main() {
       await openThread(tester);
 
       expect(find.text('Confirm receipt'), findsNothing);
-      expect(find.text('Reply…'), findsNothing);
     });
   });
 
@@ -673,13 +650,17 @@ void main() {
       await tester.pump();
       await tester.pump();
       await tester.pump();
-
-      await tester.tap(find.descendant(
-        of: find.byType(SidePanelHost),
-        matching: find.text('Reply…'),
-      ));
+      // No doorway to walk through: the thread beside carries its own docked
+      // box, and the capability read is what the last pumps wait on.
       await tester.pump();
       await tester.pump();
+      expect(
+        find.descendant(
+          of: find.byType(SidePanelHost),
+          matching: find.byType(Composer),
+        ),
+        findsOneWidget,
+      );
     }
 
     testWidgets('a chat episode opens a box that can send', (tester) async {

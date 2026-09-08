@@ -695,7 +695,7 @@ storyline the main pane happened to be showing. A document off a storyline's
 shelf carries no origin, and offers no `Use in reply`: the shelf's files belong
 to the storyline rather than to any one conversation. When the file was opened
 from the thread beside — which it replaced — `Use in reply` brings that thread
-back beside with its box open and the file goes: the draft is what was asked
+back beside with its docked box and the file goes: the draft is what was asked
 for, and a box off screen is nothing happening.
 
 ### Three segments, always all three
@@ -946,11 +946,12 @@ a composer to write into. The full viewer has none, so `AttachmentViewerPane`
 takes no such callback at all. Neither does a thread the pane cannot reply to:
 a chat without `Chat.ReadWrite` shows no composer, so the host passes a null
 target and the offer disappears rather than spending a fast-slot draft on words
-nobody would see. It
-opens the reply box and asks the draft notifier to regenerate with this
+nobody would see. It asks the draft notifier to regenerate with this
 attachment's id in `pinned_attachment_ids`, which is what floats it to the
-front of what the retriever quotes. Opening the box is the point: a regenerate
-whose spinner is off screen is not visible feedback.
+front of what the retriever quotes, and it takes the cursor to the box the
+draft will land in. The box itself is always there — it is docked under every
+thread a reply is possible on — so what has to be brought back is the THREAD:
+a regenerate whose spinner is off screen is not visible feedback.
 
 ## Code
 

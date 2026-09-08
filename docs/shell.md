@@ -83,6 +83,67 @@ what it was opened from because it is the newer thing the user asked for.
 
 ---
 
+## Room anatomy
+
+A thread and a storyline are both **rooms**, and they wear the same parts in
+the same places. `app/lib/widgets/room_header.dart` is the shared header;
+before it the two screens each had their own and disagreed about where things
+go, so a user who learned one had learned nothing about the next.
+
+**The header** is the room's identity plus what can be done to the ROOM: an
+optional Back, a leading glyph (`#` on a storyline), the title and a subtitle,
+the faces of who is on it, a state chip, then the actions. Anything about ONE
+message lives on that message, never up here.
+
+- An action with an icon is an `IconButton` whose **tooltip is its label**; one
+  without is a quiet text button. Which of the two a call site picks is a width
+  decision: this header shares its width with the attachment preview in the
+  split, and every label comes out of the title.
+- **The ⋯ menu** (`RoomHeader.moreKey`, tooltip `More`) holds the corrections —
+  filing a thread, re-sorting a spine, syncing, retiring a storyline. A
+  `PopupMenuButton` is not a dialog. A menu item with a null `onTap` renders
+  disabled, which is what a label like `Syncing…` needs. An item **says what it
+  does**: the storyline's sort item names the order it switches TO.
+- **The faces are the first thing to give.** Below `540` of header width the
+  `AvatarStack` comes off, because the subtitle already names those people and
+  the alternative is a clipped control.
+
+**The tab row** is a second line of `BondFilterPill`s, drawn only when there is
+more than one tab — one pill is a label pretending to be a choice. Each pill
+carries `RoomHeader.tabKey(value)`. A storyline's tabs are **Messages | Files
+(n) | About**: the catch-up, the pinned bar and the spine; then the whole
+document shelf; then the charter and the member list. Thread tabs arrive in
+Phase 5.
+
+**The hover strip** (`app/lib/widgets/hover_actions.dart`) puts **Reply** and
+**Suggest a reply** at an inbound row's top-right while the mouse is over it.
+It is a WRAPPER around `MessageRow`, not a change to it: the row seeds its
+collapsed state once, and hover is a per-frame fact about the pointer. Touch
+never enters a `MouseRegion`, so nothing may live only here — both buttons have
+a home the pointer is not needed for.
+
+**The composer is docked.** Whenever a reply is possible the box is under the
+transcript from the moment the thread opens, placeholder `Reply to <who>…`.
+There is no reply window, no `Reply…` row and no ✕ to close: a thread that can
+be answered says where the answer goes, and the transcript keeps the reader's
+attention anyway because the box is quiet until typed in. Where a reply is NOT
+possible — a chat without `Chat.ReadWrite` — the same slot says `Reply in
+Microsoft Teams`. The focus node lives on the screen, one per pane, because the
+composer is rebuilt with a new key on every send epoch.
+
+**Reply-to** is the override the hover Reply writes: a `Replying to <who>`
+caption with a ✕ above the box, and the send carries that message id. It is
+cleared on a send that did not fail, on a change of selection, and when a side
+thread goes away. Unnamed is the ordinary case and resolves the way it always
+did — see [pipeline/07-replies.md](pipeline/07-replies.md).
+
+**The pinned-documents bar** (`app/lib/widgets/pinned_documents_bar.dart`) is
+Slack's bookmark bar: the files pinned to THIS room, at the top of its
+Messages tab, one tap from being opened. It carries no × — unpinning is a
+correction and stays a two-step on the Files tab.
+
+---
+
 ## The bold grammar
 
 **Bold means unread. Everywhere.** It used to mean "you owe this" in Needs You
@@ -231,3 +292,12 @@ the person room's header `AvatarStack`.
 - Settings, Activity log and Sign out are reached through
   `IconRail.accountMenuKey` and then `settingsItemKey` / `activityItemKey` /
   `signOutItemKey`.
+- **Hover** needs a real mouse: `tester.createGesture(kind:
+  PointerDeviceKind.mouse)`, then `addPointer(location: Offset.zero)`, then
+  `moveTo(tester.getCenter(rowFor(id)))`, then `pump()`. The buttons are
+  `HoverActions.replyKeyFor(id)` / `suggestKeyFor(id)`.
+- **A ⋯ menu is a route.** Tap `RoomHeader.moreKey`, then `pump()` and
+  `pump(Duration(milliseconds: 400))` to run the opening animation out; the
+  same pair runs the closing one out after picking an item. A panel-only test
+  with no `InboxScreen` under it can use `pumpAndSettle` instead.
+- **Tabs** are selected by `find.byKey(RoomHeader.tabKey(StorylineTab.files))`.

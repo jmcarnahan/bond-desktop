@@ -331,7 +331,9 @@ void main() {
     await pumpInbox(tester);
     await openThread(tester);
 
-    // The box opens on the ask, before the preview does anything to the pane.
+    // The box is under the thread before the preview does anything to the
+    // pane, and the ask above it takes the cursor there rather than opening it.
+    expect(find.byType(Composer), findsOneWidget);
     await tester.tap(find.text('Confirm the survey window'));
     await tester.pump();
     await tester.pump();
@@ -562,22 +564,33 @@ void main() {
   });
 
   group('use in reply', () {
-    testWidgets('opens the box and asks for a draft naming the file',
+    testWidgets('asks for a draft naming the file, in the box already there',
         (tester) async {
       await seedThread(needsReply: true);
       await pumpInbox(tester);
       await openThread(tester);
       await openAttachment(tester, 'Terms.pdf');
 
-      expect(find.byType(Composer), findsNothing);
+      // Docked through the split: there is no box left to open.
+      expect(find.byType(Composer), findsOneWidget);
 
       await tester.tap(find.byKey(AttachmentPreviewPanel.useInReplyKey));
       await tester.pump();
       await tester.pump();
 
-      // Opening the box is what makes the new draft visible — a regenerate
-      // nobody can see is a spinner in an empty pane.
       expect(find.byType(Composer), findsOneWidget);
+      // The cursor goes where the draft will land, so the user is already in
+      // the box the words appear in.
+      expect(
+        tester
+            .widget<TextField>(find.descendant(
+              of: find.byType(Composer),
+              matching: find.byType(TextField),
+            ))
+            .focusNode
+            ?.hasFocus,
+        isTrue,
+      );
 
       final rows = await db
           .customSelect("SELECT * FROM work_items WHERE task_kind = 'draft'")
@@ -633,17 +646,11 @@ void main() {
       // is several conversations, and the one the reply belongs to is the one
       // that just opened beside it.
       expect(find.byType(StorylineTimelinePanel), findsOneWidget);
-      expect(find.byType(Composer), findsNothing);
 
-      // The card in the spine says the same thing, so the tap is scoped: this
-      // is the banner in the thread beside, and it is the one with a box.
-      await tester.tap(find.descendant(
-        of: find.byType(SidePanelHost),
-        matching: find.text('Confirm the survey window'),
-      ));
-      await tester.pump();
-      await tester.pump();
-
+      // Exactly one box on screen, and the thread beside has it. The spine has
+      // none of its own: a storyline is several conversations, and the one a
+      // reply belongs to is the one that just opened beside it.
+      expect(find.byType(Composer), findsOneWidget);
       expect(
         find.descendant(
           of: find.byType(SidePanelHost),
@@ -673,7 +680,7 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      // The thread comes back beside the spine with its box open, and the file
+      // The thread comes back beside the spine with its box, and the file
       // goes: the draft is what was asked for, and a box off screen is nothing
       // happening. The main pane is untouched.
       expect(find.byType(AttachmentPreviewPanel), findsNothing);
