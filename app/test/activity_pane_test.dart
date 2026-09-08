@@ -5,6 +5,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/activity_log_panel.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
@@ -69,7 +70,13 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    await tester.tap(find.byTooltip('Activity log'));
+    // Settings and the activity log live in the icon rail's account menu now
+    // (D8), so getting there is two taps. Bounded pumps throughout —
+    // `pumpAndSettle` never comes back with InboxScreen's timer running.
+    await tester.tap(find.byKey(IconRail.accountMenuKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(IconRail.activityItemKey));
     // One for the tap, then one per round trip the pane's read model makes.
     await tester.pump();
     await tester.pump();

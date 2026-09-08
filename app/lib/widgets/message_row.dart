@@ -2,14 +2,21 @@ import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
+import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
 import 'attachment_chip.dart';
 import 'attachment_chip_row.dart';
 import 'attachment_format.dart';
+import 'bond_avatar.dart';
 import 'chips.dart';
 import 'inline_image_thumb.dart';
 import 'preview/preview_kind.dart';
 import 'time_format.dart';
+
+// The avatar and its two pure helpers moved to `bond_avatar.dart` when the
+// same face had to be drawn in a typeahead row and a rail. Re-exported so
+// every caller that learned them here still finds them here.
+export 'bond_avatar.dart' show avatarColorFor, initialsFor;
 
 /// How long a gap can be before a message stops reading as part of the same
 /// breath and gets its own header again.
@@ -60,45 +67,6 @@ final RegExp _blankRun = RegExp(r'\n{3,}');
 /// A size of 0 means "the connector did not say" (every Teams attachment) and
 /// is never treated as small.
 const int inlineImageMinBytes = 20 * 1024;
-
-/// Inbound avatar fills, picked from the existing token set rather than a new
-/// one. Five is enough that adjacent senders rarely collide and few enough
-/// that the transcript still reads as one palette.
-const List<Color> _avatarPalette = [
-  BondColors.primaryDeep,
-  BondColors.attention,
-  BondColors.success,
-  BondColors.darkTileAlt,
-  BondColors.channelVideo,
-];
-
-/// Two letters from a display name, one from an address, "?" from nothing.
-/// Never throws on the half-empty senders a mailbox is full of.
-String initialsFor(String? name, String? address) {
-  final words = [
-    for (final w in (name ?? '').split(RegExp(r'\s+')))
-      if (w.isNotEmpty) w,
-  ];
-  if (words.length >= 2) {
-    return '${words.first[0]}${words.last[0]}'.toUpperCase();
-  }
-  if (words.length == 1) return words.first[0].toUpperCase();
-
-  final addr = (address ?? '').trim();
-  if (addr.isNotEmpty) return addr[0].toUpperCase();
-  return '?';
-}
-
-/// The avatar fill. Outbound is always the product's own primary — "this one
-/// is you" should not depend on which address the account signs with. Everyone
-/// else gets a stable color per address, so a sender looks the same in every
-/// thread.
-Color avatarColorFor(String? address, {required bool outbound}) {
-  if (outbound) return BondColors.primary;
-  final hash = (address ?? '').toLowerCase().hashCode;
-  final index = hash.remainder(_avatarPalette.length).abs();
-  return _avatarPalette[index];
-}
 
 /// Whether [b] collapses under [a]: same sender, same direction, and close
 /// enough in time. An unparseable timestamp on either side breaks the run —
@@ -402,6 +370,10 @@ class MessageRow extends StatefulWidget {
   /// reads a disk.
   final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
 
+  /// Where the sender's face comes from. Null draws initials and asks nothing,
+  /// which is what every test and every signed-out session gets.
+  final ProfilePhotos? photos;
+
   const MessageRow({
     super.key,
     required this.message,
@@ -414,6 +386,7 @@ class MessageRow extends StatefulWidget {
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
+    this.photos,
   });
 
   /// The one line a folded row keeps about its files.
@@ -837,21 +810,15 @@ class _MessageRowState extends State<MessageRow> {
   }
 
   Widget _avatar(Message message) {
-    return Container(
-      width: _avatarSize,
-      height: _avatarSize,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: avatarColorFor(message.fromAddress, outbound: message.outbound),
-      ),
-      child: Text(
-        initialsFor(message.fromName, message.fromAddress),
-        style: BondType.caption.copyWith(
-          color: BondColors.onDarkPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
+    return BondAvatar(
+      name: message.fromName,
+      address: message.fromAddress,
+      outbound: message.outbound,
+      size: _avatarSize,
+      // A stored message knows an address and never a Graph id, except for
+      // Teams, where the address IS one wearing a `teams:` prefix.
+      photoKey: photoKeyFor(address: message.fromAddress),
+      photos: widget.photos,
     );
   }
 }

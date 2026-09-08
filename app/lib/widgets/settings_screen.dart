@@ -17,6 +17,17 @@ import 'settings_models_body.dart';
 import 'settings_section.dart';
 import 'time_format.dart' show relativeTime;
 
+/// How much of Settings a host is asking for.
+///
+/// [SettingsScope.all] is the screen the avatar menu opens. [SettingsScope.ai]
+/// is the same screen narrowed to the sections that are about the model — the
+/// pane behind the icon rail's AI stop — and titled for it.
+///
+/// A scope rather than a second screen: every section here is wired through
+/// forty callbacks the host already assembles, and a second screen would be a
+/// second copy of that wiring drifting out of step with this one.
+enum SettingsScope { all, ai }
+
 /// What the user gets to say about how the inbox behaves, plus what Microsoft
 /// has actually let this app do.
 ///
@@ -225,8 +236,12 @@ class SettingsScreen extends StatefulWidget {
 
   final String? databasePath;
 
+  /// Which half of the screen to render — see [SettingsScope].
+  final SettingsScope scope;
+
   const SettingsScreen({
     super.key,
+    this.scope = SettingsScope.all,
     required this.threshold,
     required this.aboutMe,
     required this.onThresholdChanged,
@@ -448,7 +463,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget build(BuildContext context) {
     final onHome = widget.onHome;
     return PaneSurface(
-      title: 'Settings',
+      title: widget.scope == SettingsScope.ai ? 'AI' : 'Settings',
       // Both ways out commit a half-typed server URL and a typed lookback date
       // first: they are the two clicks that take those fields off the screen,
       // and [Focus] does not see them (see _commitPendingServerUrl).
@@ -487,9 +502,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     // the same instant: two rows a millisecond apart on the boundary of a
     // minute would otherwise disagree with each other.
     final now = widget.now();
+    // The AI scope keeps the sections that describe how the model reads this
+    // mailbox — who the user is, which server answers, what counts as needing
+    // them, how storylines are ordered, and the log of what it did. Everything
+    // else on this screen is about the app or the account, and belongs to the
+    // avatar menu's Settings.
+    final ai = widget.scope == SettingsScope.ai;
     return [
       _section('About me', _aboutMeSummary(), _aboutMeBody()),
-      if (_connectionWired)
+      if (!ai && _connectionWired)
         MicrosoftConnectionSection(
           key: _connectionKey,
           expanded: _open.contains(MicrosoftConnectionSection.title),
@@ -515,17 +536,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _modelsBody(),
         ),
       _section('Needs You', _needsYouSummary(), _needsYouBody()),
-      if (widget.onNotifyStyleChanged != null)
+      if (!ai && widget.onNotifyStyleChanged != null)
         _section('Notifications', _notifySummary(), _notifyBody()),
       if (widget.onShowActivityLogChanged != null)
         _section('Activity log', _activityLogSummary(), _activityLogBody()),
-      if (widget.onHomeShowDroppedChanged != null)
+      if (!ai && widget.onHomeShowDroppedChanged != null)
         _section('Home & feed', _homeSummary(), _homeBody()),
       if (widget.onStorylineNewestFirstChanged != null)
         _section('Storylines', _storylinesSummary(), _storylinesBody()),
-      if (widget.onRefreshNow != null)
+      if (!ai && widget.onRefreshNow != null)
         _section('Sync & data', _syncSummary(now), _syncBody(now)),
-      if (widget.appVersion != null || widget.databasePath != null)
+      if (!ai && (widget.appVersion != null || widget.databasePath != null))
         _section('About', _aboutSummary(), _aboutBody()),
     ];
   }

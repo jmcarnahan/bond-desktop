@@ -32,6 +32,7 @@ import '../services/llm/model_probe.dart';
 // second import of `model_slots.dart` for the same declaration is redundant.
 import '../services/llm/needs_you_task.dart'
     show needsYouDefaultRules, needsYouOutputContract, needsYouRulesCap;
+import '../services/profile_photos.dart' show photoKeyFor;
 import '../services/triage_queue.dart';
 import '../theme/tokens.dart';
 import '../widgets/activity_log_panel.dart';
@@ -40,9 +41,13 @@ import '../widgets/archive_pane.dart';
 import '../widgets/attachment_format.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
+import '../widgets/bond_avatar.dart' show AvatarStack;
 import '../widgets/home_pane.dart';
+import '../widgets/icon_rail.dart';
 import '../widgets/inline_alert.dart';
+import '../widgets/people_rooms.dart';
 import '../widgets/notification_ribbon.dart';
+import '../widgets/pane_surface.dart';
 import '../widgets/preview/attachment_preview_panel.dart';
 import '../widgets/preview/attachment_viewer_pane.dart';
 import '../widgets/preview/pdf_preview.dart';
@@ -141,6 +146,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// The open Later day, as a `yyyy-mm-dd` key. Exclusive with the two above
   /// for the same reason they are exclusive with each other.
   String? _selectedLaterDay;
+
+  /// The open People room, as the key [roomKeyFor] minted for it. Exclusive
+  /// with the three selections above, and a SELECTION rather than an overlay —
+  /// so [_clearOverlays] does not touch it, and every selection setter nulls
+  /// it by hand exactly as they null [_selectedStorylineId].
+  ///
+  /// A key and not a [PersonRoom]: rooms are derived from the conversation
+  /// list on every build, so holding one would be holding a snapshot that
+  /// stops agreeing with the rail the moment mail arrives.
+  String? _selectedRoomKey;
 
   /// Which pile Archive is showing. Kept here rather than in the pane so the
   /// tab survives every rebuild the sixty-second poll causes.
@@ -267,7 +282,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   bool _syncing = false;
 
   /// The stored "Teams last synced" stamp, read once and re-read only after a
-  /// pull. See [_teamsFreshness].
+  /// pull. See [_refreshAction], whose tooltip is the only thing that shows it.
   Future<String?>? _teamsSyncedAt;
 
   Timer? _poll;
@@ -278,6 +293,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   late final Future<AccountInfo?> _account =
       ref.read(authSessionProvider).storedAccount;
+
+  /// The signed-in account once [_account] has resolved, held in state because
+  /// the People grouping needs it SYNCHRONOUSLY on every build — a
+  /// FutureBuilder around the rail would rebuild the whole column, and the
+  /// grouping is a pure function that wants a value, not a future.
+  ///
+  /// Null for the first frames, which groups every thread by everyone on it,
+  /// the owner included. One rebuild later it is right, and nothing was
+  /// blocked waiting for a keychain read.
+  AccountInfo? _owner;
+
+  /// The owner as [peopleRooms] wants them.
+  Owner get _ownerRecord =>
+      (name: _owner?.displayName, address: _owner?.mail ?? _owner?.userPrincipalName);
 
   /// Whether the tenant granted `Chat.Read`. Read once — it is a keychain
   /// read, and the answer cannot change without a fresh sign-in, which
@@ -309,6 +338,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       if (!mounted) return;
       ref.read(homeFeedProvider.notifier).load();
     });
+    // LAST of the three, deliberately: this is a keychain read whose only
+    // consumers are the People grouping and one avatar, and queueing it ahead
+    // of the list load would put a face in front of the mail.
+    //
+    // Resolved once and kept, because both consumers want it synchronously on
+    // every build and neither can await.
+    unawaited(() async {
+      final AccountInfo? account;
+      try {
+        account = await _account;
+      } on Object {
+        // A keychain the platform will not answer for — under `flutter test`
+        // there is no channel behind it at all. Swallowed rather than left to
+        // the zone: nothing on this screen waits for the answer, the rooms
+        // simply group by everyone on a thread until it lands, and a failed
+        // read must not be an unhandled error in whatever ran the app.
+        return;
+      }
+      if (!mounted) return;
+      setState(() => _owner = account);
+    }());
     _poll = Timer.periodic(_pollInterval, (_) => _refresh());
   }
 
@@ -497,6 +547,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // person's empty inbox. Cleared here rather than left to the next
     // selection, because signing out is not a selection.
     _clearOverlays();
+    // A SELECTION and so not in that block, but it names people out of the
+    // mailbox that was just wiped, and it must not survive into the next
+    // person's session either.
+    _selectedRoomKey = null;
     if (!mounted) return;
     ref.invalidate(conversationsProvider);
     ref.invalidate(storylinesProvider);
@@ -590,6 +644,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = resolvedSource;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _selectedRoomKey = null;
     });
     // The quietest signal the app collects: opening a thread is the user saying
     // this one was worth their time. Fire-and-forget, and nothing on screen
@@ -625,6 +680,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedId = null;
       _selectedSource = null;
       _selectedLaterDay = null;
+      _selectedRoomKey = null;
     });
     ref.read(storylineTimelineProvider(id).notifier).load();
   }
@@ -644,6 +700,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _selectedRoomKey = null;
+    });
+  }
+
+  /// Opens one person's room. The section moves with it, so Back out of the
+  /// room lands on the People overview rather than wherever the user was
+  /// before — the same rule [_selectLaterDay] follows for a day.
+  void _selectRoom(String key) {
+    setState(() {
+      _clearOverlays();
+      _section = RailSection.people;
+      _selectedRoomKey = key;
+      _selectedId = null;
+      _selectedSource = null;
+      _selectedStorylineId = null;
+      _selectedLaterDay = null;
     });
   }
 
@@ -659,12 +731,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedId = null;
       _selectedSource = null;
       _selectedStorylineId = null;
+      _selectedRoomKey = null;
     });
   }
 
   /// Opens the activity log, which is a pane and not a section: it belongs to
-  /// the app rather than to the mail, so it is reached from the rail's footer
-  /// and clears whatever the user was reading.
+  /// the app rather than to the mail, so it is reached from the icon rail's
+  /// avatar menu and clears whatever the user was reading.
   void _openActivityLog() {
     setState(() {
       _clearOverlays();
@@ -673,6 +746,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _selectedRoomKey = null;
     });
   }
 
@@ -893,11 +967,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // counts from what they are handed, and filtering some of them would
         // put a badge over a section showing fewer rows than it claims.
         final rows = bySource(conversations, _sourceFilter);
+        // Grouped ONCE per build, here, and handed to the rail, the room pane
+        // and the main ladder: three callers deriving the same rooms from the
+        // same list is three chances for the row the user tapped and the pane
+        // that opened to disagree about who is in it.
+        final rooms = peopleRooms(
+          rows,
+          owner: _ownerRecord,
+          threshold: ref.watch(appPrefsProvider).attentionThreshold,
+        );
         return LayoutBuilder(
           builder: (context, constraints) =>
               constraints.maxWidth >= _twoPaneBreakpoint
-                  ? _wide(rows, loadError)
-                  : _narrow(rows, loadError),
+                  ? _wide(rows, rooms, loadError)
+                  : _narrow(rows, rooms, loadError),
         );
     }
   }
@@ -906,12 +989,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// The width is measured POST-RAIL — see [SidePanelHost.availableBesideRail]
   /// — and the two-pane breakpoint is applied to THAT figure rather than to
-  /// the window: 260 of rail, its 1px divider and the 16px seam come off
-  /// first, so the split appears from a window of 1237px. Measuring the raw
-  /// window instead would open the split at 960, where the main pane would be
-  /// left with 379 — under the transcript's own minimum, with nothing to
-  /// catch it.
-  Widget _wide(List<Conversation> conversations, String? loadError) {
+  /// the window: 56 of icon rail, 260 of list column, the 1px divider and the
+  /// 16px seam come off first, so the split appears from a window of 1293px.
+  /// Measuring the raw window instead would open the split at 960, where the
+  /// main pane would be left with 323 — under the transcript's own minimum,
+  /// with nothing to catch it.
+  Widget _wide(
+    List<Conversation> conversations,
+    List<PersonRoom> rooms,
+    String? loadError,
+  ) {
     return LayoutBuilder(
       builder: (context, constraints) {
         final side = _side;
@@ -932,7 +1019,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         return Row(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _rail(conversations),
+            _iconRail(conversations),
+            _rail(conversations, rooms),
             const SizedBox(
               width: 1,
               child: ColoredBox(color: BondColors.border),
@@ -944,7 +1032,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             if (beside != null && width == null)
               Expanded(child: _sidePanel(beside))
             else ...[
-              Expanded(child: _main(conversations, loadError)),
+              Expanded(child: _main(conversations, rooms, loadError)),
               if (beside != null && width != null) ...[
                 const SizedBox(width: BondSpacing.s16),
                 SizedBox(width: width, child: _sidePanel(beside)),
@@ -958,7 +1046,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The rail lifts off the page instead of shoving it aside: at this width
   /// the main pane has nothing to spare.
-  Widget _narrow(List<Conversation> conversations, String? loadError) {
+  Widget _narrow(
+    List<Conversation> conversations,
+    List<PersonRoom> rooms,
+    String? loadError,
+  ) {
     return Stack(
       children: [
         Column(
@@ -984,7 +1076,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             Expanded(
               child: (_side != null && !_sideFull)
                   ? _sidePanel(_side!)
-                  : _main(conversations, loadError),
+                  : _main(conversations, rooms, loadError),
             ),
           ],
         ),
@@ -1003,7 +1095,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             bottom: 0,
             child: DecoratedBox(
               decoration: const BoxDecoration(boxShadow: BondShadows.overlay),
-              child: _rail(conversations),
+              // Both columns lift off together: the stops and the list they
+              // scope are one navigator, and half of it would be half a way
+              // around the app.
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _iconRail(conversations),
+                  _rail(conversations, rooms),
+                ],
+              ),
             ),
           ),
         ],
@@ -1077,7 +1178,46 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  Widget _rail(List<Conversation> conversations) {
+  /// The stop the two rails highlight, or null when what is on screen is not a
+  /// section at all — a thread, a storyline, a room, a Later day or a pane.
+  ///
+  /// One getter for both columns: the icon rail and the list column must never
+  /// disagree about where the user is, and two copies of this rule is how they
+  /// would come to.
+  RailSection? get _highlightedSection => (_selectedId == null &&
+          _selectedStorylineId == null &&
+          _selectedLaterDay == null &&
+          _selectedRoomKey == null &&
+          !_showingActivityLog &&
+          !_showingSettings &&
+          !_showingCompose)
+      ? _section
+      : null;
+
+  /// The 56px strip of stops, and the account's face at the foot of it.
+  Widget _iconRail(List<Conversation> conversations) {
+    return IconRail(
+      selected: _highlightedSection,
+      // The same count the list column's own badge shows, at the same
+      // threshold: two numbers for one pile is one number too many.
+      needsYouCount: needsYouRows(
+        conversations,
+        threshold: ref.watch(appPrefsProvider).attentionThreshold,
+      ).length,
+      onSelect: _selectSection,
+      accountName: _owner?.displayName ?? '',
+      accountAddress: _owner?.mail ?? _owner?.userPrincipalName,
+      onSettings: _openSettings,
+      // Behind the preference it has always been behind. Null leaves the item
+      // out of the menu rather than showing one that does nothing.
+      onActivityLog:
+          ref.watch(appPrefsProvider).showActivityLog ? _openActivityLog : null,
+      onSignOut: _signOut,
+      photos: ref.read(profilePhotosProvider),
+    );
+  }
+
+  Widget _rail(List<Conversation> conversations, List<PersonRoom> rooms) {
     final later = laterRows(conversations);
     return AppRail(
       conversations: conversations,
@@ -1090,16 +1230,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       laterDays: laterDayCounts(conversations),
       attentionThreshold: ref.watch(appPrefsProvider).attentionThreshold,
       processingSince: ref.watch(sessionStartProvider),
-      // A thread, a storyline or a Later day being open means no section
-      // overview is showing, so the rail must not highlight one.
-      selectedSection: (_selectedId == null &&
-              _selectedStorylineId == null &&
-              _selectedLaterDay == null &&
-              !_showingActivityLog &&
-              !_showingSettings &&
-              !_showingCompose)
-          ? _section
-          : null,
+      // A thread, a storyline, a room or a Later day being open means no
+      // section overview is showing, so the rail must not highlight one.
+      selectedSection: _highlightedSection,
+      header: _listHeader(),
+      // The column is scoped to wherever the user is, and it keeps that scope
+      // while they read: a thread opened from People must not drop the column
+      // back to the Home stack under them.
+      scope: _section ?? RailSection.home,
+      rooms: rooms,
+      selectedRoomKey: _selectedRoomKey,
+      onSelectRoom: _selectRoom,
+      photos: ref.read(profilePhotosProvider),
       onSelectConversation: (source, id) => _select(id, source: source),
       onSelectSection: _selectSection,
       onSelectStoryline: _selectStoryline,
@@ -1119,63 +1261,83 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         }
         ref.read(storylinesProvider.notifier).dismiss(id);
       },
-      footer: _railFooter(),
     );
   }
 
-  /// Account, refresh, sign-out — everything the old header row carried,
-  /// parked at the foot of the rail where it stops competing with the mail.
-  Widget _railFooter() {
+  /// What the list column is showing, how to add to it, and how to bring it up
+  /// to date — drawn at the TOP of the column, above the list.
+  ///
+  /// Everything the footer used to carry that belonged to the MAIL is here;
+  /// everything that belonged to the app went to the avatar menu on the icon
+  /// rail (D8). What is left is three lines: which pile this is beside the two
+  /// verbs that act on it, the source chips, and the triage caption.
+  ///
+  /// The Teams freshness caption is gone as a line and lives in the refresh
+  /// button's tooltip: it is a fact ABOUT that button — chats do not arrive on
+  /// their own, so the one control that pulls them is the one place worth
+  /// saying how old they are.
+  Widget _listHeader() {
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s12),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
-          _sourceFilterBar(),
-          _triageProgress(),
           Row(
             children: [
               Expanded(
-                child: FutureBuilder<AccountInfo?>(
-                  future: _account,
-                  builder: (context, snapshot) {
-                    final name = snapshot.data?.displayName ?? '';
-                    if (name.isEmpty) return const SizedBox.shrink();
-                    return Text(
-                      name,
-                      style: BondType.caption
-                          .copyWith(color: BondColors.onDarkSecondary),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    );
-                  },
+                child: Text(
+                  (_section ?? RailSection.home).label.toUpperCase(),
+                  style: BondType.caption.copyWith(
+                    color: BondColors.onDarkMuted,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.96,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              // First of the actions: writing to somebody is the one thing
-              // here that starts something rather than adjusting the app.
+              // Writing to somebody is the one control here that starts
+              // something rather than adjusting what is already on screen.
               _railAction(
                 Icons.edit_outlined,
                 'New message',
                 () => _openCompose(),
               ),
-              if (ref.watch(appPrefsProvider).showActivityLog)
-                _railAction(
-                  Icons.receipt_long,
-                  'Activity log',
-                  _openActivityLog,
-                ),
-              _railAction(Icons.settings, 'Settings', _openSettings),
-              // The ONE button that pulls Teams. Every other refresh in this
-              // screen — the timer, the retry links on the error banners — is
-              // mail only.
-              _railAction(Icons.refresh, 'Refresh', () => unawaited(_refreshAll())),
-              _railAction(Icons.logout, 'Sign out', _signOut),
+              _refreshAction(),
             ],
           ),
-          _teamsFreshness(),
+          const SizedBox(height: BondSpacing.s8),
+          _sourceFilterBar(),
+          _triageProgress(),
         ],
       ),
+    );
+  }
+
+  /// The ONE button that pulls Teams. Every other refresh in this screen — the
+  /// timer, the retry links on the error banners — is mail only.
+  ///
+  /// Its tooltip carries how old the Teams side of the inbox is, and says
+  /// nothing at all before the first pull. The difference between "quiet" and
+  /// "stale" is worth a sentence, and this is the control that changes it.
+  Widget _refreshAction() {
+    // Held rather than re-read on every build: it is a stored read and so a
+    // future now, and a fresh future per build would restart the FutureBuilder
+    // — blanking the tooltip for a frame every time anything on this screen
+    // changed. [_refreshTeams] drops it, which is the only thing that can
+    // change the answer.
+    final future = _teamsSyncedAt ??= ref.read(teamsSyncProvider).lastSyncedAt;
+    return FutureBuilder<String?>(
+      future: future,
+      builder: (context, snapshot) {
+        final label = relativeTime(snapshot.data, DateTime.now());
+        return _railAction(
+          Icons.refresh,
+          label == null ? 'Refresh' : 'Refresh · Teams updated $label',
+          () => unawaited(_refreshAll()),
+        );
+      },
     );
   }
 
@@ -1201,38 +1363,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// How old the Teams side of the inbox is, and nothing at all before the
-  /// first pull.
-  ///
-  /// It sits under the refresh button because that is the one control that
-  /// changes it — chats do not arrive on their own here, and a caption saying
-  /// so is the difference between "quiet" and "stale".
-  Widget _teamsFreshness() {
-    // Held rather than re-read on every build: it is a stored read and so a
-    // future now, and a fresh future per build would restart the FutureBuilder
-    // — blanking the caption for a frame every time anything on this screen
-    // changed. [_refreshTeams] drops it, which is the only thing that can
-    // change the answer.
-    final future = _teamsSyncedAt ??= ref.read(teamsSyncProvider).lastSyncedAt;
-    return FutureBuilder<String?>(
-      future: future,
-      builder: (context, snapshot) {
-        final label = relativeTime(snapshot.data, DateTime.now());
-        if (label == null) return const SizedBox.shrink();
-        return Padding(
-          padding: const EdgeInsets.only(top: BondSpacing.s4),
-          child: Text(
-            'Teams updated $label',
-            style: BondType.caption.copyWith(color: BondColors.onDarkMuted),
-          ),
-        );
-      },
-    );
-  }
-
   /// Opens Settings, which is a pane and not a section — it belongs to the
-  /// app rather than to the mail, so it is reached from the rail's footer and
-  /// clears whatever the user was reading, exactly as the activity log does.
+  /// app rather than to the mail, so it is reached from the icon rail's avatar
+  /// menu and clears whatever the user was reading, exactly as the activity
+  /// log does.
   void _openSettings() {
     setState(() {
       // Which includes the rail overlay: at narrow widths leaving it open
@@ -1243,6 +1377,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _selectedRoomKey = null;
     });
   }
 
@@ -1264,6 +1399,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _selectedRoomKey = null;
     });
   }
 
@@ -1299,7 +1435,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// method now, and the Needs You summary reads the STORED rules to say
   /// whether they are custom — a Save from inside the screen only moves that
   /// line because this host rebuilds. Do not "optimise" it to `ref.read`.
-  Widget _settings() {
+  ///
+  /// [scope] is what tells the two rungs apart: the avatar menu's Settings
+  /// opens all of it, the AI stop opens the model half under the title 'AI'.
+  /// ONE builder for both, so a callback added to one is added to the other —
+  /// two copies of forty wired parameters is two copies that drift.
+  Widget _settingsScreen({
+    required SettingsScope scope,
+    required VoidCallback onBack,
+  }) {
     final prefs = ref.watch(appPrefsProvider);
     final notifier = ref.read(appPrefsProvider.notifier);
     // `watch` is legal here because this runs inside `build`, and it is what
@@ -1314,7 +1458,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final appInfo = ref.watch(appInfoProvider).valueOrNull;
     final databasePath = ref.watch(databasePathProvider).valueOrNull;
     return SettingsScreen(
-      onBack: _closeSettings,
+      scope: scope,
+      onBack: onBack,
       onHome: () => _selectSection(RailSection.home),
       threshold: prefs.attentionThreshold,
       aboutMe: prefs.aboutMe,
@@ -1627,9 +1772,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// A selected Later day is not a case here: it is a section overview with a
   /// filter on it, and [_overviewBody] reads it.
-  Widget _main(List<Conversation> conversations, String? loadError) {
+  Widget _main(
+    List<Conversation> conversations,
+    List<PersonRoom> rooms,
+    String? loadError,
+  ) {
     if (_showingCompose) return _compose();
-    if (_showingSettings) return _settings();
+    if (_showingSettings) {
+      return _settingsScreen(scope: SettingsScope.all, onBack: _closeSettings);
+    }
     if (_showingActivityLog) return _activityLog();
 
     final addingTo = _addingToStorylineId;
@@ -1666,6 +1817,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       if (storyline != null) return _storyline(storyline);
     }
 
+    // A room whose people all went quiet is a room that no longer exists — the
+    // grouping is derived, not stored. Falling through rather than clearing the
+    // key, because build never setStates: the next selection clears it.
+    final roomKey = _selectedRoomKey;
+    if (roomKey != null) {
+      for (final room in rooms) {
+        if (room.key == roomKey) return _room(room);
+      }
+    }
+
     // The last rung before the section overviews, so every selection above
     // still outranks it: a thread opened from the feed shows the thread, and
     // Home is what is left when nothing else is selected. A Later day is not a
@@ -1673,6 +1834,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if ((_section ?? RailSection.home) == RailSection.home &&
         _selectedLaterDay == null) {
       return _home();
+    }
+
+    // The AI stop's pane IS Settings, narrowed to the sections that are about
+    // the model. It sits here rather than with the other panes above because
+    // it is a SECTION and not an overlay: nothing opened it, the user is
+    // simply standing on that stop.
+    if (_section == RailSection.ai) {
+      return _settingsScreen(
+        scope: SettingsScope.ai,
+        onBack: () => _selectSection(RailSection.home),
+      );
     }
 
     return _overview(conversations, loadError);
@@ -2008,6 +2180,62 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _openCompose(prefill: OpenComposeIntent(to: to));
   }
 
+  /// One person's room: every live thread with them in it, what they are
+  /// waiting on first.
+  ///
+  /// A list and not a merged timeline this phase — Phase 6 replaces the body.
+  /// The two sections are the same split the rail makes, so a room says the
+  /// same thing about a thread that the column the user came from did.
+  Widget _room(PersonRoom room) {
+    final threshold = ref.watch(appPrefsProvider).attentionThreshold;
+    return PaneSurface(
+      title: room.title,
+      // Back goes to the People overview rather than to whatever was on screen
+      // before: the room IS the People stop, and dropping the user somewhere
+      // else would make the way out depend on how they got in.
+      onBack: () => _selectSection(RailSection.people),
+      onHome: () => _selectSection(RailSection.home),
+      trailing: AvatarStack(
+        people: [
+          for (final p in room.people)
+            (
+              name: p.display,
+              address: p.email,
+              photoKey: photoKeyFor(address: p.email),
+            ),
+        ],
+        photos: ref.read(profilePhotosProvider),
+      ),
+      child: ConversationListPane(
+        sources: _sources,
+        filter: InboxFilter.open,
+        conversations: room.threads,
+        // Nothing in the room is the open thread: opening one takes the whole
+        // pane, and the room is what Back returns to.
+        selectedId: null,
+        selectedSource: null,
+        onSelect: (source, id) => _select(id, source: source),
+        sectionsOverride: [
+          (
+            'NEEDS YOU',
+            [
+              for (final c in room.threads)
+                if (isNeedsYou(c, threshold: threshold)) c,
+            ],
+          ),
+          (
+            'THREADS',
+            [
+              for (final c in room.threads)
+                if (!isNeedsYou(c, threshold: threshold)) c,
+            ],
+          ),
+        ],
+        processingSince: ref.watch(sessionStartProvider),
+      ),
+    );
+  }
+
   /// The thread in the MAIN pane: the transcript, and the composer under it.
   Widget _thread(Conversation selected) => _threadColumn(
         selected,
@@ -2132,6 +2360,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       key: ValueKey(selected.id),
       conversation: selected,
       messages: shown,
+      // Read, not watched: the service is a session-long singleton, and each
+      // avatar asks it for its own face.
+      photos: ref.read(profilePhotosProvider),
       // The suggestions sit with the messages they answer. The panel places
       // them and never learns what they are.
       suggestionFor: cardFor,
@@ -2872,7 +3103,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         : (_section ?? RailSection.needsYou);
     final day = _selectedLaterDay;
     final title = (section == RailSection.archive && day != null)
-        ? 'Archive · ${formatDayLabel(day) ?? day}'
+        ? 'Later · ${formatDayLabel(day) ?? day}'
         : section.label;
 
     return Padding(
@@ -2979,7 +3210,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ),
         ],
-      RailSection.conversations => [
+      // The People OVERVIEW is the flat list of everything nobody has claimed
+      // — the same rows the rail groups into rooms, ungrouped. A room is one
+      // person; this is all of them, and it is what the stop lands on before
+      // a room is picked.
+      RailSection.people => [
           (
             'OPEN',
             conversationRows(
@@ -2988,12 +3223,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ),
           ),
         ],
-      // Unreachable: [_main] routes Home to its own pane, and the two above
-      // return before this switch. The arms exist so the analyzer keeps this
-      // exhaustive when a stop is added.
+      // Unreachable: [_main] routes Home and AI to their own panes, and the
+      // two above return before this switch. The arms exist so the analyzer
+      // keeps this exhaustive when a stop is added.
       RailSection.home ||
       RailSection.archive ||
-      RailSection.storylines =>
+      RailSection.storylines ||
+      RailSection.ai =>
         const <(String, List<Conversation>)>[],
     };
 

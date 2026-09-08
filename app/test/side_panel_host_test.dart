@@ -164,8 +164,10 @@ void main() {
       // 260 of rail, its 1px divider and the 16px seam. Applying the two-pane
       // breakpoint to the window instead would open the split at 960, where
       // the main pane would be left under its own minimum.
-      expect(SidePanelHost.availableBesideRail(1400), 1123);
-      expect(SidePanelHost.availableBesideRail(1237), 960);
+      expect(SidePanelHost.availableBesideRail(1400), 1067);
+      // The window at which the split first appears: the icon rail's 56, the
+      // list column's 260, the divider and the seam leave exactly 960.
+      expect(SidePanelHost.availableBesideRail(1293), 960);
     });
   });
 }

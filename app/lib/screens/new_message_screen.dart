@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/person.dart';
+import '../providers/app_providers.dart';
 import '../providers/compose_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/navigation_provider.dart';
@@ -154,6 +155,7 @@ class _NewMessageScreenState extends ConsumerState<NewMessageScreen> {
                 // screen can act on the pick.
                 onChatPicked:
                     state.isTeams ? notifier.pickExistingChat : null,
+                photos: ref.watch(profilePhotosProvider),
               ),
               const SizedBox(height: BondSpacing.s12),
             ],
@@ -231,6 +233,7 @@ class _NewMessageScreenState extends ConsumerState<NewMessageScreen> {
           channel: RecipientChannel.mail,
           allowTypedAddress: true,
           hint: 'Cc',
+          photos: ref.watch(profilePhotosProvider),
         ),
         const SizedBox(height: BondSpacing.s12),
       ] else ...[

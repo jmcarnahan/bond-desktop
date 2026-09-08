@@ -8,6 +8,7 @@ import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/services/message_search.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
@@ -254,7 +255,10 @@ void main() {
     await tester.pump();
     expect(find.byType(HomePane), findsNothing);
 
-    await tester.tap(find.text('HOME'));
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('Home'),
+    ));
     await tester.pump();
     await tester.pump();
 
@@ -323,7 +327,10 @@ void main() {
     await seedThread('c1', 'Homepage copy');
 
     await pumpInbox(tester);
-    await tester.tap(find.text('CONVERSATIONS'));
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('People'),
+    ));
     await tester.pump();
     expect(find.byType(HomePane), findsNothing);
 

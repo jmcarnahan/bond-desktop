@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import '../../models/person.dart';
 import '../backend/backend_types.dart';
 import '../backend/people_backend.dart';
@@ -69,6 +72,75 @@ class McpPeopleBackend implements PeopleBackend {
           Person.fromDirectoryJson(Map<String, dynamic>.from(entry)),
     ].where(_showable).toList();
   }
+
+  /// [user]'s profile photo, or null when there is nothing to draw.
+  ///
+  /// The tool is `get_profile` — the SAME published name the account header
+  /// already reads, given its photo arguments. No new tool name enters this
+  /// app for a picture.
+  ///
+  /// The split between null and a throw is the whole method. Everything that
+  /// is a fact ABOUT THIS PERSON — no photo, not in the directory, an id Graph
+  /// could not parse, an image too big or malformed — is null, because an
+  /// avatar's fallback is initials and none of those is worth a second ask.
+  /// `directory_scope_missing` is the one permanent failure, and every other
+  /// error is a bad moment: both are thrown, so [ProfilePhotos] can stop
+  /// asking for the session in the first case and retry in the second.
+  @override
+  Future<ProfilePhoto?> profilePhoto(String user, {String size = '96x96'}) async {
+    final result = await _call('get_profile', {
+      // Self sends no `user` key at all: that path needs only User.Read, and
+      // naming yourself would put it behind the directory grant for nothing.
+      if (user.trim().isNotEmpty) 'user': user,
+      'photo': 'bytes',
+      'photo_size': size,
+    });
+
+    final error = result['error'];
+    if (error == 'directory_scope_missing') {
+      throw const DirectoryUnavailable(
+        scopeMissing: true,
+        message: 'Profile photos are not enabled for this account.',
+      );
+    }
+    if (error != null) {
+      if (_aboutThisPerson.contains(error)) return null;
+      throw DirectoryUnavailable(
+        scopeMissing: false,
+        message: 'The profile photo could not be read: $error',
+      );
+    }
+
+    if (result['has_photo'] != true) return null;
+    final encoded = result['content_base64'];
+    if (encoded is! String || encoded.isEmpty) return null;
+
+    final Uint8List bytes;
+    try {
+      bytes = base64Decode(encoded);
+    } on FormatException {
+      // The server said there was a picture and sent something that is not
+      // one. Initials, not an exception: nothing a retry would fix.
+      return null;
+    }
+
+    final type = result['content_type'];
+    return ProfilePhoto(
+      bytes: bytes,
+      contentType: type is String && type.isNotEmpty ? type : 'image/jpeg',
+    );
+  }
+
+  /// The `get_profile` errors that describe the PERSON rather than the
+  /// connection, and therefore answer null. Asking again returns the same
+  /// thing for every one of them.
+  static const Set<String> _aboutThisPerson = {
+    'user_not_found',
+    'invalid_arguments',
+    'invalid_photo',
+    'invalid_photo_size',
+    'too_large',
+  };
 
   /// Whether an entry names somebody the field could actually put on a
   /// message. An id-less entry cannot be stored or chatted with, and one with

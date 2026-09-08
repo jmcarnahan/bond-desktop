@@ -4,6 +4,7 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart'
     show needsYouDefaultRules;
 import 'package:bond_inbox/services/sync_service.dart';
@@ -79,9 +80,15 @@ void main() {
       tester.element(find.byType(InboxScreen)),
     );
 
-    await tester.tap(find.byTooltip('Settings'));
+    // Settings and the activity log live in the icon rail's account menu now
+    // (D8), so getting there is two taps. Bounded pumps throughout —
+    // `pumpAndSettle` never comes back with InboxScreen's timer running.
+    await tester.tap(find.byKey(IconRail.accountMenuKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(IconRail.settingsItemKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
   }
 
   /// Taps something after scrolling it into view. The sections stack into one

@@ -4,6 +4,7 @@ import '../models/attachment_models.dart';
 import '../providers/draft_provider.dart' show DraftTarget;
 import '../theme/tokens.dart';
 import 'app_rail.dart' show AppRail;
+import 'icon_rail.dart' show IconRail;
 
 /// What is open beside the main pane, if anything.
 ///
@@ -109,11 +110,11 @@ class SidePanelHost extends StatelessWidget {
   /// rather than squeezing it, the same call the rail makes at its own
   /// breakpoint.
   ///
-  /// [available] is measured POST-RAIL: the window less the rail's 260, its
-  /// 1px divider and the 16px seam. The shell applies its two-pane breakpoint
-  /// to that figure rather than to the window, so the split appears from a
-  /// window of 1237px — close to the 1269 the thread pane's own split needed
-  /// when this math lived inside its 24px padding.
+  /// [available] is measured POST-RAIL: the window less the icon rail's 56,
+  /// the list column's 260, the 1px divider and the 16px seam. The shell
+  /// applies its two-pane breakpoint to that figure rather than to the window,
+  /// so the split appears from a window of 1293px — the 1237 of the one-column
+  /// shell plus the icon rail that now stands beside it.
   static double? widthFor({
     required double available,
     required double minWidth,
@@ -125,9 +126,10 @@ class SidePanelHost extends StatelessWidget {
     return width;
   }
 
-  /// What [widthFor] measures against, from the whole window.
+  /// What [widthFor] measures against, from the whole window: everything the
+  /// two rails and the seam between them have already spent.
   static double availableBesideRail(double windowWidth) =>
-      windowWidth - AppRail.width - 1 - BondSpacing.s16;
+      windowWidth - IconRail.width - AppRail.width - 1 - BondSpacing.s16;
 
   @override
   Widget build(BuildContext context) {

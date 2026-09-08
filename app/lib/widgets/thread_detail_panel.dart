@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart';
+import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
 import 'chips.dart';
 import 'inline_alert.dart';
@@ -93,6 +94,10 @@ class ThreadDetailPanel extends StatelessWidget {
   /// [ImageProvider] rather than bytes or a path — see [MessageRow.thumbnailFor].
   final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
 
+  /// Where each sender's face comes from, passed straight to every row. Null
+  /// draws initials and asks nothing.
+  final ProfilePhotos? photos;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -110,6 +115,7 @@ class ThreadDetailPanel extends StatelessWidget {
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
+    this.photos,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -189,6 +195,7 @@ class ThreadDetailPanel extends StatelessWidget {
         onOpenAttachment: onOpenAttachment,
         selectedAttachment: selectedAttachment,
         thumbnailFor: thumbnailFor,
+        photos: photos,
       ));
       previous = message;
     }

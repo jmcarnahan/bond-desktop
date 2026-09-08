@@ -3,6 +3,7 @@ import 'package:bond_inbox/models/person.dart';
 import 'package:bond_inbox/providers/recipient_search_provider.dart'
     show RecipientResults;
 import 'package:bond_inbox/theme/tokens.dart';
+import 'package:bond_inbox/widgets/bond_avatar.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/recipients_field.dart';
 import 'package:flutter/material.dart';
@@ -216,6 +217,36 @@ void main() {
       expect(find.text('sarah@corp.example · Ops'), findsOneWidget);
     });
 
+    testWidgets('a person is offered with their face, a chat with its icon',
+        (tester) async {
+      // The avatar draws initials here — no photo service is handed in, which
+      // is what a test and a signed-out session both get.
+      final search = _FakeSearch(directory: [sarah], chats: [crew]);
+      await pumpField(
+        tester,
+        search: search.call,
+        channel: RecipientChannel.teams,
+        onChatPicked: (_) {},
+      );
+
+      await type(tester, 'sa');
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('recipient-option-u1')),
+          matching: find.byType(BondAvatar),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('recipient-chat-chat-1')),
+          matching: find.byIcon(Icons.groups_outlined),
+        ),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('a throwing search shows nothing and throws nothing',
         (tester) async {
       await pumpField(tester, search: _throwingSearch);
@@ -305,11 +336,15 @@ void main() {
       final search = _FakeSearch(recents: [sam], directory: [sarah]);
       await pumpField(tester, search: search.call);
 
+      // `.first`: the row's own fill is the outermost container in it — the
+      // avatar's initials disc is a container too.
       Color? rowColor(String id) => tester
-          .widget<Container>(find.descendant(
-            of: find.byKey(Key('recipient-option-$id')),
-            matching: find.byType(Container),
-          ))
+          .widget<Container>(find
+              .descendant(
+                of: find.byKey(Key('recipient-option-$id')),
+                matching: find.byType(Container),
+              )
+              .first)
           .color;
 
       await type(tester, 'sa');
@@ -338,11 +373,15 @@ void main() {
       final search = _FakeSearch(directory: crowd);
       await pumpField(tester, search: search.call);
 
+      // `.first`: the row's own fill is the outermost container in it — the
+      // avatar's initials disc is a container too.
       Color? rowColor(String id) => tester
-          .widget<Container>(find.descendant(
-            of: find.byKey(Key('recipient-option-$id')),
-            matching: find.byType(Container),
-          ))
+          .widget<Container>(find
+              .descendant(
+                of: find.byKey(Key('recipient-option-$id')),
+                matching: find.byType(Container),
+              )
+              .first)
           .color;
 
       await type(tester, 'sa');

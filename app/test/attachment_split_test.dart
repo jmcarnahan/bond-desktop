@@ -12,6 +12,7 @@ import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/pane_surface.dart';
 import 'package:bond_inbox/screens/new_message_screen.dart';
 import 'package:bond_inbox/services/attachments/file_dialogs.dart';
 import 'package:bond_inbox/services/attachments/xlsx_reader.dart';
@@ -96,6 +97,10 @@ class _FakePeople implements PeopleBackend {
   @override
   Future<List<Person>> searchPeople(String query, {int top = 10}) async =>
       const [];
+
+  @override
+  Future<ProfilePhoto?> profilePhoto(String user, {String size = '96x96'}) async =>
+      null;
 }
 
 /// A save panel that answers with a path the test picked, and remembers what
@@ -382,7 +387,11 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    await tester.tap(find.text('Home'));
+    // Scoped: the icon rail's Home stop carries the same word.
+    await tester.tap(find.descendant(
+      of: find.byType(PaneSurface),
+      matching: find.text('Home'),
+    ));
     await tester.pump();
     await tester.pump();
     await tester.pump();

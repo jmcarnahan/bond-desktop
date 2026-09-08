@@ -98,6 +98,63 @@ class GraphPeople implements PeopleBackend {
     ];
   }
 
+  /// [user]'s profile photo, straight from Graph.
+  ///
+  /// `/me/photos/{size}/$value` for the signed-in user and
+  /// `/users/{id}/photos/{size}/$value` for anybody else — the first needs only
+  /// `User.Read`, which every session has, so the owner's own face survives a
+  /// tenant that never granted the directory scope.
+  ///
+  /// A 404 is null rather than a failure, and covers three different truths
+  /// Graph does not separate: this person uploaded no picture, this person is
+  /// not in the directory, or the mailbox is not a user at all. All three end
+  /// at the same avatar, so telling them apart would buy nothing.
+  ///
+  /// The response is read as BYTES and never decoded here — `$value` on a
+  /// photo is the image itself, not JSON, and the content type is whatever the
+  /// person uploaded.
+  @override
+  Future<ProfilePhoto?> profilePhoto(String user, {String size = '96x96'}) async {
+    final response = await _request('GET', _photoUri(user, size));
+
+    if (response.statusCode == 200) {
+      return ProfilePhoto(
+        bytes: response.bodyBytes,
+        contentType: response.headers['content-type'] ?? _defaultPhotoType,
+      );
+    }
+    if (response.statusCode == 404) return null;
+    // The tenant has not granted User.ReadBasic.All: the same permanent answer
+    // the search gets, and for the same reason.
+    if (response.statusCode == 403) {
+      throw const DirectoryUnavailable(
+        scopeMissing: true,
+        message: 'Profile photos are not enabled for this account.',
+      );
+    }
+    throw DirectoryUnavailable(
+      scopeMissing: false,
+      message: _describe(response, 'The profile photo could not be read'),
+    );
+  }
+
+  /// Graph serves whatever was uploaded; this is only what a response with no
+  /// content type at all is read as.
+  static const String _defaultPhotoType = 'image/jpeg';
+
+  /// The photo endpoint for one person. Built with the path escaped rather
+  /// than by interpolation: a UPN is a legitimate value for [user] and carries
+  /// an `@`, which is path punctuation Graph will not take raw.
+  Uri _photoUri(String user, String size) {
+    final trimmed = user.trim();
+    final who = trimmed.isEmpty
+        ? 'me'
+        : 'users/${Uri.encodeComponent(trimmed)}';
+    return Uri.parse(
+      '$_base/$who/photos/${Uri.encodeComponent(size)}/\$value',
+    );
+  }
+
   /// Built by hand rather than through `queryParameters`, which encodes a
   /// space as `+` — and `$search`'s value is a quoted expression with spaces
   /// inside it that Graph's OData parser wants as `%20`. Same reason

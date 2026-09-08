@@ -2,6 +2,8 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
+import 'package:bond_inbox/widgets/bond_avatar.dart';
+import 'package:bond_inbox/widgets/people_rooms.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -21,6 +23,9 @@ Storyline _storyline({
   );
 }
 
+/// The account every room in this file is grouped against.
+const Owner _owner = (name: 'Dana Whitfield', address: 'dana@example.com');
+
 Conversation _conv({
   required String id,
   String? who,
@@ -32,9 +37,11 @@ Conversation _conv({
   String? lastMessageAt,
   int unread = 0,
   int pending = 0,
+  String source = 'email',
 }) {
   return Conversation(
     id: id,
+    source: source,
     subject: subject,
     participants: who == null ? const [] : [Participant(name: who)],
     state: state,
@@ -317,6 +324,75 @@ void main() {
     });
   });
 
+  group('needsYouTitleFor', () {
+    test('the ask wins over everything', () {
+      expect(
+        needsYouTitleFor(_conv(
+          id: 'a',
+          who: 'Eric Nolan',
+          subject: 'Rate sheet',
+          cta: 'Send the rate sheet',
+        )),
+        'Send the rate sheet',
+      );
+    });
+
+    test('then the subject, reply prefixes stripped', () {
+      expect(
+        needsYouTitleFor(
+          _conv(id: 'a', who: 'Eric Nolan', subject: 'Re: Rate sheet'),
+        ),
+        'Rate sheet',
+      );
+    });
+
+    test('and the person last, exactly as the rail would have said it', () {
+      expect(needsYouTitleFor(_conv(id: 'a', who: 'Eric Nolan')), 'Eric Nolan');
+      expect(
+        needsYouTitleFor(_conv(id: 'a', who: 'Sarah', source: 'teams')),
+        '💬 Sarah',
+      );
+      expect(needsYouTitleFor(_conv(id: 'a')), '(no subject)');
+    });
+
+    test('a blank ask is not an ask', () {
+      expect(
+        needsYouTitleFor(_conv(id: 'a', who: 'Eric Nolan', cta: '   ')),
+        'Eric Nolan',
+      );
+    });
+  });
+
+  group('needsYouWhoFor', () {
+    test('names the person when the title is not already them', () {
+      expect(
+        needsYouWhoFor(_conv(
+          id: 'a',
+          who: 'Eric Nolan',
+          cta: 'Send the rate sheet',
+        )),
+        ' · Eric Nolan',
+      );
+      expect(
+        needsYouWhoFor(_conv(id: 'a', who: 'Eric Nolan', subject: 'Rate sheet')),
+        ' · Eric Nolan',
+      );
+    });
+
+    test('and adds nothing when the row IS the person', () {
+      expect(needsYouWhoFor(_conv(id: 'a', who: 'Eric Nolan')), isNull);
+      // Including through the glyph, which is part of how the rail says it.
+      expect(
+        needsYouWhoFor(_conv(id: 'a', who: 'Sarah', source: 'teams')),
+        isNull,
+      );
+    });
+
+    test('nor when there is nobody to name', () {
+      expect(needsYouWhoFor(_conv(id: 'a', subject: 'Rate sheet')), isNull);
+    });
+  });
+
   group('AppRail', () {
     final conversations = [
       _conv(id: 'a', who: 'Alice', state: ConversationState.needsReply),
@@ -336,13 +412,22 @@ void main() {
       RailSection? selectedSection = RailSection.needsYou,
       void Function(String, String)? onSelectConversation,
       void Function(RailSection)? onSelectSection,
+      RailSection scope = RailSection.home,
+      List<PersonRoom>? rooms,
+      void Function(String)? onSelectRoom,
+      String? selectedRoomKey,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: rooms ?? const [],
+        onSelectRoom: onSelectRoom ?? (_) {},
         conversations: conversations,
         selectedId: selectedId,
         selectedSection: selectedSection,
+        selectedRoomKey: selectedRoomKey,
         onSelectConversation: onSelectConversation ?? (_, _) {},
         onSelectSection: onSelectSection ?? (_) {},
       )));
@@ -353,8 +438,31 @@ void main() {
 
       expect(find.text('NEEDS YOU'), findsOneWidget);
       expect(find.text('STORYLINES'), findsOneWidget);
-      expect(find.text('CONVERSATIONS'), findsOneWidget);
-      expect(find.text('ARCHIVE'), findsOneWidget);
+      expect(find.text('PEOPLE'), findsOneWidget);
+      expect(find.text('LATER'), findsOneWidget);
+      // Home is a stop on the icon rail now, not a row in this column.
+      expect(find.text('HOME'), findsNothing);
+    });
+
+    testWidgets('the Home stack is in the order the day is worked',
+        (tester) async {
+      await pumpRail(tester);
+
+      double topOf(String label) => tester.getTopLeft(find.text(label)).dy;
+
+      expect(topOf('NEEDS YOU'), lessThan(topOf('STORYLINES')));
+      expect(topOf('STORYLINES'), lessThan(topOf('PEOPLE')));
+      expect(topOf('PEOPLE'), lessThan(topOf('LATER')));
+    });
+
+    testWidgets('the foot of the column is empty', (tester) async {
+      await pumpRail(tester);
+
+      // Settings, Sign out and the account name went to the icon rail's avatar
+      // menu; compose and refresh went to the header the screen hands down.
+      expect(find.byTooltip('Settings'), findsNothing);
+      expect(find.byTooltip('Sign out'), findsNothing);
+      expect(find.byTooltip('Activity log'), findsNothing);
     });
 
     testWidgets('the empty sections say so rather than going blank',
@@ -386,8 +494,9 @@ void main() {
         onSelectConversation: (source, id) => selected.add((source, id)),
       );
 
-      // Cleo has an ask on her, so Needs You is the one section she is in.
-      await tester.tap(find.text('Cleo'));
+      // Cleo has an ask on her, so Needs You is the one section she is in —
+      // and Needs You titles her row by the ask, not by her name.
+      await tester.tap(find.text('Send the homepage copy · Cleo'));
       // The source rides along: the host cannot resolve it from the id, and a
       // key shared with the other connector would open the wrong thread.
       expect(selected, [('email', 'c')]);
@@ -397,14 +506,23 @@ void main() {
       final sections = <RailSection>[];
       await pumpRail(tester, onSelectSection: sections.add);
 
-      await tester.tap(find.text('CONVERSATIONS'));
-      expect(sections, [RailSection.conversations]);
+      await tester.tap(find.text('PEOPLE'));
+      expect(sections, [RailSection.people]);
     });
 
     testWidgets('the chevron collapses a section without selecting it',
         (tester) async {
       final sections = <RailSection>[];
-      await pumpRail(tester, onSelectSection: sections.add);
+      await pumpRail(
+        tester,
+        onSelectSection: sections.add,
+        // Bruno has no ask, so the rail carries him as a room and not as a
+        // Needs You row — which is what makes him the control here.
+        rooms: peopleRooms(
+          [_conv(id: 'b', who: 'Bruno')],
+          owner: _owner,
+        ),
+      );
 
       expect(find.text('Alice'), findsOneWidget);
 
@@ -412,8 +530,8 @@ void main() {
       await tester.tap(find.byIcon(Icons.expand_more).first);
       await tester.pumpAndSettle();
 
-      // Alice was in Needs You and is gone with it; Bruno's section is
-      // untouched, so it was that one section that closed and not the list.
+      // Alice was in Needs You and is gone with it; People is untouched, so
+      // it was that one section that closed and not the list.
       expect(find.text('Alice'), findsNothing);
       expect(find.text('Bruno'), findsOneWidget);
       expect(sections, isEmpty);
@@ -426,10 +544,17 @@ void main() {
       required List<Conversation> conversations,
       String? selectedLaterDay,
       void Function(String)? onSelectLaterDay,
+      RailSection scope = RailSection.home,
+      List<PersonRoom>? rooms,
+      void Function(String)? onSelectRoom,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 900));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: rooms ?? const [],
+        onSelectRoom: onSelectRoom ?? (_) {},
         conversations: conversations,
         selectedId: null,
         selectedSection: RailSection.archive,
@@ -445,8 +570,10 @@ void main() {
     testWidgets('the section is named for everything it holds', (tester) async {
       await pumpRail(tester, conversations: [_conv(id: 'a')]);
 
-      expect(find.text('ARCHIVE'), findsOneWidget);
-      expect(find.text('LATER'), findsNothing);
+      // The section holds done threads too, and is named for the pile the user
+      // actually put things in.
+      expect(find.text('LATER'), findsOneWidget);
+      expect(find.text('ARCHIVE'), findsNothing);
     });
 
     testWidgets('an empty pile keeps the placeholder and no badge',
@@ -522,7 +649,7 @@ void main() {
         ),
       ]);
 
-      // Its name is nowhere: not in Needs You, not in Conversations. Only the
+      // Its name is nowhere: not in Needs You, not in a People room. Only the
       // day row it was folded into.
       expect(find.text('Alice'), findsNothing);
       expect(find.text('Wed, Jan 14 — 1'), findsOneWidget);
@@ -549,10 +676,17 @@ void main() {
       required List<Conversation> conversations,
       double threshold = 0,
       void Function(RailSection)? onSelectSection,
+      RailSection scope = RailSection.home,
+      List<PersonRoom>? rooms,
+      void Function(String)? onSelectRoom,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 1400));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: rooms ?? const [],
+        onSelectRoom: onSelectRoom ?? (_) {},
         conversations: conversations,
         selectedId: null,
         selectedSection: RailSection.needsYou,
@@ -579,9 +713,9 @@ void main() {
 
       expect(find.text('Person 0'), findsOneWidget);
       expect(find.text('Person 6'), findsOneWidget);
-      // Person 7..9 are past the cap, and Needs You claimed them so
-      // Conversations does not carry them either: the overflow row is the only
-      // way to them, which is what makes it load-bearing rather than decorative.
+      // Person 7..9 are past the cap, and the rail's People rooms are not a
+      // second list of them: the overflow row is the only way to them, which
+      // is what makes it load-bearing rather than decorative.
       expect(find.text('Person 7'), findsNothing);
       expect(find.text('+3 more'), findsOneWidget);
       // The badge still counts all ten. It must never flatter the workload.
@@ -627,10 +761,26 @@ void main() {
         ],
       );
 
-      // One row each, in one section each: Loud in Needs You, Quiet in
-      // Conversations. Nothing is ever hidden entirely by the slider.
+      // Loud stays in Needs You; Quiet dropped out of it and is not hidden —
+      // the screen's People grouping still carries it, which is what makes
+      // turning the slider up safe.
       expect(find.text('Loud'), findsOneWidget);
-      expect(find.text('Quiet'), findsOneWidget);
+      expect(find.text('Quiet'), findsNothing);
+      expect(
+        peopleRooms(
+          [
+            _conv(
+              id: 'b',
+              who: 'Quiet',
+              state: ConversationState.needsReply,
+              score: 0.1,
+            ),
+          ],
+          owner: _owner,
+          threshold: 0.5,
+        ).single.title,
+        'Quiet',
+      );
     });
 
     testWidgets('a waiting row renders dimmed below the needs-reply block',
@@ -640,6 +790,7 @@ void main() {
           id: 'a',
           who: 'Owed',
           state: ConversationState.needsReply,
+          unread: 1,
           score: 1,
         ),
         _conv(
@@ -647,15 +798,24 @@ void main() {
           who: 'Waiting',
           state: ConversationState.waiting,
           cta: 'Send the homepage copy',
+          unread: 1,
           score: 1.9,
         ),
       ]);
 
-      // Present, and quieter than the row above it.
-      expect(find.text('Waiting'), findsOneWidget);
-      final dimmed = tester.widget<Text>(find.text('Waiting'));
-      expect(dimmed.style?.color, BondColors.onDarkMuted);
+      // Present, titled by its ask, with the person after it — and quieter
+      // than the row above.
+      // One Text, rich: the ask in the row's own ink and the person after it
+      // in the muted one. `find.text` reads the whole span.
+      final row = find.text('Send the homepage copy · Waiting');
+      expect(row, findsOneWidget);
+      expect(
+        tester.widget<Text>(row).textSpan!.style?.color,
+        BondColors.onDarkMuted,
+      );
 
+      // 'Owed' has no ask and no subject, so its row IS the person and stays
+      // a plain Text with no suffix.
       final loud = tester.widget<Text>(find.text('Owed'));
       expect(loud.style?.color, BondColors.onDarkPrimary);
     });
@@ -664,11 +824,18 @@ void main() {
   group('AppRail bold grammar', () {
     Future<void> pumpRail(
       WidgetTester tester,
-      List<Conversation> conversations,
-    ) async {
+      List<Conversation> conversations, {
+      RailSection scope = RailSection.home,
+      List<PersonRoom>? rooms,
+      void Function(String)? onSelectRoom,
+    }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: rooms ?? const [],
+        onSelectRoom: onSelectRoom ?? (_) {},
         conversations: conversations,
         selectedId: null,
         selectedSection: null,
@@ -680,17 +847,18 @@ void main() {
     FontWeight? weightOf(WidgetTester tester, String label) =>
         tester.widget<Text>(find.text(label)).style?.fontWeight;
 
-    testWidgets('in Conversations, bold means unread', (tester) async {
-      await pumpRail(tester, [
+    testWidgets('in People, bold means unread', (tester) async {
+      final rows = [
         _conv(id: 'a', who: 'Unread', unread: 1),
         _conv(id: 'b', who: 'Read'),
-      ]);
+      ];
+      await pumpRail(tester, rows, rooms: peopleRooms(rows, owner: _owner));
 
       expect(weightOf(tester, 'Unread'), FontWeight.w600);
       expect(weightOf(tester, 'Read'), FontWeight.w500);
     });
 
-    testWidgets('in Needs You, bold means you owe it — read or not',
+    testWidgets('in Needs You, bold means unread as well — not "you owe it"',
         (tester) async {
       await pumpRail(tester, [
         _conv(id: 'a', who: 'Owed', state: ConversationState.needsReply),
@@ -702,10 +870,25 @@ void main() {
         ),
       ]);
 
-      // A needs-you thread staying bold after it has been read is the point:
-      // that row is the follow-up signal, not the unread one.
-      expect(weightOf(tester, 'Owed'), FontWeight.w600);
+      // One grammar in the whole column. What Needs You owes is said by the
+      // section badge, by the accent dot and by the ask the row is titled
+      // with — never by a font weight that means something else next door.
+      expect(weightOf(tester, 'Owed'), FontWeight.w500);
       expect(weightOf(tester, 'Owed and unread'), FontWeight.w600);
+    });
+
+    testWidgets('a read Needs You row still carries the accent dot',
+        (tester) async {
+      await pumpRail(tester, [
+        _conv(id: 'a', who: 'Owed', state: ConversationState.needsReply),
+      ]);
+
+      final row =
+          find.ancestor(of: find.text('Owed'), matching: find.byType(Row)).first;
+      final dot = find.descendant(of: row, matching: find.byType(Container));
+      final decoration =
+          tester.widget<Container>(dot.first).decoration! as BoxDecoration;
+      expect(decoration.color, BondColors.railAccent);
     });
   });
 
@@ -717,10 +900,17 @@ void main() {
       WidgetTester tester,
       List<Conversation> conversations, {
       DateTime? processingSince,
+      RailSection scope = RailSection.home,
+      List<PersonRoom>? rooms,
+      void Function(String)? onSelectRoom,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: rooms ?? const [],
+        onSelectRoom: onSelectRoom ?? (_) {},
         conversations: conversations,
         selectedId: null,
         selectedSection: null,
@@ -774,6 +964,7 @@ void main() {
             id: 'a',
             who: 'Settled',
             state: ConversationState.needsReply,
+            unread: 1,
             lastMessageAt: arrivedThisSession,
           ),
         ],
@@ -786,7 +977,7 @@ void main() {
       expect(dot.border, isNull);
     });
 
-    testWidgets('a busy thread in Conversations reads quiet too',
+    testWidgets('an unread thread reads quiet while the model works',
         (tester) async {
       await pumpRail(
         tester,
@@ -794,6 +985,7 @@ void main() {
           _conv(
             id: 'a',
             who: 'Chatty',
+            state: ConversationState.needsReply,
             unread: 2,
             pending: 1,
             lastMessageAt: arrivedThisSession,
@@ -802,6 +994,8 @@ void main() {
         processingSince: since,
       );
 
+      // Unread would normally make this the loudest row on the rail. Whatever
+      // it says about itself is a half-formed answer until the model is done.
       expect(inkOf(tester, 'Chatty'), BondColors.onDarkMuted);
       expect(dotOf(tester, 'Chatty').border, isNotNull);
     });
@@ -817,6 +1011,7 @@ void main() {
             id: 'a',
             who: 'Backlog',
             state: ConversationState.needsReply,
+            unread: 1,
             pending: 3,
             lastMessageAt: '2026-08-01T09:00:00Z',
           ),
@@ -835,6 +1030,7 @@ void main() {
           id: 'a',
           who: 'Busy',
           state: ConversationState.needsReply,
+          unread: 1,
           pending: 3,
           lastMessageAt: arrivedThisSession,
         ),
@@ -842,6 +1038,263 @@ void main() {
 
       expect(inkOf(tester, 'Busy'), BondColors.onDarkPrimary);
       expect(dotOf(tester, 'Busy').border, isNull);
+    });
+  });
+
+  group('AppRail People', () {
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      required List<Conversation> conversations,
+      String? selectedRoomKey,
+      void Function(String)? onSelectRoom,
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: RailSection.home,
+        rooms: peopleRooms(conversations, owner: _owner),
+        onSelectRoom: onSelectRoom ?? (_) {},
+        selectedRoomKey: selectedRoomKey,
+        conversations: conversations,
+        selectedId: null,
+        selectedSection: null,
+        onSelectConversation: (_, _) {},
+        onSelectSection: (_) {},
+      )));
+    }
+
+    Conversation withPeople(
+      String id, {
+      String source = 'email',
+      required List<Participant> people,
+      ConversationState state = ConversationState.waiting,
+      String? cta,
+      int unread = 0,
+    }) =>
+        Conversation(
+          id: id,
+          source: source,
+          participants: people,
+          state: state,
+          ctaText: cta,
+          unreadCount: unread,
+          lastMessageAt: '2026-09-01T09:00:00Z',
+        );
+
+    testWidgets('one row per person, titled by them', (tester) async {
+      await pumpRail(tester, conversations: [
+        withPeople('a', people: const [Participant(name: 'Eric Nolan')]),
+        withPeople('b', people: const [Participant(name: 'Eric Nolan')]),
+        withPeople('c', people: const [Participant(name: 'Priya Raman')]),
+      ]);
+
+      expect(find.text('Eric Nolan'), findsOneWidget);
+      expect(find.text('Priya Raman'), findsOneWidget);
+    });
+
+    testWidgets('a one-source room is marked; a person on both is not',
+        (tester) async {
+      await pumpRail(tester, conversations: [
+        withPeople(
+          'chat-1',
+          source: 'teams',
+          people: const [Participant(name: 'Sarah Vance')],
+        ),
+        withPeople('a', people: const [Participant(name: 'Eric Nolan')]),
+        withPeople(
+          'chat-2',
+          source: 'teams',
+          people: const [Participant(name: 'Eric Nolan')],
+        ),
+      ]);
+
+      expect(find.text('💬 Sarah Vance'), findsOneWidget);
+      // Eric reaches this mailbox both ways, so neither mark would be true.
+      expect(find.text('Eric Nolan'), findsOneWidget);
+    });
+
+    testWidgets('bold means the room has something unread', (tester) async {
+      await pumpRail(tester, conversations: [
+        withPeople(
+          'a',
+          people: const [Participant(name: 'Unread')],
+          unread: 2,
+        ),
+        withPeople('b', people: const [Participant(name: 'Read')]),
+      ]);
+
+      expect(
+        tester.widget<Text>(find.text('Unread')).style?.fontWeight,
+        FontWeight.w600,
+      );
+      expect(
+        tester.widget<Text>(find.text('Read')).style?.fontWeight,
+        FontWeight.w500,
+      );
+    });
+
+    testWidgets('the badge is the needs-you count, else the thread count',
+        (tester) async {
+      await pumpRail(tester, conversations: [
+        withPeople(
+          'a',
+          people: const [Participant(name: 'Asking')],
+          state: ConversationState.needsReply,
+        ),
+        withPeople('b', people: const [Participant(name: 'Asking')]),
+        withPeople('c', people: const [Participant(name: 'Quiet')]),
+        withPeople('d', people: const [Participant(name: 'Quiet')]),
+      ]);
+
+      Color fillOf(String count) {
+        final pill = find
+            .ancestor(of: find.text(count), matching: find.byType(Container))
+            .first;
+        return (tester.widget<Container>(pill).decoration! as BoxDecoration)
+            .color!;
+      }
+
+      // Asking: one of two threads needs the user → a red 1, not a grey 2.
+      expect(fillOf('1'), BondColors.railBadge);
+      // Quiet: nothing owed, so the row says how much is there.
+      expect(fillOf('2'), BondColors.onDarkTint);
+    });
+
+    testWidgets('a 1:1 room leads with a face; a group keeps the dot',
+        (tester) async {
+      await pumpRail(tester, conversations: [
+        withPeople(
+          'a',
+          people: const [Participant(name: 'Eric Nolan', email: 'e@x.test')],
+        ),
+        withPeople('b', people: const [
+          Participant(name: 'Priya Raman'),
+          Participant(name: 'Tom Alder'),
+        ]),
+      ]);
+
+      expect(find.byType(BondAvatar), findsOneWidget);
+      expect(
+        tester.widget<BondAvatar>(find.byType(BondAvatar)).name,
+        'Eric Nolan',
+      );
+      expect(find.text('Priya Raman, Tom Alder'), findsOneWidget);
+    });
+
+    testWidgets('tapping a room reports its key', (tester) async {
+      final picked = <String>[];
+      await pumpRail(
+        tester,
+        conversations: [
+          withPeople('a', people: const [Participant(name: 'Eric Nolan')]),
+        ],
+        onSelectRoom: picked.add,
+      );
+
+      await tester.tap(find.text('Eric Nolan'));
+      expect(picked, ['eric nolan']);
+    });
+
+    testWidgets('the open room reads as selected', (tester) async {
+      await pumpRail(
+        tester,
+        conversations: [
+          withPeople('a', people: const [Participant(name: 'Eric Nolan')]),
+        ],
+        selectedRoomKey: 'eric nolan',
+      );
+
+      final material = find
+          .ancestor(
+            of: find.text('Eric Nolan'),
+            matching: find.byType(Material),
+          )
+          .first;
+      expect(tester.widget<Material>(material).color, BondColors.onDarkTint);
+    });
+
+    testWidgets('nobody waiting says so rather than going blank',
+        (tester) async {
+      await pumpRail(tester, conversations: const []);
+
+      expect(find.text('Nobody is waiting on anything'), findsOneWidget);
+    });
+  });
+
+  group('AppRail scope', () {
+    Future<void> pumpRail(WidgetTester tester, RailSection scope) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: peopleRooms(
+          [
+            Conversation(
+              id: 'a',
+              participants: const [Participant(name: 'Eric Nolan')],
+              lastMessageAt: '2026-09-01T09:00:00Z',
+            ),
+          ],
+          owner: _owner,
+        ),
+        onSelectRoom: (_) {},
+        conversations: [
+          _conv(id: 'n', who: 'Alice', state: ConversationState.needsReply),
+        ],
+        storylines: [_storyline(id: 'sl-1')],
+        selectedId: null,
+        selectedSection: scope,
+        onSelectConversation: (_, _) {},
+        onSelectSection: (_) {},
+        onSelectStoryline: (_) {},
+      )));
+    }
+
+    testWidgets('Home shows the whole stack', (tester) async {
+      await pumpRail(tester, RailSection.home);
+
+      expect(find.text('NEEDS YOU'), findsOneWidget);
+      expect(find.text('STORYLINES'), findsOneWidget);
+      expect(find.text('PEOPLE'), findsOneWidget);
+      expect(find.text('LATER'), findsOneWidget);
+    });
+
+    testWidgets('a stop shows only its own section, and no chevron',
+        (tester) async {
+      await pumpRail(tester, RailSection.people);
+
+      expect(find.text('PEOPLE'), findsOneWidget);
+      expect(find.text('NEEDS YOU'), findsNothing);
+      expect(find.text('STORYLINES'), findsNothing);
+      expect(find.text('LATER'), findsNothing);
+      // Its rows are there, and there is nothing to close them with: the user
+      // picked this stop, and a chevron that emptied the column would lie.
+      expect(find.text('Eric Nolan'), findsOneWidget);
+      expect(find.byIcon(Icons.expand_more), findsNothing);
+    });
+
+    testWidgets('every other stop narrows the same way', (tester) async {
+      await pumpRail(tester, RailSection.needsYou);
+      expect(find.text('Alice'), findsOneWidget);
+      expect(find.text('PEOPLE'), findsNothing);
+
+      await pumpRail(tester, RailSection.storylines);
+      expect(find.text('Website redesign'), findsOneWidget);
+      expect(find.text('NEEDS YOU'), findsNothing);
+
+      await pumpRail(tester, RailSection.archive);
+      expect(find.text('LATER'), findsOneWidget);
+      expect(find.text('Nothing deferred yet'), findsOneWidget);
+    });
+
+    testWidgets('the AI stop says what its pane holds', (tester) async {
+      await pumpRail(tester, RailSection.ai);
+
+      expect(find.text('AI'), findsOneWidget);
+      expect(find.text('Models, rules and the log'), findsOneWidget);
+      expect(find.text('NEEDS YOU'), findsNothing);
     });
   });
 
@@ -866,10 +1319,17 @@ void main() {
       void Function(String)? onSelectStoryline,
       void Function(String)? onKeepSuggestion,
       void Function(String)? onDismissSuggestion,
+      RailSection scope = RailSection.home,
+      List<PersonRoom>? rooms,
+      void Function(String)? onSelectRoom,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: scope,
+        rooms: rooms ?? const [],
+        onSelectRoom: onSelectRoom ?? (_) {},
         conversations: const [],
         storylines: storylines,
         selectedId: null,

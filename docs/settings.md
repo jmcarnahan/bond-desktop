@@ -4,9 +4,28 @@ Everything the owner gets to say about how the app behaves, on one pane.
 
 `SettingsScreen` (`app/lib/widgets/settings_screen.dart`) is a main-pane view,
 hosted the way the activity log is: a `bool _showingSettings` on
-`_InboxScreenState`, set by the rail footer's gear (`_openSettings`), cleared by
-every other selector, and first in the `_main()` ladder. There is no router and
-no `Navigator.push` — nothing is stacked on top of anything.
+`_InboxScreenState`, cleared by every other selector, and first in the
+`_main()` ladder. There is no router and no `Navigator.push` — nothing is
+stacked on top of anything.
+
+**Two ways in**, and one builder behind both (`_settingsScreen`):
+
+- **The avatar menu's Settings.** The icon rail's account button
+  (`IconRail.accountMenuKey`) opens a `PopupMenuButton` whose items are the
+  account, Settings, Activity log and Sign out — see `docs/shell.md`. This is
+  `_openSettings`, the whole screen, `SettingsScope.all`.
+- **The AI stop.** `RailSection.ai` renders the same screen with
+  `SettingsScope.ai`: titled **AI**, and narrowed to the sections that are
+  about how the model reads this mailbox — About me, Models, Needs You,
+  Activity log and Storylines. The Microsoft connection, Notifications, Home &
+  feed, Sync & data and About are about the app or the account rather than the
+  model, and stay behind the avatar menu. Its Back goes to Home rather than to a `_showingSettings`
+  that was never set: the AI pane is a SECTION, not an overlay — nothing opened
+  it, the user is standing on that stop.
+
+A scope rather than a second screen, because every section here is wired
+through forty callbacks the host assembles, and a second screen would be a
+second copy of that wiring drifting out of step with this one.
 
 It replaced an `AlertDialog`, which was the last popup in the app. **The house
 rule is full screens with a back arrow, never popups**, and
@@ -17,7 +36,8 @@ added without deleting that test.
 ## The shape
 
 `PaneSurface` (`app/lib/widgets/pane_surface.dart`) draws the header: a back
-arrow tooltipped **Back**, the title **Settings**, and — because Settings is
+arrow tooltipped **Back**, the title (**Settings**, or **AI** under
+`SettingsScope.ai`), and — because Settings is
 deep enough that Back alone is a poor way out — a labelled **Home** link that
 goes straight to `RailSection.home`. `onHome` is optional on `PaneSurface`; a
 host with no Home to offer passes null and no affordance renders at all.
@@ -63,7 +83,9 @@ body has the same shape in `settings_models_body.dart`.
 
 **A section whose wiring is absent is absent** — the same discipline every
 optional row in the old dialog followed, and what lets the permissions tests
-wire `hasScope` alone.
+wire `hasScope` alone. Under `SettingsScope.ai` five of them are absent for a
+second reason: the AI pane keeps About me, Models, Needs You, Activity log and
+Storylines, in this same order, and drops the rest.
 
 **These strings are pinned by tests** (`settings_screen_test.dart`,
 `settings_connection_test.dart`, `settings_models_test.dart`,

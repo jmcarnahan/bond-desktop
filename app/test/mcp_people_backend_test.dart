@@ -1,4 +1,7 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/services/backend/backend_types.dart';
+import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/mcp/bond_mcp_client.dart';
 import 'package:bond_inbox/services/mcp/mcp_people_backend.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -211,6 +214,171 @@ void main() {
       // `people` is a server that answered with an empty directory, which is
       // the one shape that is NOT a failure.
       expect(await McpPeopleBackend(_FakeMcp()).searchPeople('sarah'), isEmpty);
+    });
+  });
+  /// The photo half of the same tool. What is pinned here is the LINE between
+  /// null and a throw: an avatar's fallback is initials, so everything that is
+  /// a fact about the person must be a value, and only the two failures the
+  /// caller can act on — stop for the session, or try again — may be raised.
+  group('the photo', () {
+    test('asks get_profile for bytes at the size it was given', () async {
+      final mcp = _FakeMcp({
+        'get_profile': [
+          {'has_photo': false},
+        ],
+      });
+
+      await McpPeopleBackend(mcp).profilePhoto('u1', size: '240x240');
+
+      expect(mcp.argsFor('get_profile'), {
+        'user': 'u1',
+        'photo': 'bytes',
+        'photo_size': '240x240',
+      });
+    });
+
+    test('names nobody when it is asking about the signed-in user', () async {
+      // `user` omitted is the /me path, which needs only User.Read — naming
+      // yourself would put your own face behind the directory grant.
+      final mcp = _FakeMcp({
+        'get_profile': [
+          {'has_photo': false},
+        ],
+      });
+
+      await McpPeopleBackend(mcp).profilePhoto(PeopleBackend.self);
+
+      expect(mcp.argsFor('get_profile').containsKey('user'), isFalse);
+      expect(mcp.argsFor('get_profile')['photo_size'], '96x96');
+    });
+
+    test('decodes the base64 the server sent, and keeps its content type',
+        () async {
+      final photo = await McpPeopleBackend(
+        _FakeMcp({
+          'get_profile': [
+            {
+              'has_photo': true,
+              'content_base64': base64Encode(const [1, 2, 3]),
+              'content_type': 'image/png',
+            },
+          ],
+        }),
+      ).profilePhoto('u1');
+
+      expect(photo!.bytes, [1, 2, 3]);
+      expect(photo.contentType, 'image/png');
+    });
+
+    test('falls back to jpeg when the server named no type', () async {
+      final photo = await McpPeopleBackend(
+        _FakeMcp({
+          'get_profile': [
+            {
+              'has_photo': true,
+              'content_base64': base64Encode(const [9]),
+              'content_type': null,
+            },
+          ],
+        }),
+      ).profilePhoto('u1');
+
+      expect(photo!.contentType, 'image/jpeg');
+    });
+
+    test('a person with no photo is null, not a failure', () async {
+      expect(
+        await McpPeopleBackend(
+          _FakeMcp({
+            'get_profile': [
+              {'has_photo': false, 'content_base64': null},
+            ],
+          }),
+        ).profilePhoto('u1'),
+        isNull,
+      );
+    });
+
+    test('a photo the server could not encode is null', () async {
+      // has_photo true and nothing behind it: initials, and no exception for a
+      // caller who cannot do anything about it either.
+      expect(
+        await McpPeopleBackend(
+          _FakeMcp({
+            'get_profile': [
+              {'has_photo': true, 'content_base64': 'not base64 at all!!'},
+            ],
+          }),
+        ).profilePhoto('u1'),
+        isNull,
+      );
+    });
+
+    test('a person the directory does not have is null', () async {
+      expect(
+        await McpPeopleBackend(
+          _FakeMcp({
+            'get_profile': [
+              {'error': 'user_not_found'},
+            ],
+          }),
+        ).profilePhoto('nobody@example.com'),
+        isNull,
+      );
+    });
+
+    test('the missing scope is permanent, and says so', () async {
+      await expectLater(
+        McpPeopleBackend(
+          _FakeMcp({
+            'get_profile': [
+              {'error': 'directory_scope_missing', 'reason': 'no consent'},
+            ],
+          }),
+        ).profilePhoto('u1'),
+        throwsA(isA<DirectoryUnavailable>()
+            .having((e) => e.scopeMissing, 'scopeMissing', isTrue)),
+      );
+    });
+
+    test('any other error is a bad moment worth asking again', () async {
+      await expectLater(
+        McpPeopleBackend(
+          _FakeMcp({
+            'get_profile': [
+              {'error': 'throttled'},
+            ],
+          }),
+        ).profilePhoto('u1'),
+        throwsA(isA<DirectoryUnavailable>()
+            .having((e) => e.scopeMissing, 'scopeMissing', isFalse)
+            .having((e) => e.message, 'message', contains('throttled'))),
+      );
+    });
+
+    test('a tool failure is a bad moment too', () async {
+      await expectLater(
+        McpPeopleBackend(
+          _FakeMcp({
+            'get_profile': [const McpToolException('boom')],
+          }),
+        ).profilePhoto('u1'),
+        throwsA(isA<DirectoryUnavailable>()
+            .having((e) => e.scopeMissing, 'scopeMissing', isFalse)),
+      );
+    });
+
+    test('a disconnected server is the one thing a sign-in can fix', () async {
+      await expectLater(
+        McpPeopleBackend(
+          _FakeMcp({
+            'get_profile': [
+              {'error': 'not_connected'},
+            ],
+          }),
+        ).profilePhoto('u1'),
+        throwsA(isA<ReconsentRequired>()),
+      );
     });
   });
 }

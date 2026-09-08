@@ -11,7 +11,8 @@ import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/attachment_documents_strip.dart';
 import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
 import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
@@ -184,9 +185,19 @@ void main() {
   /// Opens the storyline in the main pane and unfolds its shelf.
   Future<void> openShelf(WidgetTester tester) async {
     await pumpInbox(tester);
-    // The rail's storylines section is expanded by default, so the row is
-    // already on screen.
-    await tester.tap(find.text('Website redesign'));
+    // The list column shows the stop that is lit, so the icon rail comes
+    // first; the row is tapped inside the column, because the overview beside
+    // it names the same storylines.
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('Storylines'),
+    ));
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: find.byType(AppRail),
+      matching: find.text('Website redesign'),
+    ));
     await tester.pump();
     await tester.pump();
     await tester.pump();

@@ -658,9 +658,10 @@ the last column of the shell's `Row`, so a file opens beside a thread, beside a
 storyline's spine, and beside a thread that is itself in the side panel (where
 it REPLACES that thread, one thing at a time on that side of the seam).
 
-The width is measured **post-rail** — the window less `AppRail.width`, the 1 px
-divider and the 16 px seam — and the two-pane breakpoint is applied to that
-figure, so the split appears from a window of 1237 px. The panel takes 45 % of
+The width is measured **post-rail** — the window less `IconRail.width`,
+`AppRail.width`, the 1 px divider and the 16 px seam — and the two-pane
+breakpoint is applied to that figure, so the split appears from a window of
+1293 px. The panel takes 45 % of
 what is left, clamped to 360–640 px for a file and 420–640 px for a thread (a
 `ThreadDetailPanel` header spends its width on controls before the subject sees
 any), and the main pane never goes under 420. When both cannot be had — a

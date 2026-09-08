@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
+import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/graph_people.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -233,6 +234,73 @@ void main() {
 
       expect((await people.searchPeople('a')).single.id, 'u1');
       expect(seen, hasLength(2));
+    });
+  });
+  /// The photo endpoint, which is the one Graph call in this app that reads
+  /// BYTES rather than JSON. Most of what is pinned here is the URL: `/me` and
+  /// `/users/{id}` are different grants, and a 404 covers three different
+  /// truths that all end at the same initials.
+  group('the photo', () {
+    http.Response bytesOk(List<int> bytes, String type) => http.Response.bytes(
+          bytes,
+          200,
+          headers: {'content-type': type},
+        );
+
+    test('asks /me for the signed-in user, which needs no directory grant',
+        () async {
+      await peopleWith(() => bytesOk(const [1], 'image/jpeg'))
+          .profilePhoto(PeopleBackend.self);
+
+      expect(
+        seen.single.url.toString(),
+        'https://graph.microsoft.com/v1.0/me/photos/96x96/\$value',
+      );
+    });
+
+    test('asks /users for anybody else, with the id escaped', () async {
+      await peopleWith(() => bytesOk(const [1], 'image/jpeg'))
+          .profilePhoto('sarah@example.com', size: '240x240');
+
+      expect(
+        seen.single.url.toString(),
+        'https://graph.microsoft.com/v1.0/users/sarah%40example.com'
+        '/photos/240x240/\$value',
+      );
+    });
+
+    test('hands back the bytes and the type Graph served them as', () async {
+      final photo = await peopleWith(() => bytesOk(const [7, 8], 'image/png'))
+          .profilePhoto('u1');
+
+      expect(photo!.bytes, [7, 8]);
+      expect(photo.contentType, 'image/png');
+    });
+
+    test('a 404 is no face, not a failure', () async {
+      // No photo uploaded, no such user, not a mailbox at all — Graph answers
+      // all three the same way and so does the avatar.
+      expect(
+        await peopleWith(() => http.Response('', 404)).profilePhoto('u1'),
+        isNull,
+      );
+    });
+
+    test('a 403 is the tenant refusing the scope, and is permanent', () async {
+      await expectLater(
+        peopleWith(() => http.Response('', 403)).profilePhoto('u1'),
+        throwsA(isA<DirectoryUnavailable>()
+            .having((e) => e.scopeMissing, 'scopeMissing', isTrue)),
+      );
+    });
+
+    test('anything else is a bad moment worth asking again', () async {
+      await expectLater(
+        peopleWith(() => http.Response('nope', 500)).profilePhoto('u1'),
+        throwsA(isA<DirectoryUnavailable>()
+            .having((e) => e.scopeMissing, 'scopeMissing', isFalse)
+            .having((e) => e.message, 'message', contains('500'))),
+      );
     });
   });
 }

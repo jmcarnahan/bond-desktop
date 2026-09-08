@@ -131,6 +131,45 @@ work without it. A tenant that granted the wider `User.Read.All` or
 basic read inside both, and the app reads them that way rather than insisting
 on the narrow name an admin rarely picks.
 
+## Profile photos
+
+Avatars draw a real face when the directory has one. The photo rides on the
+SAME `get_profile` tool the account header already reads — no new tool name —
+given its photo arguments: `photo: 'bytes'`, `photo_size: '96x96'`, and `user`
+as a Graph user id or a UPN. `user` omitted is the signed-in user, which needs
+only `User.Read`; anybody else needs the same `User.ReadBasic.All` the org
+search does. The SDK twin is
+`GET /users/{id}/photos/{size}/$value` (or `/me/…`), read as bytes.
+
+`PeopleBackend.profilePhoto` (`app/lib/services/backend/people_backend.dart`)
+answers a `ProfilePhoto` — bytes plus content type — or **null**, and null is
+the everyday answer rather than a failure: every sender outside the tenant,
+everyone who uploaded no picture, and every person Graph cannot find all reach
+the same initials. Only two things throw, both `DirectoryUnavailable`:
+`directory_scope_missing` / HTTP 403, which no retry can fix, and everything
+else, which the next ask might.
+
+`ProfilePhotos` (`app/lib/services/profile_photos.dart`) is the seam the
+widgets hold, with `DirectoryProfilePhotos` over a backend and
+`NoProfilePhotos` — the default — for tests and signed-out sessions. Its rules:
+
+- `photoKeyFor(address:, id:)` decides the cache key, so one person is one
+  entry however they were learned: a Graph id when there is one, the id inside
+  a `teams:<id>` address, else the lowercased mail address.
+- One fetch per key per session, positive **and** negative. Most senders have
+  no photo, so remembering "no face" is what keeps a transcript from asking the
+  same nothing on every rebuild.
+- A missing scope disables the service for the session; any other failure
+  leaves the key askable again.
+- At most four calls in flight, since a transcript can mount thirty avatars in
+  one frame and thirty parallel Graph calls is how a session earns a throttle.
+- The cache is in MEMORY only. A disk cache is a follow-up.
+
+`BondAvatar` (`app/lib/widgets/bond_avatar.dart`) draws initials first and
+always, and swaps in the picture when it lands — never a spinner, never a hole.
+It appears in the transcript (`MessageRow`, `ThreadDetailPanel`) and the
+recipients typeahead; `AvatarStack` draws a room's first few faces and a `+N`.
+
 ## Documents in the prompt
 
 Both calls above read the same excerpts of the documents attached to this

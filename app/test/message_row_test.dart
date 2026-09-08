@@ -2,7 +2,9 @@ import 'dart:typed_data';
 
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/profile_photos.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/bond_avatar.dart';
 import 'package:bond_inbox/widgets/attachment_chip_row.dart';
 import 'package:bond_inbox/widgets/attachment_format.dart';
 import 'package:bond_inbox/widgets/chips.dart';
@@ -55,6 +57,36 @@ Message _msg({
     deadline: deadline,
     attachments: attachments,
   );
+}
+
+/// A 1×1 transparent PNG — real bytes, so nothing logs a decode error.
+final Uint8List _png = Uint8List.fromList(const [
+  0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+  0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+  0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+  0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41,
+  0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+  0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+  0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+  0x42, 0x60, 0x82,
+]);
+
+/// Faces for whoever the test scripted, and a record of who was asked about.
+class _FakePhotos implements ProfilePhotos {
+  final Map<String, ImageProvider> images;
+  final List<String> asked = [];
+
+  _FakePhotos([this.images = const {}]);
+
+  @override
+  ImageProvider? cached(String key) => null;
+
+  @override
+  Future<ImageProvider?> photoFor(String key) async {
+    asked.add(key);
+    return images[key];
+  }
 }
 
 Widget _host(Widget child) => MaterialApp(
@@ -193,6 +225,26 @@ void main() {
       expect(find.text('Eric Nolan'), findsOneWidget);
       expect(find.text(formatTimestamp('2026-08-25T09:00:00')!), findsOneWidget);
       expect(find.text('EN'), findsOneWidget);
+    });
+
+    testWidgets('the sender wears their photo once the directory has one',
+        (tester) async {
+      // The row asks under the sender's address, which is the only spelling a
+      // stored mail message carries.
+      final photos = _FakePhotos({'eric@example.com': MemoryImage(_png)});
+
+      await tester.pumpWidget(_host(MessageRow(message: _msg(), photos: photos)));
+      await tester.pump();
+
+      expect(
+        find.descendant(
+          of: find.byType(BondAvatar),
+          matching: find.byType(Image),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('EN'), findsNothing);
+      expect(photos.asked, ['eric@example.com']);
     });
 
     testWidgets('a continuation row drops the avatar and the name',

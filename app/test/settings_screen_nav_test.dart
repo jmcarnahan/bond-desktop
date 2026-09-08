@@ -4,8 +4,10 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/pane_surface.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/activity_log_panel.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
@@ -93,10 +95,16 @@ void main() {
     );
   }
 
+  /// Settings lives in the icon rail's account menu now (D8), so getting there
+  /// is two taps. Bounded pumps throughout: `pumpAndSettle` never comes back
+  /// with `InboxScreen`'s sixty-second timer running.
   Future<void> openSettings(WidgetTester tester) async {
-    await tester.tap(find.byTooltip('Settings'));
+    await tester.tap(find.byKey(IconRail.accountMenuKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(IconRail.settingsItemKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
   }
 
   testWidgets('the gear opens Settings in the main pane', (tester) async {
@@ -127,7 +135,11 @@ void main() {
     await pumpInbox(tester);
     await openSettings(tester);
 
-    await tester.tap(find.byTooltip('Home'));
+    // Scoped: the icon rail's Home stop wears the same tooltip.
+    await tester.tap(find.descendant(
+      of: find.byType(PaneSurface),
+      matching: find.byTooltip('Home'),
+    ));
     await tester.pump();
     await tester.pump();
     await tester.pump();

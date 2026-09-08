@@ -3,23 +3,34 @@ import 'package:flutter/material.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
+import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
+import 'bond_avatar.dart';
+import 'people_rooms.dart';
 import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
 
-/// The rail's stops. [RailSection.home] leads because it is where the app
-/// lands, and because it is the only one that is about the pipeline rather
-/// than about a pile of mail.
-enum RailSection { home, needsYou, storylines, conversations, archive }
+/// The app's destinations, and the icon rail's vocabulary.
+///
+/// [RailSection.home] leads because it is where the app lands, and because it
+/// is the only one that is about the pipeline rather than about a pile of
+/// mail. [RailSection.ai] trails because it is the only one that is about the
+/// app rather than about anything in the mailbox.
+///
+/// [RailSection.archive] keeps its enum name and is LABELLED 'Later': the
+/// column it reads is `bucket = 'later'`, and renaming the constant would
+/// rename it everywhere the store spells it.
+enum RailSection { home, needsYou, storylines, people, archive, ai }
 
 extension RailSectionLabel on RailSection {
   String get label => switch (this) {
         RailSection.home => 'Home',
         RailSection.needsYou => 'Needs You',
         RailSection.storylines => 'Storylines',
-        RailSection.conversations => 'Conversations',
-        RailSection.archive => 'Archive',
+        RailSection.people => 'People',
+        RailSection.archive => 'Later',
+        RailSection.ai => 'AI',
       };
 }
 
@@ -38,8 +49,9 @@ String _stripReplyPrefixes(String subject) {
 
 /// Whether one thread is the user's to answer.
 ///
-/// THE predicate the two sections partition on: Needs You is everything this
-/// returns true for, Conversations is every live thread it returns false for.
+/// THE predicate the two halves of the live inbox partition on: Needs You is
+/// everything this returns true for, and every live thread it returns false
+/// for is what is left over — the rows People's rooms are built from.
 /// One function rather than a filter in each, because two filters that were
 /// meant to be complements are two filters that will eventually disagree — and
 /// the symptom is mail in both sections, or in neither.
@@ -98,11 +110,11 @@ bool isWaitingRow(Conversation c) => c.state != ConversationState.needsReply;
 /// deferred ones dropped, and everything Needs You claimed dropped.
 ///
 /// The complement of [isNeedsYou], not a second opinion about it — exactly one
-/// section claims each thread, so the counts on the rail add up and nothing is
+/// half claims each thread, so the counts on the rail add up and nothing is
 /// asked for twice. Since it is the complement at the SAME [threshold], a
 /// thread the slider cut out of Needs You lands here rather than nowhere: that
-/// is what makes turning the slider up safe. The mail moves down a section, it
-/// never disappears.
+/// is what makes turning the slider up safe. The mail moves out of Needs You
+/// and into its sender's room, it never disappears.
 List<Conversation> conversationRows(
   List<Conversation> all, {
   double threshold = 0,
@@ -195,8 +207,43 @@ String railTitleFor(Conversation c) {
   return withSourceGlyph(c.source, '(no subject)');
 }
 
-/// The dark left rail: sections, one line per thread, and whatever account
-/// controls the screen hands down as a [footer].
+/// The one line a Needs You row has room for — the ASK, not the person.
+///
+/// The opposite priority to [railTitleFor], and deliberately: a People room is
+/// answering "who", and Needs You is answering "what do I owe". A column of
+/// seven rows that all read the same colleague's name is a list the user has
+/// to open one at a time to use; a column of asks can be read.
+///
+/// The ask first, because triage wrote it in the sender's terms. Then the
+/// subject, which is what the mail itself called it. Only then the person,
+/// which is what [railTitleFor] would have said all along — and in that last
+/// case the row is already the person, so [needsYouWhoFor] adds nothing.
+String needsYouTitleFor(Conversation c) {
+  final ask = c.ctaText?.trim() ?? '';
+  if (ask.isNotEmpty) return ask;
+  final subject = _stripReplyPrefixes(c.subject ?? '');
+  if (subject.isNotEmpty) return subject;
+  return railTitleFor(c);
+}
+
+/// The dimmed `' · who'` a Needs You row carries after its ask, or null when
+/// the row is ALREADY the person and repeating them would be noise.
+String? needsYouWhoFor(Conversation c) {
+  final who = c.primaryParticipant?.display ?? '';
+  if (who.isEmpty) return null;
+  final title = needsYouTitleFor(c);
+  if (title == who || title == withSourceGlyph(c.source, who)) return null;
+  return ' · $who';
+}
+
+/// The list column: what is inside the destination the icon rail is pointing
+/// at, one line per thing, under whatever [header] the screen hands down.
+///
+/// TWO shapes, chosen by [scope]. On Home it is the whole stack — Needs You,
+/// Storylines, People, Later — each collapsible, which is the overview the old
+/// single rail was. On any other stop it is that one section, expanded, with
+/// no chevron: the user picked it on the icon rail, and a column that let them
+/// close the only thing in it would be a column that could show nothing.
 ///
 /// The rail owns only its collapse state. Selection lives on the screen, so
 /// the rail can be rebuilt from scratch on any data change without losing the
@@ -266,9 +313,31 @@ class AppRail extends StatefulWidget {
   final void Function(String storylineId)? onKeepSuggestion;
   final void Function(String storylineId)? onDismissSuggestion;
 
-  /// Account block, refresh, sign-out — built by the screen, pinned to the
-  /// bottom by the rail.
-  final Widget? footer;
+  /// The section caption, compose, refresh, the source chips and the triage
+  /// line — built by the screen, drawn by the rail at the TOP of the column.
+  ///
+  /// At the top rather than the foot because it is about the list under it:
+  /// which pile this is, how to add to it, how to bring it up to date. The
+  /// foot is empty now, which is what the footer was crowding.
+  final Widget header;
+
+  /// Which stop the column is showing. [RailSection.home] is the whole stack;
+  /// anything else is that one section on its own.
+  final RailSection scope;
+
+  /// The People rooms, already grouped by the screen — see [peopleRooms]. The
+  /// rail renders them and never computes them: the grouping needs the signed
+  /// in account, which is the screen's to know.
+  final List<PersonRoom> rooms;
+
+  final void Function(String roomKey) onSelectRoom;
+
+  /// The open room, when one is open.
+  final String? selectedRoomKey;
+
+  /// Faces for the 1:1 rooms. Null renders initials, which is what a host with
+  /// no directory behind it wants.
+  final ProfilePhotos? photos;
 
   const AppRail({
     super.key,
@@ -289,7 +358,12 @@ class AppRail extends StatefulWidget {
     this.onSelectLaterDay,
     this.onKeepSuggestion,
     this.onDismissSuggestion,
-    this.footer,
+    required this.header,
+    required this.scope,
+    required this.rooms,
+    required this.onSelectRoom,
+    this.selectedRoomKey,
+    this.photos,
   });
 
   /// Fixed: the rail is a landmark, not a resizable pane.
@@ -314,11 +388,64 @@ class _AppRailState extends State<AppRail> {
 
   @override
   Widget build(BuildContext context) {
-    final needsYou = needsYouRows(
-      widget.conversations,
-      threshold: widget.attentionThreshold,
+    return SizedBox(
+      width: AppRail.width,
+      child: Material(
+        color: BondColors.rail,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            widget.header,
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(
+                  vertical: BondSpacing.s12,
+                ),
+                children: _stack(),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
-    final open = conversationRows(
+  }
+
+  /// What the column holds, for the scope it is showing.
+  ///
+  /// Home is the stack in the order the day is worked: what you owe, what it
+  /// belongs to, who it is with, what you put off. Every other scope is one
+  /// section, and it does not collapse.
+  List<Widget> _stack() {
+    switch (widget.scope) {
+      case RailSection.home:
+        return [
+          ..._needsYouSection(),
+          ..._storylinesSection(),
+          ..._peopleSection(),
+          ..._laterSection(),
+        ];
+      case RailSection.needsYou:
+        return _needsYouSection(collapsible: false);
+      case RailSection.storylines:
+        return _storylinesSection(collapsible: false);
+      case RailSection.people:
+        return _peopleSection(collapsible: false);
+      case RailSection.archive:
+        return _laterSection(collapsible: false);
+      case RailSection.ai:
+        // The AI stop's pane IS the settings screen; there is no list of
+        // anything to put beside it, and a column that repeated the pane's own
+        // section names would be a second table of contents for one screen.
+        return [
+          _header(RailSection.ai, badge: null, collapsed: false,
+              collapsible: false),
+          _placeholder('Models, rules and the log'),
+        ];
+    }
+  }
+
+  List<Widget> _needsYouSection({bool collapsible = true}) {
+    final needsYou = needsYouRows(
       widget.conversations,
       threshold: widget.attentionThreshold,
     );
@@ -331,145 +458,76 @@ class _AppRailState extends State<AppRail> {
         : needsYou;
     final overflow = needsYou.length - shown.length;
 
-    return SizedBox(
-      width: AppRail.width,
-      child: Material(
-        color: BondColors.rail,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              child: ListView(
-                padding: const EdgeInsets.symmetric(
-                  vertical: BondSpacing.s12,
-                ),
-                children: [
-                  _stop(RailSection.home, Icons.bolt),
-                  const SizedBox(height: BondSpacing.s12),
-                  ..._section(
-                    RailSection.needsYou,
-                    rows: [
-                      for (final c in shown)
-                        _item(
-                          c,
-                          dimmed: isWaitingRow(c),
-                          bold: true,
-                          processing:
-                              showsProcessing(c, since: widget.processingSince),
-                        ),
-                      if (overflow > 0) _more(overflow),
-                    ],
-                    badge: needsYou.isEmpty
-                        ? null
-                        : _badge(needsYou.length, attention: true),
-                  ),
-                  ..._section(
-                    RailSection.storylines,
-                    rows: [
-                      for (final s in storylineRows(widget.storylines))
-                        _storylineItem(s),
-                    ],
-                    placeholder: 'Suggestions arrive after processing',
-                  ),
-                  ..._section(
-                    RailSection.conversations,
-                    rows: [
-                      for (final c in open)
-                        _item(
-                          c,
-                          bold: c.hasUnread,
-                          processing:
-                              showsProcessing(c, since: widget.processingSince),
-                        ),
-                    ],
-                  ),
-                  ..._section(
-                    RailSection.archive,
-                    rows: [
-                      for (final (dayKey, count) in widget.laterDays)
-                        _laterDayItem(dayKey, count),
-                    ],
-                    // Deferred mail only, though the section now holds done
-                    // threads too: a done pile grows without bound and asks
-                    // nothing of anyone, and badging it would put a number on
-                    // the rail that never goes back down.
-                    badge: widget.laterCount == 0
-                        ? null
-                        : _badge(widget.laterCount, attention: false),
-                    // Only when there is genuinely nothing deferred. A pile
-                    // with no day breakdown must not read as an empty one.
-                    placeholder: widget.laterCount == 0
-                        ? 'Nothing deferred yet'
-                        : null,
-                  ),
-                ],
-              ),
-            ),
-            if (widget.footer != null) ...[
-              const Divider(height: 1, color: BondColors.onDarkBorder),
-              widget.footer!,
-            ],
-          ],
-        ),
-      ),
+    return _section(
+      RailSection.needsYou,
+      collapsible: collapsible,
+      rows: [
+        for (final c in shown)
+          _item(
+            c,
+            dimmed: isWaitingRow(c),
+            // Bold is unread here as everywhere (D5). What makes a Needs You
+            // row loud is the badge over the section, the accent dot on the
+            // row and the ask in its own words — three signals that say
+            // "yours", instead of one that also has to mean "new".
+            bold: c.hasUnread,
+            processing: showsProcessing(c, since: widget.processingSince),
+          ),
+        if (overflow > 0) _more(overflow),
+      ],
+      badge: needsYou.isEmpty ? null : _badge(needsYou.length, attention: true),
     );
   }
 
-  /// A stop with nothing under it: one row, selectable, no chevron.
-  ///
-  /// [_header]'s chrome minus the collapse affordance, deliberately — Home has
-  /// no children to hide, and a chevron that did nothing would be an
-  /// affordance that lied. The icon is what tells the eye it is a destination
-  /// rather than the heading of a list.
-  Widget _stop(RailSection section, IconData icon) {
-    final selected = widget.selectedSection == section;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
-      child: Material(
-        color: selected ? BondColors.onDarkTint : BondColors.rail,
-        borderRadius: BondRadii.smAll,
-        child: InkWell(
-          onTap: () => widget.onSelectSection(section),
-          borderRadius: BondRadii.smAll,
-          hoverColor: BondColors.onDarkFaint,
-          child: SizedBox(
-            height: _rowHeight,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
-              child: Row(
-                children: [
-                  Icon(icon, size: 16, color: BondColors.onDarkMuted),
-                  const SizedBox(width: BondSpacing.s8),
-                  Expanded(
-                    child: Text(
-                      section.label.toUpperCase(),
-                      style: BondType.caption.copyWith(
-                        color: BondColors.onDarkMuted,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 0.96,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  List<Widget> _storylinesSection({bool collapsible = true}) => _section(
+        RailSection.storylines,
+        collapsible: collapsible,
+        rows: [
+          for (final s in storylineRows(widget.storylines)) _storylineItem(s),
+        ],
+        placeholder: 'Suggestions arrive after processing',
+      );
+
+  List<Widget> _peopleSection({bool collapsible = true}) => _section(
+        RailSection.people,
+        collapsible: collapsible,
+        rows: [for (final room in widget.rooms) _roomItem(room)],
+        placeholder: 'Nobody is waiting on anything',
+      );
+
+  List<Widget> _laterSection({bool collapsible = true}) => _section(
+        RailSection.archive,
+        collapsible: collapsible,
+        rows: [
+          for (final (dayKey, count) in widget.laterDays)
+            _laterDayItem(dayKey, count),
+        ],
+        // Deferred mail only, though the section now holds done threads too:
+        // a done pile grows without bound and asks nothing of anyone, and
+        // badging it would put a number on the rail that never goes back down.
+        badge: widget.laterCount == 0
+            ? null
+            : _badge(widget.laterCount, attention: false),
+        // Only when there is genuinely nothing deferred. A pile with no day
+        // breakdown must not read as an empty one.
+        placeholder: widget.laterCount == 0 ? 'Nothing deferred yet' : null,
+      );
 
   List<Widget> _section(
     RailSection section, {
     required List<Widget> rows,
     Widget? badge,
     String? placeholder,
+    bool collapsible = true,
   }) {
-    final collapsed = _collapsed.contains(section);
+    final collapsed = collapsible && _collapsed.contains(section);
     return [
-      _header(section, badge: badge, collapsed: collapsed),
+      _header(
+        section,
+        badge: badge,
+        collapsed: collapsed,
+        collapsible: collapsible,
+      ),
       if (!collapsed) ...[
         ...rows,
         if (rows.isEmpty && placeholder != null) _placeholder(placeholder),
@@ -480,10 +538,15 @@ class _AppRailState extends State<AppRail> {
 
   /// The label selects the section's overview; the chevron collapses it. Two
   /// targets in one row rather than a third affordance nobody would find.
+  ///
+  /// [collapsible] is false when this section is the ONLY thing in the column:
+  /// there is nothing for a chevron to reveal underneath it, and one that
+  /// emptied the column would be an affordance that lied.
   Widget _header(
     RailSection section, {
     required Widget? badge,
     required bool collapsed,
+    bool collapsible = true,
   }) {
     final selected = widget.selectedSection == section;
     return Padding(
@@ -521,23 +584,26 @@ class _AppRailState extends State<AppRail> {
                 ),
               ),
               ?badge,
-              InkWell(
-                onTap: () => _toggle(section),
-                borderRadius: BondRadii.fullAll,
-                hoverColor: BondColors.onDarkFaint,
-                child: Padding(
-                  padding: const EdgeInsets.all(BondSpacing.s4),
-                  child: AnimatedRotation(
-                    turns: collapsed ? -0.25 : 0,
-                    duration: const Duration(milliseconds: 120),
-                    child: const Icon(
-                      Icons.expand_more,
-                      size: 16,
-                      color: BondColors.onDarkMuted,
+              if (collapsible)
+                InkWell(
+                  onTap: () => _toggle(section),
+                  borderRadius: BondRadii.fullAll,
+                  hoverColor: BondColors.onDarkFaint,
+                  child: Padding(
+                    padding: const EdgeInsets.all(BondSpacing.s4),
+                    child: AnimatedRotation(
+                      turns: collapsed ? -0.25 : 0,
+                      duration: const Duration(milliseconds: 120),
+                      child: const Icon(
+                        Icons.expand_more,
+                        size: 16,
+                        color: BondColors.onDarkMuted,
+                      ),
                     ),
                   ),
-                ),
-              ),
+                )
+              else
+                const SizedBox(width: BondSpacing.s8),
             ],
           ),
         ),
@@ -545,7 +611,10 @@ class _AppRailState extends State<AppRail> {
     );
   }
 
-  /// One thread. [dimmed] drops it to the muted ink used for the quieter half
+  /// One Needs You thread, titled by the ASK — see [needsYouTitleFor] — with
+  /// the person after it in quieter ink.
+  ///
+  /// [dimmed] drops the whole row to the muted ink used for the quieter half
   /// of Needs You — a thread on the list because someone else is late, not
   /// because the user is.
   ///
@@ -562,16 +631,52 @@ class _AppRailState extends State<AppRail> {
     final selected = widget.selectedId == c.id &&
         (widget.selectedSource == null || widget.selectedSource == c.source);
 
-    // Bold is the whole grammar, and it says a different thing in each section
-    // because the sections ask different questions. In Needs You every row is
-    // bold: you owe this. In Conversations bold means you have not read this.
-    // Nothing else in the rail is bold, and the caller decides which question
-    // this row is answering.
+    // Bold is the whole grammar and it says ONE thing everywhere: you have not
+    // read this. It used to mean "you owe this" in Needs You and "unread" in
+    // the section under it, which is two grammars in one column — and a reader
+    // who has to know which section they are looking at to read a font weight
+    // is reading nothing. What Needs You owes is said by the section's badge,
+    // by the accent dot on the row, and by the ask the row is titled with.
     final color = processing
         ? BondColors.onDarkMuted
         : (selected || (bold && !dimmed))
             ? BondColors.onDarkPrimary
             : (dimmed ? BondColors.onDarkMuted : BondColors.onDarkSecondary);
+
+    final title = needsYouTitleFor(c);
+    final who = needsYouWhoFor(c);
+    final style = BondType.small.copyWith(
+      color: color,
+      fontWeight: bold ? FontWeight.w600 : FontWeight.w500,
+    );
+    // Plain text when the row is just the person, rich only when there is a
+    // suffix to quieten: a Text with data on it is what every finder in the
+    // suite reads, and a RichText where one is not needed would cost that for
+    // nothing.
+    final label = who == null
+        ? Text(
+            title,
+            style: style,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          )
+        : Text.rich(
+            TextSpan(
+              text: title,
+              style: style,
+              children: [
+                TextSpan(
+                  text: who,
+                  style: style.copyWith(
+                    color: BondColors.onDarkMuted,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          );
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
@@ -604,23 +709,102 @@ class _AppRailState extends State<AppRail> {
                           )
                         : BoxDecoration(
                             shape: BoxShape.circle,
-                            color: bold
+                            // The dot is what carries "yours" now that bold
+                            // does not: filled and warm for a thread on the
+                            // hook, hollow grey for one merely being watched.
+                            color: isNeedsYou(
+                              c,
+                              threshold: widget.attentionThreshold,
+                            )
                                 ? BondColors.railAccent
                                 : BondColors.onDarkBorder,
                           ),
                   ),
                   const SizedBox(width: BondSpacing.s8),
+                  Expanded(child: label),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// One People room: a colleague, or a group, and every live thread with
+  /// them in it.
+  ///
+  /// A face where there is one person to show — a room is about WHO, and a
+  /// name beside their photograph is how a reader picks a row out of a column
+  /// of names. A group keeps the dot: three overlapping faces at 20px on a
+  /// 260px row is a smudge, and the names are already the title.
+  ///
+  /// The badge is the room's Needs You count in the attention red where there
+  /// is one, and the thread count in grey where there is not — the two
+  /// numbers a reader wants from a row they are deciding whether to open, and
+  /// never both, because a row with two counts on it has neither.
+  Widget _roomItem(PersonRoom room) {
+    final selected = widget.selectedRoomKey == room.key;
+    final bold = room.unread > 0;
+    // Only when every thread in the room came from one connector. A person on
+    // both would otherwise be marked as whichever the newest thread happened
+    // to be, which is a mark that changes when nothing about them did.
+    final title = room.sources.length == 1
+        ? withSourceGlyph(room.sources.first, room.title)
+        : room.title;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
+      child: Material(
+        color: selected ? BondColors.onDarkTint : BondColors.rail,
+        borderRadius: BondRadii.smAll,
+        child: InkWell(
+          onTap: () => widget.onSelectRoom(room.key),
+          borderRadius: BondRadii.smAll,
+          hoverColor: BondColors.onDarkFaint,
+          child: SizedBox(
+            height: _rowHeight,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+              child: Row(
+                children: [
+                  if (room.people.length == 1)
+                    BondAvatar(
+                      name: room.people.first.display,
+                      address: room.people.first.email,
+                      size: 20,
+                      photoKey: photoKeyFor(address: room.people.first.email),
+                      photos: widget.photos,
+                    )
+                  else
+                    Container(
+                      width: BondSpacing.s8,
+                      height: BondSpacing.s8,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: bold
+                            ? BondColors.railAccent
+                            : BondColors.onDarkBorder,
+                      ),
+                    ),
+                  const SizedBox(width: BondSpacing.s8),
                   Expanded(
                     child: Text(
-                      railTitleFor(c),
+                      title,
                       style: BondType.small.copyWith(
-                        color: color,
+                        color: (selected || bold)
+                            ? BondColors.onDarkPrimary
+                            : BondColors.onDarkSecondary,
                         fontWeight: bold ? FontWeight.w600 : FontWeight.w500,
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  if (room.needsYou > 0)
+                    _badge(room.needsYou, attention: true)
+                  else
+                    _badge(room.threads.length, attention: false),
                 ],
               ),
             ),

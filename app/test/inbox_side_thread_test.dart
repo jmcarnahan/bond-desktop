@@ -9,7 +9,8 @@ import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
@@ -146,12 +147,28 @@ void main() {
   /// Opens the storyline in the main pane. At narrow widths the rail is an
   /// overlay, so the hamburger comes first.
   Future<void> openStoryline(WidgetTester tester, {bool narrow = false}) async {
-    if (narrow) {
+    Future<void> openRail() async {
+      if (!narrow) return;
       await tester.tap(find.byTooltip('Sections'));
       await tester.pump();
       await tester.pump();
     }
-    await tester.tap(find.text('Website redesign'));
+
+    // The list column shows the stop that is lit, so the icon rail comes
+    // first. Picking a stop clears the narrow overlay, so it is reopened.
+    await openRail();
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('Storylines'),
+    ));
+    await tester.pump();
+    await tester.pump();
+    await openRail();
+    // Scoped to the column: the overview beside it names the same storylines.
+    await tester.tap(find.descendant(
+      of: find.byType(AppRail),
+      matching: find.text('Website redesign'),
+    ));
     await tester.pump();
     await tester.pump();
     await tester.pump();
@@ -264,7 +281,10 @@ void main() {
 
     // Every selection clears the overlays, and a thread left open beside the
     // next thing the user asked for is exactly what that list is for.
-    await tester.tap(find.text('NEEDS YOU'));
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('Needs You'),
+    ));
     await tester.pump();
     await tester.pump();
 

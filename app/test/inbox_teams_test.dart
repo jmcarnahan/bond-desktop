@@ -12,7 +12,8 @@ import 'package:bond_inbox/services/graph_teams.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/services/token_store.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/services/attachments/attachment_bytes.dart';
@@ -593,7 +594,11 @@ void main() {
         (tester) async {
       await seedMail('c1');
       await pumpScreen(tester);
-      expect(find.textContaining('Teams updated'), findsNothing);
+      // It rides on the refresh button's tooltip now: chats do not arrive on
+      // their own, so the one control that pulls them is the one place worth
+      // saying how old they are.
+      expect(find.byTooltip('Refresh'), findsOneWidget);
+      expect(find.byTooltip('Refresh · Teams updated 4m ago'), findsNothing);
 
       await store.setSyncedAt(
         TeamsSync.folder,
@@ -605,7 +610,8 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('Teams updated 4m ago'), findsOneWidget);
+      expect(find.byTooltip('Refresh · Teams updated 4m ago'), findsOneWidget);
+      expect(find.byTooltip('Refresh'), findsNothing);
     });
   });
 
@@ -634,7 +640,16 @@ void main() {
           addedBy: 'auto');
 
       await pumpScreen(tester, grantedScopes: grantedScopes);
-      await tester.tap(find.text('Website redesign'));
+      await tester.tap(find.descendant(
+        of: find.byType(IconRail),
+        matching: find.text('Storylines'),
+      ));
+      await tester.pump();
+      await tester.pump();
+      await tester.tap(find.descendant(
+        of: find.byType(AppRail),
+        matching: find.text('Website redesign'),
+      ));
       // One for the tap, then the timeline read, then the capability read the
       // reply surface waits on.
       await tester.pump();

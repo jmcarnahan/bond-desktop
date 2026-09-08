@@ -11,6 +11,7 @@ import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/composer.dart' show Composer;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -198,7 +199,9 @@ void main() {
     await tester.pumpWidget(ProviderScope(
       overrides: [
         dbProvider.overrideWithValue(db),
-        initialSectionProvider.overrideWithValue(RailSection.needsYou),
+        // This thread scores under the Needs You cut, so People is the stop
+        // that carries it — and its room row and the overview both name Eric.
+        initialSectionProvider.overrideWithValue(RailSection.people),
         initialAppPrefsProvider.overrideWithValue(prefs),
         graphAuthProvider.overrideWithValue(auth),
         mailBackendProvider.overrideWithValue(mail),
@@ -214,7 +217,12 @@ void main() {
   }
 
   Future<void> openThread(WidgetTester tester) async {
-    await tester.tap(find.text('Eric Vance').first);
+    // In the overview beside the column, not the room row in it: tapping the
+    // rail's People row opens the ROOM, and this test wants the thread.
+    await tester.tap(find.descendant(
+      of: find.byType(ConversationListPane),
+      matching: find.text('Eric Vance'),
+    ));
     // The tap, the transcript read, then the capability the cards wait on.
     await tester.pump();
     await tester.pump();
