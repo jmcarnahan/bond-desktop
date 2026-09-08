@@ -4,6 +4,7 @@ import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../theme/tokens.dart';
+import 'dismissed_storylines_fold.dart';
 import 'processing_hint.dart';
 import 'source_glyph.dart';
 import 'time_format.dart';
@@ -320,11 +321,6 @@ class _AppRailState extends State<AppRail> {
   /// life of the screen.
   final Set<RailSection> _collapsed = {};
 
-  /// Whether the dismissed storylines are unfolded. Shut every time, unlike
-  /// the sections: this is the one list on the rail nobody opens the app to
-  /// look at.
-  bool _showDismissed = false;
-
   static const double _rowHeight = 32;
 
   void _toggle(RailSection section) {
@@ -392,12 +388,11 @@ class _AppRailState extends State<AppRail> {
                       // Under the live rows, and behind a fold: what the user
                       // already said no to must not compete with what is
                       // still asking.
-                      if (widget.dismissed.isNotEmpty) ...[
-                        _dismissedHeader(),
-                        if (_showDismissed)
-                          for (final s in widget.dismissed)
-                            _dismissedItem(s),
-                      ],
+                      if (widget.dismissed.isNotEmpty)
+                        DismissedStorylinesFold(
+                          dismissed: widget.dismissed,
+                          onRestore: widget.onRestoreStoryline,
+                        ),
                     ],
                     placeholder: 'Suggestions arrive after processing',
                   ),
@@ -815,94 +810,6 @@ class _AppRailState extends State<AppRail> {
                     _badge(storyline.openCount, attention: false),
                 ],
               ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// The fold over the dismissed storylines. Its count is in the label, the
-  /// way a Later day's is: it is what the row has to say for itself while it
-  /// is shut.
-  Widget _dismissedHeader() {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
-      child: Material(
-        color: BondColors.ink,
-        borderRadius: BondRadii.smAll,
-        child: InkWell(
-          onTap: () => setState(() => _showDismissed = !_showDismissed),
-          borderRadius: BondRadii.smAll,
-          hoverColor: BondColors.onDarkFaint,
-          child: SizedBox(
-            height: _rowHeight,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Dismissed · ${widget.dismissed.length}',
-                      style: BondType.caption.copyWith(
-                        color: BondColors.onDarkSecondary,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  AnimatedRotation(
-                    turns: _showDismissed ? 0 : -0.25,
-                    duration: const Duration(milliseconds: 120),
-                    child: const Icon(
-                      Icons.expand_more,
-                      size: 16,
-                      color: BondColors.onDarkMuted,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// One dismissed storyline: the title, and the one action that can undo the
-  /// dismissal. No dot — the dot says whether a row is asking for something,
-  /// and this one is not — and no count, for the same reason.
-  Widget _dismissedItem(Storyline storyline) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
-      child: Material(
-        color: BondColors.ink,
-        borderRadius: BondRadii.smAll,
-        child: SizedBox(
-          height: _rowHeight,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    storyline.title.isEmpty ? '(untitled)' : storyline.title,
-                    style: BondType.small.copyWith(
-                      color: BondColors.onDarkSecondary,
-                      fontWeight: FontWeight.w500,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                _storylineAction(
-                  Icons.restore,
-                  'Restore',
-                  widget.onRestoreStoryline == null
-                      ? null
-                      : () => widget.onRestoreStoryline!(storyline.id),
-                ),
-              ],
             ),
           ),
         ),

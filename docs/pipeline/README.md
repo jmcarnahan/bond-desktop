@@ -118,7 +118,10 @@ did is spread across eight tables. `MessageHistoryScreen`
 (`app/lib/screens/message_history_screen.dart`) is where all of it is read at
 once, behind `messageHistoryProvider`, which folds those eight reads into one
 `MessageHistory` and re-reads it behind the progress ticks the message's own
-stages publish.
+stages publish. `MessageHistoryHost` (`app/lib/widgets/message_history_host.dart`)
+is the one place that provider is read and every lever below is wired; the
+screen itself is prop-driven, and a host that draws its own header seats it
+with `chrome: false`.
 
 Four doors reach it, and all four hand it the same `(source,
 source_message_id)` pair:

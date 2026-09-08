@@ -1,0 +1,184 @@
+import 'dart:convert';
+
+import 'package:bond_inbox/data/database.dart';
+import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/embed_handler.dart';
+import 'package:bond_inbox/services/llm/embeddings_client.dart';
+import 'package:bond_inbox/services/message_search.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
+
+import 'fixtures/test_db.dart';
+import 'fixtures/vec_test_db.dart';
+
+/// What a search HAND BACK, as against how it ranks.
+///
+/// Two questions that happen to share a door: the row a hit carries is the
+/// same row the home feed renders, joins and all, and the connector filter
+/// narrows both passes rather than the list afterwards. `message_search_test`
+/// owns the geometry; this file owns the shape of the answer.
+///
+/// Its little embedding server is its own on purpose. The one next door is
+/// built to make a ranking arithmetic-free and would be read as this file's
+/// fixture the moment it were shared — nothing here cares which vector comes
+/// back, only that one does.
+
+/// A server that answers every text with the same 768-wide vector, so every
+/// message is exactly as near the query as every other one.
+EmbeddingsClient flatServer() => EmbeddingsClient(
+      baseUrl: 'http://localhost:8081/v1/embeddings',
+      httpClient: MockClient((_) async {
+        final vector = List.filled(768, 0.0)..[0] = 1.0;
+        return http.Response(
+          jsonEncode({
+            'data': [
+              {'embedding': vector}
+            ]
+          }),
+          200,
+          headers: const {'content-type': 'application/json'},
+        );
+      }),
+    );
+
+/// A client whose socket never answers, which leaves the text pass alone on
+/// the field.
+EmbeddingsClient downServer() => EmbeddingsClient(
+      baseUrl: 'http://localhost:8081/v1/embeddings',
+      httpClient: MockClient(
+        (_) async => throw http.ClientException('connection refused'),
+      ),
+    );
+
+void main() {
+  group('a hit carries the feed row', () {
+    late bool available;
+    late BondDatabase db;
+    late MessageStore store;
+
+    setUpAll(() {
+      available = ensureSqliteVecLoaded();
+    });
+
+    setUp(() {
+      db = vecTestDb();
+      store = MessageStore(db);
+    });
+
+    tearDown(() async => db.close());
+
+    Future<void> seed(String id, String subject) async {
+      await store.upsertMessage({
+        'source': 'email',
+        'source_message_id': id,
+        'conversation_key': 'conv-$id',
+        'direction': 'inbound',
+        'subject': subject,
+        'from_name': 'Sarah',
+        'from_address': 'sarah@x.com',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'body text',
+      });
+      await store.writeTriage(
+        'email',
+        id,
+        status: 'triaged',
+        result: TriageResult(
+          urgency: 'normal',
+          category: 'work',
+          summary: subject,
+          needsAction: false,
+          actionItems: const [],
+        ),
+      );
+      final row = (await store.getMessageRow('email', id))!;
+      final outcome = await embedMessageRow(store, flatServer(), 'email', row);
+      expect(outcome, MessageEmbedOutcome.embedded);
+    }
+
+    test('a hit carries the reasons the feed reads, over the same joins',
+        () async {
+      if (!available) return;
+      await seed('inv', 'Invoice 4471 is overdue');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Acme renewal',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      // The thread's membership only — the progress row's own pointer is
+      // never stamped here, so this also pins the fallback on the one reader
+      // that spells its own FROM.
+      await store.addStorylineMember(
+        'sl-1',
+        'email',
+        'conv-inv',
+        addedBy: 'auto',
+        evidence: 'Same invoice thread',
+      );
+
+      final result =
+          await MessageSearch(store, flatServer()).search('the invoice');
+
+      final row = (result as MessageSearchHits).hits.first.row;
+      expect(row.storylineId, 'sl-1');
+      expect(row.storylineTitle, 'Acme renewal');
+      expect(row.storylineEvidence, 'Same invoice thread');
+      expect(row.storylineAddedBy, 'auto');
+      expect(row.updatedAt, isNotEmpty);
+      expect(row.workOpen, false);
+    });
+  });
+
+  group('the connector filter', () {
+    late BondDatabase db;
+    late MessageStore store;
+
+    setUp(() {
+      db = testDb();
+      store = MessageStore(db);
+    });
+
+    tearDown(() async => db.close());
+
+    Future<void> seed(String source, String id) => store.upsertMessage({
+          'source': source,
+          'source_message_id': id,
+          'conversation_key': 'conv-$id',
+          'direction': 'inbound',
+          'subject': 'Invoice 4471 is overdue',
+          'received_at': '2026-08-29T10:00:00Z',
+        });
+
+    /// The ids the word pass found, with the server down so the ranking pass
+    /// contributes nothing and every row on screen came through the filter
+    /// under test.
+    Future<List<String>> textIds(List<String>? sources) async {
+      final search = MessageSearch(store, downServer());
+      final result = sources == null
+          ? await search.search('invoice')
+          : await search.search('invoice', sources: sources);
+      return [
+        for (final row in (result as MessageSearchHits).textRows)
+          row.sourceMessageId,
+      ];
+    }
+
+    test('sources narrows the text pass', () async {
+      await seed('email', 'mail-1');
+      await seed('teams', 'chat-1');
+
+      expect(await textIds(const ['teams']), ['chat-1']);
+      expect(await textIds(const ['email']), ['mail-1']);
+      // The default is every connector, which is what makes the facet an
+      // opt-in narrowing rather than something a caller has to remember.
+      expect(
+        (await textIds(null))..sort(),
+        ['chat-1', 'mail-1'],
+      );
+    });
+  });
+}

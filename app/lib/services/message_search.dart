@@ -147,16 +147,23 @@ class MessageSearch {
   /// failed, which in practice means the database itself is unreadable — an
   /// embedding server that is off leaves the text pass standing, and a text
   /// pass that throws under a healthy index leaves the ranking standing.
+  ///
+  /// [sources] narrows BOTH corpora to a set of connectors — the `in:` facet,
+  /// honoured in SQL because the source is a column on every row either read
+  /// touches. Filtering it after the fact would spend the index's whole budget
+  /// on hits from the connector the reader excluded.
   Future<MessageSearchResult> search(
     String query, {
     int limit = 50,
     bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
   }) async {
     final text = query.trim();
     final pass = await _semantic(
       text,
       limit: limit,
       includeDropped: includeDropped,
+      sources: sources,
     );
 
     List<HomeFeedRow> textRows;
@@ -166,6 +173,7 @@ class MessageSearch {
         pass.hits ?? const [],
         limit: limit,
         includeDropped: includeDropped,
+        sources: sources,
       );
     } catch (e) {
       // Nothing left to show, so the sealed case earns itself: the reader is
@@ -206,7 +214,12 @@ class MessageSearch {
     int limit = 50,
   }) async {
     final text = query.trim();
-    final pass = await _semantic(text, limit: limit, includeDropped: true);
+    final pass = await _semantic(
+      text,
+      limit: limit,
+      includeDropped: true,
+      sources: const ['email', 'teams'],
+    );
     final semantic = pass.hits ?? const <SemanticHit>[];
 
     return ArchiveSearchResult(
@@ -218,6 +231,7 @@ class MessageSearch {
           semantic,
           limit: limit,
           includeDropped: true,
+          sources: const ['email', 'teams'],
         ),
       ],
       pass.notice,
@@ -230,6 +244,7 @@ class MessageSearch {
     String text, {
     required int limit,
     required bool includeDropped,
+    required List<String> sources,
   }) async {
     final result = await _embeddings.embedResult(
       text,
@@ -260,6 +275,7 @@ class MessageSearch {
       embedModel: EmbeddingsClient.documentModelTag,
       limit: limit,
       includeDropped: includeDropped,
+      sources: sources,
     );
     // Null and not empty: the native index is missing on this build, which is
     // a different sentence from "no message matches".
@@ -278,6 +294,7 @@ class MessageSearch {
       embedModel: EmbeddingsClient.documentModelTag,
       limit: _documentLimit,
       includeDropped: includeDropped,
+      sources: sources,
     );
     return _SemanticPass(hits, documents: chunks ?? const []);
   }
@@ -292,6 +309,7 @@ class MessageSearch {
     List<SemanticHit> semantic, {
     required int limit,
     required bool includeDropped,
+    required List<String> sources,
   }) async {
     final seen = {for (final hit in semantic) hit.row.feedKey};
     return [
@@ -299,6 +317,7 @@ class MessageSearch {
         text,
         limit: limit,
         includeDropped: includeDropped,
+        sources: sources,
       ))
         if (seen.add(row.feedKey)) row,
     ];

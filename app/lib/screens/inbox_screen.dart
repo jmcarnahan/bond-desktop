@@ -16,7 +16,6 @@ import '../providers/archive_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/home_provider.dart';
-import '../providers/message_history_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/notify_routing.dart';
@@ -44,6 +43,7 @@ import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/home_pane.dart';
 import '../widgets/inline_alert.dart';
+import '../widgets/message_history_host.dart';
 import '../widgets/notification_ribbon.dart';
 import '../widgets/preview/attachment_preview_panel.dart';
 import '../widgets/preview/attachment_viewer_pane.dart';
@@ -57,7 +57,6 @@ import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
-import 'message_history_screen.dart';
 import 'new_message_screen.dart';
 
 /// The whole app, for now: a dark rail of sections beside one main pane that
@@ -1774,40 +1773,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// One message's whole story, and every lever beside it.
   ///
-  /// Everything the screen renders is a prop — see [MessageHistoryScreen] — so
-  /// this is the only place the history provider is read. Every notifier and
-  /// service is read BEFORE the awaits, the way the repair lever on the home
-  /// feed is: the reader can leave the pane while a write is in flight, and a
-  /// `ref.read` after the await is how a lever comes to throw at the end of
-  /// doing its job.
+  /// The story itself, and every provider behind it, live in
+  /// [MessageHistoryHost]; what is left here is what only this screen can
+  /// answer — where Back goes, and where the storyline picker is drawn.
   Widget _history(({String source, String id}) target) {
-    final source = target.source;
-    final id = target.id;
-    final args = (source: source, id: id);
-    final history = ref.watch(messageHistoryProvider(args));
-    final value = history.valueOrNull;
-
-    final reader = ref.read(messageHistoryProvider(args).notifier);
-    final repair = ref.read(pipelineRepairServiceProvider);
-    final restore = ref.read(restoreServiceProvider);
-    final archive = ref.read(archiveProvider.notifier);
-    final storylines = ref.read(storylinesProvider.notifier);
-    final conversations = ref.read(conversationsProvider.notifier);
-
-    // The pane's own re-read. Filing a thread, lifting a block and keeping a
-    // thread in the inbox all move rows this screen renders without moving any
-    // stage, so nothing is published and nothing would come back on its own.
-    void reload() => unawaited(reader.reload());
-
-    // The thread's key, which every thread-scoped lever needs and which is
-    // only known once the first read has landed. Without it the screen is
-    // handed nulls rather than buttons that would act on the empty string.
-    final threadKey = value?.conversationKey ?? '';
-    final threaded = threadKey.isNotEmpty;
-
-    return MessageHistoryScreen(
-      history: history,
-      now: DateTime.now(),
+    return MessageHistoryHost(
+      target: target,
       // Back only leaves the pane. Whatever was underneath — the thread, the
       // archive, the home table — was never cleared, so it is still there.
       onBack: () => setState(() => _showingHistory = null),
@@ -1815,59 +1786,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenThread: (threadSource, conversationKey) =>
           _select(conversationKey, source: threadSource),
       onOpenStoryline: _selectStoryline,
-      // The archive's own pattern: the pane sheds the row first and the
-      // pipeline catches up, and the re-read is what reports whether it did.
-      onRestore: () {
-        archive.noteRestored(source, id);
-        unawaited(restore.restore(source, id).then((_) => reload()));
-      },
-      onRetry: () =>
-          unawaited(repair.retryOwed(source, id).then((_) => reload())),
-      onRejudge: () =>
-          unawaited(repair.rejudgeNeedsYou(source, id).then((_) => reload())),
-      onIgnore: () =>
-          unawaited(repair.ignore(source, id).then((_) => reload())),
       // The picker overlays this pane rather than replacing it — see [_main] —
       // so filing from here comes back to the story it was filed from.
-      onAddToStoryline: threaded
-          ? () => setState(
-                () => _pickingStorylineForThread =
-                    (source: source, id: threadKey),
-              )
-          : null,
-      onRemoveFromStoryline: threaded
-          ? (storylineId) => unawaited(
-                storylines
-                    .removeThread(storylineId, source, threadKey)
-                    .then((_) => reload()),
-              )
-          : null,
-      onAllowAgain: threaded
-          ? (storylineId) => unawaited(
-                storylines
-                    .unblockThread(storylineId, source, threadKey)
-                    .then((_) => reload()),
-              )
-          : null,
-      onAddBack: threaded
-          ? (storylineId) => unawaited(
-                storylines
-                    .addThread(storylineId, source, threadKey)
-                    .then((_) => reload()),
-              )
-          : null,
-      onKeepInInbox: threaded
-          ? () => unawaited(
-                _keepThread(source, threadKey).then((_) => reload()),
-              )
-          : null,
-      onSendToLater: threaded
-          ? () => unawaited(
-                conversations
-                    .sendThreadToLater(source, threadKey)
-                    .then((_) => reload()),
-              )
-          : null,
+      onAddToStoryline: (source, threadKey) => setState(
+        () => _pickingStorylineForThread = (source: source, id: threadKey),
+      ),
+      onKeepInInbox: _keepThread,
       onEditRules: _openSettings,
     );
   }

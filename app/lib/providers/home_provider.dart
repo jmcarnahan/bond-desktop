@@ -54,6 +54,7 @@ String homeRowKey(HomeFeedRow row) => row.feedKey;
 typedef HomeSearchRunner = Future<MessageSearchResult> Function(
   String query, {
   bool includeDropped,
+  List<String> sources,
 });
 
 @immutable
@@ -798,9 +799,16 @@ final homeFeedProvider =
     // Read inside the closure, so the search stack — the embedding client and
     // everything it holds — is built the first time somebody actually asks a
     // question rather than every time the feed loads.
-    searchRunner: (query, {includeDropped = false}) => ref
-        .read(messageSearchProvider)
-        .search(query, includeDropped: includeDropped),
+    searchRunner: (
+      query, {
+      includeDropped = false,
+      sources = const ['email', 'teams'],
+    }) =>
+        ref.read(messageSearchProvider).search(
+              query,
+              includeDropped: includeDropped,
+              sources: sources,
+            ),
     bus: ref.watch(progressBusProvider),
   );
 });

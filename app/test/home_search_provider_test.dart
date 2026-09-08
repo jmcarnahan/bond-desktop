@@ -33,6 +33,7 @@ class _FakeRunner {
   Future<MessageSearchResult> call(
     String query, {
     bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
   }) {
     calls.add((query: query, includeDropped: includeDropped));
     final completer = Completer<MessageSearchResult>();

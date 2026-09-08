@@ -106,6 +106,11 @@ class MessageHistoryScreen extends StatefulWidget {
   /// door rather than a jump.
   final VoidCallback? onEditRules;
 
+  /// Whether to draw the pane's own title bar. False for a host that seats the
+  /// story under a header of its own — a side panel — and only wants the
+  /// sections.
+  final bool chrome;
+
   const MessageHistoryScreen({
     super.key,
     required this.history,
@@ -125,6 +130,7 @@ class MessageHistoryScreen extends StatefulWidget {
     this.onKeepInInbox,
     this.onSendToLater,
     this.onEditRules,
+    this.chrome = true,
   });
 
   static const ValueKey<String> openThreadKey =
@@ -170,6 +176,7 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (!widget.chrome) return _body();
     return PaneSurface(
       title: 'What happened',
       onBack: widget.onBack,

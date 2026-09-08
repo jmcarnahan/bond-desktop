@@ -313,39 +313,6 @@ void main() {
       expect(row.receivedAt, '2026-08-29T10:00:00Z');
     });
 
-    test('a hit carries the reasons the feed reads, over the same joins',
-        () async {
-      if (!available) return;
-      await seedCorpus();
-      await store.insertStoryline(
-        id: 'sl-1',
-        title: 'Acme renewal',
-        status: 'active',
-        createdBy: 'auto',
-      );
-      // The thread's membership only — the progress row's own pointer is
-      // never stamped here, so this also pins the fallback on the one reader
-      // that spells its own FROM.
-      await store.addStorylineMember(
-        'sl-1',
-        'email',
-        'conv-inv',
-        addedBy: 'auto',
-        evidence: 'Same invoice thread',
-      );
-
-      final result =
-          await MessageSearch(store, server.client).search('the invoice');
-
-      final row = (result as MessageSearchHits).hits.first.row;
-      expect(row.storylineId, 'sl-1');
-      expect(row.storylineTitle, 'Acme renewal');
-      expect(row.storylineEvidence, 'Same invoice thread');
-      expect(row.storylineAddedBy, 'auto');
-      expect(row.updatedAt, isNotEmpty);
-      expect(row.workOpen, false);
-    });
-
     test('honours the limit', () async {
       if (!available) return;
       await seedCorpus();
