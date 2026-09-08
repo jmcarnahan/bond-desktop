@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
 import '../theme/tokens.dart';
+import 'attachment_card.dart';
 import 'attachment_format.dart';
 
 /// The files somebody pinned to this room, under its name and one tap away —
@@ -13,8 +14,11 @@ import 'attachment_format.dart';
 /// it is a two-step, and it lives on the Files tab beside everything else the
 /// room holds — so this bar carries no ×.
 ///
-/// Phase 5 swaps these entries for the compact document cards; the bar's place
-/// and meaning do not change with them.
+/// Each entry is an [AttachmentCard] in its compact shape: one line saying what
+/// is pinned, and under it the model's one-sentence read of the document. The
+/// digest is the whole reason the shape changed — a pinned file is the one
+/// whose contents somebody keeps coming back for, so the bar that names it
+/// should say what is in it rather than making the reader open it to remember.
 class PinnedDocumentsBar extends StatelessWidget {
   final List<AttachmentRef> documents;
 
@@ -32,66 +36,23 @@ class PinnedDocumentsBar extends StatelessWidget {
   static ValueKey<String> entryKeyFor(AttachmentRef attachment) =>
       attachmentKey('pinned-entry', attachment);
 
-  /// A file name can be arbitrarily long; a bookmark bar of them cannot.
-  static const double _entryMaxWidth = 200;
-
   @override
   Widget build(BuildContext context) {
     if (documents.isEmpty) return const SizedBox.shrink();
+    final open = onOpen;
     return Wrap(
       key: barKey,
       spacing: BondSpacing.s8,
       runSpacing: BondSpacing.s4,
       children: [
-        for (final document in documents) _entry(document),
+        for (final document in documents)
+          AttachmentCard(
+            key: entryKeyFor(document),
+            attachment: document,
+            compact: true,
+            onTap: open == null ? null : () => open(document),
+          ),
       ],
-    );
-  }
-
-  Widget _entry(AttachmentRef document) {
-    final glyph = attachmentGlyph(
-      document.kind,
-      document.contentType,
-      name: document.name,
-    );
-    final open = onOpen;
-    // Its own transparent Material, because ink paints on the nearest Material
-    // ANCESTOR — which here is the room's opaque surface, where no hover could
-    // ever show.
-    return Material(
-      key: entryKeyFor(document),
-      type: MaterialType.transparency,
-      child: InkWell(
-        onTap: open == null ? null : () => open(document),
-        borderRadius: BondRadii.fullAll,
-        child: Container(
-          padding: const EdgeInsets.symmetric(
-            horizontal: BondSpacing.s8,
-            vertical: BondSpacing.s4,
-          ),
-          decoration: BoxDecoration(
-            color: BondColors.faintGround,
-            borderRadius: BondRadii.fullAll,
-            border: Border.all(color: BondColors.border),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Icon(Icons.push_pin_outlined, size: 12),
-              const SizedBox(width: BondSpacing.s4),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: _entryMaxWidth),
-                child: Text(
-                  '$glyph ${document.name ?? '(unnamed)'}',
-                  style: BondType.caption,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
     );
   }
 }

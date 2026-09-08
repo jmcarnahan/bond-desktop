@@ -1,6 +1,6 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
-import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/hover_actions.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/gestures.dart';
@@ -583,7 +583,7 @@ void main() {
       );
 
       final chips =
-          tester.widgetList<AttachmentChip>(find.byType(AttachmentChip));
+          tester.widgetList<AttachmentCard>(find.byType(AttachmentCard));
       expect(chips.where((c) => c.selected).length, 1);
       expect(chips.firstWhere((c) => c.selected).attachment.attachmentId, 'a1');
     });
@@ -603,7 +603,7 @@ void main() {
 
       expect(find.text('Terms.pdf'), findsOneWidget);
       expect(
-        tester.widget<AttachmentChip>(find.byType(AttachmentChip)).onTap,
+        tester.widget<AttachmentCard>(find.byType(AttachmentCard)).onTap,
         isNull,
       );
     });

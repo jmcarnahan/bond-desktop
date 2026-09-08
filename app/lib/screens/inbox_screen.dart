@@ -17,6 +17,7 @@ import '../providers/archive_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/drafts_inbox_provider.dart';
+import '../providers/files_provider.dart';
 import '../providers/home_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
@@ -45,6 +46,7 @@ import '../widgets/chips.dart';
 import '../widgets/composer.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/drafts_pane.dart';
+import '../widgets/files_pane.dart';
 import '../widgets/find_field.dart';
 import '../widgets/find_filter.dart';
 import '../widgets/bond_avatar.dart' show AvatarStack;
@@ -111,6 +113,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   static const double _twoPaneBreakpoint = 960;
 
   static const List<String> _sources = inboxSources;
+
+  /// The connectors every pane is scoped to right now.
+  ///
+  /// The source chips in the list column's header are the ONE control that
+  /// says which mailbox halves are in play, so a pane that took its own would
+  /// be a second answer to a question already on screen. Panes built from the
+  /// conversations list get this narrowing for free through `bySource`; the
+  /// ones that read the store themselves — the Files stop — ask here.
+  List<String> get _activeSources =>
+      _sourceFilter == null ? _sources : [_sourceFilter!];
 
   /// Slow enough to be invisible on a metered connection, fast enough that a
   /// reply that arrived while the user was reading feels like it just showed
@@ -182,6 +194,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   final TextEditingController _findText = TextEditingController();
   final FocusNode _findFocus = FocusNode(debugLabel: 'find');
   String _find = '';
+
+  /// The Files stop's own query box. Held here rather than in [FilesPane] for
+  /// the reason every other pane's controller is: the pane is rebuilt on every
+  /// answer, and a controller it owned would lose a half-typed query each time.
+  final TextEditingController _filesSearchText = TextEditingController();
 
   /// Whether the list column is showing only rows with something unread.
   /// Never touches a badge — see [AppRail.unreadOnly].
@@ -419,6 +436,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _sideComposerFocus.dispose();
     _findText.dispose();
     _findFocus.dispose();
+    _filesSearchText.dispose();
     super.dispose();
   }
 
@@ -479,6 +497,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // fresh ones, so a pane left alone for a minute would be listing work that
     // is already gone.
     ref.read(draftsInboxProvider.notifier).load();
+    // The shelf only when it is what the reader is looking at: it is a paged
+    // read over the whole mailbox, and running it on the minute for a pane
+    // nobody has open is a query for nothing.
+    if (_section == RailSection.files) {
+      ref.read(filesProvider.notifier).load(sources: _activeSources);
+    }
     await _reloadOpenThread();
   }
 
@@ -767,6 +791,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // the moment they are worth being current.
     if (section == RailSection.drafts) {
       ref.read(draftsInboxProvider.notifier).load();
+    }
+    // And the Files shelf, for the same reason: a sync lands documents while
+    // the reader is elsewhere, and arriving is the shelf's only chance to be
+    // current.
+    if (section == RailSection.files) {
+      ref.read(filesProvider.notifier).load(sources: _activeSources);
     }
     setState(() {
       _clearOverlays();
@@ -1358,6 +1388,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // waiting.
       pendingDraftCount:
           conversations.where((c) => c.pendingDraftCount > 0).length,
+      // The shelf's own state, so the rows here and the pills in the pane
+      // cannot disagree about which shelf is up.
+      filesKind: ref.watch(filesProvider).kind,
+      onSelectFilesKind: (kind) =>
+          ref.read(filesProvider.notifier).setKind(kind, sources: _activeSources),
       rooms: rooms,
       selectedRoomKey: _selectedRoomKey,
       onSelectRoom: _selectRoom,
@@ -1487,7 +1522,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         child: SourceFilterBar(
           selected: _sourceFilter,
           teamsAvailable: snapshot.data ?? true,
-          onSelected: (source) => setState(() => _sourceFilter = source),
+          onSelected: (source) {
+            setState(() => _sourceFilter = source);
+            // Every other pane is built from the already-filtered rows; the
+            // shelf reads the store itself, so the chips have to re-ask it.
+            if (_section == RailSection.files) {
+              ref.read(filesProvider.notifier).load(sources: _activeSources);
+            }
+          },
         ),
       ),
     );
@@ -2702,6 +2744,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       )),
       selectedAttachment: _sideAttachment,
       thumbnailFor: _thumbnailFor,
+      // The same path the file panel's own button takes — see
+      // [_useAttachmentInReply].
+      onUseInReply:
+          canReply ? (a) => _useAttachmentInReply(target, a) : null,
+      onOpenLink: (url) => unawaited(_launchExternal(url)),
     );
 
     // The composer sits OUTSIDE the panel, in this column: the panel renders a
@@ -2799,32 +2846,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         // Only where there is a composer to write into. Opening the box is
         // what makes the new draft visible; the spinner in it is the
         // notifier's own `generating`, so nothing here waits.
-        onUseInReply: canReply
-            ? () {
-                setState(() {
-                  // The box is always there; what has to be on screen is the
-                  // THREAD. A file opened from the MAIN thread leaves that
-                  // thread where it is; one opened from the thread beside
-                  // REPLACED it, so the thread comes back and the file goes —
-                  // the draft is what was asked for, and a draft written off
-                  // screen is nothing happening.
-                  if (!_isMainThread(from)) {
-                    _side = ThreadPanel(
-                      source: from.source,
-                      conversationKey: from.conversationKey,
-                    );
-                    _sideFull = false;
-                  }
-                });
-                unawaited(ref.read(draftProvider(from).notifier).generate(
-                      pinnedAttachmentIds: [attachment.attachmentId],
-                    ));
-                // The cursor goes where the draft will land, so the user is
-                // already in the box the words appear in.
-                (_isMainThread(from) ? _mainComposerFocus : _sideComposerFocus)
-                    .requestFocus();
-              }
-            : null,
+        onUseInReply:
+            canReply ? () => _useAttachmentInReply(from, attachment) : null,
         // Nowhere to pin is not a disabled button, it is no button: a thread in
         // no storyline has nothing to offer here.
         onPinToStoryline: pinTo == null
@@ -2834,6 +2857,37 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onOpenLink: (url) => unawaited(_launchExternal(url)),
       ),
     );
+  }
+
+  /// Puts one file into the reply being written for [from].
+  ///
+  /// One method rather than a closure per surface, because "use this file in
+  /// the reply" is asked from three places now — the preview panel's own
+  /// button, a card's hover strip in the transcript, and the same strip on the
+  /// thread's Files tab — and three copies of this would be three chances for
+  /// one of them to leave the draft written off screen.
+  void _useAttachmentInReply(DraftTarget from, AttachmentRef attachment) {
+    setState(() {
+      // The box is always there; what has to be on screen is the THREAD. A
+      // file opened from the MAIN thread leaves that thread where it is; one
+      // opened from the thread beside REPLACED it, so the thread comes back
+      // and the file goes — the draft is what was asked for, and a draft
+      // written off screen is nothing happening.
+      if (!_isMainThread(from)) {
+        _side = ThreadPanel(
+          source: from.source,
+          conversationKey: from.conversationKey,
+        );
+        _sideFull = false;
+      }
+    });
+    unawaited(ref.read(draftProvider(from).notifier).generate(
+          pinnedAttachmentIds: [attachment.attachmentId],
+        ));
+    // The cursor goes where the draft will land, so the user is already in the
+    // box the words appear in.
+    (_isMainThread(from) ? _mainComposerFocus : _sideComposerFocus)
+        .requestFocus();
   }
 
   /// A conversation beside the storyline it belongs to.
@@ -3468,6 +3522,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   Widget _overviewBody(RailSection section, List<Conversation> conversations) {
     if (section == RailSection.storylines) return _storylinesOverview();
+    // Its own early return, on the archive arm's precedent: the shelf has a
+    // search box and a pill row above its list, so it is a column rather than
+    // a `(label, rows)` pair the list pane could draw.
+    if (section == RailSection.files) return _filesPane();
     if (section == RailSection.archive) {
       final archive = ref.watch(archiveProvider);
       return ArchivePane(
@@ -3543,6 +3601,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // exist so the analyzer keeps this exhaustive when a stop is added.
       RailSection.home ||
       RailSection.drafts ||
+      RailSection.files ||
       RailSection.archive ||
       RailSection.storylines ||
       RailSection.needsYou ||
@@ -3559,6 +3618,51 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onSelect: (source, id) => _select(id, source: source),
       sectionsOverride: sections,
       processingSince: ref.watch(sessionStartProvider),
+    );
+  }
+
+  /// Every document in the mailbox, on one shelf.
+  ///
+  /// A file opens BESIDE with its thread carried along, which is what makes
+  /// Use in reply and pinning work from here: the shelf knows which
+  /// conversation each file came with, so the preview panel has the same
+  /// origin it would have had if the file had been opened from the transcript.
+  Widget _filesPane() {
+    final files = ref.watch(filesProvider);
+    return FilesPane(
+      rows: files.rows,
+      loaded: files.loaded,
+      loadingMore: files.loadingMore,
+      atEnd: files.atEnd,
+      error: files.error,
+      kind: files.kind,
+      onKind: (kind) => ref
+          .read(filesProvider.notifier)
+          .setKind(kind, sources: _activeSources),
+      searchController: _filesSearchText,
+      search: files.search,
+      searchQuery: files.searchQuery,
+      searching: files.searching,
+      searchNotice: files.searchNotice,
+      onSearch: (query) => ref
+          .read(filesProvider.notifier)
+          .submitSearch(query, sources: _activeSources),
+      onExitSearch: () {
+        _filesSearchText.clear();
+        ref.read(filesProvider.notifier).exitSearch();
+      },
+      thumbnailFor: _thumbnailFor,
+      onOpen: (row) => _openBeside(FilePanel(
+        attachment: row.ref,
+        from: row.conversationKey == null
+            ? null
+            : (source: row.source, conversationKey: row.conversationKey!),
+      )),
+      onOpenThread: _openThreadBeside,
+      onOpenLink: (url) => unawaited(_launchExternal(url)),
+      onLoadMore: () =>
+          ref.read(filesProvider.notifier).loadMore(sources: _activeSources),
+      now: DateTime.now(),
     );
   }
 

@@ -89,9 +89,10 @@ final class FindRoom extends FindTarget {
 /// dropped, which is why the rail must never be "optimised" into that order.
 /// A test pins the two against each other.
 ///
-/// Later days and the AI stop answer null. A day is a bucket rather than a
-/// thing, and the AI pane is one screen with no list beside it — there is no
-/// first row for Enter to mean.
+/// Later days, the Files stop and the AI stop answer null. A day is a bucket
+/// rather than a thing, the Files column is a list of SHELVES rather than of
+/// rows, and the AI pane is one screen with no list beside it — none of the
+/// three has a first row for Enter to mean.
 FindTarget? firstFindTarget({
   required RailSection scope,
   required List<Conversation> conversations,
@@ -144,6 +145,7 @@ FindTarget? firstFindTarget({
       return firstStoryline();
     case RailSection.people:
       return firstRoom();
+    case RailSection.files:
     case RailSection.archive:
     case RailSection.ai:
       return null;

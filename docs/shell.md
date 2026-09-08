@@ -51,6 +51,7 @@ transcript's own 420 minimum, with nothing to catch it.
 | Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count | the Needs You overview |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
 | People | `people_outline` | one row per person room | the flat list of live threads nobody has claimed, or the open room |
+| Files | `folder_outlined` | the four kinds as rows — All · Documents · Images · Links | `FilesPane` — every document in the mailbox, by day |
 | Later | `schedule` | one row per deferred day | `ArchivePane` — Later · Done · Dropped |
 | AI | `auto_awesome` | one line: 'Models, rules and the log' | `SettingsScreen(scope: ai)`, titled 'AI' |
 
@@ -65,10 +66,21 @@ already offering. The row has nothing under it, because the pane IS the list and
 a column repeating it would be a second copy always a beat behind.
 
 `RailSection` is the vocabulary for all of this
-(`{ home, needsYou, drafts, storylines, people, archive, ai }`). `archive` keeps
-its enum name and is **labelled 'Later'**: the column the store reads is
-`bucket = 'later'`, and renaming the constant would rename it everywhere.
-`IconRail.stops` is an explicit ordered list and does NOT contain `drafts`.
+(`{ home, needsYou, drafts, storylines, people, files, archive, ai }`).
+`archive` keeps its enum name and is **labelled 'Later'**: the column the store
+reads is `bucket = 'later'`, and renaming the constant would rename it
+everywhere. `IconRail.stops` is an explicit ordered list: it DOES contain
+`files`, between People and Later, and does NOT contain `drafts`.
+
+**The Files column is a list of shelves, not of rows.** The four kinds are the
+whole column, with the one that is up highlighted, and there are no counts on
+them — a number per kind is a fourth query for something nobody acts on, and
+the pane's own pills already say which shelf is showing. The kind itself lives
+in `filesProvider`, so the rows and the pills cannot disagree about it. Neither
+Find nor the unread toggle touches them, on the Drafts & sent row's precedent:
+there is nothing here to narrow. The source chips in the column header DO scope
+the shelf — they scope every pane — which is why `FilesPane` has no source bar
+of its own.
 
 On Home the column is the whole stack and every section collapses. On any other
 stop it is that one section, expanded, with its header row and **no chevron** —
@@ -211,8 +223,16 @@ message lives on that message, never up here.
 more than one tab — one pill is a label pretending to be a choice. Each pill
 carries `RoomHeader.tabKey(value)`. A storyline's tabs are **Messages | Files
 (n) | About**: the catch-up, the pinned bar and the spine; then the whole
-document shelf; then the charter and the member list. Thread tabs arrive in
-Phase 5.
+document shelf; then the charter and the member list.
+
+A **thread's** tabs are **Messages | Files (n)**, and only when it carries
+files — with one tab the header draws no tab row, so a fileless thread looks
+exactly as it always did. The Files list is DERIVED from the transcript
+(`threadFiles(messages)`), not queried: `loadThread` already loads the whole
+thread and hydrates every message's attachments, so a second query would be a
+second answer to one question, with a loading state the transcript beside it
+never has. The CTA banner stays above both tabs — what a thread wants does not
+stop being true because somebody went looking for an attachment.
 
 **The hover strip** (`app/lib/widgets/hover_actions.dart`) puts **Reply** and
 **Suggest a reply** at an inbound row's top-right while the mouse is over it.
@@ -401,7 +421,21 @@ the person room's header `AvatarStack`.
   `pump(Duration(milliseconds: 400))` to run the opening animation out; the
   same pair runs the closing one out after picking an item. A panel-only test
   with no `InboxScreen` under it can use `pumpAndSettle` instead.
-- **Tabs** are selected by `find.byKey(RoomHeader.tabKey(StorylineTab.files))`.
+- **Tabs** are selected by `find.byKey(RoomHeader.tabKey(StorylineTab.files))`,
+  and a thread's by `RoomHeader.tabKey(ThreadTab.files)`. Scope a `find.text`
+  for the word `Files` — the icon rail's own stop wears it too.
+- **Files** in a transcript are `AttachmentCard`s inside `MessageRow.cardsKey`;
+  a card is reached by `AttachmentCard.keyFor(ref)` and its rendering by
+  `imageKeyFor(ref)`. Two or more pictures are `ImageGrid.gridKey` (tiles by
+  `ImageGrid.tileKeyFor`, the counter by `overflowKey`); a link is
+  `LinkUnfurl.keyFor(ref)` with `openLinkKeyFor(ref)` for its button. The
+  digest line keeps the key it always had, `attachmentKey('digest', ref)`,
+  wherever it is drawn.
+- **The Files stop**: `FilesPane.kindPillsKey` scopes the pill finders (the
+  source chips carry an `All` of their own), `FilesPane.rowKeyFor(row)` names
+  one file, `threadLinkKeyFor(row)` its way back into the conversation, and
+  `emptyKey` / `loadMoreKey` the two ends of the list. The rail's kind rows are
+  `ValueKey('files-kind-<name>')`.
 - **Find** is reached by `find.byKey(FindField.fieldKey)`. `enterText` then
   `pump()` narrows the column; `tester.testTextInput.receiveAction(
   TextInputAction.search)` is Enter. ⌘K is four events —

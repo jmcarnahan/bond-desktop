@@ -3,14 +3,17 @@ import 'dart:typed_data';
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/profile_photos.dart';
+import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/bond_avatar.dart';
-import 'package:bond_inbox/widgets/attachment_chip_row.dart';
 import 'package:bond_inbox/widgets/attachment_format.dart';
 import 'package:bond_inbox/widgets/chips.dart';
+import 'package:bond_inbox/widgets/image_grid.dart';
 import 'package:bond_inbox/widgets/inline_image_thumb.dart';
+import 'package:bond_inbox/widgets/link_unfurl.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/time_format.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -658,8 +661,8 @@ void main() {
         ]),
       )));
 
-      expect(find.byKey(AttachmentChipRow.rowKey), findsOneWidget);
-      expect(find.byType(AttachmentChip), findsNWidgets(2));
+      expect(find.byKey(MessageRow.cardsKey), findsOneWidget);
+      expect(find.byType(AttachmentCard), findsNWidgets(2));
       expect(find.text('Terms.pdf'), findsOneWidget);
       expect(find.text('Schedule.xlsx'), findsOneWidget);
     });
@@ -676,7 +679,9 @@ void main() {
         ),
       )));
 
-      expect(find.byKey(AttachmentChipRow.rowKey), findsNothing);
+      // A file placed IN the sentence stays a chip there — a 320px card
+      // halfway through a paragraph is not a paragraph.
+      expect(find.byKey(MessageRow.cardsKey), findsNothing);
       expect(find.byType(AttachmentChip), findsOneWidget);
       expect(find.text('Signed copy'), findsOneWidget);
       expect(find.text('let me know'), findsOneWidget);
@@ -739,12 +744,12 @@ void main() {
 
       expect(find.byKey(MessageRow.collapsedAttachmentHintKey), findsOneWidget);
       expect(find.text('📎 2 files'), findsOneWidget);
-      expect(find.byType(AttachmentChip), findsNothing);
+      expect(find.byType(AttachmentCard), findsNothing);
 
       await tester.tap(find.text('Eric Nolan'));
       await tester.pump();
       expect(find.byKey(MessageRow.collapsedAttachmentHintKey), findsNothing);
-      expect(find.byType(AttachmentChip), findsNWidgets(2));
+      expect(find.byType(AttachmentCard), findsNWidgets(2));
     });
 
     testWidgets('one file says one file', (tester) async {
@@ -786,7 +791,7 @@ void main() {
       )));
 
       expect(
-        tester.widget<AttachmentChip>(find.byType(AttachmentChip)).selected,
+        tester.widget<AttachmentCard>(find.byType(AttachmentCard)).selected,
         isTrue,
       );
       await tester.tap(find.text('Terms.pdf'));
@@ -812,8 +817,9 @@ void main() {
         message: _msg(attachments: [file]),
       )));
 
+      // The card is the file, so the line no longer has to name it.
       expect(
-        find.text('AI: Terms.pdf: Fixed 4.25% for sixty months.'),
+        find.text('AI: Fixed 4.25% for sixty months.'),
         findsOneWidget,
       );
       expect(find.byKey(attachmentKey('digest', file)), findsOneWidget);
@@ -875,7 +881,7 @@ void main() {
       )));
 
       expect(find.textContaining('AI: '), findsOneWidget);
-      expect(find.text('AI: Terms.pdf: The renewal terms.'), findsOneWidget);
+      expect(find.text('AI: The renewal terms.'), findsOneWidget);
     });
 
     testWidgets('a long digest never outgrows two lines', (tester) async {
@@ -923,7 +929,7 @@ void main() {
   });
 
   group('a document with a picture', () {
-    testWidgets('a document with a picture shows it above its chip',
+    testWidgets('a document with a picture shows it on its card',
         (tester) async {
       final document = ref(name: 'Terms.pdf');
       await tester.pumpWidget(_host(MessageRow(
@@ -932,34 +938,35 @@ void main() {
         onOpenAttachment: (_) {},
       )));
 
-      expect(find.byKey(InlineImageThumb.keyFor(document)), findsOneWidget);
-      // The chip is still what names it: the picture carries no size and no
-      // file name.
-      expect(find.byType(AttachmentChip), findsOneWidget);
+      // The rendering is INSIDE the card now rather than a thumbnail above
+      // it: one thing on screen per file, carrying the picture, the name and
+      // the size together.
+      expect(find.byKey(AttachmentCard.imageKeyFor(document)), findsOneWidget);
+      expect(find.byType(AttachmentCard), findsOneWidget);
       expect(find.text('Terms.pdf'), findsOneWidget);
     });
 
-    testWidgets('a document with no picture is just its chip', (tester) async {
+    testWidgets('a document with no picture is a card with its glyph',
+        (tester) async {
       final document = ref(name: 'Terms.pdf');
       await tester.pumpWidget(_host(MessageRow(
         message: _msg(bodyText: 'The terms.', attachments: [document]),
         thumbnailFor: (a) => null,
       )));
 
-      // No frame, no dashed placeholder — the chip below IS the file.
+      // No frame and no dashed placeholder — the card IS the file, and it
+      // wears the file's own mark where a rendering would have gone.
       expect(find.byType(InlineImageThumb), findsNothing);
-      expect(find.byType(AttachmentChip), findsOneWidget);
+      expect(find.byKey(AttachmentCard.imageKeyFor(document)), findsNothing);
+      expect(find.byType(AttachmentCard), findsOneWidget);
     });
 
     testWidgets('a link never asks for a picture', (tester) async {
       final asked = <String>[];
+      final link =
+          ref(kind: 'reference', name: 'Budget.xlsx', sourceUrl: 'https://x');
       await tester.pumpWidget(_host(MessageRow(
-        message: _msg(
-          bodyText: 'The budget.',
-          attachments: [
-            ref(kind: 'reference', name: 'Budget.xlsx', sourceUrl: 'https://x'),
-          ],
-        ),
+        message: _msg(bodyText: 'The budget.', attachments: [link]),
         thumbnailFor: (a) {
           asked.add(a.attachmentId);
           return null;
@@ -967,16 +974,16 @@ void main() {
       )));
 
       expect(asked, isEmpty);
-      expect(find.byType(AttachmentChip), findsOneWidget);
+      // And it is drawn as what it is: a file that lives somewhere else.
+      expect(find.byKey(LinkUnfurl.keyFor(link)), findsOneWidget);
+      expect(find.byType(AttachmentCard), findsNothing);
     });
 
-    testWidgets('a spreadsheet is a chip and nothing more', (tester) async {
+    testWidgets('a spreadsheet is a card and nothing more', (tester) async {
       final asked = <String>[];
+      final sheet = ref(name: 'Quote.xlsx', contentType: null);
       await tester.pumpWidget(_host(MessageRow(
-        message: _msg(
-          bodyText: 'The quote.',
-          attachments: [ref(name: 'Quote.xlsx', contentType: null)],
-        ),
+        message: _msg(bodyText: 'The quote.', attachments: [sheet]),
         thumbnailFor: (a) {
           asked.add(a.attachmentId);
           return MemoryImage(Uint8List.fromList(onePixelPng));
@@ -985,6 +992,8 @@ void main() {
 
       expect(asked, isEmpty);
       expect(find.byType(InlineImageThumb), findsNothing);
+      expect(find.byType(AttachmentCard), findsOneWidget);
+      expect(find.byKey(AttachmentCard.imageKeyFor(sheet)), findsNothing);
     });
 
     testWidgets('a folded row still counts it once', (tester) async {
@@ -999,6 +1008,84 @@ void main() {
       )));
 
       expect(find.text('📎 1 file'), findsOneWidget);
+    });
+  });
+
+  group('pictures on a message', () {
+    testWidgets('one picture is a picture', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final shot = imageRef(attachmentId: 'i1', isInline: false);
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [shot]),
+      )));
+
+      expect(find.byKey(InlineImageThumb.keyFor(shot)), findsOneWidget);
+      expect(find.byKey(ImageGrid.gridKey), findsNothing);
+    });
+
+    testWidgets('two are a grid', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final first = imageRef(attachmentId: 'i1', isInline: false);
+      final second =
+          imageRef(attachmentId: 'i2', ordinal: 1, isInline: false);
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [first, second]),
+      )));
+
+      expect(find.byKey(ImageGrid.gridKey), findsOneWidget);
+      expect(find.byKey(ImageGrid.tileKeyFor(first)), findsOneWidget);
+      expect(find.byKey(ImageGrid.tileKeyFor(second)), findsOneWidget);
+      // The single-thumbnail shape is gone once there are two of them.
+      expect(find.byKey(InlineImageThumb.keyFor(first)), findsNothing);
+    });
+  });
+
+  group('use in reply, from the card', () {
+    testWidgets('the pointer offers it, and the host is handed the file',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final file = ref(attachmentId: 'a1', name: 'Terms.pdf');
+      final used = <String>[];
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [file]),
+        onUseInReply: (a) => used.add(a.attachmentId),
+      )));
+
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await gesture.moveTo(tester.getCenter(find.byType(AttachmentCard)));
+      await tester.pump();
+
+      await tester.tap(find.byKey(AttachmentCard.useInReplyKeyFor(file)));
+      await tester.pump();
+
+      expect(used, ['a1']);
+    });
+
+    testWidgets('a host that cannot reply offers nothing on hover',
+        (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final file = ref(attachmentId: 'a1', name: 'Terms.pdf');
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(attachments: [file]),
+      )));
+
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await gesture.moveTo(tester.getCenter(find.byType(AttachmentCard)));
+      await tester.pump();
+
+      expect(find.byKey(AttachmentCard.useInReplyKeyFor(file)), findsNothing);
     });
   });
 

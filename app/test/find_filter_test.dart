@@ -218,8 +218,14 @@ void main() {
       expect((storyline as FindStoryline).id, 's1');
     });
 
-    test('Later and AI have no first row for Enter to mean', () {
-      for (final scope in const [RailSection.archive, RailSection.ai]) {
+    test('Later, Files and AI have no first row for Enter to mean', () {
+      // A Files column is a list of SHELVES rather than of rows — there is
+      // nothing in it for Enter to open.
+      for (final scope in const [
+        RailSection.archive,
+        RailSection.files,
+        RailSection.ai,
+      ]) {
         expect(
           firstFindTarget(
             scope: scope,

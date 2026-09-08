@@ -309,8 +309,15 @@ void main() {
 
     await openShelf(tester);
 
-    // The bare label, because there is no count to give.
-    expect(find.text('Files'), findsOneWidget);
+    // The bare label, because there is no count to give. Scoped to the tab
+    // itself: the icon rail's own Files stop wears the same word.
+    expect(
+      find.descendant(
+        of: find.byKey(RoomHeader.tabKey(StorylineTab.files)),
+        matching: find.text('Files'),
+      ),
+      findsOneWidget,
+    );
     expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsOneWidget);
     await settleQueues(tester);
   });

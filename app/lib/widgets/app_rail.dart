@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/files_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
@@ -23,6 +24,11 @@ import 'time_format.dart';
 /// column it reads is `bucket = 'later'`, and renaming the constant would
 /// rename it everywhere the store spells it.
 ///
+/// [RailSection.files] sits between People and Later because it is the last of
+/// the piles that are about the MAIL rather than about the app: everything
+/// above it is a way of asking who owes what, and this one asks where a
+/// document went.
+///
 /// [RailSection.drafts] is the one destination that is NOT a stop on the icon
 /// rail. It is a row in the Home stack — see `IconRail.stops`, which is an
 /// explicit list and does not contain it — because what it holds is the
@@ -30,7 +36,16 @@ import 'time_format.dart';
 /// list that is usually empty would cost a permanent stop for an occasional
 /// one. While its pane is up the icon rail lights Home, which is the stack the
 /// row lives in.
-enum RailSection { home, needsYou, drafts, storylines, people, archive, ai }
+enum RailSection {
+  home,
+  needsYou,
+  drafts,
+  storylines,
+  people,
+  files,
+  archive,
+  ai
+}
 
 extension RailSectionLabel on RailSection {
   String get label => switch (this) {
@@ -39,6 +54,7 @@ extension RailSectionLabel on RailSection {
         RailSection.drafts => 'Drafts & sent',
         RailSection.storylines => 'Storylines',
         RailSection.people => 'People',
+        RailSection.files => 'Files',
         RailSection.archive => 'Later',
         RailSection.ai => 'AI',
       };
@@ -370,6 +386,15 @@ class AppRail extends StatefulWidget {
   /// same list, and the screen is what holds it.
   final int pendingDraftCount;
 
+  /// Which shelf the Files stop is showing. Held by the screen's provider
+  /// rather than here, because the pane's own pills change the same fact and
+  /// two controls holding one answer is how they come to disagree.
+  final FilesKind filesKind;
+
+  /// Null leaves the four rows drawn but inert, the rule every other row on
+  /// this rail follows.
+  final ValueChanged<FilesKind>? onSelectFilesKind;
+
   const AppRail({
     super.key,
     required this.conversations,
@@ -398,6 +423,8 @@ class AppRail extends StatefulWidget {
     this.find = '',
     this.unreadOnly = false,
     this.pendingDraftCount = 0,
+    this.filesKind = FilesKind.all,
+    this.onSelectFilesKind,
   });
 
   /// Fixed: the rail is a landmark, not a resizable pane.
@@ -470,6 +497,8 @@ class _AppRailState extends State<AppRail> {
         return _storylinesSection(collapsible: false);
       case RailSection.people:
         return _peopleSection(collapsible: false);
+      case RailSection.files:
+        return _filesSection();
       case RailSection.archive:
         return _laterSection(collapsible: false);
       case RailSection.ai:
@@ -576,6 +605,64 @@ class _AppRailState extends State<AppRail> {
             _roomItem(room),
       ],
       placeholder: 'Nobody is waiting on anything',
+    );
+  }
+
+  /// The four shelves, as rows.
+  ///
+  /// No counts on them, unlike Later's days: a count per kind is a fourth
+  /// query for a number nobody acts on, and the pane's own pills already say
+  /// which shelf is up. It does not collapse, because it IS the column here —
+  /// a chevron that emptied it would be an affordance that lied.
+  ///
+  /// Neither Find nor the unread toggle touches it, on the drafts section's
+  /// precedent: there is nothing here to narrow, and a row that vanished while
+  /// the reader typed a colleague's name would take the way into a shelf with
+  /// it.
+  List<Widget> _filesSection() => _section(
+        RailSection.files,
+        collapsible: false,
+        rows: [
+          for (final kind in FilesKind.values) _filesKindItem(kind),
+        ],
+      );
+
+  Widget _filesKindItem(FilesKind kind) {
+    final selected = kind == widget.filesKind;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
+      child: Material(
+        key: ValueKey('files-kind-${kind.name}'),
+        color: selected ? BondColors.onDarkTint : BondColors.rail,
+        borderRadius: BondRadii.smAll,
+        child: InkWell(
+          onTap: widget.onSelectFilesKind == null
+              ? null
+              : () => widget.onSelectFilesKind!(kind),
+          borderRadius: BondRadii.smAll,
+          hoverColor: BondColors.onDarkFaint,
+          child: SizedBox(
+            height: _rowHeight,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  kind.label,
+                  style: BondType.small.copyWith(
+                    color: selected
+                        ? BondColors.onDarkPrimary
+                        : BondColors.onDarkSecondary,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 

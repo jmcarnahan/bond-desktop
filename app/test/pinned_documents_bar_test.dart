@@ -43,7 +43,7 @@ void main() {
     expect(find.byKey(PinnedDocumentsBar.entryKeyFor(quote)), findsOneWidget);
     expect(find.byKey(PinnedDocumentsBar.entryKeyFor(brief)), findsOneWidget);
     // The glyph rides with the name, the way it does on every other chip.
-    expect(find.text('📕 Quote.pdf'), findsOneWidget);
+    expect(find.text('📌 📕 Quote.pdf'), findsOneWidget);
     // No way to unpin from here: that question belongs beside the whole shelf.
     expect(find.byIcon(Icons.close), findsNothing);
   });
@@ -82,6 +82,6 @@ void main() {
     await tester.pump();
 
     expect(tester.takeException(), isNull);
-    expect(find.text('📕 Quote.pdf'), findsOneWidget);
+    expect(find.text('📌 📕 Quote.pdf'), findsOneWidget);
   });
 }

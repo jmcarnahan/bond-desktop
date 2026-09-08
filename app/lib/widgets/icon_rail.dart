@@ -10,7 +10,7 @@ import 'bond_avatar.dart';
 /// foot of it.
 ///
 /// Two columns rather than one, because the old single rail was doing two
-/// jobs: WHERE you are (six destinations, always visible, never scrolling) and
+/// jobs: WHERE you are (seven destinations, always visible, never scrolling) and
 /// WHAT is there (a list that scrolls and changes with the destination). This
 /// is the first job. It never scrolls and it never changes.
 ///
@@ -77,6 +77,7 @@ class IconRail extends StatelessWidget {
     (RailSection.needsYou, Icons.notifications_outlined),
     (RailSection.storylines, Icons.tag),
     (RailSection.people, Icons.people_outline),
+    (RailSection.files, Icons.folder_outlined),
     (RailSection.archive, Icons.schedule),
     (RailSection.ai, Icons.auto_awesome),
   ];
@@ -143,8 +144,8 @@ class IconRail extends StatelessWidget {
                         children: [
                           Icon(icon, size: 20, color: ink),
                           const SizedBox(height: 2),
-                          // The label is what stops six similar glyphs being a
-                          // guessing game. It clips before the rail widens:
+                          // The label is what stops seven similar glyphs being
+                          // a guessing game. It clips before the rail widens:
                           // the tooltip carries the whole word.
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 2),

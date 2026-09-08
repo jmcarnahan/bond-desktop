@@ -1,3 +1,4 @@
+import 'package:bond_inbox/models/files_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/theme/tokens.dart';
@@ -1660,6 +1661,87 @@ void main() {
       expect((target as FindThread).conversationKey, 'b');
       expect(find.text('Sign the invoice · Priya Raman'), findsOneWidget);
       expect(find.text('Confirm the launch date · Eric Vance'), findsNothing);
+    });
+  });
+
+  group('AppRail on the Files stop', () {
+    Future<void> pumpRail(
+      WidgetTester tester, {
+      FilesKind filesKind = FilesKind.all,
+      ValueChanged<FilesKind>? onSelectFilesKind,
+      String find = '',
+    }) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(AppRail(
+        header: const SizedBox(),
+        scope: RailSection.files,
+        rooms: const [],
+        onSelectRoom: (_) {},
+        conversations: const [],
+        selectedId: null,
+        selectedSection: RailSection.files,
+        onSelectConversation: (_, _) {},
+        onSelectSection: (_) {},
+        filesKind: filesKind,
+        onSelectFilesKind: onSelectFilesKind,
+        find: find,
+      )));
+    }
+
+    testWidgets('the column is the four shelves, and nothing else',
+        (tester) async {
+      await pumpRail(tester);
+
+      for (final kind in FilesKind.values) {
+        expect(
+          find.byKey(ValueKey('files-kind-${kind.name}')),
+          findsOneWidget,
+          reason: kind.name,
+        );
+      }
+      // No counts: a number per shelf is a fourth query for something nobody
+      // acts on.
+      expect(find.text('All'), findsOneWidget);
+      expect(find.textContaining('All ('), findsNothing);
+    });
+
+    testWidgets('the shelf that is up is the one lit', (tester) async {
+      await pumpRail(tester, filesKind: FilesKind.images);
+
+      expect(
+        tester.widget<Text>(find.text('Images')).style?.color,
+        BondColors.onDarkPrimary,
+      );
+      expect(
+        tester.widget<Text>(find.text('Links')).style?.color,
+        BondColors.onDarkSecondary,
+      );
+    });
+
+    testWidgets('picking one tells the host which', (tester) async {
+      final picked = <FilesKind>[];
+      await pumpRail(tester, onSelectFilesKind: picked.add);
+
+      await tester.tap(find.byKey(const ValueKey('files-kind-links')));
+      await tester.pump();
+
+      expect(picked, [FilesKind.links]);
+    });
+
+    testWidgets('Find leaves the shelves alone', (tester) async {
+      // There is nothing here to narrow, and a row that vanished while the
+      // reader typed a colleague's name would take the way into a shelf with
+      // it — the drafts section's rule.
+      await pumpRail(tester, find: 'invoice');
+
+      for (final kind in FilesKind.values) {
+        expect(
+          find.byKey(ValueKey('files-kind-${kind.name}')),
+          findsOneWidget,
+          reason: kind.name,
+        );
+      }
     });
   });
 }

@@ -11,7 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// is no sixty-second timer here, and the menu opens on an animation that has
 /// to finish before its items are tappable.
 
-/// Loose height so all six stops lay out; the rail sizes its own width.
+/// Loose height so all seven stops lay out; the rail sizes its own width.
 Widget _host(Widget rail) => MaterialApp(
       home: Scaffold(
         body: Row(children: [rail, const Expanded(child: SizedBox())]),
@@ -50,7 +50,7 @@ void main() {
   }
 
   group('the stops', () {
-    testWidgets('all six, each with its label', (tester) async {
+    testWidgets('all seven, each with its label', (tester) async {
       await pumpRail(tester);
 
       for (final label in const [
@@ -58,11 +58,28 @@ void main() {
         'Needs You',
         'Storylines',
         'People',
+        'Files',
         'Later',
         'AI',
       ]) {
         expect(find.text(label), findsOneWidget, reason: label);
       }
+    });
+
+    testWidgets('Files sits between People and Later', (tester) async {
+      // Order is what the reader navigates by, and `stops` is an explicit list
+      // so it cannot drift: Files is the last of the piles that are about the
+      // mail, and Later is where things go to be dealt with afterwards.
+      final sections = [for (final (section, _) in IconRail.stops) section];
+
+      expect(
+        sections.indexOf(RailSection.files),
+        sections.indexOf(RailSection.people) + 1,
+      );
+      expect(
+        sections.indexOf(RailSection.archive),
+        sections.indexOf(RailSection.files) + 1,
+      );
     });
 
     testWidgets('and Drafts & sent is deliberately not one of them',

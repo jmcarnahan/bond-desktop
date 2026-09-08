@@ -18,7 +18,7 @@ import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/services/attachments/attachment_bytes.dart';
 import 'package:bond_inbox/services/attachments/xlsx_reader.dart';
-import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
@@ -383,7 +383,7 @@ void main() {
       await pumpScreen(tester, attachmentBytes: FakeAttachmentBytes());
 
       await openChat(tester);
-      await tester.tap(find.byType(AttachmentChip));
+      await tester.tap(find.byType(AttachmentCard));
       await tester.pump();
       await tester.pump();
 
@@ -403,7 +403,7 @@ void main() {
       );
 
       await openChat(tester);
-      await tester.tap(find.byType(AttachmentChip));
+      await tester.tap(find.byType(AttachmentCard));
       await tester.pump();
       await tester.pump();
 

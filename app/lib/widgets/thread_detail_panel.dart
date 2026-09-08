@@ -5,12 +5,51 @@ import '../models/message_models.dart';
 import '../models/open_asks.dart';
 import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
+import 'attachment_card.dart';
+import 'attachment_format.dart';
 import 'chips.dart';
 import 'hover_actions.dart';
 import 'inline_alert.dart';
+import 'link_unfurl.dart';
 import 'message_row.dart';
+import 'preview/preview_kind.dart';
 import 'room_header.dart';
 import 'time_format.dart';
+
+/// The two halves of a thread: what was said, and what came with it.
+enum ThreadTab { messages, files }
+
+/// The kinds that live somewhere else rather than on the message — drawn as
+/// unfurls on the Files tab exactly as they are in the transcript.
+const Set<String> _linkKinds = {'reference', 'message_reference', 'card'};
+
+/// Every file this thread carried, newest message first.
+///
+/// DERIVED from the transcript rather than queried. `MessageStore.loadThread`
+/// loads the WHOLE thread with no limit and hydrates every message's
+/// attachments, so the list is already in hand; a second query would be a
+/// second answer to one question, with a loading state the transcript beside
+/// it never has and a window in which the tab's count and the tab's contents
+/// disagree.
+///
+/// Inline images are left out: a signature logo is not a file anybody sent,
+/// which is the same rule the Documents shelf and the row's own fold count
+/// follow.
+///
+/// Messages arrive oldest-first, so the walk is reversed; within one message
+/// the connector's own `ordinal` is the order, because that is the order the
+/// sender attached them in.
+List<AttachmentRef> threadFiles(List<Message> messages) {
+  final files = <AttachmentRef>[];
+  for (final message in messages.reversed) {
+    final carried = [
+      for (final attachment in message.attachments)
+        if (!attachment.isInline) attachment,
+    ]..sort((a, b) => a.ordinal.compareTo(b.ordinal));
+    files.addAll(carried);
+  }
+  return files;
+}
 
 /// The thread view: the main pane's whole content once a thread is open.
 ///
@@ -21,7 +60,13 @@ import 'time_format.dart';
 /// It renders a transcript and a header, and nothing else: the composer is
 /// docked UNDER this panel by the host, which is what keeps the panel ignorant
 /// of drafts and sending.
-class ThreadDetailPanel extends StatelessWidget {
+///
+/// A thread carrying files wears TABS — Messages and Files (n) — because "where
+/// is that attachment" is a question about the whole conversation rather than
+/// about any one message in it, and scrolling a transcript is the wrong way to
+/// answer it. A thread with no files draws no tab row at all and looks exactly
+/// as it always did.
+class ThreadDetailPanel extends StatefulWidget {
   final Conversation conversation;
   final List<Message> messages;
 
@@ -111,6 +156,15 @@ class ThreadDetailPanel extends StatelessWidget {
   /// draws initials and asks nothing.
   final ProfilePhotos? photos;
 
+  /// Puts one of the thread's files into the reply being written — what the
+  /// card's hover strip offers, in the transcript and on the Files tab alike.
+  /// Null leaves the strip off, for a host with no box under the thread.
+  final void Function(AttachmentRef attachment)? onUseInReply;
+
+  /// Hands a link's address to the operating system — the unfurl's `Open link`.
+  /// Null draws no button.
+  final void Function(String url)? onOpenLink;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -131,7 +185,20 @@ class ThreadDetailPanel extends StatelessWidget {
     this.selectedAttachment,
     this.thumbnailFor,
     this.photos,
+    this.onUseInReply,
+    this.onOpenLink,
   });
+
+  @override
+  State<ThreadDetailPanel> createState() => _ThreadDetailPanelState();
+}
+
+class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
+  /// Which half of the thread is showing. Seeded on Messages and kept for the
+  /// life of the panel — the storyline's own `_tab` precedent: a reader who
+  /// went looking for a file and came back to the words has not asked to be
+  /// put back on the Files tab by the next sync.
+  ThreadTab _tab = ThreadTab.messages;
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
   /// does not turn every message into one unreadable line.
@@ -162,11 +229,11 @@ class ThreadDetailPanel extends StatelessWidget {
     // Anything but "needs reply" closes them: without this, a send that clears
     // the banner leaves the ask lines lit for up to a minute until the sent
     // message syncs back.
-    final lastOut = latestOutboundAt(messages);
-    final closed = conversation.state != ConversationState.needsReply;
+    final lastOut = latestOutboundAt(widget.messages);
+    final closed = widget.conversation.state != ConversationState.needsReply;
 
-    for (var i = 0; i < messages.length; i++) {
-      final message = messages[i];
+    for (var i = 0; i < widget.messages.length; i++) {
+      final message = widget.messages[i];
       final day = dayKeyOf(message);
       final label = formatDayLabel(message.receivedAt);
       if (label != null && (first || day != previousDay)) {
@@ -183,11 +250,11 @@ class ThreadDetailPanel extends StatelessWidget {
         lastOutboundAt: lastOut,
         conversationClosed: closed,
       );
-      final suggestion = suggestionFor?.call(message);
+      final suggestion = widget.suggestionFor?.call(message);
       final header = previous == null || !sameRun(previous, message);
-      final next = i + 1 < messages.length ? messages[i + 1] : null;
+      final next = i + 1 < widget.messages.length ? widget.messages[i + 1] : null;
       final standalone = next == null || !sameRun(message, next);
-      final isLast = identical(message, messages.last);
+      final isLast = identical(message, widget.messages.last);
       // Only a message that is a run all by itself folds, and never the newest
       // one. Folding a run's header while its continuations stayed up would
       // hide half a run and leave the rest of it hanging under no name; and the
@@ -200,17 +267,19 @@ class ThreadDetailPanel extends StatelessWidget {
         showHeader: header,
         openAsk: open,
         // Only a line that is actually on screen gets a tap.
-        onAskTap: open ? onOpenReply : null,
+        onAskTap: open ? widget.onOpenReply : null,
         suggestion: suggestion,
         collapsible: collapsible,
         // Folded by default only where there is nothing left to do: history the
         // thread has moved past. An open ask or a live suggestion is the whole
         // reason to scroll back, so neither ever starts hidden.
         initiallyCollapsed: collapsible && !open && suggestion == null,
-        onOpenAttachment: onOpenAttachment,
-        selectedAttachment: selectedAttachment,
-        thumbnailFor: thumbnailFor,
-        photos: photos,
+        onOpenAttachment: widget.onOpenAttachment,
+        selectedAttachment: widget.selectedAttachment,
+        thumbnailFor: widget.thumbnailFor,
+        photos: widget.photos,
+        onUseInReply: widget.onUseInReply,
+        onOpenLink: widget.onOpenLink,
       );
       // Only what is being ANSWERED wears the strip. There is nothing to reply
       // to on the user's own message, and nothing to draft an answer to either.
@@ -222,7 +291,7 @@ class ThreadDetailPanel extends StatelessWidget {
       previous = message;
     }
 
-    final after = afterTranscript;
+    final after = widget.afterTranscript;
     if (after != null) {
       items.add(Padding(
         // The avatar column plus its gutter — `MessageRow` reserves exactly
@@ -241,8 +310,8 @@ class ThreadDetailPanel extends StatelessWidget {
   /// What the pointer offers on one inbound row. Empty when the host wired
   /// neither callback, which is what turns the wrapper back into the bare row.
   List<HoverAction> _hoverActionsFor(Message message) {
-    final reply = onReplyTo;
-    final suggest = onSuggestFor;
+    final reply = widget.onReplyTo;
+    final suggest = widget.onSuggestFor;
     return [
       if (reply != null)
         HoverAction(
@@ -266,17 +335,21 @@ class ThreadDetailPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cta = conversation.ctaText;
-    final showCta = conversation.state == ConversationState.needsReply &&
+    // Computed ONCE per build and handed to both the header and the body: the
+    // count on the tab and the list under it are the same answer, so they can
+    // never disagree about how many files a thread has.
+    final files = threadFiles(widget.messages);
+    final cta = widget.conversation.ctaText;
+    final showCta = widget.conversation.state == ConversationState.needsReply &&
         cta != null &&
         cta.isNotEmpty;
 
     // The banner names the newest ask only. When older ones are still open,
     // the count says so — the transcript below is where they are read.
     final openAsks = openAskCount(
-      messages,
+      widget.messages,
       conversationClosed:
-          conversation.state != ConversationState.needsReply,
+          widget.conversation.state != ConversationState.needsReply,
     );
 
     // A height-filling bordered surface, not a shrink-wrapping card: the
@@ -291,7 +364,7 @@ class ThreadDetailPanel extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _header(),
+          _header(files),
           const Divider(height: 1, color: BondColors.border),
           if (showCta)
             Padding(
@@ -314,7 +387,9 @@ class ThreadDetailPanel extends StatelessWidget {
               ),
             ),
           Expanded(
-            child: messages.isEmpty
+            child: _tab == ThreadTab.files
+                ? _filesBody(files)
+                : widget.messages.isEmpty
                 ? Center(
                     child: Text('No messages in this thread.',
                         style: BondType.small),
@@ -342,6 +417,78 @@ class ThreadDetailPanel extends StatelessWidget {
     );
   }
 
+  /// Everything this thread carried, newest first, in the same cards the
+  /// transcript draws.
+  ///
+  /// The same widgets on purpose: a file the reader recognises from the
+  /// conversation must look like the same file here, digest line and all. The
+  /// CTA banner stays above both tabs — what the thread wants does not stop
+  /// being true because somebody went looking for an attachment.
+  Widget _filesBody(List<AttachmentRef> files) {
+    if (files.isEmpty) {
+      return Center(
+        child: Text('No files on this thread.', style: BondType.small),
+      );
+    }
+    return Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: _maxContentWidth),
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(
+            BondSpacing.s24,
+            BondSpacing.s16,
+            BondSpacing.s24,
+            BondSpacing.s24,
+          ),
+          children: [
+            Wrap(
+              spacing: BondSpacing.s8,
+              runSpacing: BondSpacing.s8,
+              children: [
+                for (final file in files)
+                  if (_linkKinds.contains(file.kind))
+                    LinkUnfurl(
+                      key: LinkUnfurl.keyFor(file),
+                      attachment: file,
+                      onOpen: _openFile(file),
+                      onOpenLink: widget.onOpenLink,
+                    )
+                  else
+                    AttachmentCard(
+                      key: AttachmentCard.keyFor(file),
+                      attachment: file,
+                      selected:
+                          sameAttachment(widget.selectedAttachment, file),
+                      image: _fileImage(file),
+                      onTap: _openFile(file),
+                      onUseInReply: widget.onUseInReply == null
+                          ? null
+                          : () => widget.onUseInReply!(file),
+                    ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  VoidCallback? _openFile(AttachmentRef file) {
+    final open = widget.onOpenAttachment;
+    return open == null ? null : () => open(file);
+  }
+
+  /// A picture only for a file this build might be able to render — a PDF's
+  /// first page, a shared document's. Asking for one of a spreadsheet is
+  /// asking for a picture that can never arrive, which is the same rule
+  /// `layOutBody.thumbnailable` applies in the transcript.
+  ImageProvider? _fileImage(AttachmentRef file) {
+    const drawable = {PreviewKind.pdf, PreviewKind.document};
+    if (!drawable.contains(previewKindFor(file))) return null;
+    return widget.thumbnailFor?.call(file);
+  }
+
   /// The ask above the transcript. It is the largest statement on the pane of
   /// what this thread wants, so it is also the shortest way to answer it: with
   /// a reply to open, the whole banner is the click.
@@ -355,7 +502,7 @@ class ThreadDetailPanel extends StatelessWidget {
       text: text,
       maxLines: 2,
     );
-    final onTap = onOpenReply;
+    final onTap = widget.onOpenReply;
     if (onTap == null) return alert;
     return Material(
       type: MaterialType.transparency,
@@ -376,19 +523,29 @@ class ThreadDetailPanel extends StatelessWidget {
   /// The storyline half is one item that opens a pane. Listing every storyline
   /// in the menu would put the whole choice in a popup, and the house rule is a
   /// screen with a way back.
-  Widget _header() {
-    final participants = conversation.participants
+  Widget _header(List<AttachmentRef> files) {
+    final participants = widget.conversation.participants
         .map((p) => p.display)
         .where((d) => d.isNotEmpty)
         .join(', ');
 
-    final bucketed = conversation.bucket != null;
-    final showKeep = onKeepInInbox != null && bucketed;
+    final bucketed = widget.conversation.bucket != null;
+    final showKeep = widget.onKeepInInbox != null && bucketed;
 
-    return RoomHeader(
+    return RoomHeader<ThreadTab>(
+      // One tab is a label pretending to be a choice, so a thread with no
+      // files draws no tab row at all — see `RoomHeader`'s own rule. That is
+      // what keeps a fileless thread looking exactly as it always did.
+      tabs: files.isEmpty ? const [ThreadTab.messages] : ThreadTab.values,
+      selectedTab: _tab,
+      tabLabel: (tab) => switch (tab) {
+        ThreadTab.messages => 'Messages',
+        ThreadTab.files => 'Files (${files.length})',
+      },
+      onTab: (tab) => setState(() => _tab = tab),
       title: Text(
-        conversation.subject?.isNotEmpty == true
-            ? conversation.subject!
+        widget.conversation.subject?.isNotEmpty == true
+            ? widget.conversation.subject!
             : '(no subject)',
         style: BondType.titleSm,
         maxLines: 1,
@@ -396,7 +553,7 @@ class ThreadDetailPanel extends StatelessWidget {
       ),
       subtitle: participants.isEmpty ? null : participants,
       people: [
-        for (final p in conversation.participants)
+        for (final p in widget.conversation.participants)
           if (p.display.isNotEmpty)
             (
               name: p.display,
@@ -404,51 +561,51 @@ class ThreadDetailPanel extends StatelessWidget {
               photoKey: photoKeyFor(address: p.email),
             ),
       ],
-      photos: photos,
+      photos: widget.photos,
       stateChip: BondChip.semantic(
-        _stateLabel(conversation.state),
-        _stateTone(conversation.state),
+        _stateLabel(widget.conversation.state),
+        _stateTone(widget.conversation.state),
       ),
-      onBack: onBack,
+      onBack: widget.onBack,
       actions: [
         // Before the state chip's neighbours, because writing to these people
         // is something to DO with the thread. An icon rather than a labelled
         // button: this header shares its width with the attachment preview in
         // the split, and every label here comes out of the title.
-        if (onCompose != null)
+        if (widget.onCompose != null)
           RoomAction(
             icon: Icons.edit_outlined,
             label: 'Message',
-            onTap: onCompose,
+            onTap: widget.onCompose,
             key: const Key('thread-compose'),
           ),
         // The same button in the same place saying the opposite thing, because
         // a thread closed by mistake is reopened from here.
-        if (conversation.state != ConversationState.done)
-          RoomAction(label: 'Mark done', onTap: onMarkDone)
-        else if (onReopen != null)
-          RoomAction(label: 'Reopen', onTap: onReopen),
+        if (widget.conversation.state != ConversationState.done)
+          RoomAction(label: 'Mark done', onTap: widget.onMarkDone)
+        else if (widget.onReopen != null)
+          RoomAction(label: 'Reopen', onTap: widget.onReopen),
       ],
       moreItems: [
-        if (onAddToStoryline != null)
+        if (widget.onAddToStoryline != null)
           RoomMenuItem(
             value: _addToStorylineValue,
             label: 'Add to storyline…',
-            onTap: onAddToStoryline,
+            onTap: widget.onAddToStoryline,
           ),
-        if (onSendToLater != null)
+        if (widget.onSendToLater != null)
           RoomMenuItem(
             value: _sendToLaterValue,
             label: 'Send to Later',
-            onTap: onSendToLater,
-            dividerBefore: onAddToStoryline != null,
+            onTap: widget.onSendToLater,
+            dividerBefore: widget.onAddToStoryline != null,
           ),
         if (showKeep)
           RoomMenuItem(
             value: _keepInInboxValue,
             label: 'Keep in inbox',
-            onTap: onKeepInInbox,
-            dividerBefore: onAddToStoryline != null && onSendToLater == null,
+            onTap: widget.onKeepInInbox,
+            dividerBefore: widget.onAddToStoryline != null && widget.onSendToLater == null,
           ),
       ],
     );

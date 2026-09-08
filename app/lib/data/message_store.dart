@@ -5,6 +5,7 @@ import 'package:drift/drift.dart';
 
 import '../models/attachment_models.dart';
 import '../models/drafts_models.dart';
+import '../models/files_models.dart';
 import '../models/home_models.dart';
 import '../models/message_models.dart';
 import '../models/person.dart';
@@ -5756,6 +5757,82 @@ LIMIT ?
         )
         .get();
     return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// Images, by whichever of the two things the connector said.
+  ///
+  /// Both halves are needed and neither is enough. Teams states `kind =
+  /// 'image'` and often no content type at all; Graph states a content type and
+  /// calls everything `file`. Nothing here reads the NAME, unlike
+  /// `isImageAttachment` in the widget layer — a `LIKE '%.png'` is a scan, and
+  /// this query is paged.
+  static const String _kindClauseImages =
+      "AND (a.kind = 'image' OR lower(a.content_type) LIKE 'image/%') ";
+
+  /// The three kinds that point somewhere else rather than carrying bytes.
+  static const String _kindClauseLinks =
+      "AND a.kind IN ('reference','message_reference','card') ";
+
+  /// Everything that is not a picture and not a link.
+  ///
+  /// The consequence worth stating: a `.png` that Graph reported as
+  /// `application/octet-stream` and gave no `image` kind files under Documents
+  /// rather than Images. Accepted deliberately — the alternative is reading the
+  /// file name in SQL, which cannot use an index, and the reader still finds
+  /// the file under All.
+  static const String _kindClauseDocuments =
+      "AND a.kind NOT IN ('image','reference','message_reference','card') "
+      "AND (a.content_type IS NULL OR lower(a.content_type) NOT LIKE 'image/%') ";
+
+  /// Every file the mailbox holds, newest message first — the Files stop.
+  ///
+  /// An INNER join, unlike the storyline shelf's LEFT one, and the difference
+  /// is the whole point of the pane: this list is grouped by DAY and every row
+  /// offers a way back into its thread, so a file whose message is gone has
+  /// neither a day to file under nor a conversation to open. The storyline
+  /// shelf keeps such a file because somebody deliberately pinned it there;
+  /// nobody pinned anything here.
+  ///
+  /// Inline images are excluded and nothing else is: a signature logo is not a
+  /// file anybody sent. There is deliberately NO byte-size rule — the
+  /// `inlineImageMinBytes` threshold in the widget layer is about inline
+  /// pictures, which are already gone, and the store must not import a widget
+  /// constant to apply it twice.
+  ///
+  /// Paged rather than capped, because [FilesKind] narrows in SQL: filtering a
+  /// page client-side would leave a "Load more" that sometimes added nothing.
+  Future<List<FileRow>> recentAttachments({
+    List<String> sources = const ['email', 'teams'],
+    FilesKind kind = FilesKind.all,
+    int limit = 100,
+    int offset = 0,
+  }) async {
+    if (sources.isEmpty) return const [];
+    final kindClause = switch (kind) {
+      FilesKind.all => '',
+      FilesKind.documents => _kindClauseDocuments,
+      FilesKind.images => _kindClauseImages,
+      FilesKind.links => _kindClauseLinks,
+    };
+    final result = await db
+        .customSelect(
+          'SELECT a.*, m.conversation_key AS conversation_key, '
+          '       m.from_name AS from_name, m.from_address AS from_address, '
+          '       m.direction AS direction, m.received_at AS received_at, '
+          '       m.subject AS subject '
+          'FROM attachments a '
+          'JOIN messages m ON m.source = a.source '
+          '  AND m.source_message_id = a.source_message_id '
+          'WHERE a.is_inline = 0 '
+          '  AND a.source IN (${_placeholders(sources.length)}) '
+          '$kindClause'
+          'ORDER BY m.received_at DESC, a.source_message_id DESC, '
+          '  a.ordinal ASC, a.attachment_id ASC '
+          'LIMIT ? OFFSET ?',
+          variables: _args([...sources, limit, offset]),
+        )
+        .get();
+    return [for (final row in result) FileRow.fromRow(row.data)];
   }
 
   // ── attachment chunks and their index ────────────────────────────────

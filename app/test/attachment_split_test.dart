@@ -23,7 +23,7 @@ import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
-import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
 import 'package:bond_inbox/widgets/inline_image_thumb.dart';
@@ -234,7 +234,7 @@ void main() {
   }
 
   Future<void> openAttachment(WidgetTester tester, String label) async {
-    await tester.tap(find.widgetWithText(AttachmentChip, label));
+    await tester.tap(find.widgetWithText(AttachmentCard, label));
     await tester.pump();
     await tester.pump();
     await tester.pump();
