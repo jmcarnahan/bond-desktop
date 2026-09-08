@@ -832,6 +832,46 @@ void main() {
       );
     });
 
+    test('a re-check says what it looked at and what it took out', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_audit',
+          detail: const {
+            'checked': 4,
+            'removed': [
+              {'source': 'email', 'conversation_key': 'c9'},
+            ],
+          },
+        )),
+        'Re-checked 4 threads, removed 1',
+      );
+      // One thread reads as one thread, and a pass that took nothing out still
+      // says what it checked.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_audit',
+          detail: const {'checked': 1, 'removed': []},
+        )),
+        'Re-checked 1 thread, removed 0',
+      );
+      // A row with no tallies on it falls back to its label rather than
+      // claiming a number it does not have.
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'storyline_audit')),
+        'Storyline re-check',
+      );
+    });
+
+    test('allowing a thread back says only that', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_unblock',
+          detail: const {'storyline_id': 'sl-1'},
+        )),
+        'Allowed a thread back into consideration',
+      );
+    });
+
     test('model tallies stay out of the sentence', () {
       // They are on nearly every AI row; spending the one line on them would
       // bury the fact the row exists to report. The trailing duration is where

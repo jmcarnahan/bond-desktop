@@ -686,6 +686,14 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
       // recruit that files threads queues a refresh for the next pump rather
       // than this one, which is what keeps the two from chasing each other.
       StorylineRefreshHandler(storylines),
+      // Between the refresh and the recruit, and both halves are the point.
+      // After the refresh, so a removal's audit judges against the charter the
+      // refresh has just narrowed rather than the one that admitted the thread
+      // the user threw out. Before the recruit, so the blocks the audit writes
+      // already exist when the recruit excludes blocked threads — an audit
+      // removal the recruit could not see would be filed straight back in this
+      // same drain.
+      StorylineAuditHandler(storylines),
       // After the sweep and before drafts: a recruit is rare — it only exists
       // when a charter was just saved, or a refresh moved one — and the
       // threads it files are exactly what the draft below should know about.

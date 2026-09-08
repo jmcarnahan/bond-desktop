@@ -113,6 +113,11 @@ class ActivityLog {
     // here are the genuine nothings — a recruit that arrived after its
     // storyline was dismissed.
     'storyline_recruit',
+    // Quiet for the recruit's reason: a pass that judged anything notes a
+    // `checked` count and shows, so what is suppressed is an audit that
+    // reached no model — a storyline dismissed while it waited, or one with
+    // nothing automatic left in it.
+    'storyline_audit',
     // Quiet for the reason the refresh is, and more so: the recap runs on
     // every message that lands in a member thread, and most of those calls end
     // with the watermark already ahead of them and no model dialled at all.

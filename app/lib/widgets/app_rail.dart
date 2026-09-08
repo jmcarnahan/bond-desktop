@@ -157,8 +157,10 @@ String laterDayLabel(String dayKey, int count) {
 /// already sorts proposals newest-first and live ones by recent activity, and
 /// re-sorting here would be a second opinion about the same thing.
 ///
-/// Dismissed and archived storylines never reach the rail; the store's default
-/// query does not return them.
+/// Archived storylines never reach the rail and dismissed ones never reach
+/// THIS list; the store's default query returns neither. Dismissed storylines
+/// arrive separately, as [AppRail.dismissed], and the rail shows them only
+/// under a fold of their own.
 List<Storyline> storylineRows(List<Storyline> all) => [
       for (final s in all)
         if (s.isSuggested) s,
@@ -208,6 +210,14 @@ class AppRail extends StatefulWidget {
   /// the normal state before the clustering pass has run, and the section
   /// says so rather than going blank.
   final List<Storyline> storylines;
+
+  /// The storylines the user said no to, folded away under the live ones.
+  ///
+  /// Dismissing was the one storyline decision that had no way back: the row
+  /// left the rail and nothing on screen remembered it. The list is folded
+  /// because it is history rather than a queue — nothing here is asking for
+  /// anything — but it is reachable, and every row in it can be restored.
+  final List<Storyline> dismissed;
 
   /// The open thread, when one is open.
   final String? selectedId;
@@ -266,6 +276,10 @@ class AppRail extends StatefulWidget {
   final void Function(String storylineId)? onKeepSuggestion;
   final void Function(String storylineId)? onDismissSuggestion;
 
+  /// Puts a dismissed storyline back as a suggestion. Null leaves the fold's
+  /// Restore buttons inert.
+  final void Function(String storylineId)? onRestoreStoryline;
+
   /// Account block, refresh, sign-out — built by the screen, pinned to the
   /// bottom by the rail.
   final Widget? footer;
@@ -279,6 +293,7 @@ class AppRail extends StatefulWidget {
     required this.onSelectConversation,
     required this.onSelectSection,
     this.storylines = const [],
+    this.dismissed = const [],
     this.selectedStorylineId,
     this.selectedLaterDay,
     this.laterCount = 0,
@@ -289,6 +304,7 @@ class AppRail extends StatefulWidget {
     this.onSelectLaterDay,
     this.onKeepSuggestion,
     this.onDismissSuggestion,
+    this.onRestoreStoryline,
     this.footer,
   });
 
@@ -303,6 +319,11 @@ class _AppRailState extends State<AppRail> {
   /// Everything starts open. A section the user closed stays closed for the
   /// life of the screen.
   final Set<RailSection> _collapsed = {};
+
+  /// Whether the dismissed storylines are unfolded. Shut every time, unlike
+  /// the sections: this is the one list on the rail nobody opens the app to
+  /// look at.
+  bool _showDismissed = false;
 
   static const double _rowHeight = 32;
 
@@ -368,6 +389,15 @@ class _AppRailState extends State<AppRail> {
                     rows: [
                       for (final s in storylineRows(widget.storylines))
                         _storylineItem(s),
+                      // Under the live rows, and behind a fold: what the user
+                      // already said no to must not compete with what is
+                      // still asking.
+                      if (widget.dismissed.isNotEmpty) ...[
+                        _dismissedHeader(),
+                        if (_showDismissed)
+                          for (final s in widget.dismissed)
+                            _dismissedItem(s),
+                      ],
                     ],
                     placeholder: 'Suggestions arrive after processing',
                   ),
@@ -785,6 +815,94 @@ class _AppRailState extends State<AppRail> {
                     _badge(storyline.openCount, attention: false),
                 ],
               ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The fold over the dismissed storylines. Its count is in the label, the
+  /// way a Later day's is: it is what the row has to say for itself while it
+  /// is shut.
+  Widget _dismissedHeader() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
+      child: Material(
+        color: BondColors.ink,
+        borderRadius: BondRadii.smAll,
+        child: InkWell(
+          onTap: () => setState(() => _showDismissed = !_showDismissed),
+          borderRadius: BondRadii.smAll,
+          hoverColor: BondColors.onDarkFaint,
+          child: SizedBox(
+            height: _rowHeight,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Dismissed · ${widget.dismissed.length}',
+                      style: BondType.caption.copyWith(
+                        color: BondColors.onDarkSecondary,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  AnimatedRotation(
+                    turns: _showDismissed ? 0 : -0.25,
+                    duration: const Duration(milliseconds: 120),
+                    child: const Icon(
+                      Icons.expand_more,
+                      size: 16,
+                      color: BondColors.onDarkMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// One dismissed storyline: the title, and the one action that can undo the
+  /// dismissal. No dot — the dot says whether a row is asking for something,
+  /// and this one is not — and no count, for the same reason.
+  Widget _dismissedItem(Storyline storyline) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
+      child: Material(
+        color: BondColors.ink,
+        borderRadius: BondRadii.smAll,
+        child: SizedBox(
+          height: _rowHeight,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    storyline.title.isEmpty ? '(untitled)' : storyline.title,
+                    style: BondType.small.copyWith(
+                      color: BondColors.onDarkSecondary,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                _storylineAction(
+                  Icons.restore,
+                  'Restore',
+                  widget.onRestoreStoryline == null
+                      ? null
+                      : () => widget.onRestoreStoryline!(storyline.id),
+                ),
+              ],
             ),
           ),
         ),

@@ -26,7 +26,7 @@ is always the authority when they disagree.
 | 8 | Bucket filing — low-value mail to Later, unless the thread holds an open ask | no | [04-extraction.md](04-extraction.md) |
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
-| 11 | **Storylines** — assign, sweep, refresh, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
+| 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply decision** — does this message need an answer | **yes** | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself | **yes** | [07-replies.md](07-replies.md) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |

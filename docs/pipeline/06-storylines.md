@@ -1,13 +1,13 @@
 # 6 · Storylines
 
 Storylines are groups of threads about the same thing, proposed by the model
-and kept or dismissed by the user. Five passes share the machinery, all in
+and kept or dismissed by the user. Six passes share the machinery, all in
 `app/lib/services/storyline_service.dart` behind the handlers in
 `app/lib/services/storyline_handler.dart`. **Their relative order is the
 handler registration order in `app_providers.dart`** — that list's comments
 are the authority on sequencing.
 
-## The five passes, in drain order
+## The six passes, in drain order
 
 1. **Assign** (`StorylineAssignHandler` → `assignConversation`) — when a
    conversation's card changes, cosine-shortlist it against live storyline
@@ -28,7 +28,22 @@ are the authority on sequencing.
    afterwards instead — "join, not seed", its own section below.
 3. **Refresh** (`StorylineRefreshHandler` → `refresh`) — re-describes a
    storyline whose membership has moved. Its own section below.
-4. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
+4. **Audit** (`StorylineAuditHandler` → `audit`) — re-judges the threads the
+   MODEL filed into one storyline, against the charter as it now reads and the
+   owner's own examples. Queued by `removeThread` and by *Re-check members* in
+   the About block. It is registered after the refresh and before the recruit,
+   and both halves of that matter: the removal that woke it also queues a
+   refresh, which is the pass that narrows the charter, so the audit judges
+   against the narrowed sentence — and the recruit that a narrowed charter
+   re-arms runs afterwards, over a member set the audit has already cleaned.
+   Members the owner filed by hand are never re-judged: their membership is
+   the owner's word, not a guess to check. A rejected member is removed WITH a
+   block whose `blocked_by = 'audit'`, because an unblocked removal would be
+   re-filed by that same recruit, in the same drain, off the same charter.
+   Idempotent: it reads current state, and a lap that removes nothing writes
+   nothing and queues nothing — it only notes what it checked, the way the
+   recruit notes a lap that filed nothing.
+5. **Recruit** (`StorylineRecruitHandler` → `recruit`) — after a user saves a
    charter, or after a refresh widened one, judges up to 8 candidate threads
    against it. It hunts again if the charter moved while it ran: a save landing
    after the row went `processing` enqueues against that row and is swallowed,
@@ -37,13 +52,15 @@ are the authority on sequencing.
    model — an extra lap needs a save *during* the previous one, and at
    temperature zero a lap with no save would ask the same questions of the same
    threads.
-5. **Recap** (`StorylineRecapHandler` → `recap`) — re-writes the storyline's
+6. **Recap** (`StorylineRecapHandler` → `recap`) — re-writes the storyline's
    running state of play from the newest messages across its member threads.
    Its own section below.
 
-A thread the user removes by hand is blocked — the model cannot put it back.
+A thread somebody takes out of a storyline is blocked, and what that block
+does — to the prompts, to the passes, and on screen — is *Removing a thread*
+below.
 
-The first four run on MEMBERSHIP and go quiet once the member set settles. The
+The first five run on MEMBERSHIP and go quiet once the member set settles. The
 recap runs on what was SAID and keeps moving as long as people are talking.
 
 ## The refresh pass
@@ -385,10 +402,23 @@ the storyline pane is already several conversations side by side and halving
 it again leaves neither readable. *Back* out of that viewer lands on the
 storyline, not on a split that was never there.
 
-Refresh and recap both report progress under their own kinds, and
-`StorylinesNotifier` listens for both, so a pass that rewrites a title or a
-recap lands on the rail and the open storyline within the list's 400 ms
-debounce rather than at the next poll.
+The About block also ends with what has been taken *out* of the storyline —
+two lists and a *Re-check members* button, all under *Removing a thread* below.
+
+Dismissing a storyline was the one storyline decision with no way back: the row
+left the rail, and nothing on screen remembered it. The rail now carries a fold
+under the live storylines reading **Dismissed · *n***, shut on every build,
+holding one row per dismissed storyline with a single **Restore**. Restoring
+puts the status back to `suggested` — the state the row was in when the
+question was first put — so the same Keep / Dismiss pair comes back with it.
+That also lifts the tombstone: `dismissedHashExistsAny` keys on
+`status = 'dismissed'`, so a restored storyline's member set can be proposed
+again. Members were kept on dismissal, so nothing is rebuilt.
+
+Refresh, audit and recap all report progress under their own kinds, and
+`StorylinesNotifier` listens for all of them, so a pass that rewrites a title,
+takes a member out, or writes a recap lands on the rail and the open storyline
+within the list's 400 ms debounce rather than at the next poll.
 
 ## Filing a thread by hand
 
@@ -399,6 +429,17 @@ they write the same per-message pointer the automatic ones do —
 visible: the home feed's storyline link and the hot-storylines strip both join
 on that column and know nothing about `storyline_members`, so before this the
 timeline and the rail showed the filing and the feed did not.
+
+A hand-filed membership also **teaches**. `addThread` writes `Filed by you` as
+the member row's evidence, and that is not decoration: user members ride into
+every `ConfirmMembershipTask` call as the `kept_by_owner` fence — up to three,
+newest first, because the owner's latest word is what teaches and a fourth card
+buys tokens on every membership question the storyline will ever ask. A row
+with no evidence would also hand a later removal a negative example that says
+nothing, since a removal copies the member's evidence onto its block. The
+sweep's own proposal confirms carry `(none)` in both example fences by
+construction: they judge candidates against an unsaved proposal, which has no
+row in the database, no members and no blocks.
 
 The write is deliberately NOT `writeStorylineProgress`. That one records how
 far the assignment pass got — `storyline_state`, `storyline_at` — and those
@@ -422,6 +463,65 @@ the window with a non-null `storyline_id`, and `hotStorylines` groups by it —
 filing one long thread by hand can add many messages to both at once. That is
 the intended reading (the messages really are in that storyline), not a
 double-count.
+
+## Removing a thread
+
+Taking a thread out of a storyline used to be a delete and a block: the
+membership row went, a row in `storyline_member_blocks` stopped the next pass
+putting it back, and that was the end of it. The removal changed nothing about
+how the model judged the *next* thread, so the same reasoning that filed the
+wrong one filed its twin the following morning. Removing a thread is now the
+strongest thing a person ever says about what a storyline is, and it is carried
+all the way through.
+
+**The block records who and why.** `storyline_member_blocks` carries
+`blocked_by` (`'user'` or `'audit'`) and `evidence` from schema v14. The
+evidence is copied off the member row inside the same transaction that deletes
+it — that row is the only place the membership's reason was ever written, and
+it is about to be gone — so the owner's block remembers what the model thought
+when it filed the thread they are now taking out. An audit's block carries the
+audit's own reason instead.
+
+**The owner's blocks are negative examples.** `ConfirmMembershipTask` takes a
+`removed_by_owner` fence: up to three of them, newest first, as the same
+enriched cards the candidate is described with. The prompt reads them as the
+owner's "no" — a candidate of the same kind, the same sender pattern, the same
+sort of message, does not belong, even when the charter reads as though it
+might. `blocked_by = 'user'` **only**: an audit's rejection is a consequence of
+a lesson the owner already taught, and feeding it back would let the model
+teach itself.
+
+**The refresh may narrow the charter for them.** `RefineStorylineTask` takes a
+`removed_threads` fence, between `threads` and `new_threads`, carrying the same
+up-to-three owner blocks. Every other pressure on that prompt widens the
+charter, and a charter that only ever grows ends up admitting the very thing
+the owner removed — so this is the one input that may make it narrower, and the
+prompt says so: when the charter as written would admit one of the removed
+threads, add the smallest clause that excludes that *kind* of thread, keeping
+every existing sentence word for word.
+
+**The threads already inside get re-judged.** A removal is the owner saying the
+model got this group wrong, and the threads the same reasoning filed here are
+still sitting in it — so `removeThread` queues a `storyline_audit` alongside
+its refresh. What that pass does is under *The six passes* above.
+
+**Audit blocks are never shown to the model, and only the owner lifts them.**
+They stay out of both example fences, and no pass clears them; a thread the
+re-check took out stays out until a person says otherwise, which is what stops
+the audit and the recruit trading the same thread back and forth across drains.
+
+**On screen**, the About block ends with two lists, **REMOVED BY YOU** and
+**REMOVED BY RE-CHECK**, each rendering only when it has something in it. An
+entry is the thread's subject — or *(thread no longer stored)*, since a block
+outlives the conversation row it was written about — over the evidence that was
+recorded, and two buttons. ***Allow again*** lifts the block and does nothing
+else: the owner is withdrawing a veto, not making a membership, and whether the
+thread belongs is a question the model may now answer on its own the next time
+a pass looks at it. ***Add back*** files the thread by hand, which clears a
+block of either kind on the way in. Both buttons sit on both lists — a
+re-check's block is as reversible as the owner's. Under them, ***Re-check
+members*** queues the audit by hand and pumps the worker, for a storyline whose
+charter has drifted without anything being removed.
 
 ## How the sweep finds its pairs
 
@@ -528,13 +628,26 @@ recipe; a dismissal made under the old one holds forever.
 
 **ConfirmMembershipTask** — `app/lib/services/llm/storyline_tasks.dart`,
 schema `storyline_membership`, **fast / bulk slot** (`confirmClient` in
-`app_providers.dart`), **temperature 0** at all three call sites (assign,
-recruit, sweep-member). Given a storyline described by its *charter* and one
-candidate thread: an evidence sentence first, a boolean `belongs`, and a
+`app_providers.dart`), **temperature 0** at all four call sites (assign,
+recruit, sweep-member, audit). Given a storyline described by its *charter* and
+one candidate thread: an evidence sentence first, a boolean `belongs`, and a
 low/medium/high confidence — **low is treated as a no**. The prompt's real
 work is what *not* to weigh: two threads of the same kind (two invoices, two
 trips) do not belong together, and the participant list is context, not a
 requirement.
+
+Four fences, in the order `storyline`, `kept_by_owner`, `removed_by_owner`,
+`candidate_thread`. The two example fences are what the owner has taught this
+storyline (*Filing a thread by hand*, *Removing a thread*), and both are always
+present, rendering `(none)` when there is nothing — an empty fence says the
+owner has taught nothing yet, which is the fact the pass has, and a fence that
+appeared and vanished between calls would change the shape of the message for
+no gain. The candidate goes **last** on purpose: within one recruit lap the
+storyline and its examples are identical across every call while the candidate
+varies, so the constant part first is what keeps the server's prefix cache warm
+across the eight confirmations a lap makes. The examples are always passed *in*
+by the caller and never read from the storyline's id inside the task, because
+the sweep judges candidates against an unsaved proposal.
 
 **NameStorylineTask** — same file, schema `storyline_name`, **prose / 27B
 slot**, **temperature 0**. Names a group of threads: evidence sentence, a
@@ -547,15 +660,17 @@ charter is the membership contract, the summary is display text.
 
 **RefineStorylineTask** — same file, schema `storyline_refresh`, **prose / 27B
 slot**, **temperature 0**. The same four fields as naming, asked of a
-storyline that already has them: three fences (`storyline` with the current
-text and the two lock lines, `threads` with every member card, `new_threads`
-with what just joined — always present, `(none)` when nothing is known to be
-new). Its prompt is mostly about *not* changing things — continuity as the
-default answer, minimal drift on the charter, no noun that is not in the
+storyline that already has them: four fences (`storyline` with the current text
+and the two lock lines, `threads` with every member card, `removed_threads`
+with up to three the owner took out, `new_threads` with what just joined — the
+last two always present, `(none)` when nothing was removed or nothing is known
+to be new). Its prompt is mostly about *not* changing things — continuity as
+the default answer, minimal drift on the charter, no noun that is not in the
 threads — because every word it moves is a word that moved under a person who
-had already read it. Its validator is separate from naming's for one reason:
-an empty title here keeps the stored one, where naming substitutes
-`Untitled storyline`.
+had already read it. `removed_threads` is the single exception, and the only
+input that may make a charter *narrower*: see *Removing a thread*. Its
+validator is separate from naming's for one reason: an empty title here keeps
+the stored one, where naming substitutes `Untitled storyline`.
 
 **StorylineRecapTask** — same file, schema `storyline_recap`, **prose / 27B
 slot**, **temperature 0**. Two fences (`storyline` with the title, charter and

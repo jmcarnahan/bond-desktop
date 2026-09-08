@@ -3220,14 +3220,31 @@ FROM storylines s''';
     });
   }
 
-  /// Takes a thread out of a storyline. [block] records that the user meant
+  /// Takes a thread out of a storyline. [block] records that someone meant
   /// it, so the next clustering pass cannot put it straight back — the model
   /// is not allowed to overrule a person by being confident twice.
+  ///
+  /// [blockedBy] says WHOSE "no" this is. `'user'` is the owner's own hand and
+  /// is the only kind the confirm prompt ever learns from; `'audit'` is the
+  /// re-check pass acting on a lesson the owner already taught, and feeding
+  /// that back would let the model teach itself.
+  ///
+  /// [evidence] defaults to the MEMBER's own evidence — the sentence that put
+  /// the thread here — read inside the same transaction that deletes it. That
+  /// is what makes a negative example say what the model thought at the time.
+  /// An explicit value wins, which is how the audit records its own reason.
+  ///
+  /// The block insert stays `INSERT OR IGNORE`: a thread already blocked here
+  /// keeps its ORIGINAL provenance and evidence. The first "no" is the one
+  /// that was reasoned about, and an audit re-blocking what the owner already
+  /// removed must not overwrite the owner's word with its own.
   Future<void> removeStorylineMember(
     String storylineId,
     String source,
     String conversationKey, {
     required bool block,
+    String blockedBy = 'user',
+    String? evidence,
   }) async {
     if (!block) {
       await db.customUpdate(
@@ -3241,6 +3258,20 @@ FROM storylines s''';
     // removal that landed without its block would let the next sweep put the
     // thread straight back.
     await db.transaction(() async {
+      // Read before the delete, and only when the caller named nothing: the
+      // member row is about to be gone, and it is the only place the
+      // membership's reason was ever written.
+      var reason = evidence;
+      if (reason == null) {
+        final rows = await db
+            .customSelect(
+              'SELECT evidence FROM storyline_members '
+              'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+              variables: _args([storylineId, source, conversationKey]),
+            )
+            .get();
+        if (rows.isNotEmpty) reason = rows.first.data['evidence'] as String?;
+      }
       await db.customUpdate(
         'DELETE FROM storyline_members '
         'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
@@ -3248,11 +3279,35 @@ FROM storylines s''';
       );
       await db.customUpdate(
         'INSERT OR IGNORE INTO storyline_member_blocks '
-        '(storyline_id, source, conversation_key, blocked_at) '
-        'VALUES (?, ?, ?, ?)',
-        variables: _args([storylineId, source, conversationKey, _nowIso()]),
+        '(storyline_id, source, conversation_key, blocked_at, blocked_by, '
+        'evidence) VALUES (?, ?, ?, ?, ?, ?)',
+        variables: _args([
+          storylineId,
+          source,
+          conversationKey,
+          _nowIso(),
+          blockedBy,
+          reason,
+        ]),
       );
     });
+  }
+
+  /// Lifts a block, and does nothing else — the thread is NOT re-added.
+  ///
+  /// What "Allow again" means: the owner is not filing the thread back, they
+  /// are withdrawing the veto. Whether it belongs is a question the model may
+  /// now answer on its own judgement, the next time a pass considers it.
+  Future<void> unblockStorylineMember(
+    String storylineId,
+    String source,
+    String conversationKey,
+  ) async {
+    await db.customUpdate(
+      'DELETE FROM storyline_member_blocks '
+      'WHERE storyline_id = ? AND source = ? AND conversation_key = ?',
+      variables: _args([storylineId, source, conversationKey]),
+    );
   }
 
   Future<bool> isMemberBlocked(
@@ -3321,6 +3376,48 @@ FROM storylines s''';
         )
         .get();
     return [for (final row in result) StorylineMember.fromRow(row.data)];
+  }
+
+  /// The threads the OWNER filed into [storylineId] by hand, newest first.
+  ///
+  /// Newest first, unlike [membersOf], because these are read as examples: the
+  /// owner's latest word about what belongs here is the one worth showing a
+  /// model, and the caller takes the first few.
+  Future<List<StorylineMember>> userMembersOf(String storylineId) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM storyline_members WHERE storyline_id = ? '
+          "AND added_by = 'user' "
+          'ORDER BY added_at DESC, conversation_key ASC',
+          variables: _args([storylineId]),
+        )
+        .get();
+    return [for (final row in result) StorylineMember.fromRow(row.data)];
+  }
+
+  /// The blocks on [storylineId], newest first, optionally only those written
+  /// by [blockedBy] — `'user'` for the owner's own removals, `'audit'` for the
+  /// re-check pass's.
+  ///
+  /// The subject rides along on a LEFT JOIN, so a block whose conversation row
+  /// is gone still comes back: the block is the record, and it outlives the
+  /// thread it was written about.
+  Future<List<StorylineBlock>> blocksOf(
+    String storylineId, {
+    String? blockedBy,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT b.*, c.subject AS subject FROM storyline_member_blocks b '
+          'LEFT JOIN conversations c ON c.source = b.source '
+          'AND c.conversation_key = b.conversation_key '
+          'WHERE b.storyline_id = ?'
+          '${blockedBy == null ? '' : ' AND b.blocked_by = ?'} '
+          'ORDER BY b.blocked_at DESC, b.conversation_key ASC',
+          variables: _args([storylineId, ?blockedBy]),
+        )
+        .get();
+    return [for (final row in result) StorylineBlock.fromRow(row.data)];
   }
 
   /// Everything the comparison passes need about the members of

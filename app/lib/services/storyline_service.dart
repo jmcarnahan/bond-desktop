@@ -297,6 +297,9 @@ class StorylineService {
     }
 
     final cardData = await _store.newestInboundCardData(source, conversationKey);
+    // What the owner has already said about this storyline, by hand. One read
+    // for the one confirmation this pass makes.
+    final examples = await _examplesFor(best.id);
 
     final result = await runTask(
       _confirmClient,
@@ -305,6 +308,8 @@ class StorylineService {
         storyline: best,
         storylineParticipants: await _participantsOfStoryline(best.id),
         candidateCard: enrichedCardForConversationRow(row, cardData),
+        keptExamples: examples.kept,
+        removedExamples: examples.removed,
       ),
       // Zero: the same thread judged against the same storyline twice must
       // give the same answer, or a re-run after a restart would move threads
@@ -492,6 +497,7 @@ class StorylineService {
             storyline,
             cards,
             _newSince(storyline.refreshedMemberCount, preCount, cards.length),
+            await _removedCardsOf(storylineId),
           );
 
     // The PRE-call hash and count, not the current ones. A thread filed by
@@ -866,6 +872,7 @@ class StorylineService {
     Storyline storyline,
     List<String> cards,
     int newCount,
+    List<String> removedCards,
   ) async {
     final result = await runTask(
       _client,
@@ -878,6 +885,7 @@ class StorylineService {
         charterLocked: storyline.charterLocked,
         memberCards: cards,
         addedCards: cards.sublist(cards.length - newCount),
+        removedCards: removedCards,
       ),
       // Zero, like every other storyline call: the same members described
       // twice must come back the same, or a re-run after a park would rewrite
@@ -1042,6 +1050,10 @@ class StorylineService {
       // what all eight are judged against, not a group that grows under the
       // later candidates as the earlier ones land.
       final storylineParticipants = await _participantsOfStoryline(storylineId);
+      // And one read of the owner's examples, for the same reason and one
+      // more: they are the constant prefix of all eight prompts, so fetching
+      // them per candidate would buy queries and change nothing.
+      final examples = await _examplesFor(storylineId);
 
       var recruited = 0;
       for (final candidate in considered) {
@@ -1057,6 +1069,8 @@ class StorylineService {
             storyline: storyline,
             storylineParticipants: storylineParticipants,
             candidateCard: enrichedCardForConversationRow(row, cardData),
+            keptExamples: examples.kept,
+            removedExamples: examples.removed,
           ),
           // Zero for the reason assignment runs at zero: a re-run after a park
           // must not move different threads.
@@ -1115,6 +1129,139 @@ class StorylineService {
       charterMoved = _normalized(fresh.charter ?? '') != charterUsed;
       if (charterMoved) storyline = fresh;
     } while (charterMoved);
+  }
+
+  // ── automatic: one storyline, on the owner's removal ───────────────────
+
+  /// Re-checks a storyline's AUTOMATIC members against its charter and the
+  /// owner's examples. Queued by [removeThread] and by the About section's
+  /// "Re-check members"; runs after the refresh that a removal also queues
+  /// (handler order), so it judges against the narrowed charter.
+  ///
+  /// Members the owner filed by hand are never audited: their membership is
+  /// the owner's word. A rejected member is removed WITH a block whose
+  /// `blocked_by = 'audit'` and whose evidence is the audit's own reason —
+  /// unblocked, the recruit the refresh just woke would file it straight back.
+  /// Idempotent: a run that removes nothing writes nothing and queues nothing;
+  /// it still notes what it checked, the way the recruit notes a lap that
+  /// filed nothing.
+  Future<void> audit(String storylineId) async {
+    final storyline = await _store.getStoryline(storylineId);
+    // Dismissed between the removal and the drain. Re-judging it would spend a
+    // call per member on a group nothing renders.
+    if (storyline == null ||
+        (storyline.status != 'active' && storyline.status != 'suggested')) {
+      return;
+    }
+
+    // Everything the model put here, and nothing the owner did. `addedByUser`
+    // rather than an equality against `'auto'`: any provenance that is not the
+    // owner's own hand is the app's, and the app's work is what this re-reads.
+    final auto = [
+      for (final member in await _store.membersOf(storylineId))
+        if (!member.addedByUser) member,
+    ];
+    if (auto.isEmpty) return;
+
+    // One snapshot for every member, [recruit]'s recipe exactly: all of them
+    // are judged against the group as it stood when the pass began, not
+    // against one that shrinks under the later questions as the earlier
+    // members are removed out from under them.
+    final participants = await _participantsOfStoryline(storylineId);
+    final examples = await _examplesFor(storylineId);
+
+    final removed = <Map<String, Object?>>[];
+    var checked = 0;
+    for (final member in auto) {
+      final row = await _store.getConversationRow(
+        member.source,
+        member.conversationKey,
+      );
+      // A member whose conversation row is gone has no card to judge. Left
+      // alone rather than removed: nothing about it is known to be wrong, and
+      // the refresh already treats such a member as contributing no card.
+      if (row == null) continue;
+      final cardData = await _store.newestInboundCardData(
+        member.source,
+        member.conversationKey,
+      );
+
+      final result = await runTask(
+        _confirmClient,
+        const ConfirmMembershipTask(),
+        ConfirmInput(
+          storyline: storyline,
+          storylineParticipants: participants,
+          candidateCard: enrichedCardForConversationRow(row, cardData),
+          keptExamples: examples.kept,
+          removedExamples: examples.removed,
+        ),
+        // Zero, like every other membership call in this file: the same member
+        // re-judged after a park must not leave the storyline different.
+        temperature: 0,
+      );
+      checked++;
+      // A `low` yes is a no — the identical rule every other membership path
+      // applies, and here it means the member goes.
+      if (result.belongs && result.confidence != 'low') continue;
+
+      // Blocked, not merely removed. The recruit handler runs AFTER this one,
+      // so an unblocked removal would be re-filed in the same drain, by a pass
+      // reading the same charter this one just judged against.
+      await _store.removeStorylineMember(
+        storylineId,
+        member.source,
+        member.conversationKey,
+        block: true,
+        blockedBy: 'audit',
+        evidence: result.evidence,
+      );
+      removed.add({
+        'source': member.source,
+        'conversation_key': member.conversationKey,
+        'subject': row['subject'],
+        'evidence': result.evidence,
+      });
+    }
+
+    // Noted onto the worker's row rather than recorded as a row of its own,
+    // the recruit's convention: the audit runs only inside a drain, and a
+    // `record` here would leave the worker writing a second, empty row for
+    // the same item. `checked` is what keeps a "removed nothing" pass
+    // visible — the model was consulted and said keep, which is an answer;
+    // the kind is quiet-listed so a pass that reached no model says nothing.
+    _log.note({'checked': checked, 'removed': removed});
+
+    // Nothing moved, so nothing is written and nothing is queued. The common
+    // ending: a storyline the owner corrected once usually holds together.
+    if (removed.isEmpty) return;
+
+    await _store.updateStoryline(
+      storylineId,
+      memberHash: await _memberHashOf(storylineId),
+      // Cleared with the hash, for the reason spelled out in
+      // [assignConversation].
+      recapThrough: null,
+    );
+    // The same pointer work [removeThread] does, per thread: the feed and the
+    // hot strip read `message_progress.storyline_id` and know nothing about
+    // member rows, so a member removed here would otherwise still look filed
+    // everywhere the pipeline stamped it.
+    for (final thread in removed) {
+      final source = thread['source'] as String;
+      final key = thread['conversation_key'] as String;
+      _progress.noteStorylineLink(
+        source,
+        await _store.stampStorylineId(
+          source,
+          key,
+          clearingStorylineId: storylineId,
+        ),
+      );
+      await _stampPointer(source, key);
+    }
+    // What is left is a smaller group than the recap was written against.
+    await _store.requeueWork('storyline_recap', _workSource, storylineId);
   }
 
   // ── automatic: the whole mailbox ───────────────────────────────────────
@@ -1580,6 +1727,8 @@ class StorylineService {
       final confirm = await runTask(
         _confirmClient,
         const ConfirmMembershipTask(),
+        // No examples: the proposal has no user members and no blocks by
+        // construction.
         ConfirmInput(
           storyline: proposal,
           storylineParticipants: storylineParticipants,
@@ -1766,6 +1915,8 @@ class StorylineService {
             final confirm = await runTask(
               _confirmClient,
               const ConfirmMembershipTask(),
+              // No examples: the proposal has no user members and no blocks
+              // by construction.
               ConfirmInput(
                 storyline: proposal,
                 storylineParticipants: postParticipants,
@@ -1863,6 +2014,14 @@ class StorylineService {
   Future<void> dismissSuggestion(String id) =>
       _store.updateStoryline(id, status: 'dismissed');
 
+  /// Brings a dismissed storyline back as a suggestion — the state it was in
+  /// before the owner said no, so the same Keep / Dismiss question is asked
+  /// again. The tombstone check keys on `status = 'dismissed'`, so restoring
+  /// also lifts the block on re-proposing this member set. Members were kept
+  /// on dismissal, so nothing else needs rebuilding.
+  Future<void> restoreDismissed(String id) =>
+      _store.updateStoryline(id, status: 'suggested');
+
   Future<void> rename(String id, String title) =>
       _store.updateStoryline(id, title: title, titleLocked: true);
 
@@ -1931,7 +2090,17 @@ class StorylineService {
   /// too, but only when it gets past its own gate — and a hand-filed thread is
   /// the case where the user is watching.
   Future<void> addThread(String id, String source, String key) async {
-    await _store.addStorylineMember(id, source, key, addedBy: 'user');
+    // Evidence, on a `user` row, and it is not decoration: this membership is
+    // read back as an EXAMPLE by the confirm prompt (see [_examplesFor]), and
+    // a removal copies the member's evidence onto its block. A row with none
+    // would hand a later removal a negative example that says nothing.
+    await _store.addStorylineMember(
+      id,
+      source,
+      key,
+      addedBy: 'user',
+      evidence: 'Filed by you',
+    );
     final storyline = await _store.getStoryline(id);
     await _store.updateStoryline(
       id,
@@ -1976,8 +2145,25 @@ class StorylineService {
   /// is why clearing the recap watermark matters most here: the recap the
   /// refresh tail queues has no new mail to make it stale, and would return at
   /// its own gate still describing a thread that is gone.
+  ///
+  /// And it queues an [audit] as well as the refresh. A removal is the owner
+  /// saying the model got this group wrong, and the threads the same reasoning
+  /// filed here are still sitting in it — so the automatic members are
+  /// re-judged. The audit handler is registered AFTER the refresh handler, so
+  /// the two run in that order within one drain and the audit judges against
+  /// the charter the refresh has just narrowed.
   Future<void> removeThread(String id, String source, String key) async {
-    await _store.removeStorylineMember(id, source, key, block: true);
+    // `blocked_by: 'user'` — the owner's own "no", which is the only kind the
+    // confirm prompt ever learns from. The evidence is copied off the member
+    // row by the store, so the block records what the model thought when it
+    // filed the thread the owner is now taking out.
+    await _store.removeStorylineMember(
+      id,
+      source,
+      key,
+      block: true,
+      blockedBy: 'user',
+    );
     await _store.updateStoryline(
       id,
       memberHash: await _memberHashOf(id),
@@ -1991,6 +2177,27 @@ class StorylineService {
     );
     await _stampPointer(source, key);
     await _store.requeueWork('storyline_refresh', _workSource, id);
+    await _store.requeueWork('storyline_audit', _workSource, id);
+  }
+
+  /// Lifts a block and nothing else — "Allow again".
+  ///
+  /// The thread is NOT re-filed: the owner is withdrawing a veto, not making a
+  /// membership. Whether it belongs is a question the model may now answer on
+  /// its own judgement the next time a pass considers the thread, which is
+  /// what makes this different from [addThread].
+  ///
+  /// Nothing is queued. There is no membership change to re-describe and
+  /// nothing new to recap — the storyline is exactly as it was a moment ago,
+  /// and only the set of threads a future pass may look at has widened.
+  Future<void> unblockThread(String id, String source, String key) async {
+    await _store.unblockStorylineMember(id, source, key);
+    await _log.record(
+      'storyline_unblock',
+      source: source,
+      entityId: key,
+      detail: {'storyline_id': id},
+    );
   }
 
   /// Points a thread's messages at the storyline the rest of the app would
@@ -2234,6 +2441,75 @@ class StorylineService {
         await _store.newestInboundCardData(
           member.source,
           member.conversationKey,
+        ),
+      ));
+    }
+    return cards;
+  }
+
+  /// How many of each kind of example ride into a confirm prompt. Three: the
+  /// owner's latest word is what teaches, and a fourth card buys tokens on
+  /// every membership question this storyline will ever ask.
+  static const int _examplesEach = 3;
+
+  /// Up to three threads the owner filed by hand and up to three they took
+  /// out, as the enriched cards the confirm task reads — newest first, so the
+  /// lesson is the owner's latest word. Removed means `blocked_by = 'user'`
+  /// ONLY: an audit's rejection is a consequence of the owner's "no", not a
+  /// second lesson, and feeding it back would let the model teach itself.
+  /// Fetched once per pass and reused for every confirm in it.
+  Future<({List<String> kept, List<String> removed})> _examplesFor(
+    String storylineId,
+  ) async {
+    final kept = <String>[];
+    for (final member
+        in (await _store.userMembersOf(storylineId)).take(_examplesEach)) {
+      final card = await _cardOf(member.source, member.conversationKey);
+      if (card != null) kept.add(card);
+    }
+    final removed = <String>[];
+    for (final block in (await _store.blocksOf(storylineId, blockedBy: 'user'))
+        .take(_examplesEach)) {
+      final card = await _cardOf(block.source, block.conversationKey);
+      if (card != null) removed.add(card);
+    }
+    return (kept: kept, removed: removed);
+  }
+
+  /// One thread's enriched card, or null when its conversation row is gone —
+  /// a block outlives the thread it was written about, and an example nothing
+  /// can be said about is left out rather than rendered blank.
+  Future<String?> _cardOf(String source, String conversationKey) async {
+    final row = await _store.getConversationRow(source, conversationKey);
+    if (row == null) return null;
+    return enrichedCardForConversationRow(
+      row,
+      await _store.newestInboundCardData(source, conversationKey),
+    );
+  }
+
+  /// The threads the OWNER removed from this storyline, as the naming cards
+  /// the refresh prompt's other card fences carry — newest first, up to
+  /// [_examplesEach].
+  ///
+  /// The owner's blocks only, for [_examplesFor]'s reason: an audit's block is
+  /// a consequence of a lesson the owner already taught, and handing it back
+  /// as grounds to narrow the charter would let one removal ratchet a
+  /// storyline shut.
+  Future<List<String>> _removedCardsOf(String storylineId) async {
+    final cards = <String>[];
+    for (final block in (await _store.blocksOf(storylineId, blockedBy: 'user'))
+        .take(_examplesEach)) {
+      final row = await _store.getConversationRow(
+        block.source,
+        block.conversationKey,
+      );
+      if (row == null) continue;
+      cards.add(_namingCardForConversationRow(
+        row,
+        await _store.newestInboundCardData(
+          block.source,
+          block.conversationKey,
         ),
       ));
     }

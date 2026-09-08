@@ -667,6 +667,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return state is StorylinesLoaded ? state.storylines : const [];
   }
 
+  /// The storylines the user said no to. Read from the same state as
+  /// [_storylines] and never mixed into it: the rail folds these away under a
+  /// heading of their own.
+  List<Storyline> _dismissedStorylines() {
+    final state = ref.watch(storylinesProvider);
+    return state is StorylinesLoaded ? state.dismissed : const [];
+  }
+
   Storyline? _storylineById(String id) {
     for (final storyline in _storylines()) {
       if (storyline.id == id) return storyline;
@@ -1005,6 +1013,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return AppRail(
       conversations: conversations,
       storylines: _storylines(),
+      dismissed: _dismissedStorylines(),
       selectedId: _selectedId,
       selectedSource: _selectedSource,
       selectedStorylineId: _selectedStorylineId,
@@ -1042,6 +1051,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         }
         ref.read(storylinesProvider.notifier).dismiss(id);
       },
+      // Back to a suggestion, which is where the row came from — so it leaves
+      // the fold and re-joins the live list asking the same question.
+      onRestoreStoryline: (id) =>
+          ref.read(storylinesProvider.notifier).undismiss(id),
       footer: _railFooter(),
     );
   }
@@ -1872,6 +1885,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         if (!mounted) return;
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
+      // Empty for the frame before the read lands, like the members above.
+      blocks: ref.watch(storylineBlocksProvider(storyline.id)).valueOrNull ??
+          const [],
+      onUnblockThread: (source, key) =>
+          notifier.unblockThread(storyline.id, source, key),
+      // The spine gains a card, so it reloads with the list — the same pair of
+      // reads the remove above does, in the other direction.
+      onAddBackThread: (source, key) async {
+        await notifier.addThread(storyline.id, source, key);
+        if (!mounted) return;
+        ref.read(storylineTimelineProvider(storyline.id).notifier).load();
+      },
+      onAudit: () => notifier.auditNow(storyline.id),
       onOpenThread: (source, key) => _select(key, source: source),
       onAddThread: () =>
           setState(() => _addingToStorylineId = storyline.id),

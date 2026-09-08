@@ -86,6 +86,8 @@ class ActivityLogPanel extends StatefulWidget {
     'storyline': 'Storylines',
     'storyline_sweep': 'Storyline sweep',
     'storyline_recruit': 'Storyline recruit',
+    'storyline_audit': 'Storyline re-check',
+    'storyline_unblock': 'Storyline allow again',
     'embed_fail': 'Embeddings',
     'restore': 'Restore',
     'attachment_text': 'Read attachment',
@@ -246,6 +248,15 @@ class ActivityLogPanel extends StatefulWidget {
       case 'attachment_digest':
         final kind = detail['kind'];
         return kind is String && kind.isNotEmpty ? '$label — $kind' : label;
+      case 'storyline_audit':
+        final checked = detail['checked'];
+        final removed = detail['removed'];
+        if (checked is! num) return label;
+        return 'Re-checked ${checked.toInt()} '
+            '${checked == 1 ? 'thread' : 'threads'}, removed '
+            '${removed is List ? removed.length : 0}';
+      case 'storyline_unblock':
+        return 'Allowed a thread back into consideration';
       case 'storyline_recruit':
         final recruited = detail['recruited'];
         final considered = detail['considered'];

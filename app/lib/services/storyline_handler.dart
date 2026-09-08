@@ -134,6 +134,36 @@ class StorylineRefreshHandler extends WorkHandler {
   }
 }
 
+/// Re-judges the members one storyline's automatic passes filed, against the
+/// charter and the owner's own examples. Queued by
+/// `StorylineService.removeThread` — a removal says the reasoning that filled
+/// this group was wrong, and the threads that reasoning filed are still in it
+/// — and by the About section's "Re-check members".
+///
+/// Registered BETWEEN the refresh and the recruit, and the position is
+/// behaviour twice over. After the refresh, so a removal's audit judges
+/// against the charter the refresh has just narrowed. Before the recruit, so
+/// the blocks it writes already exist when the recruit excludes blocked
+/// threads — an audit removal the recruit could not see would be re-filed in
+/// the same drain.
+class StorylineAuditHandler extends WorkHandler {
+  final StorylineService _service;
+
+  StorylineAuditHandler(this._service);
+
+  @override
+  String get kind => 'storyline_audit';
+
+  @override
+  Future<void> run(Map<String, Object?> item) {
+    final id = item['entity_id'] as String? ?? '';
+    // An empty id is a row nothing can be done about. Done, not failed —
+    // retrying it would produce the same nothing twice.
+    if (id.isEmpty) return Future<void>.value();
+    return _service.audit(id);
+  }
+}
+
 /// Re-writes one storyline's running state of play — where it stands, what is
 /// still open, what has been decided — from the newest messages across its
 /// member threads. Queued by every path that changes what has been SAID in a

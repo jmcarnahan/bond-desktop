@@ -118,6 +118,23 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// host owns the cache; the rows only ask.
   final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
 
+  /// The threads somebody took out of this storyline — the owner's own and
+  /// the re-check pass's — for the About block's two lists. Empty is the
+  /// ordinary state and renders no headings at all.
+  final List<StorylineBlock> blocks;
+
+  /// Lifts the veto on one blocked thread without filing it back: the model
+  /// may decide for itself, next time a pass looks at it. Null leaves the
+  /// button inert.
+  final void Function(String source, String conversationKey)? onUnblockThread;
+
+  /// Files a blocked thread back in by hand, which clears its block whichever
+  /// pass wrote it. Null leaves the button inert.
+  final void Function(String source, String conversationKey)? onAddBackThread;
+
+  /// Re-judges the threads the model filed here. Null leaves the button inert.
+  final VoidCallback? onAudit;
+
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -145,10 +162,19 @@ class StorylineTimelinePanel extends StatefulWidget {
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
+    this.blocks = const [],
+    this.onUnblockThread,
+    this.onAddBackThread,
+    this.onAudit,
   });
 
   static const Key documentsButtonKey = ValueKey('storyline-documents-button');
   static const Key documentsStripKey = ValueKey('storyline-documents-strip');
+  static const Key userBlocksHeadingKey =
+      ValueKey('storyline-blocks-user-heading');
+  static const Key auditBlocksHeadingKey =
+      ValueKey('storyline-blocks-audit-heading');
+  static const Key auditButtonKey = ValueKey('storyline-audit-button');
 
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
   /// that an ultrawide window does not turn every message into one line.
@@ -882,6 +908,126 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
           // this suggestion anyway.
           if (!_editingCharter && suggestion.isNotEmpty)
             _suggestionBlock(suggestion),
+          ..._blockList(
+            'REMOVED BY YOU',
+            [
+              for (final block in widget.blocks)
+                if (block.blockedByUser) block,
+            ],
+            key: StorylineTimelinePanel.userBlocksHeadingKey,
+          ),
+          ..._blockList(
+            'REMOVED BY RE-CHECK',
+            [
+              for (final block in widget.blocks)
+                if (!block.blockedByUser) block,
+            ],
+            key: StorylineTimelinePanel.auditBlocksHeadingKey,
+          ),
+          Row(
+            children: [
+              _quietButton(
+                'Re-check members',
+                widget.onAudit,
+                key: StorylineTimelinePanel.auditButtonKey,
+              ),
+            ],
+          ),
+          Text(
+            'Re-judges the threads the model filed here against the charter '
+            'and what you kept and removed.',
+            style: BondType.caption,
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// One heading and its removed threads, or nothing when none were removed
+  /// that way. Two lists rather than one, because the two answer different
+  /// questions: what the owner has already said no to, and what the re-check
+  /// pass decided on its own and may have got wrong.
+  List<Widget> _blockList(
+    String heading,
+    List<StorylineBlock> blocks, {
+    required Key key,
+  }) {
+    if (blocks.isEmpty) return const [];
+    return [
+      const SizedBox(height: BondSpacing.s8),
+      Text(heading, key: key, style: BondType.label),
+      const SizedBox(height: 2),
+      for (final block in blocks)
+        Padding(
+          padding: const EdgeInsets.only(bottom: BondSpacing.s4),
+          child: _blockEntry(block),
+        ),
+    ];
+  }
+
+  /// One removed thread, shaped like a member entry so the two lists read as
+  /// the same kind of thing seen from opposite sides.
+  ///
+  /// A block outlives the thread it was written about — the store keeps it
+  /// when the conversation row goes — so the subject can be missing and the
+  /// entry says so rather than rendering a blank line.
+  Widget _blockEntry(StorylineBlock block) {
+    return Container(
+      constraints: const BoxConstraints(
+        maxWidth: StorylineTimelinePanel._entryMaxWidth,
+      ),
+      decoration: BoxDecoration(
+        color: BondColors.faintGround,
+        borderRadius: BondRadii.smAll,
+        border: Border.all(color: BondColors.border),
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: BondSpacing.s8,
+        vertical: BondSpacing.s4,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            block.subject ?? '(thread no longer stored)',
+            style: BondType.caption,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          Text(
+            block.evidence?.isNotEmpty == true
+                ? block.evidence!
+                : 'No reason recorded.',
+            style: BondType.caption,
+          ),
+          Row(
+            children: [
+              // Lifts the veto and nothing else: the thread is not filed back,
+              // the model is simply allowed to decide about it again.
+              _quietButton(
+                'Allow again',
+                widget.onUnblockThread == null
+                    ? null
+                    : () => widget.onUnblockThread!(
+                          block.source,
+                          block.conversationKey,
+                        ),
+              ),
+              const SizedBox(width: BondSpacing.s4),
+              // Files the thread by hand, which clears the block on the way
+              // in — a block of either kind, since both offer both buttons.
+              _quietButton(
+                'Add back',
+                widget.onAddBackThread == null
+                    ? null
+                    : () => widget.onAddBackThread!(
+                          block.source,
+                          block.conversationKey,
+                        ),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -1055,8 +1201,11 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
             overflow: TextOverflow.ellipsis,
           ),
           Text(
+            // The same words the store now writes as a user row's evidence,
+            // and the same words a block copied off one shows: one spelling
+            // for one fact, wherever it is read back.
             member.addedByUser
-                ? 'You added this.'
+                ? 'Filed by you'
                 : (member.evidence?.isNotEmpty == true
                     ? member.evidence!
                     : 'Grouped automatically.'),

@@ -199,6 +199,53 @@ class StorylineMember {
   }
 }
 
+/// One thread somebody took OUT of a storyline, and would not have back.
+///
+/// The mirror of [StorylineMember]: a membership says why a thread is here, a
+/// block says why it is not. [blockedBy] is `'user'` for the owner's own
+/// removal and `'audit'` for the re-check pass that runs after one — only the
+/// owner's are ever shown to a model as examples, because an audit's block is
+/// a consequence of the owner's word rather than a second opinion.
+///
+/// [evidence] is the member's own evidence at the moment it was removed, or
+/// the audit's own reason. Null on a row migrated from before either was
+/// recorded. [subject] comes from a LEFT JOIN on the conversation and is null
+/// when that row is gone — the block outlives the thread.
+@immutable
+class StorylineBlock {
+  final String storylineId;
+  final String source;
+  final String conversationKey;
+  final String blockedBy;
+  final String? evidence;
+  final String blockedAt;
+  final String? subject;
+
+  const StorylineBlock({
+    required this.storylineId,
+    this.source = 'email',
+    required this.conversationKey,
+    this.blockedBy = 'user',
+    this.evidence,
+    this.blockedAt = '',
+    this.subject,
+  });
+
+  bool get blockedByUser => blockedBy == 'user';
+
+  factory StorylineBlock.fromRow(Map<String, Object?> row) {
+    return StorylineBlock(
+      storylineId: row['storyline_id'] as String? ?? '',
+      source: row['source'] as String? ?? 'email',
+      conversationKey: row['conversation_key'] as String? ?? '',
+      blockedBy: row['blocked_by'] as String? ?? 'user',
+      evidence: row['evidence'] as String?,
+      blockedAt: row['blocked_at'] as String? ?? '',
+      subject: row['subject'] as String?,
+    );
+  }
+}
+
 /// One member thread's whole run inside a storyline — the unit the storyline
 /// pane renders as a card.
 ///
