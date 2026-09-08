@@ -22,6 +22,15 @@ const Duration homeDropLinger = Duration(seconds: 3);
 /// deleting late leaves a gap where the row already was.
 const Duration homeDropCollapse = Duration(milliseconds: 180);
 
+/// How long a still-pending row may go without a progress write before it is
+/// called stuck rather than slow.
+///
+/// Fifteen minutes is longer than any single stage takes and shorter than a
+/// person's patience with a bar that is not moving. The tile's SQL and the
+/// row's Dart both read this one number, so a list with two flags on it and a
+/// tile that counted three cannot happen.
+const Duration homeStalledAfter = Duration(minutes: 15);
+
 /// One message's trip through the pipeline, as one feed row.
 ///
 /// Every stage state is a raw string rather than an enum, for the reason a
@@ -34,6 +43,13 @@ const Duration homeDropCollapse = Duration(milliseconds: 180);
 /// settled the message. That is what makes scrolling back through history
 /// honest: a thread that has since gone quiet still shows the verdict the user
 /// was actually given at the time.
+///
+/// The reason fields are the opposite and are meant to be: [needsYouReason],
+/// [gateReason], [bucketReason], [storylineEvidence] and the rest are the
+/// pipeline's own record of why it decided what it did, read live on every
+/// query. A row has to be able to explain itself with what the pipeline
+/// believes NOW, or the explanation would go on defending a decision that has
+/// since been revised.
 @immutable
 class HomeFeedRow {
   final String source;
@@ -83,6 +99,44 @@ class HomeFeedRow {
   final String? fromName;
   final String? fromAddress;
 
+  /// When the pipeline last wrote anything about this row. The stalled
+  /// clock's zero, and empty only on a path that predates the column.
+  final String updatedAt;
+
+  /// The needs-you judgement as it stands on the message. Null is its own
+  /// answer — nothing has judged this one yet — and is why it is not a plain
+  /// bool: "no" and "not asked" send a reader to different places.
+  final bool? needsYouVerdict;
+
+  /// Why the verdict went that way, in the judge's own words.
+  final String? needsYouReason;
+
+  /// Why triage let the message through, or did not. Distinct from
+  /// [dropReason], which is the gate's verdict recorded on the progress row.
+  final String? gateReason;
+
+  /// Where the attention sweep filed the thread — `later`, `done`, and the
+  /// rest of the archive rail's vocabulary. Null when nothing has ruled.
+  final String? bucket;
+
+  /// Who decided the [bucket], or `user` when a person did.
+  final String? bucketReason;
+
+  /// The sweep's ranking score for the thread, 0 to 1. Null before it ran.
+  final double? attentionScore;
+
+  /// What the storyline pass wrote down for joining this thread to its
+  /// storyline. Null when the row is filed nowhere.
+  final String? storylineEvidence;
+
+  /// `auto` or `user` — whether the filing was the model's or a person's.
+  final String? storylineAddedBy;
+
+  /// True when something is queued or running for this message, its thread,
+  /// or one of its documents. A row with work open is never stalled, however
+  /// long it has been sitting there.
+  final bool workOpen;
+
   const HomeFeedRow({
     required this.source,
     required this.sourceMessageId,
@@ -103,6 +157,16 @@ class HomeFeedRow {
     this.subject,
     this.fromName,
     this.fromAddress,
+    this.updatedAt = '',
+    this.needsYouVerdict,
+    this.needsYouReason,
+    this.gateReason,
+    this.bucket,
+    this.bucketReason,
+    this.attentionScore,
+    this.storylineEvidence,
+    this.storylineAddedBy,
+    this.workOpen = false,
   });
 
   factory HomeFeedRow.fromRow(Map<String, Object?> row) => HomeFeedRow(
@@ -125,6 +189,21 @@ class HomeFeedRow {
         subject: row['subject'] as String?,
         fromName: row['from_name'] as String?,
         fromAddress: row['from_address'] as String?,
+        updatedAt: row['updated_at'] as String? ?? '',
+        // Three-valued on purpose: null stays null, and only a stored 1 is a
+        // yes. Anything else the column could hold is a no.
+        needsYouVerdict: switch (row['needs_you_verdict'] as num?) {
+          null => null,
+          final n => n.toInt() == 1,
+        },
+        needsYouReason: row['needs_you_reason'] as String?,
+        gateReason: row['gate_reason'] as String?,
+        bucket: row['bucket'] as String?,
+        bucketReason: row['bucket_reason'] as String?,
+        attentionScore: (row['attention_score'] as num?)?.toDouble(),
+        storylineEvidence: row['storyline_evidence'] as String?,
+        storylineAddedBy: row['storyline_added_by'] as String?,
+        workOpen: (row['work_open'] as num?)?.toInt() == 1,
       );
 
   /// The pair the feed is keyed and cursored by. A message id is only unique
@@ -170,7 +249,35 @@ class HomeFeedRow {
         subject: subject,
         fromName: fromName,
         fromAddress: fromAddress,
+        updatedAt: updatedAt,
+        needsYouVerdict: needsYouVerdict,
+        needsYouReason: needsYouReason,
+        gateReason: gateReason,
+        bucket: bucket,
+        bucketReason: bucketReason,
+        attentionScore: attentionScore,
+        storylineEvidence: storylineEvidence,
+        storylineAddedBy: storylineAddedBy,
+        // `RestoreService` queues the work in the same breath as the reset, so
+        // the optimistic row must not spend a frame claiming to be stalled.
+        workOpen: true,
       );
+
+  /// Still pending, nothing queued or running for it or its thread, and no
+  /// progress write for [homeStalledAfter]. [now] is a parameter, never read
+  /// from the clock, so a test can pin the threshold.
+  ///
+  /// An unreadable [updatedAt] answers false rather than true: an unknown
+  /// clock is not evidence that anything went wrong, and a row accused of
+  /// being stuck because a column was never written would send the reader
+  /// after a fault that is not there.
+  bool isStalled(DateTime now) {
+    if (outcome != 'pending') return false;
+    if (workOpen) return false;
+    final since = DateTime.tryParse(updatedAt)?.toUtc();
+    if (since == null) return false;
+    return now.toUtc().difference(since) >= homeStalledAfter;
+  }
 }
 
 /// One semantic-search result: a feed row, and how far its message sat from
@@ -267,6 +374,12 @@ class HomeMetrics {
   /// Still moving: `outcome = 'pending'`.
   final int inFlight;
 
+  /// The subset of [inFlight] that has stopped moving — pending, with nothing
+  /// queued or running for it, and no progress write since the cutoff the
+  /// caller bound. Counted here so the tile and the flags on the rows below
+  /// it are one answer rather than two.
+  final int stalled;
+
   /// Messages where some stage ended in `error`. Counted once however many
   /// stages failed — this is "how many messages went wrong", not "how many
   /// things went wrong".
@@ -282,6 +395,7 @@ class HomeMetrics {
     this.needsYou = 0,
     this.storylined = 0,
     this.inFlight = 0,
+    this.stalled = 0,
     this.errored = 0,
     this.total = 0,
   });
@@ -296,6 +410,7 @@ class HomeMetrics {
       needsYou: at('needs_you'),
       storylined: at('storylined'),
       inFlight: at('in_flight'),
+      stalled: at('stalled'),
       errored: at('errored'),
       total: at('total'),
     );

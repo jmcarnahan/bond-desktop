@@ -817,7 +817,15 @@ final homeMetricsProvider = FutureProvider.autoDispose<HomeMetrics>((ref) {
   // carries the previous value through the rebuild, so the numbers change
   // without the tiles ever blinking blank.
   ref.watch(homeFeedProvider.select((s) => s.metricsEpoch));
-  return ref.watch(messageStoreProvider).homeMetrics(sinceIso: _windowStart());
+  return ref.watch(messageStoreProvider).homeMetrics(
+        sinceIso: _windowStart(),
+        // Computed here and bound once, so every row the tile is counting is
+        // measured against the same instant the rows themselves are.
+        stalledBeforeIso: DateTime.now()
+            .toUtc()
+            .subtract(homeStalledAfter)
+            .toIso8601String(),
+      );
 });
 
 final hotStorylinesProvider =

@@ -237,6 +237,31 @@ class PipelineProgress {
         (store) => store.restoreProgress(source, sourceMessageId),
       );
 
+  /// A retry is a progress write.
+  ///
+  /// Nothing about the row's stage states changes here — the stages are put
+  /// back on their queues by [PipelineRepairService], and each will record
+  /// itself when it runs. What this does is restart the stalled clock, so a
+  /// row the owner has just asked for again stops accusing the pipeline of
+  /// having abandoned it, and give the live screen a tick to re-read behind.
+  ///
+  /// The tick goes out under [stage] and `pending`, which is honest rather
+  /// than nominal: [stage] is the first thing owed and the first thing about
+  /// to run. As with [noteRestored], the live screen re-reads the whole row
+  /// behind any tick, so one tick carries the other stages with it.
+  Future<void> noteRetry(
+    String source,
+    String sourceMessageId, {
+    required String stage,
+  }) =>
+      _one(
+        source,
+        sourceMessageId,
+        stage,
+        'pending',
+        (store) => store.touchProgress(source, sourceMessageId),
+      );
+
   /// Takes the Needs You chip off a thread the user has answered or finished,
   /// and says so per message.
   ///

@@ -2040,6 +2040,46 @@ RETURNING *
     );
   }
 
+  /// [reviveErroredTriage] for ONE message, with no attempts ceiling.
+  ///
+  /// The ceiling is deliberately absent, and the difference matters: the bulk
+  /// revival is the pipeline healing itself and has to stop somewhere, while
+  /// this is the owner's own hand on one row — and a row past the ceiling is
+  /// precisely the row they are asking about. Attempts are not reset either,
+  /// so a message that fails again lands back in `error` honestly rather than
+  /// looking untried.
+  ///
+  /// Returns how many rows moved: zero when the message was never errored,
+  /// which is how the caller knows there was nothing to retry here.
+  Future<int> reviveTriageFor(String source, String sourceMessageId) {
+    return db.customUpdate(
+      "UPDATE messages SET triage_status = 'pending', updated_at = ? "
+      "WHERE source = ? AND source_message_id = ? AND triage_status = 'error'",
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+  }
+
+  /// One work row's status, or null when the queue has never held it.
+  ///
+  /// Read before a requeue so a caller can tell what it actually did:
+  /// [requeueWork] deliberately leaves a `pending` or `processing` row where
+  /// it is, and a retry that named that stage anyway would be claiming credit
+  /// for work that was already under way.
+  Future<String?> workStatusOf(
+    String kind,
+    String source,
+    String entityId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT status FROM work_items '
+          'WHERE task_kind = ? AND source = ? AND entity_id = ?',
+          variables: _args([kind, source, entityId]),
+        )
+        .get();
+    return rows.isEmpty ? null : rows.first.data['status'] as String?;
+  }
+
   /// [touchTriage] for the work queue, and for the same reason: only
   /// `updated_at` moves, so a heartbeat can never overwrite the result the
   /// worker is mid-way through producing.
@@ -4490,6 +4530,45 @@ WHERE m.source = ? AND m.source_message_id = ?
   /// for it would wait forever.
   static const String _terminalStates = "('done', 'skipped', 'error')";
 
+  /// True when the message or its thread has work queued or running.
+  ///
+  /// Three arms because one message's work is filed under three different
+  /// entity ids: its own id for the per-message stages, its conversation key
+  /// for storyline assignment, and `'<message id>|<attachment id>'` for every
+  /// document hanging off it (see `attachmentEntityId`). `substr` rather than
+  /// LIKE on that last arm: a Graph message id can contain `_`, which LIKE
+  /// reads as a wildcard, and the prefix test would then match ids that are
+  /// not this message's at all.
+  ///
+  /// It is what tells a row that has stopped from a row nobody has got to
+  /// yet, so [HomeFeedRow.isStalled] and the stalled tile both stand on it.
+  static const String _openWorkExists = '''
+EXISTS (
+  SELECT 1 FROM work_items w
+  WHERE w.source = p.source
+    AND w.status IN ('pending', 'processing')
+    AND (w.entity_id = p.source_message_id
+         OR w.entity_id = p.conversation_key
+         OR substr(w.entity_id, 1, length(p.source_message_id) + 1)
+            = p.source_message_id || '|'))''';
+
+  /// Which storyline the row is really filed in.
+  ///
+  /// `message_progress.storyline_id` is a pointer stamped when THIS row's own
+  /// storyline pass ran, so it is null for a message that arrived on a thread
+  /// already in a storyline, and null for a thread a person filed by hand
+  /// afterwards — in both cases the thread is a member and the row says
+  /// nothing. The feed's "Filed in" has to read the membership when the
+  /// pointer is missing, or it would hide most of what is actually filed.
+  ///
+  /// Newest membership wins, because a thread is allowed to sit in several
+  /// and the last one it joined is the one the reader was told about.
+  static const String _effectiveStorylineId = '''
+COALESCE(p.storyline_id, (
+  SELECT x.storyline_id FROM storyline_members x
+  WHERE x.source = p.source AND x.conversation_key = p.conversation_key
+  ORDER BY x.added_at DESC LIMIT 1))''';
+
   /// Everything a home-feed row needs, in one projection.
   ///
   /// Shared by the two paging reads and the live patch read on purpose: they
@@ -4497,21 +4576,56 @@ WHERE m.source = ? AND m.source_message_id = ?
   /// rows with rows that have holes in them.
   /// The column list alone, so a read that needs the same row shape over a
   /// DIFFERENT set of joins — [semanticSearch] comes in through
-  /// `message_vectors` — can have it without copying nineteen column names
-  /// that [HomeFeedRow.fromRow] then has to keep agreeing with.
+  /// `message_vectors` — can have it without copying the column list that
+  /// [HomeFeedRow.fromRow] then has to keep agreeing with.
+  ///
+  /// The reason columns are here rather than behind a second read because
+  /// they are what a row has to be able to explain itself with: why the gate
+  /// let it through, why the verdict went the way it did, which bucket the
+  /// sweep put the thread in. They are read live rather than snapshotted —
+  /// they are the pipeline's own record, and it is allowed to change its
+  /// mind.
+  ///
+  /// The two membership fields are SCALAR SUBQUERIES and not a join, and that
+  /// is load-bearing: a thread can be in several storylines, a join would
+  /// return one feed row per membership, and the list is keyed by row — two
+  /// rows under one key is a crash, not a duplicate.
   static const String _homeFeedColumns = '''
 p.source, p.source_message_id, p.conversation_key, p.received_at,
   p.triage_state, p.extract_state, p.storyline_state, p.draft_state,
   p.settle_state,
-  p.outcome, p.dropped, p.drop_reason, p.storyline_id, p.needs_you, p.urgency,
-  m.subject, m.from_name, m.from_address, s.title AS storyline_title''';
+  p.outcome, p.dropped, p.drop_reason, p.needs_you, p.urgency, p.updated_at,
+  $_effectiveStorylineId AS storyline_id,
+  m.subject, m.from_name, m.from_address,
+  m.needs_you_verdict, m.needs_you_reason, m.gate_reason,
+  s.title AS storyline_title,
+  ai.bucket, ai.bucket_reason, ai.attention_score,
+  (SELECT sm.evidence FROM storyline_members sm
+     WHERE sm.storyline_id = s.id AND sm.source = p.source
+       AND sm.conversation_key = p.conversation_key) AS storyline_evidence,
+  (SELECT sm.added_by FROM storyline_members sm
+     WHERE sm.storyline_id = s.id AND sm.source = p.source
+       AND sm.conversation_key = p.conversation_key) AS storyline_added_by,
+  $_openWorkExists AS work_open''';
+
+  /// The joins [_homeFeedColumns] is written against, so the four readers
+  /// cannot drift apart: a column present on one path and missing on another
+  /// is a hole [HomeFeedRow.fromRow] reads as null on that path alone.
+  ///
+  /// `conversation_ai`'s primary key is `(source, conversation_key)`, so its
+  /// LEFT JOIN cannot multiply a row — unlike the memberships above, which is
+  /// why those stayed subqueries.
+  static const String _homeFeedJoins = '''
+JOIN messages m
+  ON m.source = p.source AND m.source_message_id = p.source_message_id
+LEFT JOIN storylines s ON s.id = $_effectiveStorylineId
+LEFT JOIN conversation_ai ai
+  ON ai.source = p.source AND ai.conversation_key = p.conversation_key''';
 
   static const String _homeFeedSelect = '''
 SELECT $_homeFeedColumns
 FROM message_progress p
-JOIN messages m
-  ON m.source = p.source AND m.source_message_id = p.source_message_id
-LEFT JOIN storylines s ON s.id = p.storyline_id''';
+$_homeFeedJoins''';
 
   /// Records where triage got to, and returns the message's `received_at` so
   /// the caller can tick a live listener without a second read. Null when
@@ -4588,6 +4702,23 @@ RETURNING received_at
     final rows = await db.customWriteReturning(
       'UPDATE message_progress SET\n$_resetProgressSet\n'
       'WHERE source = ?2 AND source_message_id = ?3\n'
+      'RETURNING received_at',
+      variables: _args([_nowIso(), source, sourceMessageId]),
+    );
+    return rows.isEmpty ? null : rows.first.data['received_at'] as String?;
+  }
+
+  /// Moves one progress row's clock, and nothing else.
+  ///
+  /// A retry is a progress write even when no stage state changes: it
+  /// restarts the stalled clock, so the row stops accusing the pipeline of
+  /// having given up on it, and the returned `received_at` gives the live
+  /// screen a tick to re-read behind. Null when there is no progress row,
+  /// which costs the tick and nothing else.
+  Future<String?> touchProgress(String source, String sourceMessageId) async {
+    final rows = await db.customWriteReturning(
+      'UPDATE message_progress SET updated_at = ?1 '
+      'WHERE source = ?2 AND source_message_id = ?3 '
       'RETURNING received_at',
       variables: _args([_nowIso(), source, sourceMessageId]),
     );
@@ -5057,7 +5188,17 @@ RETURNING source, source_message_id, received_at
   /// ONE statement, which is the whole point: read separately, a message
   /// settling between two queries would land in one number and not the other,
   /// and the tiles would disagree until something reloaded them.
-  Future<HomeMetrics> homeMetrics({required String sinceIso}) async {
+  ///
+  /// `stalled` is the same three facts [HomeFeedRow.isStalled] reads, spelled
+  /// in SQL: still `pending`, nothing queued or running for the message or
+  /// its thread, and no progress write since [stalledBeforeIso]. The cutoff
+  /// is BOUND rather than computed here so the tile and the rows under it are
+  /// answering at the same instant — a tile that counted three and a list
+  /// with two flags on it is a tile nobody believes twice.
+  Future<HomeMetrics> homeMetrics({
+    required String sinceIso,
+    required String stalledBeforeIso,
+  }) async {
     final row = await db
         .customSelect(
           '''
@@ -5072,14 +5213,17 @@ SELECT
     AS storylined,
   COALESCE(SUM(CASE WHEN outcome = 'pending' THEN 1 ELSE 0 END), 0)
     AS in_flight,
+  COALESCE(SUM(CASE WHEN p.outcome = 'pending' AND p.updated_at < ?2
+                      AND NOT $_openWorkExists THEN 1 ELSE 0 END), 0)
+    AS stalled,
   COALESCE(SUM(CASE WHEN triage_state = 'error' OR extract_state = 'error'
                       OR storyline_state = 'error' THEN 1 ELSE 0 END), 0)
     AS errored,
   COUNT(*) AS total
-FROM message_progress
-WHERE received_at >= ?
+FROM message_progress p
+WHERE received_at >= ?1
 ''',
-          variables: _args([sinceIso]),
+          variables: _args([sinceIso, stalledBeforeIso]),
         )
         .getSingle();
     return HomeMetrics.fromRow(row.data);
@@ -5424,9 +5568,7 @@ SELECT v.id AS vector_id, $_homeFeedColumns
 FROM message_vectors v
 JOIN message_progress p
   ON p.source = v.source AND p.source_message_id = v.source_message_id
-JOIN messages m
-  ON m.source = p.source AND m.source_message_id = p.source_message_id
-LEFT JOIN storylines s ON s.id = p.storyline_id
+$_homeFeedJoins
 $where
 ''',
           variables: _args(args),

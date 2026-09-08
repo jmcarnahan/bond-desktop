@@ -49,6 +49,7 @@ import '../services/needs_you_handler.dart';
 import '../services/notification_coordinator.dart';
 import '../services/notify/desktop_notifier.dart';
 import '../services/pipeline_progress.dart';
+import '../services/pipeline_repair_service.dart';
 import '../services/progress_bus.dart';
 import '../services/notify/local_desktop_notifier.dart';
 import '../services/read_ack_queue.dart';
@@ -571,6 +572,21 @@ final restoreServiceProvider = Provider<RestoreService>(
     ref.watch(messageStoreProvider),
     progress: ref.watch(pipelineProgressProvider),
     ensureBody: ref.watch(syncServiceProvider).ensureMessageBody,
+    pumpTriage: () => ref.read(triageQueueProvider).pump(),
+    pumpWork: () => ref.read(aiWorkerProvider).pump(),
+    activityLog: ref.watch(activityLogProvider),
+  ),
+);
+
+/// Retrying the stages one stalled message still owes.
+///
+/// A plain `Provider` and `read` inside the pump closures, both for
+/// [restoreServiceProvider]'s reasons — see its comment; this is the same
+/// wiring over the same two drains, for the rows Restore is not about.
+final pipelineRepairServiceProvider = Provider<PipelineRepairService>(
+  (ref) => PipelineRepairService(
+    ref.watch(messageStoreProvider),
+    progress: ref.watch(pipelineProgressProvider),
     pumpTriage: () => ref.read(triageQueueProvider).pump(),
     pumpWork: () => ref.read(aiWorkerProvider).pump(),
     activityLog: ref.watch(activityLogProvider),
