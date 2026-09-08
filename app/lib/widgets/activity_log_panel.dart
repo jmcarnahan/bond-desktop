@@ -90,6 +90,7 @@ class ActivityLogPanel extends StatefulWidget {
     'storyline_unblock': 'Storyline allow again',
     'embed_fail': 'Embeddings',
     'restore': 'Restore',
+    'ignore': 'Ignore',
     'attachment_text': 'Read attachment',
     'attachment_digest': 'Attachment digest',
     'needs_you': 'Needs you',
@@ -221,6 +222,8 @@ class ActivityLogPanel extends StatefulWidget {
         return 'Storylines updated';
       case 'restore':
         return 'Restored a filtered message';
+      case 'ignore':
+        return 'Ignored a message';
       case 'storyline_sweep':
         final proposed = detail['proposed'];
         final confirmed = detail['confirmed'];

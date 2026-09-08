@@ -11,7 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 /// nothing else, a needed one says so, a filed one links where it went — so
 /// most of this file is about which of those a row is allowed to claim at
 /// once. WHICH sentence a row gets is `home_result_test.dart`'s question; this
-/// file is about the dressing and the three nested gestures.
+/// file is about the dressing and the four nested gestures.
 
 final DateTime _now = DateTime.utc(2026, 9, 3, 12);
 
@@ -88,6 +88,7 @@ Future<void> _pump(
   void Function(String, String)? onOpenThread,
   void Function(String)? onOpenStoryline,
   void Function(String, String)? onRetry,
+  void Function(String, String)? onOpenHistory,
   bool animateIn = false,
 }) async {
   // A desktop pane's width. The row is a fixed grid with two flexible cells,
@@ -101,6 +102,7 @@ Future<void> _pump(
     onOpenThread: onOpenThread ?? (_, _) {},
     onOpenStoryline: onOpenStoryline ?? (_) {},
     onRetry: onRetry,
+    onOpenHistory: onOpenHistory,
   )));
 }
 
@@ -330,11 +332,12 @@ void main() {
       );
     });
 
-    testWidgets('three nested gestures, and each tap fires exactly one',
+    testWidgets('four nested gestures, and each tap fires exactly one',
         (tester) async {
       final threads = <String>[];
       final storylines = <String>[];
       final retries = <(String, String)>[];
+      final histories = <(String, String)>[];
       // Stalled AND filed: every affordance the cell has, on one row.
       final row = _row(
         id: 'm9',
@@ -350,28 +353,52 @@ void main() {
         onOpenThread: (_, key) => threads.add(key),
         onOpenStoryline: storylines.add,
         onRetry: (source, id) => retries.add((source, id)),
+        onOpenHistory: (source, id) => histories.add((source, id)),
       );
 
       expect(find.text('Stalled — waiting on settle'), findsOneWidget);
 
-      // All three counted after every tap: the failure worth catching is a
+      // All four counted after every tap: the failure worth catching is a
       // gesture that fires its own callback AND the row's underneath it.
+      void expectOnly(String fired) {
+        expect(threads, fired == 'thread' ? ['c1'] : isEmpty);
+        expect(storylines, fired == 'storyline' ? ['s1'] : isEmpty);
+        expect(retries, fired == 'retry' ? [('email', 'm9')] : isEmpty);
+        expect(histories, fired == 'history' ? [('email', 'm9')] : isEmpty);
+        threads.clear();
+        storylines.clear();
+        retries.clear();
+        histories.clear();
+      }
+
       await tester.tap(find.text('Launch date'));
-      expect(threads, ['c1']);
-      expect(storylines, isEmpty);
-      expect(retries, isEmpty);
+      expectOnly('thread');
 
-      threads.clear();
+      // The bar and the sentence are two doors onto the same story, and the
+      // row underneath must not open behind either.
+      await tester.tap(find.byKey(HomeFeedRowTile.historyBarKey(row)));
+      expectOnly('history');
+
+      // Near the left edge of the cell rather than its centre: the storyline
+      // link and Retry live at the right of the same cell and win the arena
+      // where they sit, which is the whole point of the nesting.
+      final cell = find.byKey(HomeFeedRowTile.historyCellKey(row));
+      await tester.tapAt(tester.getTopLeft(cell) + const Offset(4, 8));
+      expectOnly('history');
+
       await tester.tap(find.text('Website redesign'));
-      expect(threads, isEmpty);
-      expect(storylines, ['s1']);
-      expect(retries, isEmpty);
+      expectOnly('storyline');
 
-      storylines.clear();
       await tester.tap(find.byKey(HomeFeedRowTile.retryKey(row)));
-      expect(threads, isEmpty);
-      expect(storylines, isEmpty);
-      expect(retries, [('email', 'm9')]);
+      expectOnly('retry');
+    });
+
+    testWidgets('no history target without a handler', (tester) async {
+      final row = _row(id: 'm9');
+      await _pump(tester, row);
+
+      expect(find.byKey(HomeFeedRowTile.historyBarKey(row)), findsNothing);
+      expect(find.byKey(HomeFeedRowTile.historyCellKey(row)), findsNothing);
     });
 
     testWidgets('no Retry when there is nothing to retry', (tester) async {

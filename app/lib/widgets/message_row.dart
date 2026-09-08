@@ -402,6 +402,13 @@ class MessageRow extends StatefulWidget {
   /// reads a disk.
   final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
 
+  /// Opens this message's own history — every stage, judgement and queue row
+  /// behind it. Null renders no link, which is what a host with nowhere to
+  /// show one needs; and it appears on header rows only, because a run's
+  /// continuations are the same message's neighbours rather than rows of
+  /// their own.
+  final VoidCallback? onWhatHappened;
+
   const MessageRow({
     super.key,
     required this.message,
@@ -414,7 +421,13 @@ class MessageRow extends StatefulWidget {
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
+    this.onWhatHappened,
   });
+
+  /// The link into this message's history. One key and not a per-message one:
+  /// a transcript renders many rows, and every test that wants this wants it
+  /// on a row it has already found.
+  static const Key whatHappenedKey = ValueKey('message-row-what-happened');
 
   /// The one line a folded row keeps about its files.
   static const Key collapsedAttachmentHintKey =
@@ -769,6 +782,25 @@ class _MessageRowState extends State<MessageRow> {
         if (meta.isNotEmpty) ...[
           const SizedBox(width: BondSpacing.s8),
           Text(meta, style: BondType.caption),
+        ],
+        // After the meta and before the chevron, in its own transparent
+        // Material and its own InkWell: the header IS the fold's target, and a
+        // link sharing that gesture would collapse the message every time
+        // somebody asked why it was here.
+        if (widget.onWhatHappened != null) ...[
+          const SizedBox(width: BondSpacing.s8),
+          Material(
+            type: MaterialType.transparency,
+            child: InkWell(
+              key: MessageRow.whatHappenedKey,
+              onTap: widget.onWhatHappened,
+              borderRadius: BondRadii.smAll,
+              child: Text(
+                'What happened',
+                style: BondType.caption.copyWith(color: BondColors.primary),
+              ),
+            ),
+          ),
         ],
         if (folds) ...[
           const SizedBox(width: BondSpacing.s4),

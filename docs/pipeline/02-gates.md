@@ -62,3 +62,27 @@ then pump triage and the AI worker — chained in that order under the shared
 A restored message never toasts, deliberately: `admitNotifyCandidates` is
 recency-floored and inserts with `INSERT OR IGNORE`, and restore is the user
 pulling history back, not new mail arriving.
+
+## Ignoring a kept message
+
+The mirror of Restore, and the owner's own gate. `MessageStore.dropMessage`
+writes `messages.triage_status = 'skipped'` with `gate_reason = 'user'`,
+clears `triage_error`, and runs the SAME progress cascade a gate does through
+`writeTriageProgress` — pending stages close as `skipped`, the row settles
+`dropped` under that reason, and a stage that already finished keeps what it
+did. It also clears the thread's needs-you chips and records a `down` /
+`explicit` row in `feedback_events`, because a button press is exactly that.
+
+Nothing that was already queued has to be cancelled: the handlers all skip a
+gated row on their own, so whatever is on a queue for this message reads the
+new `triage_status` and declines. The thread stops holding an open ask for the
+same reason — the open-ask predicate excludes gated rows — which is why the
+verdict itself is deliberately left alone. `needs_you_verdict` is what the
+judge decided about the words, and an Ignore is the owner saying they do not
+want the message, not that the judge misread it.
+
+`gate_override` is not cleared either, so a message that was restored and then
+ignored carries both facts, and the history screen shows both. Restore
+reverses an Ignore exactly as it reverses any other gate — the reason is a
+`gate_reason` like the rest — which is what makes the pair on the history
+screen safe to press.

@@ -110,3 +110,59 @@ this order:
 The eight tiles above the table read the same columns over the last 24 hours,
 and Retry (`PipelineRepairService`) puts back exactly the stages a row still
 owes — never one that finished, and never a dropped row, which is Restore's.
+
+## Finding out what happened to a message
+
+Every sentence above is a summary, and the reason a row got the sentence it
+did is spread across eight tables. `MessageHistoryScreen`
+(`app/lib/screens/message_history_screen.dart`) is where all of it is read at
+once, behind `messageHistoryProvider`, which folds those eight reads into one
+`MessageHistory` and re-reads it behind the progress ticks the message's own
+stages publish.
+
+Four doors reach it, and all four hand it the same `(source,
+source_message_id)` pair:
+
+- **A home row's stage bar or its Result cell.** Two targets on the row rather
+  than one, because those are the two places a reader looks when the sentence
+  is not the one they expected. They nest inside the row's own tap and outside
+  the storyline link and Retry, so each gesture fires exactly one thing.
+- **A home search result.** Home search now always runs the text pass behind
+  the semantic one, so a query answers with the ranked hits first and the
+  plain word matches under a *Text matches* heading — including the
+  gate-dropped mail that has no vector at all and is unreachable by meaning,
+  whenever *Show dropped* is on. A notice above the rows says when only the
+  words ran.
+- **An Archive row**, in the Dropped pile or in an archive search.
+- **"What happened" on a message in a thread**, on the header of each message
+  in the transcript. Per message and not per thread: the pipeline decides one
+  message at a time.
+
+The screen is one column of sections, in the order the question gets asked:
+the header (subject, sender, source, age, and a link into the thread); the
+**outcome**, which is `resultLine`'s own sentence with its explanation under
+it; the five **stages**, each with what it did, when, and what that means, in
+`HomeStageBar`'s own words so the rail and the tooltip cannot disagree; the
+**judgements** (needs-you verdict and reason, attention bucket with its score
+against the threshold in force, triage urgency/category/summary, the gate and
+whether the owner has overridden it, and the triage status with its error);
+the **storylines** the thread is in and the ones it was kept out of; the
+**work** still queued with its attempts and errors; and every **activity** row
+either the message or its thread wrote, described by `ActivityLogPanel`'s own
+sentences.
+
+The levers come last, and each one is a write with a way back:
+
+| Lever | What it writes | How it is undone |
+|-------|----------------|------------------|
+| Restore (dropped rows only) | `RestoreService` — `messages.gate_override = 'user'`, the progress cascade reset, the stages requeued | Ignore |
+| Ignore this message (kept rows, two taps) | `MessageStore.dropMessage` — a `user` gate, see [02-gates.md](02-gates.md#ignoring-a-kept-message) | Restore |
+| Retry owed stages (stalled or failed rows) | `PipelineRepairService.retryOwed` — exactly the stages still owed, never a terminal one | nothing to undo; it re-runs work that was owed |
+| Re-judge Needs You (kept rows) | `PipelineRepairService.rejudgeNeedsYou` — requeues `needs_you` on a row that was already judged | press it again after changing the rules |
+| Add to storyline… / Remove (two taps) / Allow again / Add back | `StorylinesNotifier.addThread` / `removeThread` / `unblockThread` — the same methods the storyline's own About block calls | each other; a removal is a block, and Allow again lifts it |
+| Keep in inbox / Send to Later | `ConversationsNotifier.keepThreadInInbox` / `sendThreadToLater` | each other |
+| Edit Needs You rules | nothing — it opens Settings, where the rules live | the editor's own Save |
+| The storyline link | nothing — it opens the storyline, where the charter is edited | the charter editor's own Save |
+
+Every write is followed by a re-read of the screen, because a thread-level
+decision moves rows here without moving any stage and so ticks nothing.

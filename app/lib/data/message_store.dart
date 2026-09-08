@@ -1481,6 +1481,69 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     );
   }
 
+  /// Ignore: the owner throwing one message out by hand.
+  ///
+  /// The mirror of [restoreMessage] and written so that one is the way back.
+  /// What it deliberately does NOT touch is `gate_override`: `triage_status`
+  /// is the column every handler actually reads, so a message the owner once
+  /// restored and has since changed their mind about stays out, and Restore
+  /// still works — it re-stamps the override and re-pends the row.
+  ///
+  /// One transaction, because a half-ignored message is worse than an
+  /// un-ignored one: a row skipped on `messages` while its thread still
+  /// carries a Needs You chip would go on interrupting the person who just
+  /// dismissed it.
+  ///
+  /// Queue rows are left exactly where they are. The extract and needs-you
+  /// handlers already refuse a `skipped` row whose gate reason is not
+  /// `teams_source`, so whatever is queued drains as a skip rather than as
+  /// work — and deleting the rows would only lose the record that they ran.
+  ///
+  /// False when nothing is stored under the keys, having written nothing.
+  Future<bool> dropMessage(String source, String sourceMessageId) {
+    return db.transaction(() async {
+      final rows = await db.customWriteReturning(
+        "UPDATE messages SET triage_status = 'skipped', "
+        "gate_reason = 'user', triage_error = NULL, updated_at = ? "
+        'WHERE source = ? AND source_message_id = ? '
+        'RETURNING conversation_key',
+        variables: _args([_nowIso(), source, sourceMessageId]),
+      );
+      if (rows.isEmpty) return false;
+      final conversationKey =
+          rows.first.data['conversation_key'] as String? ?? '';
+
+      // The same cascade a gate writes, through the same writer: pending
+      // stages close as skipped, the row settles dropped under this reason,
+      // and a stage that already finished keeps what it did.
+      await writeTriageProgress(
+        source,
+        sourceMessageId,
+        state: 'skipped',
+        gateReason: 'user',
+      );
+
+      // The chips go and the VERDICT stays. `needs_you` is the snapshot the
+      // rails and the digest read; `needs_you_verdict` is what the judge
+      // decided about the words, and an Ignore is not the owner saying the
+      // judge misread them. The open-ask predicate excludes gated rows on its
+      // own, so the thread stops holding an ask on the strength of the write
+      // above rather than of a verdict rewritten here.
+      await clearNeedsYou(source, conversationKey);
+
+      // `explicit`, because a button is exactly that. Anything that learns
+      // from these has to be able to tell it from the implicit signal of a
+      // thread merely being opened.
+      await recordFeedback(
+        scope: 'message',
+        scopeKey: sourceMessageId,
+        direction: 'down',
+        origin: 'explicit',
+      );
+      return true;
+    });
+  }
+
   /// Puts the newest inbound message of each conversation back in the triage
   /// queue when triage v2 has never judged it, and returns how many that was.
   ///
@@ -2078,6 +2141,41 @@ RETURNING *
         )
         .get();
     return rows.isEmpty ? null : rows.first.data['status'] as String?;
+  }
+
+  /// Every queue row behind one message: its own, its thread's storyline row,
+  /// and its attachments'.
+  ///
+  /// Three shapes of `entity_id` because three grains file here — a message
+  /// id, a conversation key (`storyline` is a question about a thread), and
+  /// `'<message id>|<attachment id>'` for the attachment work. The LIKE is
+  /// escaped, so an id carrying a `%` or a `_` matches its own attachments and
+  /// nobody else's.
+  ///
+  /// Source-filtered, where [activityForEntity] is not: `work_items` keys on
+  /// it, and a second connector's message with the same id is a different item
+  /// of work rather than the same one seen twice.
+  Future<List<Map<String, Object?>>> workItemsFor(
+    String source,
+    String sourceMessageId,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT task_kind, source, entity_id, status, attempts, error, '
+          'created_at, updated_at FROM work_items '
+          'WHERE source = ?1 AND (entity_id = ?2 OR entity_id = ?3 '
+          "OR entity_id LIKE ?4 ESCAPE '\\') "
+          'ORDER BY updated_at DESC, task_kind ASC',
+          variables: _args([
+            source,
+            sourceMessageId,
+            conversationKey,
+            '${_escapeLike(sourceMessageId)}|%',
+          ]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
   /// [touchTriage] for the work queue, and for the same reason: only
@@ -2848,6 +2946,40 @@ SELECT conversation_key FROM (
     return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
+  /// Everything the log holds about one message: its own events, its thread's,
+  /// and its attachments'.
+  ///
+  /// The same three grains [workItemsFor] reads, and the same escaped LIKE for
+  /// the attachment ids.
+  ///
+  /// No `source` filter, deliberately, and this is where the two reads part.
+  /// An event's `source` column is sometimes the WORK's source rather than the
+  /// message's — the storyline kinds record under their own — so filtering on
+  /// it would drop rows that are genuinely about this message. The ids on
+  /// either side are opaque server ids that do not collide across connectors,
+  /// so nothing is bought by the filter anyway.
+  Future<List<Map<String, Object?>>> activityForEntity({
+    required String sourceMessageId,
+    required String conversationKey,
+    int limit = 100,
+  }) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM activity_events '
+          'WHERE entity_id = ?1 OR entity_id = ?2 '
+          "OR entity_id LIKE ?3 ESCAPE '\\' "
+          'ORDER BY id DESC LIMIT ?4',
+          variables: _args([
+            sourceMessageId,
+            conversationKey,
+            '${_escapeLike(sourceMessageId)}|%',
+            limit,
+          ]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
   /// Deletes what is older than [keepDays], then whatever is left beyond
   /// [maxRows]. Two rules rather than one: the age is what a user would
   /// expect "history" to mean, and the row cap is what stops a first sync of
@@ -3458,6 +3590,59 @@ FROM storylines s''';
         )
         .get();
     return [for (final row in result) StorylineBlock.fromRow(row.data)];
+  }
+
+  /// Every storyline one THREAD has been filed into, newest first, each with
+  /// its storyline's title and status beside it.
+  ///
+  /// Thread-keyed where [membersOf] is storyline-keyed, because the caller is
+  /// standing on one message and asking what became of the thread it is on.
+  ///
+  /// Every status rather than only the live ones, and a LEFT JOIN so a
+  /// membership outlives the storyline row it names. A filing that has since
+  /// been dismissed still HAPPENED; a history that showed only the decisions
+  /// still standing would be a history of the present.
+  Future<List<Map<String, Object?>>> membershipsForThread(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT m.storyline_id AS storyline_id, m.added_by AS added_by, '
+          'm.evidence AS evidence, m.added_at AS added_at, '
+          's.title AS title, s.status AS status '
+          'FROM storyline_members m '
+          'LEFT JOIN storylines s ON s.id = m.storyline_id '
+          'WHERE m.source = ? AND m.conversation_key = ? '
+          'ORDER BY m.added_at DESC, m.storyline_id ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
+  }
+
+  /// The other half of [membershipsForThread]: every storyline this thread was
+  /// kept OUT of, newest first, with who wrote the block and what they thought.
+  ///
+  /// Same shape and same LEFT JOIN for the same reason — a block is a record,
+  /// and it outlives both the thread and the storyline it was written about.
+  Future<List<Map<String, Object?>>> blocksForThread(
+    String source,
+    String conversationKey,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT b.storyline_id AS storyline_id, '
+          'b.blocked_by AS blocked_by, b.evidence AS evidence, '
+          'b.blocked_at AS blocked_at, s.title AS title, s.status AS status '
+          'FROM storyline_member_blocks b '
+          'LEFT JOIN storylines s ON s.id = b.storyline_id '
+          'WHERE b.source = ? AND b.conversation_key = ? '
+          'ORDER BY b.blocked_at DESC, b.storyline_id ASC',
+          variables: _args([source, conversationKey]),
+        )
+        .get();
+    return [for (final row in result) Map<String, Object?>.from(row.data)];
   }
 
   /// Everything the comparison passes need about the members of
@@ -4640,6 +4825,28 @@ SELECT $_homeFeedColumns
 FROM message_progress p
 $_homeFeedJoins''';
 
+  /// One `message_progress` row exactly as stored, or null.
+  ///
+  /// The raw row, where [progressRowsFor] hands back the joined feed shape.
+  /// A caller explaining one message needs both: the feed row for everything
+  /// the rails already know how to say, and this for the five `*_at` stamps,
+  /// which are joined onto nothing and are the only record of WHEN each stage
+  /// finished.
+  Future<Map<String, Object?>?> getProgressRow(
+    String source,
+    String sourceMessageId,
+  ) async {
+    final result = await db
+        .customSelect(
+          'SELECT * FROM message_progress '
+          'WHERE source = ? AND source_message_id = ?',
+          variables: _args([source, sourceMessageId]),
+        )
+        .get();
+    if (result.isEmpty) return null;
+    return Map<String, Object?>.from(result.first.data);
+  }
+
   /// Records where triage got to, and returns the message's `received_at` so
   /// the caller can tick a live listener without a second read. Null when
   /// there is no progress row — a message stored before v8 that the backfill
@@ -5626,9 +5833,11 @@ $where
   /// leaves the one pile a person is most likely to come looking for
   /// unsearchable by the only search there is.
   ///
-  /// Dropped rows are included ALWAYS rather than behind a flag: the archive
-  /// is this read's only caller, and hiding them here would remove the reason
-  /// it exists.
+  /// [includeDropped] defaults to TRUE, which is the archive's meaning of the
+  /// word: its selling point is "I know I got that email", and a search that
+  /// quietly skipped the pile the gate threw out would answer that sentence
+  /// with silence. Home passes its own "Show dropped" toggle instead, so the
+  /// text half of a home search obeys the same filter the table under it does.
   ///
   /// Deliberately LIKE and not FTS — the corpus is one person's history and a
   /// scan of it is cheap at that size. Revisit if it gets slow; an FTS5 table
@@ -5637,6 +5846,7 @@ $where
     String query, {
     int limit = 50,
     List<String> sources = const ['email', 'teams'],
+    bool includeDropped = true,
   }) async {
     if (sources.isEmpty) return const [];
     final terms = query.trim().toLowerCase().split(RegExp(r'\s+'))
@@ -5663,6 +5873,7 @@ $where
     }
     where.write(' AND p.source IN (${_placeholders(sources.length)})');
     args.addAll(sources);
+    if (!includeDropped) where.write(' AND p.dropped = 0');
 
     final result = await db
         .customSelect(

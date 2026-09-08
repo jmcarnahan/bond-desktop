@@ -55,7 +55,8 @@ void main() {
   // ONE test, and it has to stay one: the first probe registers sqlite-vec for
   // the rest of the process, so every connection opened after it has the
   // extension and a second test here would be asserting the opposite thing.
-  test('a missing index reads as unavailable, never as "no matches"', () async {
+  test('a missing index narrows the answer, and never reads as "no matches"',
+      () async {
     await store.upsertMessage({
       'source': 'email',
       'source_message_id': 'gated',
@@ -78,11 +79,15 @@ void main() {
 
     final result = await MessageSearch(store, workingServer()).search('invoice');
 
-    // And the sentence built on it. An empty hit list would tell the reader
-    // their mail contains nothing about invoices — a statement about their
-    // mailbox, made on the strength of a feature being switched off.
-    expect(result, isA<MessageSearchUnavailable>());
-    expect((result as MessageSearchUnavailable).reason, contains('index'));
+    // And the sentence built on it. A bare empty hit list would tell the
+    // reader their mail contains nothing about invoices — a statement about
+    // their mailbox, made on the strength of a feature being switched off. The
+    // words still answer, and the notice says the ranking did not.
+    final hits = result as MessageSearchHits;
+    expect(hits.hits, isEmpty);
+    expect([for (final row in hits.textRows) row.sourceMessageId], ['gated']);
+    expect(hits.notice, startsWith('Text matches only'));
+    expect(hits.notice, contains('index'));
 
     // The archive over the same missing index: still an answer, because the
     // text pass never needed one. Same connection and therefore the same test

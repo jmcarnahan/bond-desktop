@@ -87,6 +87,7 @@ Future<void> _pump(
   void Function(String)? onSearch,
   VoidCallback? onExitSearch,
   void Function(String, String)? onRetry,
+  void Function(String, String)? onOpenHistory,
 }) async {
   await tester.binding.setSurfaceSize(const Size(1400, 900));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -118,6 +119,7 @@ Future<void> _pump(
         onSearch: onSearch,
         onExitSearch: onExitSearch,
         onRetry: onRetry,
+        onOpenHistory: onOpenHistory,
       ),
     ),
   ));
@@ -569,7 +571,7 @@ void main() {
       await _pump(tester, search: const HomeSearch('x', []));
       await swap(tester);
 
-      expect(find.text('Nothing indexed matches that.'), findsOneWidget);
+      expect(find.text('Nothing matches that.'), findsOneWidget);
       expect(find.text('0 results for “x”'), findsOneWidget);
     });
 
@@ -668,8 +670,76 @@ void main() {
       await swap(tester);
 
       expect(find.byType(AttachmentSearchTile), findsOneWidget);
-      expect(find.text('Nothing indexed matches that.'), findsOneWidget);
+      expect(find.text('Nothing matches that.'), findsOneWidget);
       expect(find.text('0 results for “renewal”'), findsOneWidget);
+    });
+
+    testWidgets(
+        'text matches follow the ranked rows, under their own heading',
+        (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch(
+          'invoice',
+          [SemanticHit(_row(7), 0.1)],
+          textRows: [_row(8)],
+          notice: 'Text matches only — the semantic index is unavailable',
+        ),
+      );
+      await swap(tester);
+
+      // Both halves counted: a reader can count the rows on screen.
+      expect(find.text('2 results for “invoice”'), findsOneWidget);
+      expect(
+        find.text('Text matches only — the semantic index is unavailable'),
+        findsOneWidget,
+      );
+      expect(find.text('Text matches'), findsOneWidget);
+
+      final heading = tester.getTopLeft(find.text('Text matches'));
+      expect(tester.getTopLeft(find.text('Subject 7')).dy,
+          lessThan(heading.dy));
+      expect(tester.getTopLeft(find.text('Subject 8')).dy,
+          greaterThan(heading.dy));
+    });
+
+    testWidgets('words alone are still an answer', (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch('invoice', const [], textRows: [_row(8)]),
+      );
+      await swap(tester);
+
+      expect(find.text('1 result for “invoice”'), findsOneWidget);
+      expect(find.text('Subject 8'), findsOneWidget);
+      expect(
+        find.text('Nothing matches that.'),
+        findsNothing,
+        reason: 'the words found something, so nothing is not the answer',
+      );
+    });
+
+    testWidgets('no text matches means no sub-heading', (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch('invoice', [SemanticHit(_row(7), 0.1)]),
+      );
+      await swap(tester);
+
+      expect(find.text('Text matches'), findsNothing);
+    });
+
+    testWidgets('a result row opens its history', (tester) async {
+      final opened = <(String, String)>[];
+      await _pump(
+        tester,
+        search: HomeSearch('invoice', const [], textRows: [_row(8)]),
+        onOpenHistory: (source, id) => opened.add((source, id)),
+      );
+      await swap(tester);
+
+      await tester.tap(find.byKey(HomeFeedRowTile.historyBarKey(_row(8))));
+      expect(opened, [('email', 'm8')]);
     });
 
     testWidgets('the clear affordance leaves too', (tester) async {

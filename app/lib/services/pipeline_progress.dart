@@ -237,6 +237,27 @@ class PipelineProgress {
         (store) => store.restoreProgress(source, sourceMessageId),
       );
 
+  /// Ignore: the tick behind the owner's hand, and nothing more.
+  ///
+  /// The whole cascade an Ignore writes — the skip on `messages`, the pending
+  /// stages closed out, the drop, the cleared chips — is one transaction
+  /// inside [MessageStore.dropMessage], where it belongs: it must not be
+  /// half-written, and half of it is not a progress write at all. What is left
+  /// for here is the announcement, so the live feed re-reads the row and grays
+  /// it where it stands.
+  ///
+  /// The tick goes out under `triage`/`skipped`, which is honest — that is
+  /// precisely what the transaction wrote — and [touchProgress] is the write
+  /// under it because there is nothing left to change: the stage states are
+  /// already correct, and only the stalled clock still needs restarting.
+  Future<void> noteIgnored(String source, String sourceMessageId) => _one(
+        source,
+        sourceMessageId,
+        'triage',
+        'skipped',
+        (store) => store.touchProgress(source, sourceMessageId),
+      );
+
   /// A retry is a progress write.
   ///
   /// Nothing about the row's stage states changes here — the stages are put

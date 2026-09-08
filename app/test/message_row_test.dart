@@ -950,6 +950,50 @@ void main() {
     });
   });
 
+  group('what happened', () {
+    testWidgets('the link rides on the header and never folds the row',
+        (tester) async {
+      var asked = 0;
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(),
+        collapsible: true,
+        onWhatHappened: () => asked++,
+      )));
+
+      expect(find.text('What happened'), findsOneWidget);
+      expect(find.text('Hello there.'), findsOneWidget);
+
+      await tester.tap(find.byKey(MessageRow.whatHappenedKey));
+      await tester.pump();
+
+      expect(asked, 1);
+      expect(
+        find.text('Hello there.'),
+        findsOneWidget,
+        reason: 'asking why must not collapse the message being asked about',
+      );
+    });
+
+    testWidgets('no link without a handler', (tester) async {
+      await tester.pumpWidget(_host(MessageRow(message: _msg())));
+
+      expect(find.text('What happened'), findsNothing);
+    });
+
+    testWidgets('a continuation row carries no link of its own',
+        (tester) async {
+      // The run's header already has one, and the message it names is the
+      // same message.
+      await tester.pumpWidget(_host(MessageRow(
+        message: _msg(),
+        showHeader: false,
+        onWhatHappened: () {},
+      )));
+
+      expect(find.text('What happened'), findsNothing);
+    });
+  });
+
   group('DayDivider', () {
     testWidgets('renders its label between two rules', (tester) async {
       await tester.pumpWidget(_host(const DayDivider(label: 'Yesterday')));

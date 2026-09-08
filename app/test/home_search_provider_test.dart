@@ -153,6 +153,32 @@ void main() {
     expect(notifier.state.searching, isFalse);
   });
 
+  test('the text half and its notice ride along to the state', () async {
+    final notifier = build();
+    final search = notifier.submitSearch('invoice');
+    runner.answer(
+      0,
+      MessageSearchHits(
+        'invoice',
+        const [],
+        textRows: [_row('gated', subject: 'Invoice 4471 is overdue')],
+        notice: 'Text matches only — the semantic index is unavailable.',
+      ),
+    );
+    await search;
+
+    // The notifier carries both without interpreting either: a set of results
+    // that is narrower than it looks is still a set of results, so it swaps
+    // the body the way any other answer does — the sentence explaining the
+    // narrowness travels ON it rather than in `searchNotice`, which is for a
+    // search that did not happen.
+    expect(notifier.state.search!.textRows, hasLength(1));
+    expect(notifier.state.search!.textRows.single.sourceMessageId, 'gated');
+    expect(notifier.state.search!.notice, startsWith('Text matches only'));
+    expect(notifier.state.searchNotice, isNull);
+    expect(notifier.state.searching, isFalse);
+  });
+
   test('a blank query is not a search', () async {
     final notifier = build();
     final before = notifier.state;

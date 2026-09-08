@@ -21,10 +21,10 @@ import 'time_format.dart';
 ///
 /// The Result cell is a SENTENCE with the reason in it — [resultLine] decides
 /// which one — rather than a chip that names a verdict and leaves the reader
-/// to guess what stood behind it. Three gestures nest inside it, and the
+/// to guess what stood behind it. Four gestures nest inside it, and the
 /// innermost wins the arena in this order: the row itself opens the thread,
-/// the storyline name opens the storyline, and Retry requeues what the row
-/// still owes.
+/// the bar and the Result cell open this message's history, the storyline
+/// name opens the storyline, and Retry requeues what the row still owes.
 class HomeFeedRowTile extends StatefulWidget {
   static const double glyphWidth = 20;
   static const double fromWidth = 160;
@@ -59,6 +59,16 @@ class HomeFeedRowTile extends StatefulWidget {
   static ValueKey<String> retryKey(HomeFeedRow row) =>
       ValueKey('retry-${row.feedKey}');
 
+  /// The two history targets. Keyed apart rather than sharing one key because
+  /// the bar and the sentence are two different places a reader looks when
+  /// they want to know why, and a test that could only find one of them would
+  /// pass with the other unwired.
+  static ValueKey<String> historyBarKey(HomeFeedRow row) =>
+      ValueKey('history-bar-${row.feedKey}');
+
+  static ValueKey<String> historyCellKey(HomeFeedRow row) =>
+      ValueKey('history-cell-${row.feedKey}');
+
   final HomeFeedRow row;
 
   /// The clock, injected so a test pins what "3h ago" means.
@@ -91,6 +101,12 @@ class HomeFeedRowTile extends StatefulWidget {
   /// going to refuse the message again at the first gate.
   final void Function(String source, String sourceMessageId)? onRetry;
 
+  /// Opens the whole story of THIS message — every stage, judgement, filing
+  /// and queue row behind the sentence in the Result cell. Optional, and null
+  /// draws no target at all: the bar and the cell stay part of the row's own
+  /// tap, which is what a host with nowhere to show a history needs.
+  final void Function(String source, String sourceMessageId)? onOpenHistory;
+
   const HomeFeedRowTile({
     super.key,
     required this.row,
@@ -102,6 +118,7 @@ class HomeFeedRowTile extends StatefulWidget {
     this.collapsing = false,
     this.muteBar = false,
     this.onRetry,
+    this.onOpenHistory,
   });
 
   @override
@@ -216,16 +233,27 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
                       const SizedBox(width: BondSpacing.s8),
                       SizedBox(
                         width: HomeFeedRowTile.barWidth,
-                        child: HomeStageBar.forRow(
+                        // The history InkWell sits INSIDE the SizedBox and
+                        // OUTSIDE the bar, so every segment keeps its own
+                        // tooltip and the bar as a whole is still one target.
+                        child: _historyTarget(
                           row,
-                          // A finished row's bar is history, not progress.
-                          muted: widget.muteBar || row.outcome != 'pending',
+                          key: HomeFeedRowTile.historyBarKey(row),
+                          child: HomeStageBar.forRow(
+                            row,
+                            // A finished row's bar is history, not progress.
+                            muted: widget.muteBar || row.outcome != 'pending',
+                          ),
                         ),
                       ),
                       const SizedBox(width: BondSpacing.s8),
                       Expanded(
                         flex: HomeFeedRowTile.resultFlex,
-                        child: _result(row),
+                        child: _historyTarget(
+                          row,
+                          key: HomeFeedRowTile.historyCellKey(row),
+                          child: _result(row),
+                        ),
                       ),
                       const SizedBox(width: BondSpacing.s8),
                       SizedBox(
@@ -247,6 +275,31 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
     );
   }
 
+  /// Wraps a cell in the tap that opens this message's history, or hands it
+  /// straight back when the host wired none up.
+  ///
+  /// Its own [InkWell] INSIDE the row's, for [_storylineLink]'s reason: the
+  /// innermost gesture wins the arena, so pressing the bar or the sentence
+  /// asks why rather than opening the thread underneath. The storyline link
+  /// and Retry sit inside this one in turn and still win over it.
+  Widget _historyTarget(
+    HomeFeedRow row, {
+    required Key key,
+    required Widget child,
+  }) {
+    final open = widget.onOpenHistory;
+    if (open == null) return child;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        key: key,
+        onTap: () => open(row.source, row.sourceMessageId),
+        borderRadius: BondRadii.smAll,
+        child: child,
+      ),
+    );
+  }
+
   /// What the app decided, as a sentence with its reason.
   ///
   /// A dropped row shows its reason and NOTHING else: it is behind the toggle
@@ -258,6 +311,10 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
   ///
   /// Which sentence is [resultLine]'s judgement, not this widget's. All that
   /// happens here is the dressing.
+  ///
+  /// The gesture arena over this cell is four deep once a host wires up
+  /// [onOpenHistory]: the row opens the thread, the cell around this one opens
+  /// the history, and the storyline link and Retry inside it win over both.
   Widget _result(HomeFeedRow row) {
     final result = resultLine(row, now: widget.now);
     final storylineId = row.storylineId;

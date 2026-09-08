@@ -97,12 +97,55 @@ void main() {
 
     tearDown(() async => db.close());
 
-    test('an unreachable embedding server is not an empty result', () async {
+    Future<void> seedGated() => store.upsertMessage({
+          'source': 'email',
+          'source_message_id': 'gated',
+          'conversation_key': 'c-gated',
+          'direction': 'inbound',
+          'subject': 'Invoice 4471 is overdue',
+          'received_at': '2026-08-29T10:00:00Z',
+        });
+
+    test('an unreachable embedding server narrows the answer rather than '
+        'removing it', () async {
+      await seedGated();
+
       final result = await MessageSearch(store, downServer()).search('invoice');
 
-      // The distinction the whole sealed type exists for: an empty list would
-      // tell the reader their mail contains nothing about invoices, which is a
-      // lie about their mailbox rather than a fact about the machine.
+      // The home search runs the same two passes the archive does, so a dead
+      // embedding server costs the RANKING and not the answer. An empty list
+      // with no sentence on it would tell the reader their mail contains
+      // nothing about invoices — a lie about their mailbox, told on the
+      // strength of a server being off.
+      final hits = result as MessageSearchHits;
+      expect(hits.hits, isEmpty);
+      expect([for (final row in hits.textRows) row.sourceMessageId], ['gated']);
+      expect(hits.notice, startsWith('Text matches only'));
+      expect(hits.notice, contains('make embed'));
+    });
+
+    test('a server that answers badly narrows it the same way — the reader '
+        'can do nothing different about either', () async {
+      await seedGated();
+
+      final result =
+          await MessageSearch(store, rejectingServer()).search('invoice');
+
+      final hits = result as MessageSearchHits;
+      expect(hits.hits, isEmpty);
+      expect([for (final row in hits.textRows) row.sourceMessageId], ['gated']);
+      expect(hits.notice, isNotNull);
+    });
+
+    test('only BOTH passes failing is unavailable', () async {
+      await seedGated();
+      // The database out from under the text pass, which is the one shape
+      // that leaves nothing to show: the embedding server is already down, so
+      // neither half can answer and the sealed case earns itself.
+      await db.close();
+
+      final result = await MessageSearch(store, downServer()).search('invoice');
+
       expect(result, isA<MessageSearchUnavailable>());
       expect(
         (result as MessageSearchUnavailable).reason,
@@ -110,13 +153,41 @@ void main() {
       );
     });
 
-    test('a server that answers badly is also unavailable — the reader can '
-        'do nothing different about it', () async {
-      final result =
-          await MessageSearch(store, rejectingServer()).search('invoice');
+    group('the dropped filter reaches the text pass too', () {
+      Future<void> seedDropped() async {
+        await seedGated();
+        await store.writeSettledProgress(
+          'email',
+          'gated',
+          needsYou: false,
+          reason: 'newsletter',
+          dropped: true,
+        );
+      }
 
-      expect(result, isA<MessageSearchUnavailable>());
-      expect((result as MessageSearchUnavailable).reason, isNotEmpty);
+      test('a dropped message is out of a home search by default', () async {
+        await seedDropped();
+
+        final result =
+            await MessageSearch(store, downServer()).search('invoice');
+
+        // The table under the results hides dropped rows, and a search that
+        // did not would answer a question the reader is not asking.
+        expect((result as MessageSearchHits).textRows, isEmpty);
+      });
+
+      test('and comes back when the toggle asks for it', () async {
+        await seedDropped();
+
+        final result = await MessageSearch(store, downServer())
+            .search('invoice', includeDropped: true);
+
+        expect(
+          [for (final row in (result as MessageSearchHits).textRows)
+            row.sourceMessageId],
+          ['gated'],
+        );
+      });
     });
 
     test('the archive still answers with what text can find', () async {

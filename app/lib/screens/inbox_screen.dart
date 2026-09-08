@@ -16,6 +16,7 @@ import '../providers/archive_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/home_provider.dart';
+import '../providers/message_history_provider.dart';
 import '../providers/navigation_provider.dart';
 import '../providers/notification_provider.dart';
 import '../providers/notify_routing.dart';
@@ -56,6 +57,7 @@ import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
 import '../widgets/thread_detail_panel.dart';
 import '../widgets/time_format.dart';
+import 'message_history_screen.dart';
 import 'new_message_screen.dart';
 
 /// The whole app, for now: a dark rail of sections beside one main pane that
@@ -161,6 +163,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// exclusive set again: composing is not a section, and it clears whatever
   /// was being read exactly as Settings and the log do.
   bool _showingCompose = false;
+
+  /// The message whose history is open, as `(source, sourceMessageId)`. It
+  /// joins the same exclusive set — every selector that clears Settings clears
+  /// this too — but with one difference that is the whole point of it: opening
+  /// it does NOT clear the selection underneath, so Back lands back on the
+  /// thread or the section the question was asked from.
+  ({String source, String id})? _showingHistory;
 
   /// Who or what compose was opened on, when something asked for it
   /// pre-filled. Null is the rail's own button — a blank message.
@@ -536,6 +545,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingHistory = null;
       _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
@@ -579,6 +589,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingHistory = null;
       _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
@@ -610,6 +621,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedLaterDay = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingHistory = null;
       _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
@@ -633,6 +645,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedStorylineId = null;
       _showingActivityLog = false;
       _showingSettings = false;
+      _showingHistory = null;
       _showingCompose = false;
       _addingToStorylineId = null;
       _pickingStorylineForThread = null;
@@ -650,6 +663,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     setState(() {
       _showingActivityLog = true;
       _showingSettings = false;
+      _showingHistory = null;
       _showingCompose = false;
       _selectedId = null;
       _selectedSource = null;
@@ -1177,6 +1191,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _openSettings() {
     setState(() {
       _showingSettings = true;
+      _showingHistory = null;
       _showingActivityLog = false;
       _showingCompose = false;
       _selectedId = null;
@@ -1195,6 +1210,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   void _closeSettings() => setState(() => _showingSettings = false);
+
+  /// Opens one message's history over whatever is on screen.
+  ///
+  /// Deliberately NOT a selector: it clears nothing but the rail, because the
+  /// question "why did this happen" is always asked about something the reader
+  /// is already looking at, and Back has to put them back where they were.
+  /// [_main]'s rung order is what makes that true.
+  void _openHistory(String source, String id) {
+    setState(() {
+      _showingHistory = (source: source, id: id);
+      // At narrow widths the rail is an overlay: leaving it open would put the
+      // pane behind a scrim.
+      _railOpen = false;
+    });
+  }
 
   /// Saves the Needs You rules and re-asks the recent window under them.
   ///
@@ -1253,6 +1283,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _showingCompose = true;
       _composePrefill = prefill;
       _showingSettings = false;
+      _showingHistory = null;
       _showingActivityLog = false;
       _selectedId = null;
       _selectedSource = null;
@@ -1620,12 +1651,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   }
 
   /// Exactly one view, never two: compose, then Settings, then the activity
-  /// log, then the two picker panes, then the full attachment viewer, then the
-  /// thread transcript, then the storyline timeline, then the section
-  /// overview. The order is the priority — compose, Settings and the log come
-  /// first because they are the three that are not about the mail already on
-  /// screen, and a pane outranks what it was opened from because it is the
-  /// newer thing the user asked for.
+  /// log, then the two picker panes, then the history screen, then the full
+  /// attachment viewer, then the thread transcript, then the storyline
+  /// timeline, then the section overview. The order is the priority — compose,
+  /// Settings and the log come first because they are the three that are not
+  /// about the mail already on screen, and a pane outranks what it was opened
+  /// from because it is the newer thing the user asked for.
   ///
   /// The viewer sits directly above the transcript because that is what it was
   /// opened from and what Back returns to — and above the storyline too, since
@@ -1648,6 +1679,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
     final picking = _pickingStorylineForThread;
     if (picking != null) return _pickStorylinePane(picking);
+
+    // Under the storyline picker and over everything else: the picker is
+    // opened FROM the history screen's Add to storyline…, so it has to overlay
+    // this, and its own Back lands back here. Everything below is what the
+    // history was opened from, which is what Back off this pane returns to.
+    final showing = _showingHistory;
+    if (showing != null) return _history(showing);
 
     final viewing = _previewing;
     // A viewer whose thread vanished falls through — never setState in build;
@@ -1727,6 +1765,110 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onRetry: (source, id) => unawaited(
         ref.read(pipelineRepairServiceProvider).retryOwed(source, id),
       ),
+      // Two doors on every row — the stage bar and the Result cell — because
+      // those are the two places a reader looks when the sentence is not the
+      // one they expected.
+      onOpenHistory: _openHistory,
+    );
+  }
+
+  /// One message's whole story, and every lever beside it.
+  ///
+  /// Everything the screen renders is a prop — see [MessageHistoryScreen] — so
+  /// this is the only place the history provider is read. Every notifier and
+  /// service is read BEFORE the awaits, the way the repair lever on the home
+  /// feed is: the reader can leave the pane while a write is in flight, and a
+  /// `ref.read` after the await is how a lever comes to throw at the end of
+  /// doing its job.
+  Widget _history(({String source, String id}) target) {
+    final source = target.source;
+    final id = target.id;
+    final args = (source: source, id: id);
+    final history = ref.watch(messageHistoryProvider(args));
+    final value = history.valueOrNull;
+
+    final reader = ref.read(messageHistoryProvider(args).notifier);
+    final repair = ref.read(pipelineRepairServiceProvider);
+    final restore = ref.read(restoreServiceProvider);
+    final archive = ref.read(archiveProvider.notifier);
+    final storylines = ref.read(storylinesProvider.notifier);
+    final conversations = ref.read(conversationsProvider.notifier);
+
+    // The pane's own re-read. Filing a thread, lifting a block and keeping a
+    // thread in the inbox all move rows this screen renders without moving any
+    // stage, so nothing is published and nothing would come back on its own.
+    void reload() => unawaited(reader.reload());
+
+    // The thread's key, which every thread-scoped lever needs and which is
+    // only known once the first read has landed. Without it the screen is
+    // handed nulls rather than buttons that would act on the empty string.
+    final threadKey = value?.conversationKey ?? '';
+    final threaded = threadKey.isNotEmpty;
+
+    return MessageHistoryScreen(
+      history: history,
+      now: DateTime.now(),
+      // Back only leaves the pane. Whatever was underneath — the thread, the
+      // archive, the home table — was never cleared, so it is still there.
+      onBack: () => setState(() => _showingHistory = null),
+      onHome: () => _selectSection(RailSection.home),
+      onOpenThread: (threadSource, conversationKey) =>
+          _select(conversationKey, source: threadSource),
+      onOpenStoryline: _selectStoryline,
+      // The archive's own pattern: the pane sheds the row first and the
+      // pipeline catches up, and the re-read is what reports whether it did.
+      onRestore: () {
+        archive.noteRestored(source, id);
+        unawaited(restore.restore(source, id).then((_) => reload()));
+      },
+      onRetry: () =>
+          unawaited(repair.retryOwed(source, id).then((_) => reload())),
+      onRejudge: () =>
+          unawaited(repair.rejudgeNeedsYou(source, id).then((_) => reload())),
+      onIgnore: () =>
+          unawaited(repair.ignore(source, id).then((_) => reload())),
+      // The picker overlays this pane rather than replacing it — see [_main] —
+      // so filing from here comes back to the story it was filed from.
+      onAddToStoryline: threaded
+          ? () => setState(
+                () => _pickingStorylineForThread =
+                    (source: source, id: threadKey),
+              )
+          : null,
+      onRemoveFromStoryline: threaded
+          ? (storylineId) => unawaited(
+                storylines
+                    .removeThread(storylineId, source, threadKey)
+                    .then((_) => reload()),
+              )
+          : null,
+      onAllowAgain: threaded
+          ? (storylineId) => unawaited(
+                storylines
+                    .unblockThread(storylineId, source, threadKey)
+                    .then((_) => reload()),
+              )
+          : null,
+      onAddBack: threaded
+          ? (storylineId) => unawaited(
+                storylines
+                    .addThread(storylineId, source, threadKey)
+                    .then((_) => reload()),
+              )
+          : null,
+      onKeepInInbox: threaded
+          ? () => unawaited(
+                _keepThread(source, threadKey).then((_) => reload()),
+              )
+          : null,
+      onSendToLater: threaded
+          ? () => unawaited(
+                conversations
+                    .sendThreadToLater(source, threadKey)
+                    .then((_) => reload()),
+              )
+          : null,
+      onEditRules: _openSettings,
     );
   }
 
@@ -2357,6 +2499,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       }),
       selectedAttachment: _previewing,
       thumbnailFor: _thumbnailFor,
+      // Per MESSAGE, not per thread: the pipeline decides one message at a
+      // time, and the row's own header is where the question is asked.
+      onWhatHappened: (message) => _openHistory(message.source, message.id),
     );
 
     // The composer sits OUTSIDE the panel, in this column: the panel renders a
@@ -3043,6 +3188,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.read(archiveProvider.notifier).noteRestored(source, id);
           unawaited(ref.read(restoreServiceProvider).restore(source, id));
         },
+        // The same door the home feed opens: a dropped row is exactly the one
+        // somebody wants the reason for.
+        onOpenHistory: _openHistory,
         search: archive.search,
         searching: archive.searching,
         searchNotice: archive.searchNotice,

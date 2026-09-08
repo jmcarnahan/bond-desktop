@@ -316,7 +316,30 @@ class HomeSearch {
   /// null, for [hits]' reason: an empty list is a real answer.
   final List<AttachmentChunkHit> documents;
 
-  const HomeSearch(this.query, this.hits, {this.documents = const []});
+  /// Messages the words match that the index did not already rank, in date
+  /// order behind [hits].
+  ///
+  /// Kept apart from [hits] rather than merged into them because only those
+  /// carry a distance, and because the two answer differently: the ranked list
+  /// is "about this", and these are "contains these words" — including the
+  /// gate-dropped messages that have no vector at all and are therefore
+  /// unreachable by meaning.
+  final List<HomeFeedRow> textRows;
+
+  /// Non-null when only the words found anything — the semantic half could not
+  /// run, and this set of results is narrower than it looks.
+  ///
+  /// Travels with the rows for [ArchiveSearch.notice]'s reason: it is a fact
+  /// about this answer, not a standing condition of the screen.
+  final String? notice;
+
+  const HomeSearch(
+    this.query,
+    this.hits, {
+    this.documents = const [],
+    this.textRows = const [],
+    this.notice,
+  });
 }
 
 /// The archive pane's result set: what a search of the whole history came back

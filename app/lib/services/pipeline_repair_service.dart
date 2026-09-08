@@ -6,7 +6,7 @@ import '../data/message_store.dart';
 import 'activity_log.dart';
 import 'pipeline_progress.dart';
 
-/// Retry: the owner's hand on a row that stopped.
+/// Every per-message lever that is not Restore: retry, ignore, re-judge.
 ///
 /// The sibling of `RestoreService`, and deliberately not the same thing. A
 /// dropped message is one the gates refused and Restore is how the owner
@@ -21,6 +21,13 @@ import 'pipeline_progress.dart';
 /// `skipped` one would undo a decision the pipeline made on purpose. What the
 /// caller gets back is the list of what was actually put back on a queue,
 /// which is the only honest thing to tell a person who pressed Retry.
+///
+/// [ignore] and [rejudgeNeedsYou] arrived with the history screen and belong
+/// beside it rather than in `RestoreService`: all three are the owner reaching
+/// into ONE message's pipeline, and all three have to say truthfully whether
+/// anything moved. Restore stayed where it is because it is the only one that
+/// overrules a verdict; these two work with the pipeline rather than against
+/// it.
 class PipelineRepairService {
   final MessageStore _store;
   final PipelineProgress _progress;
@@ -143,6 +150,77 @@ class PipelineRepairService {
     unawaited(_pumpBoth());
 
     return stages;
+  }
+
+  /// Ignore: the owner throwing one message out, and the tick that shows it.
+  ///
+  /// The write is [MessageStore.dropMessage]'s single transaction; what is
+  /// here is the announcement and the record. False when nothing is stored
+  /// under the keys — and then nothing is logged either, for [retryOwed]'s
+  /// reason: a log of what the app did must not claim something that did not
+  /// happen.
+  ///
+  /// No pump, because an Ignore queues nothing. Whatever was already queued
+  /// for the message drains as a skip, since the extract and needs-you
+  /// handlers both refuse a gated row.
+  ///
+  /// Swallows its own failures, like everything else here: the screen fires
+  /// this from a button.
+  Future<bool> ignore(String source, String sourceMessageId) async {
+    try {
+      final dropped = await _store.dropMessage(source, sourceMessageId);
+      if (!dropped) return false;
+      await _progress.noteIgnored(source, sourceMessageId);
+      await _log.record('ignore', source: source, entityId: sourceMessageId);
+      return true;
+    } catch (e) {
+      debugPrint('ignore: $source/$sourceMessageId failed: $e');
+      return false;
+    }
+  }
+
+  /// Asks the needs-you stage the question again, on a message that has
+  /// already been judged.
+  ///
+  /// Distinct from [retryOwed], which only ever requeues a stage a row still
+  /// OWES: this deliberately re-runs one that finished, because the owner has
+  /// seen the verdict and disagrees with the reasoning behind it — a rules
+  /// edit, a document that has landed since, a thread that reads differently
+  /// now. `requeueWork` revives a `done` or `error` row and leaves anything
+  /// else alone, which is exactly the semantics wanted.
+  ///
+  /// False rather than a re-judge in three cases, each an honest "nothing to
+  /// do": the item is already queued or in a worker's hands, nothing is stored
+  /// under the keys, or the message is gated — a gated row is never judged, so
+  /// queueing one would spend a slot on a handler that will refuse it.
+  Future<bool> rejudgeNeedsYou(String source, String sourceMessageId) async {
+    try {
+      final queued =
+          await _store.workStatusOf('needs_you', source, sourceMessageId);
+      if (queued == 'pending' || queued == 'processing') return false;
+
+      final message = await _store.getMessageRow(source, sourceMessageId);
+      if (message == null) return false;
+      // The handlers' own guard, spelled the same way: a Teams message is
+      // `skipped` by the gate that admits it, and it IS judged.
+      if (message['triage_status'] == 'skipped' &&
+          message['gate_reason'] != 'teams_source') {
+        return false;
+      }
+
+      await _store.requeueWork('needs_you', source, sourceMessageId);
+      await _log.record(
+        'needs_you_rejudge',
+        source: source,
+        entityId: sourceMessageId,
+        count: 1,
+      );
+      unawaited(_pumpBoth());
+      return true;
+    } catch (e) {
+      debugPrint('re-judge: $source/$sourceMessageId failed: $e');
+      return false;
+    }
   }
 
   /// Requeues one stage and claims it only if it was not already in flight.

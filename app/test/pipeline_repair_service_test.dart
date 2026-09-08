@@ -236,6 +236,145 @@ void main() {
     });
   });
 
+  group('ignore', () {
+    test('the drop is written, announced, and written down', () async {
+      await seed(needsYouVerdict: 1);
+      final bus = ProgressBus();
+      final ticks = <ProgressTick>[];
+      bus.ticks.listen(ticks.add);
+      addTearDown(bus.dispose);
+      final service = PipelineRepairService(
+        store,
+        progress: PipelineProgress(store, bus: bus),
+        activityLog: ActivityLog(store),
+      );
+
+      expect(await service.ignore('email', 'm1'), isTrue);
+
+      final message = (await store.getMessageRow('email', 'm1'))!;
+      expect(message['triage_status'], 'skipped');
+      expect(message['gate_reason'], 'user');
+      expect((await progressOf('m1'))['dropped'], 1);
+
+      // Honest rather than nominal: `skipped` is exactly what the transaction
+      // wrote, and the live feed grays the row behind it.
+      expect(ticks, hasLength(1));
+      expect(ticks.single.stage, 'triage');
+      expect(ticks.single.state, 'skipped');
+      expect(ticks.single.sourceMessageId, 'm1');
+
+      final event = (await activity()).firstWhere((e) => e.kind == 'ignore');
+      expect(event.entityId, 'm1');
+      expect(event.source, 'email');
+    });
+
+    test('nothing stored under the keys is claimed as nothing done', () async {
+      final service =
+          PipelineRepairService(store, activityLog: ActivityLog(store));
+
+      expect(await service.ignore('email', 'ghost'), isFalse);
+      expect(await activity(), isEmpty);
+    });
+
+    test('no pump: an ignore queues nothing', () async {
+      await seed();
+      final pumped = <String>[];
+      final service = PipelineRepairService(
+        store,
+        pumpTriage: () async => pumped.add('triage'),
+        pumpWork: () async => pumped.add('work'),
+      );
+
+      await service.ignore('email', 'm1');
+      await Future<void>.delayed(Duration.zero);
+
+      // Whatever was already queued drains as a skip — the handlers refuse a
+      // gated row — so there is nothing here for a pump to turn.
+      expect(pumped, isEmpty);
+    });
+  });
+
+  group('rejudgeNeedsYou', () {
+    test('a finished judgement goes back on the queue, and the queue turns',
+        () async {
+      await seed(needsYouVerdict: 0);
+      await store.enqueueWork('needs_you', 'email', 'm1');
+      await store.writeWork('needs_you', 'email', 'm1', status: 'done');
+      final pumped = <String>[];
+      final service = PipelineRepairService(
+        store,
+        activityLog: ActivityLog(store),
+        pumpTriage: () async => pumped.add('triage'),
+        pumpWork: () async => pumped.add('work'),
+      );
+
+      expect(await service.rejudgeNeedsYou('email', 'm1'), isTrue);
+      await Future<void>.delayed(Duration.zero);
+
+      // Deliberately a terminal stage re-run, which `retryOwed` would never
+      // do: the owner has seen the verdict and disagrees with what it was
+      // made on.
+      expect(await workStatus('needs_you', 'm1'), 'pending');
+      expect(pumped, ['triage', 'work']);
+
+      final event =
+          (await activity()).firstWhere((e) => e.kind == 'needs_you_rejudge');
+      expect(event.entityId, 'm1');
+      expect(event.count, 1);
+    });
+
+    test('an item already in flight is never claimed', () async {
+      await seed(needsYouVerdict: 0);
+      await store.enqueueWork('needs_you', 'email', 'm1');
+      await store.writeWork('needs_you', 'email', 'm1', status: 'processing');
+      final service =
+          PipelineRepairService(store, activityLog: ActivityLog(store));
+
+      expect(await service.rejudgeNeedsYou('email', 'm1'), isFalse);
+
+      expect(await workStatus('needs_you', 'm1'), 'processing');
+      expect(await activity(), isEmpty);
+    });
+
+    test('a gated message is never judged, so it is never re-judged',
+        () async {
+      await seed(triageStatus: 'skipped');
+      await db.customUpdate(
+        "UPDATE messages SET gate_reason = 'newsletter' "
+        'WHERE source = ? AND source_message_id = ?',
+        variables: [Variable('email'), Variable('m1')],
+      );
+      final service =
+          PipelineRepairService(store, activityLog: ActivityLog(store));
+
+      expect(await service.rejudgeNeedsYou('email', 'm1'), isFalse);
+      expect(await workStatus('needs_you', 'm1'), isNull);
+      expect(await activity(), isEmpty);
+    });
+
+    test('a Teams message is skipped by the gate that admits it, and IS '
+        're-judged', () async {
+      await seed(source: 'teams', triageStatus: 'skipped');
+      await db.customUpdate(
+        "UPDATE messages SET gate_reason = 'teams_source' "
+        'WHERE source = ? AND source_message_id = ?',
+        variables: [Variable('teams'), Variable('m1')],
+      );
+      final service = PipelineRepairService(store);
+
+      expect(await service.rejudgeNeedsYou('teams', 'm1'), isTrue);
+      expect(await workStatus('needs_you', 'm1', source: 'teams'), 'pending');
+    });
+
+    test('a message nothing is stored under is not re-judged', () async {
+      final service =
+          PipelineRepairService(store, activityLog: ActivityLog(store));
+
+      expect(await service.rejudgeNeedsYou('email', 'ghost'), isFalse);
+      expect(await activity(), isEmpty);
+    });
+  });
+
   group('the tick', () {
     late ProgressBus bus;
     late List<ProgressTick> ticks;

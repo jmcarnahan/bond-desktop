@@ -487,6 +487,28 @@ void main() {
       );
     });
 
+    test('the two hands on one message read as what a person did', () {
+      // A pair, because they are opposites and the panel is where somebody
+      // goes to work out which of them they pressed last week.
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'ignore', entityId: 'm1')),
+        'Ignored a message',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'restore', entityId: 'm1')),
+        'Restored a filtered message',
+      );
+      // And the kind is named as well as sentenced: status is read before
+      // kind, so a row that failed falls back to the label map, and an
+      // unmapped kind would print `ignore` in a column of English.
+      expect(
+        ActivityLogPanel.describe(
+          _event(kind: 'ignore', status: 'error', detail: const {}),
+        ),
+        startsWith('Ignore failed'),
+      );
+    });
+
     test('a reconcile names what the delta feed skipped', () {
       // The row exists only because it found something, so the sentence has no
       // "nothing new" form to write — it says what was missing instead.

@@ -93,6 +93,12 @@ class ThreadDetailPanel extends StatelessWidget {
   /// [ImageProvider] rather than bytes or a path — see [MessageRow.thumbnailFor].
   final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
 
+  /// Opens one message's own history, from the link in its header. The panel
+  /// does not know what a history is: it hands back the message that was
+  /// asked about and the host decides where that goes — the same arrangement
+  /// [onOpenAttachment] lives under. Null leaves every header a statement.
+  final void Function(Message message)? onWhatHappened;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -110,6 +116,7 @@ class ThreadDetailPanel extends StatelessWidget {
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
+    this.onWhatHappened,
   });
 
   /// Wide enough for a long paragraph, narrow enough that an ultrawide window
@@ -189,6 +196,11 @@ class ThreadDetailPanel extends StatelessWidget {
         onOpenAttachment: onOpenAttachment,
         selectedAttachment: selectedAttachment,
         thumbnailFor: thumbnailFor,
+        // Bound per message here rather than passed down as a builder: the row
+        // renders one message and has no reason to learn which.
+        onWhatHappened: onWhatHappened == null
+            ? null
+            : () => onWhatHappened!(message),
       ));
       previous = message;
     }
