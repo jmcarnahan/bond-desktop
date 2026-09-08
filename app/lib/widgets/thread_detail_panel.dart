@@ -173,6 +173,11 @@ class ThreadDetailPanel extends StatefulWidget {
   /// Hands a link's address to the operating system — the unfurl's `Open link`.
   /// Null draws no button.
   final void Function(String url)? onOpenLink;
+  /// Opens one message's own history, from the fourth button on its hover
+  /// strip. The panel does not know what a history is: it hands back the
+  /// message that was asked about and the host decides where that goes — the
+  /// same arrangement [onOpenAttachment] lives under. Null draws no button.
+  final void Function(Message message)? onWhatHappened;
 
   const ThreadDetailPanel({
     super.key,
@@ -198,6 +203,7 @@ class ThreadDetailPanel extends StatefulWidget {
     this.photos,
     this.onUseInReply,
     this.onOpenLink,
+    this.onWhatHappened,
   });
 
   @override
@@ -324,6 +330,7 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
     final reply = widget.onReplyTo;
     final suggest = widget.onSuggestFor;
     final why = widget.onWhy;
+    final history = widget.onWhatHappened;
     return [
       if (reply != null)
         HoverAction(
@@ -347,6 +354,15 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
           tooltip: 'Why',
           onTap: () => why(message),
           key: HoverActions.whyKeyFor(message.id),
+        ),
+      // After Why, because it is the longer answer to the same question: Why
+      // is the verdict, this is everything the pipeline did to reach it.
+      if (history != null)
+        HoverAction(
+          icon: Icons.history,
+          tooltip: 'What happened',
+          onTap: () => history(message),
+          key: HoverActions.historyKeyFor(message.id),
         ),
     ];
   }

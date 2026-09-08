@@ -90,8 +90,9 @@ that:
 - **A body carrying no marker is returned byte for byte.** The whitespace
   tidying only runs on a body that actually lost a marker; ordinary mail, where
   a run of spaces is a numbered list, is never rewritten.
-- **`textSearchMessages` does NOT strip.** It reads the stored column with a
-  LIKE, and a marker in it matches nothing a person would type.
+- **The keyword index does NOT strip.** `fts_messages` files the stored column
+  as it is, markers and all, and a marker in it matches nothing a person would
+  type (see [05-embeddings.md](05-embeddings.md)).
 
 A body that is nothing BUT markers gets a synthesised stand-in
 (`attachmentStandIn` in `message_block.dart`): a rendered card's text if there

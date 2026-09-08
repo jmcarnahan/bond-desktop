@@ -143,6 +143,18 @@ void main() {
       expect((notifier.state as StorylinesLoaded).storylines, isEmpty);
     });
 
+    test('dismissed storylines ride on their own list', () async {
+      await seedStoryline('sl-1', status: 'dismissed', title: 'Old thing');
+      await seedStoryline('sl-2', status: 'active');
+      final notifier = StorylinesNotifier(store, service);
+
+      await notifier.load();
+
+      final state = notifier.state as StorylinesLoaded;
+      expect(state.storylines.map((s) => s.id), ['sl-2']);
+      expect(state.dismissed.map((s) => s.id), ['sl-1']);
+    });
+
     test('a failed re-read keeps the rows and explains itself', () async {
       await seedStoryline('sl-1');
       final broken = UnreadableStore(db);
@@ -263,6 +275,47 @@ void main() {
       expect(await store.nextPendingWork('storyline_recruit'), isNull);
     });
 
+    test('undismiss puts the question back on the live list', () async {
+      await seedStoryline('sl-1', status: 'dismissed');
+      final notifier = StorylinesNotifier(store, service);
+      await notifier.load();
+      expect((notifier.state as StorylinesLoaded).dismissed, hasLength(1));
+
+      await notifier.undismiss('sl-1');
+
+      final state = notifier.state as StorylinesLoaded;
+      expect(state.dismissed, isEmpty);
+      expect(state.storylines.single.status, 'suggested');
+    });
+
+    test('unblockThread lifts the block and reloads', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedConversation('c1');
+      final notifier = StorylinesNotifier(store, service);
+      await notifier.load();
+      await notifier.addThread('sl-1', 'email', 'c1');
+      await notifier.removeThread('sl-1', 'email', 'c1');
+      expect(await store.blocksOf('sl-1'), hasLength(1));
+
+      await notifier.unblockThread('sl-1', 'email', 'c1');
+
+      expect(await store.blocksOf('sl-1'), isEmpty);
+      // Withdrawing the veto is not filing the thread back.
+      expect((notifier.state as StorylinesLoaded).storylines.single.memberCount,
+          0);
+    });
+
+    test('auditNow leaves a re-check waiting for the worker', () async {
+      await seedStoryline('sl-1', status: 'active');
+      final notifier = StorylinesNotifier(store, service);
+      await notifier.load();
+
+      await notifier.auditNow('sl-1');
+
+      expect((await store.nextPendingWork('storyline_audit'))?['entity_id'],
+          'sl-1');
+    });
+
     test('create returns the new id and lands it in the list', () async {
       await seedConversation('c1');
       final notifier = StorylinesNotifier(store, service);
@@ -314,10 +367,15 @@ void main() {
       expect((notifier.state as StorylinesLoaded).storylines, hasLength(1));
     });
 
-    // Both rewrite the row the list renders — refresh the title, summary and
-    // charter, recap the paragraph the header leads with — so both have to
-    // land on screen without waiting for the next poll.
-    for (final kind in const ['storyline_refresh', 'storyline_recap']) {
+    // All three rewrite the row the list renders — refresh the title, summary
+    // and charter, recap the paragraph the header leads with, and an audit the
+    // member count — so all three have to land on screen without waiting for
+    // the next poll.
+    for (final kind in const [
+      'storyline_refresh',
+      'storyline_recap',
+      'storyline_audit',
+    ]) {
       test('a $kind report reloads too', () async {
         final worker = AiWorker(store, handlers: [SilentHandler(kind)]);
         addTearDown(worker.dispose);

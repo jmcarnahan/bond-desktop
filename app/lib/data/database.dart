@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 13;
+  int get schemaVersion => 14;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -515,6 +515,26 @@ UPDATE storylines
                   'ix_attachment_chunks_unindexed '
                   'ON attachment_chunks(indexed_at)',
                 );
+              },
+              // v14 — the ingestion-truth round. A block now says who wrote it
+              // and why. Existing rows are the owner's: only removeThread ever
+              // wrote one, and the DEFAULT covers them; evidence stays NULL
+              // because nothing recorded what the model thought at the time.
+              from13To14: (m, schema) async {
+                if (!await _columnExists(
+                    'storyline_member_blocks', 'blocked_by')) {
+                  await m.addColumn(
+                    schema.storylineMemberBlocks,
+                    schema.storylineMemberBlocks.blockedBy,
+                  );
+                }
+                if (!await _columnExists(
+                    'storyline_member_blocks', 'evidence')) {
+                  await m.addColumn(
+                    schema.storylineMemberBlocks,
+                    schema.storylineMemberBlocks.evidence,
+                  );
+                }
               },
             ),
           ),

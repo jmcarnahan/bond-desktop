@@ -12,6 +12,7 @@ import 'inline_alert.dart';
 import 'pinned_documents_bar.dart';
 import 'room_header.dart';
 import 'source_glyph.dart';
+import 'storyline_blocks_section.dart';
 import 'time_format.dart';
 
 /// What the storyline's body is showing. Three tabs and not three folds: the
@@ -114,6 +115,23 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// Remove is not.
   final void Function(AttachmentRef attachment)? onUnpinDocument;
 
+  /// The threads somebody took out of this storyline — the owner's own and
+  /// the re-check pass's — for the About block's two lists. Empty is the
+  /// ordinary state and renders no headings at all.
+  final List<StorylineBlock> blocks;
+
+  /// Lifts the veto on one blocked thread without filing it back: the model
+  /// may decide for itself, next time a pass looks at it. Null leaves the
+  /// button inert.
+  final void Function(String source, String conversationKey)? onUnblockThread;
+
+  /// Files a blocked thread back in by hand, which clears its block whichever
+  /// pass wrote it. Null leaves the button inert.
+  final void Function(String source, String conversationKey)? onAddBackThread;
+
+  /// Re-judges the threads the model filed here. Null leaves the button inert.
+  final VoidCallback? onAudit;
+
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -137,6 +155,10 @@ class StorylineTimelinePanel extends StatefulWidget {
     this.onOpenDocument,
     this.onPinDocument,
     this.onUnpinDocument,
+    this.blocks = const [],
+    this.onUnblockThread,
+    this.onAddBackThread,
+    this.onAudit,
   });
 
   static const Key documentsStripKey = ValueKey('storyline-documents-strip');
@@ -867,6 +889,12 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         // anyway.
         if (!_editingCharter && suggestion.isNotEmpty)
           _suggestionBlock(suggestion),
+        StorylineBlocksSection(
+          blocks: widget.blocks,
+          onUnblockThread: widget.onUnblockThread,
+          onAddBackThread: widget.onAddBackThread,
+          onAudit: widget.onAudit,
+        ),
       ],
     );
   }
@@ -1031,8 +1059,11 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
             overflow: TextOverflow.ellipsis,
           ),
           Text(
+            // The same words the store now writes as a user row's evidence,
+            // and the same words a block copied off one shows: one spelling
+            // for one fact, wherever it is read back.
             member.addedByUser
-                ? 'You added this.'
+                ? 'Filed by you'
                 : (member.evidence?.isNotEmpty == true
                     ? member.evidence!
                     : 'Grouped automatically.'),

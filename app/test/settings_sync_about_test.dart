@@ -25,6 +25,7 @@ void main() {
     String? mail,
     String? teams,
     String? sweep,
+    String? reconcile,
     Future<void> Function()? onRefreshNow,
     Future<void> Function()? onSignOutAndClear,
     Future<int> Function()? attachmentCacheBytes,
@@ -47,6 +48,7 @@ void main() {
           lastMailSyncIso: mail,
           lastTeamsSyncIso: teams,
           lastSweepIso: sweep,
+          lastReconcileIso: reconcile,
           onRefreshNow: wireRefresh ? (onRefreshNow ?? () async {}) : null,
           onSignOutAndClear: onSignOutAndClear,
           attachmentCacheBytes: attachmentCacheBytes,
@@ -81,7 +83,8 @@ void main() {
     expect(find.text('Not synced yet'), findsOneWidget);
 
     await expand(tester, 'Sync & data');
-    expect(find.text('never'), findsNWidgets(3));
+    // Mail, the mail reconcile, Teams and the storyline sweep.
+    expect(find.text('never'), findsNWidgets(4));
   });
 
   testWidgets('the summary is relative, in one unit', (tester) async {
@@ -94,10 +97,25 @@ void main() {
     expect(find.text('Mail synced 4m ago · Teams 2h ago'), findsOneWidget);
 
     await expand(tester, 'Sync & data');
-    // The sweep alone has never run.
-    expect(find.text('never'), findsOneWidget);
+    // The sweep and the mail reconcile have never run.
+    expect(find.text('never'), findsNWidgets(2));
     expect(find.text('4m ago'), findsOneWidget);
     expect(find.text('2h ago'), findsOneWidget);
+  });
+
+  testWidgets('the reconcile has its own stamp', (tester) async {
+    await open(
+      tester,
+      mail: _ago(const Duration(minutes: 1)),
+      reconcile: _ago(const Duration(minutes: 7)),
+    );
+
+    await expand(tester, 'Sync & data');
+    // Its own row because it runs on its own cadence: the safety net being
+    // minutes behind the pull that carries it is the normal state, and only a
+    // second number can say whether it is alive.
+    expect(find.text('Mail reconcile'), findsOneWidget);
+    expect(find.text('7m ago'), findsOneWidget);
   });
 
   testWidgets('a side that has never run is said in words, not as "synced '

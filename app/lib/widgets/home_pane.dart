@@ -78,6 +78,16 @@ class HomePane extends StatefulWidget {
   final ValueChanged<String>? onSearch;
   final VoidCallback? onExitSearch;
 
+  /// Requeues the stages a stalled or failed row still owes. Null hides the
+  /// Retry link on every row — the pane is dumb about whether a repair is
+  /// wired up, it just does not offer one.
+  final void Function(String source, String sourceMessageId)? onRetry;
+
+  /// Opens one message's whole story — the door the stage bar and the Result
+  /// cell become. Null leaves both as part of the row's own tap, exactly as
+  /// [onRetry] null leaves the Retry link undrawn.
+  final void Function(String source, String sourceMessageId)? onOpenHistory;
+
   const HomePane({
     super.key,
     required this.rows,
@@ -104,6 +114,8 @@ class HomePane extends StatefulWidget {
     this.searchNotice,
     this.onSearch,
     this.onExitSearch,
+    this.onRetry,
+    this.onOpenHistory,
   });
 
   /// How close to the bottom the viewport has to get before the next page is
@@ -285,11 +297,16 @@ class _HomePaneState extends State<HomePane> {
 
   /// What a query came back with: how many, for what, and the way back.
   ///
-  /// Its own list, with no controller and no [PageStorageKey]: a result set's
-  /// scroll position is disposable, and the live table keeps its own through
-  /// the swap precisely because that key stays on the list that owns it.
+  /// One list of messages in score order under a count of itself, with the
+  /// document passages above it. Its own list, with no controller and no
+  /// [PageStorageKey]: a result set's scroll position is disposable, and the
+  /// live table keeps its own through the swap precisely because that key
+  /// stays on the list that owns it.
   Widget _searchBody(HomeSearch search) {
+    // The rows on screen and nothing else — one fused list means the header
+    // can simply count it. Documents are not in the number; see below.
     final count = search.hits.length;
+    final notice = search.notice;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -329,12 +346,24 @@ class _HomePaneState extends State<HomePane> {
             ],
           ),
         ),
+        // Between the count and the rows, because it qualifies THEM: one
+        // half of the search could not run, so what is listed below is
+        // narrower than it looks. The service writes the sentence — this only
+        // places it, and the archive pane places its own the same way.
+        if (notice != null) ...[
+          InlineAlert(
+            severity: InlineAlertSeverity.attention,
+            text: notice,
+            maxLines: 2,
+          ),
+          const SizedBox(height: BondSpacing.s8),
+        ],
         // Documents first, above the messages. A passage that ANSWERS the
         // query is a better answer than a message that merely mentions it, and
         // the reader who typed a phrase from inside a spreadsheet is looking
         // for the spreadsheet.
         //
-        // The header count above stays a count of MESSAGE hits: it labels the
+        // The header count above stays a count of MESSAGES: it labels the
         // list under it, and a number that silently included documents would
         // never match the rows a person can count on screen.
         //
@@ -368,11 +397,27 @@ class _HomePaneState extends State<HomePane> {
               ],
             ),
           ),
-        if (search.hits.isEmpty)
+        // Two ways to have no message rows, and they are not the same
+        // sentence. With nothing above it either, the search found nothing at
+        // all. With documents above it, the mailbox HAS an answer and it is
+        // sitting on screen — the relevance floor makes that combination
+        // ordinary rather than rare, and "Nothing matches that." over a named
+        // file is the screen contradicting itself.
+        if (search.hits.isEmpty && search.documents.isEmpty)
           Expanded(
             child: Center(
               child: Text(
-                'Nothing indexed matches that.',
+                'Nothing matches that.',
+                style: BondType.small.copyWith(color: BondColors.inkMuted),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          )
+        else if (search.hits.isEmpty)
+          Expanded(
+            child: Center(
+              child: Text(
+                'No messages match that.',
                 style: BondType.small.copyWith(color: BondColors.inkMuted),
                 textAlign: TextAlign.center,
               ),
@@ -380,24 +425,34 @@ class _HomePaneState extends State<HomePane> {
           )
         else ...[
           const HomeFeedHeaderRow(),
-          Expanded(
-            child: ListView.builder(
-              itemCount: search.hits.length,
-              itemBuilder: (context, index) {
-                final hit = search.hits[index];
-                return HomeFeedRowTile(
-                  key: ValueKey<String>('search-${hit.row.feedKey}'),
-                  row: hit.row,
-                  now: widget.now,
-                  muteBar: true,
-                  onOpenThread: widget.onOpenThread,
-                  onOpenStoryline: widget.onOpenStoryline,
-                );
-              },
-            ),
-          ),
+          Expanded(child: _resultList(search)),
         ],
       ],
+    );
+  }
+
+  /// Every result, in score order, under one scroller.
+  ///
+  /// One list and one order, because a row found by its words and a row found
+  /// by its meaning are answers to the same question — the fusion already
+  /// weighed them against each other, and a heading splitting them apart
+  /// would file the row that matched BOTH ways under one of them.
+  Widget _resultList(HomeSearch search) {
+    return ListView.builder(
+      itemCount: search.hits.length,
+      itemBuilder: (context, index) {
+        final row = search.hits[index].row;
+        return HomeFeedRowTile(
+          key: ValueKey<String>('search-${row.feedKey}'),
+          row: row,
+          now: widget.now,
+          muteBar: true,
+          onOpenThread: widget.onOpenThread,
+          onOpenStoryline: widget.onOpenStoryline,
+          onRetry: widget.onRetry,
+          onOpenHistory: widget.onOpenHistory,
+        );
+      },
     );
   }
 
@@ -440,6 +495,8 @@ class _HomePaneState extends State<HomePane> {
                     collapsing: widget.collapsing.contains(key),
                     onOpenThread: widget.onOpenThread,
                     onOpenStoryline: widget.onOpenStoryline,
+                    onRetry: widget.onRetry,
+                    onOpenHistory: widget.onOpenHistory,
                   );
                 },
               ),

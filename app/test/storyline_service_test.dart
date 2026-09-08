@@ -16,6 +16,7 @@ import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
+import 'package:bond_inbox/services/storyline_handler.dart';
 import 'package:bond_inbox/services/storyline_service.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
@@ -232,6 +233,18 @@ Map<String, dynamic> recapAnswer({
 /// agree with it however wrong both were.
 String memberHashOf(List<String> keys, {String source = 'email'}) =>
     cardHash(([for (final key in keys) '$source\n$key']..sort()).join('\n'));
+
+/// The body of one fence in a built user message — everything between its
+/// opening tag and the next closing one.
+///
+/// Sliced rather than searched for, because "the subject is somewhere in the
+/// message" is not what any of these tests mean: an example belongs in ITS
+/// fence, and a card that leaked into the wrong one would still be `contains`.
+String fenceBody(String message, String label) => message
+    .split('<untrusted_data source="$label">')
+    .last
+    .split('</untrusted_data>')
+    .first;
 
 void main() {
   late BondDatabase db;
@@ -2125,6 +2138,30 @@ void main() {
       expect(await store.dismissedHashExistsAny(['h1']), isTrue);
     });
 
+    test('restoring a dismissed storyline asks the question again', () async {
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        summary: 'The studio is reviewing the homepage copy.',
+        status: 'suggested',
+        createdBy: 'auto',
+        memberHash: 'h1',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.dismissSuggestion('sl-1');
+      await service.restoreDismissed('sl-1');
+
+      final restored = (await store.getStoryline('sl-1'))!;
+      expect(restored.status, 'suggested');
+      expect(restored.summary, 'The studio is reviewing the homepage copy.');
+      expect(await store.membersOf('sl-1'), hasLength(1));
+      // The tombstone reads `status = 'dismissed'`, so a restore lifts the
+      // block on ever proposing this member set again.
+      expect(await store.dismissedHashExistsAny(['h1']), isFalse);
+    });
+
     test('renaming locks the title', () async {
       await store.insertStoryline(
         id: 'sl-1',
@@ -2155,6 +2192,112 @@ void main() {
 
       expect(await store.membersOf('sl-1'), isEmpty);
       expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isTrue);
+    });
+
+    test("a removal keeps the model's reason and queues the re-check",
+        () async {
+      await seed(store, 'c1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1',
+          addedBy: 'auto', evidence: 'Both concern the website redesign.');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.removeThread('sl-1', 'email', 'c1');
+
+      // The owner's own "no", carrying what the model thought when it filed
+      // the thread — which is what makes the negative example say something.
+      final block = (await store.blocksOf('sl-1')).single;
+      expect(block.blockedBy, 'user');
+      expect(block.evidence, 'Both concern the website redesign.');
+      // Both rows: the refresh may narrow the charter, and the audit re-judges
+      // the rest of the group against whatever it narrowed to. The handler
+      // order is what makes them run in that sequence.
+      expect((await store.nextPendingWork('storyline_refresh'))?['entity_id'],
+          'sl-1');
+      expect((await store.nextPendingWork('storyline_audit'))?['entity_id'],
+          'sl-1');
+    });
+
+    test('a hand-filed thread records that the owner filed it', () async {
+      await seed(store, 'c1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.addThread('sl-1', 'email', 'c1');
+
+      // Not decoration: the confirm prompt reads this membership back as an
+      // example, and a removal copies the evidence onto the block.
+      final member = (await store.membersOf('sl-1')).single;
+      expect(member.addedBy, 'user');
+      expect(member.evidence, 'Filed by you');
+    });
+
+    test('unblocking lifts the veto and files nothing back', () async {
+      await seed(store, 'c1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'keep', addedBy: 'auto');
+      await store.removeStorylineMember('sl-1', 'email', 'c1', block: true);
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final service =
+          StorylineService(store, FakeLlm(const {}), activityLog: log);
+
+      await service.unblockThread('sl-1', 'email', 'c1');
+
+      expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
+      // NOT re-filed: the owner withdrew a veto, they did not make a
+      // membership. Whether it belongs is the model's question again.
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['keep']);
+      final row = ActivityEvent.fromRow((await store.recentActivity()).single);
+      expect(row.kind, 'storyline_unblock');
+      expect(row.detail['storyline_id'], 'sl-1');
+      // Nothing to re-describe and nothing new to recap: the storyline is
+      // exactly as it was a moment ago.
+      for (final kind in const [
+        'storyline_refresh',
+        'storyline_audit',
+        'storyline_recap',
+      ]) {
+        expect(await store.nextPendingWork(kind), isNull, reason: kind);
+      }
+    });
+
+    test("filing a thread back clears an audit's block too", () async {
+      await seed(store, 'c1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.removeStorylineMember('sl-1', 'email', 'c1',
+          block: true, blockedBy: 'audit', evidence: 'A different launch.');
+      final service = StorylineService(store, FakeLlm(const {}));
+
+      await service.addThread('sl-1', 'email', 'c1');
+
+      // A block is a block whoever wrote it: the owner filing the thread by
+      // hand is the last word, and leaving the row would have the next
+      // assignment pass refuse a membership a person just asked for.
+      expect(await store.isMemberBlocked('sl-1', 'email', 'c1'), isFalse);
+      expect(await store.blocksOf('sl-1'), isEmpty);
+      expect((await store.membersOf('sl-1')).single.addedBy, 'user');
     });
 
     test('adding a thread back un-blocks it', () async {
@@ -2208,6 +2351,485 @@ void main() {
       await service.addThread('sl-1', 'email', 'c1');
 
       expect((await store.getStoryline('sl-1'))!.status, 'active');
+    });
+  });
+
+  /// What the owner's own corrections teach the model, and the pass that
+  /// applies the lesson to the memberships already sitting in the storyline.
+  ///
+  /// Until this existed a removal taught nothing: the block kept the thread
+  /// out of that one storyline and never reached a prompt, so the reasoning
+  /// that filed it went on filing its siblings.
+  group('the owner teaches the prompt', () {
+    /// A storyline the owner has corrected once each way: one thread filed by
+    /// hand, one taken out. Returns nothing — the fixture is the database.
+    Future<StorylineService> taught(FakeLlm llm) async {
+      await seedStoryline(store);
+      await seed(store, 'k1');
+      await seed(store, 'r1');
+      final service = StorylineService(store, llm);
+      await service.addThread('sl-1', 'email', 'k1');
+      await service.addThread('sl-1', 'email', 'r1');
+      await service.removeThread('sl-1', 'email', 'r1');
+      return service;
+    }
+
+    test('an assignment is judged against what the owner filed and removed',
+        () async {
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = await taught(llm);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+
+      await service.assignConversation('email', 'c1');
+
+      final user = llm.userMessages.single;
+      expect(fenceBody(user.split('"removed_by_owner"').first, 'kept_by_owner'),
+          contains('Subject for k1'));
+      expect(
+        fenceBody(user.split('"candidate_thread"').first, 'removed_by_owner'),
+        contains('Subject for r1'),
+      );
+      // The candidate goes last, so the examples are a cacheable prefix.
+      expect(user.indexOf('"removed_by_owner"'),
+          lessThan(user.indexOf('"candidate_thread"')));
+    });
+
+    test('a proposal has nobody to learn from, and says so', () async {
+      await seed(store, 'c1', vector: vectorAt(1));
+      await seed(store, 'c2', vector: vectorAt(0.9));
+      final llm = FakeLlm({
+        'storyline_name': [nameAnswer()],
+        'storyline_membership': [confirmAnswer()],
+      });
+
+      await StorylineService(store, llm).sweep();
+
+      final confirms = [
+        for (var i = 0; i < llm.schemas.length; i++)
+          if (llm.schemas[i] == 'storyline_membership') llm.userMessages[i],
+      ];
+      expect(confirms, isNotEmpty);
+      for (final user in confirms) {
+        // The proposal is not in the database yet: it has no user members and
+        // no blocks by construction, so both fences are honestly empty.
+        expect(
+          fenceBody(user.split('"removed_by_owner"').first, 'kept_by_owner'),
+          contains('(none)'),
+        );
+        expect(
+          fenceBody(user.split('"candidate_thread"').first, 'removed_by_owner'),
+          contains('(none)'),
+        );
+      }
+    });
+
+    test('a recruit lap carries the same lesson to every candidate', () async {
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = await taught(llm);
+      await seed(store, 'c1', vector: vectorAt(0.8));
+      await seed(store, 'c2', vector: vectorAt(0.7));
+
+      await service.recruit('sl-1');
+
+      // Two candidates over the gate, and the examples on both prompts —
+      // fetched once per lap, not once per candidate, but that is a cost the
+      // prompt cannot show; what it can show is that neither call went out
+      // without the owner's word on it.
+      expect(llm.callsFor('storyline_membership'), 2);
+      for (final user in llm.userMessages) {
+        expect(
+          fenceBody(user.split('"removed_by_owner"').first, 'kept_by_owner'),
+          contains('Subject for k1'),
+        );
+        expect(
+          fenceBody(user.split('"candidate_thread"').first, 'removed_by_owner'),
+          contains('Subject for r1'),
+        );
+      }
+    });
+
+    test('a block whose thread is gone teaches nothing rather than a blank',
+        () async {
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = await taught(llm);
+      // The block outlives the conversation row it was written about; an
+      // example nothing can be said about is left out, not rendered empty.
+      await db.customStatement(
+        "DELETE FROM conversations WHERE conversation_key = 'r1'",
+      );
+      await seed(store, 'c1', vector: vectorAt(0.8));
+
+      await service.assignConversation('email', 'c1');
+
+      final removed = fenceBody(
+        llm.userMessages.single.split('"candidate_thread"').first,
+        'removed_by_owner',
+      );
+      expect(removed, contains('(none)'));
+      expect(removed, isNot(contains('r1')));
+    });
+
+    test('gone threads do not crowd out the lessons that remain', () async {
+      // Three of the four removals are threads the app no longer stores, and
+      // they are the newest three. Counting to three BEFORE the gone-thread
+      // filter would spend the whole example budget on them and teach the
+      // model nothing at all.
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final service = await taught(llm);
+      for (final key in const ['r2', 'r3', 'r4']) {
+        await seed(store, key);
+        await service.addThread('sl-1', 'email', key);
+        await service.removeThread('sl-1', 'email', key);
+        await db.customUpdate(
+          'UPDATE storyline_member_blocks SET blocked_at = ? '
+          'WHERE storyline_id = ? AND conversation_key = ?',
+          variables: [
+            Variable('2026-09-0${key.substring(1)}T00:00:00Z'),
+            Variable('sl-1'),
+            Variable(key),
+          ],
+        );
+        await db.customStatement(
+          "DELETE FROM conversations WHERE conversation_key = '$key'",
+        );
+      }
+      await db.customUpdate(
+        'UPDATE storyline_member_blocks SET blocked_at = ? '
+        "WHERE storyline_id = ? AND conversation_key = 'r1'",
+        variables: [Variable('2026-09-01T00:00:00Z'), Variable('sl-1')],
+      );
+      await seed(store, 'c1', vector: vectorAt(0.8));
+
+      await service.assignConversation('email', 'c1');
+
+      final removed = fenceBody(
+        llm.userMessages.single.split('"candidate_thread"').first,
+        'removed_by_owner',
+      );
+      expect(removed, contains('Subject for r1'));
+    });
+
+    test('a removal is what lets the refresh narrow an unlocked charter',
+        () async {
+      const narrowed = 'The redesign of the Northline Studio website — the '
+          'homepage copy, the new photography, and the launch date. Payroll '
+          'and other back-office mail does not belong.';
+      final llm = FakeLlm({
+        'storyline_refresh': [refineAnswer(charter: narrowed)],
+      });
+      final service = await taught(llm);
+
+      expect(await drainRefresh(service), 'sl-1');
+
+      final user = llm.userMessages.single;
+      expect(fenceBody(user.split('"new_threads"').first, 'removed_threads'),
+          contains('Subject for r1'));
+      // The charter is the model's own text, so the model may narrow it.
+      expect((await store.getStoryline('sl-1'))!.charter, narrowed);
+    });
+
+    test('and a locked one only ever gets the offer', () async {
+      const narrowed = 'The website redesign. Payroll mail does not belong.';
+      final llm = FakeLlm({
+        'storyline_refresh': [refineAnswer(charter: narrowed)],
+      });
+      final service = await taught(llm);
+      await store.updateStoryline('sl-1', charterLocked: true);
+
+      expect(await drainRefresh(service), 'sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charterSuggestion, narrowed);
+      expect(storyline.charter, isNot(narrowed));
+    });
+
+    /// A storyline holding two automatic members and one the owner filed,
+    /// with the membership order pinned so a positional script is reading the
+    /// members it means.
+    Future<void> seedMixed({String? memberHash}) async {
+      await seedStoryline(store, memberKey: 'a1');
+      await seed(store, 'a2', vector: vectorAt(0.9));
+      await store.addStorylineMember('sl-1', 'email', 'a2',
+          addedBy: 'auto', evidence: 'Both concern the website redesign.');
+      await seed(store, 'u1');
+      await store.addStorylineMember('sl-1', 'email', 'u1',
+          addedBy: 'user', evidence: 'Filed by you');
+      await memberAddedAt('sl-1', 'a1', '2026-08-01T00:00:00Z');
+      await memberAddedAt('sl-1', 'a2', '2026-08-02T00:00:00Z');
+      await memberAddedAt('sl-1', 'u1', '2026-08-03T00:00:00Z');
+      await store.updateStoryline(
+        'sl-1',
+        memberHash: memberHash ?? memberHashOf(['a1', 'a2', 'u1']),
+      );
+    }
+
+    test('the audit re-judges what the model filed and nothing the owner did',
+        () async {
+      await seedMixed();
+      await seedMessage(store, 'a2', 'm-a2');
+      await store.stampStorylineId('email', 'a2', storylineId: 'sl-1');
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(
+            belongs: false,
+            evidence: 'A different launch entirely.',
+          ),
+        ],
+      });
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+      final service =
+          StorylineService(store, llm, activityLog: log);
+
+      await service.audit('sl-1');
+      // The audit notes onto the worker's row, as the recruit does; this is
+      // the record the worker would write at the end of the item.
+      await log.record('storyline_audit', source: 'email', entityId: 'sl-1');
+
+      // Two calls, not three: the owner's own membership is the owner's word
+      // and is never put to a model.
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['a1', 'u1']);
+      // Blocked, and blocked as the audit's own doing — the recruit runs after
+      // this handler and would file an unblocked removal straight back.
+      final block = (await store.blocksOf('sl-1')).single;
+      expect(block.conversationKey, 'a2');
+      expect(block.blockedBy, 'audit');
+      expect(block.evidence, 'A different launch entirely.');
+      // The row a person reads, naming what went.
+      final row = ActivityEvent.fromRow((await store.recentActivity()).single);
+      expect(row.kind, 'storyline_audit');
+      expect(row.detail['checked'], 2);
+      expect(
+        (row.detail['removed'] as List).single,
+        containsPair('subject', 'Subject for a2'),
+      );
+      // The hash follows the members, and the pointer follows the hash: a
+      // removed thread must not still look filed on the home feed.
+      expect((await store.getStoryline('sl-1'))!.memberHash,
+          memberHashOf(['a1', 'u1']));
+      expect(await pointerOf('m-a2'), isNull);
+      // Both passes follow the members: the title, summary and charter
+      // describe a group that just got smaller, and so does the recap.
+      expect((await store.nextPendingWork('storyline_refresh'))?['entity_id'],
+          'sl-1');
+      expect((await store.nextPendingWork('storyline_recap'))?['entity_id'],
+          'sl-1');
+    });
+
+    test('an audit removal clears the recap too', () async {
+      await seedMixed();
+      await store.updateStoryline('sl-1',
+          recapText: 'The a2 thread is where the launch date came from.',
+          recapThrough: '2026-08-03T00:00:00Z');
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(belongs: false, evidence: 'no'),
+        ],
+      });
+
+      await StorylineService(store, llm).audit('sl-1');
+
+      // The re-check is a removal like the owner's own, and the recap it
+      // queues has to be written from the members that are left: the stored
+      // paragraph was derived from a2 as much as from anything else, and no
+      // rewrite carrying it forward could tell which half to drop.
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.recapText, isNull);
+      expect(storyline.recapThrough, isNull);
+    });
+
+    test('and the recruit cannot put back what the audit took out', () async {
+      await seedMixed();
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(belongs: false, evidence: 'A different launch.'),
+        ],
+      });
+      final service = StorylineService(store, llm);
+      await service.audit('sl-1');
+
+      await service.recruit('sl-1');
+
+      // a2 sits at cosine 0.9 against the centroid and would top the ranking,
+      // so the block is the only thing keeping it out — and the model is never
+      // asked a third question.
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['a1', 'u1']);
+    });
+
+    test('a low-confidence yes is a no here too', () async {
+      await seedMixed();
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(confidence: 'low', evidence: 'Could be either.'),
+        ],
+      });
+
+      await StorylineService(store, llm).audit('sl-1');
+
+      // The identical rule every other membership path applies: a group the
+      // user has to correct costs more than one it never got offered.
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['a1', 'u1']);
+      expect((await store.blocksOf('sl-1')).single.conversationKey, 'a2');
+    });
+
+    test('an audit that removes nothing still says it checked', () async {
+      await seedMixed(memberHash: 'h-before');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await StorylineService(store, llm, activityLog: log).audit('sl-1');
+      await log.record('storyline_audit', source: 'email', entityId: 'sl-1');
+
+      expect(llm.callsFor('storyline_membership'), 2);
+      expect(await store.membersOf('sl-1'), hasLength(3));
+      // The model was consulted and said keep, which is an answer: the row
+      // shows with what it checked, and nothing removed.
+      final row = ActivityEvent.fromRow((await store.recentActivity()).single);
+      expect(row.detail['checked'], 2);
+      // Absent rather than empty: every value on a quiet kind's note has to be
+      // a numeric zero for the row to stay out of the panel, and an empty list
+      // is not one.
+      expect(row.detail.containsKey('removed'), isFalse);
+      // Idempotent: nothing moved, so nothing was stamped and nothing queued.
+      expect((await store.getStoryline('sl-1'))!.memberHash, 'h-before');
+      expect(await store.nextPendingWork('storyline_refresh'), isNull);
+      expect(await store.nextPendingWork('storyline_recap'), isNull);
+    });
+
+    test('an audit that reached no model says nothing', () async {
+      // Every automatic member's conversation row is gone, so there is no card
+      // to judge and no call to make. `checked` is then zero, every value on
+      // the note is a zero, and the quiet kind keeps the row out of the panel.
+      await seedMixed();
+      for (final key in const ['a1', 'a2']) {
+        await db.customUpdate(
+          'DELETE FROM conversations WHERE source = ? AND conversation_key = ?',
+          variables: [Variable('email'), Variable(key)],
+        );
+      }
+      final llm = FakeLlm({'storyline_membership': const []});
+      final log = ActivityLog(store);
+      addTearDown(log.dispose);
+
+      await StorylineService(store, llm, activityLog: log).audit('sl-1');
+      await log.record('storyline_audit', source: 'email', entityId: 'sl-1');
+
+      expect(llm.callsFor('storyline_membership'), 0);
+      expect(await store.recentActivity(), isEmpty);
+    });
+
+    test('an unavailable server parks the audit and keeps what already landed',
+        () async {
+      await seedMixed();
+      await seedMessage(store, 'a1', 'm-a1');
+      await store.stampStorylineId('email', 'a1', storylineId: 'sl-1');
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(belongs: false, evidence: 'no'),
+          const LlmUnavailableException('server off'),
+        ],
+      });
+
+      await expectLater(
+        StorylineService(store, llm).audit('sl-1'),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+
+      // The first removal is whole: the member is gone with its block, the
+      // storyline's hash describes what is left, and the thread no longer
+      // looks filed on the home feed. A park must not leave the storyline
+      // describing members that are not there.
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['a2', 'u1']);
+      expect((await store.blocksOf('sl-1')).single.blockedBy, 'audit');
+      expect((await store.getStoryline('sl-1'))!.memberHash,
+          isNot(memberHashOf(['a1', 'a2', 'u1'])));
+      expect(await pointerOf('m-a1'), isNull);
+    });
+
+    test("an audit's own block never comes back as the owner's lesson",
+        () async {
+      await seedMixed();
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(belongs: false, evidence: 'A different launch.'),
+          confirmAnswer(),
+        ],
+      });
+      final service = StorylineService(store, llm);
+      await service.audit('sl-1');
+      await seed(store, 'c9', vector: vectorAt(0.8));
+
+      await service.assignConversation('email', 'c9');
+
+      // The fence carries the OWNER's removals only. An audit rejection fed
+      // back as an example would be the model teaching itself.
+      final user = llm.userMessages.last;
+      final removed =
+          fenceBody(user.split('"candidate_thread"').first, 'removed_by_owner');
+      expect(removed, contains('(none)'));
+      expect(removed, isNot(contains('Subject for a2')));
+    });
+
+    test('an audit skips a storyline the user dismissed while it waited',
+        () async {
+      await seedMixed();
+      await store.updateStoryline('sl-1', status: 'dismissed');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).audit('sl-1');
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(3));
+    });
+
+    test('a storyline the owner built by hand is never audited at all',
+        () async {
+      await seed(store, 'u1');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'user',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'u1', addedBy: 'user');
+      final llm = FakeLlm({'storyline_membership': [confirmAnswer()]});
+
+      await StorylineService(store, llm).audit('sl-1');
+
+      expect(llm.schemas, isEmpty);
+      expect(await store.membersOf('sl-1'), hasLength(1));
+    });
+
+    test('the handler hands its row to the audit', () async {
+      await seedMixed();
+      final llm = FakeLlm({
+        'storyline_membership': [
+          confirmAnswer(),
+          confirmAnswer(belongs: false, evidence: 'A different launch.'),
+        ],
+      });
+      final handler = StorylineAuditHandler(StorylineService(store, llm));
+
+      expect(handler.kind, 'storyline_audit');
+      await handler.run({'entity_id': 'sl-1', 'source': 'email'});
+
+      expect((await store.membersOf('sl-1')).map((m) => m.conversationKey),
+          ['a1', 'u1']);
+      // An empty id is a row nothing can be done about, and reaches no model.
+      await handler.run({'entity_id': '', 'source': 'email'});
+      expect(llm.callsFor('storyline_membership'), 2);
     });
   });
 
@@ -3758,6 +4380,13 @@ void main() {
       // The one membership change that adds no message anywhere: nothing new
       // was said, so nothing but the clear can make the recap stale.
       await service.removeThread('sl-1', 'email', 'c2');
+
+      // Blanked on the way out, before anything has run. The paragraph was
+      // written about a member set this storyline no longer has, and there is
+      // no rewrite that can tell which of its sentences the departed thread
+      // paid for.
+      expect((await store.getStoryline('sl-1'))!.recapText, isNull);
+
       expect(await drainRefresh(service), 'sl-1');
       expect(await drainRecap(service), 'sl-1');
 
@@ -3767,6 +4396,13 @@ void main() {
       expect(storyline.recapText, 'The venue is somebody else.');
       expect(storyline.recapThrough, '2026-08-01T11:00:00Z');
       expect(llm.userMessages.last, isNot(contains('the venue is booked')));
+      // And the old recap was not handed to the model to carry forward: the
+      // line renders as the bare label an absent previous recap always gets,
+      // which is what keeps Dana's venue out of the next paragraph.
+      expect(llm.userMessages.last,
+          isNot(contains('Previous recap: Dana has the venue booked.')));
+      expect(llm.userMessages.last,
+          contains('Previous recap: \n</untrusted_data>'));
     });
 
     test('a hand-added thread recaps the storyline', () async {

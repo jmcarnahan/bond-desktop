@@ -14,14 +14,44 @@ triage field — and it is the ask half **only**: a judged yes is still gated by
 the attention threshold, the `later` bucket and the `done` state, like every
 other ask. NULL and 0 add nothing.
 
-**Waiting for the verdict.** `openNotifyCandidates` projects a `needs_you_open`
-flag beside `extract_open`, keyed by message, and `_isComplete` holds the row
-open while a `needs_you` work item is `pending` or `processing` — settling
-first would judge the message on an answer that had not arrived. An **absent**
-work row is terminal, as everywhere else in this stage: the gated and
-beyond-cap rows are never queued for the pass at all. `needs_you` also joins
-the debounce's wake set, so a drain that finishes verdicts sweeps in 750 ms
-rather than waiting out the 30-second timer.
+**Waiting for the verdict — from the record, not the queue.** `_isComplete`
+reads `message_progress.extract_state` and `storyline_state` (terminal =
+`done`/`skipped`/`error`) plus a `needs_you_judged` flag that
+`openNotifyCandidates` projects as "a verdict is written, or a `needs_you` work
+row reached `done`/`error`". The work-row EXISTS flags this replaced were the
+wrong answer: extract, needs-you and embed rows are enqueued *after both
+drains* of a sync while triage claims `messages.triage_status` the instant a
+page commits, and a sweep can land at any instant of a sync. In that gap a
+freshly triaged message had no work rows at all, read as finished, and settled
+— and the storyline stamp that arrived a minute later was refused, freezing the
+row at `storyline_state = 'pending'`, `outcome = 'pending'` for good.
+
+The flip has a price and it is paid on purpose: an **absent or pending stage
+now reads as open**, so a message past the 150-per-pass backlog cap settles on
+the six-minute deadline rather than immediately. A re-drain is not news. The
+second arm of `needs_you_judged` is not redundant either — the handler ends an
+item `done` on each of its own guards (deleted, outbound, gated) without
+writing a verdict, and waiting past that would be waiting on nobody. A verdict
+left *stale* by a re-judge also reads as judged, so a candidate can settle on
+the old answer; `PipelineProgress.refreshNeedsYou` moves the chip when the new
+one lands (see [11-needs-you.md](11-needs-you.md)).
+
+`MessageStore.writeStorylineProgress` is guarded `(settle_state <> 'done' OR
+storyline_state = 'pending')` so a stage that was still **owed** at settle time
+finishes normally; only a stage already terminal when the row settled is frozen
+as history. `MessageStore.reviveOwedStorylineStages`, called by both syncs,
+hands the rows the old rule stranded back to the queue.
+
+`needs_you` also joins the debounce's wake set, so a drain that finishes
+verdicts sweeps in 750 ms rather than waiting out the 30-second timer.
+
+The sweep re-reads the row it is about to settle, so a verdict that landed
+between the candidate capture and the settle is the one the snapshot takes.
+
+**Waiting on a score.** A deadline settle with no `attention_score` would score
+zero and never be revisited, so a scoreless candidate is held for one more
+deadline's grace before it settles on what it has. The score is stamped by the
+list load's attention sweep, which runs every minute the app is open.
 
 **Stamps.** `_isComplete` also holds a row open while `ai_updated_at` sorts
 before `message_updated_at` — a score older than the message is a verdict

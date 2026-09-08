@@ -1333,6 +1333,7 @@ void main() {
     Future<void> pumpRail(
       WidgetTester tester, {
       required List<Storyline> storylines,
+      List<Storyline> dismissed = const [],
       String? selectedStorylineId,
       void Function(String)? onSelectStoryline,
       void Function(String)? onKeepSuggestion,
@@ -1340,6 +1341,7 @@ void main() {
       RailSection scope = RailSection.home,
       List<PersonRoom>? rooms,
       void Function(String)? onSelectRoom,
+      void Function(String)? onRestoreStoryline,
     }) async {
       await tester.binding.setSurfaceSize(const Size(1200, 800));
       addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -1350,6 +1352,7 @@ void main() {
         onSelectRoom: onSelectRoom ?? (_) {},
         conversations: const [],
         storylines: storylines,
+        dismissed: dismissed,
         selectedId: null,
         selectedStorylineId: selectedStorylineId,
         selectedSection: RailSection.storylines,
@@ -1358,6 +1361,7 @@ void main() {
         onSelectStoryline: onSelectStoryline ?? (_) {},
         onKeepSuggestion: onKeepSuggestion ?? (_) {},
         onDismissSuggestion: onDismissSuggestion ?? (_) {},
+        onRestoreStoryline: onRestoreStoryline ?? (_) {},
       )));
     }
 
@@ -1433,6 +1437,34 @@ void main() {
       await pumpRail(tester, storylines: [_storyline(id: 'sl-1', title: '')]);
 
       expect(find.text('(untitled)'), findsOneWidget);
+    });
+
+    testWidgets('nothing dismissed, no fold', (tester) async {
+      await pumpRail(tester, storylines: [_storyline(id: 'sl-1')]);
+
+      expect(find.textContaining('Dismissed'), findsNothing);
+    });
+
+    testWidgets('a dismissed storyline is not one of the live rows',
+        (tester) async {
+      await pumpRail(
+        tester,
+        storylines: [_storyline(id: 'sl-1', title: 'Live', openCount: 3)],
+        dismissed: [
+          _storyline(id: 'sl-9', title: 'Office move', status: 'dismissed'),
+        ],
+      );
+
+      await tester.tap(find.text('Dismissed · 1'));
+      await tester.pumpAndSettle();
+
+      // Open, the dismissed row is there — but it carries none of a live
+      // row's grammar: no Keep/Dismiss pair, and no count pill of its own.
+      expect(find.text('Office move'), findsOneWidget);
+      expect(find.byIcon(Icons.check), findsNothing);
+      expect(find.byIcon(Icons.restore), findsOneWidget);
+      // The only badge on the section is the live row's open count.
+      expect(find.text('3'), findsOneWidget);
     });
   });
 

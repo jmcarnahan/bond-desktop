@@ -2,12 +2,13 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/activity_provider.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/services/sync_service.dart' show mailLastReconcileKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
 
-/// The three freshness stamps on their own.
+/// The four freshness stamps on their own.
 ///
 /// The settings screen reads these instead of the activity snapshot, so the
 /// contract worth pinning is the one the snapshot already keeps: nothing before
@@ -35,6 +36,20 @@ void main() {
     expect(stamps.mailIso, isNull);
     expect(stamps.teamsIso, isNull);
     expect(stamps.sweepIso, isNull);
+    expect(stamps.reconcileIso, isNull);
+  });
+
+  test('the reconcile carries a stamp of its own', () async {
+    final store = MessageStore(db);
+    // Written by the mail pass rather than by the recorder, because the
+    // reconcile runs on a cadence of its own: it is not a pass the activity
+    // log stamps, and a reader asking whether the safety net is alive cannot
+    // tell from the mail stamp beside it.
+    await store.setPref(mailLastReconcileKey, '2026-09-05T10:00:00.000Z');
+
+    final stamps = await container.read(syncStampsProvider.future);
+    expect(stamps.reconcileIso, '2026-09-05T10:00:00.000Z');
+    expect(stamps.mailIso, isNull);
   });
 
   test('a recorded pass stamps its own side and nobody else\'s', () async {

@@ -3,6 +3,7 @@ import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/widgets/archive_pane.dart';
 import 'package:bond_inbox/widgets/chips.dart' show BondFilterPill;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
+import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/later_digest.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -74,6 +75,7 @@ void main() {
     VoidCallback? onLoadMoreDropped,
     void Function(String)? onOpenStoryline,
     void Function(String, String)? onRestore,
+    void Function(String, String)? onOpenHistory,
     ArchiveSearch? search,
     bool searching = false,
     String? searchNotice,
@@ -102,6 +104,7 @@ void main() {
           onLoadMoreDropped: onLoadMoreDropped ?? () {},
           onOpenStoryline: onOpenStoryline ?? (_) {},
           onRestore: onRestore ?? (_, _) {},
+          onOpenHistory: onOpenHistory,
           search: search,
           searching: searching,
           searchNotice: searchNotice,
@@ -345,18 +348,18 @@ void main() {
       expect(left, 1);
     });
 
-    testWidgets('a text-only answer says so over its own rows', (tester) async {
+    testWidgets('a half-answer says so over its own rows', (tester) async {
       await pump(
         tester,
         conversations: const [],
         search: results(
           [_dropped(id: 'd1', subject: 'Invoice 4471')],
-          notice: 'Text matches only — the embedding server is not reachable.',
+          notice: 'Words only — the embedding server is not reachable.',
         ),
       );
 
       expect(
-        find.text('Text matches only — the embedding server is not reachable.'),
+        find.text('Words only — the embedding server is not reachable.'),
         findsOneWidget,
       );
       expect(find.text('Invoice 4471'), findsOneWidget,
@@ -491,5 +494,21 @@ void main() {
 
     expect(find.text('Launch date'), findsOneWidget);
     expect(find.text('Homepage copy'), findsNothing);
+  });
+
+  testWidgets("a dropped row's cell opens its history", (tester) async {
+    final opened = <(String, String)>[];
+    final row = _dropped(id: 'm1');
+    await pump(
+      tester,
+      conversations: const [],
+      tab: ArchiveTab.dropped,
+      droppedRows: [row],
+      onOpenHistory: (source, id) => opened.add((source, id)),
+    );
+
+    await tester.tap(find.byKey(HomeFeedRowTile.historyBarKey(row)));
+
+    expect(opened, [('email', 'm1')]);
   });
 }

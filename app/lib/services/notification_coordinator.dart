@@ -7,77 +7,18 @@ import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'attention.dart';
 import 'notify/settled_event.dart';
+import 'notify_worthy.dart';
 import 'pipeline_progress.dart';
 
-/// Whether this message is worth interrupting for: a message-level ask AND a
-/// thread-level volume, never one of the two.
-///
-/// Top-level and public because it is asked twice about one message and the
-/// two answers have to be the same answer. The sweep asks it to decide whether
-/// to notify; the settle then asks it for the `needs_you` snapshot the home
-/// screen shows. Two copies would drift, and the symptom is the tile
-/// disagreeing with the toast it came from.
-///
-/// BOTH halves are required, and they answer different questions. The ask
-/// says the message wants something from the reader. The volume says the
-/// user wants to hear about this thread at all — the attention threshold and
-/// the `later` bucket are their ONE loudness control, and an ask that
-/// bypassed them would take the control away exactly when it matters.
-/// Volume alone is worse still: a high score is a ranking, not a request, so
-/// firing on it would announce every unread message of every decent thread
-/// and invert the app into the notification stream it exists to replace.
-/// Either half alone is a notification the user did not sign up for.
-///
-/// `== 1` comparisons only, never truthiness: `reply_expected` NULL means
-/// "no v2 pass has judged this", which is not a "no". Reading NULL as 0
-/// would turn every un-judged message into a decided negative.
-///
-/// Every ask below is the message's own except `cta_text`, which lives on the
-/// CONVERSATION and belongs to whichever message was triaged into it last.
-/// The thread's CTA therefore testifies for this message only when this
-/// message's own triage wrote it: `triaged` is the one status whose pass
-/// rewrote the conversation's CTA fields. Counted for a candidate still
-/// `pending` at its deadline, or one whose triage ended in `error`, it is
-/// another message's ask — and the toast that followed named THIS message
-/// while quoting THAT one.
-///
-/// Read state is not asked about here, because a read message never reaches
-/// this: [NotificationCoordinator]'s decision table suppresses it first.
-/// `needsYouSql`, which judges the rows this never sees, has to carry that
-/// guard itself.
-///
-/// `needs_you_verdict` is an ask in its own right, and the only one that was
-/// decided about THIS message as a whole rather than inferred from a field:
-/// the needs-you stage wrote it either from the deterministic Teams floor or
-/// from a confident model yes, so a 1 here is already the considered answer to
-/// "does this want the owner". It is the ASK HALF ONLY. The volume half below
-/// is untouched by it — the attention threshold, the `later` bucket and the
-/// `done` state still gate a judged yes exactly as they gate every other ask,
-/// because the user's one loudness control does not get an exception carved
-/// into it for the newest stage. NULL and 0 add nothing, per the `== 1` rule
-/// above: never judged is not a yes, and judged no is not a veto either — the
-/// other asks stand on their own.
-bool notifyWorthy(Map<String, Object?> row, {required double threshold}) {
-  final ask = _int(row['needs_you_verdict']) == 1 ||
-      _int(row['reply_expected']) == 1 ||
-      _int(row['needs_action']) == 1 ||
-      row['urgency'] == 'urgent' ||
-      row['urgency'] == 'high' ||
-      (row['deadline'] as String? ?? '').isNotEmpty ||
-      (_ownsCta(row) && (row['cta_text'] as String? ?? '').isNotEmpty);
-  final score = (row['attention_score'] as num?)?.toDouble() ?? 0;
-  return ask &&
-      row['conversation_state'] != 'done' &&
-      row['bucket'] != 'later' &&
-      score >= threshold;
-}
+// Re-exported because this file is where `notifyWorthy` lived, and the settle
+// is still where a reader looks for it. It moved out so `PipelineProgress` can
+// call it — the coordinator imports that recorder, so the recorder cannot
+// import back.
+export 'notify_worthy.dart' show notifyWorthy, ownsCta;
 
-/// Whether the conversation's CTA fields are this message's own words.
-///
-/// They describe the newest TRIAGED message of the thread, so only a
-/// candidate whose own triage finished may be judged — or quoted — by them.
-bool _ownsCta(Map<String, Object?> row) => row['triage_status'] == 'triaged';
-
+/// The coordinator's own copy of the null-tolerant int read. Private in both
+/// files on purpose: it is a cast, not a rule, and nothing about the settle
+/// depends on the two staying the same expression.
 int? _int(Object? value) => (value as num?)?.toInt();
 
 /// Decides, once per message, whether the user hears about it.
@@ -290,10 +231,31 @@ class NotificationCoordinator {
     final nowIso = _iso(_clock());
 
     for (final row in rows) {
-      final decision = _decide(row, threshold: threshold, nowIso: nowIso);
+      var decision = _decide(row, threshold: threshold, nowIso: nowIso);
       if (decision == null) continue;
       final source = row['source'] as String? ?? '';
       final id = row['source_message_id'] as String? ?? '';
+      // Re-read the row we are about to settle. The candidates were captured
+      // when the sweep began, and a verdict written between that capture and
+      // this settle would otherwise be lost for good: the settle snapshots the
+      // stale answer, and [MessageStore.refreshNeedsYouFlag] refuses to correct
+      // a row that was not settled yet when it ran. One extra read per SETTLE,
+      // not per candidate — the sweep usually walks past everything it reads,
+      // and only the handful that are about to be decided pay for it.
+      Map<String, Object?>? fresh;
+      try {
+        fresh = await _store.notifyRowFor(source, id);
+      } catch (e) {
+        debugPrint('notify: re-reading $source/$id failed: $e');
+      }
+      // The fresh read carries what can move under a sweep — the verdict, the
+      // read flag, the triage status, the conversation state, the outbound
+      // stamp, the score and the bucket. The stage states and
+      // `needs_you_judged` stay from the capture, because those only ever move
+      // forward and a re-read could only agree with them.
+      final current = fresh == null ? row : {...row, ...fresh};
+      decision = _decide(current, threshold: threshold, nowIso: nowIso);
+      if (decision == null) continue;
       try {
         final settled = await _store.settleNotify(
           source,
@@ -302,20 +264,23 @@ class NotificationCoordinator {
           reason: decision.reason,
         );
         if (!settled) continue;
+        final droppedHere = decision.state == 'suppressed' &&
+            _dropReasons.contains(decision.reason);
         // The SAME verdict the decision was made on, not a second opinion:
         // `needs_you` is what the home screen's tile reads and the toast is
         // what the user saw, and two evaluations of one predicate would
-        // eventually disagree about one message.
+        // eventually disagree about one message. A dropped row never carries a
+        // chip either way — the feed hides it and the tile would still count
+        // it.
         await _pipeline.noteSettled(
           source,
           id,
-          needsYou: notifyWorthy(row, threshold: threshold),
+          needsYou: !droppedHere && notifyWorthy(current, threshold: threshold),
           reason: decision.reason,
-          dropped: decision.state == 'suppressed' &&
-              _dropReasons.contains(decision.reason),
+          dropped: droppedHere,
         );
         if (decision.state != 'notified') continue;
-        await _emit(row, decision);
+        await _emit(current, decision);
       } catch (e) {
         debugPrint('notify: settling $source/$id failed: $e');
       }
@@ -359,6 +324,20 @@ class NotificationCoordinator {
     }
     final deadline = row['deadline_at'] as String? ?? '';
     if (deadline.compareTo(nowIso) <= 0) {
+      // A deadline settle with no attention score scores zero, writes
+      // `needs_you = 0`, and nothing ever comes back to it. So hold once more:
+      // the score is stamped by the list load's attention sweep, which runs
+      // every minute the app is open, and one more deadline's grace is the same
+      // bound the deadline itself already asks the user to accept. Past that
+      // grace it settles on what it has, because a candidate held forever is
+      // worse than one judged on a missing score.
+      if (row['attention_score'] == null) {
+        final grace = DateTime.tryParse(deadline);
+        if (grace != null &&
+            nowIso.compareTo(_iso(grace.add(settleDeadline))) < 0) {
+          return null;
+        }
+      }
       return notifyWorthy(row, threshold: threshold)
           ? const _Decision('notified', 'deadline', onDeadline: true)
           : const _Decision('suppressed', 'deadline', onDeadline: true);
@@ -366,23 +345,42 @@ class NotificationCoordinator {
     return null;
   }
 
-  /// Whether every pass that could still change the verdict has finished.
+  /// Whether every pass that could still change the verdict has finished —
+  /// asked of the PIPELINE'S RECORD, not of the queue.
   ///
-  /// An ABSENT work row counts as terminal: never-queued is a real end state —
-  /// a message the extractor was never going to look at is not one to wait on.
+  /// The work rows used to be the answer, and they were the wrong one. They
+  /// are enqueued after both drains of a sync while triage claims its rows the
+  /// moment a page commits, so a sweep landing in that gap found a triaged
+  /// message with no work rows at all and read it as finished. It settled, and
+  /// the storyline stamp that arrived a minute later was refused — a row stuck
+  /// at `outcome = 'pending'` for good. `extract_state` and `storyline_state`
+  /// cannot lie that way: they say `pending` until the stage that owns them
+  /// writes something else.
+  ///
+  /// An ABSENT stage — no `message_progress` row at all — now reads as OPEN
+  /// rather than terminal, which is the flip from what the comment below used
+  /// to argue. It is the safer default in both directions: the cost of waiting
+  /// on a stage nobody will run is one deadline settle, and the cost of not
+  /// waiting is the frozen row above. The deadline is what makes that trade
+  /// affordable, and it now BITES on a bulk drain — a message past the
+  /// 150-per-pass backlog cap has a pending stage and no work row, so it
+  /// settles six minutes later instead of immediately. A re-drain is not news,
+  /// so that is a price and not a defect.
+  ///
+  /// `needs_you_judged` keeps the `== 0` spelling its neighbours' `== 1` used
+  /// to have, and the documented split still holds for it: an absent key reads
+  /// as JUDGED, because needs-you is the one stage with no column of its own
+  /// and a projection that forgot the flag would otherwise hold every row to
+  /// its deadline. A verdict left STALE by a re-judge also reads as judged, so
+  /// a candidate can settle on the old answer — the chip follows the new one
+  /// when it lands, through [PipelineProgress.refreshNeedsYou].
   bool _isComplete(Map<String, Object?> row) {
     const terminal = {'triaged', 'error', 'skipped'};
     if (!terminal.contains(row['triage_status'])) return false;
-    // `== 1` where its neighbours are `!= 0`, deliberately. Both spellings
-    // agree on the values [openNotifyCandidates] actually projects, which are
-    // 0 and 1. They differ on an ABSENT key — a row built somewhere else, or a
-    // future projection that forgets this one — where the value reads null:
-    // `!= 0` would call that open and wait until the deadline for a stage that
-    // may never have been queued, while this reads it as complete, which is
-    // what the coordinator did before this stage existed.
-    if (_int(row['needs_you_open']) == 1) return false;
-    if (_int(row['extract_open']) != 0) return false;
-    if (_int(row['storyline_open']) != 0) return false;
+    if (_int(row['needs_you_judged']) == 0) return false;
+    const stageTerminal = {'done', 'skipped', 'error'};
+    if (!stageTerminal.contains(row['extract_state'])) return false;
+    if (!stageTerminal.contains(row['storyline_state'])) return false;
     if (row['attention_score'] == null) return false;
     final aiAt = row['ai_updated_at'] as String?;
     final msgAt = row['message_updated_at'] as String? ?? '';
@@ -423,7 +421,7 @@ class NotificationCoordinator {
     // somebody else's ask and this toast must not quote it. The urgency goes
     // with it — it only colours the CTA's severity, and a colour kept from a
     // sentence that is no longer shown is a severity about nothing.
-    final ownsCta = _ownsCta(row);
+    final quotesCta = ownsCta(row);
     if (_controller.isClosed) return;
     _controller.add(
       MessageSettled(
@@ -432,9 +430,10 @@ class NotificationCoordinator {
         conversationKey: conversationKey,
         title: row['subject'] as String? ?? row['from_name'] as String?,
         summary: row['summary'] as String?,
-        ctaText: ownsCta ? row['cta_text'] as String? : null,
+        ctaText: quotesCta ? row['cta_text'] as String? : null,
         ctaUrgency:
-            CtaUrgency.fromWire(ownsCta ? row['cta_urgency'] as String? : null),
+            CtaUrgency.fromWire(
+                quotesCta ? row['cta_urgency'] as String? : null),
         urgency: row['urgency'] as String?,
         deadline: row['deadline'] as String?,
         replyExpected: _int(row['reply_expected']) == 1,

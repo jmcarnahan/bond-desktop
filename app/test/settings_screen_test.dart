@@ -30,6 +30,7 @@ void main() {
     void Function(NotifyStyle)? onNotifyStyleChanged,
     VoidCallback? onBack,
     VoidCallback? onHome,
+    int needsYouRejudging = 0,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -48,6 +49,7 @@ void main() {
           onNotifyStyleChanged: onNotifyStyleChanged,
           hasScope: hasScope,
           onSignInAgain: onSignInAgain,
+          needsYouRejudging: needsYouRejudging,
         ),
       ),
     ));
@@ -86,6 +88,42 @@ void main() {
     expect(find.text('Only the critical'), findsWidgets);
     expect(find.text('Anything plausible'), findsWidgets);
     expect(find.byType(Slider), findsOneWidget);
+  });
+
+  testWidgets('the Needs You summary says how much is being re-judged',
+      (tester) async {
+    // The only feedback a rules save gives: the verdicts themselves move
+    // minutes later, on a queue this screen does not show.
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+      needsYouRejudging: 3,
+    );
+
+    expect(find.textContaining('judging 3 messages'), findsOneWidget);
+  });
+
+  testWidgets('and says it in the singular for one', (tester) async {
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+      needsYouRejudging: 1,
+    );
+
+    expect(find.textContaining('judging 1 message'), findsOneWidget);
+  });
+
+  testWidgets('and says nothing at all when the queue is empty',
+      (tester) async {
+    await open(
+      tester,
+      onThresholdChanged: (_) {},
+      onAboutMeChanged: (_) {},
+    );
+
+    expect(find.textContaining('judging'), findsNothing);
   });
 
   testWidgets('the rules editor is absent when no save is wired',

@@ -266,6 +266,11 @@ double _recencyFactor(String? lastMessageAt, DateTime now) {
 /// - A sender rule wins outright, in both directions. It is a person's
 ///   standing instruction, and the model does not get to overrule it by being
 ///   confident.
+/// - A thread holding an OPEN ASK — a message the needs-you stage judged yes
+///   that the user has not answered — is never deferred by the automatic rule.
+///   Later is where quiet mail goes, and an ask the owner has not answered is
+///   not quiet. A person's standing rule still wins over it: someone who asked
+///   for a sender to be deferred asked for that sender's questions too.
 /// - A thread awaiting the user's reply is NEVER deferred, whatever the model
 ///   thinks of the message. Getting this wrong hides work the user is holding up,
 ///   which is the one failure this feature cannot afford.
@@ -276,9 +281,11 @@ String? bucketFor({
   required String intent,
   required String importance,
   required bool needsReply,
+  bool? needsYouVerdict,
 }) {
   if (senderPref == 'later') return 'later';
   if (senderPref == 'keep') return null;
+  if (needsYouVerdict == true) return null;
   if (needsReply) return null;
   if (importance == 'low' && AttentionTuning.quietIntents.contains(intent)) {
     return 'later';

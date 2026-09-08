@@ -476,6 +476,80 @@ void main() {
       );
     });
 
+    test('a re-judge says how much the rules edit queued', () {
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'needs_you_rejudge', count: 12)),
+        'Needs You re-judge — 12 messages',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'needs_you_rejudge', count: 1)),
+        'Needs You re-judge — 1 message',
+      );
+    });
+
+    test('the two hands on one message read as what a person did', () {
+      // A pair, because they are opposites and the panel is where somebody
+      // goes to work out which of them they pressed last week.
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'ignore', entityId: 'm1')),
+        'Ignored a message',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'restore', entityId: 'm1')),
+        'Restored a filtered message',
+      );
+      // And the kind is named as well as sentenced: status is read before
+      // kind, so a row that failed falls back to the label map, and an
+      // unmapped kind would print `ignore` in a column of English.
+      expect(
+        ActivityLogPanel.describe(
+          _event(kind: 'ignore', status: 'error', detail: const {}),
+        ),
+        startsWith('Ignore failed'),
+      );
+    });
+
+    test('a reconcile names what the delta feed skipped', () {
+      // The row exists only because it found something, so the sentence has no
+      // "nothing new" form to write — it says what was missing instead.
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'sync_reconcile', count: 1)),
+        'Mail reconcile — 1 message the delta feed skipped',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'sync_reconcile', count: 3)),
+        'Mail reconcile — 3 messages the delta feed skipped',
+      );
+    });
+
+    test('a retry names the stages it put back', () {
+      // Which work was requeued is the whole question a person has after
+      // pressing Retry; a count of stages does not answer it.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'retry',
+          count: 2,
+          detail: const {
+            'stages': ['triage', 'extract'],
+          },
+        )),
+        'Retried triage, extract',
+      );
+    });
+
+    test('a retry with no stages recorded still reads as one', () {
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'retry')),
+        'Retried owed stages',
+      );
+      expect(
+        ActivityLogPanel.describe(
+          _event(kind: 'retry', detail: const {'stages': []}),
+        ),
+        'Retried owed stages',
+      );
+    });
+
     test('a Teams sync counts its own messages', () {
       expect(
         ActivityLogPanel.describe(_event(kind: 'sync_teams', count: 2)),
@@ -805,6 +879,46 @@ void main() {
       expect(
         ActivityLogPanel.describe(_event(kind: 'storyline_recruit')),
         'Storyline recruit',
+      );
+    });
+
+    test('a re-check says what it looked at and what it took out', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_audit',
+          detail: const {
+            'checked': 4,
+            'removed': [
+              {'source': 'email', 'conversation_key': 'c9'},
+            ],
+          },
+        )),
+        'Re-checked 4 threads, removed 1',
+      );
+      // One thread reads as one thread, and a pass that took nothing out still
+      // says what it checked.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_audit',
+          detail: const {'checked': 1, 'removed': []},
+        )),
+        'Re-checked 1 thread, removed 0',
+      );
+      // A row with no tallies on it falls back to its label rather than
+      // claiming a number it does not have.
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'storyline_audit')),
+        'Storyline re-check',
+      );
+    });
+
+    test('allowing a thread back says only that', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'storyline_unblock',
+          detail: const {'storyline_id': 'sl-1'},
+        )),
+        'Allowed a thread back into consideration',
       );
     });
 

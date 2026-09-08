@@ -23,6 +23,7 @@ import 'package:bond_inbox/services/backend/people_backend.dart';
 import 'package:bond_inbox/services/backend/teams_backend.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail;
 import 'package:bond_inbox/widgets/attachment_card.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
@@ -616,8 +617,14 @@ void main() {
     }
 
     /// Opens the storyline in the main pane and its episode card beside it.
+    ///
+    /// Scoped to the rail: the home feed underneath names the storyline the
+    /// thread is filed in, on the same words.
     Future<void> openBeside(WidgetTester tester) async {
-      await tester.tap(find.text('Boundary survey'));
+      await tester.tap(find.descendant(
+        of: find.byType(AppRail),
+        matching: find.text('Boundary survey'),
+      ));
       await tester.pump();
       await tester.pump();
       await tester.pump();

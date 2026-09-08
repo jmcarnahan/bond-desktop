@@ -70,6 +70,7 @@ void main() {
     void Function(Message message)? onReplyTo,
     void Function(Message message)? onSuggestFor,
     void Function(Message message)? onWhy,
+    void Function(Message message)? onWhatHappened,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -94,6 +95,7 @@ void main() {
           onReplyTo: onReplyTo,
           onSuggestFor: onSuggestFor,
           onWhy: onWhy,
+          onWhatHappened: onWhatHappened,
         ),
       ),
     ));
@@ -796,6 +798,66 @@ void main() {
       await hover(tester, 'mine');
 
       expect(find.byKey(HoverActions.whyKeyFor('mine')), findsNothing);
+    });
+
+    testWidgets('What happened is the fourth button, and names its message',
+        (tester) async {
+      // The door into a message's history rides the hover strip with the
+      // other per-message actions, not the row's header: the row renders one
+      // message and does not know what a history is.
+      final asked = <String>[];
+      await pump(
+        tester,
+        messages: two,
+        onReplyTo: (_) {},
+        onSuggestFor: (_) {},
+        onWhy: (_) {},
+        onWhatHappened: (m) => asked.add(m.id),
+      );
+
+      expect(find.byKey(HoverActions.historyKeyFor('a')), findsNothing);
+      expect(find.text('What happened'), findsNothing);
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.historyKeyFor('a')), findsOneWidget);
+      expect(find.byKey(HoverActions.historyKeyFor('b')), findsNothing);
+      expect(find.byTooltip('What happened'), findsOneWidget);
+
+      await tester.tap(find.byKey(HoverActions.historyKeyFor('a')));
+      await tester.pump();
+
+      expect(asked, ['a']);
+      expect(
+        find.text('Body of a.'),
+        findsOneWidget,
+        reason: 'asking what happened must not fold the message asked about',
+      );
+    });
+
+    testWidgets('no What happened without a handler', (tester) async {
+      await pump(tester, messages: two, onWhy: (_) {});
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.whyKeyFor('a')), findsOneWidget);
+      expect(find.byKey(HoverActions.historyKeyFor('a')), findsNothing);
+    });
+
+    testWidgets('an outbound row has no history to ask about either',
+        (tester) async {
+      await pump(
+        tester,
+        messages: [
+          _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+          _msg(id: 'mine', outbound: true, receivedAt: '2026-08-25T16:00:00'),
+        ],
+        onWhatHappened: (_) {},
+      );
+
+      await hover(tester, 'mine');
+
+      expect(find.byKey(HoverActions.historyKeyFor('mine')), findsNothing);
     });
   });
 }

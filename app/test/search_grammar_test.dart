@@ -34,10 +34,12 @@ HomeFeedRow _row({
       hasAttachments: hasAttachments,
     );
 
-List<SemanticHit> _hits(List<HomeFeedRow> rows) =>
-    [for (final row in rows) SemanticHit(row, 0.1)];
+List<SearchHit> _hits(List<HomeFeedRow> rows) => [
+      for (final row in rows)
+        SearchHit(row: row, score: 0.5, matchedBy: MatchedBy.meaning),
+    ];
 
-List<String> _idsOf(List<SemanticHit> hits) =>
+List<String> _idsOf(List<SearchHit> hits) =>
     [for (final hit in hits) hit.row.sourceMessageId];
 
 void main() {

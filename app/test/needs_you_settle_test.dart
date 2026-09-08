@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/data/progress_sql.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/attention_service.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
@@ -139,6 +142,87 @@ void main() {
 
     expect(await sqlVerdict(), 0);
     expect(await dartVerdict(), isFalse);
+  });
+
+  test('a low_value Later cannot coexist with an open ask', () async {
+    // D5's whole claim, pinned on the two predicates that still carry a
+    // `bucket <> 'later'` clause. Neither of them was changed: what changed is
+    // that the automatic filing can no longer put a thread with an unanswered
+    // judged yes into Later, so the clause only ever bites on a Later a person
+    // asked for.
+    const at = '2026-09-04T09:55:00.000Z';
+    await store.upsertConversation({
+      'source': 'email',
+      'conversation_key': 'conv-quiet',
+      'subject': 'Quarter close notes',
+      'state': 'waiting',
+      // On the conversation, not on the message: it lifts the thread's score
+      // over the threshold without adding a second ask for either predicate to
+      // answer.
+      'cta_urgency': 'urgent',
+      'last_message_at': at,
+      'last_inbound_at': at,
+    });
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'm-quiet',
+      'conversation_key': 'conv-quiet',
+      'direction': 'inbound',
+      'subject': 'Quarter close notes',
+      'from_name': 'Priya Natarajan',
+      'from_address': 'priya@x.com',
+      'received_at': at,
+      'is_read': 0,
+      'created_at': '2026-09-04T09:56:00.000Z',
+    });
+    await store.writeTriage(
+      'email',
+      'm-quiet',
+      status: 'triaged',
+      result: const TriageResult(
+        urgency: 'normal',
+        category: 'work',
+        summary: 'Where the quarter close stands.',
+        needsAction: false,
+        actionItems: [],
+        replyExpected: false,
+        deadline: '',
+      ),
+    );
+    // What the extraction made of it — exactly the pair the quiet rule defers
+    // on.
+    await store.writeExtraction(
+      'email',
+      'm-quiet',
+      jsonEncode({'intent': 'fyi', 'importance': 'low'}),
+    );
+    await store.writeNeedsYouVerdict('email', 'm-quiet',
+        verdict: true, reason: 'asks the owner to confirm the close date');
+
+    // The sweep both scores and files, so it writes the bucket this asserts on
+    // and the score both predicates read.
+    await AttentionService(store).recomputeAll(now: DateTime.parse(at));
+
+    expect(
+      (await store.getConversationAi('email', 'conv-quiet'))?['bucket'],
+      isNull,
+    );
+
+    final sqlRows = await db.customSelect(
+      'SELECT ${needsYouSql(threshold: '0.5')} AS needs_you '
+      'FROM messages m WHERE m.source = ? AND m.source_message_id = ?',
+      variables: [Variable('email'), Variable('m-quiet')],
+    ).get();
+    expect(sqlRows.single.data['needs_you'], 1);
+
+    await store.admitNotifyCandidates(
+      armedAtIso: armedAt,
+      recencyFloorIso: recencyFloor,
+      deadlineIso: deadline,
+    );
+    final row = (await store.openNotifyCandidates())
+        .singleWhere((r) => r['source_message_id'] == 'm-quiet');
+    expect(notifyWorthy(row, threshold: 0.5), isTrue);
   });
 
   test('the migration keeps a copy of the SQL that predates the column', () {

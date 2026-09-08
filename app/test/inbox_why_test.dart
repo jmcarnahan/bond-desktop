@@ -6,6 +6,7 @@ import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/screens/message_history_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
@@ -200,6 +201,70 @@ void main() {
     }
 
     expect(whyPanel(), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('its What happened link swaps the history into the same slot',
+      (tester) async {
+    // One side slot: the longer answer replaces the shorter one rather than
+    // stacking behind it, and its ✕ returns to the transcript, not to Why.
+    await seedThread('c1', 'Homepage copy');
+    await pumpInbox(tester);
+    await openThread(tester, 'Send the survey back');
+
+    await hover(tester, find.byKey(const ValueKey('c1-m1')));
+    await tester.tap(find.byKey(HoverActions.whyKeyFor('c1-m1')));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+    expect(whyPanel(), findsOneWidget);
+
+    await tester.tap(find.byKey(WhyPanelBody.whatHappenedKey));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    expect(whyPanel(), findsNothing);
+    expect(find.byType(SidePanelHost), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(MessageHistoryScreen),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(ThreadDetailPanel), findsOneWidget);
+
+    await tester.tap(find.byKey(SidePanelHost.closeKey));
+    for (var i = 0; i < 3; i++) {
+      await tester.pump();
+    }
+    expect(find.byType(SidePanelHost), findsNothing);
+    expect(find.byType(ThreadDetailPanel), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('the hover strip opens the history directly, beside the thread',
+      (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await pumpInbox(tester);
+    await openThread(tester, 'Send the survey back');
+
+    await hover(tester, find.byKey(const ValueKey('c1-m1')));
+    expect(find.byKey(HoverActions.historyKeyFor('c1-m1')), findsOneWidget);
+    await tester.tap(find.byKey(HoverActions.historyKeyFor('c1-m1')));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(MessageHistoryScreen),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(ThreadDetailPanel), findsOneWidget);
     await settleQueues(tester);
   });
 

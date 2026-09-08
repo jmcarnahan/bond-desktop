@@ -6507,12 +6507,37 @@ class StorylineMemberBlocks extends Table
     requiredDuringInsert: true,
     $customConstraints: 'NOT NULL',
   );
+  static const VerificationMeta _blockedByMeta = const VerificationMeta(
+    'blockedBy',
+  );
+  late final GeneratedColumn<String> blockedBy = GeneratedColumn<String>(
+    'blocked_by',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'user\'',
+    defaultValue: const CustomExpression('\'user\''),
+  );
+  static const VerificationMeta _evidenceMeta = const VerificationMeta(
+    'evidence',
+  );
+  late final GeneratedColumn<String> evidence = GeneratedColumn<String>(
+    'evidence',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     storylineId,
     source,
     conversationKey,
     blockedAt,
+    blockedBy,
+    evidence,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -6562,6 +6587,18 @@ class StorylineMemberBlocks extends Table
     } else if (isInserting) {
       context.missing(_blockedAtMeta);
     }
+    if (data.containsKey('blocked_by')) {
+      context.handle(
+        _blockedByMeta,
+        blockedBy.isAcceptableOrUnknown(data['blocked_by']!, _blockedByMeta),
+      );
+    }
+    if (data.containsKey('evidence')) {
+      context.handle(
+        _evidenceMeta,
+        evidence.isAcceptableOrUnknown(data['evidence']!, _evidenceMeta),
+      );
+    }
     return context;
   }
 
@@ -6591,6 +6628,14 @@ class StorylineMemberBlocks extends Table
         DriftSqlType.string,
         data['${effectivePrefix}blocked_at'],
       )!,
+      blockedBy: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}blocked_by'],
+      )!,
+      evidence: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}evidence'],
+      ),
     );
   }
 
@@ -6615,11 +6660,23 @@ class StorylineMemberBlock extends DataClass
   final String source;
   final String conversationKey;
   final String blockedAt;
+
+  /// Who wrote the block and what they (or the model) thought at the time.
+  /// 'user' is the owner's own "no"; 'audit' is the re-check pass that runs
+  /// after a removal (see StorylineService.audit). Only the owner's blocks
+  /// teach the confirm prompt; the audit's are a consequence, not a lesson.
+  final String blockedBy;
+
+  /// The member's evidence at removal time (the owner's removal) or the
+  /// audit's own reason — so a negative example says what the model thought.
+  final String? evidence;
   const StorylineMemberBlock({
     required this.storylineId,
     required this.source,
     required this.conversationKey,
     required this.blockedAt,
+    required this.blockedBy,
+    this.evidence,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -6628,6 +6685,10 @@ class StorylineMemberBlock extends DataClass
     map['source'] = Variable<String>(source);
     map['conversation_key'] = Variable<String>(conversationKey);
     map['blocked_at'] = Variable<String>(blockedAt);
+    map['blocked_by'] = Variable<String>(blockedBy);
+    if (!nullToAbsent || evidence != null) {
+      map['evidence'] = Variable<String>(evidence);
+    }
     return map;
   }
 
@@ -6637,6 +6698,10 @@ class StorylineMemberBlock extends DataClass
       source: Value(source),
       conversationKey: Value(conversationKey),
       blockedAt: Value(blockedAt),
+      blockedBy: Value(blockedBy),
+      evidence: evidence == null && nullToAbsent
+          ? const Value.absent()
+          : Value(evidence),
     );
   }
 
@@ -6650,6 +6715,8 @@ class StorylineMemberBlock extends DataClass
       source: serializer.fromJson<String>(json['source']),
       conversationKey: serializer.fromJson<String>(json['conversation_key']),
       blockedAt: serializer.fromJson<String>(json['blocked_at']),
+      blockedBy: serializer.fromJson<String>(json['blocked_by']),
+      evidence: serializer.fromJson<String?>(json['evidence']),
     );
   }
   @override
@@ -6660,6 +6727,8 @@ class StorylineMemberBlock extends DataClass
       'source': serializer.toJson<String>(source),
       'conversation_key': serializer.toJson<String>(conversationKey),
       'blocked_at': serializer.toJson<String>(blockedAt),
+      'blocked_by': serializer.toJson<String>(blockedBy),
+      'evidence': serializer.toJson<String?>(evidence),
     };
   }
 
@@ -6668,11 +6737,15 @@ class StorylineMemberBlock extends DataClass
     String? source,
     String? conversationKey,
     String? blockedAt,
+    String? blockedBy,
+    Value<String?> evidence = const Value.absent(),
   }) => StorylineMemberBlock(
     storylineId: storylineId ?? this.storylineId,
     source: source ?? this.source,
     conversationKey: conversationKey ?? this.conversationKey,
     blockedAt: blockedAt ?? this.blockedAt,
+    blockedBy: blockedBy ?? this.blockedBy,
+    evidence: evidence.present ? evidence.value : this.evidence,
   );
   StorylineMemberBlock copyWithCompanion(StorylineMemberBlocksCompanion data) {
     return StorylineMemberBlock(
@@ -6684,6 +6757,8 @@ class StorylineMemberBlock extends DataClass
           ? data.conversationKey.value
           : this.conversationKey,
       blockedAt: data.blockedAt.present ? data.blockedAt.value : this.blockedAt,
+      blockedBy: data.blockedBy.present ? data.blockedBy.value : this.blockedBy,
+      evidence: data.evidence.present ? data.evidence.value : this.evidence,
     );
   }
 
@@ -6693,14 +6768,22 @@ class StorylineMemberBlock extends DataClass
           ..write('storylineId: $storylineId, ')
           ..write('source: $source, ')
           ..write('conversationKey: $conversationKey, ')
-          ..write('blockedAt: $blockedAt')
+          ..write('blockedAt: $blockedAt, ')
+          ..write('blockedBy: $blockedBy, ')
+          ..write('evidence: $evidence')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode =>
-      Object.hash(storylineId, source, conversationKey, blockedAt);
+  int get hashCode => Object.hash(
+    storylineId,
+    source,
+    conversationKey,
+    blockedAt,
+    blockedBy,
+    evidence,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -6708,7 +6791,9 @@ class StorylineMemberBlock extends DataClass
           other.storylineId == this.storylineId &&
           other.source == this.source &&
           other.conversationKey == this.conversationKey &&
-          other.blockedAt == this.blockedAt);
+          other.blockedAt == this.blockedAt &&
+          other.blockedBy == this.blockedBy &&
+          other.evidence == this.evidence);
 }
 
 class StorylineMemberBlocksCompanion
@@ -6717,12 +6802,16 @@ class StorylineMemberBlocksCompanion
   final Value<String> source;
   final Value<String> conversationKey;
   final Value<String> blockedAt;
+  final Value<String> blockedBy;
+  final Value<String?> evidence;
   final Value<int> rowid;
   const StorylineMemberBlocksCompanion({
     this.storylineId = const Value.absent(),
     this.source = const Value.absent(),
     this.conversationKey = const Value.absent(),
     this.blockedAt = const Value.absent(),
+    this.blockedBy = const Value.absent(),
+    this.evidence = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   StorylineMemberBlocksCompanion.insert({
@@ -6730,6 +6819,8 @@ class StorylineMemberBlocksCompanion
     this.source = const Value.absent(),
     required String conversationKey,
     required String blockedAt,
+    this.blockedBy = const Value.absent(),
+    this.evidence = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : storylineId = Value(storylineId),
        conversationKey = Value(conversationKey),
@@ -6739,6 +6830,8 @@ class StorylineMemberBlocksCompanion
     Expression<String>? source,
     Expression<String>? conversationKey,
     Expression<String>? blockedAt,
+    Expression<String>? blockedBy,
+    Expression<String>? evidence,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -6746,6 +6839,8 @@ class StorylineMemberBlocksCompanion
       if (source != null) 'source': source,
       if (conversationKey != null) 'conversation_key': conversationKey,
       if (blockedAt != null) 'blocked_at': blockedAt,
+      if (blockedBy != null) 'blocked_by': blockedBy,
+      if (evidence != null) 'evidence': evidence,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -6755,6 +6850,8 @@ class StorylineMemberBlocksCompanion
     Value<String>? source,
     Value<String>? conversationKey,
     Value<String>? blockedAt,
+    Value<String>? blockedBy,
+    Value<String?>? evidence,
     Value<int>? rowid,
   }) {
     return StorylineMemberBlocksCompanion(
@@ -6762,6 +6859,8 @@ class StorylineMemberBlocksCompanion
       source: source ?? this.source,
       conversationKey: conversationKey ?? this.conversationKey,
       blockedAt: blockedAt ?? this.blockedAt,
+      blockedBy: blockedBy ?? this.blockedBy,
+      evidence: evidence ?? this.evidence,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -6781,6 +6880,12 @@ class StorylineMemberBlocksCompanion
     if (blockedAt.present) {
       map['blocked_at'] = Variable<String>(blockedAt.value);
     }
+    if (blockedBy.present) {
+      map['blocked_by'] = Variable<String>(blockedBy.value);
+    }
+    if (evidence.present) {
+      map['evidence'] = Variable<String>(evidence.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -6794,6 +6899,8 @@ class StorylineMemberBlocksCompanion
           ..write('source: $source, ')
           ..write('conversationKey: $conversationKey, ')
           ..write('blockedAt: $blockedAt, ')
+          ..write('blockedBy: $blockedBy, ')
+          ..write('evidence: $evidence, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -17360,6 +17467,8 @@ typedef $StorylineMemberBlocksCreateCompanionBuilder =
       Value<String> source,
       required String conversationKey,
       required String blockedAt,
+      Value<String> blockedBy,
+      Value<String?> evidence,
       Value<int> rowid,
     });
 typedef $StorylineMemberBlocksUpdateCompanionBuilder =
@@ -17368,6 +17477,8 @@ typedef $StorylineMemberBlocksUpdateCompanionBuilder =
       Value<String> source,
       Value<String> conversationKey,
       Value<String> blockedAt,
+      Value<String> blockedBy,
+      Value<String?> evidence,
       Value<int> rowid,
     });
 
@@ -17397,6 +17508,16 @@ class $StorylineMemberBlocksFilterComposer
 
   ColumnFilters<String> get blockedAt => $composableBuilder(
     column: $table.blockedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get blockedBy => $composableBuilder(
+    column: $table.blockedBy,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get evidence => $composableBuilder(
+    column: $table.evidence,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -17429,6 +17550,16 @@ class $StorylineMemberBlocksOrderingComposer
     column: $table.blockedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get blockedBy => $composableBuilder(
+    column: $table.blockedBy,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get evidence => $composableBuilder(
+    column: $table.evidence,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $StorylineMemberBlocksAnnotationComposer
@@ -17455,6 +17586,12 @@ class $StorylineMemberBlocksAnnotationComposer
 
   GeneratedColumn<String> get blockedAt =>
       $composableBuilder(column: $table.blockedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get blockedBy =>
+      $composableBuilder(column: $table.blockedBy, builder: (column) => column);
+
+  GeneratedColumn<String> get evidence =>
+      $composableBuilder(column: $table.evidence, builder: (column) => column);
 }
 
 class $StorylineMemberBlocksTableManager
@@ -17498,12 +17635,16 @@ class $StorylineMemberBlocksTableManager
                 Value<String> source = const Value.absent(),
                 Value<String> conversationKey = const Value.absent(),
                 Value<String> blockedAt = const Value.absent(),
+                Value<String> blockedBy = const Value.absent(),
+                Value<String?> evidence = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => StorylineMemberBlocksCompanion(
                 storylineId: storylineId,
                 source: source,
                 conversationKey: conversationKey,
                 blockedAt: blockedAt,
+                blockedBy: blockedBy,
+                evidence: evidence,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -17512,12 +17653,16 @@ class $StorylineMemberBlocksTableManager
                 Value<String> source = const Value.absent(),
                 required String conversationKey,
                 required String blockedAt,
+                Value<String> blockedBy = const Value.absent(),
+                Value<String?> evidence = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => StorylineMemberBlocksCompanion.insert(
                 storylineId: storylineId,
                 source: source,
                 conversationKey: conversationKey,
                 blockedAt: blockedAt,
+                blockedBy: blockedBy,
+                evidence: evidence,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

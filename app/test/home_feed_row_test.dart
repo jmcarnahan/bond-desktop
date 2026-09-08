@@ -9,7 +9,9 @@ import 'package:flutter_test/flutter_test.dart';
 ///
 /// The result cell is where the judgements live — a dropped row says why and
 /// nothing else, a needed one says so, a filed one links where it went — so
-/// most of this file is about which of those a row is allowed to claim at once.
+/// most of this file is about which of those a row is allowed to claim at
+/// once. WHICH sentence a row gets is `home_result_test.dart`'s question; this
+/// file is about the dressing and the four nested gestures.
 
 final DateTime _now = DateTime.utc(2026, 9, 3, 12);
 
@@ -32,6 +34,14 @@ HomeFeedRow _row({
   String? subject = 'Launch date',
   String? fromName = 'Sarah Chen',
   String? fromAddress,
+  String? updatedAt,
+  String? needsYouReason,
+  String? gateReason,
+  String? bucket,
+  String? bucketReason,
+  String? storylineEvidence,
+  String? storylineAddedBy,
+  bool workOpen = false,
 }) =>
     HomeFeedRow(
       source: source,
@@ -53,6 +63,15 @@ HomeFeedRow _row({
       subject: subject,
       fromName: fromName,
       fromAddress: fromAddress,
+      // A minute ago, so the ordinary row is neither stuck nor about to be.
+      updatedAt: updatedAt ?? '2026-09-03T11:59:00Z',
+      needsYouReason: needsYouReason,
+      gateReason: gateReason,
+      bucket: bucket,
+      bucketReason: bucketReason,
+      storylineEvidence: storylineEvidence,
+      storylineAddedBy: storylineAddedBy,
+      workOpen: workOpen,
     );
 
 /// Loose width, like the pane gives it — a Scaffold body's tight constraints
@@ -68,6 +87,8 @@ Future<void> _pump(
   HomeFeedRow row, {
   void Function(String, String)? onOpenThread,
   void Function(String)? onOpenStoryline,
+  void Function(String, String)? onRetry,
+  void Function(String, String)? onOpenHistory,
   bool animateIn = false,
 }) async {
   // A desktop pane's width. The row is a fixed grid with two flexible cells,
@@ -80,6 +101,8 @@ Future<void> _pump(
     animateIn: animateIn,
     onOpenThread: onOpenThread ?? (_, _) {},
     onOpenStoryline: onOpenStoryline ?? (_) {},
+    onRetry: onRetry,
+    onOpenHistory: onOpenHistory,
   )));
 }
 
@@ -195,28 +218,84 @@ void main() {
       await _pump(
         tester,
         _row(
+          outcome: 'done',
           needsYou: true,
           storylineId: 's1',
           storylineTitle: 'Website redesign',
         ),
       );
 
+      // The sentence is the ask; the filing follows it, still tappable, so a
+      // row that is both does not have to give one of them up.
       expect(find.text('Needs You'), findsOneWidget);
+      expect(
+        find.text('Needs you — the app thinks this wants you'),
+        findsOneWidget,
+      );
       expect(find.text('Website redesign'), findsOneWidget);
     });
 
-    testWidgets('a row with nothing decided shows a dash', (tester) async {
-      await _pump(tester, _row(triage: 'running', settle: 'pending'));
+    testWidgets('a row with nothing decided says so', (tester) async {
+      await _pump(tester, _row(outcome: 'done', draft: 'skipped'));
 
-      expect(find.text('—'), findsOneWidget);
+      expect(find.text('Nothing to do'), findsOneWidget);
     });
 
     testWidgets('a title with no storyline behind it is not a link',
         (tester) async {
-      await _pump(tester, _row(storylineTitle: 'Website redesign'));
+      await _pump(
+        tester,
+        _row(
+          outcome: 'done',
+          draft: 'skipped',
+          storylineTitle: 'Website redesign',
+        ),
+      );
 
       expect(find.text('Website redesign'), findsNothing);
-      expect(find.text('—'), findsOneWidget);
+      expect(find.text('Nothing to do'), findsOneWidget);
+    });
+
+    testWidgets('the sentence carries a tooltip with the full reason',
+        (tester) async {
+      await _pump(
+        tester,
+        _row(
+          outcome: 'dropped',
+          dropped: true,
+          dropReason: 'gated',
+          gateReason: 'sender_muted',
+        ),
+      );
+
+      // The cell is two columns wide and most reasons are longer than that,
+      // so the whole sentence has to live somewhere a hover can reach.
+      expect(
+        find.byTooltip('Dropped: Filtered — sender muted'),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(HomeFeedRowTile.resultTextKey(_row())),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a filed row keeps its evidence beside the link',
+        (tester) async {
+      await _pump(
+        tester,
+        _row(
+          outcome: 'done',
+          draft: 'skipped',
+          storylineId: 's1',
+          storylineTitle: 'Website redesign',
+          storylineEvidence: 'same launch thread',
+        ),
+      );
+
+      expect(find.text('Filed in '), findsOneWidget);
+      expect(find.text('Website redesign'), findsOneWidget);
+      expect(find.text(' — same launch thread'), findsOneWidget);
     });
   });
 
@@ -251,6 +330,100 @@ void main() {
         isEmpty,
         reason: 'the inner InkWell wins the arena over the row it sits in',
       );
+    });
+
+    testWidgets('four nested gestures, and each tap fires exactly one',
+        (tester) async {
+      final threads = <String>[];
+      final storylines = <String>[];
+      final retries = <(String, String)>[];
+      final histories = <(String, String)>[];
+      // Stalled AND filed: every affordance the cell has, on one row.
+      final row = _row(
+        id: 'm9',
+        outcome: 'pending',
+        settle: 'pending',
+        updatedAt: '2026-09-03T11:30:00Z',
+        storylineId: 's1',
+        storylineTitle: 'Website redesign',
+      );
+      await _pump(
+        tester,
+        row,
+        onOpenThread: (_, key) => threads.add(key),
+        onOpenStoryline: storylines.add,
+        onRetry: (source, id) => retries.add((source, id)),
+        onOpenHistory: (source, id) => histories.add((source, id)),
+      );
+
+      expect(find.text('Stalled — waiting on settle'), findsOneWidget);
+
+      // All four counted after every tap: the failure worth catching is a
+      // gesture that fires its own callback AND the row's underneath it.
+      void expectOnly(String fired) {
+        expect(threads, fired == 'thread' ? ['c1'] : isEmpty);
+        expect(storylines, fired == 'storyline' ? ['s1'] : isEmpty);
+        expect(retries, fired == 'retry' ? [('email', 'm9')] : isEmpty);
+        expect(histories, fired == 'history' ? [('email', 'm9')] : isEmpty);
+        threads.clear();
+        storylines.clear();
+        retries.clear();
+        histories.clear();
+      }
+
+      await tester.tap(find.text('Launch date'));
+      expectOnly('thread');
+
+      // The bar and the sentence are two doors onto the same story, and the
+      // row underneath must not open behind either.
+      await tester.tap(find.byKey(HomeFeedRowTile.historyBarKey(row)));
+      expectOnly('history');
+
+      // Near the left edge of the cell rather than its centre: the storyline
+      // link and Retry live at the right of the same cell and win the arena
+      // where they sit, which is the whole point of the nesting.
+      final cell = find.byKey(HomeFeedRowTile.historyCellKey(row));
+      await tester.tapAt(tester.getTopLeft(cell) + const Offset(4, 8));
+      expectOnly('history');
+
+      await tester.tap(find.text('Website redesign'));
+      expectOnly('storyline');
+
+      await tester.tap(find.byKey(HomeFeedRowTile.retryKey(row)));
+      expectOnly('retry');
+    });
+
+    testWidgets('no history target without a handler', (tester) async {
+      final row = _row(id: 'm9');
+      await _pump(tester, row);
+
+      expect(find.byKey(HomeFeedRowTile.historyBarKey(row)), findsNothing);
+      expect(find.byKey(HomeFeedRowTile.historyCellKey(row)), findsNothing);
+    });
+
+    testWidgets('no Retry when there is nothing to retry', (tester) async {
+      await _pump(
+        tester,
+        _row(outcome: 'done', draft: 'skipped'),
+        onRetry: (_, _) {},
+      );
+
+      expect(find.text('Retry'), findsNothing);
+    });
+
+    testWidgets('no Retry without a handler', (tester) async {
+      // The archive pane passes none: a dropped row is Restore's business.
+      await _pump(
+        tester,
+        _row(
+          outcome: 'pending',
+          settle: 'pending',
+          updatedAt: '2026-09-03T11:30:00Z',
+        ),
+      );
+
+      expect(find.text('Stalled — waiting on settle'), findsOneWidget);
+      expect(find.text('Retry'), findsNothing);
     });
   });
 

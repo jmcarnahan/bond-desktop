@@ -785,6 +785,50 @@ void main() {
     expect((await messageOf('m-news'))['gate_override'], 'user');
   });
 
+  test("v13 to v14 stamps every existing block as the owner's, with no "
+      'evidence', () async {
+    final schema = await verifier.schemaAt(13);
+    schema.rawDatabase.execute("""
+      INSERT INTO storylines (id, title, status, created_by, title_locked,
+        pinned, charter_locked, created_at, updated_at)
+      VALUES ('sl-1', 'Website redesign', 'active', 'auto', 0, 0, 0, 't', 't');
+      INSERT INTO storyline_member_blocks (storyline_id, source,
+        conversation_key, blocked_at)
+      VALUES ('sl-1', 'email', 'c1', '2026-09-01T10:00:00Z');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 14);
+    addTearDown(db.close);
+
+    Future<Map<String, Object?>> blockOf(String key) async => (await db
+            .customSelect(
+                'SELECT * FROM storyline_member_blocks '
+                'WHERE conversation_key = ?',
+                variables: [Variable(key)])
+            .getSingle())
+        .data;
+
+    // The DEFAULT is the backfill, and it is the truthful one: only
+    // `removeThread` ever wrote a block, and that is the owner's own hand.
+    // The evidence stays NULL because nothing recorded what the model thought
+    // at the time — a migration inventing one would be inventing the lesson
+    // the confirm prompt then learns from.
+    final block = await blockOf('c1');
+    expect(block['blocked_by'], 'user');
+    expect(block['evidence'], null);
+    // What the row already carried survives: this step reads nothing.
+    expect(block['blocked_at'], '2026-09-01T10:00:00Z');
+
+    // And both columns take a write, which a STRICT table would reject if the
+    // step had declared either as the wrong type.
+    await db.customStatement("UPDATE storyline_member_blocks "
+        "SET blocked_by = 'audit', evidence = 'x'");
+    final audited = await blockOf('c1');
+    expect(audited['blocked_by'], 'audit');
+    expect(audited['evidence'], 'x');
+  });
+
   test('v12 to v13 adds the three attachment tables, all empty', () async {
     final schema = await verifier.schemaAt(12);
     schema.rawDatabase.execute("""

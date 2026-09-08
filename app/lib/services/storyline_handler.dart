@@ -43,10 +43,11 @@ class StorylineAssignHandler extends WorkHandler {
     if (key.isEmpty) return;
 
     final outcome = await _service.assignConversation(source, key);
-    // Four of the five outcomes end this stage: the thread was filed, or it
-    // was looked at and deliberately not filed. `noVector` is the exception —
-    // the queue parks on an embedding server that is not running, so the bar
-    // parks with it rather than claiming a verdict nobody reached.
+    // Every outcome ends this stage: the thread was filed, or it was looked at
+    // and deliberately not filed. A thread whose embedding cannot be written —
+    // the embedding server is not running — never reaches here at all; the
+    // pass throws [LlmUnavailableException] instead, and the queue parks with
+    // the bar still `pending` rather than claiming a verdict nobody reached.
     switch (outcome) {
       // `assigned` is noted by the service, with the storyline's NAME — the
       // handler only has the conversation key, which the row already carries.
@@ -70,8 +71,6 @@ class StorylineAssignHandler extends WorkHandler {
         _log
           ..noteStatus('skipped')
           ..note({'outcome': outcome.name});
-      case AssignOutcome.noVector:
-        break;
     }
   }
 }
@@ -131,6 +130,36 @@ class StorylineRefreshHandler extends WorkHandler {
     // retrying it would produce the same nothing twice.
     if (id.isEmpty) return Future<void>.value();
     return _service.refresh(id);
+  }
+}
+
+/// Re-judges the members one storyline's automatic passes filed, against the
+/// charter and the owner's own examples. Queued by
+/// `StorylineService.removeThread` — a removal says the reasoning that filled
+/// this group was wrong, and the threads that reasoning filed are still in it
+/// — and by the About section's "Re-check members".
+///
+/// Registered BETWEEN the refresh and the recruit, and the position is
+/// behaviour twice over. After the refresh, so a removal's audit judges
+/// against the charter the refresh has just narrowed. Before the recruit, so
+/// the blocks it writes already exist when the recruit excludes blocked
+/// threads — an audit removal the recruit could not see would be re-filed in
+/// the same drain.
+class StorylineAuditHandler extends WorkHandler {
+  final StorylineService _service;
+
+  StorylineAuditHandler(this._service);
+
+  @override
+  String get kind => 'storyline_audit';
+
+  @override
+  Future<void> run(Map<String, Object?> item) {
+    final id = item['entity_id'] as String? ?? '';
+    // An empty id is a row nothing can be done about. Done, not failed —
+    // retrying it would produce the same nothing twice.
+    if (id.isEmpty) return Future<void>.value();
+    return _service.audit(id);
   }
 }
 

@@ -73,7 +73,15 @@ HomeFeedRow _row(
 
 MessageSearchHits _hits(String query, List<String> ids) => MessageSearchHits(
       query,
-      [for (final id in ids) SemanticHit(_row(id), 0.1)],
+      [
+        for (final id in ids)
+          SearchHit(
+            row: _row(id),
+            score: 0.9,
+            distance: 0.1,
+            matchedBy: MatchedBy.meaning,
+          ),
+      ],
     );
 
 void main() {
@@ -174,6 +182,39 @@ void main() {
     expect(notifier.state.search, isNotNull);
     expect(notifier.state.search!.query, 'invoice');
     expect(notifier.state.search!.hits, hasLength(2));
+    expect(notifier.state.searching, isFalse);
+  });
+
+  test('the notice rides along to the state', () async {
+    final notifier = build();
+    final search = notifier.submitSearch('invoice');
+    runner.answer(
+      0,
+      MessageSearchHits(
+        'invoice',
+        [
+          SearchHit(
+            row: _row('gated', subject: 'Invoice 4471 is overdue'),
+            score: 0.4,
+            bm25: 3.2,
+            matchedBy: MatchedBy.words,
+          ),
+        ],
+        notice: 'Words only — the semantic index is unavailable.',
+      ),
+    );
+    await search;
+
+    // The notifier carries both without interpreting either: a set of results
+    // that is narrower than it looks is still a set of results, so it swaps
+    // the body the way any other answer does — the sentence explaining the
+    // narrowness travels ON it rather than in `searchNotice`, which is for a
+    // search that did not happen.
+    expect(notifier.state.search!.hits, hasLength(1));
+    expect(notifier.state.search!.hits.single.row.sourceMessageId, 'gated');
+    expect(notifier.state.search!.hits.single.matchedBy, MatchedBy.words);
+    expect(notifier.state.search!.notice, startsWith('Words only'));
+    expect(notifier.state.searchNotice, isNull);
     expect(notifier.state.searching, isFalse);
   });
 
@@ -394,8 +435,8 @@ void main() {
       runner.answer(
         0,
         MessageSearchHits('invoice', [
-          SemanticHit(_row('a'), 0.1),
-          SemanticHit(_row('b', fromName: 'Eric Vance'), 0.2),
+          SearchHit(row: _row('a'), score: 0.5, matchedBy: MatchedBy.meaning),
+          SearchHit(row: _row('b', fromName: 'Eric Vance'), score: 0.5, matchedBy: MatchedBy.meaning),
         ]),
       );
       await search;
@@ -412,8 +453,8 @@ void main() {
       runner.answer(
         0,
         MessageSearchHits('invoice', [
-          SemanticHit(_row('plain'), 0.1),
-          SemanticHit(_row('attached', hasAttachments: true), 0.2),
+          SearchHit(row: _row('plain'), score: 0.5, matchedBy: MatchedBy.meaning),
+          SearchHit(row: _row('attached', hasAttachments: true), score: 0.5, matchedBy: MatchedBy.meaning),
         ]),
       );
       await search;

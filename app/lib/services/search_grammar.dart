@@ -190,7 +190,7 @@ SearchQuery parseSearchQuery(String raw) {
 /// lexicographically in the same order they sort chronologically. A row with
 /// no stamp at all fails any date facet — a message that cannot say when it
 /// arrived cannot be shown to have arrived inside a window.
-List<SemanticHit> filterHits(SearchQuery query, List<SemanticHit> hits) {
+List<SearchHit> filterHits(SearchQuery query, List<SearchHit> hits) {
   if (query.from == null &&
       !query.hasFile &&
       query.before == null &&

@@ -58,6 +58,11 @@ void main() {
       'received_at': '2026-09-02T11:55:00.000Z',
       'created_at': '2026-09-02T12:01:00.000Z',
     });
+    // The verdict before triage, so the score written last is newer than every
+    // write to the message row. Completeness reads a written verdict rather
+    // than a work row, so a candidate with none stays open to its deadline.
+    await store.writeNeedsYouVerdict('email', id, verdict: false,
+        reason: 'seeded');
     await store.writeTriage(
       'email',
       id,
@@ -71,6 +76,10 @@ void main() {
         replyExpected: true,
       ),
     );
+    // The stages the pipeline would have written by now. Completeness reads
+    // `message_progress`, not the work queue.
+    await store.writeExtractProgress('email', id, state: 'done');
+    await store.writeStorylineProgress('email', key, state: 'done');
     if (attentionScore != null) {
       await store.writeAttentionScore('email', key, attentionScore);
     }

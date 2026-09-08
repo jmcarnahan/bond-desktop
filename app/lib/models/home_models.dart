@@ -22,6 +22,15 @@ const Duration homeDropLinger = Duration(seconds: 3);
 /// deleting late leaves a gap where the row already was.
 const Duration homeDropCollapse = Duration(milliseconds: 180);
 
+/// How long a still-pending row may go without a progress write before it is
+/// called stuck rather than slow.
+///
+/// Fifteen minutes is longer than any single stage takes and shorter than a
+/// person's patience with a bar that is not moving. The tile's SQL and the
+/// row's Dart both read this one number, so a list with two flags on it and a
+/// tile that counted three cannot happen.
+const Duration homeStalledAfter = Duration(minutes: 15);
+
 /// One message's trip through the pipeline, as one feed row.
 ///
 /// Every stage state is a raw string rather than an enum, for the reason a
@@ -34,6 +43,13 @@ const Duration homeDropCollapse = Duration(milliseconds: 180);
 /// settled the message. That is what makes scrolling back through history
 /// honest: a thread that has since gone quiet still shows the verdict the user
 /// was actually given at the time.
+///
+/// The reason fields are the opposite and are meant to be: [needsYouReason],
+/// [gateReason], [bucketReason], [storylineEvidence] and the rest are the
+/// pipeline's own record of why it decided what it did, read live on every
+/// query. A row has to be able to explain itself with what the pipeline
+/// believes NOW, or the explanation would go on defending a decision that has
+/// since been revised.
 @immutable
 class HomeFeedRow {
   final String source;
@@ -92,6 +108,43 @@ class HomeFeedRow {
   /// a search returns fifty rows and a per-row attachment lookup would be
   /// fifty reads to decide which ones to throw away.
   final bool hasAttachments;
+  /// When the pipeline last wrote anything about this row. The stalled
+  /// clock's zero, and empty only on a path that predates the column.
+  final String updatedAt;
+
+  /// The needs-you judgement as it stands on the message. Null is its own
+  /// answer — nothing has judged this one yet — and is why it is not a plain
+  /// bool: "no" and "not asked" send a reader to different places.
+  final bool? needsYouVerdict;
+
+  /// Why the verdict went that way, in the judge's own words.
+  final String? needsYouReason;
+
+  /// Why triage let the message through, or did not. Distinct from
+  /// [dropReason], which is the gate's verdict recorded on the progress row.
+  final String? gateReason;
+
+  /// Where the attention sweep filed the thread — `later`, `done`, and the
+  /// rest of the archive rail's vocabulary. Null when nothing has ruled.
+  final String? bucket;
+
+  /// Who decided the [bucket], or `user` when a person did.
+  final String? bucketReason;
+
+  /// The sweep's ranking score for the thread, 0 to 1. Null before it ran.
+  final double? attentionScore;
+
+  /// What the storyline pass wrote down for joining this thread to its
+  /// storyline. Null when the row is filed nowhere.
+  final String? storylineEvidence;
+
+  /// `auto` or `user` — whether the filing was the model's or a person's.
+  final String? storylineAddedBy;
+
+  /// True when something is queued or running for this message, its thread,
+  /// or one of its documents. A row with work open is never stalled, however
+  /// long it has been sitting there.
+  final bool workOpen;
 
   const HomeFeedRow({
     required this.source,
@@ -114,6 +167,16 @@ class HomeFeedRow {
     this.fromName,
     this.fromAddress,
     this.hasAttachments = false,
+    this.updatedAt = '',
+    this.needsYouVerdict,
+    this.needsYouReason,
+    this.gateReason,
+    this.bucket,
+    this.bucketReason,
+    this.attentionScore,
+    this.storylineEvidence,
+    this.storylineAddedBy,
+    this.workOpen = false,
   });
 
   factory HomeFeedRow.fromRow(Map<String, Object?> row) => HomeFeedRow(
@@ -137,6 +200,21 @@ class HomeFeedRow {
         fromName: row['from_name'] as String?,
         fromAddress: row['from_address'] as String?,
         hasAttachments: (row['has_attachments'] as num?)?.toInt() == 1,
+        updatedAt: row['updated_at'] as String? ?? '',
+        // Three-valued on purpose: null stays null, and only a stored 1 is a
+        // yes. Anything else the column could hold is a no.
+        needsYouVerdict: switch (row['needs_you_verdict'] as num?) {
+          null => null,
+          final n => n.toInt() == 1,
+        },
+        needsYouReason: row['needs_you_reason'] as String?,
+        gateReason: row['gate_reason'] as String?,
+        bucket: row['bucket'] as String?,
+        bucketReason: row['bucket_reason'] as String?,
+        attentionScore: (row['attention_score'] as num?)?.toDouble(),
+        storylineEvidence: row['storyline_evidence'] as String?,
+        storylineAddedBy: row['storyline_added_by'] as String?,
+        workOpen: (row['work_open'] as num?)?.toInt() == 1,
       );
 
   /// The pair the feed is keyed and cursored by. A message id is only unique
@@ -183,7 +261,35 @@ class HomeFeedRow {
         fromName: fromName,
         fromAddress: fromAddress,
         hasAttachments: hasAttachments,
+        updatedAt: updatedAt,
+        needsYouVerdict: needsYouVerdict,
+        needsYouReason: needsYouReason,
+        gateReason: gateReason,
+        bucket: bucket,
+        bucketReason: bucketReason,
+        attentionScore: attentionScore,
+        storylineEvidence: storylineEvidence,
+        storylineAddedBy: storylineAddedBy,
+        // `RestoreService` queues the work in the same breath as the reset, so
+        // the optimistic row must not spend a frame claiming to be stalled.
+        workOpen: true,
       );
+
+  /// Still pending, nothing queued or running for it or its thread, and no
+  /// progress write for [homeStalledAfter]. [now] is a parameter, never read
+  /// from the clock, so a test can pin the threshold.
+  ///
+  /// An unreadable [updatedAt] answers false rather than true: an unknown
+  /// clock is not evidence that anything went wrong, and a row accused of
+  /// being stuck because a column was never written would send the reader
+  /// after a fault that is not there.
+  bool isStalled(DateTime now) {
+    if (outcome != 'pending') return false;
+    if (workOpen) return false;
+    final since = DateTime.tryParse(updatedAt)?.toUtc();
+    if (since == null) return false;
+    return now.toUtc().difference(since) >= homeStalledAfter;
+  }
 }
 
 /// One semantic-search result: a feed row, and how far its message sat from
@@ -202,6 +308,77 @@ class SemanticHit {
   const SemanticHit(this.row, this.distance);
 }
 
+/// One keyword-search result: a feed row, how well the words scored, and how
+/// much of the query it actually contained.
+///
+/// [SemanticHit]'s opposite number, and shaped like it for the same reason —
+/// the store hands back a ranking plus the number the ranking was made from,
+/// and the fusion above needs both.
+@immutable
+class KeywordHit {
+  final HomeFeedRow row;
+
+  /// FTS5's bm25 score, already NEGATED at the index so that bigger is better.
+  /// It has no absolute scale; it is only meaningful against the best score
+  /// the same query found.
+  final double bm25;
+
+  /// The fraction of the query's terms this row contains, 0 to 1.
+  ///
+  /// The correction bm25 needs. An OR query lets a row that matched one rare
+  /// word top the ranking on that word's rarity alone, and without this the
+  /// message containing only "12" would outrank the one that answers the
+  /// question.
+  final double coverage;
+
+  const KeywordHit(this.row, {required this.bm25, required this.coverage});
+}
+
+/// Which half of a search found a row.
+///
+/// Not a display label — nothing prints it yet. It is the fact a later "why
+/// this result?" surface will be built from, and recording it at the moment
+/// the two rankings are merged is far cheaper than reconstructing it after.
+enum MatchedBy { meaning, words, both }
+
+/// One search result, whichever way it was found.
+///
+/// Replaces the ranked-hits-plus-text-rows pair the search used to hand back.
+/// Two lists meant a reader saw the same mailbox twice under two headings,
+/// with the row that BOTH passes found sitting at the top of one and buried in
+/// the other; one list with one score puts it where it belongs.
+///
+/// The numbers ride along rather than being discarded after the sort. Nothing
+/// shows them today; they are what a per-row explanation would need, and a
+/// score with no evidence behind it is the kind of thing nobody can debug.
+@immutable
+class SearchHit {
+  final HomeFeedRow row;
+
+  /// The fused relevance, 0 to 1. Everything below `SearchTuning.minScore` was
+  /// dropped before this list was built, so a hit that is here earned it.
+  final double score;
+
+  /// Cosine distance from the query, or null when the index did not find this
+  /// row — a gate-dropped message was never embedded and can only ever arrive
+  /// by words.
+  final double? distance;
+
+  /// The word pass's score, bigger-is-better, or null when only meaning found
+  /// it.
+  final double? bm25;
+
+  final MatchedBy matchedBy;
+
+  const SearchHit({
+    required this.row,
+    required this.score,
+    this.distance,
+    this.bm25,
+    required this.matchedBy,
+  });
+}
+
 /// The search results a reader is looking at, in place of the live feed.
 ///
 /// Down here beside [SemanticHit] rather than up in the feed's notifier,
@@ -214,27 +391,47 @@ class HomeSearch {
   /// rather than by what is on screen.
   final String query;
 
-  /// Never null: an empty list is a real answer — nothing indexed matches —
-  /// and the state where there is no answer at all is no [HomeSearch] at all.
-  final List<SemanticHit> hits;
+  /// ONE ranking, meaning and words together, best first.
+  ///
+  /// Never null: an empty list is a real answer — nothing matches — and the
+  /// state where there is no answer at all is no [HomeSearch] at all.
+  ///
+  /// Each [SearchHit] carries the numbers `search_fusion.dart` ranked it by,
+  /// so a row found both ways sits above the rows found one way instead of
+  /// appearing twice under two headings. Gate-dropped mail was never embedded
+  /// and can only ever arrive here by its words, which is what makes it
+  /// findable at all when *Show dropped* is on.
+  final List<SearchHit> hits;
 
   /// The passages of attached documents that answer the same query. Never
   /// null, for [hits]' reason: an empty list is a real answer.
   final List<AttachmentChunkHit> documents;
 
-  const HomeSearch(this.query, this.hits, {this.documents = const []});
+  /// Non-null when only one half of the search ran — the meaning pass or the
+  /// word pass could not — and this set of results is narrower than it looks.
+  ///
+  /// Travels with the rows for [ArchiveSearch.notice]'s reason: it is a fact
+  /// about this answer, not a standing condition of the screen.
+  final String? notice;
+
+  const HomeSearch(
+    this.query,
+    this.hits, {
+    this.documents = const [],
+    this.notice,
+  });
 }
 
 /// The archive pane's result set: what a search of the whole history came back
 /// with, and whether half of it was missing.
 ///
-/// Rows and not hits, because only some of them have a distance to carry — the
-/// rest arrive from a text match, which ranks by date and knows nothing about
-/// meaning. A shape that insisted on a distance would have to invent one.
+/// Rows and not hits, because the archive renders feed rows and has nowhere to
+/// put a score: the fused ranking still decides the ORDER, and then it is
+/// flattened. A shape that carried the numbers would carry them for nobody.
 ///
 /// [notice] travels WITH the results rather than beside them on the screen:
-/// "these came from text only" is a fact about THIS result set — the answer is
-/// narrower than it looks — and not a standing condition of the pane.
+/// "only one half of the search ran" is a fact about THIS result set — the
+/// answer is narrower than it looks — and not a standing condition of the pane.
 ///
 /// Down here beside [HomeSearch] for its reason: the pane renders this and the
 /// pane reads no providers.
@@ -244,11 +441,12 @@ class ArchiveSearch {
   /// was typed into again is labelled by what it is.
   final String query;
 
-  /// Semantic matches first, in rank order, then text matches the index did
-  /// not already return. Never null: empty is a real answer.
+  /// One fused ranking, best first, meaning and words together. Never null:
+  /// empty is a real answer.
   final List<HomeFeedRow> rows;
 
-  /// Non-null when the semantic half could not run and text answered alone.
+  /// Non-null when only one half of the search ran and the other answered
+  /// alone.
   final String? notice;
 
   const ArchiveSearch(this.query, this.rows, this.notice);
@@ -280,6 +478,12 @@ class HomeMetrics {
   /// Still moving: `outcome = 'pending'`.
   final int inFlight;
 
+  /// The subset of [inFlight] that has stopped moving — pending, with nothing
+  /// queued or running for it, and no progress write since the cutoff the
+  /// caller bound. Counted here so the tile and the flags on the rows below
+  /// it are one answer rather than two.
+  final int stalled;
+
   /// Messages where some stage ended in `error`. Counted once however many
   /// stages failed — this is "how many messages went wrong", not "how many
   /// things went wrong".
@@ -295,6 +499,7 @@ class HomeMetrics {
     this.needsYou = 0,
     this.storylined = 0,
     this.inFlight = 0,
+    this.stalled = 0,
     this.errored = 0,
     this.total = 0,
   });
@@ -309,6 +514,7 @@ class HomeMetrics {
       needsYou: at('needs_you'),
       storylined: at('storylined'),
       inFlight: at('in_flight'),
+      stalled: at('stalled'),
       errored: at('errored'),
       total: at('total'),
     );

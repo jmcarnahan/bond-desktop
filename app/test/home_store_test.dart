@@ -1,5 +1,6 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/home_models.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -43,6 +44,12 @@ void main() {
     String extractState = 'done',
     String storylineState = 'done',
     bool hasAttachments = false,
+    String? updatedAt,
+    // Triaged by default: `work_open` reads a pending triage as work in
+    // flight (the queue claims `messages.triage_status` directly, there is
+    // no work row), so a seed that left the column at its default would make
+    // every row here look busy.
+    String triageStatus = 'triaged',
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -56,6 +63,7 @@ void main() {
       'created_at': receivedAt,
       'updated_at': receivedAt,
       'has_attachments': hasAttachments ? 1 : 0,
+      'triage_status': triageStatus,
     });
     await db.customUpdate(
       'UPDATE message_progress SET outcome = ?, dropped = ?, drop_reason = ?, '
@@ -76,6 +84,16 @@ void main() {
         Variable(id),
       ],
     );
+    // Separate, and only when asked: `upsertMessage` stamps the progress row's
+    // `updated_at` with wall-clock time, which is exactly the column the
+    // stalled tests need to pin.
+    if (updatedAt != null) {
+      await db.customUpdate(
+        'UPDATE message_progress SET updated_at = ? '
+        'WHERE source = ? AND source_message_id = ?',
+        variables: [Variable(updatedAt), Variable(source), Variable(id)],
+      );
+    }
   }
 
   Future<void> seedStoryline(
@@ -90,6 +108,12 @@ void main() {
         createdBy: 'auto',
       );
 
+  /// The cutoff the stalled count is measured against: fifteen minutes before
+  /// the fixture's "now" of 10:00. Rows the tests do not stamp carry
+  /// wall-clock `updated_at`, which is far later than this, so nothing counts
+  /// as stalled unless a test says so.
+  const stalledCutoff = '2026-09-01T09:45:00Z';
+
   group('the tiles', () {
     test('every number comes off the same window', () async {
       await seed('m1', urgency: 'high', needsYou: true);
@@ -99,8 +123,10 @@ void main() {
       await seed('m5', extractState: 'error');
       await seed('m6', storylineId: 'sl-1');
 
-      final metrics =
-          await store.homeMetrics(sinceIso: '2026-09-01T00:00:00Z');
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
 
       expect(metrics.total, 6);
       expect(metrics.emails, 5);
@@ -119,8 +145,10 @@ void main() {
       await seed('m2', urgency: 'high');
       await seed('m3', urgency: 'normal');
 
-      final metrics =
-          await store.homeMetrics(sinceIso: '2026-09-01T00:00:00Z');
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
 
       expect(metrics.urgent, 2);
     });
@@ -128,8 +156,10 @@ void main() {
     test('a message errored in two stages is still one message', () async {
       await seed('m1', triageState: 'error', extractState: 'error');
 
-      final metrics =
-          await store.homeMetrics(sinceIso: '2026-09-01T00:00:00Z');
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
 
       expect(metrics.errored, 1);
     });
@@ -138,19 +168,72 @@ void main() {
       await seed('old', receivedAt: '2026-08-20T10:00:00Z');
       await seed('new');
 
-      final metrics =
-          await store.homeMetrics(sinceIso: '2026-09-01T00:00:00Z');
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
 
       expect(metrics.total, 1);
     });
 
     test('an empty mailbox reads as zeros rather than nulls', () async {
-      final metrics =
-          await store.homeMetrics(sinceIso: '2026-09-01T00:00:00Z');
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
 
       expect(metrics.total, 0);
       expect(metrics.dropped, 0);
       expect(metrics.needsYou, 0);
+      expect(metrics.stalled, 0);
+    });
+
+    test('stalled counts a pending row nobody is working on', () async {
+      await seed('m1', outcome: 'pending', updatedAt: '2026-09-01T09:40:00Z');
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
+
+      expect(metrics.inFlight, 1);
+      expect(metrics.stalled, 1);
+    });
+
+    test('a row with work in flight is slow, not stalled', () async {
+      await seed('m1', outcome: 'pending', updatedAt: '2026-09-01T09:40:00Z');
+      await store.enqueueWork('extract', 'email', 'm1');
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
+
+      expect(metrics.inFlight, 1);
+      expect(metrics.stalled, 0);
+    });
+
+    test('a finished row cannot be stalled, however old it is', () async {
+      await seed('m1', updatedAt: '2026-08-01T09:40:00Z');
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
+
+      expect(metrics.stalled, 0);
+    });
+
+    test('a row that moved inside the window is not stalled yet', () async {
+      await seed('m1', outcome: 'pending', updatedAt: '2026-09-01T09:50:00Z');
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+      );
+
+      expect(metrics.inFlight, 1);
+      expect(metrics.stalled, 0);
     });
   });
 
@@ -412,6 +495,242 @@ void main() {
       ]);
 
       expect(rows, hasLength(250));
+    });
+  });
+
+  group('the reasons ride on every row', () {
+    /// One message carrying every explanation the pipeline can record, so the
+    /// four readers can be asked the same question.
+    Future<void> seedExplained() async {
+      await seed('m1', storylineId: 'sl-1');
+      await store.writeNeedsYouVerdict(
+        'email',
+        'm1',
+        verdict: true,
+        reason: 'asks for the DPA by Friday',
+      );
+      await db.customUpdate(
+        "UPDATE messages SET gate_reason = 'addressed_me' "
+        'WHERE source = ? AND source_message_id = ?',
+        variables: [Variable('email'), Variable('m1')],
+      );
+      await store.setConversationBucket(
+        'email',
+        'c1',
+        bucket: 'later',
+        reason: 'low_value',
+      );
+      await store.writeAttentionScore('email', 'c1', 0.42);
+      await seedStoryline('sl-1');
+      await store.addStorylineMember(
+        'sl-1',
+        'email',
+        'c1',
+        addedBy: 'auto',
+        evidence: 'Same renewal thread',
+      );
+    }
+
+    void expectExplained(HomeFeedRow row) {
+      expect(row.needsYouVerdict, true);
+      expect(row.needsYouReason, 'asks for the DPA by Friday');
+      expect(row.gateReason, 'addressed_me');
+      expect(row.bucket, 'later');
+      expect(row.bucketReason, 'low_value');
+      expect(row.attentionScore, closeTo(0.42, 0.0001));
+      expect(row.storylineEvidence, 'Same renewal thread');
+      expect(row.storylineAddedBy, 'auto');
+      expect(row.updatedAt, isNotEmpty);
+    }
+
+    // Four readers, one projection: a column present on one path and absent
+    // on another is a row that explains itself in the feed and goes silent in
+    // search, which is worse than never explaining itself at all.
+    test('the paging read carries them', () async {
+      await seedExplained();
+
+      expectExplained((await store.pageHomeFeed()).single);
+    });
+
+    test('the live patch read carries them', () async {
+      await seedExplained();
+
+      expectExplained(
+        (await store.progressRowsFor([(source: 'email', id: 'm1')])).single,
+      );
+    });
+
+    test('the keyword search carries them', () async {
+      await seedExplained();
+
+      expectExplained((await store.keywordSearchMessages('Launch'))!.single.row);
+    });
+
+    test('a message nothing has judged reads null rather than false',
+        () async {
+      await seed('m1');
+
+      final row = (await store.pageHomeFeed()).single;
+
+      // Null and false are different answers — "nobody has looked" sends a
+      // reader somewhere else entirely from "we looked and it is fine".
+      expect(row.needsYouVerdict, isNull);
+      expect(row.needsYouReason, isNull);
+      expect(row.bucket, isNull);
+      expect(row.attentionScore, isNull);
+      expect(row.storylineEvidence, isNull);
+      expect(row.workOpen, false);
+    });
+  });
+
+  group('the storyline a row is really filed in', () {
+    test('falls back to thread membership when the pointer is null', () async {
+      await seedStoryline('sl-1');
+      await seed('m1');
+      await store.addStorylineMember(
+        'sl-1',
+        'email',
+        'c1',
+        addedBy: 'user',
+        evidence: 'Filed by hand',
+      );
+
+      final row = (await store.pageHomeFeed()).single;
+
+      expect(row.storylineId, 'sl-1');
+      expect(row.storylineTitle, 'Website redesign');
+      expect(row.storylineEvidence, 'Filed by hand');
+      expect(row.storylineAddedBy, 'user');
+    });
+
+    test('reads the newest membership, and still returns one row', () async {
+      await seedStoryline('sl-1', title: 'Website redesign');
+      await seedStoryline('sl-2', title: 'Tahoe trip');
+      await seed('m1');
+      // Both memberships are written directly so their stamps are the test's
+      // rather than the wall clock's — `addStorylineMember` stamps `now`, and
+      // two calls a millisecond apart would not settle "newer" reliably.
+      for (final (id, at) in const [
+        ('sl-1', '2026-09-01T10:00:00Z'),
+        ('sl-2', '2026-09-02T10:00:00Z'),
+      ]) {
+        await db.customUpdate(
+          'INSERT INTO storyline_members '
+          '(storyline_id, source, conversation_key, added_by, evidence, '
+          'added_at) VALUES (?, ?, ?, ?, ?, ?)',
+          variables: [
+            Variable(id),
+            Variable('email'),
+            Variable('c1'),
+            Variable('auto'),
+            Variable('joined $id'),
+            Variable(at),
+          ],
+        );
+      }
+
+      final page = await store.pageHomeFeed();
+
+      // One row, not two: the memberships are subqueries precisely so a
+      // thread in several storylines cannot split its message across them.
+      expect(page, hasLength(1));
+      expect(page.single.storylineId, 'sl-2');
+      expect(page.single.storylineTitle, 'Tahoe trip');
+      expect(page.single.storylineEvidence, 'joined sl-2');
+    });
+
+    test('a dismissed storyline is not where a row is filed', () async {
+      // Member rows survive a dismissal on purpose, so the join to a live
+      // status is the only thing keeping a thrown-away suggestion off the
+      // feed.
+      await seedStoryline('sl-1', status: 'dismissed');
+      await seed('m1');
+      await store.addStorylineMember(
+        'sl-1',
+        'email',
+        'c1',
+        addedBy: 'auto',
+        evidence: 'joined sl-1',
+      );
+
+      final row = (await store.pageHomeFeed()).single;
+
+      expect(row.storylineId, isNull);
+      expect(row.storylineTitle, isNull);
+    });
+
+    test('the progress pointer still wins when it is set', () async {
+      await seedStoryline('sl-1', title: 'Website redesign');
+      await seedStoryline('sl-2', title: 'Tahoe trip');
+      await seed('m1', storylineId: 'sl-1');
+      await store.addStorylineMember('sl-2', 'email', 'c1', addedBy: 'auto');
+
+      expect((await store.pageHomeFeed()).single.storylineId, 'sl-1');
+    });
+  });
+
+  group('work_open', () {
+    test('reads the message, its thread, and its attachments', () async {
+      await seed('m1', conversationKey: 'c1');
+      await seed('m2', conversationKey: 'c2');
+      await seed('m3', conversationKey: 'c3');
+      await seed('m4', conversationKey: 'c4');
+      await store.enqueueWork('extract', 'email', 'm1');
+      // Storyline work is filed under the conversation key.
+      await store.enqueueWork('storyline', 'email', 'c2');
+      // And attachment work under '<message id>|<attachment id>'.
+      await store.enqueueWork('attachment_text', 'email', 'm3|att-1');
+      await store.enqueueWork('extract', 'email', 'm4');
+      await store.writeWork('extract', 'email', 'm4', status: 'done');
+
+      final open = {
+        for (final row in await store.pageHomeFeed())
+          row.sourceMessageId: row.workOpen,
+      };
+
+      expect(open, {'m1': true, 'm2': true, 'm3': true, 'm4': false});
+    });
+
+    test('a message the triage queue has not reached yet is work in flight',
+        () async {
+      // Triage has no work row — the queue claims `triage_status` directly —
+      // so this is the arm that keeps a large drain from reading as a
+      // hundred stalled rows fifteen minutes in.
+      await seed('m1', conversationKey: 'c1', triageStatus: 'pending');
+      await seed('m2', conversationKey: 'c2', triageStatus: 'processing');
+      await seed('m3', conversationKey: 'c3', triageStatus: 'error');
+
+      final rows = await store.pageHomeFeed();
+      final open = {for (final row in rows) row.sourceMessageId: row.workOpen};
+      expect(open, {'m1': true, 'm2': true, 'm3': false});
+    });
+
+    test('an untriaged row is slow, never stalled', () async {
+      await seed(
+        'm1',
+        outcome: 'pending',
+        triageState: 'pending',
+        triageStatus: 'pending',
+        updatedAt: '2026-09-01T09:00:00Z',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: '2026-09-01T09:45:00Z',
+      );
+
+      expect(metrics.inFlight, 1);
+      expect(metrics.stalled, 0);
+    });
+
+    test('another message whose id is a prefix of this one is not this one',
+        () async {
+      // The `substr` arm rather than LIKE: a Graph id can contain `_`, and the
+      // prefix has to be an exact one up to the separator.
+      await seed('m1', conversationKey: 'c1');
+      await store.enqueueWork('attachment_text', 'email', 'm10|att-1');
+
+      expect((await store.pageHomeFeed()).single.workOpen, false);
     });
   });
 

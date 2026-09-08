@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import '../data/message_store.dart';
+import 'notify_worthy.dart';
 import 'progress_bus.dart';
 
 /// Writes down where each message is in the pipeline, and says so out loud.
@@ -236,6 +237,52 @@ class PipelineProgress {
         (store) => store.restoreProgress(source, sourceMessageId),
       );
 
+  /// Ignore: the tick behind the owner's hand, and nothing more.
+  ///
+  /// The whole cascade an Ignore writes — the skip on `messages`, the pending
+  /// stages closed out, the drop, the cleared chips — is one transaction
+  /// inside [MessageStore.dropMessage], where it belongs: it must not be
+  /// half-written, and half of it is not a progress write at all. What is left
+  /// for here is the announcement, so the live feed re-reads the row and grays
+  /// it where it stands.
+  ///
+  /// The tick goes out under `triage`/`skipped`, which is honest — that is
+  /// precisely what the transaction wrote — and [touchProgress] is the write
+  /// under it because there is nothing left to change: the stage states are
+  /// already correct, and only the stalled clock still needs restarting.
+  Future<void> noteIgnored(String source, String sourceMessageId) => _one(
+        source,
+        sourceMessageId,
+        'triage',
+        'skipped',
+        (store) => store.touchProgress(source, sourceMessageId),
+      );
+
+  /// A retry is a progress write.
+  ///
+  /// Nothing about the row's stage states changes here — the stages are put
+  /// back on their queues by [PipelineRepairService], and each will record
+  /// itself when it runs. What this does is restart the stalled clock, so a
+  /// row the owner has just asked for again stops accusing the pipeline of
+  /// having abandoned it, and give the live screen a tick to re-read behind.
+  ///
+  /// The tick goes out under [stage] and `pending`, which is honest rather
+  /// than nominal: [stage] is the first thing owed and the first thing about
+  /// to run. As with [noteRestored], the live screen re-reads the whole row
+  /// behind any tick, so one tick carries the other stages with it.
+  Future<void> noteRetry(
+    String source,
+    String sourceMessageId, {
+    required String stage,
+  }) =>
+      _one(
+        source,
+        sourceMessageId,
+        stage,
+        'pending',
+        (store) => store.touchProgress(source, sourceMessageId),
+      );
+
   /// Takes the Needs You chip off a thread the user has answered or finished,
   /// and says so per message.
   ///
@@ -266,6 +313,86 @@ class PipelineProgress {
     } catch (e) {
       debugPrint('progress: needs-you clear $source/$conversationKey '
           'failed: $e');
+    }
+  }
+
+  /// Moves a settled row's Needs You chip to match a verdict that has since
+  /// changed, and says so.
+  ///
+  /// The snapshot in `message_progress.needs_you` is taken once, at settle
+  /// time, from the same [notifyWorthy] call that decided whether to interrupt
+  /// the user. That is right for the moment it is taken and wrong afterwards:
+  /// a re-judge — a document that landed an ask, the owner editing their Needs
+  /// You rules — writes a new verdict onto `messages` and the chip beside it
+  /// goes on showing the old one.
+  ///
+  /// Two things make this safe to run after the fact. The first is that the
+  /// store refuses to write unless the value actually differs, so a re-verdict
+  /// that returned the same answer is silent and a chip cleared by a reply or
+  /// a Done stays cleared. The second is the `answered` guard below:
+  /// [notifyWorthy] has no outbound clause, because the coordinator settles
+  /// long before any reply can exist, and a false→true re-verdict months later
+  /// must not put a chip back on a thread the user has answered.
+  ///
+  /// Reading is deliberately NOT a clearing condition, exactly as
+  /// [MessageStore.sweepSettledProgress] argues: a chip once earned survives
+  /// being read, and clears when the user replies or marks the thread done.
+  Future<void> refreshNeedsYou(
+    String source,
+    String sourceMessageId, {
+    required double threshold,
+  }) async {
+    final store = _store;
+    if (store == null) return;
+    Map<String, Object?>? row;
+    try {
+      row = await store.notifyRowFor(source, sourceMessageId);
+    } catch (e) {
+      debugPrint('progress: needs-you row $source/$sourceMessageId failed: $e');
+      return;
+    }
+    if (row == null) return;
+    final answered = row['conversation_state'] == 'done' ||
+        (row['last_outbound_at'] as String? ?? '')
+                .compareTo(row['received_at'] as String? ?? '') >
+            0;
+    final needsYou = !answered && notifyWorthy(row, threshold: threshold);
+    await _one(
+      source,
+      sourceMessageId,
+      'settle',
+      'done',
+      (store) => store.refreshNeedsYouFlag(
+        source,
+        sourceMessageId,
+        needsYou: needsYou,
+      ),
+    );
+  }
+
+  /// The one-shot catch-up for rows that settled before the verdict column
+  /// existed. Returns how many chips it raised.
+  Future<int> backfillNeedsYou({required double threshold}) async {
+    final store = _store;
+    if (store == null) return 0;
+    try {
+      final raised =
+          await store.backfillNeedsYouFromVerdicts(threshold: threshold);
+      for (final row in raised) {
+        _bus.publish(
+          ProgressTick(
+            source: row.source,
+            sourceMessageId: row.sourceMessageId,
+            stage: 'settle',
+            state: 'done',
+            receivedAt: row.receivedAt,
+          ),
+        );
+      }
+      return raised.length;
+    } catch (e) {
+      debugPrint('progress: needs-you backfill failed: $e');
+      return 0;
     }
   }
 

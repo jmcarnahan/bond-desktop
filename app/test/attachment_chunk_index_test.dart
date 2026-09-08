@@ -321,7 +321,9 @@ void main() {
       );
 
       expect(hits!.map((h) => h.ref.attachmentId), ['a1', 'b1']);
-      expect(hits.first.distance, lessThan(hits.last.distance));
+      // Bang: the vector pass always reports a distance — it is the word
+      // pass that has none.
+      expect(hits.first.distance, lessThan(hits.last.distance!));
       expect(hits.first.name, 'Lease.pdf');
     });
 

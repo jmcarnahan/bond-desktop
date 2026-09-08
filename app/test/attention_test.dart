@@ -618,6 +618,64 @@ void main() {
       }
     });
 
+    test('an open ask beats the quiet rule for every quiet intent', () {
+      // Later is where quiet mail goes, and an ask nobody has answered is not
+      // quiet — whatever the extraction made of the newest message.
+      for (final intent in AttentionTuning.quietIntents) {
+        expect(
+          bucketFor(
+            intent: intent,
+            importance: 'low',
+            needsReply: false,
+            needsYouVerdict: true,
+          ),
+          isNull,
+          reason: '$intent with an open ask should stay in the inbox',
+        );
+      }
+    });
+
+    test('but a later RULE still beats an open ask', () {
+      // The same order the needs-reply case follows: a person's standing
+      // instruction outranks anything the pipeline decided.
+      expect(
+        bucketFor(
+          senderPref: 'later',
+          intent: 'fyi',
+          importance: 'low',
+          needsReply: false,
+          needsYouVerdict: true,
+        ),
+        'later',
+      );
+    });
+
+    test('no open ask, judged or unjudged, changes nothing', () {
+      // The fence is `== true`: a thread the stage judged and declined and one
+      // it never judged both defer exactly as they did before this input.
+      for (final intent in AttentionTuning.quietIntents) {
+        expect(
+          bucketFor(
+            intent: intent,
+            importance: 'low',
+            needsReply: false,
+            needsYouVerdict: false,
+          ),
+          'later',
+          reason: '$intent judged no should still defer',
+        );
+        expect(
+          bucketFor(
+            intent: intent,
+            importance: 'low',
+            needsReply: false,
+          ),
+          'later',
+          reason: '$intent unjudged should still defer',
+        );
+      }
+    });
+
     test('low importance with an asking intent does not', () {
       for (final intent in AttentionTuning.askingIntents) {
         expect(

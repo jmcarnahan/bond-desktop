@@ -13,8 +13,8 @@ import 'icon_rail.dart' show IconRail;
 /// second nullable field per kind is how the file preview and the full viewer
 /// drifted apart — one could be set while the other said something else.
 ///
-/// Four kinds: a thread, a file, a person and the reasoning behind one
-/// message's verdict.
+/// Five kinds: a thread, a file, a person, the reasoning behind one message's
+/// verdict, and the whole story of what the pipeline did to one message.
 sealed class SidePanel {
   const SidePanel();
 }
@@ -69,6 +69,21 @@ final class WhyPanel extends SidePanel {
     required this.conversationKey,
     required this.messageId,
   });
+}
+
+/// What happened to one message — every stage, judgement and queue row behind
+/// it, with the levers beside them — read beside whatever the question was
+/// asked from.
+///
+/// Keyed by the message alone, where [WhyPanel] carries the thread too: the
+/// history host resolves the thread itself from the message's own record, and
+/// the row it is opened from (a home row, a search hit) may not know the
+/// conversation it belongs to.
+final class HistoryPanel extends SidePanel {
+  final String source;
+  final String id;
+
+  const HistoryPanel({required this.source, required this.id});
 }
 
 /// The chrome around whatever is open beside the main pane: a title, the way

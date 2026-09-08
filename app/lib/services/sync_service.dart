@@ -1,10 +1,13 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../data/message_store.dart';
 import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
 import 'attachments/attachment_policy.dart';
 import 'attachments/owa_links.dart';
+import 'attention.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
@@ -34,6 +37,25 @@ int clampLookbackDays(int days) => days.clamp(minLookbackDays, maxLookbackDays);
 /// deep window drains over several passes instead of being cut down to its
 /// newest this-many forever.
 const int backlogEnqueueCap = 150;
+
+/// How far back the reconcile re-enumerates, and how often it does it.
+///
+/// The delta feed is trusted for POSITION and has still been seen to skip a
+/// message — two of nine inbound on one day, both of them present in a fresh
+/// enumeration hours later, with no cause anyone could name. So a second pass
+/// asks the plain question the cursor cannot: what is in the last day of this
+/// folder? A day is far enough back that a skipped message is still inside it
+/// by the time anyone notices, and ten minutes apart is cheap — two requests,
+/// usually one empty page each — while bounding how late such a message can
+/// arrive. The cursor itself is never touched: this is a safety net beside the
+/// delta feed, not a replacement for it.
+const Duration reconcileWindow = Duration(hours: 24);
+const Duration reconcileEvery = Duration(minutes: 10);
+
+/// When the last reconcile finished, as a UTC ISO stamp. A preference rather
+/// than a field, because the cadence has to survive the app being closed: a
+/// service rebuilt on every launch would otherwise reconcile on every launch.
+const String mailLastReconcileKey = 'mail_last_reconcile';
 
 /// Bodies fetched per [MailSync.ensureBodies] call. A thread longer than this
 /// fills in from the newest end down over subsequent opens.
@@ -92,16 +114,38 @@ class SyncService implements MailSync {
   /// and answers [syncFloorDays].
   final int Function()? _lookbackDays;
 
+  /// The user's attention floor, for the one-shot backfill below. A callback
+  /// for [_lookbackDays]'s reason — the slider moves under a service built
+  /// once — and null for every caller that predates the backfill, which then
+  /// judges history against [AttentionTuning.defaultThreshold].
+  final Future<double> Function()? _threshold;
+
   SyncService(
     this._mail,
     this._store, {
     ActivityLog? activityLog,
     PipelineProgress? progress,
     Future<String?> Function()? userAddress,
+    Future<double> Function()? attentionThreshold,
     this._lookbackDays,
   })  : _log = activityLog ?? ActivityLog.disabled(),
         _progress = progress ?? const PipelineProgress.disabled(),
-        _userAddressReader = userAddress;
+        _userAddressReader = userAddress,
+        _threshold = attentionThreshold;
+
+  /// The settle machine's reader, degraded its way — see
+  /// `NotificationCoordinator._attentionThreshold`. A preference that cannot
+  /// be read is a default, never a failed sync.
+  Future<double> _thresholdOrDefault() async {
+    final read = _threshold;
+    if (read == null) return AttentionTuning.defaultThreshold;
+    try {
+      return await read();
+    } catch (e) {
+      debugPrint('sync: reading the attention threshold failed: $e');
+      return AttentionTuning.defaultThreshold;
+    }
+  }
 
   @override
   Future<void> syncNow() async {
@@ -157,6 +201,16 @@ class SyncService implements MailSync {
         await _store.setPref(mailBootstrapFloorKey, floor);
       }
 
+      // The safety net, after the marker so a widen this pass detected is
+      // already recorded, and before the revives so anything it finds is
+      // ordinary mail by the time they run. What it ingests takes exactly the
+      // ordinary path — `_ingestPage` lands it `pending` (or `backlog` below
+      // the floor), and the backlog enqueues further down this same pass file
+      // its extract, needs-you and embed rows — so there is nothing here to
+      // queue by hand.
+      final (reconciledInbox, reconciledSent, reconcileSubjects, reconcileError) =
+          await _reconcileIfDue(floor: floor);
+
       // A transient failure — the model server mid-load, two timeouts in a row
       // — must not remove mail from the AI pipeline forever. Errored rows get
       // another chance on each sync until their attempt ceiling; the enqueue
@@ -188,6 +242,15 @@ class SyncService implements MailSync {
       );
       final revivedTerminalWork = await _store.reviveTerminalWork(
         olderThanIso: terminalBefore,
+      );
+
+      // The rows the settle race left owing a storyline stage — settled while
+      // this sync's own enqueue was still to come, so their `outcome` never
+      // closed. Self-exhausting: with the owed-stage arm on
+      // [MessageStore.writeStorylineProgress] the pass this queues finishes
+      // them, and the next sync matches nothing.
+      final revivedStoryline = await _store.reviveOwedStorylineStages(
+        sources: const [_source],
       );
 
       // Mail the first triage judged before it asked whether a reply is
@@ -250,6 +313,22 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_model_revive', '1');
       }
 
+      // The other half of that catch-up, on the home screen's side. The v10
+      // verdict column arrived AFTER these rows settled, so the `needs_you`
+      // snapshot each of them took never saw it: a message the pass later
+      // judged yes carries `needs_you_verdict = 1` beside `needs_you = 0`, and
+      // nothing else in the app would ever reconcile the two. Raise-only, and
+      // guarded on the thread not being done and having no reply newer than
+      // the message — a chip raised months late must not land on something the
+      // user has already answered. Null until it runs, like the revive above.
+      int? backfilledNeedsYou;
+      if (await _store.getPref('needs_you_flag_backfill') == null) {
+        backfilledNeedsYou = await _progress.backfillNeedsYou(
+          threshold: await _thresholdOrDefault(),
+        );
+        await _store.setPref('needs_you_flag_backfill', '1');
+      }
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -264,6 +343,23 @@ class SyncService implements MailSync {
       // than an enqueue, so the sweep that ran after the last sync runs again
       // after this one instead of staying `done` forever.
       await _store.requeueWork('storyline_sweep', _source, 'sweep');
+
+      // Only when it found something. A reconcile that found nothing is the
+      // normal state and every ten minutes of it would bury the panel — and it
+      // cannot be made quiet the ordinary way, because [ActivityLog] never
+      // suppresses a row whose detail carries a list.
+      if (reconciledInbox + reconciledSent > 0) {
+        await _log.record(
+          'sync_reconcile',
+          source: _source,
+          count: reconciledInbox + reconciledSent,
+          detail: {
+            'inbox': reconciledInbox,
+            'sent': reconciledSent,
+            'subjects': reconcileSubjects,
+          },
+        );
+      }
 
       await _log.record(
         'sync_mail',
@@ -287,8 +383,17 @@ class SyncService implements MailSync {
           if (revivedTerminalWork > 0)
             'revived_terminal_work': revivedTerminalWork,
           if (rejudged > 0) 'rejudged_triage': rejudged,
+          if (revivedStoryline > 0) 'revived_storyline': revivedStoryline,
+          // The count the delta feed owed and did not deliver. Absent on every
+          // healthy pass, which is what makes its presence worth reading.
+          if (reconciledInbox + reconciledSent > 0)
+            'reconciled': reconciledInbox + reconciledSent,
+          // A safety net that failed is a fact about the net, not about the
+          // sync: the pass around it succeeded, so this rides on an `ok` row.
+          'reconcile_error': ?reconcileError,
           'backfilled_addressed_me': ?backfilled,
           'revived_needs_you': ?revivedNeedsYou,
+          'backfilled_needs_you': ?backfilledNeedsYou,
           if (inboxResync || sentResync) 'resync': true,
         },
       );
@@ -454,8 +559,94 @@ class SyncService implements MailSync {
     return (newMessages, resynced);
   }
 
+  /// How many of a reconcile's finds it names in the activity row. Enough to
+  /// recognise what the feed dropped, few enough that one bad day does not
+  /// write a mailbox listing into the log.
+  static const int _reconcileSubjectsCap = 10;
+
+  /// The safety net, at most once per [reconcileEvery]. Returns
+  /// `(inbox finds, sent finds, their subjects, the failure or null)`.
+  ///
+  /// [floor] is the pass's own, handed down — see the computation site in
+  /// [syncNow]. Nothing here recomputes it, and nothing here writes a cursor.
+  Future<(int, int, List<String>, String?)> _reconcileIfDue({
+    required String floor,
+  }) async {
+    final stamp = await _store.getPref(mailLastReconcileKey);
+    final last =
+        (stamp == null || stamp.isEmpty) ? null : DateTime.tryParse(stamp);
+    // Absent, empty and unparseable all read as "never". A stamp nobody can
+    // date cannot say the net ran recently, and the honest answer to that
+    // doubt is two cheap requests rather than an unbounded wait.
+    if (last != null &&
+        DateTime.now().toUtc().difference(last.toUtc()) < reconcileEvery) {
+      return (0, 0, const <String>[], null);
+    }
+
+    var inbox = 0;
+    var sent = 0;
+    final subjects = <String>[];
+    String? error;
+    try {
+      final (inboxCount, inboxSubjects) =
+          await _reconcileFolder('inbox', 'inbound', floor: floor);
+      inbox = inboxCount;
+      subjects.addAll(inboxSubjects);
+      final (sentCount, sentSubjects) =
+          await _reconcileFolder('sentitems', 'outbound', floor: floor);
+      sent = sentCount;
+      subjects.addAll(sentSubjects);
+    } catch (e) {
+      // Everything, including the [DeltaResyncRequired] that a 410 becomes. A
+      // reconcile holds no cursor for Graph to expire, so a 410 here is a
+      // server hiccup rather than the recoverable state it is in [_syncFolder]
+      // — and a network failure in a safety net must never take the pass with
+      // it. Both drains have already landed and the enqueue below still has to
+      // run; whatever the inbox half found is kept.
+      debugPrint('sync: mail reconcile failed: $e');
+      error = '$e';
+    }
+
+    // Stamped after the attempt whether it worked or not, and never between
+    // the two folders. A reconcile that fails every time must retry on the
+    // ten-minute cadence, not on every sixty-second poll.
+    await _store.setPref(mailLastReconcileKey, _isoAgo(Duration.zero));
+    return (inbox, sent, subjects.take(_reconcileSubjectsCap).toList(), error);
+  }
+
+  /// One folder's reconcile: the last [reconcileWindow] enumerated from
+  /// scratch, ingested through the same idempotent page path, with the cursor
+  /// left exactly where the ordinary drain put it. Returns the messages seen
+  /// for the first time and their subjects (at most [_reconcileSubjectsCap]).
+  Future<(int, List<String>)> _reconcileFolder(
+    String folder,
+    String direction, {
+    required String floor,
+  }) async {
+    final subjects = <String>[];
+    final count = await _drain(
+      folder,
+      direction,
+      startLink: null,
+      minReceivedIso: _isoAgo(reconcileWindow),
+      // Never a widen: everything a reconcile finds is news the feed owed,
+      // whatever its timestamp, so nothing it ingests is quieted.
+      quietBeforeIso: null,
+      backlogCutoff: floor,
+      persistCursor: false,
+      onFirstSighting: (subject) {
+        if (subjects.length < _reconcileSubjectsCap) subjects.add(subject);
+      },
+    );
+    return (count, subjects);
+  }
+
   /// Walks every page of one delta drain, committing as it goes. Returns how
   /// many messages were seen for the first time.
+  ///
+  /// [persistCursor] is false for a reconcile — see the terminal block below.
+  /// [onFirstSighting] is told the subject of each message this drain is the
+  /// first to see, which is how a reconcile can say what it caught.
   Future<int> _drain(
     String folder,
     String direction, {
@@ -463,6 +654,8 @@ class SyncService implements MailSync {
     required String? minReceivedIso,
     required String? quietBeforeIso,
     required String backlogCutoff,
+    bool persistCursor = true,
+    void Function(String subject)? onFirstSighting,
   }) async {
     var link = startLink;
     var firstRequest = true;
@@ -483,6 +676,7 @@ class SyncService implements MailSync {
         direction,
         quietBeforeIso: quietBeforeIso,
         backlogCutoff: backlogCutoff,
+        onFirstSighting: onFirstSighting,
       );
 
       final next = page.nextLink;
@@ -495,7 +689,12 @@ class SyncService implements MailSync {
       }
 
       final delta = page.deltaLink;
-      if (delta != null && delta.isNotEmpty) {
+      // A reconcile enumerates from scratch, and both Graph and the MCP tool
+      // hand back a deltaLink for such a walk. Storing it would rewind the
+      // folder's delta position to "now" — skipping every change between the
+      // real cursor and this moment — AND stamp `synced_at`, which is what the
+      // vacation rule reads. So a reconcile discards it.
+      if (persistCursor && delta != null && delta.isNotEmpty) {
         await _store.setDeltaLink(folder, delta, source: _source);
       }
       return newMessages;
@@ -569,6 +768,10 @@ class SyncService implements MailSync {
   /// last bootstrap reached — see the `historical` flag in the loop below for
   /// what that buys.
   ///
+  /// [onFirstSighting] is told each message this page is the first to see, by
+  /// subject. Additive: the returned count is unchanged, and a caller that
+  /// passes nothing behaves exactly as before.
+  ///
   /// [backlogCutoff] is the pass's effective floor, handed down from [syncNow]
   /// rather than computed here. Mail older than it lands already
   /// `skipped`/`backlog` — a delta update can replay or introduce a message
@@ -581,6 +784,7 @@ class SyncService implements MailSync {
     String direction, {
     String? quietBeforeIso,
     required String backlogCutoff,
+    void Function(String subject)? onFirstSighting,
   }) async {
     if (raw.isEmpty) return 0;
     final outbound = direction == 'outbound';
@@ -702,6 +906,10 @@ class SyncService implements MailSync {
 
         if (!firstSighting) continue;
         newMessages++;
+        // Only ever a first sighting, so a delta page replaying itself names
+        // nothing. It is what lets the reconcile report WHICH messages the
+        // feed had skipped rather than only how many.
+        onFirstSighting?.call(subject ?? '');
 
         // Spelled out rather than `putIfAbsent`, which takes a synchronous
         // factory and the seed read is a query now.

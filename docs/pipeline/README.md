@@ -23,10 +23,10 @@ is always the authority when they disagree.
 | 5 | **Triage** — urgency, category, summary, action items | **yes** | [03-triage.md](03-triage.md) |
 | 6 | **Needs-you verdict** — does this message want the owner | **yes**† | [11-needs-you.md](11-needs-you.md) |
 | 7 | **Extraction** — evidence, topics, people, intent, importance | **yes** | [04-extraction.md](04-extraction.md) |
-| 8 | Bucket filing — low-value mail to Later | no | [04-extraction.md](04-extraction.md) |
+| 8 | Bucket filing — low-value mail to Later, unless the thread holds an open ask | no | [04-extraction.md](04-extraction.md) |
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
-| 11 | **Storylines** — assign, sweep, refresh, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
+| 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply decision** — does this message need an answer | **yes** | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself | **yes** | [07-replies.md](07-replies.md) |
 | 14 | Attention rescore — Needs You ranking | no | [08-attention.md](08-attention.md) |
@@ -87,3 +87,92 @@ above does not change. See
 The home screen's five-segment stage bar (triage · extract · storyline ·
 draft · settle) is this pipeline rendered per row; `pipeline_progress.dart`
 records the transitions it draws.
+
+## What the home screen shows
+
+Every row's Result cell is one sentence with the reason in it, and every
+reason is a column this pipeline already writes. `resultLine` in
+`app/lib/widgets/home_result.dart` picks the first sentence that matches, in
+this order:
+
+| Sentence | Columns behind it |
+|----------|-------------------|
+| `Filtered — …`, `Newsletter`, `Nothing to do — …` | `message_progress.drop_reason`, plus `messages.gate_reason` for a gated drop; for `not_worthy` the judge's `needs_you_reason` when the verdict was a no, or "the thread is in Later" / "below the attention threshold" when it was a yes |
+| `Failed at <stage>` | the first `message_progress.<stage>_state` that is `error` |
+| `Stalled — waiting on <stage>` | `message_progress.outcome = 'pending'`, no open `work_items` for the message, its thread or its documents, `messages.triage_status` neither pending nor processing, and `message_progress.updated_at` older than 15 minutes |
+| `Triaging…` / `Waiting on <stage>` | the five stage states, and whether any `work_items` row is open ("not queued yet" when none is) |
+| `Needs you — …` | `message_progress.needs_you` with `messages.needs_you_reason` |
+| `Filed in <storyline>` | the row's storyline pointer, or the thread's newest `storyline_members` row, with its `evidence` — or "filed by you" when `added_by = 'user'` |
+| `Later — …` | `conversation_ai.bucket` with `conversation_ai.bucket_reason` |
+| `Draft ready` | `message_progress.draft_state = 'done'` |
+| `Nothing to do` | nothing above matched; the tooltip carries `needs_you_reason` when the verdict was a no |
+
+The eight tiles above the table read the same columns over the last 24 hours,
+and Retry (`PipelineRepairService`) puts back exactly the stages a row still
+owes — never one that finished, and never a dropped row, which is Restore's.
+
+## Finding out what happened to a message
+
+Every sentence above is a summary, and the reason a row got the sentence it
+did is spread across eight tables. `MessageHistoryScreen`
+(`app/lib/screens/message_history_screen.dart`) is where all of it is read at
+once, behind `messageHistoryProvider`, which folds those eight reads into one
+`MessageHistory` and re-reads it behind the progress ticks the message's own
+stages publish. `MessageHistoryHost` (`app/lib/widgets/message_history_host.dart`)
+is the one place that provider is read and every lever below is wired; the
+screen itself is prop-driven. The shell seats it BESIDE the main pane, as the
+`HistoryPanel` kind of side panel inside a `SidePanelHost` (`chrome: false`, the
+host draws the header), so whatever the question was asked from — the home
+table, a thread, a storyline — stays on screen, and the storyline picker its
+`Add to storyline…` opens draws in the main pane while the story stays beside.
+See [../shell.md](../shell.md#what-opens-where).
+
+Four doors reach it, and all four hand it the same `(source,
+source_message_id)` pair:
+
+- **A home row's stage bar or its Result cell.** Two targets on the row rather
+  than one, because those are the two places a reader looks when the sentence
+  is not the one they expected. They nest inside the row's own tap and outside
+  the storyline link and Retry, so each gesture fires exactly one thing.
+- **A home search result.** Home search runs a meaning pass and a word pass
+  and fuses them into ONE ranking, best first — no *Text matches* heading, and
+  one count that is the rows on screen. Gate-dropped mail has no vector at all
+  and is unreachable by meaning, so the words are the only way it is ever
+  found, whenever *Show dropped* is on. A notice above the rows says when only
+  one of the two halves ran. See [05-embeddings.md](05-embeddings.md).
+- **An Archive row**, in the Dropped pile or in an archive search.
+- **"What happened" on a message in a thread**, the fourth button on an
+  inbound row's hover strip, after Why — and the `What happened ›` door at the
+  foot of the Why panel, which swaps the history into the same side slot. Per
+  message and not per thread: the pipeline decides one message at a time. The
+  strip is drawn on inbound rows only, so the owner's own messages reach their
+  history through the home feed.
+
+The screen is one column of sections, in the order the question gets asked:
+the header (subject, sender, source, age, and a link into the thread); the
+**outcome**, which is `resultLine`'s own sentence with its explanation under
+it; the five **stages**, each with what it did, when, and what that means, in
+`HomeStageBar`'s own words so the rail and the tooltip cannot disagree; the
+**judgements** (needs-you verdict and reason, attention bucket with its score
+against the threshold in force, triage urgency/category/summary, the gate and
+whether the owner has overridden it, and the triage status with its error);
+the **storylines** the thread is in and the ones it was kept out of; the
+**work** still queued with its attempts and errors; and every **activity** row
+either the message or its thread wrote, described by `ActivityLogPanel`'s own
+sentences.
+
+The levers come last, and each one is a write with a way back:
+
+| Lever | What it writes | How it is undone |
+|-------|----------------|------------------|
+| Restore (dropped rows only) | `RestoreService` — `messages.gate_override = 'user'`, the progress cascade reset, the stages requeued | Ignore |
+| Ignore this message (kept rows, two taps) | `MessageStore.dropMessage` — a `user` gate, see [02-gates.md](02-gates.md#ignoring-a-kept-message) | Restore |
+| Retry owed stages (stalled or failed rows) | `PipelineRepairService.retryOwed` — exactly the stages still owed, never a terminal one; when nothing at all is owed it runs the settle sweep, which is what a row stuck with every stage terminal and `outcome = 'pending'` is waiting for | nothing to undo; it re-runs work that was owed |
+| Re-judge Needs You (kept rows) | `PipelineRepairService.rejudgeNeedsYou` — requeues `needs_you` on a row that was already judged | press it again after changing the rules |
+| Add to storyline… / Remove (two taps) / Allow again / Add back | `StorylinesNotifier.addThread` / `removeThread` / `unblockThread` — the same methods the storyline's own About block calls | each other; a removal is a block, and Allow again lifts it |
+| Keep in inbox / Send to Later | `ConversationsNotifier.keepThreadInInbox` / `sendThreadToLater` | each other |
+| Edit Needs You rules | nothing — it opens Settings, where the rules live | the editor's own Save |
+| The storyline link | nothing — it opens the storyline, where the charter is edited | the charter editor's own Save |
+
+Every write is followed by a re-read of the screen, because a thread-level
+decision moves rows here without moving any stage and so ticks nothing.

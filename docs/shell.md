@@ -99,7 +99,7 @@ affordance that lied.
 That is Slack's rule, and it is what keeps the room on screen while one
 conversation in it is being read.
 
-`SidePanel` has four kinds, and the panel shows exactly one of them:
+`SidePanel` has five kinds, and the panel shows exactly one of them:
 
 | Kind | What it holds | Opened by |
 |---|---|---|
@@ -107,11 +107,22 @@ conversation in it is being read.
 | `FilePanel` | one file | any card, chip, unfurl or shelf row |
 | `WhyPanel` | why one message got its verdict | the hover **Why** on an inbound row, and the CTA banner |
 | `PersonPanel` | one person | the room header's **Profile**, and tapping the faces on a room or a thread |
+| `HistoryPanel` | what happened to one message — every stage, judgement and queue row, with the levers | the hover **What happened** on an inbound row, the Why panel's `What happened ›`, a home row's stage bar or Result cell, an Archive row |
 
-Why and Person follow the file rule: opened from a thread that is itself
-beside, they REPLACE it. One panel, never two stacked. The Why panel carries no
-⤢ — it is a paragraph about one message, and a paragraph does not improve by
-being given the whole window.
+Why, Person and History follow the file rule: opened from a thread that is
+itself beside, they REPLACE it. One panel, never two stacked — the Why panel's
+`What happened ›` swaps the history into the same slot, and its ✕ returns to
+the transcript, not to Why. Neither Why nor History carries ⤢: each is prose
+about one message, and prose does not improve by being given the whole window.
+The history takes the thread's minimum width (`threadMinWidth`) rather than the
+file's — it is a page of sections and levers, not a caption.
+
+The history is NOT a rung of `_main()`: the storyline picker its
+`Add to storyline…` opens draws in the main pane while the story stays beside,
+which is what gives the picker's Back somewhere to go. Every selector closes it
+through `_clearOverlays()`, like every other panel. The pipeline side of the
+screen — what it reads, what each lever writes — is in
+[pipeline/README.md](pipeline/README.md#finding-out-what-happened-to-a-message).
 
 `_main()`'s ladder is the priority order, top rung first: compose → Settings →
 activity log → add-thread picker → pick-storyline picker → full file viewer →
@@ -249,13 +260,18 @@ never has. The CTA banner stays above both tabs — what a thread wants does not
 stop being true because somebody went looking for an attachment.
 
 **The hover strip** (`app/lib/widgets/hover_actions.dart`) puts **Reply**,
-**Suggest a reply** and **Why** at an inbound row's top-right while the mouse
-is over it. It is a WRAPPER around `MessageRow`, not a change to it: the row
-seeds its collapsed state once, and hover is a per-frame fact about the
-pointer. Touch never enters a `MouseRegion`, so nothing may live only here —
-all three buttons have a home the pointer is not needed for. Why is last,
-because it is the only one that does not act on the mail: the two before it
-write a reply, this one explains the row.
+**Suggest a reply**, **Why** and **What happened** at an inbound row's
+top-right while the mouse is over it. It is a WRAPPER around `MessageRow`, not
+a change to it: the row seeds its collapsed state once, and hover is a
+per-frame fact about the pointer. Touch never enters a `MouseRegion`, so
+nothing may live only here — all four buttons have a home the pointer is not
+needed for (the history is also reachable from the Why panel, from every home
+row and from the archive). The two that explain come after the two that write
+a reply, and What happened comes after Why because it is the longer answer to
+the same question: Why is the verdict, What happened is everything the
+pipeline did to reach it. The strip is drawn on INBOUND rows only, so from a
+thread the history of the owner's own message is reachable through the home
+feed, not the transcript.
 
 **The CTA banner explains, it no longer opens the box.** Tapping it opens
 **Why** on the newest inbound message. The composer is docked and always
@@ -523,8 +539,16 @@ the person room's header `AvatarStack`.
 - **The Why panel**: `WhyPanelBody` inside a `SidePanelHost`, with
   `verdictKey` / `triageKey` / `asksKey` / `attentionKey` / `extractionKey` per
   block and `whatHappenedKey` for the history door. `inbox_why_test.dart`
-  covers the seam (which gesture, which pane); `why_panel_test.dart` owns the
-  wording. A Needs You rail row is titled by its ASK and carries a dimmed
+  covers the seam (which gesture, which pane, and that the door swaps the
+  history into the same slot); `why_panel_test.dart` owns the wording.
+- **The history panel**: `MessageHistoryScreen` (`chrome: false`) inside a
+  `SidePanelHost` titled `What happened`. `message_history_nav_test.dart`
+  covers the shell seam from a home row (opens beside, ✕, Open thread, the
+  picker in main with the story still beside, another stop closes it); the
+  hover door is `HoverActions.historyKeyFor(id)`, pinned in
+  `thread_detail_panel_test.dart`. The story is a lazy `ListView` and the
+  panel is narrower than a pane, so `scrollUntilVisible` a lever before
+  tapping it. A Needs You rail row is titled by its ASK and carries a dimmed
   `· who` suffix, which makes it a `Text.rich` — use `find.textContaining`,
   not `find.text`.
 - **The Person panel**: `PersonPanelBody`, with

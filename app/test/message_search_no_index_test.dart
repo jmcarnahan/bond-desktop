@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/message_search.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -55,7 +56,8 @@ void main() {
   // ONE test, and it has to stay one: the first probe registers sqlite-vec for
   // the rest of the process, so every connection opened after it has the
   // extension and a second test here would be asserting the opposite thing.
-  test('a missing index reads as unavailable, never as "no matches"', () async {
+  test('a missing index narrows the answer, and never reads as "no matches"',
+      () async {
     await store.upsertMessage({
       'source': 'email',
       'source_message_id': 'gated',
@@ -78,11 +80,15 @@ void main() {
 
     final result = await MessageSearch(store, workingServer()).search('invoice');
 
-    // And the sentence built on it. An empty hit list would tell the reader
-    // their mail contains nothing about invoices — a statement about their
-    // mailbox, made on the strength of a feature being switched off.
-    expect(result, isA<MessageSearchUnavailable>());
-    expect((result as MessageSearchUnavailable).reason, contains('index'));
+    // And the sentence built on it. A bare empty hit list would tell the
+    // reader their mail contains nothing about invoices — a statement about
+    // their mailbox, made on the strength of a feature being switched off. The
+    // words still answer, and the notice says the ranking did not.
+    final hits = result as MessageSearchHits;
+    expect([for (final hit in hits.hits) hit.row.sourceMessageId], ['gated']);
+    expect(hits.hits.single.matchedBy, MatchedBy.words);
+    expect(hits.notice, startsWith('Words only'));
+    expect(hits.notice, contains('index'));
 
     // The archive over the same missing index: still an answer, because the
     // text pass never needed one. Same connection and therefore the same test
@@ -92,7 +98,7 @@ void main() {
         await MessageSearch(store, workingServer()).searchArchive('invoice');
 
     expect([for (final row in archive.rows) row.sourceMessageId], ['gated']);
-    expect(archive.notice, startsWith('Text matches only'));
+    expect(archive.notice, startsWith('Words only'));
     expect(archive.notice, contains('index'));
   });
 }

@@ -44,7 +44,19 @@ class StorylinesLoaded extends StorylinesState {
   /// just older than they should be.
   final String? loadError;
 
-  const StorylinesLoaded(this.storylines, [this.loadError]);
+  /// The storylines the user said no to, read in the same pass as the live
+  /// ones and kept apart from them. They are history rather than a queue — the
+  /// rail folds them away — but they are the one storyline decision that used
+  /// to have no way back, so the list has to reach a surface.
+  final List<Storyline> dismissed;
+
+  /// [dismissed] trails [loadError] positionally so that every existing
+  /// construction of this state keeps its meaning.
+  const StorylinesLoaded(
+    this.storylines, [
+    this.loadError,
+    this.dismissed = const [],
+  ]);
 }
 
 class StorylinesError extends StorylinesState {
@@ -71,6 +83,9 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     'storyline_refresh',
     'storyline_recruit',
     'storyline_recap',
+    // An audit takes members out, which moves the thread count the rail
+    // renders and takes cards off the spine the timeline draws.
+    'storyline_audit',
   };
 
   static const String _source = 'email';
@@ -131,20 +146,35 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     if (state is! StorylinesLoaded) state = const StorylinesLoading();
 
     final List<Storyline> rows;
+    final List<Storyline> dismissed;
     try {
       rows = await _store.loadStorylines();
+      // Abandoned here rather than after the second read: a load that has
+      // already been overtaken has no one to hand its rows to, and the query
+      // below is a query nobody is waiting for.
+      if (seq != _fetchSeq) return;
+      // A second read rather than one wider query: the rail renders the two
+      // lists in different places under different rules, and the live list
+      // must never have a dismissed row in it by accident.
+      dismissed = await _store.loadStorylines(statuses: const ['dismissed']);
     } catch (e) {
       if (seq != _fetchSeq) return;
       final current = state;
       state = current is StorylinesLoaded
-          ? StorylinesLoaded(current.storylines, _staleStorylinesMessage)
+          ? StorylinesLoaded(
+              current.storylines,
+              _staleStorylinesMessage,
+              // Carried through for the same reason the rows above it are: a
+              // failed re-read leaves what was on screen where it was.
+              current.dismissed,
+            )
           : StorylinesError('Could not read storylines: $e');
       return;
     }
 
     if (seq != _fetchSeq) return;
     _onMembersChanged?.call();
-    state = StorylinesLoaded(rows);
+    state = StorylinesLoaded(rows, null, dismissed);
   }
 
   // ── user actions ───────────────────────────────────────────────────────
@@ -210,6 +240,36 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     await load();
   }
 
+  /// Lifts a block without filing the thread back — "Allow again". The reload
+  /// is what redraws the About block's two lists, and the members callback
+  /// goes with it because those lists are read by a provider that caches, the
+  /// way the member strip is.
+  Future<void> unblockThread(
+    String id,
+    String source,
+    String conversationKey,
+  ) async {
+    await _service.unblockThread(id, source, conversationKey);
+    _onMembersChanged?.call();
+    await load();
+  }
+
+  /// Queues a re-check of the storyline's automatic members and pumps the
+  /// worker, the way [setCharter] pumps the recruit it queued. Nothing is
+  /// re-read here: the audit reports through the worker, and the listener at
+  /// the top of this class is what reloads when it has done something.
+  Future<void> auditNow(String id) async {
+    await _store.requeueWork('storyline_audit', _source, id);
+    unawaited(_worker?.pump());
+  }
+
+  /// Puts a dismissed storyline back in front of the user as the question it
+  /// was. See [StorylineService.restoreDismissed] for what that lifts.
+  Future<void> undismiss(String id) async {
+    await _service.restoreDismissed(id);
+    await load();
+  }
+
   /// Starts a storyline around one thread and returns its id, so the caller
   /// can select what it just made.
   Future<String> create(
@@ -237,6 +297,10 @@ final storylinesProvider =
       ref.invalidate(storylineMembersProvider);
       ref.invalidate(storylineThreadIdsProvider);
       ref.invalidate(storylineBlockedThreadsProvider);
+      // With the members, always: a removal writes a block in the same
+      // transaction it deletes the membership, and an add clears one. The two
+      // lists move together or the About block contradicts the strip above it.
+      ref.invalidate(storylineBlocksProvider);
     },
   ),
 );
@@ -252,6 +316,19 @@ final storylinesProvider =
 final storylineMembersProvider =
     FutureProvider.autoDispose.family<List<StorylineMember>, String>(
   (ref, id) => ref.watch(messageStoreProvider).membersOf(id),
+);
+
+/// The threads somebody took out of one storyline — the owner's own removals
+/// and the re-check pass's — newest first, with each block's evidence and the
+/// subject of the thread it was written about.
+///
+/// A provider for the reason [storylineMembersProvider] is one, and dropped
+/// with it: the About block renders the two lists side by side, so a cache
+/// that refreshed one and not the other would show a thread as both removed
+/// and a member.
+final storylineBlocksProvider =
+    FutureProvider.autoDispose.family<List<StorylineBlock>, String>(
+  (ref, id) => ref.watch(messageStoreProvider).blocksOf(id),
 );
 
 /// Every document this storyline can show: the files on its member threads,

@@ -56,11 +56,12 @@ import '../widgets/bond_avatar.dart' show BondAvatar;
 import '../widgets/home_pane.dart';
 import '../widgets/icon_rail.dart';
 import '../widgets/inline_alert.dart';
+import '../widgets/message_history_host.dart';
 import '../widgets/needs_you_tabs.dart';
+import '../widgets/notification_ribbon.dart';
 import '../widgets/people_rooms.dart';
 import '../widgets/person_panel.dart';
 import '../widgets/person_room_pane.dart';
-import '../widgets/notification_ribbon.dart';
 import '../widgets/preview/attachment_preview_panel.dart';
 import '../widgets/preview/attachment_viewer_pane.dart';
 import '../widgets/preview/pdf_preview.dart';
@@ -479,6 +480,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (!mounted) return;
     final mail = ref.read(conversationsProvider.notifier).load();
     ref.read(storylinesProvider.notifier).load();
+    // The tiles otherwise re-read only behind a pipeline tick, and a row
+    // crosses the stalled threshold by NOT ticking. This poll is the clock
+    // that lets the In flight tile catch up with the rows under it, which
+    // re-evaluate on every rebuild. A no-op when nobody is watching them.
+    ref.invalidate(homeMetricsProvider);
     await mail;
     if (!mounted) return;
     final selected = _selectedId;
@@ -907,6 +913,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return state is StorylinesLoaded ? state.storylines : const [];
   }
 
+  /// The storylines the user said no to. Read from the same state as
+  /// [_storylines] and never mixed into it: the rail folds these away under a
+  /// heading of their own.
+  List<Storyline> _dismissedStorylines() {
+    final state = ref.watch(storylinesProvider);
+    return state is StorylinesLoaded ? state.dismissed : const [];
+  }
+
   Storyline? _storylineById(String id) {
     for (final storyline in _storylines()) {
       if (storyline.id == id) return storyline;
@@ -1192,7 +1206,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ? null
             : SidePanelHost.widthFor(
                 available: available,
-                minWidth: beside is ThreadPanel
+                // A history is a page of prose and levers, as wide as a
+                // transcript; a file, a person and a Why fit the narrower one.
+                minWidth: (beside is ThreadPanel || beside is HistoryPanel)
                     ? SidePanelHost.threadMinWidth
                     : SidePanelHost.fileMinWidth,
                 mainMinWidth: SidePanelHost.mainMinWidth,
@@ -1424,6 +1440,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return AppRail(
       conversations: conversations,
       storylines: _storylines(),
+      dismissed: _dismissedStorylines(),
       selectedId: _selectedId,
       selectedSource: _selectedSource,
       selectedStorylineId: _selectedStorylineId,
@@ -1475,6 +1492,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         }
         ref.read(storylinesProvider.notifier).dismiss(id);
       },
+      // Back to a suggestion, which is where the row came from — so it leaves
+      // the fold and re-joins the live list asking the same question.
+      onRestoreStoryline: (id) =>
+          ref.read(storylinesProvider.notifier).undismiss(id),
     );
   }
 
@@ -1614,6 +1635,66 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   void _closeSettings() => setState(() => _showingSettings = false);
 
+  /// Opens one message's history BESIDE whatever is on screen.
+  ///
+  /// Deliberately NOT a selector: it clears nothing underneath, because the
+  /// question "what happened to this" is always asked about something the
+  /// reader is already looking at, and closing the panel has to leave them
+  /// where they were. From a side thread, a Why panel or a file it replaces
+  /// that panel — the side shows one thing — and [_openBeside] closes the
+  /// rail overlay at narrow widths.
+  void _openHistory(String source, String id) =>
+      _openBeside(HistoryPanel(source: source, id: id));
+
+  /// Saves the Needs You rules and re-asks the recent window under them.
+  ///
+  /// The editor replaces the WHOLE prompt body, so a Save changes how every
+  /// message is judged — and every verdict already on disk was written under
+  /// the words the owner has just replaced. The last week is re-asked so the
+  /// chip and the tile follow what the new rules say (the needs-you handler's
+  /// tail rewrites the flag when a verdict moves); anything older is history
+  /// rather than a mistake, because those rules were the rules at the time.
+  ///
+  /// It lives here rather than on [AppPrefsNotifier] because the notifier
+  /// holds a store and nothing else: the activity log and the worker pump are
+  /// this host's, and a pref writer that reached for them would be a pref
+  /// writer that could not be tested without them.
+  Future<void> _saveNeedsYouRules(String text) async {
+    // The editor already stores default-equal text as the empty string, so the
+    // two strings compared here are in the same normal form and an unchanged
+    // Save re-judges nothing.
+    final before = ref.read(appPrefsProvider).needsYouRules;
+    final notifier = ref.read(appPrefsProvider.notifier);
+    unawaited(notifier.setNeedsYouRules(text));
+    if (text == before) return;
+
+    // Everything the rest of this needs is read BEFORE the first await, so a
+    // Settings pane closed while the requeue is on disk still gets its log
+    // row and its wake — the work is queued by then, and a queue nobody
+    // pumped would sit until the next sync. Nothing below touches `ref`.
+    final store = ref.read(messageStoreProvider);
+    final log = ref.read(activityLogProvider);
+    final worker = ref.read(aiWorkerProvider);
+    final since = DateTime.now()
+        .toUtc()
+        .subtract(const Duration(days: 7))
+        .toIso8601String();
+    final queued = await store.requeueNeedsYouRejudge(
+      sinceIso: since,
+      sources: inboxSources,
+    );
+    if (queued == 0) return;
+    await log.record(
+      'needs_you_rejudge',
+      count: queued,
+      detail: {'since': since},
+    );
+    // The same wake the attachment digest's requeue relies on: on a running
+    // drain this only sets the re-pump flag, and the future it returns is that
+    // drain's.
+    unawaited(worker.pump());
+  }
+
   /// Opens the New message screen. A pane and not a section, like Settings and
   /// the log, and it clears the same things they do — including the reply
   /// window, which belongs to a thread that is no longer on screen.
@@ -1707,7 +1788,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       needsYouDefaultRules: needsYouDefaultRules,
       needsYouFixedTail: needsYouOutputContract,
       needsYouRulesMaxLength: needsYouRulesCap,
-      onNeedsYouRulesSaved: (text) => unawaited(notifier.setNeedsYouRules(text)),
+      onNeedsYouRulesSaved: (text) => unawaited(_saveNeedsYouRules(text)),
+      needsYouRejudging: ref.watch(needsYouPendingProvider).valueOrNull ?? 0,
       showActivityLog: prefs.showActivityLog,
       onShowActivityLogChanged: (on) =>
           unawaited(notifier.setShowActivityLog(on)),
@@ -1832,6 +1914,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       lastMailSyncIso: stamps?.mailIso,
       lastTeamsSyncIso: stamps?.teamsIso,
       lastSweepIso: stamps?.sweepIso,
+      lastReconcileIso: stamps?.reconcileIso,
       // Handed over as the future it is, so the section's button can hold
       // 'Refreshing…' until both pulls are back.
       onRefreshNow: _refreshAll,
@@ -2088,10 +2171,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Exactly one view, never two: compose, then Settings, then the activity
   /// log, then the two picker panes, then the full attachment viewer, then the
   /// thread transcript, then the storyline timeline, then the section
-  /// overview. The order is the priority — compose, Settings and the log come
-  /// first because they are the three that are not about the mail already on
-  /// screen, and a pane outranks what it was opened from because it is the
-  /// newer thing the user asked for.
+  /// overview. A message's history is not a rung: it opens BESIDE, as a
+  /// [HistoryPanel], so the picker its Add to storyline… opens draws here
+  /// while the story stays on screen. The order is the priority — compose,
+  /// Settings and the log come first because they are the three that are not
+  /// about the mail already on screen, and a pane outranks what it was opened
+  /// from because it is the newer thing the user asked for.
   ///
   /// The full-pane file viewer sits directly above the transcript because that
   /// is what it was expanded from and what Back returns to — and above the
@@ -2255,6 +2340,56 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onSearch: (query) =>
           ref.read(homeFeedProvider.notifier).submitSearch(query),
       onExitSearch: () => ref.read(homeFeedProvider.notifier).exitSearch(),
+      // Fire-and-forget, like Restore: the service swallows its own failures
+      // and the row's next re-read is what reports whether anything moved.
+      // The one thing a re-read cannot say is that nothing was owed, because
+      // the row looks the same afterwards — so that answer is spoken.
+      onRetry: (source, id) => unawaited(() async {
+        final stages =
+            await ref.read(pipelineRepairServiceProvider).retryOwed(source, id);
+        if (!mounted || stages.isNotEmpty) return;
+        _toast('Nothing to retry — every stage has finished.');
+      }()),
+      // Two doors on every row — the stage bar and the Result cell — because
+      // those are the two places a reader looks when the sentence is not the
+      // one they expected.
+      onOpenHistory: _openHistory,
+    );
+  }
+
+  /// One message's whole story, and every lever beside it, in the side panel.
+  ///
+  /// The story itself, and every provider behind it, live in
+  /// [MessageHistoryHost]; what is left here is what only this screen can
+  /// answer — where Back goes, and where the storyline picker is drawn. No ⤢,
+  /// for the Why panel's reason: it is prose about one message and does not
+  /// improve by being given the whole window.
+  Widget _historyPanel(HistoryPanel side) {
+    return SidePanelHost(
+      title: 'What happened',
+      leading: const Icon(Icons.history, size: 18),
+      onClose: _closeSide,
+      child: MessageHistoryHost(
+        target: (source: side.source, id: side.id),
+        // The host draws the header; the story renders bare inside it.
+        chrome: false,
+        // Back only closes the panel. Whatever was underneath — the thread,
+        // the archive, the home table — was never cleared, so it is still
+        // there.
+        onBack: _closeSide,
+        onHome: () => _selectSection(RailSection.home),
+        onOpenThread: (threadSource, conversationKey) =>
+            _select(conversationKey, source: threadSource),
+        onOpenStoryline: _selectStoryline,
+        // The picker overlays the main pane rather than replacing the panel —
+        // see [_main] — so filing from here comes back to the story it was
+        // filed from.
+        onAddToStoryline: (source, threadKey) => setState(
+          () => _pickingStorylineForThread = (source: source, id: threadKey),
+        ),
+        onKeepInInbox: _keepThread,
+        onEditRules: _openSettings,
+      ),
     );
   }
 
@@ -2423,6 +2558,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         if (!mounted) return;
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
+      // Empty for the frame before the read lands, like the members above.
+      blocks: ref.watch(storylineBlocksProvider(storyline.id)).valueOrNull ??
+          const [],
+      onUnblockThread: (source, key) =>
+          notifier.unblockThread(storyline.id, source, key),
+      // The spine gains a card, so it reloads with the list — the same pair of
+      // reads the remove above does, in the other direction.
+      onAddBackThread: (source, key) async {
+        await notifier.addThread(storyline.id, source, key);
+        if (!mounted) return;
+        ref.read(storylineTimelineProvider(storyline.id).notifier).load();
+      },
+      onAudit: () => notifier.auditNow(storyline.id),
       onOpenThread: (source, key) => _select(key, source: source),
       // The card's own tap. A thread opens BESIDE the spine rather than over
       // it: the storyline is the room the reader is in, and the answer they
@@ -2860,6 +3008,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onUseInReply:
           canReply ? (a) => _useAttachmentInReply(target, a) : null,
       onOpenLink: (url) => unawaited(_launchExternal(url)),
+      // Per MESSAGE, not per thread: the pipeline decides one message at a
+      // time, and the row's own header is where the question is asked.
+      onWhatHappened: (message) => _openHistory(message.source, message.id),
     );
 
     // The composer sits OUTSIDE the panel, in this column: the panel renders a
@@ -2911,6 +3062,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ThreadPanel() => _threadPanel(side),
         PersonPanel() => _personPanel(side),
         WhyPanel() => _whyPanel(side),
+        HistoryPanel() => _historyPanel(side),
       };
 
   /// Why one message got the verdict it did.
@@ -2959,9 +3111,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ai: facts.ai,
           threshold: threshold,
           now: DateTime.now(),
-          // The history screen is not on this branch yet. Null draws no door
-          // rather than a dead one — see [WhyPanelBody.onWhatHappened].
-          onWhatHappened: null,
+          // The longer answer, in the same slot: the history replaces this
+          // panel, and its ✕ comes back to the transcript, not to here.
+          onWhatHappened: () => _openHistory(side.source, side.messageId),
         ),
       ),
     );
@@ -3843,6 +3995,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ref.read(archiveProvider.notifier).noteRestored(source, id);
           unawaited(ref.read(restoreServiceProvider).restore(source, id));
         },
+        // The same door the home feed opens: a dropped row is exactly the one
+        // somebody wants the reason for.
+        onOpenHistory: _openHistory,
         search: archive.search,
         searching: archive.searching,
         searchNotice: archive.searchNotice,

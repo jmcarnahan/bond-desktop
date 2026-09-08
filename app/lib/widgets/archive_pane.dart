@@ -101,6 +101,12 @@ class ArchivePane extends StatefulWidget {
   /// one message and a restore gives back exactly that one.
   final void Function(String source, String sourceMessageId) onRestore;
 
+  /// Opens one message's whole story — why the gates took it, what each stage
+  /// did, what is still queued. Optional, and null leaves the bar and the
+  /// Result cell part of the row's own tap: this pane is dumb about whether
+  /// the host has a history screen to show.
+  final void Function(String source, String sourceMessageId)? onOpenHistory;
+
   /// What a query came back with, or null for the tabs.
   final ArchiveSearch? search;
 
@@ -148,6 +154,7 @@ class ArchivePane extends StatefulWidget {
     required this.onLoadMoreDropped,
     required this.onOpenStoryline,
     required this.onRestore,
+    this.onOpenHistory,
     required this.search,
     required this.searching,
     required this.searchNotice,
@@ -326,6 +333,7 @@ class _ArchivePaneState extends State<ArchivePane> {
                   muteBar: true,
                   onOpenThread: widget.onOpen,
                   onOpenStoryline: widget.onOpenStoryline,
+                  onOpenHistory: widget.onOpenHistory,
                 );
                 // A search spans the piles, so only the rows the gates took
                 // get the way back: a hit that was never dropped has nothing
@@ -368,6 +376,7 @@ class _ArchivePaneState extends State<ArchivePane> {
             onOpenThread: widget.onOpen,
             onOpenStoryline: widget.onOpenStoryline,
             onRestore: widget.onRestore,
+            onOpenHistory: widget.onOpenHistory,
           ),
       };
 }
@@ -417,6 +426,7 @@ class _DroppedList extends StatefulWidget {
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
   final void Function(String source, String sourceMessageId) onRestore;
+  final void Function(String source, String sourceMessageId)? onOpenHistory;
 
   const _DroppedList({
     required this.rows,
@@ -428,6 +438,7 @@ class _DroppedList extends StatefulWidget {
     required this.onOpenThread,
     required this.onOpenStoryline,
     required this.onRestore,
+    required this.onOpenHistory,
   });
 
   /// How close to the bottom the viewport has to get before the next page is
@@ -530,6 +541,7 @@ class _DroppedListState extends State<_DroppedList> {
                   muteBar: true,
                   onOpenThread: widget.onOpenThread,
                   onOpenStoryline: widget.onOpenStoryline,
+                  onOpenHistory: widget.onOpenHistory,
                 );
                 return _withRestore(tile, row, widget.onRestore);
               },

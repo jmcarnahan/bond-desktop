@@ -5,6 +5,7 @@ import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
+import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart'
     show needsYouDefaultRules;
 import 'package:bond_inbox/services/sync_service.dart';
@@ -65,6 +66,10 @@ void main() {
         initialSectionProvider.overrideWithValue(RailSection.needsYou),
         initialAppPrefsProvider.overrideWithValue(prefs),
         syncServiceProvider.overrideWithValue(_FakeSync()),
+        // A worker with no handlers: a rules save wakes the queue, and the
+        // real one would reach a model server this test has no business
+        // dialling — and would claim the very rows the assertions read.
+        aiWorkerProvider.overrideWithValue(AiWorker(store, handlers: const [])),
       ],
       child: const MaterialApp(home: InboxScreen()),
     ));
@@ -175,6 +180,98 @@ void main() {
           .text,
       needsYouDefaultRules,
     );
+  });
+
+  /// One kept inbound message, [ageDays] old.
+  Future<void> seedJudgeable(String id, {required int ageDays}) async {
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': id,
+      'conversation_key': 'conv-$id',
+      'direction': 'inbound',
+      'subject': 'Launch date',
+      'from_address': 'sarah@x.com',
+      'received_at': DateTime.now()
+          .toUtc()
+          .subtract(Duration(days: ageDays))
+          .toIso8601String(),
+      'triage_status': 'triaged',
+    });
+  }
+
+  /// Every `needs_you` work row, as `entity_id` → status.
+  Future<Map<String, String>> needsYouWork() async {
+    final rows = await db
+        .customSelect(
+          "SELECT entity_id, status FROM work_items "
+          "WHERE task_kind = 'needs_you'",
+        )
+        .get();
+    return {
+      for (final row in rows)
+        row.data['entity_id'] as String: row.data['status'] as String,
+    };
+  }
+
+  Future<List<Map<String, Object?>>> rejudgeEvents() async => [
+        for (final row in await store.recentActivity())
+          if (row['kind'] == 'needs_you_rejudge') row,
+      ];
+
+  /// Types [text] into the rules field and saves it.
+  Future<void> saveRules(WidgetTester tester, String text) async {
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(NeedsYouRulesEditor),
+        matching: find.byType(TextField),
+      ),
+      text,
+    );
+    await tester.pump();
+    await tapVisible(tester, find.text('Save'));
+    await tester.pump();
+    await tester.pump();
+  }
+
+  testWidgets('saving the same rules again re-judges nothing', (tester) async {
+    // The whitespace is what makes Save available at all: the editor trims on
+    // the way out, so what the host is handed is the string already stored.
+    await store.setPref(needsYouRulesKey, 'Invoices always.');
+    await seedJudgeable('m1', ageDays: 1);
+
+    await openRules(tester);
+    await saveRules(tester, '  Invoices always. \n');
+
+    expect(await needsYouWork(), isEmpty);
+    expect(await rejudgeEvents(), isEmpty);
+  });
+
+  testWidgets('new rules re-judge the recent window and record what they queued',
+      (tester) async {
+    await seedJudgeable('m-today', ageDays: 1);
+    await seedJudgeable('m-week', ageDays: 5);
+    await seedJudgeable('m-month', ageDays: 30);
+
+    await openRules(tester);
+    await saveRules(tester, 'Anything about the budget.');
+
+    expect(
+      (await needsYouWork()).keys,
+      unorderedEquals(['m-today', 'm-week']),
+      reason: 'the month-old verdict is history, not a mistake',
+    );
+    final events = await rejudgeEvents();
+    expect(events, hasLength(1));
+    expect(events.single['count'], 2);
+  });
+
+  testWidgets('the Needs You summary counts the queue down', (tester) async {
+    await seedJudgeable('m-today', ageDays: 1);
+
+    await openRules(tester);
+    await saveRules(tester, 'Anything about the budget.');
+
+    expect(find.textContaining('judging 1 message'), findsOneWidget);
   });
 
   testWidgets('the Home & feed switch moves the feed now, not at next launch',
