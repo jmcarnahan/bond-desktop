@@ -49,11 +49,14 @@ void main() {
     required String receivedAt,
     String source = 'email',
     String? gateReason,
+    /// Files the message under another message's thread — the one case a
+    /// test needs two messages on one conversation.
+    String? conversationKey,
   }) =>
       store.upsertMessage({
         'source': source,
         'source_message_id': id,
-        'conversation_key': 'c-$id',
+        'conversation_key': conversationKey ?? 'c-$id',
         'direction': 'inbound',
         'subject': 'Subject $id',
         'from_name': 'Sender $id',
@@ -69,12 +72,14 @@ void main() {
     required String receivedAt,
     String source = 'email',
     String? gateReason,
+    String? conversationKey,
   }) async {
     final ingested = await seed(
       id,
       receivedAt: receivedAt,
       source: source,
       gateReason: gateReason,
+      conversationKey: conversationKey,
     );
     progress.noteIngest(source, id, receivedAt: ingested!);
   }
@@ -525,6 +530,41 @@ void main() {
 
       expect(idsOf(notifier), ['loud']);
       expect(notifier.state.pendingNewCount, 0);
+      await quiet(tester);
+    });
+
+    testWidgets('an older message of a thread already shown is not counted',
+        (tester) async {
+      // The store's flag carries the newest-kept-in-thread clause the page
+      // read has, which one row alone never could: a backfilled older message
+      // of a thread whose newest row is on the table is refused the count,
+      // where a Dart twin reading the row alone would have promised a row the
+      // release could not show.
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.needsYou);
+
+      await arrive('loud', receivedAt: '2026-09-03T10:00:00Z');
+      await thread('loud', owed: true);
+      await settle('loud', needsYou: true);
+      await settleTicks(tester);
+      await notifier.releasePending();
+      expect(idsOf(notifier), ['loud']);
+
+      await arrive(
+        'loud-older',
+        receivedAt: '2026-09-03T08:00:00Z',
+        conversationKey: 'c-loud',
+      );
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['loud']);
+      expect(
+        notifier.state.pendingNewCount,
+        0,
+        reason: 'the thread is already standing for itself on the table',
+      );
       await quiet(tester);
     });
 

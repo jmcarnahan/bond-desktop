@@ -756,6 +756,38 @@ void main() {
       );
     });
 
+    test('under Needs You the threshold binds, and binds where it should',
+        () async {
+      // The one filter that carries an argument. A thread scoring 0.3 is
+      // admitted under a bar of 0.3 and refused under 0.5 — and a mis-bind of
+      // the number into the source list would fail this loudly rather than
+      // quietly admit everything.
+      await seed(
+        'scored',
+        conversationKey: 'scored',
+        receivedAt: '2026-09-01T09:00:00Z',
+        threadState: 'needs_reply',
+        attentionScore: 0.3,
+      );
+      final keys = [(source: 'email', id: 'scored')];
+
+      final under = await store.progressPatchFor(
+        keys,
+        filter: HomeFilter.needsYou,
+        threshold: 0.3,
+      );
+      expect(under.single.admitted, isTrue);
+
+      final over = await store.progressPatchFor(
+        keys,
+        filter: HomeFilter.needsYou,
+        threshold: 0.5,
+      );
+      expect(over.single.admitted, isFalse);
+      expect(over.single.row.sourceMessageId, 'scored',
+          reason: 'refused rows still come back — the table patches in place');
+    });
+
     test('no chips up admits nothing and still hands back the rows', () async {
       await seed('m1');
 
