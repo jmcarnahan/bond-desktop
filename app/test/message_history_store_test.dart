@@ -540,6 +540,51 @@ void main() {
       expect(await store.hasOpenAsk('email', 'c1'), isFalse);
     });
 
+    test('Ignore of the only kept inbound folds the thread to waiting and '
+        'drops its ask', () async {
+      await seed('m1');
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'subject': 'Renewal paperwork',
+        'state': 'needs_reply',
+        'cta_text': 'Look at the DPA',
+        'cta_urgency': 'high',
+      });
+      await db.customUpdate(
+        "UPDATE message_progress SET needs_you = 1 "
+        "WHERE source = 'email' AND source_message_id = 'm1'",
+      );
+
+      await store.dropMessage('email', 'm1');
+
+      // Ignore is the owner working a gate by hand, so it lowers the thread
+      // exactly as a gate does — and an ask can only come from a kept
+      // message, so the CTA and the chip go with it.
+      final thread = (await store.getConversationRow('email', 'c1'))!;
+      expect(thread['state'], 'waiting');
+      expect(thread['cta_text'], isNull);
+      expect(thread['cta_urgency'], 'normal');
+      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+    });
+
+    test('an Ignore leaves a thread with a kept newer inbound asking',
+        () async {
+      await seed('m1', receivedAt: '2026-09-01T08:00:00Z');
+      await seed('m2', receivedAt: '2026-09-01T09:00:00Z');
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'subject': 'Renewal paperwork',
+        'state': 'needs_reply',
+      });
+
+      await store.dropMessage('email', 'm1');
+
+      expect(
+        (await store.getConversationRow('email', 'c1'))!['state'],
+        'needs_reply',
+      );
+    });
+
     test('an Ignore settles the pending notify row', () async {
       // Otherwise the next coordinator sweep re-decides a row the owner has
       // already thrown out — and every admitted row settles exactly once.

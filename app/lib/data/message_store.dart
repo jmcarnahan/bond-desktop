@@ -874,22 +874,6 @@ WHERE source = ? AND conversation_key = ?
         .customSelect(
           'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score, '
           '  ai.snoozed_until AS snoozed_until, '
-          // Whether the pipeline threw away EVERY message on the thread — the
-          // owner's own copies of a self-addressed test, an auto-reply, a
-          // backlog nobody read. The state machine folds `needs_reply` onto a
-          // thread the moment an inbound arrives, before the gate has spoken,
-          // and nothing folds it back when the gate drops that message; this
-          // column is how the Needs You rule finds out. A thread with no
-          // progress rows at all answers 0, so a row older than the progress
-          // table keeps whatever its state says.
-          '  (CASE WHEN EXISTS (SELECT 1 FROM message_progress p '
-          '                      WHERE p.source = c.source '
-          '                        AND p.conversation_key = c.conversation_key) '
-          '         AND NOT EXISTS (SELECT 1 FROM message_progress p '
-          '                      WHERE p.source = c.source '
-          '                        AND p.conversation_key = c.conversation_key '
-          '                        AND ${_keptProgress('p')}) '
-          '        THEN 1 ELSE 0 END) AS all_dropped, '
           '  (SELECT COUNT(*) FROM messages m '
           '   WHERE m.source = c.source AND m.conversation_key = c.conversation_key '
           "     AND m.direction = 'inbound' AND m.is_read = 0) AS unread_count, "
@@ -1105,6 +1089,183 @@ WHERE source = ? AND conversation_key = ?
       'WHERE source = ? AND conversation_key = ?',
       variables: _args([state.wire, now, now, source, conversationKey]),
     );
+  }
+
+  /// A message the gate KEPT, for one aliased `messages` table.
+  ///
+  /// The one spelling of "kept" in this file, spliced by alias, because
+  /// several readers ask the same question and three spellings of it are
+  /// three ways for the rail, the tile and the thread's own state to
+  /// disagree.
+  ///
+  /// Kept means the gate did not throw the message out. Two subtleties ride
+  /// in the clause:
+  /// - a chat stored before chats were triaged was born `skipped` under
+  ///   `teams_source`, and it is a real message from a real person — the
+  ///   `skipped` there records a pipeline that did not exist yet, not a
+  ///   judgement about the words.
+  /// - a settle-time `not_worthy` drop is NOT a gate. It is a verdict about a
+  ///   message the gate kept, and it leaves `triage_status` alone — so such a
+  ///   message counts as kept here, which is the point: the pipeline deciding
+  ///   a message was not worth a card is not the pipeline deciding it was
+  ///   never said.
+  static String keptMessageSql(String alias) => "($alias.triage_status "
+      "<> 'skipped' OR $alias.gate_reason = 'teams_source')";
+
+  /// Re-derives one thread's state from the messages the gate KEPT, in ONE
+  /// direction, and says which state it wrote (null when nothing moved).
+  ///
+  /// The fold at ingest sets `needs_reply` the moment an inbound lands, and
+  /// the gates speak afterwards — at the claim, at an Ignore, at a backlog
+  /// demotion. This is how the thread finds out. The rule is the fold's own,
+  /// re-read off the table: `needs_reply` iff a kept inbound exists and is
+  /// STRICTLY newer than the newest outbound (no outbound at all counts as
+  /// newer), else `waiting`. The asymmetry is the fold's — ties settle the
+  /// thread, because a reply and the mail it answers sharing a timestamp is a
+  /// reply, not an unanswered question.
+  ///
+  /// Outbound has NO kept clause. An outbound message is born
+  /// `skipped`/`outbound` by the gates — triage answers "does this need me?"
+  /// and the user's own send never does — so requiring it to be kept would
+  /// throw away every reply the thread contains. Whatever the gate stamped
+  /// it, an outbound is the owner's own word.
+  ///
+  /// ONE direction, and [restored] picks which:
+  /// - `restored: false` may only lower `needs_reply → waiting`. A gate drop
+  ///   can only take an obligation away. Raising here would let a widened
+  ///   sync window reopen threads the user closed months ago — exactly what
+  ///   the fold's `historical` flag exists to prevent, and the store does not
+  ///   remember which rows were historical, so the only way to honour that
+  ///   flag is to never raise on this path.
+  /// - `restored: true` may only raise `waiting → needs_reply`. The owner
+  ///   pulling one message back out of the dropped pile is a reason for the
+  ///   thread to ask again, and never a reason to quieten it.
+  ///
+  /// `done` is a human's decision and neither direction moves it.
+  ///
+  /// A lowering refold that finds NO kept inbound at all also clears the
+  /// thread's CTA and its Needs You chips: an ask can only come from a kept
+  /// message, and a thread with nothing kept has nothing anybody could be
+  /// answering.
+  ///
+  /// Written through [setConversationState] so `state_changed_at` is stamped
+  /// — "waiting since the gate spoke" is a different row from "waiting since
+  /// last month", and only that write knows.
+  Future<String?> refoldThreadState(
+    String source,
+    String sourceMessageId, {
+    required bool restored,
+  }) async {
+    return db.transaction(() async {
+      final rows = await db
+          .customSelect(
+            'SELECT conversation_key FROM messages '
+            'WHERE source = ? AND source_message_id = ?',
+            variables: _args([source, sourceMessageId]),
+          )
+          .get();
+      if (rows.isEmpty) return null;
+      final key = rows.first.data['conversation_key'] as String? ?? '';
+      if (key.isEmpty) return null;
+      return _refoldThreadByKey(source, key, restored: restored);
+    });
+  }
+
+  /// [refoldThreadState] with the thread already resolved, for the callers
+  /// that have a key and no particular message — the backlog demotion, which
+  /// moves many messages at once, and the one-shot repair.
+  ///
+  /// No transaction of its own: the public entry point above opens one, the
+  /// two writers that call this directly are already inside theirs, and the
+  /// one-shot repair walks thread by thread on purpose — a single transaction
+  /// over a whole mailbox is a lock nobody needs held.
+  Future<String?> _refoldThreadByKey(
+    String source,
+    String key, {
+    required bool restored,
+  }) async {
+    final current = await db
+        .customSelect(
+          'SELECT state FROM conversations '
+          'WHERE source = ? AND conversation_key = ?',
+          variables: _args([source, key]),
+        )
+        .get();
+    if (current.isEmpty) return null;
+    final state = current.first.data['state'] as String? ?? 'waiting';
+    // A human's decision, and nothing in the pipeline outranks it.
+    if (state == 'done') return null;
+
+    final marks = await db
+        .customSelect(
+          'SELECT '
+          '  (SELECT MAX(m.received_at) FROM messages m '
+          '   WHERE m.source = ? AND m.conversation_key = ? '
+          "     AND m.direction = 'inbound' AND ${keptMessageSql('m')}"
+          '  ) AS kept_inbound, '
+          '  (SELECT MAX(m.received_at) FROM messages m '
+          '   WHERE m.source = ? AND m.conversation_key = ? '
+          "     AND m.direction = 'outbound'"
+          '  ) AS last_outbound',
+          variables: _args([source, key, source, key]),
+        )
+        .getSingle();
+    final keptInbound = marks.data['kept_inbound'] as String?;
+    final lastOutbound = marks.data['last_outbound'] as String?;
+
+    final computed = keptInbound != null &&
+            (lastOutbound == null || keptInbound.compareTo(lastOutbound) > 0)
+        ? 'needs_reply'
+        : 'waiting';
+    if (computed == state) return null;
+
+    if (restored) {
+      if (!(state == 'waiting' && computed == 'needs_reply')) return null;
+    } else {
+      if (!(state == 'needs_reply' && computed == 'waiting')) return null;
+      if (keptInbound == null) {
+        await db.customUpdate(
+          "UPDATE conversations SET cta_text = NULL, cta_urgency = 'normal', "
+          'updated_at = ? WHERE source = ? AND conversation_key = ?',
+          variables: _args([_nowIso(), source, key]),
+        );
+        await clearNeedsYou(source, key);
+      }
+    }
+
+    await setConversationState(
+      source,
+      key,
+      ConversationState.fromWire(computed),
+    );
+    return computed;
+  }
+
+  /// The one-shot repair: every thread still claiming `needs_reply` is
+  /// re-derived with the lowering rule, across every connector. Returns how
+  /// many actually moved.
+  ///
+  /// These are the rows written before the fold learned to wait for the gate:
+  /// an inbound landed, the thread said `needs_reply`, and the gate that
+  /// threw the message out a moment later told nobody. Only `needs_reply`
+  /// rows are read because only they can move — the rule here never raises.
+  Future<int> refoldAllThreadStates() async {
+    final rows = await db
+        .customSelect(
+          'SELECT source, conversation_key FROM conversations '
+          "WHERE state = 'needs_reply'",
+        )
+        .get();
+    var moved = 0;
+    for (final row in rows) {
+      final written = await _refoldThreadByKey(
+        row.data['source'] as String? ?? 'email',
+        row.data['conversation_key'] as String? ?? '',
+        restored: false,
+      );
+      if (written != null) moved++;
+    }
+    return moved;
   }
 
   /// Which way the thread's last message went, or null when it has none.
@@ -1403,9 +1564,17 @@ RETURNING *
   /// this one row, so it is never demoted back to backlog even when it sits
   /// far outside the newest slice — which is exactly where a restore from the
   /// archive usually finds it.
-  Future<void> capPendingTriage(int cap, {String source = 'email'}) async {
-    await db.customUpdate(
-      '''
+  ///
+  /// Returns how many THREADS the demotion then folded back to `waiting`.
+  /// Demoting a message is a gate speaking late, so every thread it touched
+  /// is re-derived from what is left kept ([refoldThreadState]) — a thread
+  /// whose only inbound just left the pipeline is nobody's to answer, and the
+  /// whole demotion runs in one transaction so no reader can see the messages
+  /// skipped while their threads still ask for a reply.
+  Future<int> capPendingTriage(int cap, {String source = 'email'}) {
+    return db.transaction(() async {
+      final demoted = await db.customWriteReturning(
+        '''
 UPDATE messages SET triage_status = 'skipped', gate_reason = 'backlog',
   updated_at = ?
 WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
@@ -1415,9 +1584,26 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
     ORDER BY received_at DESC LIMIT ?
   )
+RETURNING conversation_key
 ''',
-      variables: _args([_nowIso(), source, source, cap]),
-    );
+        variables: _args([_nowIso(), source, source, cap]),
+      );
+      // DISTINCT in Dart rather than in SQL: one demotion legitimately takes
+      // several messages off the same thread, and refolding that thread once
+      // per message would be the same answer written four times.
+      final keys = <String>{
+        for (final row in demoted)
+          if ((row.data['conversation_key'] as String? ?? '').isNotEmpty)
+            row.data['conversation_key'] as String,
+      };
+      var refolded = 0;
+      for (final key in keys) {
+        final written =
+            await _refoldThreadByKey(source, key, restored: false);
+        if (written != null) refolded++;
+      }
+      return refolded;
+    });
   }
 
   /// Flips every message the last run left mid-flight back to `pending`.
@@ -1631,6 +1817,13 @@ WHERE source = ? AND triage_status = 'pending' AND direction = 'inbound'
         state: 'suppressed',
         reason: 'gated',
       );
+
+      // And the thread hears about it. Ignore is the owner working a gate by
+      // hand, so it lowers the same way every other gate does: a thread whose
+      // only kept inbound just left is nobody's to answer. Inside the
+      // transaction, because a message skipped on `messages` while its thread
+      // still says `needs_reply` is exactly the disagreement this fixes.
+      await refoldThreadState(source, sourceMessageId, restored: false);
 
       // The chips go and the VERDICT stays. `needs_you` is the snapshot the
       // rails and the digest read; `needs_you_verdict` is what the judge
@@ -5306,7 +5499,7 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
   p.outcome, p.dropped, p.drop_reason, p.needs_you, p.urgency, p.updated_at,
   $_effectiveStorylineId AS storyline_id,
   m.subject, m.from_name, m.from_address, m.has_attachments, m.summary,
-  m.needs_you_verdict, m.needs_you_reason, m.gate_reason,
+  m.needs_you_verdict, m.needs_you_reason, m.gate_reason, m.triage_status,
   c.cta_text, c.state AS thread_state,
   s.title AS storyline_title,
   ai.bucket, ai.bucket_reason, ai.attention_score,
@@ -6007,11 +6200,12 @@ RETURNING source, source_message_id, received_at
   ///
   /// It is a SCALAR SUBQUERY rather than a column of the aggregate, and that
   /// is what lets one statement answer two questions about two spans of time:
-  /// the subquery has no [sinceIso] in it. Its two LEFT JOINs live inside it
-  /// and are aliased `c` and `ai` because that is what the fragment reads;
-  /// the outer query carries neither, since needs_you was the only reason they
-  /// were ever there. Both are keyed on `(source, conversation_key)`, the
-  /// primary key of both tables, so neither can turn one progress row into two.
+  /// the subquery has no [sinceIso] in it. Its joins live inside it: `c` and
+  /// `ai` because that is what the [_liveNeedsYouThread] fragment reads, and
+  /// `m2` because "kept" is [keptMessageSql], a fact about the MESSAGE. The
+  /// outer query carries none of the three, since needs_you was the only
+  /// reason they were ever wanted. All three are keyed on the primary key of
+  /// the table they join, so none can turn one progress row into two.
   ///
   /// Still one statement, which is still the whole point: read separately, a
   /// thread settling between two queries would land in one number and not the
@@ -6035,11 +6229,13 @@ SELECT
   COALESCE(SUM(p.dropped), 0) AS dropped,
   (SELECT COUNT(DISTINCT p2.source || char(10) || p2.conversation_key)
      FROM message_progress p2
+     JOIN messages m2
+       ON m2.source = p2.source AND m2.source_message_id = p2.source_message_id
      LEFT JOIN conversations c
        ON c.source = p2.source AND c.conversation_key = p2.conversation_key
      LEFT JOIN conversation_ai ai
        ON ai.source = p2.source AND ai.conversation_key = p2.conversation_key
-    WHERE ${_keptProgress('p2')} AND p2.source IN ($places)
+    WHERE ${keptMessageSql('m2')} AND p2.source IN ($places)
       AND $_liveNeedsYouThread) AS needs_you,
   COALESCE(SUM(CASE WHEN p.storyline_id IS NOT NULL THEN 1 ELSE 0 END), 0)
     AS storylined,
@@ -6073,18 +6269,6 @@ WHERE p.received_at >= ? AND p.source IN ($places)
         .getSingle();
     return HomeMetrics.fromRow(row.data);
   }
-
-  /// A progress row the pipeline KEPT, for one aliased table.
-  ///
-  /// `dropped = 0`, plus the `teams_source` tolerance every other reader of a
-  /// kept message carries: a chat stored before chats were triaged was born
-  /// `skipped` under that reason and is a real message from a real person.
-  /// Written once and spliced by alias, because the Needs You rule reads it
-  /// in three places — the conversation list's `all_dropped`, the tile's
-  /// count, and the filter's newest-kept-message cursor — and three spellings
-  /// of "kept" are three ways for the rail and the tile to disagree.
-  static String _keptProgress(String alias) =>
-      "($alias.dropped = 0 OR $alias.drop_reason = 'teams_source')";
 
   /// `isNeedsYou` spelled in SQL, over the `conversations c` and
   /// `conversation_ai ai` joins [_homeFeedJoins] already carries.
@@ -6131,6 +6315,13 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// thread being its newest message the app kept. Every other filter is
   /// message-level, because every other tile counts messages.
   ///
+  /// "Kept" there is [keptMessageSql] on `messages`, read through `m` — the
+  /// alias [_homeFeedJoins] already carries — and through a `qm` join of its
+  /// own inside the newest-kept subquery. It is a fact about the message the
+  /// gate judged, not about the progress row that recorded the judgement, and
+  /// three readers say it one way: this filter, [homeMetrics]' needs-you
+  /// count, and the live twin in `home_provider.dart`.
+  ///
   /// [HomeFilter.processed] deliberately includes dropped rows. The tile it
   /// belongs to counts `total − in_flight`, and a filter that showed fewer
   /// rows than the number written above it would be a tile nobody believes
@@ -6150,12 +6341,14 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
       switch (filter) {
         HomeFilter.fromOthers => (sql: 'p.dropped = 0', args: const []),
         HomeFilter.needsYou => (
-            sql: '${_keptProgress('p')} AND $_liveNeedsYouThread '
+            sql: '${keptMessageSql('m')} AND $_liveNeedsYouThread '
                 'AND p.received_at = (SELECT MAX(q.received_at) '
                 'FROM message_progress q '
+                'JOIN messages qm ON qm.source = q.source '
+                '  AND qm.source_message_id = q.source_message_id '
                 'WHERE q.source = p.source '
                 'AND q.conversation_key = p.conversation_key '
-                'AND ${_keptProgress('q')})',
+                'AND ${keptMessageSql('qm')})',
             args: [threshold],
           ),
         HomeFilter.urgent => (

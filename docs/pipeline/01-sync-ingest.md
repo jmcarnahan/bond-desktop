@@ -99,6 +99,25 @@ backlog enqueue in this same pass. Because that enqueue runs after the drains,
 they settle on the notification coordinator's deadline like any other message
 rather than immediately.
 
+**What the fold reads.** The thread state machine
+(`app/lib/services/conversation_state.dart`) folds only the messages the gate
+KEPT. An inbound the gate throws out AT INSERT — mail from behind the sync
+floor, stored `skipped`/`backlog`; a Teams bot's line under `auto_generated` —
+is history being backfilled rather than news, so both ingests pass it to
+`foldMessage` as `historical`: watermarks, counts, preview and subject move,
+the state does not. A thread must not be made to ask for a reply to a message
+no stage of this app will ever read. The rule is INBOUND-ONLY: every outbound
+is born `skipped`/`outbound`, and reading that stamp as a gate would make every
+reply historical and no thread would ever settle. `resolvesAsk` is unchanged
+for the same reason.
+
+A gate that speaks AFTER ingest tells the thread through
+`MessageStore.refoldThreadState`, in one direction — see
+[02-gates.md](02-gates.md). The one-shot `thread_state_refold` repairs the rows
+written before the fold learned to wait for the gate, walking every
+`needs_reply` thread on every connector with the lowering rule and reporting
+`refolded_threads` on the `sync_mail` event.
+
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never
 interleave (PR #9).

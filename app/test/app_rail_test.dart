@@ -42,12 +42,10 @@ Conversation _conv({
   int unread = 0,
   int pending = 0,
   String source = 'email',
-  bool allDropped = false,
 }) {
   return Conversation(
     id: id,
     source: source,
-    allDropped: allDropped,
     subject: subject,
     participants: who == null ? const [] : [Participant(name: who)],
     state: state,
@@ -97,23 +95,6 @@ void main() {
         _conv(id: 'a', state: ConversationState.waiting),
       ]);
       expect(rows, isEmpty);
-    });
-
-    test('excludes a thread the pipeline threw every message of, whatever '
-        'its state says', () {
-      // A self-addressed test mail: the inbound copy folded `needs_reply`
-      // onto the thread before the gate dropped it as the owner's own.
-      final rows = needsYouRows([
-        _conv(
-          id: 'a',
-          state: ConversationState.needsReply,
-          cta: 'Reply to yourself',
-          score: 1.4,
-          allDropped: true,
-        ),
-        _conv(id: 'b', state: ConversationState.needsReply, score: 1.4),
-      ]);
-      expect(rows.map((c) => c.id), ['b']);
     });
 
     test('preserves input order among equals', () {

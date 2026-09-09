@@ -350,6 +350,18 @@ class SyncService implements MailSync {
         await _store.setPref('participant_names_backfill', '1');
       }
 
+      // The threads written before the fold learned to wait for the gate.
+      // An inbound landed, the thread said `needs_reply`, and the gate that
+      // threw that message out a moment later told nobody — so the rail has
+      // been listing threads holding nothing anyone could answer. Same
+      // one-shot idiom as the three above, and null until it runs. Every
+      // connector at once, because the lie is not the mail sync's alone.
+      int? refoldedThreads;
+      if (await _store.getPref('thread_state_refold') == null) {
+        refoldedThreads = await _store.refoldAllThreadStates();
+        await _store.setPref('thread_state_refold', '1');
+      }
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -417,6 +429,7 @@ class SyncService implements MailSync {
           'backfilled_needs_you': ?backfilledNeedsYou,
           'stripped_sender_tips': ?strippedSenderTips,
           'named_participants': ?namedParticipants,
+          'refolded_threads': ?refoldedThreads,
           if (inboxResync || sentResync) 'resync': true,
         },
       );
@@ -881,6 +894,19 @@ class SyncService implements MailSync {
           backlogCutoff: backlogCutoff,
         );
 
+        // An inbound the gate throws out AT INSERT — mail from behind the
+        // sync floor, stored `skipped`/`backlog` — is history being
+        // backfilled, not news arriving: nothing will ever read it, and a
+        // thread must not be made to ask for a reply to a message no stage of
+        // this app will look at. So it folds as `historical`, which moves the
+        // watermarks and the counts and leaves the state where it stands.
+        //
+        // Inbound only. An outbound is ALWAYS `skipped`/`outbound` at insert
+        // — triage answers "does this need me?" and the user's own send never
+        // does — so folding on that stamp would make every reply historical
+        // and no thread would ever settle.
+        final gatedAtInsert = !outbound && triageStatus == 'skipped';
+
         // Asked before the write, because the fold below must see each
         // message exactly once. Delta feeds legitimately replay messages —
         // across pages, and wholesale during the 24-hour re-drain a 410
@@ -967,7 +993,9 @@ class SyncService implements MailSync {
           receivedAt: receivedAt,
           subject: subject,
           preview: preview,
-          historical: historical,
+          // And NOT into `resolvesAsk` above, which is outbound-only and so
+          // can never see this flag set — see where it is computed.
+          historical: historical || gatedAtInsert,
         );
         if (resolvesAsk) {
           entry.clearCta();

@@ -592,6 +592,24 @@ class TeamsSync {
             receivedAt != null &&
             receivedAt.compareTo(quietBeforeIso) < 0;
 
+        // A chat the gate throws out AT INSERT — a bot's build notification
+        // under [teamsBotGate], a line from behind the sync floor under
+        // `backlog` — is history being backfilled, not a chat waking up:
+        // nothing will read it, and no thread should be made to ask for a
+        // reply to it. Same words as `historical` above, and it folds the
+        // same way: watermarks and counts move, state does not.
+        //
+        // Inbound only, for the mail ingest's reason: an outbound is always
+        // `skipped`/`outbound` at insert, and folding on that stamp would
+        // stop every reply from settling its chat.
+        //
+        // No [teamsSourceGate] exemption is needed here. Nothing writes that
+        // reason any more — [_messageRow] stamps a bot or defers to
+        // `triageStatusOnInsert` — so a live person's chat cannot arrive
+        // `skipped` under it, and the rows that carry it are legacy rows the
+        // re-pend above is already clearing.
+        final gatedAtInsert = !outbound && row['triage_status'] == 'skipped';
+
         // Asked BEFORE the fold advances the inbound watermark — a reply the
         // user sent from any Teams client resolves the standing ask, exactly
         // as the composer's send path does for a reply sent from here. A
@@ -606,7 +624,7 @@ class TeamsSync {
           outbound: outbound,
           receivedAt: receivedAt,
           preview: row['body_preview'] as String?,
-          historical: historical,
+          historical: historical || gatedAtInsert,
         );
         if (resolvesAsk) {
           work.clearCta();

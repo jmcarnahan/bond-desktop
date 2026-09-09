@@ -149,6 +149,21 @@ void main() {
       expect(HomeFeedRow.fromRow(base({})).threadState, isNull);
     });
 
+    test('the triage status reads, and a read that skipped it says pending',
+        () {
+      // With `gateReason` beside it this IS `MessageStore.keptMessageSql`,
+      // which is what the Needs You filter narrows on.
+      final row = HomeFeedRow.fromRow(base({
+        'triage_status': 'skipped',
+        'gate_reason': 'newsletter',
+      }));
+      expect(row.triageStatus, 'skipped');
+
+      // Never `skipped` by omission: a read that did not select the column
+      // must not read as a message the gate threw out.
+      expect(HomeFeedRow.fromRow(base({})).triageStatus, 'pending');
+    });
+
     test('the reasons come through as written', () {
       final row = HomeFeedRow.fromRow(base({
         'updated_at': '2026-09-01T11:00:00Z',
@@ -338,6 +353,7 @@ void main() {
         'needs_you_verdict': 0,
         'needs_you_reason': 'nobody is waiting on you',
         'gate_reason': 'newsletter',
+        'triage_status': 'skipped',
         'bucket': 'later',
         'bucket_reason': 'low_value',
         'attention_score': 0.1,
@@ -351,6 +367,11 @@ void main() {
       expect(restored.needsYouVerdict, false);
       expect(restored.needsYouReason, 'nobody is waiting on you');
       expect(restored.gateReason, 'newsletter');
+      // The one field the twin does NOT carry over: `restoreMessage` writes
+      // `triage_status = 'pending'`, and the row has to read as KEPT in the
+      // same frame the button was pressed in.
+      expect(row.triageStatus, 'skipped');
+      expect(restored.triageStatus, 'pending');
       expect(restored.bucket, 'later');
       expect(restored.bucketReason, 'low_value');
       expect(restored.attentionScore, closeTo(0.1, 0.0001));

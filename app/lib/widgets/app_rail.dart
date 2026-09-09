@@ -89,21 +89,18 @@ String _stripReplyPrefixes(String subject) {
 /// meant to be complements are two filters that will eventually disagree — and
 /// the symptom is mail in both sections, or in neither.
 ///
-/// Four tests: nothing deferred to Later, which is the whole point of Later;
-/// nothing already closed; nothing the pipeline threw every message of; nothing
-/// scoring below [threshold], which is what the volume slider moves.
+/// Three tests: nothing deferred to Later, which is the whole point of Later;
+/// nothing already closed; nothing scoring below [threshold], which is what
+/// the volume slider moves.
 ///
-/// The third is the one the thread's own state cannot answer. The state
-/// machine folds `needs_reply` onto a thread the moment an inbound lands,
-/// before the gate has read it, and a gate drop — the owner's own copy of a
-/// self-addressed mail, an auto-reply — never folds it back. A thread with
-/// nothing kept has nothing anyone could answer, and the Inbox's Needs You
-/// tile has always required a kept message; this is what makes the rail's
-/// badge and that tile one number.
+/// A thread with nothing kept cannot reach here saying `needs_reply`, because
+/// the ingest and the gates keep the state honest — the fold takes only the
+/// messages the gate kept, and every later gate drop refolds the thread down
+/// (see `docs/pipeline/02-gates.md`). So there is no fourth test: the state
+/// this reads is already the answer.
 bool isNeedsYou(Conversation c, {double threshold = 0}) {
   if (c.bucket == 'later') return false;
   if (c.state == ConversationState.done) return false;
-  if (c.allDropped) return false;
   if ((c.attentionScore ?? 0) < threshold) return false;
   return c.state == ConversationState.needsReply ||
       (c.ctaText?.isNotEmpty == true);

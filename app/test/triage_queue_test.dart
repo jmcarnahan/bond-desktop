@@ -359,6 +359,35 @@ void main() {
       expect((await messageRow('m1'))['gate_reason'], 'self');
     });
 
+    test('a sender gate folds the thread back to waiting', () async {
+      // The fold at ingest reads only kept messages, and this one was kept
+      // until the claim. Nothing else would ever tell the thread that the
+      // message it is waiting on will never reach a model.
+      await seedConversation();
+      await seedMessage(id: 'm1', from: 'no-reply@bank.com');
+
+      await TriageQueue(store, FakeLlm([answer()])).pump();
+
+      expect((await conversationRow())['state'], 'waiting');
+    });
+
+    test('a gate on one message leaves a thread with a kept newer inbound '
+        'alone', () async {
+      await seedConversation(lastInboundAt: '2026-08-29T12:00:00Z');
+      await seedMessage(
+        id: 'bulk',
+        from: 'no-reply@bank.com',
+        receivedAt: '2026-08-29T11:00:00Z',
+      );
+      await seedMessage(id: 'real', receivedAt: '2026-08-29T12:00:00Z');
+
+      await TriageQueue(store, FakeLlm([answer()])).pump();
+
+      // One direction, and only when nothing kept is left: the newer message
+      // is still somebody's question.
+      expect((await conversationRow())['state'], 'needs_reply');
+    });
+
     test('a gated message does not stop the drain behind it', () async {
       await seedMessage(
         id: 'bulk',
@@ -473,6 +502,24 @@ void main() {
       final row = await messageRow('m1');
       expect(row['triage_status'], 'skipped');
       expect(row['gate_reason'], 'newsletter');
+    });
+
+    test('a header gate folds the thread back to waiting', () async {
+      // Tier two, where the gate has headers to read for the first time — the
+      // thread has to hear about a drop there exactly as it does at tier one.
+      await seedConversation();
+      await seedMessage(id: 'm1', withBody: false, bodyPreview: 'This week');
+      final fetch = FakeDetailFetch(
+        store,
+        bodyText: 'Body',
+        headers: const {'list-unsubscribe': '<mailto:stop@news.example.com>'},
+      );
+
+      await TriageQueue(store, FakeLlm([answer()]), ensureBody: fetch.call)
+          .pump();
+
+      expect((await messageRow('m1'))['gate_reason'], 'newsletter');
+      expect((await conversationRow())['state'], 'waiting');
     });
 
     test('a sender gate skips the fetch entirely', () async {

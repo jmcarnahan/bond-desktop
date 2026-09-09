@@ -541,13 +541,15 @@ pile to burn down to zero rather than a reading of activity, and a week around
 it would hide the work owed longest. It also counts THREADS by the rail's own
 rule (`isNeedsYou`, spelled in SQL and bound to the same attention threshold),
 and shows one row per thread under its filter; the rest count messages. That
-rule has four tests — not in Later, not done, not a thread the pipeline threw
-EVERY message of (`Conversation.allDropped`, a read-time column off
-`message_progress`), and not under the attention threshold — and the third is
-what keeps the rail's badge and this tile one number: the state machine folds
-`needs_reply` onto a thread the moment an inbound lands, before the gate has
-read it, and a self-addressed test mail or an auto-reply dropped at the gate
-would otherwise sit in Needs You with nothing anyone could answer. Emails
+rule has three tests — not in Later, not done, and not under the attention
+threshold. There is no fourth, because the pipeline keeps the thread's own
+state honest: the fold reads only the messages the gate KEPT, and every later
+gate drop refolds the thread down (`MessageStore.refoldThreadState`, see
+`docs/pipeline/02-gates.md`), so a self-addressed test mail or an auto-reply
+can no longer leave a thread in Needs You with nothing anyone could answer.
+"Kept" is `MessageStore.keptMessageSql` — not gate-skipped, with the retired
+`teams_source` tolerance — and the tile under the Inbox reads it the same way,
+which is what keeps the rail's badge and that tile one number. Emails
 and Teams are the two tiles that write somewhere else — they move the list
 column's source chips, which is the one source selection the app has. While a filter is on, a caption
 under the tiles names it and offers **Show everyone**

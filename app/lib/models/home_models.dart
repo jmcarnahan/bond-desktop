@@ -184,6 +184,15 @@ class HomeFeedRow {
   /// [dropReason], which is the gate's verdict recorded on the progress row.
   final String? gateReason;
 
+  /// `messages.triage_status` — `pending`, `triaged`, `skipped`. With
+  /// [gateReason] it is the whole of `MessageStore.keptMessageSql`, which is
+  /// what the Needs You filter narrows on: one definition of "kept", read by
+  /// the filter's SQL, the tile's count and the provider's live twin.
+  ///
+  /// Defaults to `pending` on any read that did not select it — which reads
+  /// as "kept, nothing judged yet", never as a message the gate threw out.
+  final String triageStatus;
+
   /// Where the attention sweep filed the thread — `later`, `done`, and the
   /// rest of the archive rail's vocabulary. Null when nothing has ruled.
   final String? bucket;
@@ -234,6 +243,7 @@ class HomeFeedRow {
     this.needsYouVerdict,
     this.needsYouReason,
     this.gateReason,
+    this.triageStatus = 'pending',
     this.bucket,
     this.bucketReason,
     this.attentionScore,
@@ -278,6 +288,7 @@ class HomeFeedRow {
         },
         needsYouReason: row['needs_you_reason'] as String?,
         gateReason: row['gate_reason'] as String?,
+        triageStatus: row['triage_status'] as String? ?? 'pending',
         bucket: row['bucket'] as String?,
         bucketReason: row['bucket_reason'] as String?,
         attentionScore: (row['attention_score'] as num?)?.toDouble(),
@@ -337,6 +348,12 @@ class HomeFeedRow {
         needsYouVerdict: needsYouVerdict,
         needsYouReason: needsYouReason,
         gateReason: gateReason,
+        // Not carried over, unlike the reason beside it: `restoreMessage`
+        // writes `triage_status = 'pending'`, and this row has to read as
+        // KEPT in the same frame the button was pressed in — a twin still
+        // saying `skipped` is a row the Needs You filter would refuse until
+        // the re-read caught up.
+        triageStatus: 'pending',
         bucket: bucket,
         bucketReason: bucketReason,
         attentionScore: attentionScore,

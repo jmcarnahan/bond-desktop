@@ -142,9 +142,14 @@ between two reads cannot land in one number and not another. It is also the one
 tile that counts THREADS: the rail's own rule — `isNeedsYou` spelled in SQL as
 `_liveNeedsYouThread` over the thread's live state, bucket, score and ask,
 bound to the same attention threshold the rail reads — and under that filter
-the table shows one row per thread, its newest kept message. Every other tile
-counts messages. Emails and Teams are the two tiles that write elsewhere: they
-move the list column's source chips, which every pane reads.
+the table shows one row per thread, its newest kept message. "Kept" is
+`MessageStore.keptMessageSql` on `messages` (`triage_status <> 'skipped' OR
+gate_reason = 'teams_source'`), a fact about the message the gate judged rather
+than about the progress row that recorded the judgement, and three readers say
+it one way: this filter, the tile's own count, and the live twin in
+`home_provider.dart`. Every other tile counts messages. Emails and Teams are
+the two tiles that write elsewhere: they move the list column's source chips,
+which every pane reads.
 
 **The pulse strip** under the tiles narrates the work a filter may be hiding,
 in three segments joined by `·` (`app/lib/widgets/home_pulse.dart`):

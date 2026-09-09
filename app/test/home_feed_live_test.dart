@@ -504,6 +504,42 @@ void main() {
       await quiet(tester);
     });
 
+    testWidgets('the twin admits a teams_source row and refuses a gated one',
+        (tester) async {
+      // "Kept" is `MessageStore.keptMessageSql` on both sides now — a fact
+      // about the MESSAGE, read here off `triageStatus` and `gateReason`. A
+      // live path admitting rows the store would not return is how a table
+      // comes to hold rows a reload deletes.
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.needsYou);
+
+      // Born `skipped` before chats were triaged, and a real message.
+      await arrive(
+        'legacy-chat',
+        receivedAt: '2026-09-03T10:00:00Z',
+        gateReason: 'teams_source',
+      );
+      await thread('legacy-chat', owed: true);
+      await settleTicks(tester);
+      expect(notifier.state.pendingNewCount, 1);
+
+      // And one the gate genuinely threw out, on a thread that still says it
+      // owes a reply.
+      await arrive(
+        'gated',
+        receivedAt: '2026-09-03T11:00:00Z',
+        gateReason: 'newsletter',
+      );
+      await thread('gated', owed: true);
+      await settleTicks(tester);
+      expect(notifier.state.pendingNewCount, 1,
+          reason: 'the newsletter is not admitted, so nothing was added');
+
+      await quiet(tester);
+    });
+
     testWidgets('one older than the window never lands under a windowed one',
         (tester) async {
       /// Inside and outside the tiles' week, which is measured from the wall

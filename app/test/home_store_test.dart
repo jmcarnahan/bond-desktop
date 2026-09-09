@@ -58,7 +58,12 @@ void main() {
     // flight (the queue claims `messages.triage_status` directly, there is
     // no work row), so a seed that left the column at its default would make
     // every row here look busy.
+    //
+    // These two ARE `MessageStore.keptMessageSql`, which is what the Needs
+    // You filter and tile narrow on — a fact about the message the gate
+    // judged, not about the progress row that recorded the judgement.
     String triageStatus = 'triaged',
+    String? gateReason,
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -73,6 +78,7 @@ void main() {
       'updated_at': receivedAt,
       'has_attachments': hasAttachments ? 1 : 0,
       'triage_status': triageStatus,
+      'gate_reason': gateReason,
     });
     // Written straight onto the row: `upsertMessage` never touches the triage
     // columns — that belongs to `writeTriage`, which wants a whole
@@ -1017,6 +1023,8 @@ void main() {
         'live-sent',
         conversationKey: 'live',
         receivedAt: '2026-09-01T12:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'outbound',
         dropped: true,
         dropReason: 'outbound',
         threadState: 'needs_reply',
@@ -1099,6 +1107,81 @@ void main() {
       // rows under it together, or one of the two is lying.
       expect(await counted(0.2), 1);
       expect(await listed(0.2), ['live-new']);
+    });
+
+    test('a chat born skipped under teams_source is kept by both', () async {
+      // The one tolerance `MessageStore.keptMessageSql` carries: a chat
+      // stored before chats were triaged is `skipped` for a pipeline that did
+      // not exist yet, not for anything about the words.
+      await seed(
+        'chat',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        receivedAt: '2026-09-01T10:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'teams_source',
+        threadState: 'needs_reply',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 1);
+      expect(
+        (await store.pageHomeFeed(filter: HomeFilter.needsYou))
+            .map((r) => r.sourceMessageId),
+        ['chat'],
+      );
+    });
+
+    test('a settle-time not_worthy drop is still the thread\'s row', () async {
+      // `not_worthy` is a verdict ABOUT a kept message — it lives on the
+      // progress row and leaves `triage_status` alone — so the thread still
+      // has a message anybody could answer.
+      await seed(
+        'quiet',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T10:00:00Z',
+        dropped: true,
+        dropReason: 'not_worthy',
+        threadState: 'needs_reply',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 1);
+      expect(
+        (await store.pageHomeFeed(filter: HomeFilter.needsYou))
+            .map((r) => r.sourceMessageId),
+        ['quiet'],
+      );
+    });
+
+    test('a gate-skipped message is refused by both', () async {
+      await seed(
+        'gated',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T10:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'newsletter',
+        threadState: 'needs_reply',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 0);
+      expect(await store.pageHomeFeed(filter: HomeFilter.needsYou), isEmpty);
     });
 
     test('a thread with no conversation row is nobody\'s to answer', () async {
