@@ -5291,7 +5291,7 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
   $_effectiveStorylineId AS storyline_id,
   m.subject, m.from_name, m.from_address, m.has_attachments, m.summary,
   m.needs_you_verdict, m.needs_you_reason, m.gate_reason,
-  c.cta_text,
+  c.cta_text, c.state AS thread_state,
   s.title AS storyline_title,
   ai.bucket, ai.bucket_reason, ai.attention_score,
   (SELECT sm.evidence FROM storyline_members sm
@@ -5946,7 +5946,14 @@ RETURNING source, source_message_id, received_at
     ];
   }
 
-  /// The home screen's tiles, over everything received since [sinceIso].
+  /// The home screen's tiles, over everything received since [sinceIso] — or
+  /// over the whole table, which is what null means and what the Inbox passes.
+  ///
+  /// The tiles ARE the filter, and a filter's number has to be the number of
+  /// rows under it. A window would make that false twice over: the tile would
+  /// count a week of a table that goes back further, and the reader who tapped
+  /// it and reached the bottom would be told "that's everything" about rows the
+  /// number never included.
   ///
   /// ONE statement, which is the whole point: read separately, a message
   /// settling between two queries would land in one number and not the other,
@@ -5970,9 +5977,23 @@ RETURNING source, source_message_id, received_at
   /// the table is hiding would be a number nobody can find the rows for. An
   /// empty list is "no connector at all", which is zeros rather than
   /// everything.
+  ///
+  /// `needs_you` is the one number here that counts THREADS: it is
+  /// [_liveNeedsYouThread] — the rail's own rule, bound to the same
+  /// [threshold] the rail reads — over the distinct `(source,
+  /// conversation_key)` pairs it holds for. The rail says "4" and this tile
+  /// has to say "4", so the message-level `SUM(needs_you)` it used to be is
+  /// gone: that column is the settle pass's snapshot of one MESSAGE, and a
+  /// three-message thread counted three.
+  ///
+  /// The two LEFT JOINs the rule reads through are keyed on
+  /// `(source, conversation_key)`, which is the primary key of both tables, so
+  /// neither can turn one progress row into two — every other number here is
+  /// still a count of messages and is still correct.
   Future<HomeMetrics> homeMetrics({
-    required String sinceIso,
+    String? sinceIso,
     required String stalledBeforeIso,
+    required double threshold,
     List<String> sources = const ['email', 'teams'],
   }) async {
     if (sources.isEmpty) return const HomeMetrics();
@@ -5980,41 +6001,95 @@ RETURNING source, source_message_id, received_at
         .customSelect(
           '''
 SELECT
-  COALESCE(SUM(CASE WHEN source = 'email' THEN 1 ELSE 0 END), 0) AS emails,
-  COALESCE(SUM(CASE WHEN source = 'teams' THEN 1 ELSE 0 END), 0) AS teams,
-  COALESCE(SUM(CASE WHEN urgency IN ('urgent', 'high') THEN 1 ELSE 0 END), 0)
+  COALESCE(SUM(CASE WHEN p.source = 'email' THEN 1 ELSE 0 END), 0) AS emails,
+  COALESCE(SUM(CASE WHEN p.source = 'teams' THEN 1 ELSE 0 END), 0) AS teams,
+  COALESCE(SUM(CASE WHEN p.urgency IN ('urgent', 'high') THEN 1 ELSE 0 END), 0)
     AS urgent,
-  COALESCE(SUM(dropped), 0) AS dropped,
-  COALESCE(SUM(needs_you), 0) AS needs_you,
-  COALESCE(SUM(CASE WHEN storyline_id IS NOT NULL THEN 1 ELSE 0 END), 0)
+  COALESCE(SUM(p.dropped), 0) AS dropped,
+  COUNT(DISTINCT CASE WHEN p.dropped = 0 AND $_liveNeedsYouThread
+                      THEN p.source || char(10) || p.conversation_key END)
+    AS needs_you,
+  COALESCE(SUM(CASE WHEN p.storyline_id IS NOT NULL THEN 1 ELSE 0 END), 0)
     AS storylined,
-  COALESCE(SUM(CASE WHEN outcome = 'pending' THEN 1 ELSE 0 END), 0)
+  COALESCE(SUM(CASE WHEN p.outcome = 'pending' THEN 1 ELSE 0 END), 0)
     AS in_flight,
-  COALESCE(SUM(CASE WHEN p.outcome = 'pending' AND p.updated_at <= ?2
+  COALESCE(SUM(CASE WHEN p.outcome = 'pending' AND p.updated_at <= ?
                       AND p.updated_at <> ''
                       AND NOT $_openWorkExists THEN 1 ELSE 0 END), 0)
     AS stalled,
-  COALESCE(SUM(CASE WHEN triage_state = 'error' OR extract_state = 'error'
-                      OR storyline_state = 'error' THEN 1 ELSE 0 END), 0)
+  COALESCE(SUM(CASE WHEN p.triage_state = 'error' OR p.extract_state = 'error'
+                      OR p.storyline_state = 'error' THEN 1 ELSE 0 END), 0)
     AS errored,
   COUNT(*) AS total
 FROM message_progress p
-WHERE received_at >= ?1 AND p.source IN (${_placeholders(sources.length)})
+LEFT JOIN conversations c
+  ON c.source = p.source AND c.conversation_key = p.conversation_key
+LEFT JOIN conversation_ai ai
+  ON ai.source = p.source AND ai.conversation_key = p.conversation_key
+WHERE p.source IN (${_placeholders(sources.length)})
+${sinceIso == null ? '' : 'AND p.received_at >= ?'}
 ''',
-          variables: _args([sinceIso, stalledBeforeIso, ...sources]),
+          // In text order, which is the only order sqlite numbers anonymous
+          // placeholders in: the threshold's `?` is inside the SELECT list, so
+          // it binds before the stalled cutoff beside it and before the WHERE
+          // clause's own. Every column is qualified for the same reason the
+          // joins are LEFT — `source`, `updated_at` and the rest exist on all
+          // three tables now, and an unqualified one would be ambiguous.
+          variables: _args([
+            threshold,
+            stalledBeforeIso,
+            ...sources,
+            ?sinceIso,
+          ]),
         )
         .getSingle();
     return HomeMetrics.fromRow(row.data);
   }
 
+  /// `isNeedsYou` spelled in SQL, over the `conversations c` and
+  /// `conversation_ai ai` joins [_homeFeedJoins] already carries.
+  ///
+  /// Term for term with the Dart predicate the rail partitions on — nothing
+  /// deferred to Later, nothing already closed, nothing scoring below the
+  /// threshold the volume slider moves, and then a reply owed or an ask
+  /// written. Two spellings of one rule, because the rail's count and the
+  /// tile's count are the same promise and a reader who sees them disagree
+  /// has no way to tell which one lied.
+  ///
+  /// It is about the THREAD, not the message: every column it reads is on
+  /// `conversations` or `conversation_ai`, and `message_progress.needs_you` —
+  /// the settle pass's snapshot — is deliberately not among them. The
+  /// snapshot is what the row was told at the time; this is what is true now.
+  ///
+  /// The one `?` is the threshold, and it is the reason every caller returns
+  /// its arguments beside its SQL.
+  static const String _liveNeedsYouThread = '''
+COALESCE(ai.bucket, '') <> 'later'
+AND c.state <> 'done'
+AND COALESCE(ai.attention_score, 0) >= ?
+AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
+
   /// The WHERE fragment one [HomeFilter] stands for, with no leading `AND`
   /// and never empty — every filter narrows something, so a caller can always
-  /// write `WHERE ${homeFilterSql(filter)} AND …`.
+  /// write `WHERE ${homeFilterSql(filter, threshold: t).sql} AND …`.
+  ///
+  /// The arguments ride back with the SQL rather than being bound by the
+  /// caller from memory: one filter carries a placeholder and the rest carry
+  /// none, and a caller that had to know which is which would eventually bind
+  /// the wrong one. They splice in FIRST, because this fragment opens the
+  /// WHERE clause and sqlite numbers anonymous placeholders by where they
+  /// appear in the text.
   ///
   /// Public and static because it is a definition rather than a query: the
   /// notifier's live path has to admit exactly the rows this admits, and the
   /// only way two copies of a rule stay equal is if one of them is the one
   /// everybody reads.
+  ///
+  /// [HomeFilter.needsYou] is the one filter that counts THREADS. The rail
+  /// counts threads, the tile above the table is the same number, and so the
+  /// table under it has to be one row per thread — the row that stands for a
+  /// thread being its newest message the app kept. Every other filter is
+  /// message-level, because every other tile counts messages.
   ///
   /// [HomeFilter.processed] deliberately includes dropped rows. The tile it
   /// belongs to counts `total − in_flight`, and a filter that showed fewer
@@ -6028,17 +6103,37 @@ WHERE received_at >= ?1 AND p.source IN (${_placeholders(sources.length)})
   /// `ix_message_progress_visible` leads with `dropped`, so the two
   /// dropped-keyed filters stay equality seeks rather than scans over the
   /// whole table.
-  static String homeFilterSql(HomeFilter filter) => switch (filter) {
-        HomeFilter.fromOthers => 'p.dropped = 0',
-        HomeFilter.needsYou => 'p.dropped = 0 AND p.needs_you = 1',
-        HomeFilter.urgent =>
-          "p.dropped = 0 AND p.urgency IN ('urgent', 'high')",
-        HomeFilter.inFlight => "p.outcome = 'pending'",
-        HomeFilter.errors => "(p.triage_state = 'error' "
-            "OR p.extract_state = 'error' "
-            "OR p.storyline_state = 'error')",
-        HomeFilter.dropped => 'p.dropped = 1',
-        HomeFilter.processed => "p.outcome <> 'pending'",
+  static ({String sql, List<Object?> args}) homeFilterSql(
+    HomeFilter filter, {
+    required double threshold,
+  }) =>
+      switch (filter) {
+        HomeFilter.fromOthers => (sql: 'p.dropped = 0', args: const []),
+        HomeFilter.needsYou => (
+            sql: 'p.dropped = 0 AND $_liveNeedsYouThread '
+                'AND p.received_at = (SELECT MAX(q.received_at) '
+                'FROM message_progress q '
+                'WHERE q.source = p.source '
+                'AND q.conversation_key = p.conversation_key '
+                'AND q.dropped = 0)',
+            args: [threshold],
+          ),
+        HomeFilter.urgent => (
+            sql: "p.dropped = 0 AND p.urgency IN ('urgent', 'high')",
+            args: const [],
+          ),
+        HomeFilter.inFlight => (sql: "p.outcome = 'pending'", args: const []),
+        HomeFilter.errors => (
+            sql: "(p.triage_state = 'error' "
+                "OR p.extract_state = 'error' "
+                "OR p.storyline_state = 'error')",
+            args: const [],
+          ),
+        HomeFilter.dropped => (sql: 'p.dropped = 1', args: const []),
+        HomeFilter.processed => (
+            sql: "p.outcome <> 'pending'",
+            args: const [],
+          ),
       };
 
   /// One page of the feed, newest first — or oldest first under [ascending].
@@ -6061,10 +6156,15 @@ WHERE received_at >= ?1 AND p.source IN (${_placeholders(sources.length)})
   /// because a gate-dropped message never reached the embedder and there is no
   /// vector to ask about it.
   ///
-  /// [sinceIso] bounds the read by `received_at`, and the Inbox passes the
-  /// tiles' own window under a tile filter and nothing under the default: the
-  /// number on a tile is only the number of rows under it if both are measured
-  /// over the same week.
+  /// [sinceIso] bounds the read by `received_at`. Nothing in the app passes it
+  /// any more — the tiles have no window, so neither do the filters under them
+  /// — but the bound is real and cheap to keep, and a caller that wants a
+  /// week of history should not have to reinvent it.
+  ///
+  /// [threshold] is the attention slider's, and only [HomeFilter.needsYou]
+  /// reads it. It defaults to 0 rather than being required because every other
+  /// caller — the archive's Dropped tab, a test paging the feed — has no
+  /// business knowing the rail's rule exists.
   Future<List<HomeFeedRow>> pageHomeFeed({
     String? beforeReceivedAt,
     String? beforeSourceMessageId,
@@ -6072,13 +6172,18 @@ WHERE received_at >= ?1 AND p.source IN (${_placeholders(sources.length)})
     HomeFilter filter = HomeFilter.fromOthers,
     String? sinceIso,
     bool ascending = false,
+    double threshold = 0,
     List<String> sources = const ['email', 'teams'],
   }) async {
     if (sources.isEmpty) return const [];
     final places = _placeholders(sources.length);
-    final where = StringBuffer(homeFilterSql(filter))
+    final narrowing = homeFilterSql(filter, threshold: threshold);
+    final where = StringBuffer(narrowing.sql)
       ..write(' AND p.source IN ($places)');
-    final args = <Object?>[...sources];
+    // In text order, which is the only order sqlite numbers anonymous
+    // placeholders in: the filter's fragment opens the WHERE clause, so its
+    // arguments bind before the sources, the window and the cursor.
+    final args = <Object?>[...narrowing.args, ...sources];
     if (sinceIso != null) {
       where.write(' AND p.received_at >= ?');
       args.add(sinceIso);

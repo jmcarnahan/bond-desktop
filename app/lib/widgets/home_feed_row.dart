@@ -43,11 +43,23 @@ class HomeFeedRowTile extends StatefulWidget {
   /// today now says — the old 76 was sized for `3h ago`.
   static const double whenWidth = 104;
 
-  /// Subject, Result and Ask share what is left, three to two to three. The
-  /// subject and the ask are what a reader reads; the result is a label.
+  /// Subject and Ask share what is left, three to three: they are what a
+  /// reader reads.
   static const int subjectFlex = 3;
-  static const int resultFlex = 2;
   static const int askFlex = 3;
+
+  /// Narrower under [compact], where the same two cells are the only flexed
+  /// ones on the line: the ask is the reader's own work and the subject is how
+  /// they recognise the thread, so the words get the larger share.
+  static const int compactSubjectFlex = 2;
+
+  /// The Result column is FIXED rather than flexed, because it holds one
+  /// thing: a chip, a label, or `Filed in <name>`. A flexed cell made the
+  /// column's left edge move with the window, which is the one thing a column
+  /// of verdicts cannot do — the whole reason it is a column is that the eye
+  /// runs down it. 168 px fits `Waiting on extract` and the chip beside a
+  /// Retry, and ellipsises a long storyline name rather than the label.
+  static const double resultWidth = 168;
 
   static const Duration entryDuration = Duration(milliseconds: 200);
 
@@ -255,8 +267,8 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
         const SizedBox(width: BondSpacing.s8),
         _bar(row),
         const SizedBox(width: BondSpacing.s8),
-        Expanded(
-          flex: HomeFeedRowTile.resultFlex,
+        SizedBox(
+          width: HomeFeedRowTile.resultWidth,
           child: _historyTarget(
             row,
             key: HomeFeedRowTile.historyCellKey(row),
@@ -271,57 +283,34 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
     );
   }
 
-  /// The same cells over two lines: who and what on top, what the app did with
-  /// it underneath.
+  /// ONE line: who it is from, what it is about, what is being asked, and
+  /// when.
   ///
-  /// The second line is indented past the sender column so the two lines read
-  /// as one row rather than as two, and so the eye still has a single left edge
-  /// to run down when it is scanning the pipeline rather than the mail.
+  /// No bar and no Result cell, which is the whole point. This layout is what
+  /// the pane folds to with a thread open beside it, and at that width there
+  /// is not room for both a verdict and a progress bar and the words — and
+  /// there is no need: the thread beside is carrying both, and its Why panel's
+  /// `What happened ›` is the door to this message's history that the Result
+  /// cell used to be.
+  ///
+  /// The ask keeps its tone as a dot in front of it, so a row that needs the
+  /// reader is still findable by scanning down the column the words are in.
   Widget _compact(HomeFeedRow row, HomeResult result) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
-          children: [
-            _glyph(row),
-            const SizedBox(width: BondSpacing.s8),
-            _from(row),
-            const SizedBox(width: BondSpacing.s8),
-            Expanded(child: _subject(row)),
-            const SizedBox(width: BondSpacing.s8),
-            _when(row),
-          ],
+        _glyph(row),
+        const SizedBox(width: BondSpacing.s8),
+        _from(row),
+        const SizedBox(width: BondSpacing.s8),
+        Expanded(
+          flex: HomeFeedRowTile.compactSubjectFlex,
+          child: _subject(row),
         ),
-        const SizedBox(height: BondSpacing.s4),
-        Padding(
-          padding: const EdgeInsets.only(
-            left: HomeFeedRowTile.glyphWidth +
-                BondSpacing.s8 +
-                HomeFeedRowTile.fromWidth +
-                BondSpacing.s8,
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              _bar(row),
-              const SizedBox(width: BondSpacing.s8),
-              Expanded(
-                flex: HomeFeedRowTile.resultFlex,
-                child: _historyTarget(
-                  row,
-                  key: HomeFeedRowTile.historyCellKey(row),
-                  child: _result(row, result),
-                ),
-              ),
-              const SizedBox(width: BondSpacing.s8),
-              Expanded(
-                flex: HomeFeedRowTile.askFlex,
-                child: _ask(row, result),
-              ),
-            ],
-          ),
-        ),
+        const SizedBox(width: BondSpacing.s8),
+        Expanded(flex: HomeFeedRowTile.askFlex, child: _ask(row, result)),
+        const SizedBox(width: BondSpacing.s8),
+        _when(row),
       ],
     );
   }
@@ -369,15 +358,37 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
   /// A summary is context and stays quiet. Two lines and then an ellipsis: the
   /// cell is a column in a table, not a preview pane, and the whole of it is on
   /// the tooltip for anyone who wants it.
+  ///
+  /// Under [compact] an ask carries the result's tone as a dot in front of it.
+  /// The chip is what colours a needs-you row in the wide layout, and compact
+  /// has no Result cell to put a chip in — without the dot, the one row on the
+  /// table the reader is on the hook for would look like every other row.
+  /// A summary gets no dot: it is not a verdict about anything.
   Widget _ask(HomeFeedRow row, HomeResult result) {
     final ask = askLine(row, result);
-    final text = Text(
-      ask.text,
-      key: HomeFeedRowTile.askKey(row),
-      style: BondType.small.copyWith(
-        color: ask.ask ? BondColors.ink : BondColors.inkSecondary,
-        fontWeight: ask.ask ? FontWeight.w600 : null,
+    final style = BondType.small.copyWith(
+      color: ask.ask ? BondColors.ink : BondColors.inkSecondary,
+      fontWeight: ask.ask ? FontWeight.w600 : null,
+    );
+    final dot = widget.compact && ask.ask && ask.text.isNotEmpty;
+    // Text.rich in both cases, so the key sits on the same widget type
+    // whichever layout is up and a finder cannot pass on one and miss on the
+    // other.
+    final text = Text.rich(
+      TextSpan(
+        children: [
+          if (dot)
+            TextSpan(
+              text: '● ',
+              style: style.copyWith(
+                color: bondToneColors[result.tone]!.foreground,
+              ),
+            ),
+          TextSpan(text: ask.text),
+        ],
       ),
+      key: HomeFeedRowTile.askKey(row),
+      style: style,
       maxLines: 2,
       overflow: TextOverflow.ellipsis,
     );
@@ -439,14 +450,19 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
     );
   }
 
-  /// What the app decided, as a label.
+  /// What the app decided, as a label — and, under it, the storyline the row
+  /// belongs to.
+  ///
+  /// TWO LINES rather than one row of pieces, because the cell is one fixed
+  /// column now and a verdict beside a storyline name is two things competing
+  /// for the same 168 px: whichever lost was ellipsised into nothing. The
+  /// verdict is what the column is for, so it gets the line; the filing is
+  /// context and sits under it, quiet, in a caption.
   ///
   /// A dropped row shows its reason and NOTHING else: it is out of the default
   /// feed precisely because the app judged it did not need the user, and a
   /// "Needs you" chip beside "Newsletter" would be the app arguing with itself.
-  /// Everything else can co-occur — a thread can be both the user's to answer
-  /// and part of a storyline — so a label that is not about the filing still
-  /// carries the storyline link after it.
+  /// A filed row shows no second line either — the storyline IS its label.
   ///
   /// Which label is [resultLine]'s judgement, not this widget's. All that
   /// happens here is the dressing.
@@ -458,25 +474,32 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
     final storylineId = row.storylineId;
     final storylineTitle = row.storylineTitle;
     final linked = storylineId != null && (storylineTitle?.isNotEmpty ?? false);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.center,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Expanded(child: _label(result, row)),
-        // Already inside the label when the label IS the filing.
-        if (!row.dropped &&
-            linked &&
-            result.kind != HomeResultKind.filed) ...[
-          const SizedBox(width: BondSpacing.s8),
-          Flexible(child: _storylineLink(storylineId, storylineTitle!)),
-        ],
-        if (result.retryable && widget.onRetry != null) ...[
-          const SizedBox(width: BondSpacing.s8),
-          // Flexible for the storyline link's reason, one line up: a child with
-          // no flex on it is laid out against an UNBOUNDED main axis, so at a
-          // narrow width it would take the whole cell and push the label off
-          // the end rather than share what there is.
-          Flexible(child: _retryLink(row)),
-        ],
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Flexible(child: _label(result, row)),
+            // Retry is the ONE thing that shares the verdict's line, because
+            // it is about the verdict: a row that stalled is a row somebody
+            // wants to push again, and a link on the next line down would read
+            // as being about the storyline instead.
+            if (result.retryable && widget.onRetry != null) ...[
+              const SizedBox(width: BondSpacing.s8),
+              // Flexible for the label's reason: a child with no flex on it is
+              // laid out against an UNBOUNDED main axis, so at a narrow width
+              // it would take the whole cell and push the label off the end
+              // rather than share what there is.
+              Flexible(child: _retryLink(row)),
+            ],
+          ],
+        ),
+        // Already inside the label when the label IS the filing, and never on
+        // a dropped row, whose reason is the whole of what it has to say.
+        if (!row.dropped && linked && result.kind != HomeResultKind.filed)
+          _storylineLink(storylineId, storylineTitle!, caption: true),
       ],
     );
   }
@@ -489,9 +512,10 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
   /// the words said the same thing twice, and the words are now in the Ask
   /// cell where the reader is already looking.
   ///
-  /// A filed row is built from three pieces rather than one string, because the
-  /// storyline's name in the middle has to stay tappable; the words either side
-  /// of it are what [resultLine] already composed.
+  /// A filed row is `Filed in <name>` and stops there. The evidence that used
+  /// to hang off it after a dash is [HomeResult.detail] — it is in the tooltip
+  /// and it is what the Ask cell falls back to — and inside a fixed 168 px it
+  /// only ever ellipsised the storyline's name away.
   Widget _label(HomeResult result, HomeFeedRow row) {
     final style = BondType.small.copyWith(
       color: bondToneColors[result.tone]!.foreground,
@@ -512,7 +536,6 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
     }
 
     if (result.kind == HomeResultKind.filed) {
-      final evidence = homeFiledEvidence(row);
       return Tooltip(
         message: result.tooltip,
         child: Row(
@@ -528,15 +551,6 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
             Flexible(
               child: _storylineLink(row.storylineId!, row.storylineTitle!),
             ),
-            if (evidence != null)
-              Flexible(
-                child: Text(
-                  ' — $evidence',
-                  style: style,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
           ],
         ),
       );
@@ -584,7 +598,13 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
   /// Its own [InkWell] inside the row's: the innermost gesture wins the arena,
   /// so tapping the name opens the storyline and tapping anywhere else on the
   /// row opens the thread.
-  Widget _storylineLink(String id, String title) {
+  ///
+  /// [caption] is the second line of the Result cell, where the name is
+  /// context under a verdict rather than part of a sentence beside one. One
+  /// widget with two sizes rather than two widgets, because both are the same
+  /// link to the same place and a second copy is how one of them ends up
+  /// opening nothing.
+  Widget _storylineLink(String id, String title, {bool caption = false}) {
     return Tooltip(
       message: title,
       child: Material(
@@ -594,7 +614,7 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
           borderRadius: BondRadii.smAll,
           child: Text(
             title,
-            style: BondType.small.copyWith(
+            style: (caption ? BondType.caption : BondType.small).copyWith(
               fontWeight: FontWeight.w600,
               color: BondColors.primary,
             ),
@@ -614,9 +634,10 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
 /// through a shared layout widget, because the header is the one place where a
 /// wrong grid is visible immediately.
 ///
-/// [compact] drops to the three columns the folded row keeps on its first
-/// line. The second line's cells go unnamed on purpose: naming them would take
-/// a second header line for a table that folded because it had no width.
+/// [compact] names the four columns the folded row keeps — From, Subject,
+/// Ask · Summary, When. Pipeline and Result are absent because the folded row
+/// does not draw them: with a thread open beside this table there is no width
+/// for a bar and a verdict, and the thread beside carries both.
 class HomeFeedHeaderRow extends StatelessWidget {
   final bool compact;
 
@@ -649,14 +670,16 @@ class HomeFeedHeaderRow extends StatelessWidget {
           cell('From', HomeFeedRowTile.fromWidth),
           const SizedBox(width: BondSpacing.s8),
           if (compact) ...[
-            Expanded(child: Text('Subject', style: BondType.label)),
+            flexible('Subject', HomeFeedRowTile.compactSubjectFlex),
+            const SizedBox(width: BondSpacing.s8),
+            flexible('Ask · Summary', HomeFeedRowTile.askFlex),
             const SizedBox(width: BondSpacing.s8),
           ] else ...[
             flexible('Subject', HomeFeedRowTile.subjectFlex),
             const SizedBox(width: BondSpacing.s8),
             cell('Pipeline', HomeFeedRowTile.barWidth),
             const SizedBox(width: BondSpacing.s8),
-            flexible('Result', HomeFeedRowTile.resultFlex),
+            cell('Result', HomeFeedRowTile.resultWidth),
             const SizedBox(width: BondSpacing.s8),
             flexible('Ask · Summary', HomeFeedRowTile.askFlex),
             const SizedBox(width: BondSpacing.s8),

@@ -48,6 +48,12 @@ void main() {
     String? updatedAt,
     String? summary,
     String? ctaText,
+    // The THREAD's live state and score, which is what the rail's Needs You
+    // rule reads — `message_progress.needs_you` is the settle pass's snapshot
+    // of one message and the rule deliberately ignores it.
+    String? threadState,
+    double? attentionScore,
+    String? bucket,
     // Triaged by default: `work_open` reads a pending triage as work in
     // flight (the queue claims `messages.triage_status` directly, there is
     // no work row), so a seed that left the column at its default would make
@@ -81,13 +87,27 @@ void main() {
     // The ask is a fact about the THREAD, so it is written on the thread row
     // rather than on the message — which is the whole reason the feed joins
     // `conversations` at all.
-    if (ctaText != null) {
+    if (ctaText != null || threadState != null) {
       await store.upsertConversation({
         'source': source,
         'conversation_key': conversationKey,
         'subject': subject,
         'cta_text': ctaText,
+        // The column's own default, so a seed that only wanted an ask still
+        // reads as a closed thread rather than as one owing a reply.
+        'state': threadState ?? 'done',
       });
+    }
+    if (attentionScore != null) {
+      await store.writeAttentionScore(source, conversationKey, attentionScore);
+    }
+    if (bucket != null) {
+      await store.setConversationBucket(
+        source,
+        conversationKey,
+        bucket: bucket,
+        reason: 'sweep',
+      );
     }
     await db.customUpdate(
       'UPDATE message_progress SET outcome = ?, dropped = ?, drop_reason = ?, '
@@ -139,8 +159,8 @@ void main() {
   const stalledCutoff = '2026-09-01T09:45:00Z';
 
   group('the tiles', () {
-    test('every number comes off the same window', () async {
-      await seed('m1', urgency: 'high', needsYou: true);
+    test('every number comes off the same read', () async {
+      await seed('m1', urgency: 'high', threadState: 'needs_reply');
       await seed('m2', source: 'teams', conversationKey: 'chat-1');
       await seed('m3', dropped: true, dropReason: 'newsletter');
       await seed('m4', outcome: 'pending');
@@ -150,6 +170,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.total, 6);
@@ -157,6 +178,8 @@ void main() {
       expect(metrics.teams, 1);
       expect(metrics.urgent, 1);
       expect(metrics.dropped, 1);
+      // The thread owing a reply, counted once — the rail's rule, not the
+      // message-level snapshot.
       expect(metrics.needsYou, 1);
       expect(metrics.storylined, 1);
       expect(metrics.inFlight, 1);
@@ -172,6 +195,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.urgent, 2);
@@ -183,6 +207,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.errored, 1);
@@ -195,15 +220,32 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.total, 1);
+    });
+
+    test('no window at all counts the whole table', () async {
+      await seed('old', receivedAt: '2026-08-20T10:00:00Z');
+      await seed('new');
+
+      // What the Inbox passes. The tiles ARE the filter, and a filter's number
+      // has to be the number of rows under it — a week here would count a week
+      // of a table that goes back further.
+      final metrics = await store.homeMetrics(
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.total, 2);
     });
 
     test('an empty mailbox reads as zeros rather than nulls', () async {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.total, 0);
@@ -218,6 +260,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.inFlight, 1);
@@ -231,6 +274,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.inFlight, 1);
@@ -243,6 +287,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.stalled, 0);
@@ -254,6 +299,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.inFlight, 1);
@@ -744,6 +790,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: '2026-09-01T09:45:00Z',
+        threshold: 0,
       );
 
       expect(metrics.inFlight, 1);
@@ -891,8 +938,11 @@ void main() {
           await seed('yes');
           await seed('no', dropped: true, conversationKey: 'c2');
         case HomeFilter.needsYou:
-          await seed('yes', needsYou: true);
-          await seed('no', conversationKey: 'c2');
+          // The THREAD owes a reply, which is the rail's rule; the other
+          // thread carries the message-level snapshot and nothing else, so a
+          // filter still reading that column would fail here.
+          await seed('yes', threadState: 'needs_reply');
+          await seed('no', needsYou: true, conversationKey: 'c2');
         case HomeFilter.urgent:
           await seed('yes', urgency: 'high');
           await seed('no', urgency: 'normal', conversationKey: 'c2');
@@ -935,6 +985,124 @@ void main() {
       final page = await store.pageHomeFeed(filter: HomeFilter.processed);
 
       expect(page.map((r) => r.sourceMessageId), ['kept', 'gone']);
+    });
+  });
+
+  group('Needs You counts threads by the rail rule', () {
+    /// One live thread of three messages — two kept, one the user sent — and
+    /// one closed thread that still carries an ask. The rail counts the first
+    /// and not the second, and everything here is about the tile and the table
+    /// agreeing with it.
+    Future<void> seedTwoThreads() async {
+      await seed(
+        'live-old',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T09:00:00Z',
+        threadState: 'needs_reply',
+      );
+      await seed(
+        'live-new',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T11:00:00Z',
+        threadState: 'needs_reply',
+      );
+      await seed(
+        'live-sent',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T12:00:00Z',
+        dropped: true,
+        dropReason: 'outbound',
+        threadState: 'needs_reply',
+      );
+      await seed(
+        'closed',
+        conversationKey: 'closed',
+        receivedAt: '2026-09-01T10:00:00Z',
+        ctaText: 'Send the signed order form',
+      );
+    }
+
+    test('the tile counts one thread, not three messages', () async {
+      await seedTwoThreads();
+
+      final metrics = await store.homeMetrics(
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      // The rail's own rule: the closed thread is out however loud its ask is,
+      // and the live one is counted once however many messages hang off it.
+      expect(metrics.needsYou, 1);
+    });
+
+    test('the table shows the newest KEPT message of that thread', () async {
+      await seedTwoThreads();
+
+      final page = await store.pageHomeFeed(filter: HomeFilter.needsYou);
+
+      // Not `live-sent`: the user's own message is dropped as outbound, and a
+      // thread stands for itself through the newest message the app kept.
+      expect(page.map((r) => r.sourceMessageId), ['live-new']);
+      expect(page.single.threadState, 'needs_reply');
+    });
+
+    test('a thread deferred to Later is out of both', () async {
+      await seedTwoThreads();
+      await store.setConversationBucket(
+        'email',
+        'live',
+        bucket: 'later',
+        reason: 'sweep',
+      );
+
+      final metrics = await store.homeMetrics(
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 0);
+      expect(await store.pageHomeFeed(filter: HomeFilter.needsYou), isEmpty);
+    });
+
+    test('a thread under the bar is out, and in when the bar drops', () async {
+      await seedTwoThreads();
+      await store.writeAttentionScore('email', 'live', 0.3);
+
+      Future<int> counted(double threshold) async =>
+          (await store.homeMetrics(
+            stalledBeforeIso: stalledCutoff,
+            threshold: threshold,
+          ))
+              .needsYou;
+
+      Future<List<String>> listed(double threshold) async => [
+            for (final row in await store.pageHomeFeed(
+              filter: HomeFilter.needsYou,
+              threshold: threshold,
+            ))
+              row.sourceMessageId,
+          ];
+
+      expect(await counted(0.5), 0);
+      expect(await listed(0.5), isEmpty);
+      // The same slider the rail reads: moving it has to move the tile and the
+      // rows under it together, or one of the two is lying.
+      expect(await counted(0.2), 1);
+      expect(await listed(0.2), ['live-new']);
+    });
+
+    test('a thread with no conversation row is nobody\'s to answer', () async {
+      // `message_progress.needs_you` is the settle pass's snapshot of one
+      // message; the rule reads the thread, and there is no thread here.
+      await seed('orphan', needsYou: true);
+
+      final metrics = await store.homeMetrics(
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 0);
+      expect(await store.pageHomeFeed(filter: HomeFilter.needsYou), isEmpty);
     });
   });
 
@@ -1008,6 +1176,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
         sources: const ['teams'],
       );
 
@@ -1034,6 +1203,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
         sources: const [],
       );
 

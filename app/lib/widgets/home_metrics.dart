@@ -118,6 +118,12 @@ class BondStatTile extends StatelessWidget {
 /// failed outright. Each is coloured only when it is non-zero — a red nought
 /// is an alarm about the absence of a problem.
 ///
+/// The numbers reach back over the WHOLE feed under the source chips, and
+/// there is no window caption because there is no window: every tile is a
+/// filter, and a filter's number has to be the number of rows under it — a
+/// reader who taps a tile and scrolls to the bottom has to find the number
+/// they tapped, and be told that is everything.
+///
 /// EVERY tile is a filter, and one at a time: pressing a tile narrows the
 /// table to what that tile counted, and pressing it again widens back to
 /// everyone else's messages. That is the whole control — there is no pill and
@@ -132,11 +138,6 @@ class BondStatTile extends StatelessWidget {
 /// to the question of which mailbox is being read.
 class HomeMetricsBar extends StatelessWidget {
   final HomeMetrics metrics;
-
-  /// How far back the numbers reach. A parameter rather than the constant
-  /// read here, so a test can pin the caption's wording without a week's
-  /// worth of fixtures.
-  final Duration window;
 
   /// The filter in force, and the way to change it. Every tile but Emails and
   /// Teams reports through here.
@@ -155,11 +156,7 @@ class HomeMetricsBar extends StatelessWidget {
     required this.onFilter,
     required this.sourceFilter,
     required this.onSelectSource,
-    this.window = homeMetricsWindow,
   });
-
-  /// The caption naming the window, at the end of the tiles.
-  static const Key windowKey = ValueKey('home-metrics-window');
 
   /// One tile by name, so a test taps the filter rather than the number on it
   /// — the numbers are fixture values and the slugs are the columns.
@@ -242,20 +239,6 @@ class HomeMetricsBar extends StatelessWidget {
           'Errors',
           HomeFilter.errors,
           valueColor: metrics.errored > 0 ? BondColors.error : null,
-        ),
-        // The window, said once beside the numbers: eight counts with no
-        // stated period are eight counts of nothing in particular, and eight
-        // zeros with no stated period look like a broken pipeline rather
-        // than a quiet week. It bounds the FILTERS too — a tile filter reads
-        // over the week the tile counted, so the number is the number of rows
-        // under it.
-        Padding(
-          padding: const EdgeInsets.only(left: BondSpacing.s4),
-          child: Text(
-            homeMetricsWindowLabel(window),
-            key: windowKey,
-            style: BondType.caption,
-          ),
         ),
       ],
     );

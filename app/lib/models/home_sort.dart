@@ -43,12 +43,6 @@ extension HomeFilterLabel on HomeFilter {
         HomeFilter.processed => 'Processed',
       };
 
-  /// True for every filter but [HomeFilter.fromOthers]: a tile filter is
-  /// bounded by the tiles' window so the number on the tile is the number of
-  /// rows under it. The default is the whole history, because "everyone" is
-  /// the feed rather than a reading of the last seven days.
-  bool get windowed => this != HomeFilter.fromOthers;
-
   /// Whether dropped rows can appear under this filter — what the search
   /// runner's `includeDropped` is fed from.
   ///

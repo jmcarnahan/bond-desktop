@@ -117,17 +117,21 @@ That fallback is what a gate-dropped message shows: it never reached triage, so
 it has no summary, and "sender muted" in that space is worth more than a blank.
 `askLine` is the one place that order is written down.
 
-**The eight tiles are the filter.** They read the same columns over the last
-seven days (`homeMetricsWindow`, `app/lib/models/home_models.dart` — a day made
-a quiet Sunday look like a broken pipeline), the bar says the window in a
-caption beside the numbers, and the hot strip uses the same window. Pressing a
-tile narrows the table to what that tile counted; pressing it again widens back
-to everyone else's messages, and one filter is in force at a time
-(`HomeFilter`, with `MessageStore.homeFilterSql` as the single definition of
-what each one admits). A tile filter is bounded by that same seven-day window,
-so **the number on the tile is the number of rows under it**. Emails and Teams
-are the two tiles that write elsewhere: they move the list column's source
-chips, which every pane reads.
+**The eight tiles are the filter.** They read the same columns over the
+WHOLE table under the list column's source chips — no window, because a
+filter's number has to be the number of rows under it, and a week would count
+a week of a table that goes back further (the hot strip alone keeps
+`homeMetricsWindow`). Pressing a tile narrows the table to what that tile
+counted; pressing it again widens back to everyone else's messages, and one
+filter is in force at a time (`HomeFilter`, with `MessageStore.homeFilterSql`
+as the single definition of what each one admits), so **the number on the
+tile is the number of rows under it**. Needs You is the one tile that counts
+THREADS: it is the rail's own rule — `isNeedsYou` spelled in SQL as
+`_liveNeedsYouThread` over the thread's live state, bucket, score and ask,
+bound to the same attention threshold the rail reads — and under that filter
+the table shows one row per thread, its newest kept message. Every other tile
+counts messages. Emails and Teams are the two tiles that write elsewhere: they
+move the list column's source chips, which every pane reads.
 
 **The pulse strip** under the tiles narrates the work a filter may be hiding,
 in three segments joined by `·` (`app/lib/widgets/home_pulse.dart`):
@@ -167,10 +171,12 @@ See [../shell.md](../shell.md#what-opens-where).
 Four doors reach it, and all four hand it the same `(source,
 source_message_id)` pair:
 
-- **A home row's stage bar or its Result cell.** Two targets on the row rather
-  than one, because those are the two places a reader looks when the sentence
-  is not the one they expected. They nest inside the row's own tap and outside
-  the storyline link and Retry, so each gesture fires exactly one thing.
+- **An Inbox row's stage bar or its Result cell.** Two targets on the row
+  rather than one, because those are the two places a reader looks when the
+  verdict is not the one they expected. They nest inside the row's own tap and
+  outside the storyline link and Retry, so each gesture fires exactly one
+  thing. A row folded to one line (a thread open beside the table) draws
+  neither; its door is the thread beside, through the Why panel.
 - **A home search result.** Home search runs a meaning pass and a word pass
   and fuses them into ONE ranking, best first — no *Text matches* heading, and
   one count that is the rows on screen. Gate-dropped mail has no vector at all

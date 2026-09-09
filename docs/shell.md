@@ -137,8 +137,11 @@ IS a room — the person's — so it opens the way the rail's own row does.
 feed is a table, the table IS the pane, and a reader comparing rows must not
 lose the comparison to read one of them. A search result opens beside too. The
 storyline name still opens the storyline in main — that is a different room,
-not a row in this one — and the stage bar and the Result cell still open the
-history beside.
+not a row in this one — and, at full width, the stage bar and the Result cell
+still open the history beside. Under 900 px of table width the row folds to
+one line — From · Subject · Ask · When, an ask keeping its tone as a dot — with
+no bar and no Result cell: the thread beside carries both, and its Why panel's
+`What happened ›` is the door to the history.
 
 `SidePanel` has five kinds, and the panel shows exactly one of them:
 
@@ -524,9 +527,12 @@ nothing about the next.
 over the feed: the eight numbers were already on screen, and a reader who wants
 to see the twelve dropped messages is already pointing at the twelve. A tile
 taps its filter on, the same tile taps it off, and one is in force at a time
-(`HomeFilter`, `app/lib/models/home_sort.dart`). A tile filter is bounded by
-the tiles' own window, so the number on the tile IS the number of rows under
-it; the default, `fromOthers`, is the whole history. Emails and Teams are the
+(`HomeFilter`, `app/lib/models/home_sort.dart`). The tiles have no window —
+every one counts the whole table under the source chips — so the number on
+the tile IS the number of rows under it. Needs You counts THREADS by the
+rail's own rule (`isNeedsYou`, spelled in SQL and bound to the same attention
+threshold), and shows one row per thread under its filter; the rest count
+messages. Emails and Teams are the
 two tiles that write somewhere else — they move the list column's source chips,
 which is the one source selection the app has. While a filter is on, a caption
 under the tiles names it and offers **Show everyone**

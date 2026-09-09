@@ -39,17 +39,7 @@ void main() {
 
   final now = DateTime.utc(2026, 9, 1, 12);
 
-  group('homeMetricsWindowLabel', () {
-    test('days from two days up, hours below', () {
-      expect(homeMetricsWindowLabel(const Duration(days: 7)), 'Last 7 days');
-      expect(homeMetricsWindowLabel(const Duration(days: 2)), 'Last 2 days');
-      expect(
-        homeMetricsWindowLabel(const Duration(hours: 24)),
-        'Last 24 hours',
-      );
-      expect(homeMetricsWindowLabel(const Duration(hours: 47)), 'Last 47 hours');
-    });
-
+  group('the hot strip window', () {
     test('the window in force is a week', () {
       expect(homeMetricsWindow, const Duration(days: 7));
     });
@@ -131,6 +121,22 @@ void main() {
       // string — "nobody has written one" is its own answer.
       expect(HomeFeedRow.fromRow(base({})).summary, isNull);
       expect(HomeFeedRow.fromRow(base({})).ctaText, isNull);
+    });
+
+    test('the thread state is read live, beside the frozen verdict', () {
+      final row = HomeFeedRow.fromRow(base({
+        'thread_state': 'needs_reply',
+        'needs_you': 0,
+      }));
+
+      // The two disagree on purpose: the snapshot is what the message was
+      // told at settle time, and the state is what the thread says now — the
+      // fact the rail's Needs You rule stands on.
+      expect(row.threadState, 'needs_reply');
+      expect(row.needsYou, false);
+      // A read that never selected the column says nothing rather than 'done',
+      // which would be a verdict nobody wrote.
+      expect(HomeFeedRow.fromRow(base({})).threadState, isNull);
     });
 
     test('the reasons come through as written', () {
@@ -216,16 +222,6 @@ void main() {
   });
 
   group('the filters', () {
-    test('everything but the default is bounded by the tiles window', () {
-      for (final filter in HomeFilter.values) {
-        expect(
-          filter.windowed,
-          filter != HomeFilter.fromOthers,
-          reason: 'the number on a tile is the number of rows under it',
-        );
-      }
-    });
-
     test('only the outcome filters can show the dropped pile', () {
       expect(
         {
@@ -286,12 +282,17 @@ void main() {
         'dropped': 1,
         'summary': 'A weekly roundup nobody asked for',
         'cta_text': 'Send the signed order form',
+        'thread_state': 'needs_reply',
       });
 
       final restored = row.restored();
 
       expect(restored.summary, 'A weekly roundup nobody asked for');
       expect(restored.ctaText, 'Send the signed order form');
+      // The thread's state is a fact about the thread, and Restore reopens one
+      // message. Blanking it would make the restored row invisible to the live
+      // Needs You rule for the frame before the re-read lands.
+      expect(restored.threadState, 'needs_reply');
     });
 
     test('it keeps the reasons — they are why the row was dropped', () {

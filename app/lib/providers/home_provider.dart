@@ -127,6 +127,13 @@ class HomeFeedState {
   /// feature is off.
   final String? searchNotice;
 
+  /// The attention slider's setting, as the feed reads it.
+  ///
+  /// Only [HomeFilter.needsYou] uses it, and it is here rather than read from
+  /// the prefs at the call site because the live path has to admit exactly the
+  /// rows the store returned — one number, read once, seen by both.
+  final double threshold;
+
   const HomeFeedState({
     this.rows = const [],
     this.loaded = false,
@@ -144,6 +151,7 @@ class HomeFeedState {
     this.search,
     this.searching = false,
     this.searchNotice,
+    this.threshold = 0,
   });
 
   /// Whether dropped rows can be in this answer — DERIVED from [filter] rather
@@ -177,6 +185,7 @@ class HomeFeedState {
     bool? searching,
     String? searchNotice,
     bool clearSearchNotice = false,
+    double? threshold,
   }) =>
       HomeFeedState(
         rows: rows ?? this.rows,
@@ -196,6 +205,7 @@ class HomeFeedState {
         searching: searching ?? this.searching,
         searchNotice:
             clearSearchNotice ? null : (searchNotice ?? this.searchNotice),
+        threshold: threshold ?? this.threshold,
       );
 }
 
@@ -299,32 +309,24 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// Whether the viewport is at the top. See [setAnchored].
   bool _anchored = true;
 
-  /// The window a tile filter is bounded by, recomputed once per [_apply] so
-  /// every row in one batch is measured against the same instant.
-  String _windowStartIso = '';
-
   HomeFeedNotifier(
     this._store, {
     HomeSort sort = HomeSort.newest,
     List<String> sources = const ['email', 'teams'],
+    double threshold = 0,
     Future<void> Function(HomeSort value)? persistSort,
     this._searchRunner,
     ProgressBus? bus,
   })  : _persistSort = persistSort ?? _forget,
-        super(HomeFeedState(sort: sort, sources: sources)) {
+        super(HomeFeedState(
+          sort: sort,
+          sources: sources,
+          threshold: threshold,
+        )) {
     if (bus != null) _ticks = bus.ticks.listen(_onTick);
   }
 
   static Future<void> _forget(HomeSort value) async {}
-
-  /// The tiles' window as the feed reads it, or null under the default filter.
-  ///
-  /// A tile filter is bounded by the window the tile counted, so the number on
-  /// the tile IS the number of rows under it. [HomeFilter.fromOthers] is the
-  /// whole history, because "everyone" is the feed rather than a reading of
-  /// the last seven days.
-  String? _filterWindow() =>
-      state.filter.windowed ? _windowStart() : null;
 
   /// The newest page. Also what a filter change and a failed read come back
   /// through — there is one first-page path, not three.
@@ -342,8 +344,8 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
       final rows = await _store.pageHomeFeed(
         limit: pageSize,
         filter: state.filter,
-        sinceIso: _filterWindow(),
         ascending: state.sort == HomeSort.oldest,
+        threshold: state.threshold,
         sources: state.sources,
       );
       if (seq != _fetchSeq || !mounted) return;
@@ -390,8 +392,8 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
         beforeSourceMessageId: tail.sourceMessageId,
         limit: pageSize,
         filter: state.filter,
-        sinceIso: _filterWindow(),
         ascending: state.sort == HomeSort.oldest,
+        threshold: state.threshold,
         sources: state.sources,
       );
       if (seq != _fetchSeq || !mounted) return;
@@ -453,6 +455,22 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     state = state.copyWith(sources: value, atEnd: false);
     await load();
     await _reaskStandingSearch();
+  }
+
+  /// Follows the attention slider.
+  ///
+  /// The rows on screen were read against the old number, so this goes back to
+  /// page one exactly as a filter change does — under Needs You a thread that
+  /// no longer clears the bar is no longer in the answer. It reloads under
+  /// every filter rather than only that one, because the notifier's own state
+  /// has to be the number the next read binds whichever tile is up.
+  ///
+  /// A standing search is NOT re-asked: the search runner never reads the
+  /// threshold, so its answer is the same answer it just gave.
+  Future<void> setThreshold(double value) async {
+    if (state.threshold == value) return;
+    state = state.copyWith(threshold: value, atEnd: false);
+    await load();
   }
 
   static bool _sameSources(List<String> a, List<String> b) {
@@ -587,12 +605,16 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// Lets the held-back rows onto the table, newest first, above what is
   /// already there.
   Future<void> releasePending() async {
-    if (_bufferOverflowed || state.sort == HomeSort.oldest) {
+    if (_bufferOverflowed ||
+        state.sort == HomeSort.oldest ||
+        state.filter == HomeFilter.needsYou) {
       // More arrived than were kept, so prepending what survived would show a
       // feed with a hole in it. Oldest-first lands in the same branch for a
       // different reason: nothing was ever buffered under it, because the
-      // prepend arithmetic below is newest-first. Either way the newest page
-      // IS the answer.
+      // prepend arithmetic below is newest-first. Needs You for a third: an
+      // arrival there was only counted, because one row cannot say whether it
+      // is the newest of its thread — and a re-read is what can. Either way
+      // the newest page IS the answer.
       _buffer.clear();
       _bufferOverflowed = false;
       _pendingCount = 0;
@@ -685,32 +707,34 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// [MessageStore.homeFilterSql], term for term, the way [HomeFeedRow.isStalled]
   /// is the twin of the stalled tile's SQL.
   ///
-  /// Plus the window, which the SQL takes as a bound parameter rather than as
-  /// part of the fragment: a tile filter is read over the tiles' own week, so
-  /// a live arrival older than that must not appear under a number that never
-  /// counted it. [_windowStartIso] is computed once per [_apply] so every row
-  /// of one batch is measured against the same instant.
-  bool _admits(HomeFeedRow row) {
-    final matches = switch (state.filter) {
-      HomeFilter.fromOthers => !row.dropped,
-      HomeFilter.needsYou => !row.dropped && row.needsYou,
-      HomeFilter.urgent =>
-        !row.dropped && (row.urgency == 'urgent' || row.urgency == 'high'),
-      HomeFilter.inFlight => row.outcome == 'pending',
-      HomeFilter.errors => row.triageState == 'error' ||
-          row.extractState == 'error' ||
-          row.storylineState == 'error',
-      HomeFilter.dropped => row.dropped,
-      HomeFilter.processed => row.outcome != 'pending',
-    };
-    if (!matches) return false;
-    return !state.filter.windowed ||
-        row.receivedAt.compareTo(_windowStartIso) >= 0;
-  }
+  /// [HomeFilter.needsYou] is `isNeedsYou` read off the row's own thread
+  /// columns, against the same [HomeFeedState.threshold] the store bound. It
+  /// is the LIVE rule and not [HomeFeedRow.needsYou]: that field is the settle
+  /// pass's snapshot of the message, and a live path admitting rows the store
+  /// would not return is how a table comes to hold rows a reload deletes.
+  ///
+  /// Admitting is not the whole answer under that filter — see [_apply], where
+  /// an admitted row that is not already on the table is only counted.
+  bool _admits(HomeFeedRow row) => switch (state.filter) {
+        HomeFilter.fromOthers => !row.dropped,
+        HomeFilter.needsYou => !row.dropped &&
+            (row.bucket ?? '') != 'later' &&
+            row.threadState != 'done' &&
+            (row.attentionScore ?? 0) >= state.threshold &&
+            (row.threadState == 'needs_reply' ||
+                (row.ctaText?.isNotEmpty ?? false)),
+        HomeFilter.urgent =>
+          !row.dropped && (row.urgency == 'urgent' || row.urgency == 'high'),
+        HomeFilter.inFlight => row.outcome == 'pending',
+        HomeFilter.errors => row.triageState == 'error' ||
+            row.extractState == 'error' ||
+            row.storylineState == 'error',
+        HomeFilter.dropped => row.dropped,
+        HomeFilter.processed => row.outcome != 'pending',
+      };
 
   /// Turns one batch of read-back rows into one new list and one state write.
   void _apply(List<HomeFeedRow> patch) {
-    _windowStartIso = _windowStart();
     final rows = [...state.rows];
     var index = _indexOf(rows);
     final entered = <String>{};
@@ -782,12 +806,20 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
       // would have to reload to explain.
       if (!_admits(row)) continue;
 
-      if (state.sort == HomeSort.oldest) {
+      if (state.sort == HomeSort.oldest ||
+          state.filter == HomeFilter.needsYou) {
         // Everything below is newest-first arithmetic — the head is the newest
         // row, arrivals are prepended, and the buffer is sorted the same way.
         // Under oldest-first an arrival belongs at the far END of a history the
         // reader has not walked to, so it is only ever COUNTED, and the pill's
         // release re-reads page one.
+        //
+        // Needs You lands in the same branch for a different reason. That
+        // filter shows one row per thread — its newest kept message — and
+        // whether a row IS that message is a fact about its whole thread,
+        // which one patched row cannot answer. Putting it on the table would
+        // show the thread twice; counting it and re-reading page one on
+        // release shows it once.
         _pendingCount++;
         continue;
       }
@@ -963,12 +995,16 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 /// the same table rather than to a re-read first page.
 final homeFeedProvider =
     StateNotifierProvider<HomeFeedNotifier, HomeFeedState>((ref) {
-  return HomeFeedNotifier(
+  final notifier = HomeFeedNotifier(
     ref.watch(messageStoreProvider),
     // Read, not watched: this seeds the notifier, and watching it would
     // rebuild the whole feed — pages, scroll and all — every time the order
     // it writes came back round.
     sort: ref.read(appPrefsProvider).homeSort,
+    // Read for the same reason, and followed below rather than watched: the
+    // slider is the rail's, and moving it must narrow the Needs You tile and
+    // the rows under it without throwing away the pages already walked.
+    threshold: ref.read(appPrefsProvider).attentionThreshold,
     persistSort: (value) =>
         ref.read(appPrefsProvider.notifier).setHomeSort(value),
     // Read inside the closure, so the search stack — the embedding client and
@@ -986,6 +1022,14 @@ final homeFeedProvider =
             ),
     bus: ref.watch(progressBusProvider),
   );
+  // The one number the rail and this feed share. Listened to rather than
+  // watched so the slider reloads page one instead of rebuilding the notifier,
+  // and so the tile and the table are counting against the same bar.
+  ref.listen<double>(
+    appPrefsProvider.select((p) => p.attentionThreshold),
+    (_, value) => notifier.setThreshold(value),
+  );
+  return notifier;
 });
 
 /// The six numbers over the feed. autoDispose because they are cheap to
@@ -999,12 +1043,19 @@ final homeMetricsProvider = FutureProvider.autoDispose<HomeMetrics>((ref) {
   // hiding would be a number nobody can find the rows for.
   final sources = ref.watch(homeFeedProvider.select((s) => s.sources));
   return ref.watch(messageStoreProvider).homeMetrics(
-        sinceIso: _windowStart(),
+        // No window at all: the tiles ARE the filter, and a filter's number
+        // has to be the number of rows under it. A week here would count a
+        // week of a table that goes back further.
         sources: sources,
+        // The rail's own bar, so the Needs You tile and the rail's badge are
+        // one number. Watched rather than read: moving the slider has to move
+        // the tile, and the feed is following the same pref beside it.
+        threshold:
+            ref.watch(appPrefsProvider.select((p) => p.attentionThreshold)),
         // Computed here and bound once, so every row the tile is counting is
         // measured against the same instant the rows themselves are. Through
-        // `isoStamp` for [_windowStart]'s reason: this one is compared against
-        // a stored stamp.
+        // `isoStamp` because it is compared against a stored stamp — see
+        // [MessageStore.isoStamp].
         stalledBeforeIso:
             MessageStore.isoStamp(DateTime.now().subtract(homeStalledAfter)),
       );

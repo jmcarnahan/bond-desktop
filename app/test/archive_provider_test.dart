@@ -36,6 +36,7 @@ class _FailingStore extends MessageStore {
     HomeFilter filter = HomeFilter.fromOthers,
     String? sinceIso,
     bool ascending = false,
+    double threshold = 0,
     List<String> sources = const ['email', 'teams'],
   }) async {
     if (failNextPage) {
@@ -49,6 +50,7 @@ class _FailingStore extends MessageStore {
       filter: filter,
       sinceIso: sinceIso,
       ascending: ascending,
+      threshold: threshold,
       sources: sources,
     );
   }

@@ -432,12 +432,6 @@ void main() {
   });
 
   group('an arrival under a tile filter', () {
-    /// The stamps have to sit inside the tiles' window, which is measured from
-    /// the wall clock: a filter other than the default is read over that week,
-    /// and the live path admits rows by the same rule.
-    String hoursAgo(int hours) =>
-        MessageStore.isoStamp(DateTime.now().subtract(Duration(hours: hours)));
-
     /// Puts the message on the table and then says whether the app is owed
     /// something for it — the pair a settle writes.
     Future<void> settle(String id, {required bool needsYou}) =>
@@ -449,37 +443,73 @@ void main() {
           dropped: false,
         );
 
-    testWidgets('one the filter does not name never lands', (tester) async {
-      await seed('m1', receivedAt: hoursAgo(3));
+    /// What the rail's rule actually reads: the THREAD's state, not the
+    /// message's settled snapshot. `seed` files every message under its own
+    /// `c-<id>`, so one of these is one thread.
+    Future<void> thread(String id, {required bool owed}) =>
+        store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'c-$id',
+          'subject': 'Subject $id',
+          'state': owed ? 'needs_reply' : 'done',
+        });
+
+    testWidgets('one the filter does not name is not even counted',
+        (tester) async {
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
       final notifier = build();
       await notifier.load();
       await notifier.setFilter(HomeFilter.needsYou);
       expect(idsOf(notifier), isEmpty);
 
-      await arrive('quiet', receivedAt: hoursAgo(1));
-      await settle('quiet', needsYou: false);
+      await arrive('quiet', receivedAt: '2026-09-03T10:00:00Z');
+      await thread('quiet', owed: false);
+      await settle('quiet', needsYou: true);
       await settleTicks(tester);
 
       expect(
         idsOf(notifier),
         isEmpty,
-        reason: 'a row nobody can see arriving is a row nobody can explain',
+        reason: 'the thread owes nothing, whatever the settled snapshot on '
+            'the message says',
       );
+      expect(notifier.state.pendingNewCount, 0);
+      await quiet(tester);
+    });
 
-      await arrive('loud', receivedAt: hoursAgo(1));
+    testWidgets('one the filter names is counted, and releasing reloads',
+        (tester) async {
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.needsYou);
+
+      await arrive('loud', receivedAt: '2026-09-03T10:00:00Z');
+      await thread('loud', owed: true);
       await settle('loud', needsYou: true);
       await settleTicks(tester);
 
+      expect(
+        idsOf(notifier),
+        isEmpty,
+        reason: 'this filter shows one row per thread — its newest kept '
+            'message — and one patched row cannot say whether it is that one',
+      );
+      expect(notifier.state.pendingNewCount, 1);
+
+      await notifier.releasePending();
+
       expect(idsOf(notifier), ['loud']);
-      await tester.pump(HomeFeedNotifier.entryClear);
+      expect(notifier.state.pendingNewCount, 0);
       await quiet(tester);
     });
 
     testWidgets('one already on the table stays where it is', (tester) async {
-      await seed('m1', receivedAt: hoursAgo(3));
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
       final notifier = build();
       await notifier.load();
-      await arrive('m2', receivedAt: hoursAgo(2));
+      await arrive('m2', receivedAt: '2026-09-03T10:00:00Z');
+      await thread('m2', owed: true);
       await settle('m2', needsYou: true);
       await settleTicks(tester);
       await tester.pump(HomeFeedNotifier.entryClear);
@@ -487,7 +517,8 @@ void main() {
       await notifier.setFilter(HomeFilter.needsYou);
       expect(idsOf(notifier), ['m2']);
 
-      // The verdict is revised: the row no longer matches, and it stays put.
+      // The thread is closed: the row no longer matches, and it stays put.
+      await thread('m2', owed: false);
       await settle('m2', needsYou: false);
       await settleTicks(tester);
 
@@ -497,7 +528,7 @@ void main() {
         reason: 'the table never moves under a reader; the next load reads it '
             'out',
       );
-      expect(notifier.state.rows.single.needsYou, isFalse);
+      expect(notifier.state.rows.single.threadState, 'done');
       expect(notifier.state.fading, isEmpty);
       await quiet(tester);
     });

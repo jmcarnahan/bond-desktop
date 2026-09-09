@@ -236,14 +236,15 @@ void main() {
         ),
       );
 
-      // ONE chip in the Result cell, the reason one column over, and the
-      // filing after it — still tappable, so a row that is both does not have
-      // to give one of them up.
+      // ONE chip on the Result cell's first line, the reason one column over,
+      // and the filing on the line UNDER the chip — still tappable, so a row
+      // that is both does not have to give one of them up.
       expect(find.text('Needs you'), findsOneWidget);
       expect(
         tester
             .widget<Text>(find.byKey(HomeFeedRowTile.askKey(_row())))
-            .data,
+            .textSpan!
+            .toPlainText(),
         'the app thinks this wants you',
       );
       expect(find.text('Website redesign'), findsOneWidget);
@@ -294,29 +295,41 @@ void main() {
       );
     });
 
-    testWidgets('a filed row keeps its evidence beside the link',
+    testWidgets('a filed row is the label and the link, and no evidence',
         (tester) async {
-      await _pump(
-        tester,
-        _row(
-          outcome: 'done',
-          draft: 'skipped',
-          storylineId: 's1',
-          storylineTitle: 'Website redesign',
-          storylineEvidence: 'same launch thread',
-        ),
+      final row = _row(
+        outcome: 'done',
+        draft: 'skipped',
+        storylineId: 's1',
+        storylineTitle: 'Website redesign',
+        storylineEvidence: 'same launch thread',
       );
+      await _pump(tester, row);
 
       expect(find.text('Filed in '), findsOneWidget);
       expect(find.text('Website redesign'), findsOneWidget);
-      expect(find.text(' — same launch thread'), findsOneWidget);
+      // The evidence is the reason clause, and inside a fixed 168 px it only
+      // ever ellipsised the storyline's name away. It is on the tooltip and in
+      // the Ask cell, which is where the row's words live.
+      expect(find.text(' — same launch thread'), findsNothing);
+      expect(
+        tester
+            .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+            .textSpan!
+            .toPlainText(),
+        'same launch thread',
+      );
     });
   });
 
   group('the ask cell', () {
+    /// The cell is a `Text.rich` in both layouts — compact prefixes a tone dot
+    /// — so the words come off the span rather than off `data`, which is null
+    /// on every rich Text.
     String askText(WidgetTester tester, HomeFeedRow row) => tester
         .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
-        .data!;
+        .textSpan!
+        .toPlainText();
 
     TextStyle askStyle(WidgetTester tester, HomeFeedRow row) => tester
         .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
@@ -439,24 +452,72 @@ void main() {
     });
   });
 
-  testWidgets('the folded row still draws every cell', (tester) async {
-    final row = _row(
-      outcome: 'done',
-      needsYou: true,
-      ctaText: 'Confirm Thursday with Sarah',
-      storylineId: 's1',
-      storylineTitle: 'Website redesign',
-    );
-    await _pump(tester, row, compact: true, onOpenHistory: (_, _) {});
+  group('the folded row', () {
+    testWidgets('is one line: who, what, the ask, and when', (tester) async {
+      final row = _row(
+        outcome: 'done',
+        needsYou: true,
+        ctaText: 'Confirm Thursday with Sarah',
+        storylineId: 's1',
+        storylineTitle: 'Website redesign',
+      );
+      await _pump(tester, row, compact: true, onOpenHistory: (_, _) {});
 
-    expect(find.text('Sarah Chen'), findsOneWidget);
-    expect(find.text('Launch date'), findsOneWidget);
-    expect(find.byKey(HomeFeedRowTile.whenKey(row)), findsOneWidget);
-    expect(find.byKey(HomeFeedRowTile.askKey(row)), findsOneWidget);
-    expect(find.byKey(HomeFeedRowTile.historyBarKey(row)), findsOneWidget);
-    expect(find.byKey(HomeFeedRowTile.historyCellKey(row)), findsOneWidget);
-    expect(find.text('Needs you'), findsOneWidget);
-    expect(tester.takeException(), isNull);
+      expect(find.text('Sarah Chen'), findsOneWidget);
+      expect(find.text('Launch date'), findsOneWidget);
+      expect(find.byKey(HomeFeedRowTile.askKey(row)), findsOneWidget);
+      expect(find.byKey(HomeFeedRowTile.whenKey(row)), findsOneWidget);
+      // No bar and no verdict: this layout is what the pane folds to with a
+      // thread open beside it, and the thread beside carries both.
+      expect(find.byKey(HomeFeedRowTile.historyBarKey(row)), findsNothing);
+      expect(find.byKey(HomeFeedRowTile.historyCellKey(row)), findsNothing);
+      expect(find.text('Needs you'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('an ask carries its tone as a dot, a summary does not',
+        (tester) async {
+      String askText(HomeFeedRow row) => tester
+          .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+          .textSpan!
+          .toPlainText();
+
+      final asking = _row(
+        outcome: 'done',
+        needsYou: true,
+        ctaText: 'Confirm Thursday with Sarah',
+      );
+      await _pump(tester, asking, compact: true);
+      // The chip is what colours a needs-you row in the wide layout, and there
+      // is no Result cell here to put one in.
+      expect(askText(asking), '● Confirm Thursday with Sarah');
+
+      final quiet = _row(
+        outcome: 'done',
+        draft: 'skipped',
+        summary: 'A receipt for the annual licence',
+      );
+      await _pump(tester, quiet, compact: true);
+      expect(askText(quiet), 'A receipt for the annual licence');
+    });
+
+    testWidgets('the wide row keeps the dot off — the chip carries it there',
+        (tester) async {
+      final row = _row(
+        outcome: 'done',
+        needsYou: true,
+        ctaText: 'Confirm Thursday with Sarah',
+      );
+      await _pump(tester, row);
+
+      expect(
+        tester
+            .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+            .textSpan!
+            .toPlainText(),
+        'Confirm Thursday with Sarah',
+      );
+    });
   });
 
   group('taps', () {

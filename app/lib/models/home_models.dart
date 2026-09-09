@@ -31,14 +31,16 @@ const Duration homeDropCollapse = Duration(milliseconds: 180);
 /// tile that counted three cannot happen.
 const Duration homeStalledAfter = Duration(minutes: 15);
 
-/// How far back the tiles and the hot strip look.
+/// How far back the hot-storylines strip looks.
 ///
-/// A week, not a day. The tiles answer "what has the app been doing lately",
-/// and a day is short enough that a quiet Sunday — or a test account — reads
-/// as eight zeros over a table of rows, which looks like a fault rather than
-/// a quiet day. A week is the unit the rest of the app already reasons in
-/// (the needs-you re-judge, the default lookback presets), and the bar names
-/// the window beside the numbers so nobody has to guess it again.
+/// A week, not a day. "What has this mailbox been busy with" is a question
+/// about a stretch of time, and a day is short enough that a quiet Sunday —
+/// or a test account — reads as an empty strip, which looks like a fault
+/// rather than a quiet day. A week is the unit the rest of the app already
+/// reasons in (the needs-you re-judge, the default lookback presets).
+///
+/// The tiles no longer read it. They count the whole feed, because every tile
+/// is a filter and a filter's number has to be the number of rows under it.
 const Duration homeMetricsWindow = Duration(days: 7);
 
 /// How far back the pipeline pulse counts as "just now".
@@ -49,13 +51,6 @@ const Duration homeMetricsWindow = Duration(days: 7);
 /// that a quiet stretch is visible as a quiet stretch, short enough that
 /// yesterday's drain is not still being reported as news.
 const Duration homePulseWindow = Duration(minutes: 10);
-
-/// The window, in words, for the caption beside the tiles: `Last 7 days`,
-/// `Last 24 hours`. Hours under two days, days from there — "Last 1 days" is
-/// not a sentence and "Last 168 hours" is not a number anybody reads.
-String homeMetricsWindowLabel(Duration window) => window.inHours < 48
-    ? 'Last ${window.inHours} hours'
-    : 'Last ${window.inDays} days';
 
 /// One message's trip through the pipeline, as one feed row.
 ///
@@ -140,6 +135,17 @@ class HomeFeedRow {
   /// message's words as its own summary.
   final String? ctaText;
 
+  /// The thread's live state (`conversations.state`) — `needs_reply`, `done`,
+  /// and the rest of the rail's vocabulary. Null when the message has no
+  /// thread row yet.
+  ///
+  /// The rail's Needs You rule reads it, and [needsYou] — the settle pass's
+  /// snapshot, frozen on the message — does not. Both are on the row on
+  /// purpose: the snapshot is the verdict the reader was given at the time,
+  /// and this is what is true now, which is what the tile counting threads has
+  /// to agree with.
+  final String? threadState;
+
   /// Whether the message carried anything attached, straight off
   /// `messages.has_attachments`. False on any read that did not select the
   /// column — which reads as "nothing attached" rather than as a paperclip on
@@ -209,6 +215,7 @@ class HomeFeedRow {
     this.fromAddress,
     this.summary,
     this.ctaText,
+    this.threadState,
     this.hasAttachments = false,
     this.updatedAt = '',
     this.needsYouVerdict,
@@ -244,6 +251,7 @@ class HomeFeedRow {
         fromAddress: row['from_address'] as String?,
         summary: row['summary'] as String?,
         ctaText: row['cta_text'] as String?,
+        threadState: row['thread_state'] as String?,
         hasAttachments: (row['has_attachments'] as num?)?.toInt() == 1,
         updatedAt: row['updated_at'] as String? ?? '',
         // Three-valued on purpose: null stays null, and only a stored 1 is a
@@ -310,6 +318,7 @@ class HomeFeedRow {
         fromAddress: fromAddress,
         summary: summary,
         ctaText: ctaText,
+        threadState: threadState,
         hasAttachments: hasAttachments,
         updatedAt: updatedAt,
         needsYouVerdict: needsYouVerdict,

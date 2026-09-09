@@ -28,11 +28,13 @@ class _FlakyStore extends MessageStore {
   bool failNextPage = false;
 
   /// What the last read actually asked for. The notifier's whole job here is
-  /// turning its state into these four arguments, and a test that only looked
-  /// at the rows could not tell a window that was passed from one that was not.
+  /// turning its state into these arguments, and a test that only looked at
+  /// the rows could not tell a threshold that was passed from one that was
+  /// not.
   HomeFilter? lastFilter;
   String? lastSinceIso;
   bool? lastAscending;
+  double? lastThreshold;
   List<String>? lastSources;
 
   /// Held open, the read never returns — which is how a second [loadMore] can
@@ -47,12 +49,14 @@ class _FlakyStore extends MessageStore {
     HomeFilter filter = HomeFilter.fromOthers,
     String? sinceIso,
     bool ascending = false,
+    double threshold = 0,
     List<String> sources = const ['email', 'teams'],
   }) async {
     pageCalls++;
     lastFilter = filter;
     lastSinceIso = sinceIso;
     lastAscending = ascending;
+    lastThreshold = threshold;
     lastSources = sources;
     final held = gate;
     if (held != null) await held.future;
@@ -67,6 +71,7 @@ class _FlakyStore extends MessageStore {
       filter: filter,
       sinceIso: sinceIso,
       ascending: ascending,
+      threshold: threshold,
       sources: sources,
     );
   }
@@ -232,7 +237,7 @@ void main() {
       MessageStore.isoStamp(DateTime.now().subtract(Duration(days: days)));
 
   group('setFilter', () {
-    test('a tile filter is read over the tiles own window', () async {
+    test('a tile filter has no window: it reads the whole feed', () async {
       await seed('recent', receivedAt: daysAgo(1), gateReason: 'newsletter');
       await seed('ancient', receivedAt: daysAgo(30), gateReason: 'newsletter');
       await seed('kept', receivedAt: daysAgo(2));
@@ -242,21 +247,19 @@ void main() {
       await notifier.load();
 
       expect(idsOf(notifier.state.rows), ['kept']);
-      expect(
-        store.lastSinceIso,
-        isNull,
-        reason: 'everyone else is the whole history, not the last week',
-      );
+      expect(store.lastSinceIso, isNull);
 
       await notifier.setFilter(HomeFilter.dropped);
 
       expect(store.lastFilter, HomeFilter.dropped);
-      expect(store.lastSinceIso, isNotNull);
       expect(
-        idsOf(notifier.state.rows),
-        ['recent'],
-        reason: 'the number on the tile is the number of rows under it',
+        store.lastSinceIso,
+        isNull,
+        reason: 'the tiles count the whole feed, so the rows under a tile are '
+            'the whole feed too — otherwise the number is not the number of '
+            'rows under it',
       );
+      expect(idsOf(notifier.state.rows), ['recent', 'ancient']);
       expect(notifier.state.includeDropped, isTrue);
     });
 
@@ -377,6 +380,49 @@ void main() {
 
       expect(store.lastSources, ['teams']);
       expect(idsOf(notifier.state.rows), ['chat']);
+    });
+  });
+
+  group('setThreshold', () {
+    test('the constructor seeds it, and the store is bound to it', () async {
+      await seed('m1', receivedAt: daysAgo(1));
+
+      final notifier = HomeFeedNotifier(store, threshold: 0.4);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      // The rail's slider, read once at build and carried into every page
+      // read: the tile and the table have to be counting against one bar.
+      expect(notifier.state.threshold, 0.4);
+      expect(store.lastThreshold, 0.4);
+    });
+
+    test('moving the slider reloads page one against the new bar', () async {
+      await seed('m1', receivedAt: daysAgo(1));
+
+      final notifier = HomeFeedNotifier(store);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      final before = store.pageCalls;
+
+      await notifier.setThreshold(0.6);
+
+      expect(notifier.state.threshold, 0.6);
+      expect(store.pageCalls, before + 1);
+      expect(store.lastThreshold, 0.6);
+    });
+
+    test('the number it is already on is not a second read', () async {
+      await seed('m1', receivedAt: daysAgo(1));
+
+      final notifier = HomeFeedNotifier(store, threshold: 0.25);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      final before = store.pageCalls;
+
+      await notifier.setThreshold(0.25);
+
+      expect(store.pageCalls, before);
     });
   });
 }

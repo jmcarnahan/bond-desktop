@@ -390,9 +390,9 @@ class _HomePaneState extends State<HomePane> {
   ///
   /// A filter with no visible control saying so is how a reader comes to
   /// believe their mail has gone missing — and the tile that set it may have
-  /// wrapped onto a line they are not looking at. It names the window too,
-  /// because a tile filter is bounded by the week the tile counted and a
-  /// message older than that is genuinely not in the answer.
+  /// wrapped onto a line they are not looking at. It names the filter and
+  /// nothing else: there is no window to name any more, and the number on the
+  /// tile is the number of rows under it.
   ///
   /// A text link and not a button, the way `Back to live` is: this is a way
   /// out inside a body, and a raised control here would outrank the table.
@@ -402,8 +402,7 @@ class _HomePaneState extends State<HomePane> {
       children: [
         Flexible(
           child: Text(
-            'Showing ${widget.filter.label} · '
-            '${homeMetricsWindowLabel(homeMetricsWindow).toLowerCase()}',
+            'Showing ${widget.filter.label}',
             style: BondType.caption,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,

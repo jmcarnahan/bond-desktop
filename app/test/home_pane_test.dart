@@ -214,18 +214,14 @@ void main() {
       expect(find.text('2'), findsOneWidget);
     });
 
-    testWidgets('the bar names its window beside the numbers',
+    testWidgets('the bar names no window, because it counts everything',
         (tester) async {
-      // Eight zeros with no stated period look like a broken pipeline; the
-      // same eight with "Last 7 days" beside them look like a quiet week.
+      // The tiles ARE the filter now, so a number on one is the number of rows
+      // under it — over the whole feed. A caption naming a week would be a
+      // promise the table below no longer keeps.
       await _pump(tester, metrics: const HomeMetrics());
-      expect(
-        find.byKey(HomeMetricsBar.windowKey),
-        findsOneWidget,
-      );
-      expect(find.text(homeMetricsWindowLabel(homeMetricsWindow)),
-          findsOneWidget);
-      expect(find.text('Last 7 days'), findsOneWidget);
+      expect(find.text('Last 7 days'), findsNothing);
+      expect(find.textContaining('Last '), findsNothing);
     });
 
     testWidgets('In flight carries the stalled count only when there is one',
@@ -454,25 +450,37 @@ void main() {
       }
     });
 
-    testWidgets('folds to two lines when the table is narrow', (tester) async {
+    testWidgets('folds to one line when the table is narrow', (tester) async {
       // Under [HomePane.compactBelow], which is what a thread open beside this
       // pane leaves it.
       await _pump(tester, rows: [_row(1)], paneWidth: 700);
 
-      expect(find.text('From'), findsOneWidget);
-      expect(find.text('When'), findsOneWidget);
+      // Four columns, all named: the folded row still lines up, it is just
+      // shorter.
+      for (final column in ['From', 'Subject', 'Ask · Summary', 'When']) {
+        expect(find.text(column), findsOneWidget, reason: column);
+      }
       expect(
         find.text('Result'),
         findsNothing,
-        reason: 'the folded line names nothing; a second header row for a '
-            'table that folded for want of width would be the wrong trade',
+        reason: 'with a thread beside there is no width for a bar and a '
+            'verdict, and the thread beside carries both',
       );
       expect(find.text('Pipeline'), findsNothing);
 
-      // Every cell is still drawn — the row folded, it did not drop columns.
       expect(find.byKey(HomeFeedRowTile.askKey(_row(1))), findsOneWidget);
       expect(find.byKey(HomeFeedRowTile.whenKey(_row(1))), findsOneWidget);
-      expect(find.byType(HomeStageBar), findsOneWidget);
+      // The bar and the Result cell are the two history doors, and neither is
+      // drawn here — the door in compact is the thread beside.
+      expect(find.byType(HomeStageBar), findsNothing);
+      expect(
+        find.byKey(HomeFeedRowTile.historyBarKey(_row(1))),
+        findsNothing,
+      );
+      expect(
+        find.byKey(HomeFeedRowTile.historyCellKey(_row(1))),
+        findsNothing,
+      );
     });
   });
 
@@ -561,9 +569,9 @@ void main() {
         findsOneWidget,
         reason: 'a narrowing with nothing saying so reads as missing mail',
       );
-      // The window is part of the sentence: a tile filter reads over the week
-      // the tile counted, so a message older than that is genuinely not in it.
-      expect(find.textContaining('last 7 days'), findsOneWidget);
+      // The filter and nothing else: there is no window to name any more, and
+      // the number on the tile is the number of rows under it.
+      expect(find.text('Showing Urgent'), findsOneWidget);
 
       await tester.tap(find.byKey(HomePane.showEveryoneKey));
       expect(asked, [HomeFilter.fromOthers]);
