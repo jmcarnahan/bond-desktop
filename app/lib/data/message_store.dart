@@ -1137,6 +1137,18 @@ WHERE source = ? AND conversation_key = ?
   ///   the fold's `historical` flag exists to prevent, and the store does not
   ///   remember which rows were historical, so the only way to honour that
   ///   flag is to never raise on this path.
+  ///
+  ///   That is the whole of what `historical` buys here, and it is worth
+  ///   being exact about it: the flag is honoured for RAISING, which this
+  ///   path never does. It is NOT consulted when lowering, and must not be. A
+  ///   Sent copy a widened window backfilled — an outbound newer than an ask
+  ///   the store already held — will settle the thread on the next lowering
+  ///   refold, where `foldMessage(historical: true)` refused to touch state
+  ///   at ingest. That is correct rather than a leak: the user DID answer
+  ///   that ask, the incremental fold could not know it because `historical`
+  ///   is coarse (a flag about which SYNC PASS carried the row, not about
+  ///   what the row says), and this refold answers from the whole mailbox as
+  ///   stored. A backfilled reply is the mailbox's own record of a reply.
   /// - `restored: true` may only raise `waiting → needs_reply`. The owner
   ///   pulling one message back out of the dropped pile is a reason for the
   ///   thread to ask again, and never a reason to quieten it.
@@ -1175,10 +1187,13 @@ WHERE source = ? AND conversation_key = ?
   /// that have a key and no particular message — the backlog demotion, which
   /// moves many messages at once, and the one-shot repair.
   ///
-  /// No transaction of its own: the public entry point above opens one, the
-  /// two writers that call this directly are already inside theirs, and the
-  /// one-shot repair walks thread by thread on purpose — a single transaction
-  /// over a whole mailbox is a lock nobody needs held.
+  /// No transaction of its own: every caller opens one around it. The public
+  /// entry point above does, the two writers that call this directly are
+  /// already inside theirs, and the one-shot repair opens one PER THREAD —
+  /// see [refoldAllThreadStates]. It has to be inside one somewhere, because
+  /// the read of `state` and the write that answers it are one decision: an
+  /// ingest landing between them would be judged by the row this method
+  /// already read and then overwritten by the state it computed.
   Future<String?> _refoldThreadByKey(
     String source,
     String key, {
@@ -1249,6 +1264,14 @@ WHERE source = ? AND conversation_key = ?
   /// an inbound landed, the thread said `needs_reply`, and the gate that
   /// threw the message out a moment later told nobody. Only `needs_reply`
   /// rows are read because only they can move — the rule here never raises.
+  ///
+  /// ONE THREAD PER TRANSACTION, never the mailbox. Each refold reads a
+  /// thread's state and writes the state that answers it, and a concurrent
+  /// ingest landing between those two is exactly the interleaving that would
+  /// settle a thread a message just reopened. One transaction around the
+  /// whole walk would fix that too and hold a write lock over every thread in
+  /// the store while it did — on a first run that is the length of the
+  /// repair, with the syncs behind it.
   Future<int> refoldAllThreadStates() async {
     final rows = await db
         .customSelect(
@@ -1258,10 +1281,12 @@ WHERE source = ? AND conversation_key = ?
         .get();
     var moved = 0;
     for (final row in rows) {
-      final written = await _refoldThreadByKey(
-        row.data['source'] as String? ?? 'email',
-        row.data['conversation_key'] as String? ?? '',
-        restored: false,
+      final written = await db.transaction(
+        () => _refoldThreadByKey(
+          row.data['source'] as String? ?? 'email',
+          row.data['conversation_key'] as String? ?? '',
+          restored: false,
+        ),
       );
       if (written != null) moved++;
     }
@@ -6190,6 +6215,22 @@ RETURNING source, source_message_id, received_at
   /// empty list is "no connector at all", which is zeros rather than
   /// everything.
   ///
+  /// `emails` and `teams` are the TWO EXCEPTIONS, and they are exceptions
+  /// because they are the source selector rather than a readout of it. With
+  /// the Emails chip down, a Teams tile narrowed by [sources] would read `0`
+  /// — a digit that says "no Teams mail" where the truth is "you are not
+  /// looking at Teams", and the control a reader would press to find out is
+  /// the very tile claiming there is nothing there. So they are scalar
+  /// subqueries over the whole window with no source clause at all, and every
+  /// other column stays narrowed.
+  ///
+  /// `urgent` carries `p.dropped = 0` because `homeFilterSql` does: the
+  /// urgency column is triage's word about the message and a later drop —
+  /// `not_worthy` at the settle pass, an Ignore — never rewrites it, so a
+  /// count without the clause would sit above a table that could not show the
+  /// rows it counted. Every tile is a promise its filter keeps, and the only
+  /// way to keep it is for the two to narrow on the same thing.
+  ///
   /// `needs_you` is the one number here that counts THREADS: it is
   /// [_liveNeedsYouThread] — the rail's own rule, bound to the same
   /// [threshold] the rail reads — over the distinct `(source,
@@ -6222,9 +6263,12 @@ RETURNING source, source_message_id, received_at
         .customSelect(
           '''
 SELECT
-  COALESCE(SUM(CASE WHEN p.source = 'email' THEN 1 ELSE 0 END), 0) AS emails,
-  COALESCE(SUM(CASE WHEN p.source = 'teams' THEN 1 ELSE 0 END), 0) AS teams,
-  COALESCE(SUM(CASE WHEN p.urgency IN ('urgent', 'high') THEN 1 ELSE 0 END), 0)
+  (SELECT COUNT(*) FROM message_progress pe
+    WHERE pe.received_at >= ? AND pe.source = 'email') AS emails,
+  (SELECT COUNT(*) FROM message_progress pt
+    WHERE pt.received_at >= ? AND pt.source = 'teams') AS teams,
+  COALESCE(SUM(CASE WHEN p.dropped = 0
+                      AND p.urgency IN ('urgent', 'high') THEN 1 ELSE 0 END), 0)
     AS urgent,
   COALESCE(SUM(p.dropped), 0) AS dropped,
   (SELECT COUNT(DISTINCT p2.source || char(10) || p2.conversation_key)
@@ -6253,12 +6297,15 @@ FROM message_progress p
 WHERE p.received_at >= ? AND p.source IN ($places)
 ''',
           // In text order, which is the only order sqlite numbers anonymous
-          // placeholders in: the needs-you subquery sits in the SELECT list, so
-          // its sources and its threshold bind FIRST, then the stalled cutoff
-          // beside it, and only then the WHERE clause's window and sources.
-          // Every outer column is qualified `p.` so the subquery's own `p2`,
-          // `c` and `ai` cannot be read for it.
+          // placeholders in: the two connector subqueries open the SELECT
+          // list, so their windows bind FIRST; then the needs-you subquery's
+          // sources and threshold; then the stalled cutoff beside it; and only
+          // then the WHERE clause's own window and sources. Every outer column
+          // is qualified `p.` so no subquery's alias — `pe`, `pt`, `p2`, `c`,
+          // `ai` — can be read for it.
           variables: _args([
+            sinceIso,
+            sinceIso,
             ...sources,
             threshold,
             stalledBeforeIso,
@@ -7051,18 +7098,10 @@ LIMIT ?
       );
     }
 
-    // The in-flight count is a scalar subquery rather than a fourth read
-    // because it is the same table asked a second question, and one statement
-    // is one snapshot: a message settling between two reads would be counted
-    // as both finished and still moving. Its parameters bind FIRST — sqlite
-    // numbers anonymous placeholders by where they appear in the text, and
-    // the SELECT list comes before the WHERE clause.
     final row = await db
         .customSelect(
           '''
 SELECT
-  (SELECT COUNT(*) FROM message_progress f
-    WHERE f.outcome = 'pending' AND f.source IN ($places)) AS in_flight,
   COALESCE(SUM(CASE WHEN p.outcome = 'done' THEN 1 ELSE 0 END), 0) AS settled,
   COALESCE(SUM(p.dropped), 0) AS dropped,
   COALESCE(SUM(CASE WHEN p.needs_you = 1 AND p.dropped = 0 THEN 1 ELSE 0 END),
@@ -7070,7 +7109,7 @@ SELECT
 FROM message_progress p
 WHERE p.updated_at >= ? AND p.source IN ($places)
 ''',
-          variables: _args([...sources, sinceIso, ...sources]),
+          variables: _args([sinceIso, ...sources]),
         )
         .getSingle();
     int at(String column) => (row.data[column] as num?)?.toInt() ?? 0;
@@ -7081,7 +7120,6 @@ WHERE p.updated_at >= ? AND p.source IN ($places)
       recentSettled: at('settled'),
       recentDropped: at('dropped'),
       recentNeedsYou: at('needs_you'),
-      inFlight: at('in_flight'),
     );
   }
 

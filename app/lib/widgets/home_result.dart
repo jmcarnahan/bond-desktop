@@ -204,8 +204,51 @@ String? homeFiledEvidence(HomeFeedRow row) {
 /// A failure outranks a stall. A row that errored and then sat is stuck
 /// BECAUSE it errored, and "waiting on storyline" would hide the one fact the
 /// reader needs; both sentences carry the same Retry.
-HomeResult resultLine(HomeFeedRow row, {required DateTime now}) {
+///
+/// [threadNeedsYou] is the PANE telling the row something the row cannot know
+/// on its own: under the Needs You filter every row is the newest kept message
+/// of a thread the rail says is owed an answer, by construction. Without it
+/// such a row can draw `Nothing to do` — the Needs You filter keeps a
+/// settle-time `not_worthy` drop, because that drop is a verdict about a
+/// message the gate KEPT and never moves the thread — and a row saying
+/// "nothing to do" under a tile labelled Needs You is the screen contradicting
+/// itself in two inches.
+///
+/// It outranks the row's own verdict and its drop, and NOT the three labels
+/// about the pipeline: a row that errored, stalled or is still moving is that
+/// whatever its thread owes, and hiding a stuck row behind an ask is how a
+/// fault goes unnoticed. The drop is not lost either — a row dropped
+/// `not_worthy` says so in the clause, so the tooltip stays honest about what
+/// happened to THIS message.
+HomeResult resultLine(
+  HomeFeedRow row, {
+  required DateTime now,
+  bool threadNeedsYou = false,
+}) {
   final states = HomeStageBar.statesOf(row);
+  final errored = _erroredStage(states);
+  final stalled = row.isStalled(now);
+
+  // Settled: the pipeline has finished with this row and had nothing to
+  // report. Only then is the thread's own obligation the most useful thing
+  // the cell can say.
+  if (threadNeedsYou &&
+      errored == null &&
+      !stalled &&
+      row.outcome != 'pending') {
+    final reason = row.needsYouReason?.trim() ?? '';
+    final detail = row.needsYouVerdict == true && reason.isNotEmpty
+        ? reason
+        : 'the thread is still owed an answer';
+    return HomeResult(
+      HomeResultKind.needsYou,
+      'Needs you',
+      detail: row.dropped && row.dropReason == 'not_worthy'
+          ? '$detail · this message was judged nothing to do'
+          : detail,
+      tone: row.urgency == 'urgent' ? BondTone.error : BondTone.attention,
+    );
+  }
 
   if (row.dropped) {
     final reason = row.dropReason;
@@ -228,7 +271,6 @@ HomeResult resultLine(HomeFeedRow row, {required DateTime now}) {
     );
   }
 
-  final errored = _erroredStage(states);
   if (errored != null) {
     return HomeResult(
       HomeResultKind.error,
@@ -239,7 +281,7 @@ HomeResult resultLine(HomeFeedRow row, {required DateTime now}) {
     );
   }
 
-  if (row.isStalled(now)) {
+  if (stalled) {
     final stage = _openStage(states);
     return HomeResult(
       HomeResultKind.stalled,
@@ -350,8 +392,18 @@ typedef HomeAsk = ({String text, bool ask});
 /// The reason clause is what a row says when it has neither. A message the gate
 /// threw out never reached triage, so it has no summary at all — and "sender
 /// muted" in that space is worth more than a blank.
-HomeAsk askLine(HomeFeedRow row, HomeResult result) {
-  if (row.needsYou && !row.dropped) {
+///
+/// [threadNeedsYou] is [resultLine]'s, and it fires the ask branch on its own:
+/// under the Needs You filter the row stands for a thread that is owed an
+/// answer, and the thread's ask is what the reader came to that filter to
+/// read. The row's own settle-pass snapshot may say otherwise — it is a
+/// verdict about one message and this is a fact about the thread.
+HomeAsk askLine(
+  HomeFeedRow row,
+  HomeResult result, {
+  bool threadNeedsYou = false,
+}) {
+  if (threadNeedsYou || (row.needsYou && !row.dropped)) {
     final cta = row.ctaText?.trim() ?? '';
     if (cta.isNotEmpty) return (text: cta, ask: true);
     final reason = row.needsYouReason?.trim() ?? '';

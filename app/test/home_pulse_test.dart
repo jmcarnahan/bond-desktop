@@ -158,7 +158,6 @@ void main() {
           queued: {'triage': 2},
           running: {'storyline': 1},
           recentSettled: 5,
-          inFlight: 3,
         ),
         stamps: SyncStamps(mailIso: _minutesAgo(2)),
       );

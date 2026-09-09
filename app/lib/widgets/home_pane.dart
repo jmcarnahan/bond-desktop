@@ -27,8 +27,8 @@ class HomePane extends StatefulWidget {
   final List<HomeFeedRow> rows;
 
   /// The tiles' numbers, or null while the first read is in flight. Null
-  /// renders nothing rather than zeros — six noughts is a claim, and "not read
-  /// yet" is not that claim.
+  /// renders nothing rather than zeros — eight noughts is a claim, and "not
+  /// read yet" is not that claim.
   final HomeMetrics? metrics;
 
   final List<HotStoryline> hotStorylines;
@@ -166,7 +166,7 @@ class HomePane extends StatefulWidget {
   static const Key filterNoticeKey = ValueKey('home-filter-notice');
   static const Key showEveryoneKey = ValueKey('home-show-everyone');
 
-  /// Below this much table width the row folds onto two lines.
+  /// Below this much table width the row folds onto ONE line.
   ///
   /// 900 because of what sits beside this pane: with a thread open in the side
   /// panel the main pane is about 600px, and seven columns — sender, subject,
@@ -390,9 +390,12 @@ class _HomePaneState extends State<HomePane> {
   ///
   /// A filter with no visible control saying so is how a reader comes to
   /// believe their mail has gone missing — and the tile that set it may have
-  /// wrapped onto a line they are not looking at. It names the filter and
-  /// nothing else: there is no window to name any more, and the number on the
-  /// tile is the number of rows under it.
+  /// wrapped onto a line they are not looking at. It names the filter, and the
+  /// WINDOW too where the filter has one: a windowed filter's tile counts a
+  /// week and its table shows a week, and a list that stops at last Tuesday
+  /// with nothing saying so reads as a mailbox with a hole in it. Needs You
+  /// and the default name no window because they have none —
+  /// see `HomeFilterLabel.windowed`.
   ///
   /// A text link and not a button, the way `Back to live` is: this is a way
   /// out inside a body, and a raised control here would outrank the table.
@@ -405,6 +408,7 @@ class _HomePaneState extends State<HomePane> {
             // The window is named only where it applies: a Dropped list that
             // stops at last Tuesday has to say so, and a Needs You pile that
             // reaches back as far as the mail does must not claim a week.
+            // Same for the default — Everyone is the whole history.
             widget.filter.windowed
                 ? 'Showing ${widget.filter.label} · '
                     '${homeMetricsWindowLabel(homeMetricsWindow).toLowerCase()}'
@@ -631,6 +635,12 @@ class _HomePaneState extends State<HomePane> {
                     row: row,
                     now: widget.now,
                     compact: compact,
+                    // Only the LIVE rows, and only under this one filter:
+                    // every row the Needs You filter returns is the newest
+                    // kept message of a thread the rail says is owed an
+                    // answer. A search result under the same filter is
+                    // whatever the query found and carries no such promise.
+                    threadNeedsYou: widget.filter == HomeFilter.needsYou,
                     animateIn: widget.entering.contains(key),
                     fading: widget.fading.contains(key),
                     collapsing: widget.collapsing.contains(key),

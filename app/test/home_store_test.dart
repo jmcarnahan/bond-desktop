@@ -207,6 +207,42 @@ void main() {
       expect(metrics.urgent, 2);
     });
 
+    test('the Urgent tile leaves out a dropped row, the way its filter does',
+        () async {
+      // Urgency is triage's word about the message and a later drop never
+      // rewrites it, so a `not_worthy` verdict at the settle pass leaves a
+      // `high` sitting on a row the Urgent filter refuses to show.
+      await seed('kept', urgency: 'high');
+      await seed(
+        'gone',
+        urgency: 'high',
+        dropped: true,
+        dropReason: 'not_worthy',
+        conversationKey: 'c2',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+      final rows = await store.pageHomeFeed(
+        filter: HomeFilter.urgent,
+        sinceIso: '2026-09-01T00:00:00Z',
+      );
+
+      expect(metrics.urgent, 1);
+      expect(
+        rows.map((r) => r.sourceMessageId),
+        ['kept'],
+      );
+      expect(
+        metrics.urgent,
+        rows.length,
+        reason: 'the tile is a promise the filter keeps',
+      );
+    });
+
     test('a message errored in two stages is still one message', () async {
       await seed('m1', triageState: 'error', extractState: 'error');
 
@@ -984,6 +1020,100 @@ void main() {
       });
     }
 
+    /// H3 as ONE loop: every tile's number is the number of rows under it.
+    ///
+    /// Seven tiles and seven filters is fourteen chances for a count and a
+    /// list to be narrowed on different things, and the two that drifted —
+    /// Urgent counting a dropped row its filter refuses, needs-you counting
+    /// messages where the filter counts threads — both read fine on their own
+    /// tests. This one seeds a mailbox with every awkward row in it and makes
+    /// each pair answer the same question.
+    ///
+    /// `fromOthers` is out because it is the whole feed rather than a tile.
+    test('every tile counts exactly the rows its filter shows', () async {
+      const window = '2026-09-01T00:00:00Z';
+      const threshold = 0.5;
+
+      // A plain kept row, loud.
+      await seed('kept', urgency: 'high');
+      // Thrown out by the gate before triage ever read it.
+      await seed(
+        'gated',
+        conversationKey: 'c-gated',
+        dropped: true,
+        dropReason: 'gated',
+        triageStatus: 'skipped',
+        gateReason: 'sender_muted',
+      );
+      // Dropped at the SETTLE pass, which is a verdict about a message the
+      // gate kept — and still carrying the urgency triage gave it.
+      await seed(
+        'not-worthy',
+        conversationKey: 'c-nw',
+        urgency: 'high',
+        dropped: true,
+        dropReason: 'not_worthy',
+      );
+      // A thread the rail says is owed an answer.
+      await seed(
+        'ask',
+        conversationKey: 'c-ask',
+        threadState: 'needs_reply',
+        attentionScore: 0.9,
+      );
+      // The same shape, deferred — which is the rail's first test.
+      await seed(
+        'later',
+        conversationKey: 'c-later',
+        threadState: 'needs_reply',
+        attentionScore: 0.9,
+        bucket: 'later',
+      );
+      await seed('err', conversationKey: 'c-err', storylineState: 'error');
+      await seed('busy', conversationKey: 'c-busy', outcome: 'pending');
+
+      final metrics = await store.homeMetrics(
+        sinceIso: window,
+        stalledBeforeIso: stalledCutoff,
+        threshold: threshold,
+      );
+
+      for (final filter in HomeFilter.values) {
+        if (filter == HomeFilter.fromOthers) continue;
+        final rows = await store.pageHomeFeed(
+          filter: filter,
+          // The window a windowed tile counts over, and nothing under the two
+          // that count all time — the same pairing the Inbox passes.
+          sinceIso: filter.windowed ? window : null,
+          threshold: threshold,
+        );
+        final tile = switch (filter) {
+          HomeFilter.needsYou => metrics.needsYou,
+          HomeFilter.urgent => metrics.urgent,
+          HomeFilter.inFlight => metrics.inFlight,
+          HomeFilter.errors => metrics.errored,
+          HomeFilter.dropped => metrics.dropped,
+          HomeFilter.processed => metrics.total - metrics.inFlight,
+          HomeFilter.fromOthers => -1,
+        };
+        expect(
+          tile,
+          rows.length,
+          reason: 'the ${filter.name} tile says $tile and its filter shows '
+              '${rows.length}',
+        );
+      }
+
+      // And the mailbox really did hold every awkward row — a mix that
+      // narrowed to nothing would pass the loop above by counting zeros.
+      expect(metrics.needsYou, 1);
+      expect(metrics.urgent, 1);
+      expect(metrics.dropped, 2);
+      expect(metrics.errored, 1);
+      expect(metrics.inFlight, 1);
+      expect(metrics.total, 7);
+    });
+
     test('processed counts the dropped pile too', () async {
       // The tile above it is `total − in_flight`, and a filter showing fewer
       // rows than its own tile is a tile nobody believes twice.
@@ -1275,8 +1405,32 @@ void main() {
       );
 
       expect(metrics.total, 1);
-      expect(metrics.emails, 0);
-      expect(metrics.teams, 1);
+    });
+
+    test('except Emails and Teams, which count their connector whatever the '
+        'chips say', () async {
+      await seedBoth();
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+        sources: const ['email'],
+      );
+
+      expect(
+        metrics.teams,
+        1,
+        reason: 'those two tiles ARE the source selector, and a Teams tile '
+            'reading 0 because Teams is switched off would be the control '
+            'claiming there is nothing to switch to',
+      );
+      expect(metrics.emails, 1);
+      expect(
+        metrics.total,
+        1,
+        reason: 'every other column stays narrowed to the chips',
+      );
     });
 
     test('the hot strip ranks only what the table is showing', () async {
@@ -1374,11 +1528,6 @@ void main() {
       expect(pulse.recentSettled, 2);
       expect(pulse.recentDropped, 1);
       expect(pulse.recentNeedsYou, 1);
-      expect(
-        pulse.inFlight,
-        1,
-        reason: 'in flight is every pending row, however old',
-      );
     });
 
     test('a quiet pipeline reads as quiet rather than as nothing', () async {
@@ -1392,7 +1541,6 @@ void main() {
       expect(pulse.running, isEmpty);
       expect(pulse.busy, isFalse);
       expect(pulse.recentSettled, 0);
-      expect(pulse.inFlight, 0);
     });
 
     test('it counts only the connectors the table is showing', () async {

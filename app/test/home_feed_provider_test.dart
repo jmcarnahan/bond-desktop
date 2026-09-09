@@ -5,9 +5,14 @@ import 'dart:async';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
-import 'package:bond_inbox/models/home_sort.dart';
+import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
+// `prefs_provider` re-exports `home_sort.dart` — HomeFilter and HomeSort come
+// in with it, and importing that file directly is a duplicate the analyzer
+// refuses.
+import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/services/message_search.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -319,9 +324,17 @@ void main() {
         reason: 'a search under the Dropped tile has to reach the pile',
       );
 
+      // Needs You reaches the pile too: the row that stands for a thread is
+      // its newest KEPT message, and a settle-time `not_worthy` drop is a
+      // verdict about a message the gate kept — so that list carries dropped
+      // rows and a search under it has to reach them.
       await notifier.setFilter(HomeFilter.needsYou);
 
-      expect(runner.dropped, [false, true, false]);
+      expect(runner.dropped, [false, true, true]);
+
+      await notifier.setFilter(HomeFilter.urgent);
+
+      expect(runner.dropped, [false, true, true, false]);
     });
   });
 
@@ -447,6 +460,35 @@ void main() {
       await notifier.setThreshold(0.25);
 
       expect(store.pageCalls, before);
+    });
+
+    test('the provider follows the rail\'s slider without rebuilding the feed',
+        () async {
+      // The wire itself: `homeFeedProvider` READS the pref to seed the
+      // notifier and LISTENS to it afterwards. Watching it instead would
+      // throw away every page walked and the scroll position with them, so a
+      // test that only exercised `setThreshold` would pass with the listen
+      // deleted.
+      final container = ProviderContainer(
+        overrides: [dbProvider.overrideWithValue(db)],
+      );
+      addTearDown(container.dispose);
+      await container.read(appPrefsProvider.notifier).ready;
+
+      final notifier = container.read(homeFeedProvider.notifier);
+
+      await container.read(appPrefsProvider.notifier)
+          .setAttentionThreshold(0.9);
+      // The listener fires on the pref's own write; a microtask is what its
+      // reload needs to land in state.
+      await Future<void>.delayed(Duration.zero);
+
+      expect(container.read(homeFeedProvider).threshold, 0.9);
+      expect(
+        identical(container.read(homeFeedProvider.notifier), notifier),
+        isTrue,
+        reason: 'the slider moves the bar, it does not rebuild the feed',
+      );
     });
   });
 }

@@ -643,6 +643,60 @@ void main() {
       expect(find.byKey(HomePane.filterNoticeKey), findsNothing);
       expect(find.byKey(HomePane.showEveryoneKey), findsNothing);
     });
+
+    testWidgets('under Needs You the pane tells each live row its thread is '
+        'owed an answer', (tester) async {
+      bool told(WidgetTester tester, Key key) =>
+          tester.widget<HomeFeedRowTile>(find.byKey(key)).threadNeedsYou;
+
+      await _pump(
+        tester,
+        metrics: numbers,
+        rows: [_row(1)],
+        filter: HomeFilter.needsYou,
+        onFilter: (_) {},
+      );
+
+      expect(
+        told(tester, ValueKey<String>(_row(1).feedKey)),
+        isTrue,
+        reason: 'every row this filter returns is the newest kept message of '
+            'a thread the rail says needs the reader, by construction — and '
+            'the row cannot read that off its own columns',
+      );
+
+      // Any other filter, and the row is back to speaking for itself.
+      await _pump(
+        tester,
+        metrics: numbers,
+        rows: [_row(1)],
+        filter: HomeFilter.dropped,
+        onFilter: (_) {},
+      );
+      expect(told(tester, ValueKey<String>(_row(1).feedKey)), isFalse);
+    });
+
+    testWidgets('a search result under the same filter is told nothing',
+        (tester) async {
+      await _pump(
+        tester,
+        metrics: numbers,
+        filter: HomeFilter.needsYou,
+        onFilter: (_) {},
+        search: HomeSearch('invoice', [_hit(7)]),
+      );
+
+      expect(
+        tester
+            .widget<HomeFeedRowTile>(
+              find.byKey(ValueKey<String>('search-${_row(7).feedKey}')),
+            )
+            .threadNeedsYou,
+        isFalse,
+        reason: 'a hit is whatever the query found, and nothing about the '
+            'list it landed in says its thread owes anything',
+      );
+    });
   });
 
   group('the order menu', () {

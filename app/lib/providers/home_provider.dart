@@ -1070,8 +1070,8 @@ final homeFeedProvider =
   return notifier;
 });
 
-/// The six numbers over the feed. autoDispose because they are cheap to
-/// re-read and stale the moment the pane is closed.
+/// The numbers behind the eight tiles over the feed. autoDispose because they
+/// are cheap to re-read and stale the moment the pane is closed.
 final homeMetricsProvider = FutureProvider.autoDispose<HomeMetrics>((ref) {
   // The live phase's pulse: a settled burst re-reads the tiles. Riverpod
   // carries the previous value through the rebuild, so the numbers change

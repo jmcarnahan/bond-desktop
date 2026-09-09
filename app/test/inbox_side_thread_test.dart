@@ -215,6 +215,43 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('the thread beside has its draft reloaded on the sync tick',
+      (tester) async {
+    // The hazard the selected thread's reload was written for, on the side
+    // that carries it now: an Inbox row opens BESIDE and never sets the
+    // selection, so this is the thread the reader is actually looking at. A
+    // suggestion left on screen after the sync deleted it gets sent as a
+    // reply to a message that is no longer the newest one.
+    await seedStoryline();
+    await store.upsertDraft(
+      source: 'email',
+      conversationKey: 'c1',
+      replyToMessageId: 'c1-m1',
+      body: 'The hero paragraph reads well.',
+    );
+    await pumpInbox(tester);
+    await openStoryline(tester);
+    await openEpisode(tester, '✉ Homepage copy');
+
+    expect(find.byKey(InboxScreen.useSuggestionKey), findsOneWidget);
+
+    // What the next pull does to a thread that just received new mail.
+    await store.deleteDraftForMessage('email', 'c1-m1');
+
+    await tester.tap(find.byTooltip('Refresh'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.byKey(InboxScreen.useSuggestionKey),
+      findsNothing,
+      reason: 'the composer beside has to find out on the pull, not on the '
+          'next AI progress event',
+    );
+    await settleQueues(tester);
+  });
+
   testWidgets('and a second card replaces the first', (tester) async {
     await seedStoryline();
     await pumpInbox(tester);

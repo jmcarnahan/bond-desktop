@@ -56,7 +56,13 @@ It moves in ONE direction, and the caller says which:
   reopen threads the user closed months ago — exactly what the fold's
   `historical` flag exists to prevent, and the store does not remember which
   rows were historical, so the only way to honour that flag is never to raise
-  on this path.
+  on this path. The flag is honoured for RAISING and is not consulted when
+  lowering, which is deliberate: a Sent copy a widened window backfilled — an
+  outbound newer than an ask the store already held — settles the thread on
+  the next lowering refold, where `foldMessage(historical: true)` refused to
+  at ingest. The user did answer that ask; the incremental fold could not know
+  it because `historical` says which sync pass carried the row rather than
+  what the row says, and the refold answers from the whole mailbox as stored.
 - `restored: true` may only raise `waiting → needs_reply`. The owner pulling a
   message back out of the dropped pile is a reason for the thread to ask again
   and never a reason to quieten it.
@@ -85,8 +91,8 @@ two-tier split, an anchoring subtlety in the local-part regexes, and — most
 usefully — two gates that deliberately do **not** exist. Keep that comment
 authoritative; this page is the map to it.
 
-A gated message is not hidden: it lands with a drop reason, visible via the
-home screen's "Show dropped" toggle (PR #10) and the Archive section's
+A gated message is not hidden: it lands with a drop reason, visible under the
+Inbox's Dropped tile (`HomeFilter.dropped`) and in the Archive section's
 Dropped tab, which is also where Restore lives.
 
 ## Restoring a gated message

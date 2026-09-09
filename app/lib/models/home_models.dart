@@ -489,7 +489,7 @@ class HomeSearch {
   /// so a row found both ways sits above the rows found one way instead of
   /// appearing twice under two headings. Gate-dropped mail was never embedded
   /// and can only ever arrive here by its words, which is what makes it
-  /// findable at all when *Show dropped* is on.
+  /// findable at all under a filter whose `showsDropped` is true.
   final List<SearchHit> hits;
 
   /// The passages of attached documents that answer the same query. Never
@@ -541,7 +541,19 @@ class ArchiveSearch {
   const ArchiveSearch(this.query, this.rows, this.notice);
 }
 
-/// The numbers over the feed, all of them over one window.
+/// The numbers over the feed: SEVEN over one window, and [needsYou] over all
+/// time.
+///
+/// The seven are a readout of what the app has been doing lately and are
+/// bounded by [homeMetricsWindow], which the bar names in a caption beside
+/// them. [needsYou] is a pile to burn down rather than a readout, and a week
+/// around it would hide exactly the work that has been owed longest — so it
+/// is counted over the whole table, and the tile stands on the other side of
+/// a divider for saying so.
+///
+/// [emails] and [teams] are counted over BOTH connectors whatever the source
+/// chips say, because those two tiles ARE the source selector — see
+/// `MessageStore.homeMetrics`.
 ///
 /// One statement writes every field, which is what makes them agree with each
 /// other: read separately, a message settling between two queries would be
@@ -552,11 +564,14 @@ class HomeMetrics {
   final int emails;
   final int teams;
 
-  /// `urgent` or `high` — the same pair the notify sweep treats as an ask.
+  /// `urgent` or `high` — the same pair the notify sweep treats as an ask —
+  /// among the rows the app KEPT. A dropped row keeps the urgency triage gave
+  /// it, and `HomeFilter.urgent` excludes it, so counting it here would put a
+  /// number over a table that cannot show it.
   final int urgent;
 
-  /// What the app decided the user did not need. The same number the "Show
-  /// dropped" toggle reveals, so the tile is a promise the toggle keeps.
+  /// What the app decided the user did not need. The same number the Dropped
+  /// tile's own filter lists, so the tile is a promise the filter keeps.
   final int dropped;
 
   final int needsYou;
@@ -666,18 +681,12 @@ class PipelinePulse {
   final int recentDropped;
   final int recentNeedsYou;
 
-  /// Still `outcome = 'pending'`, whatever their age. Not window-bounded on
-  /// purpose: a message stuck since yesterday is exactly the one a reader
-  /// wants counted, and a ten-minute window would quietly stop mentioning it.
-  final int inFlight;
-
   const PipelinePulse({
     this.queued = const {},
     this.running = const {},
     this.recentSettled = 0,
     this.recentDropped = 0,
     this.recentNeedsYou = 0,
-    this.inFlight = 0,
   });
 
   /// Pipeline order — the order any narration walks. Triage first because it

@@ -210,7 +210,6 @@ void main() {
       expect(pulse.busy, isFalse);
       expect(pulse.waiting, 0);
       expect(pulse.working, 0);
-      expect(pulse.inFlight, 0);
     });
 
     test('a stage that is both waiting and working counts both', () {
@@ -268,7 +267,7 @@ void main() {
       );
     });
 
-    test('only the outcome filters can show the dropped pile', () {
+    test('a filter whose list carries dropped rows can search them', () {
       expect(
         {
           for (final filter in HomeFilter.values)
@@ -276,7 +275,11 @@ void main() {
         },
         {
           HomeFilter.fromOthers: false,
-          HomeFilter.needsYou: false,
+          // The row that stands for a thread is its newest KEPT message, and
+          // a settle-time `not_worthy` drop is a verdict about a message the
+          // gate kept — so this list carries dropped rows and a search under
+          // it has to be able to reach them.
+          HomeFilter.needsYou: true,
           HomeFilter.urgent: false,
           HomeFilter.inFlight: true,
           HomeFilter.errors: true,

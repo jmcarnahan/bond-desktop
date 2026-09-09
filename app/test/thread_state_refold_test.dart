@@ -413,6 +413,55 @@ void main() {
     });
   });
 
+  group('a reply a widened window backfilled', () {
+    test('settles the thread on the next lowering refold, and that is right',
+        () async {
+      // The ask, and the answer the user actually sent — five days later, and
+      // reached only when the sync window widened. `foldMessage(historical:
+      // true)` refused to move state for that Sent copy at ingest, so the
+      // thread is still on record as owing a reply.
+      await seedConversation('c1', ctaText: 'Send the signed order form');
+      await seedMessage('c1', 'ask', receivedAt: '2026-08-12T10:00:00Z');
+      await seedMessage(
+        'c1',
+        'backfilled-reply',
+        direction: 'outbound',
+        receivedAt: '2026-08-17T10:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'outbound',
+      );
+      // Something else on the thread the gate throws out, which is all it
+      // takes to ask the thread to re-derive itself.
+      await seedMessage(
+        'c1',
+        'newsletter',
+        receivedAt: '2026-08-25T10:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'newsletter',
+      );
+
+      expect(
+        await store.refoldThreadState(
+          'email',
+          'newsletter',
+          restored: false,
+        ),
+        'waiting',
+        reason: 'the `historical` flag is honoured for RAISING, which this '
+            'path never does, and is deliberately not consulted when '
+            'lowering: the user DID answer, and this refold reads the whole '
+            'mailbox as stored rather than one sync pass',
+      );
+      expect((await conversation('c1'))['state'], 'waiting');
+      expect(
+        (await conversation('c1'))['cta_text'],
+        'Send the signed order form',
+        reason: 'a kept inbound is still on the thread, so the ask it was '
+            'written about is not cleared',
+      );
+    });
+  });
+
   group('the one-shot repair', () {
     test('it lowers exactly the threads that were lying, and counts them',
         () async {

@@ -117,21 +117,30 @@ That fallback is what a gate-dropped message shows: it never reached triage, so
 it has no summary, and "sender muted" in that space is worth more than a blank.
 `askLine` is the one place that order is written down.
 
-**The eight tiles are the filter.** Pressing a tile narrows the table to what
-that tile counted; pressing it again widens back to everyone else's messages,
-and one filter is in force at a time (`HomeFilter`, with
+**Six of the eight tiles are the filter.** Pressing one narrows the table to
+what that tile counted; pressing it again widens back to everyone else's
+messages, and one filter is in force at a time (`HomeFilter`, with
 `MessageStore.homeFilterSql` as the single definition of what each one
-admits), so **the number on the tile is the number of rows under it**. All
-eight read under the list column's source chips.
+admits), so **the number on the tile is the number of rows under it**. Emails
+and Teams are the other two: they set the list column's source chips rather
+than a filter, and everything else on the bar reads under those chips.
 
 **Seven of them are a weekly readout.** Emails, Teams, Processed, Dropped,
 Urgent, In flight and Errors count the last `homeMetricsWindow` (7 days, the
 hot strip's window too), and the caption beside them says so. Those numbers
 only ever grow, and a lifetime total of processed mail is a number nobody can
 act on. Their filters are bounded by the same week — `HomeFilter.windowed`
-names exactly those five that filter (Emails and Teams write the source chips
-instead), and the feed passes the window as `sinceIso` — so each tile's number
-stays the number of rows under it.
+names exactly those five that filter — and the feed passes the window as
+`sinceIso`, so each tile's number stays the number of rows under it. Urgent
+carries the kept clause its filter carries (`p.dropped = 0`), because triage's
+urgency survives a later drop and a count without it would sit over a table
+that cannot show the rows.
+
+Emails and Teams count their connector **whatever the chips say**: they are
+scalar subqueries over the window with no source clause, where every other
+column is narrowed. Those two tiles are the selector, and a Teams tile reading
+`0` because Teams is switched off would be the control claiming there is
+nothing to switch to.
 
 **Needs You is the eighth, and stands apart.** It sits FIRST, before a
 vertical rule, and it counts ALL TIME: it is a pile to burn down to zero, not a
@@ -199,8 +208,10 @@ source_message_id)` pair:
   and fuses them into ONE ranking, best first — no *Text matches* heading, and
   one count that is the rows on screen. Gate-dropped mail has no vector at all
   and is unreachable by meaning, so the words are the only way it is ever
-  found, whenever *Show dropped* is on. A notice above the rows says when only
-  one of the two halves ran. See [05-embeddings.md](05-embeddings.md).
+  found — which matters under a filter whose `showsDropped` is true (Dropped,
+  Processed, In flight, Errors, Needs You), the filters whose lists carry
+  dropped rows. A notice above the rows says when only one of the two halves
+  ran. See [05-embeddings.md](05-embeddings.md).
 - **An Archive row**, in the Dropped pile or in an archive search.
 - **"What happened" on a message in a thread**, the fourth button on an
   inbound row's hover strip, after Why — and the `What happened ›` door at the

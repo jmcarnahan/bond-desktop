@@ -77,6 +77,11 @@ HomeFeedRow _row({
 
 HomeResult _line(HomeFeedRow row) => resultLine(row, now: _now);
 
+/// The same row read the way the pane reads it under the Needs You filter,
+/// where every live row stands for a thread the rail says is owed an answer.
+HomeResult _underNeedsYou(HomeFeedRow row) =>
+    resultLine(row, now: _now, threadNeedsYou: true);
+
 void main() {
   group('the drop labels', () {
     test('are the words a person would use', () {
@@ -414,6 +419,112 @@ void main() {
           storylineTitle: 'Website redesign',
         )).kind,
         HomeResultKind.needsYou,
+      );
+    });
+  });
+
+  group('under the Needs You filter', () {
+    test('a settle-dropped row says the thread needs you, and says what '
+        'happened to the message', () {
+      // `not_worthy` is a verdict about a message the gate KEPT, so the Needs
+      // You filter picks this row as the one standing for its thread. Left to
+      // its own columns it would draw `Nothing to do` under a tile labelled
+      // Needs You.
+      final result = _underNeedsYou(_row(
+        dropped: true,
+        dropReason: 'not_worthy',
+        needsYouVerdict: false,
+        needsYouReason: 'nothing here is addressed to you',
+      ));
+
+      expect(result.kind, HomeResultKind.needsYou);
+      expect(result.text, 'Needs you');
+      expect(
+        result.detail,
+        'the thread is still owed an answer · this message was judged '
+            'nothing to do',
+        reason: 'the thread is what the filter promised; the drop is what '
+            'happened to THIS message, and the tooltip has to stay honest '
+            'about both',
+      );
+      expect(result.tone, BondTone.attention);
+    });
+
+    test('the judge\'s own words are the clause when the verdict was a yes',
+        () {
+      final result = _underNeedsYou(_row(
+        needsYouVerdict: true,
+        needsYouReason: 'asks you to confirm Thursday',
+      ));
+
+      expect(result.detail, 'asks you to confirm Thursday');
+      // A recorded NO is not this row's reason for being here — the THREAD is
+      // — so its sentence is not borrowed.
+      expect(
+        _underNeedsYou(_row(
+          needsYouVerdict: false,
+          needsYouReason: 'nothing addressed to you',
+        )).detail,
+        'the thread is still owed an answer',
+      );
+    });
+
+    test('urgent turns it red here too', () {
+      expect(
+        _underNeedsYou(_row(urgency: 'urgent')).tone,
+        BondTone.error,
+      );
+    });
+
+    test('a stalled row is stalled whatever its thread owes', () {
+      final result = _underNeedsYou(_row(
+        outcome: 'pending',
+        updatedAt: _minutesAgo(40),
+        storyline: 'pending',
+      ));
+
+      expect(result.kind, HomeResultKind.stalled);
+      expect(result.text, 'Stalled');
+      expect(result.retryable, isTrue);
+    });
+
+    test('so is a failed row, and a row still moving', () {
+      expect(
+        _underNeedsYou(_row(extract: 'error')).text,
+        'Failed at extract',
+      );
+      expect(
+        _underNeedsYou(_row(outcome: 'pending', storyline: 'pending')).kind,
+        HomeResultKind.inFlight,
+      );
+    });
+
+    test('the ask cell prefers the thread\'s own words', () {
+      final row = _row(
+        dropped: true,
+        dropReason: 'not_worthy',
+        ctaText: 'Send the signed order form',
+        summary: 'Sarah proposes moving the launch',
+      );
+      final result = askLine(
+        row,
+        _underNeedsYou(row),
+        threadNeedsYou: true,
+      );
+
+      expect(result.text, 'Send the signed order form');
+      expect(
+        result.ask,
+        isTrue,
+        reason: 'the row is dropped, and the ask branch still fires: the '
+            'filter is a fact about the thread, not about this message',
+      );
+      // With no ask at all it falls to the result's clause rather than to the
+      // message's summary — the reader came here for the thread.
+      final bare = _row(dropped: true, dropReason: 'not_worthy');
+      expect(
+        askLine(bare, _underNeedsYou(bare), threadNeedsYou: true).text,
+        startsWith('the thread is still owed an answer'),
       );
     });
   });

@@ -74,13 +74,20 @@ extension HomeFilterLabel on HomeFilter {
   /// they ask about the OUTCOME rather than about the verdict: a dropped
   /// message has been processed, and hiding it under a filter that counts it
   /// would make the tile above disagree with the table below.
+  ///
+  /// [HomeFilter.needsYou] is on it because the list it draws already carries
+  /// dropped rows. The row that stands for a thread is its newest KEPT
+  /// message, and "kept" is a fact about the gate — a settle-time
+  /// `not_worthy` drop is a verdict about a message the gate kept, so such a
+  /// row is both dropped and the row this filter picked. A search under the
+  /// filter has to be able to reach the rows the filter is showing.
   bool get showsDropped => switch (this) {
         HomeFilter.dropped ||
         HomeFilter.processed ||
         HomeFilter.inFlight ||
-        HomeFilter.errors =>
+        HomeFilter.errors ||
+        HomeFilter.needsYou =>
           true,
-        HomeFilter.fromOthers || HomeFilter.needsYou || HomeFilter.urgent =>
-          false,
+        HomeFilter.fromOthers || HomeFilter.urgent => false,
       };
 }

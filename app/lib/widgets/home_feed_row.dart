@@ -127,10 +127,24 @@ class HomeFeedRowTile extends StatefulWidget {
   /// not progress anybody is watching.
   final bool muteBar;
 
-  /// Folds the row onto two lines. Set by the pane below
+  /// Folds the row onto ONE line. Set by the pane below
   /// [HomePane.compactBelow], where seven columns cannot line up — see the doc
   /// on that constant.
   final bool compact;
+
+  /// Whether the THREAD this row stands for is owed an answer — a fact the row
+  /// cannot read off its own columns.
+  ///
+  /// Set by the pane under the Needs You filter, where every live row is the
+  /// newest kept message of a thread the rail says needs the reader, by
+  /// construction. Without it a row whose own settle verdict was
+  /// `not_worthy` — a drop the Needs You filter deliberately keeps, because it
+  /// is a verdict about a message the gate KEPT — would draw `Nothing to do`
+  /// under a tile labelled Needs You.
+  ///
+  /// False on a search result: a hit is whatever the query found, and nothing
+  /// about the list it landed in says its thread owes anything.
+  final bool threadNeedsYou;
 
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
@@ -158,6 +172,7 @@ class HomeFeedRowTile extends StatefulWidget {
     this.collapsing = false,
     this.muteBar = false,
     this.compact = false,
+    this.threadNeedsYou = false,
     this.onRetry,
     this.onOpenHistory,
   });
@@ -243,8 +258,8 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
                   // would come to disagree about a row that changed between
                   // them.
                   child: widget.compact
-                      ? _compact(row, resultLine(row, now: widget.now))
-                      : _wide(row, resultLine(row, now: widget.now)),
+                      ? _compact(row, _narrate(row))
+                      : _wide(row, _narrate(row)),
                 ),
               ),
             ),
@@ -253,6 +268,13 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
       ),
     );
   }
+
+  /// The narrator, read with what the PANE knows on top of what the row does.
+  HomeResult _narrate(HomeFeedRow row) => resultLine(
+        row,
+        now: widget.now,
+        threadNeedsYou: widget.threadNeedsYou,
+      );
 
   /// Seven columns, the way the header names them.
   Widget _wide(HomeFeedRow row, HomeResult result) {
@@ -365,7 +387,7 @@ class _HomeFeedRowTileState extends State<HomeFeedRowTile> {
   /// table the reader is on the hook for would look like every other row.
   /// A summary gets no dot: it is not a verdict about anything.
   Widget _ask(HomeFeedRow row, HomeResult result) {
-    final ask = askLine(row, result);
+    final ask = askLine(row, result, threadNeedsYou: widget.threadNeedsYou);
     final style = BondType.small.copyWith(
       color: ask.ask ? BondColors.ink : BondColors.inkSecondary,
       fontWeight: ask.ask ? FontWeight.w600 : null,

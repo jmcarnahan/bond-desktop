@@ -270,13 +270,18 @@ class HomeMetricsBar extends StatelessWidget {
           HomeFilter.errors,
           valueColor: metrics.errored > 0 ? BondColors.error : null,
         ),
-        // The window, said once after the tiles it bounds: seven counts with
-        // no stated period are seven counts of nothing in particular, and
-        // seven zeros with no stated period look like a broken pipeline rather
-        // than a quiet week. It bounds those seven FILTERS too — each reads
-        // over the week its tile counted, so the number is the number of rows
-        // under it. Needs You is on the other side of the rule and outside
-        // this sentence: it is all time.
+        // The window, said once after the tiles it bounds: counts with no
+        // stated period are counts of nothing in particular, and zeros with no
+        // stated period look like a broken pipeline rather than a quiet week.
+        // It bounds FIVE of the seven — Processed, Dropped, Urgent, In flight,
+        // Errors — and their filters with them, so each of those numbers is
+        // the number of rows under it. Emails and Teams are the other two and
+        // are only inside the window: they move the source chips rather than
+        // the filter, and they count their connector whatever the chips say,
+        // because those two tiles ARE the selector and a Teams tile reading
+        // zero because Teams is switched off would be the control claiming
+        // there is nothing to switch to. Needs You is on the other side of the
+        // rule and outside this sentence: it is all time.
         Padding(
           padding: const EdgeInsets.only(left: BondSpacing.s4),
           child: Text(

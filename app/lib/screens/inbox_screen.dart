@@ -668,6 +668,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// reads, not watches. Bodies are not fetched: everything this reload is for
   /// is already stored, and a fetch here would put a network call on the timer
   /// path.
+  ///
+  /// The thread BESIDE also gets its draft reloaded here, where the selected
+  /// thread's is reloaded by [_refresh]. Same hazard, two places, because the
+  /// two threads are tracked in two fields and an Inbox row only ever sets the
+  /// side one.
   Future<void> _reloadOpenThread() async {
     if (!mounted) return;
     // The thread beside counts as open: it is being read as much as the one in
@@ -682,6 +687,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             ).notifier,
           )
           .load(fetchBodies: false);
+      if (!mounted) return;
+      // The same hazard [_refresh] states about the selected thread, and this
+      // is now the likelier half of it: an Inbox row opens BESIDE and never
+      // sets `_selectedId`, so the thread the reader is actually looking at on
+      // the landing screen is the one whose draft would go stale. The sync
+      // deletes a draft whose thread just received new mail, and a suggestion
+      // left on screen after that gets sent as a reply to a message that is no
+      // longer the newest one.
+      ref
+          .read(
+            draftProvider(
+              (source: side.source, conversationKey: side.conversationKey),
+            ).notifier,
+          )
+          .load();
       if (!mounted) return;
     }
     final selected = _selectedId;
