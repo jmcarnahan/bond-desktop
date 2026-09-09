@@ -8,8 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// The short answers under the transcript.
 ///
-/// The bar decides nothing: a tap reports which option it was and the host
-/// decides whether that is a send or a prefill. These tests pin what it draws
+/// The bar decides nothing: a tap asks where the host handed it a send, and
+/// reports which option it was where it did not. These tests pin what it draws
 /// and that every affordance reports exactly once.
 
 const DraftOption _confirm = DraftOption(
@@ -73,6 +73,8 @@ void main() {
     });
 
     testWidgets('a tap reports which option it was', (tester) async {
+      // `pumpBar` hands over no `onSend`, so this bar has nothing to
+      // confirm: a tap stages at once and asks nothing.
       final picked = <String>[];
       await pumpBar(tester, onPick: (o) => picked.add(o.stance));
 
@@ -80,11 +82,12 @@ void main() {
       await tester.pump();
 
       expect(picked, ['Propose Tuesday']);
+      expect(find.text('Send this reply?'), findsNothing);
     });
 
     testWidgets('an unarmed bar still reports the tap', (tester) async {
       // Whether a tap sends or prefills is the host's decision, not this
-      // widget's — it reports the same either way.
+      // widget's — with no send to offer it reports the same either way.
       final picked = <String>[];
       await pumpBar(tester, armed: false, onPick: (o) => picked.add(o.stance));
 
@@ -92,12 +95,14 @@ void main() {
       await tester.pump();
 
       expect(picked, ['Confirm Friday']);
+      expect(find.text('Send this reply?'), findsNothing);
     });
 
-    testWidgets('and says so, so a card cannot look like a send button',
+    testWidgets('with no send to offer, a card says it only composes',
         (tester) async {
-      // Rewritten: a tap no longer sends in any grant state, so the caption
-      // and the icon say "into the box" without a send grant.
+      // Rewritten: what a tap does depends on whether the host can send, so
+      // the caption and the icon do too. With no send, both say "into the
+      // box".
       await pumpBar(tester, armed: false);
 
       expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
@@ -106,20 +111,22 @@ void main() {
       expect(find.byIcon(Icons.send_outlined), findsNothing);
     });
 
-    testWidgets('an armed bar says the same thing, and wears the same icon',
-        (tester) async {
-      // Rewritten: the send grant used to change both. It changes neither now
-      // — the composer's own button is the only send there is.
-      await pumpBar(tester);
+    testWidgets('with a send to offer, it says the tap sends', (tester) async {
+      // Rewritten: a real send grant changes both, because the tap it labels
+      // now leads to a send rather than to the box.
+      await pumpBar(tester, onSend: (_) {});
 
-      expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
-      expect(find.byIcon(Icons.edit_outlined), findsNWidgets(2));
-      expect(find.byIcon(Icons.send_outlined), findsNothing);
+      expect(
+        find.text('Tap a reply to send it — you can edit it first.'),
+        findsOneWidget,
+      );
+      expect(find.byIcon(Icons.send_outlined), findsNWidgets(2));
+      expect(find.byIcon(Icons.edit_outlined), findsNothing);
     });
 
     testWidgets('the whole reply is visible — no tooltip, no truncation',
         (tester) async {
-      // A tap STAGES all of these words, so all of them are on screen. The
+      // A tap ACTS on all of these words, so all of them are on screen. The
       // long body must lay out unclipped rather than hide its tail behind a
       // hover.
       const long = DraftOption(
@@ -170,32 +177,46 @@ void main() {
   });
 
   group('send from a card', () {
-    testWidgets('is absent where the host has no real send to offer',
+    testWidgets('a tap asks nothing where the host has no real send to offer',
         (tester) async {
-      // A button that says Send and saves to Outlook drafts instead is a lie,
-      // so the lower rungs get no button at all.
-      await pumpBar(tester);
+      // A question that says Send and saves to Outlook drafts instead is a
+      // lie, so the lower rungs ask nothing: the tap stages, at once.
+      final picked = <String>[];
+      await pumpBar(tester, onPick: (o) => picked.add(o.stance));
 
-      expect(find.byKey(QuickReplyBar.sendKeyFor(0)), findsNothing);
+      await tester.tap(find.text('Confirm Friday'));
+      await tester.pump();
+
+      expect(picked, ['Confirm Friday']);
+      expect(find.text('Send this reply?'), findsNothing);
       expect(find.byIcon(Icons.send_outlined), findsNothing);
       expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
     });
 
-    testWidgets('is on every card where there is, and says so in the caption',
+    testWidgets('a tap asks where there is one, and says so in the caption',
         (tester) async {
-      await pumpBar(tester, onSend: (_) {});
+      final picked = <String>[];
+      await pumpBar(
+        tester,
+        onPick: (o) => picked.add(o.stance),
+        onSend: (_) {},
+      );
 
-      expect(find.byKey(QuickReplyBar.sendKeyFor(0)), findsOneWidget);
-      expect(find.byKey(QuickReplyBar.sendKeyFor(1)), findsOneWidget);
+      await tester.tap(find.text('Confirm Friday'));
+      await tester.pump();
+
+      expect(find.text('Send this reply?'), findsOneWidget);
+      expect(find.byKey(QuickReplyBar.editKeyFor(0)), findsOneWidget);
+      // Asking is not staging: nothing has been put in the box yet.
+      expect(picked, isEmpty);
       expect(
-        find.text('Tap a reply to put it in the box, or send it as it stands.'),
+        find.text('Tap a reply to send it — you can edit it first.'),
         findsOneWidget,
       );
     });
 
-    testWidgets('and a plain tap still only stages', (tester) async {
-      // The button consumes its own tap, so the card's stage-on-tap is
-      // untouched — and tapping the words is never a send.
+    testWidgets('Edit first puts the words in the box and sends nothing',
+        (tester) async {
       final picked = <String>[];
       final sent = <String>[];
       await pumpBar(
@@ -206,16 +227,19 @@ void main() {
 
       await tester.tap(find.text('Propose Tuesday'));
       await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBar.editKeyFor(1)));
+      await tester.pump();
 
       expect(picked, ['Propose Tuesday']);
       expect(sent, isEmpty);
+      expect(find.text('Send this reply?'), findsNothing);
     });
 
-    testWidgets('Send asks first, on that card and no other', (tester) async {
+    testWidgets('a tap asks on that card and no other', (tester) async {
       final sent = <String>[];
       await pumpBar(tester, onSend: (o) => sent.add(o.stance));
 
-      await tester.tap(find.byKey(QuickReplyBar.sendKeyFor(0)));
+      await tester.tap(find.text('Confirm Friday'));
       await tester.pump();
 
       expect(sent, isEmpty);
@@ -228,17 +252,23 @@ void main() {
     });
 
     testWidgets('Cancel puts the card back and sends nothing', (tester) async {
+      final picked = <String>[];
       final sent = <String>[];
-      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+      await pumpBar(
+        tester,
+        onPick: (o) => picked.add(o.stance),
+        onSend: (o) => sent.add(o.stance),
+      );
 
-      await tester.tap(find.byKey(QuickReplyBar.sendKeyFor(0)));
+      await tester.tap(find.text('Confirm Friday'));
       await tester.pump();
       await tester.tap(find.byKey(QuickReplyBar.cancelSendKeyFor(0)));
       await tester.pump();
 
       expect(sent, isEmpty);
+      expect(picked, isEmpty);
       expect(find.text('Send this reply?'), findsNothing);
-      expect(find.byKey(QuickReplyBar.sendKeyFor(0)), findsOneWidget);
+      expect(find.text('Confirm Friday'), findsOneWidget);
     });
 
     testWidgets('the confirm reports that option once, and disarms',
@@ -246,7 +276,7 @@ void main() {
       final sent = <String>[];
       await pumpBar(tester, onSend: (o) => sent.add(o.stance));
 
-      await tester.tap(find.byKey(QuickReplyBar.sendKeyFor(1)));
+      await tester.tap(find.text('Propose Tuesday'));
       await tester.pump();
       await tester.tap(find.byKey(QuickReplyBar.confirmSendKeyFor(1)));
       await tester.pump();
@@ -261,7 +291,7 @@ void main() {
       // asked about is not the card in front of them now.
       final sent = <String>[];
       await pumpBar(tester, onSend: (o) => sent.add(o.stance));
-      await tester.tap(find.byKey(QuickReplyBar.sendKeyFor(0)));
+      await tester.tap(find.text('Confirm Friday'));
       await tester.pump();
 
       await pumpBar(

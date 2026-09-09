@@ -30,8 +30,9 @@ are the authority on sequencing.
    storyline whose membership has moved. Its own section below.
 4. **Audit** (`StorylineAuditHandler` → `audit`) — re-judges the threads the
    MODEL filed into one storyline, against the charter as it now reads and the
-   owner's own examples. Queued by `removeThread` and by *Re-check members* in
-   the About block. It is registered after the refresh and before the recruit,
+   owner's own examples. Queued by `removeThread` and by *Re-check members* at
+   the foot of the Messages tab. It is registered after the refresh and before
+   the recruit,
    and both halves of that matter: the removal that woke it also queues a
    refresh, which is the pass that narrows the charter, so the audit judges
    against the narrowed sentence — and the recruit that a narrowed charter
@@ -366,11 +367,12 @@ brings it up to date. It is one action and one flag: the screen owns the sync
 and hands the panel the label, which is why both buttons read *Syncing…*
 together.
 
-Beside *About* in that same row sits **Documents**, which counts what it holds
-— *3 documents*, or the bare word when the storyline's threads carry no files
-at all, so a storyline answers "is there anything on the shelf" without a tap.
-It unfolds `AttachmentDocumentsStrip` under the header, where the member strip
-and the About block unfold, and folds again on a second press.
+The header's **Files** tab counts what it holds — *Files (3)*, or the bare
+word when the storyline's threads carry no files at all, so a storyline answers
+"is there anything on the shelf" without a tap. The tab holds the shelf,
+`AttachmentDocumentsStrip` whole. **About**
+holds the charter and nothing else; the membership is read on the spine, one
+card per thread.
 
 The shelf is **every document on the storyline's threads, the pinned ones
 first** — `storylineDocumentsProvider` over `attachmentsForStoryline`, not a
@@ -404,7 +406,7 @@ the storyline pane is already several conversations side by side and halving
 it again leaves neither readable. *Back* out of that viewer lands on the
 storyline, not on a split that was never there.
 
-The About block also ends with what has been taken *out* of the storyline —
+The **Messages** tab ends with what has been taken *out* of the storyline —
 two lists and a *Re-check members* button, all under *Removing a thread* below.
 
 The same two lists are readable from the other end. A message's history screen
@@ -415,10 +417,10 @@ filing, *filed by you* where `added_by = 'user'`, and the storyline's own
 status where it is no longer live — and under them every `storyline_member_blocks`
 row. The blocks are ONE list here, each entry saying which pass removed it:
 *Removed by you* or *Removed by re-check*. The four buttons beside them —
-*Remove* (two taps, as it is in the About block), *Allow again* and *Add back*
+*Remove* (two taps, as it is on the card), *Allow again* and *Add back*
 on every entry whose storyline is still live, whichever pass wrote the block,
 and *Add to storyline…* which opens the same picker pane the thread view opens
-— all route through the same `StorylinesNotifier` methods the About block
+— all route through the same `StorylinesNotifier` methods the storyline room
 calls. Two doors onto one decision, never two decisions: a removal from here
 writes the same block, teaches the model the same lesson, and offers the same
 way back. A storyline that is dismissed or gone offers no lever at all — not
@@ -439,6 +441,17 @@ Refresh, audit and recap all report progress under their own kinds, and
 `StorylinesNotifier` listens for all of them, so a pass that rewrites a title,
 takes a member out, or writes a recap lands on the rail and the open storyline
 within the list's 400 ms debounce rather than at the next poll.
+
+**The source pills narrow storylines too.** A pill leaves only the storylines
+holding at least one thread from that connector, in the rail, in the overview
+and in Find — `storylinesBySource` over the `sources` column the list query
+derives, applied once by the screen so the three cannot disagree about which
+rows exist. A storyline is not itself mail or chat, but the threads in it are.
+A storyline with no members yet matches no pill and is hidden under one, the
+way an empty section is. The OPEN storyline is never closed by a pill, and
+neither the storyline pickers nor the dismissed fold are narrowed: a pill
+changes what is browsed, never what is open or what a thread may be filed
+into.
 
 ## Filing a thread by hand
 
@@ -540,18 +553,47 @@ They stay out of both example fences, and no pass clears them; a thread the
 re-check took out stays out until a person says otherwise, which is what stops
 the audit and the recruit trading the same thread back and forth across drains.
 
-**On screen**, the About block ends with two lists, **REMOVED BY YOU** and
-**REMOVED BY RE-CHECK**, each rendering only when it has something in it. An
-entry is the thread's subject — or *(thread no longer stored)*, since a block
-outlives the conversation row it was written about — over the evidence that was
-recorded, and two buttons. ***Allow again*** lifts the block and does nothing
+**On screen**, the two lists sit at the foot of the **Messages** tab, under a
+divider below the spine — **REMOVED BY YOU** and **REMOVED BY RE-CHECK**, each
+rendering only when it has something in it. They are here and not on a
+reference tab because the reader who has just looked at six cards and doubts
+three of them is looking at the spine. One caption stands above both: *Add back
+puts a thread on the spine again. Allow again only lifts the block — the model
+may file the thread again on its own, or not.*
+
+An entry is the thread's subject — or *(thread no longer stored)*, since a
+block outlives the conversation row it was written about — over the evidence
+that was recorded, and two buttons. ***Add back*** comes FIRST
+(`StorylineBlocksSection.addBackKeyFor(source, key)`): it files the thread by
+hand, which clears a block of either kind on the way in, and it is what a
+reader looking at a thread the re-check took out actually wants. ***Allow
+again*** is second (`allowAgainKeyFor`) and lifts the block and does nothing
 else: the owner is withdrawing a veto, not making a membership, and whether the
 thread belongs is a question the model may now answer on its own the next time
-a pass looks at it. ***Add back*** files the thread by hand, which clears a
-block of either kind on the way in. Both buttons sit on both lists — a
-re-check's block is as reversible as the owner's. Under them, ***Re-check
-members*** queues the audit by hand and pumps the worker, for a storyline whose
-charter has drifted without anything being removed.
+a pass looks at it. It read like "put it back" while it stood first, which is
+how an owner clearing a re-check ends up with fewer threads than they started
+with. Both buttons sit on both lists — a re-check's block is as reversible as
+the owner's.
+
+Under them, ***Re-check members*** queues the audit by hand and pumps the
+worker, for a storyline whose charter has drifted without anything being
+removed. While that pass is in the worker the button reads ***Re-checking…***
+and answers nothing, and its caption says the spine updates as it goes:
+pressing *Add back* under a pass that is mid-flight is how a thread gets
+removed and re-filed in the same minute. It is released when `storyline_audit`
+reports nothing remaining, or by a two-minute backstop — a model server that is
+not running parks the item with work still remaining, and a button inert until
+the server comes back is a button that lies.
+
+The **About** tab is the charter alone: a `CHARTER` label with an explicit
+**Edit** button beside it (`StorylineTimelinePanel.charterEditKey`), the
+sentence itself still tappable, and a caption saying what editing it is for.
+The `THREADS · n` member list is gone from there — the spine already names
+every thread, one card each. Each episode card instead carries one quiet italic
+line saying why the thread is here
+(`StorylineTimelinePanel.evidenceKeyFor(source, key)`): *Filed by you* for a
+hand-filed member, the model's own sentence for an automatic one, and nothing
+at all where an automatic row has none. "Grouped automatically." was filler.
 
 ## How the sweep finds its pairs
 

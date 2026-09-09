@@ -965,6 +965,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return state is StorylinesLoaded ? state.storylines : const [];
   }
 
+  /// [_storylines] under the source pills. The rail, the overview and Find
+  /// read this one; a selection, the pickers and the dismissed fold read the
+  /// unfiltered list — a pill narrows what is browsed, never what is open or
+  /// what a thread may be filed into.
+  List<Storyline> _scopedStorylines() =>
+      storylinesBySource(_storylines(), _sourceFilter);
+
+  /// True while a re-check this owner asked for is still in the worker. The
+  /// set rides on the read model because the panel is pure and the screen
+  /// holds nothing per storyline.
+  bool _storylineAuditing(String id) {
+    final state = ref.watch(storylinesProvider);
+    return state is StorylinesLoaded && state.auditing.contains(id);
+  }
+
   /// The storylines the user said no to. Read from the same state as
   /// [_storylines] and never mixed into it: the rail folds these away under a
   /// heading of their own.
@@ -1491,7 +1506,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final later = laterRows(conversations);
     return AppRail(
       conversations: conversations,
-      storylines: _storylines(),
+      storylines: _scopedStorylines(),
       dismissed: _dismissedStorylines(),
       selectedId: _selectedId,
       selectedSource: _selectedSource,
@@ -2169,7 +2184,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final target = firstFindTarget(
       scope: _section ?? RailSection.home,
       conversations: _rows,
-      storylines: _storylines(),
+      storylines: _scopedStorylines(),
       rooms: _rooms,
       find: _find,
       unreadOnly: _unreadOnly,
@@ -2683,6 +2698,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ref.read(storylineTimelineProvider(storyline.id).notifier).load();
       },
       onAudit: () => notifier.auditNow(storyline.id),
+      auditing: _storylineAuditing(storyline.id),
       onOpenThread: (source, key) => _select(key, source: source),
       // The card's own tap. A thread opens BESIDE the spine rather than over
       // it: the storyline is the room the reader is in, and the answer they
@@ -3005,7 +3021,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     /// Every guard here is about honesty rather than tidiness: a card offers to
     /// write words into the box that answer THIS message, so it goes the moment
     /// that message has been answered — by a synced reply or by a queued one.
-    /// A TAP never sends; the card's own Send does, and asks first.
+    /// A tap ASKS where this build can really send, and stages where it
+    /// cannot.
     Widget? cardFor(Message m) {
       if (!m.inbound) return null;
       final row = draft.threadDrafts[m.id];
@@ -3024,13 +3041,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       return QuickReplyBar(
         options: options,
         armed: draft.capability == SendCapability.send,
-        // Whatever the grant, a tap puts this option in the box and takes the
-        // cursor there. The box is already under the thread, so all a card owes
-        // the reader is the words and somewhere to change them — and, under an
-        // OLDER message, which message they answer: a send resolves to the
-        // newest inbound on its own, so a card that stayed silent about its
-        // message would have its reply land on a different one. The newest
-        // message's card says nothing, because nothing needs saying.
+        // Puts this option in the box and takes the cursor there: the whole
+        // meaning of a tap where this build cannot send, and the *Edit first*
+        // answer where it can. The box is already under the thread, so all a
+        // card owes the reader is the words and somewhere to change them —
+        // and, under an OLDER message, which message they answer: a send
+        // resolves to the newest inbound on its own, so a card that stayed
+        // silent about its message would have its reply land on a different
+        // one. The newest message's card says nothing, because nothing needs
+        // saying.
         onPick: (option) {
           _stage(target, body: option.body);
           if (m.id != newestInboundId) {
@@ -3039,8 +3058,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             composerFocus.requestFocus();
           }
         },
-        // Only on the top rung. The lower rungs save to Outlook or copy to
-        // the clipboard, and a button that says Send and does either is a lie.
+        // The card's tap, confirmed. Only on the top rung: the lower rungs
+        // save to Outlook or copy to the clipboard, and a question that says
+        // Send and does either is a lie — so on those a tap asks nothing and
+        // stages instead.
         //
         // Always addressed to `m.id`: the card answers the message it hangs
         // under, newest or not, and nothing is staged on the way — the words
@@ -4440,8 +4461,13 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Every storyline as a card. Suggestions carry their two answers on the
   /// row, so the whole section can be cleared without opening anything.
   Widget _storylinesOverview() {
-    final storylines = storylineRows(_storylines());
+    final storylines = storylineRows(_scopedStorylines());
     if (storylines.isEmpty) {
+      // A pill emptied this pane, rather than the model never having grouped
+      // anything: say which half is showing and offer the way back, the same
+      // line every other narrowed pane ends with.
+      final notice = _storylines().isEmpty ? null : _scopeNotice();
+      if (notice != null) return Center(child: notice);
       return Center(
         child: Text(
           'Storylines appear once the local model has grouped enough mail.',

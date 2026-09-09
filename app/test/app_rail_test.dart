@@ -1375,6 +1375,38 @@ void main() {
     });
   });
 
+  group('storylinesBySource', () {
+    Storyline withSources(String id, Set<String> sources) =>
+        Storyline(id: id, title: 'Website redesign', sources: sources);
+
+    test('no pill keeps every storyline', () {
+      final all = [
+        withSources('a', const {'email'}),
+        withSources('b', const {'teams'}),
+      ];
+
+      expect(storylinesBySource(all, null), same(all));
+    });
+
+    test('a pill keeps only the storylines holding that connector', () {
+      final all = [
+        withSources('a', const {'email'}),
+        withSources('b', const {'teams'}),
+        withSources('c', const {'email', 'teams'}),
+      ];
+
+      expect(storylinesBySource(all, 'teams').map((s) => s.id), ['b', 'c']);
+      expect(storylinesBySource(all, 'email').map((s) => s.id), ['a', 'c']);
+    });
+
+    test('a storyline with no members is hidden under a pill', () {
+      final all = [withSources('a', const {})];
+
+      expect(storylinesBySource(all, 'email'), isEmpty);
+      expect(storylinesBySource(all, null), hasLength(1));
+    });
+  });
+
   group('AppRail storylines', () {
     Future<void> pumpRail(
       WidgetTester tester, {

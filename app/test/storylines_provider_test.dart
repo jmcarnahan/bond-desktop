@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/message_models.dart';
@@ -25,6 +27,20 @@ class SilentHandler extends WorkHandler {
 
   @override
   Future<void> run(Map<String, Object?> item) async {}
+}
+
+/// A handler that parks on a gate the test opens, so a queue can be looked at
+/// while an item of it is genuinely still in flight.
+class BlockingHandler extends WorkHandler {
+  @override
+  final String kind;
+
+  final Completer<void> gate = Completer<void>();
+
+  BlockingHandler(this.kind);
+
+  @override
+  Future<void> run(Map<String, Object?> item) => gate.future;
 }
 
 /// Never called — every notifier method under test is a local write.
@@ -314,6 +330,23 @@ void main() {
 
       expect((await store.nextPendingWork('storyline_audit'))?['entity_id'],
           'sl-1');
+      // And the read model says so, which is what makes the button inert:
+      // pressing Add back under a pass that is mid-flight is how a thread
+      // gets removed and re-filed in the same minute.
+      expect((notifier.state as StorylinesLoaded).auditing, {'sl-1'});
+    });
+
+    test('a storyline nobody re-checked is not marked as running', () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedStoryline('sl-2', status: 'active');
+      final notifier = StorylinesNotifier(store, service);
+      await notifier.load();
+
+      await notifier.auditNow('sl-1');
+
+      expect((notifier.state as StorylinesLoaded).auditing, isNot(contains(
+        'sl-2',
+      )));
     });
 
     test('create returns the new id and lands it in the list', () async {
@@ -390,6 +423,30 @@ void main() {
         expect((notifier.state as StorylinesLoaded).storylines, hasLength(1));
       });
     }
+
+    test('a finished audit releases the storyline it was asked about',
+        () async {
+      await seedStoryline('sl-1', status: 'active');
+      final handler = BlockingHandler('storyline_audit');
+      final worker = AiWorker(store, handlers: [handler]);
+      addTearDown(worker.dispose);
+      final notifier = StorylinesNotifier(store, service, aiWorker: worker);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      await notifier.auditNow('sl-1');
+      // The item is claimed and parked at the handler, so the pass really is
+      // in flight while this is read.
+      await settle();
+      expect((notifier.state as StorylinesLoaded).auditing, {'sl-1'});
+
+      handler.gate.complete();
+      await settle();
+
+      // Nothing remaining on the audit queue is what releases it — and the
+      // reload that follows republishes with the emptied set.
+      expect((notifier.state as StorylinesLoaded).auditing, isEmpty);
+    });
 
     test('another queue\'s report changes nothing', () async {
       final worker = AiWorker(store, handlers: [SilentHandler('extract')]);

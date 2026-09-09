@@ -234,6 +234,19 @@ void main() {
   /// One message's row, by the key the transcript gives it.
   Finder rowFor(String id) => find.byKey(ValueKey(id));
 
+  /// One card, out of the several the transcript is drawing — the way in to
+  /// everything a card can do now, since the tap is the only control on it.
+  Finder cardOn(String messageId, String stance) => find.descendant(
+        of: rowFor(messageId),
+        matching: find.text(stance),
+      );
+
+  /// The *Edit first* answer on a card that has been tapped.
+  Finder editOn(String messageId, int index) => find.descendant(
+        of: rowFor(messageId),
+        matching: find.byKey(QuickReplyBar.editKeyFor(index)),
+      );
+
   /// The text the reply box is actually holding, controller and all — the
   /// `suggestedBody` a `Composer` was handed says what the host offered, not
   /// what is on screen.
@@ -270,13 +283,16 @@ void main() {
 
   testWidgets('an older card puts ITS OWN words in the box, not the newest',
       (tester) async {
-    // Rewritten: a card stages rather than sends, so what this pins is which
-    // of the two options the box ends up holding.
+    // Rewritten twice over: a card asks before it does anything under a send
+    // grant, so *Edit first* is the answer that stages — and what this pins is
+    // which of the two options the box ends up holding.
     await seedThread();
     await pumpScreen(tester);
     await openThread(tester);
 
-    await tester.tap(find.text('Confirm receipt'));
+    await tester.tap(cardOn('c1-m1', 'Confirm receipt'));
+    await tester.pump();
+    await tester.tap(editOn('c1-m1', 0));
     await tester.pump();
     await tester.pump();
 
@@ -303,16 +319,18 @@ void main() {
   testWidgets('tapping a card sends nothing and closes no other card',
       (tester) async {
     // Rewritten: this used to assert that a queued send closed every card
-    // while it was undoable. A tap queues no send now, so nothing has been
+    // while it was undoable. A tap only asks now, so nothing has been
     // answered and every card stays where it was.
     await seedThread();
     await pumpScreen(tester);
     await openThread(tester);
 
-    await tester.tap(find.text('Confirm receipt'));
+    await tester.tap(cardOn('c1-m1', 'Confirm receipt'));
     await tester.pump();
     await tester.pump();
 
+    expect(find.text('Send this reply?'), findsOneWidget);
+    expect(mail.calls, isEmpty);
     expect(find.text('Confirm receipt'), findsOneWidget);
     expect(find.text('Say yes'), findsOneWidget);
     expect(find.text('Sending…'), findsNothing);
@@ -367,33 +385,26 @@ void main() {
     );
   });
 
-  testWidgets('without a send grant a card does the same thing, and offers '
-      'no Send', (tester) async {
-    // Rewritten: this was the honest half of a split. A TAP has no split left
-    // — it stages in either grant state — so what it pins now is that the
-    // read-only build stages exactly like the sending one, and that the card's
-    // own Send is absent where the send would really be a save to Outlook.
+  testWidgets('without a send grant a tap stages at once and asks nothing',
+      (tester) async {
+    // Rewritten: this was the honest half of a split. There is nothing to
+    // confirm where nothing can be sent, so the read-only build's tap goes
+    // straight to the box and no question ever stands.
     await seedThread();
     await pumpScreen(tester, grantedScopes: _readGrant);
     await openThread(tester);
 
-    expect(find.byKey(QuickReplyBar.sendKeyFor(0)), findsNothing);
     expect(find.text('Send this reply?'), findsNothing);
 
-    await tester.tap(find.text('Confirm receipt'));
+    await tester.tap(cardOn('c1-m1', 'Confirm receipt'));
     await tester.pump();
     await tester.pump();
     await tester.pump();
 
+    expect(find.text('Send this reply?'), findsNothing);
     expect(mail.calls, isEmpty);
     expect(find.widgetWithText(Composer, 'Got it, thanks.'), findsOneWidget);
   });
-
-  /// One message's Send, out of the several cards the transcript is drawing.
-  Finder sendOn(String messageId, int index) => find.descendant(
-        of: rowFor(messageId),
-        matching: find.byKey(QuickReplyBar.sendKeyFor(index)),
-      );
 
   testWidgets('a card can send its own words, after asking', (tester) async {
     await seedThread();
@@ -402,7 +413,7 @@ void main() {
 
     // The OLDER message's card. A send resolves to the newest inbound on its
     // own, so this is the one that proves the card addresses its own message.
-    await tester.tap(sendOn('c1-m1', 0));
+    await tester.tap(cardOn('c1-m1', 'Confirm receipt'));
     await tester.pump();
 
     // Nothing has gone yet — the card owes the reader a question first.
@@ -434,7 +445,7 @@ void main() {
     await pumpScreen(tester);
     await openThread(tester);
 
-    await tester.tap(sendOn('c1-m2', 0));
+    await tester.tap(cardOn('c1-m2', 'Say yes'));
     await tester.pump();
     await tester.tap(find.descendant(
       of: rowFor('c1-m2'),
@@ -448,6 +459,27 @@ void main() {
     expect(find.text('Send this reply?'), findsNothing);
     expect(find.text('Say yes'), findsOneWidget);
     expect(boxText(tester), '');
+  });
+
+  testWidgets("Edit first stages the card's words and sends nothing",
+      (tester) async {
+    // The middle answer, at screen level: it is the old tap, so the box ends
+    // up holding the card's own words and the older card's reply-to caption
+    // comes with them.
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    await tester.tap(cardOn('c1-m1', 'Confirm receipt'));
+    await tester.pump();
+    await tester.tap(editOn('c1-m1', 0));
+    await tester.pump();
+    await tester.pump();
+
+    expect(boxText(tester), 'Got it, thanks.');
+    expect(mail.calls, isEmpty);
+    expect(find.text('Send this reply?'), findsNothing);
+    expect(find.text('Replying to Eric Vance'), findsOneWidget);
   });
 
   testWidgets('the box opens EMPTY even when a suggestion is waiting',
@@ -521,13 +553,15 @@ void main() {
     expect(find.text('Say yes'), findsOneWidget);
   });
 
-  testWidgets('a card tap stages that option and queues no send',
+  testWidgets('Edit first stages that option and queues no send',
       (tester) async {
     await seedThread();
     await pumpScreen(tester);
     await openThread(tester);
 
-    await tester.tap(find.text('Push back'));
+    await tester.tap(cardOn('c1-m2', 'Push back'));
+    await tester.pump();
+    await tester.tap(editOn('c1-m2', 1));
     await tester.pump();
     await tester.pump();
 
@@ -552,7 +586,9 @@ void main() {
     await pumpScreen(tester);
     await openThread(tester);
 
-    await tester.tap(find.text('Confirm receipt'));
+    await tester.tap(cardOn('c1-m1', 'Confirm receipt'));
+    await tester.pump();
+    await tester.tap(editOn('c1-m1', 0));
     await tester.pump();
     await tester.pump();
 

@@ -94,6 +94,13 @@ You tab has an empty sentence of its own (`NeedsYouTab.emptyText`). Home is not
 narrowed by the pills — its feed reads both connectors — so its title never
 carries one.
 
+**Storylines narrow too.** A pill leaves only the storylines holding a thread
+from that connector — in the rail, in the overview and in Find, off the
+`sources` the list query derives (`storylinesBySource`). A storyline is not
+itself mail or chat, but the threads in it are. The OPEN storyline is never
+closed by a pill, and the storyline pickers are never narrowed: a pill changes
+what is browsed, never what is open or what a thread may be filed into.
+
 On Home the column is the whole stack and every section collapses. On any other
 stop it is that one section, expanded, with its header row and **no chevron** —
 the user picked the stop, and a chevron that emptied the column would be an
@@ -268,8 +275,10 @@ message lives on that message, never up here.
 **The tab row** is a second line of `BondFilterPill`s, drawn only when there is
 more than one tab — one pill is a label pretending to be a choice. Each pill
 carries `RoomHeader.tabKey(value)`. A storyline's tabs are **Messages | Files
-(n) | About**: the catch-up, the pinned bar and the spine; then the whole
-document shelf; then the charter and the member list.
+(n) | About**: the catch-up, the pinned bar, the spine, and under a divider at
+its foot the removed threads and *Re-check members*; then the whole document
+shelf; then the charter. Each episode card carries one italic line saying why
+the thread is here — *Filed by you*, or the model's sentence.
 
 A **thread's** tabs are **Messages | Files (n)**, and only when it carries
 files — with one tab the header draws no tab row, so a fileless thread looks
@@ -312,14 +321,16 @@ composer is rebuilt with a new key on every send epoch.
 
 **The box starts empty**, one line tall, and grows as it is written in. A
 suggestion the pipeline wrote stays on its card in the transcript until the
-reader asks for it: tapping a card, the hover strip's Suggest a reply, the box's
+reader asks for it: a card's *Edit first* (its plain tap on a build that cannot
+send), the hover strip's Suggest a reply, the box's
 own Draft reply / Regenerate, the bar's Suggest a reply, Use in reply on a file,
 or the `✨ A suggested reply is ready` hint's `Use it` above the box. Putting
 text in the box that way is *staging*, and it is screen state keyed by thread —
 never the stored draft, which is unchanged until the reader types. The ✕ on the
 box only empties it; the suggestion stays on its card, and deleting one is still
-that card's own × with its two-step confirm. Cards never send: the composer's
-own button is the one send there is.
+that card's own × with its two-step confirm. A card sends only through its own
+inline question (Send / Edit first / Cancel); the composer's button is the
+other send.
 
 **Reply-to** is the override the hover Reply writes: a `Replying to <who>`
 caption with a ✕ above the box, and the send carries that message id. It is

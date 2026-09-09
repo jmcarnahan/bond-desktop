@@ -30,6 +30,17 @@ List<String> _decodeStringList(String? raw) {
   }
 }
 
+/// The `sources` column: a `GROUP_CONCAT` of the distinct connectors a
+/// storyline's members come from. Comma-separated, never JSON, and null on a
+/// storyline with no members at all.
+Set<String> _decodeSources(String? raw) {
+  if (raw == null || raw.isEmpty) return const {};
+  return {
+    for (final part in raw.split(','))
+      if (part.trim().isNotEmpty) part.trim(),
+  };
+}
+
 /// One storyline as stored, plus the two counts the list query derives.
 ///
 /// [status] stays a raw string rather than an enum: it is written by the
@@ -100,6 +111,12 @@ class Storyline {
   final int memberCount;
   final int openCount;
 
+  /// The connectors its member threads come from — `{'email'}`, `{'teams'}`
+  /// or both — derived by the list query, not stored. Empty for a storyline
+  /// with no members yet. What the source pills filter the rail by: a
+  /// storyline is not itself mail or chat, but the threads in it are.
+  final Set<String> sources;
+
   const Storyline({
     required this.id,
     required this.title,
@@ -121,6 +138,7 @@ class Storyline {
     this.recapThrough,
     this.memberCount = 0,
     this.openCount = 0,
+    this.sources = const {},
   });
 
   bool get isSuggested => status == 'suggested';
@@ -158,6 +176,7 @@ class Storyline {
       recapThrough: row['recap_through'] as String?,
       memberCount: (row['member_count'] as num?)?.toInt() ?? 0,
       openCount: (row['open_count'] as num?)?.toInt() ?? 0,
+      sources: _decodeSources(row['sources'] as String?),
     );
   }
 }

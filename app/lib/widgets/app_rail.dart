@@ -223,6 +223,21 @@ List<Conversation> bySource(List<Conversation> all, String? source) {
   ];
 }
 
+/// Only the storylines holding at least one thread from [source], or all of
+/// them when it is null — `bySource` for storylines. A storyline with no
+/// members yet has no source to match and is hidden under a pill, the way an
+/// empty section is.
+///
+/// Applied by the screen ONCE, for `bySource`'s reason: the rail, the overview
+/// and Find must agree about which rows exist under a pill.
+List<Storyline> storylinesBySource(List<Storyline> all, String? source) {
+  if (source == null) return all;
+  return [
+    for (final s in all)
+      if (s.sources.contains(source)) s,
+  ];
+}
+
 /// The one line a rail row has room for. Who it is beats what it is about:
 /// at 260px a subject truncates to nothing useful, a name does not.
 ///

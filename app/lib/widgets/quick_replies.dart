@@ -25,12 +25,13 @@ import 'composer.dart' show Composer;
 /// is a menu, and the user would read all five before writing their own reply
 /// anyway.
 ///
-/// A TAP never sends. It puts that reply in the docked composer, where the
-/// reader changes it or presses Send — because a card is text on screen, and
-/// text that quietly put mail in front of somebody is not what a tap on it
-/// promises. The card's own Send does send, and asks first: a reply that is
-/// already right should not need a trip through the box to go, and the inline
-/// question is what keeps the tap and the send from ever being confused.
+/// A tap ASKS. Where the host can really send, tapping a card puts an inline
+/// question on it — *Send this reply?* Send · Edit first · Cancel — and
+/// nothing happens until one of the three is answered: a reply that is already
+/// right should not need a trip through the box to go, and a card that sent on
+/// a single tap is not what text on screen promises. Where the host cannot
+/// send there is nothing to confirm, so a tap stages the words in the docked
+/// composer outright, which is the only thing it could have meant.
 class QuickReplyBar extends StatefulWidget {
   /// Zero, one or two. Zero leaves the ask-for-a-suggestion button alone, or
   /// nothing at all where there is nothing to ask.
@@ -41,13 +42,14 @@ class QuickReplyBar extends StatefulWidget {
   /// row's sake and for the hosts that already know the answer.
   final bool armed;
 
-  /// A card was tapped. What that means is the host's decision, not this
-  /// widget's.
+  /// The reader wants these words in the box. What that means is the host's
+  /// decision, not this widget's — it is the *Edit first* answer where the
+  /// host can send, and the tap itself where it cannot.
   final void Function(DraftOption option) onPick;
 
   /// Sends a card's reply as it stands, after the card's own confirm. Null
-  /// hides the affordance — a host without a real send grant offers nothing
-  /// that only looks like a send.
+  /// means a tap has nothing to ask about and stages at once — a host without
+  /// a real send grant offers nothing that only looks like a send.
   final void Function(DraftOption option)? onSend;
 
   /// Closes the suggestions. Null hides the ×.
@@ -82,12 +84,15 @@ class QuickReplyBar extends StatefulWidget {
     this.suggesting = false,
   });
 
-  /// The card's own Send, and the two answers to the question it asks. Keyed
-  /// by INDEX rather than by stance, because two suggestions can share a
-  /// stance and a test that tapped the wrong one would still pass.
-  static Key sendKeyFor(int index) => Key('quick-reply-send-$index');
+  /// The three answers to the question a card's tap asks. Keyed by INDEX
+  /// rather than by stance, because two suggestions can share a stance and a
+  /// test that tapped the wrong one would still pass.
   static Key confirmSendKeyFor(int index) =>
       Key('quick-reply-confirm-send-$index');
+
+  /// The middle answer: put the words in the box instead of sending them.
+  static Key editKeyFor(int index) => Key('quick-reply-edit-$index');
+
   static Key cancelSendKeyFor(int index) =>
       Key('quick-reply-cancel-send-$index');
 
@@ -177,8 +182,7 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
             Text(
               widget.onSend == null
                   ? 'Tap a reply to put it in the box.'
-                  : 'Tap a reply to put it in the box, or send it as it '
-                      'stands.',
+                  : 'Tap a reply to send it — you can edit it first.',
               style: BondType.caption,
             ),
           const SizedBox(height: BondSpacing.s4),
@@ -205,13 +209,19 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
     );
   }
 
-  /// The question a card's Send asks, and both answers — in the card, under
-  /// the words it is about. Quiet buttons, like the ×'s: the loud thing on
-  /// this card is the reply itself.
+  /// The question a card's tap asks, and all three answers — in the card,
+  /// under the words it is about. Quiet buttons, like the ×'s: the loud thing
+  /// on this card is the reply itself.
+  ///
+  /// A Wrap rather than a Row: three labelled buttons and the question do not
+  /// fit across a 320-wide card, and a second line beats shrinking *Edit
+  /// first* to something the reader has to guess at.
   Widget _sendConfirmRow(int index, DraftOption option) {
-    return Row(
+    return Wrap(
+      spacing: BondSpacing.s4,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        Flexible(child: Text('Send this reply?', style: BondType.caption)),
+        Text('Send this reply?', style: BondType.caption),
         _quietButton(
           'Send',
           () {
@@ -219,6 +229,14 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
             widget.onSend!(option);
           },
           key: QuickReplyBar.confirmSendKeyFor(index),
+        ),
+        _quietButton(
+          'Edit first',
+          () {
+            setState(() => _confirmingSend = null);
+            widget.onPick(option);
+          },
+          key: QuickReplyBar.editKeyFor(index),
         ),
         _quietButton(
           'Cancel',
@@ -264,19 +282,19 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
     );
   }
 
-  /// One suggestion, whole: a tap puts the ENTIRE reply in the box, so the whole
-  /// reply is shown — nobody should stage words they could only read three lines
-  /// of. No tooltip for the rest; the card just takes the height its words need.
+  /// One suggestion, whole: a tap acts on the ENTIRE reply, so the entire
+  /// reply is shown — nobody should send or stage words they could only read
+  /// three lines of. No tooltip for the rest; the card just takes the height
+  /// its words need.
   ///
-  /// The header is the action: the compose icon, because that is what every tap
-  /// does, beside the stance in the app's action color — and, where the host
-  /// can really send, a quiet Send at the other end of that row. The button
-  /// sits INSIDE the card's [InkWell] and consumes its own tap, so the card's
-  /// stage-on-tap is untouched by it.
+  /// The header icon says what a tap leads to: a send glyph where the host can
+  /// really send, a compose glyph where all a tap can do is stage. There is no
+  /// separate button — the card IS the way in, and a second control on it was
+  /// how a tap and a send came to mean different things on the same words.
   ///
-  /// The question Send asks is drawn UNDER the body rather than over it: the
-  /// reader is confirming words, and words they cannot see while they answer
-  /// are words they are not really confirming.
+  /// The question the tap asks is drawn UNDER the body rather than over it:
+  /// the reader is confirming words, and words they cannot see while they
+  /// answer are words they are not really confirming.
   Widget _card(int index, DraftOption option) {
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: _cardWidth),
@@ -287,7 +305,15 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
       child: Material(
         type: MaterialType.transparency,
         child: InkWell(
-          onTap: () => widget.onPick(option),
+          onTap: () {
+            // Nothing to confirm where nothing can be sent: the only thing a
+            // tap could mean there is "put these words in the box".
+            if (widget.onSend == null) {
+              widget.onPick(option);
+              return;
+            }
+            setState(() => _confirmingSend = index);
+          },
           borderRadius: BondRadii.smAll,
           hoverColor: BondColors.primaryTint,
           child: Container(
@@ -302,8 +328,10 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
               children: [
                 Row(
                   children: [
-                    const Icon(
-                      Icons.edit_outlined,
+                    Icon(
+                      widget.onSend != null
+                          ? Icons.send_outlined
+                          : Icons.edit_outlined,
                       size: 14,
                       color: BondColors.primary,
                     ),
@@ -319,21 +347,6 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    if (widget.onSend != null)
-                      TextButton.icon(
-                        key: QuickReplyBar.sendKeyFor(index),
-                        onPressed: () =>
-                            setState(() => _confirmingSend = index),
-                        icon: const Icon(Icons.send_outlined, size: 14),
-                        label: const Text('Send'),
-                        style: TextButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: BondSpacing.s8,
-                          ),
-                          minimumSize: const Size(0, 28),
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        ),
-                      ),
                   ],
                 ),
                 const SizedBox(height: 2),

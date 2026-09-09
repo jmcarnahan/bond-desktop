@@ -116,8 +116,8 @@ class StorylineTimelinePanel extends StatefulWidget {
   final void Function(AttachmentRef attachment)? onUnpinDocument;
 
   /// The threads somebody took out of this storyline — the owner's own and
-  /// the re-check pass's — for the About block's two lists. Empty is the
-  /// ordinary state and renders no headings at all.
+  /// the re-check pass's — for the two lists at the foot of Messages. Empty is
+  /// the ordinary state and renders no headings at all.
   final List<StorylineBlock> blocks;
 
   /// Lifts the veto on one blocked thread without filing it back: the model
@@ -131,6 +131,11 @@ class StorylineTimelinePanel extends StatefulWidget {
 
   /// Re-judges the threads the model filed here. Null leaves the button inert.
   final VoidCallback? onAudit;
+
+  /// True while a re-check this owner asked for is still in the worker. Passed
+  /// straight through to the section, which is where the running label and the
+  /// inert button live.
+  final bool auditing;
 
   const StorylineTimelinePanel({
     super.key,
@@ -159,17 +164,24 @@ class StorylineTimelinePanel extends StatefulWidget {
     this.onUnblockThread,
     this.onAddBackThread,
     this.onAudit,
+    this.auditing = false,
   });
 
   static const Key documentsStripKey = ValueKey('storyline-documents-strip');
 
+  /// The About tab's explicit way into the charter field. The sentence itself
+  /// is still tappable — two doors, one action — but a sentence that looks
+  /// like prose is not an invitation, and this is the one that says so.
+  static const Key charterEditKey = ValueKey('storyline-charter-edit');
+
+  /// One episode card's evidence line, keyed by source AND key because two
+  /// connectors can carry one conversation key.
+  static Key evidenceKeyFor(String source, String key) =>
+      Key('storyline-evidence-$source-$key');
+
   /// Matches the thread panel: wide enough for a long paragraph, narrow enough
   /// that an ultrawide window does not turn every message into one line.
   static const double _maxContentWidth = 900;
-
-  /// A member entry carries a whole subject line, which can be arbitrarily
-  /// long.
-  static const double _entryMaxWidth = 320;
 
   @override
   State<StorylineTimelinePanel> createState() => _StorylineTimelinePanelState();
@@ -248,19 +260,26 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     widget.onRename(trimmed);
   }
 
-  /// A member thread's name, taken from its episode. A member whose thread
-  /// holds no messages has no episode and so no subject, which reads as a
-  /// thread with nothing in it rather than as an error.
+  /// Why this thread is in the storyline, in the words that were recorded when
+  /// it was filed — `'Filed by you'` for a hand-filed member, the model's own
+  /// sentence for an automatic one, and null for an automatic row that has
+  /// none. "Grouped automatically." was filler and said nothing.
   ///
   /// Keyed by source AND key: two connectors can carry the same conversation
-  /// key, and a lookup on the key alone would label one member row with the
-  /// other connector's subject.
-  String _labelFor(String source, String conversationKey) {
-    final subjects = {
-      for (final episode in widget.episodes) episode.threadKey: episode.subject,
-    };
-    final subject = subjects['$source\n$conversationKey'] ?? '';
-    return subject.isEmpty ? '(no subject)' : subject;
+  /// key, and a lookup on the key alone would put one connector's reason on
+  /// the other connector's card.
+  String? _evidenceFor(StorylineEpisode episode) {
+    for (final member in widget.members) {
+      if ('${member.source}\n${member.conversationKey}' != episode.threadKey) {
+        continue;
+      }
+      // The same words the store writes as a user row's evidence, and the same
+      // words a block copied off one shows: one spelling for one fact.
+      if (member.addedByUser) return 'Filed by you';
+      final evidence = member.evidence ?? '';
+      return evidence.isEmpty ? null : evidence;
+    }
+    return null;
   }
 
   @override
@@ -356,6 +375,19 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                 child: Text('No messages in this storyline.',
                     style: BondType.small),
               ),
+            // The removed threads and the re-check sit under the spine they
+            // are about. The reader who has just looked at six cards and
+            // doubts three of them is looking here, not on a reference tab.
+            const SizedBox(height: BondSpacing.s16),
+            const Divider(height: 1, color: BondColors.border),
+            const SizedBox(height: BondSpacing.s12),
+            StorylineBlocksSection(
+              blocks: widget.blocks,
+              onUnblockThread: widget.onUnblockThread,
+              onAddBackThread: widget.onAddBackThread,
+              onAudit: widget.onAudit,
+              auditing: widget.auditing,
+            ),
           ],
         ),
       ),
@@ -379,10 +411,12 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
     );
   }
 
-  /// What this storyline is for, and which threads are in it because of that.
-  /// The two belong on one tab: the charter is the membership rule and the
-  /// member list is what the rule caught, and a user who cannot read them
-  /// together has no way to tell a good group from a bad one.
+  /// What this storyline is for: the charter, and nothing else.
+  ///
+  /// The membership used to be listed here too, which said the same thing
+  /// twice — the spine on Messages already names every thread, one card each.
+  /// The reason a thread is here now reads on its own card, where the thread
+  /// is; this tab is the rule, and the spine is what the rule caught.
   Widget _aboutTab() {
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(
@@ -391,17 +425,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
         BondSpacing.s16,
         BondSpacing.s24,
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _aboutBlock(),
-          const SizedBox(height: BondSpacing.s12),
-          Text('THREADS \u00b7 ${widget.members.length}', style: BondType.label),
-          const SizedBox(height: BondSpacing.s4),
-          _memberStrip(),
-        ],
-      ),
+      child: _aboutBlock(),
     );
   }
 
@@ -472,6 +496,12 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
 
     final preview = _previewOf(episode);
 
+    // The one place the grouping explains itself, moved onto the card it
+    // explains. A user who cannot see why two threads were put together has no
+    // way to tell a good group from a bad one, and a feature that cannot be
+    // checked is a feature that gets turned off.
+    final evidence = _evidenceFor(episode);
+
     // A Material under the InkWell rather than a decorated Container alone:
     // ink paints on the nearest Material ancestor, and the card's own opaque
     // surface would otherwise hide the splash of the tap that opens it.
@@ -520,6 +550,29 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                               style: BondType.caption,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
+                          if (evidence != null) ...[
+                            const SizedBox(height: 2),
+                            // One line, elided, with the whole sentence on the
+                            // hover: it is the reason the thread is here, not
+                            // the thread itself, and a card that spent three
+                            // lines on it would bury the spine.
+                            Tooltip(
+                              message: evidence,
+                              child: Text(
+                                evidence,
+                                key: StorylineTimelinePanel.evidenceKeyFor(
+                                  episode.source,
+                                  episode.conversationKey,
+                                ),
+                                style: BondType.caption.copyWith(
+                                  color: BondColors.inkMuted,
+                                  fontStyle: FontStyle.italic,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           ],
                           // The ask replaces the summary rather than stacking
@@ -882,21 +935,49 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        Row(
+          children: [
+            Text('CHARTER', style: BondType.label),
+            const Spacer(),
+            // The sentence below is tappable and always was, but a sentence
+            // that reads as prose is not an invitation. This is the door that
+            // says so.
+            if (!_editingCharter)
+              _quietButton(
+                'Edit',
+                () => _startEditingCharter(charter),
+                key: StorylineTimelinePanel.charterEditKey,
+              ),
+          ],
+        ),
         _editingCharter ? _charterField() : _charterText(charter),
+        // What editing it is FOR. The field carries its own caption about
+        // saving, so this one only stands while the sentence is being read.
+        if (!_editingCharter)
+          Text(
+            'What belongs in this storyline, in a sentence. Edit it to narrow '
+            'or widen the group — saving pins it and hunts for matching '
+            'threads.',
+            style: BondType.caption,
+          ),
         // Not while the field is open: offering to replace a sentence the user
         // is in the middle of writing is offering to throw their work away, and
         // the field is where they would be typing the answer to this suggestion
         // anyway.
         if (!_editingCharter && suggestion.isNotEmpty)
           _suggestionBlock(suggestion),
-        StorylineBlocksSection(
-          blocks: widget.blocks,
-          onUnblockThread: widget.onUnblockThread,
-          onAddBackThread: widget.onAddBackThread,
-          onAudit: widget.onAudit,
-        ),
       ],
     );
+  }
+
+  /// Opens the charter field on [charter]. Shared by the Edit button and the
+  /// sentence's own tap: two doors, one action, and one place that decides
+  /// what the field opens holding.
+  void _startEditingCharter(String charter) {
+    setState(() {
+      _charter.text = charter;
+      _editingCharter = true;
+    });
   }
 
   /// What the refresh pass would have written to the charter, parked because
@@ -949,10 +1030,7 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
 
   Widget _charterText(String charter) {
     return InkWell(
-      onTap: () => setState(() {
-        _charter.text = charter;
-        _editingCharter = true;
-      }),
+      onTap: () => _startEditingCharter(charter),
       borderRadius: BondRadii.smAll,
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: BondSpacing.s4),
@@ -1007,70 +1085,6 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
           ],
         ),
       ],
-    );
-  }
-
-  /// The member threads and the reason each one is here. Collapsed by default:
-  /// it is an explanation, and the episodes are what the user came for.
-  ///
-  /// Read-only. Removing a thread lives on its episode card, beside the
-  /// messages that show whether it belongs — a list of subjects is not enough
-  /// to judge that on.
-  ///
-  /// The one place the grouping explains itself. A user who cannot see why two
-  /// threads were put together has no way to tell a good group from a bad one,
-  /// and a feature that cannot be checked is a feature that gets turned off.
-  Widget _memberStrip() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        for (final member in widget.members)
-          Padding(
-            padding: const EdgeInsets.only(bottom: BondSpacing.s4),
-            child: _memberEntry(member),
-          ),
-      ],
-    );
-  }
-
-  Widget _memberEntry(StorylineMember member) {
-    return Container(
-      constraints: const BoxConstraints(
-        maxWidth: StorylineTimelinePanel._entryMaxWidth,
-      ),
-      decoration: BoxDecoration(
-        color: BondColors.faintGround,
-        borderRadius: BondRadii.smAll,
-        border: Border.all(color: BondColors.border),
-      ),
-      padding: const EdgeInsets.symmetric(
-        horizontal: BondSpacing.s8,
-        vertical: BondSpacing.s4,
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            _labelFor(member.source, member.conversationKey),
-            style: BondType.caption,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
-          Text(
-            // The same words the store now writes as a user row's evidence,
-            // and the same words a block copied off one shows: one spelling
-            // for one fact, wherever it is read back.
-            member.addedByUser
-                ? 'Filed by you'
-                : (member.evidence?.isNotEmpty == true
-                    ? member.evidence!
-                    : 'Grouped automatically.'),
-            style: BondType.caption,
-          ),
-        ],
-      ),
     );
   }
 

@@ -3438,6 +3438,10 @@ SELECT conversation_key FROM (
   /// a strict subset of what `member_count` counts, and expressing that as one
   /// join would need a conditional aggregate over an outer join whose empty
   /// case reads as one member rather than none.
+  ///
+  /// `sources` rides on the list read for the same reason: the rail's source
+  /// pills need the connectors of every row at once, and asking per storyline
+  /// would be a query per row.
   static const String _storylineSelect = '''
 SELECT s.*,
   (SELECT COUNT(*) FROM storyline_members m WHERE m.storyline_id = s.id)
@@ -3446,7 +3450,10 @@ SELECT s.*,
      JOIN conversations c
        ON c.source = m.source AND c.conversation_key = m.conversation_key
      WHERE m.storyline_id = s.id AND c.state = 'needs_reply')
-    AS open_count
+    AS open_count,
+  (SELECT GROUP_CONCAT(DISTINCT m.source) FROM storyline_members m
+     WHERE m.storyline_id = s.id)
+    AS sources
 FROM storylines s''';
 
   Future<void> insertStoryline({

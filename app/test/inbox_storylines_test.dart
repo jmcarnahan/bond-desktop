@@ -16,6 +16,7 @@ import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
+import 'package:bond_inbox/widgets/storyline_blocks_section.dart';
 import 'package:bond_inbox/widgets/storyline_pickers.dart';
 import 'package:bond_inbox/widgets/room_header.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
@@ -26,13 +27,13 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
 
-/// The member strip on an open storyline, as the SCREEN assembles it.
+/// The membership of an open storyline, as the SCREEN assembles it.
 ///
 /// `storyline_timeline_test.dart` pins what the panel does with a member list
 /// it is handed. This file pins where that list comes from, which stopped being
 /// a read the build could make for itself when the store went asynchronous: it
 /// is a cached provider now, and a cache that nothing dropped would leave the
-/// strip showing the membership from before the user's last action.
+/// header counting the membership from before the user's last action.
 
 class _FakeSync implements MailSync {
   /// How many times the screen has asked for a pull. The launch sync is one
@@ -199,7 +200,7 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets('the member strip counts what the storyline holds',
+  testWidgets('the header counts what the storyline holds',
       (tester) async {
     await seedThread('c1', 'Homepage copy');
     await seedThread('c2', 'Launch date');
@@ -243,6 +244,133 @@ void main() {
 
     expect(find.textContaining('2 threads · '), findsOneWidget);
     await settleQueues(tester);
+  });
+
+  group('the removed threads under the spine', () {
+    /// The storyline the user's report was about: two threads filed
+    /// automatically, one of them then taken out by a re-check.
+    Future<void> seedWithRemoval() async {
+      await seedThread('c1', 'Homepage copy');
+      await seedThread('c2', 'Launch date');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember(
+        'sl-1',
+        'email',
+        'c1',
+        addedBy: 'auto',
+        evidence: 'Both are about the redesign.',
+      );
+      await store.addStorylineMember(
+        'sl-1',
+        'email',
+        'c2',
+        addedBy: 'auto',
+        evidence: 'Both are about the redesign.',
+      );
+      await store.removeStorylineMember(
+        'sl-1',
+        'email',
+        'c2',
+        block: true,
+        blockedBy: 'audit',
+        evidence: 'The launch date is a calendar matter.',
+      );
+    }
+
+    testWidgets("Add back puts a re-check's thread back on the spine",
+        (tester) async {
+      await seedWithRemoval();
+
+      await openStoryline(tester, 'Website redesign');
+
+      // One thread on the spine and one in the removed list — which is where
+      // the user was left after running a re-check over six threads. The
+      // removed entry names the bare subject; a CARD carries the source glyph,
+      // which is what tells the two apart on screen.
+      expect(find.text('REMOVED BY RE-CHECK'), findsOneWidget);
+      expect(find.textContaining('1 thread · '), findsOneWidget);
+      expect(find.text('Launch date'), findsOneWidget);
+      expect(find.text('✉ Launch date'), findsNothing);
+
+      await tester.tap(
+        find.byKey(StorylineBlocksSection.addBackKeyFor('email', 'c2')),
+      );
+      // Two store writes and the two reloads behind them.
+      for (var i = 0; i < 6; i++) {
+        await tester.pump();
+      }
+
+      expect(find.text('REMOVED BY RE-CHECK'), findsNothing);
+      expect(find.textContaining('2 threads · '), findsOneWidget);
+      // The removed entry is gone and the thread is a card on the spine.
+      expect(find.text('Launch date'), findsNothing);
+      expect(
+        find.descendant(
+          of: find.byType(StorylineTimelinePanel),
+          matching: find.text('✉ Launch date'),
+        ),
+        findsOneWidget,
+      );
+      // And the card says who put it back.
+      expect(
+        tester
+            .widget<Text>(find
+                .byKey(StorylineTimelinePanel.evidenceKeyFor('email', 'c2')))
+            .data,
+        'Filed by you',
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('Allow again lifts the block and files nothing back',
+        (tester) async {
+      await seedWithRemoval();
+
+      await openStoryline(tester, 'Website redesign');
+
+      await tester.tap(
+        find.byKey(StorylineBlocksSection.allowAgainKeyFor('email', 'c2')),
+      );
+      for (var i = 0; i < 6; i++) {
+        await tester.pump();
+      }
+
+      // The veto is withdrawn — the entry is gone — but the thread was not
+      // filed back, which is the difference the caption above the lists is
+      // there to explain.
+      expect(find.text('REMOVED BY RE-CHECK'), findsNothing);
+      expect(find.textContaining('1 thread · '), findsOneWidget);
+      // Neither the entry nor a card: the thread is simply not here.
+      expect(find.text('Launch date'), findsNothing);
+      expect(find.text('✉ Launch date'), findsNothing);
+      expect(await store.blocksOf('sl-1'), isEmpty);
+      await settleQueues(tester);
+    });
+
+    testWidgets('Re-check reads as running until the worker reports',
+        (tester) async {
+      await seedWithRemoval();
+
+      await openStoryline(tester, 'Website redesign');
+      expect(find.text('Re-check members'), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(StorylineBlocksSection.auditButtonKey),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      // A button that still says 'Re-check members' under a pass that is
+      // running is a button the user presses twice.
+      expect(find.text('Re-checking…'), findsOneWidget);
+      expect(find.text('Re-check members'), findsNothing);
+      await settleQueues(tester);
+    });
   });
 
   group('the parked charter', () {
@@ -495,6 +623,106 @@ void main() {
         tester.widget<ThreadDetailPanel>(find.byType(ThreadDetailPanel));
     expect(panel.conversation.source, 'teams');
     expect(panel.conversation.subject, 'Sarah Whitfield');
+    await settleQueues(tester);
+  });
+
+  testWidgets('the Teams pill hides storylines with no chat in them',
+      (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await seedThread('t1', 'Sarah Whitfield', source: 'teams');
+    await store.insertStoryline(
+      id: 'sl-mail',
+      title: 'Website redesign',
+      status: 'active',
+      createdBy: 'auto',
+    );
+    await store.insertStoryline(
+      id: 'sl-chat',
+      title: 'Launch chatter',
+      status: 'active',
+      createdBy: 'auto',
+    );
+    await store.addStorylineMember('sl-mail', 'email', 'c1', addedBy: 'auto');
+    await store.addStorylineMember('sl-chat', 'teams', 't1', addedBy: 'auto');
+
+    await pumpInbox(tester, section: RailSection.storylines);
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('Storylines'),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Website redesign'), findsWidgets);
+    expect(find.text('Launch chatter'), findsWidgets);
+
+    await tester.tap(find.byKey(SourceFilterBar.teamsKey));
+    await tester.pump();
+    await tester.pump();
+
+    // A storyline is not itself mail or chat — the threads in it are, and a
+    // storyline holding none from this connector is not a row under the pill.
+    expect(
+      find.descendant(
+        of: find.byType(AppRail),
+        matching: find.text('Website redesign'),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(AppRail),
+        matching: find.text('Launch chatter'),
+      ),
+      findsOneWidget,
+    );
+    // And the overview beside it agrees, rather than listing what the rail
+    // just hid.
+    expect(find.text('Website redesign'), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a pill never closes the storyline that is open', (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await seedThread('t1', 'Sarah Whitfield', source: 'teams');
+    await store.insertStoryline(
+      id: 'sl-mail',
+      title: 'Website redesign',
+      status: 'active',
+      createdBy: 'auto',
+    );
+    await store.insertStoryline(
+      id: 'sl-chat',
+      title: 'Launch chatter',
+      status: 'active',
+      createdBy: 'auto',
+    );
+    await store.addStorylineMember('sl-mail', 'email', 'c1', addedBy: 'auto');
+    await store.addStorylineMember('sl-chat', 'teams', 't1', addedBy: 'auto');
+
+    await openStoryline(tester, 'Website redesign');
+
+    await tester.tap(find.byKey(SourceFilterBar.teamsKey));
+    await tester.pump();
+    await tester.pump();
+
+    // The pill narrows what is browsed, never what is open: an explicit
+    // selection outranks it, exactly as an opened thread does.
+    expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(StorylineTimelinePanel),
+        matching: find.text('Website redesign'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(AppRail),
+        matching: find.text('Website redesign'),
+      ),
+      findsNothing,
+    );
     await settleQueues(tester);
   });
 
