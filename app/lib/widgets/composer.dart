@@ -30,7 +30,11 @@ enum SendCapability {
 /// send, and no "accept" that turns into a send. A draft the user never clicks
 /// stays text in a box.
 ///
-/// The suggested state is drawn as visibly *not yet theirs*: the text sits at
+/// The box starts EMPTY and one line tall, and grows as it is written in. A
+/// suggestion is in it only because the HOST put it there — a card the reader
+/// tapped, a draft they asked for — never because one happened to exist.
+///
+/// That suggested state is drawn as visibly *not yet theirs*: the text sits at
 /// reduced opacity behind an accent rule, with a caption saying where it came
 /// from. The first keystroke takes all of that away, because from that point on
 /// the words are the user's and dressing them as a machine's suggestion would be
@@ -59,7 +63,9 @@ class Composer extends StatefulWidget {
   /// host with no model wired.
   final VoidCallback? onGenerate;
 
-  /// Throws the suggestion away and leaves an empty box.
+  /// The ✕ was pressed: this empties the box. What that means for the STORED
+  /// draft is the host's decision, not this widget's — today it means nothing,
+  /// and the suggestion stays on its card in the transcript.
   final VoidCallback? onDismiss;
 
   /// The user started editing. Debounced, so it fires on pauses rather than on
@@ -213,7 +219,7 @@ class _ComposerState extends State<Composer> {
           onPressed: widget.onDismiss == null ? null : _dismiss,
           icon: const Icon(Icons.close),
           iconSize: 16,
-          tooltip: 'Dismiss this suggestion',
+          tooltip: 'Clear the box',
           padding: const EdgeInsets.all(BondSpacing.s4),
           constraints: const BoxConstraints(),
           visualDensity: VisualDensity.compact,
@@ -227,7 +233,9 @@ class _ComposerState extends State<Composer> {
       controller: _body,
       focusNode: widget.focusNode,
       onChanged: _onChanged,
-      minLines: 3,
+      // One line until there is something to hold: an empty box that opened
+      // three lines tall claimed the space of a reply nobody had written yet.
+      minLines: 1,
       maxLines: 10,
       style: _showingSuggestion
           ? BondType.body.copyWith(

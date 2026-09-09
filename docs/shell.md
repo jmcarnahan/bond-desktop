@@ -301,6 +301,17 @@ possible — a chat without `Chat.ReadWrite` — the same slot says `Reply in
 Microsoft Teams`. The focus node lives on the screen, one per pane, because the
 composer is rebuilt with a new key on every send epoch.
 
+**The box starts empty**, one line tall, and grows as it is written in. A
+suggestion the pipeline wrote stays on its card in the transcript until the
+reader asks for it: tapping a card, the hover strip's Suggest a reply, the box's
+own Draft reply / Regenerate, the bar's Suggest a reply, Use in reply on a file,
+or the `✨ A suggested reply is ready` hint's `Use it` above the box. Putting
+text in the box that way is *staging*, and it is screen state keyed by thread —
+never the stored draft, which is unchanged until the reader types. The ✕ on the
+box only empties it; the suggestion stays on its card, and deleting one is still
+that card's own × with its two-step confirm. Cards never send: the composer's
+own button is the one send there is.
+
 **Reply-to** is the override the hover Reply writes: a `Replying to <who>`
 caption with a ✕ above the box, and the send carries that message id. It is
 cleared on a send that did not fail, on a change of selection, and when a side

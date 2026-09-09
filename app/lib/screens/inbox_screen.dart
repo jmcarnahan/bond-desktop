@@ -95,6 +95,10 @@ class InboxScreen extends ConsumerStatefulWidget {
   /// The `Show all` under an empty pane while a source pill is down.
   static const Key showAllSourcesKey = ValueKey('show-all-sources');
 
+  /// The one-line hint above an empty box when a suggestion is waiting on its
+  /// card — and the `Use it` that puts it in the box.
+  static const Key useSuggestionKey = ValueKey('use-suggestion');
+
   /// The three attachment collaborators, injectable for one reason: under
   /// `flutter test` the real pair must never be built. [PreviewEngines] holds
   /// the pdfrx renderer (a native library a test process cannot load), and
@@ -274,6 +278,40 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// mean holding the transcript to draw one line.
   ({DraftTarget target, String messageId, String who})? _replyTo;
 
+  /// Which threads have a suggestion IN their box, and which text.
+  ///
+  /// A suggestion the pipeline wrote stays on its card in the transcript until
+  /// the reader asks for it, so the box under a thread starts empty and one
+  /// line tall. Putting text into it — "staging" — is what a card tap, a
+  /// Suggest / Draft reply / Regenerate, a Use in reply, or the `Use it` hint
+  /// does.
+  ///
+  /// The value is an explicit body (a tapped card's option) or null for "the
+  /// draft's own body" (a generate the reader asked for), keyed by
+  /// `'$source|$conversationKey'`. Screen state and not provider state: it is a
+  /// fact about a box on this screen, not about the stored draft, and the same
+  /// draft read on another screen has nothing in any box.
+  final Map<String, String?> _staged = {};
+
+  String _stageKey(DraftTarget t) => '${t.source}|${t.conversationKey}';
+
+  void _stage(DraftTarget t, {String? body}) =>
+      setState(() => _staged[_stageKey(t)] = body);
+
+  void _unstage(DraftTarget t) => setState(() => _staged.remove(_stageKey(t)));
+
+  /// The text the box should hold for [target], or null for an empty box.
+  ///
+  /// Absent from the map means nothing was staged; present with null means the
+  /// reader asked for the draft itself, which is read live so the words appear
+  /// the moment a generate lands.
+  String? _stagedBodyFor(DraftTarget target, DraftState draft) {
+    final key = _stageKey(target);
+    if (!_staged.containsKey(key)) return null;
+    final explicit = _staged[key];
+    return explicit ?? draft.body;
+  }
+
   /// Where each pane's composer takes its cursor from. The nodes live HERE and
   /// not in the composers: a `Composer` is rebuilt with a new key on every send
   /// epoch and on every change of thread, so a node it owned would be disposed
@@ -333,9 +371,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The threads a queued reply is going to, held until each send lands so the
   /// result can be announced even if the user has moved on to another thread
-  /// meanwhile. Only [_queueQuickReply] adds to it, which is what keeps the
-  /// composer's own send — which reports its outcome directly — from being
-  /// announced twice.
+  /// meanwhile. Nothing on this screen queues a send any more — a card stages
+  /// its words rather than sending them — so this stands empty; the listener
+  /// and the undo path stay because the provider's queued send is still API,
+  /// and the composer's own send reports its outcome directly.
   ///
   /// A SET, because the storyline spine renders an armed card per open episode
   /// and two sends can be in flight at once. One slot silenced the first send's
@@ -2940,12 +2979,20 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final lastOut = latestOutboundAt(shown);
     final notifier = ref.read(draftProvider(target).notifier);
 
+    // The message a send answers when nobody says otherwise. A card under any
+    // OTHER message has to say otherwise — see `cardFor`.
+    String? newestInboundId;
+    for (final m in shown) {
+      if (m.inbound) newestInboundId = m.id;
+    }
+
     /// The suggestion offered under one message, or null where there is none
     /// left to offer.
     ///
-    /// Every guard here is about honesty rather than tidiness: a card that can
-    /// still be tapped is a card that can still send, so it goes the moment its
-    /// message has been answered — by a synced reply or by a queued one.
+    /// Every guard here is about honesty rather than tidiness: a card offers to
+    /// write words into the box that answer THIS message, so it goes the moment
+    /// that message has been answered — by a synced reply or by a queued one.
+    /// A card never sends; the composer's own button is the only send.
     Widget? cardFor(Message m) {
       if (!m.inbound) return null;
       final row = draft.threadDrafts[m.id];
@@ -2961,20 +3008,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       if (lastOut != null && lastOut.compareTo(m.receivedAt ?? '') > 0) {
         return null;
       }
-      final armed = draft.capability == SendCapability.send;
       return QuickReplyBar(
         options: options,
-        armed: armed,
+        armed: draft.capability == SendCapability.send,
+        // Whatever the grant, a tap puts this option in the box and takes the
+        // cursor there. The box is already under the thread, so all a card owes
+        // the reader is the words and somewhere to change them — and, under an
+        // OLDER message, which message they answer: a send resolves to the
+        // newest inbound on its own, so a card that stayed silent about its
+        // message would have its reply land on a different one. The newest
+        // message's card says nothing, because nothing needs saying.
         onPick: (option) {
-          // The same honest split `_pickQuickReply` makes: without a send grant
-          // a tap puts the words in the box rather than appearing to send them.
-          // The box is already there, so all this owes the user is the cursor.
-          if (!armed) {
+          _stage(target, body: option.body);
+          if (m.id != newestInboundId) {
+            _replyToMessage(target, m, composerFocus);
+          } else {
             composerFocus.requestFocus();
-            unawaited(notifier.markEdited(option.body));
-            return;
           }
-          unawaited(_queueQuickReply(target, option.body, replyTo: m.id));
         },
         onDismiss: () => unawaited(notifier.dismissOptionsFor(m.id)),
       );
@@ -3023,7 +3073,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? (message) => _replyToMessage(target, message, composerFocus)
           : null,
       onSuggestFor: canReply && draft.suggestable
-          ? (_) => unawaited(notifier.generate())
+          ? (_) {
+              // Asked for, so it lands in the box: staged before the generate
+              // starts, so the words are not written to a box nobody opened.
+              _stage(target);
+              unawaited(notifier.generate());
+            }
           : null,
       // The third hover button, and what the CTA banner opens. From a side
       // thread it REPLACES that thread, the same rule a file opened from
@@ -3355,6 +3410,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _sideFull = false;
       }
     });
+    // The reader asked for a draft about this file, so the box is the place it
+    // belongs — staged before the generate, so the words land in an open box
+    // rather than waiting on a card for a second gesture.
+    _stage(from);
     unawaited(ref.read(draftProvider(from).notifier).generate(
           pinnedAttachmentIds: [attachment.attachmentId],
         ));
@@ -3710,7 +3769,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return QuickReplyBar(
       options: const [],
       armed: draft.capability == SendCapability.send,
-      onPick: (option) => unawaited(_pickQuickReply(selected, option)),
+      onPick: (option) => _pickQuickReply(selected, option),
       pending: draft.pending,
       onUndo: () => _cancelQueuedSend(target),
       // The way back from the ×, and the way in for a thread the queue never
@@ -3734,40 +3793,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// A card was tapped.
   ///
-  /// Under a real send grant this queues the reply and says so, with an undo
-  /// for as long as the send is still cancellable. Without one it puts the text
-  /// in the docked box and takes the cursor there — the honest version of the
-  /// same gesture, since nothing in this build could put that mail in front of
-  /// anyone anyway.
-  Future<void> _pickQuickReply(Conversation c, DraftOption option) async {
-    final target = (source: c.source, conversationKey: c.id);
-    if (ref.read(draftProvider(target)).capability != SendCapability.send) {
-      (_isMainThread(target) ? _mainComposerFocus : _sideComposerFocus)
-          .requestFocus();
-      await ref.read(draftProvider(target).notifier).markEdited(option.body);
-      return;
-    }
-    await _queueQuickReply(target, option.body);
-  }
-
-  /// Arms the send a tapped card asked for, wherever the card was — inline
-  /// under a message, or on a storyline's episode. One helper because the two
-  /// surfaces must not drift: the announcement, the undo window and the words
-  /// on the snackbar are the same promise either way.
+  /// It puts the whole option in the box and takes the cursor there, in every
+  /// grant state. A card is text on screen, and a tap on text that quietly put
+  /// mail in front of somebody — undo window or not — is not what a reader
+  /// expects of it. The composer's own button remains the one send.
   ///
-  /// [replyTo] is the message an inline card belongs to. Omitted, the send
-  /// resolves its own target the way it always did — the thread's stored draft,
-  /// then its newest inbound message.
-  Future<void> _queueQuickReply(
-    DraftTarget target,
-    String body, {
-    String? replyTo,
-  }) async {
-    setState(() => _announceSendsFor.add(target));
-    await ref
-        .read(draftProvider(target).notifier)
-        .queueSend(body, replyTo: replyTo);
-    _toast('Reply sending.', onUndo: () => _cancelQueuedSend(target));
+  /// The words are STAGED rather than saved: nothing about the stored draft
+  /// changes until the reader types, which is what keeps the suggestion on its
+  /// card if they stage it and think better of it.
+  void _pickQuickReply(Conversation c, DraftOption option) {
+    final target = (source: c.source, conversationKey: c.id);
+    _stage(target, body: option.body);
+    (_isMainThread(target) ? _mainComposerFocus : _sideComposerFocus)
+        .requestFocus();
   }
 
   /// What stands where the reply box would be when this build cannot send to a
@@ -3806,14 +3844,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final conversationKey = target.conversationKey;
     final draft = ref.watch(draftProvider(target));
     final notifier = ref.read(draftProvider(target).notifier);
+    final stagedBody = _stagedBodyFor(target, draft);
 
     final composer = Composer(
       // Keyed on the conversation so switching threads builds a fresh field
       // rather than carrying one thread's typed text into another's — and on
       // the send epoch, so a COMPLETED send builds a fresh empty one instead
-      // of leaving the sent text armed behind a re-enabled button.
-      key: ValueKey('composer-$conversationKey-${draft.sendEpoch}'),
-      suggestedBody: draft.body,
+      // of leaving the sent text armed behind a re-enabled button. The staged
+      // flag is the third: the ✕ has to rebuild an EMPTY field and a stage a
+      // filled one, and the field's own controller would otherwise keep
+      // whatever it was last given.
+      key: ValueKey('composer-$conversationKey-${draft.sendEpoch}'
+          '-${stagedBody == null ? 'empty' : 'staged'}'),
+      suggestedBody: stagedBody,
       provenance: _provenance,
       generating: draft.generating,
       sending: draft.sending,
@@ -3823,8 +3866,16 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // queue and the same system prompt a mail is — only the channel's style
       // rules differ, and those ride in the user message — so Regenerate means
       // exactly the same thing on either kind of thread.
-      onGenerate: notifier.generate,
-      onDismiss: notifier.dismiss,
+      // Staged FIRST, then asked for: the reader pressed a button to get words
+      // in this box, so the box has to be listening when they arrive.
+      onGenerate: () {
+        _stage(target);
+        notifier.generate();
+      },
+      // The ✕ empties the BOX and nothing else. The suggestion is not thrown
+      // away by closing the thing it was copied into — deleting one is still
+      // the card's own ×, with its two-step confirm.
+      onDismiss: () => _unstage(target),
       onEdited: notifier.markEdited,
       hint: hint,
       focusNode: focusNode,
@@ -3871,6 +3922,32 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ),
           const SizedBox(height: BondSpacing.s4),
         ],
+        // A suggestion exists and is not in the box. The cards under the
+        // messages are the usual way to reach one, but the draft's own body is
+        // not always one of them — a Regenerate rewrites the body without
+        // reopening cards, and a thread whose cards were dismissed still has a
+        // draft — so without this line a suggestion could sit in the store with
+        // no way to reach it from an empty box.
+        if (stagedBody == null && (draft.body?.isNotEmpty ?? false)) ...[
+          Row(
+            key: InboxScreen.useSuggestionKey,
+            children: [
+              Expanded(
+                child: Text(
+                  '✨ A suggested reply is ready',
+                  style: BondType.caption,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              TextButton(
+                onPressed: () => _stage(target),
+                child: const Text('Use it'),
+              ),
+            ],
+          ),
+          const SizedBox(height: BondSpacing.s4),
+        ],
         if (evidence == null)
           composer
         else
@@ -3895,6 +3972,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (outcome != SendOutcome.failed && _replyTo?.target == target) {
       setState(() => _replyTo = null);
     }
+    // And the box that carried it is no longer holding anything staged. The
+    // epoch bump rebuilds it empty either way; what this stops is the entry
+    // surviving to re-stage the NEXT suggestion this thread is given.
+    if (outcome != SendOutcome.failed) _unstage(target);
     switch (outcome) {
       case SendOutcome.sent:
         // A second read, after the sync `send` runs on its way out. The epoch

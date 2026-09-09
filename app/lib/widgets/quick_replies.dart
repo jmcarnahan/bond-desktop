@@ -25,16 +25,18 @@ import 'composer.dart' show Composer;
 /// is a menu, and the user would read all five before writing their own reply
 /// anyway.
 ///
-/// Tapping a card SENDS only when [armed]. Without a send grant the same tap
-/// puts the text in the docked composer instead, because a card that appeared
-/// to send and quietly did not would be worse than one that never offered.
+/// Tapping a card never sends. It puts that reply in the docked composer, where
+/// the reader changes it or presses Send — because a card is text on screen, and
+/// text that quietly put mail in front of somebody is not what a tap on it
+/// promises.
 class QuickReplyBar extends StatefulWidget {
   /// Zero, one or two. Zero leaves the ask-for-a-suggestion button alone, or
   /// nothing at all where there is nothing to ask.
   final List<DraftOption> options;
 
-  /// Whether a tap on a card sends. False means it prefills instead, and the
-  /// cards say so.
+  /// Whether this build holds a real send grant. It no longer changes what a
+  /// card does — every tap stages, either way — and is kept for the pending
+  /// row's sake and for the hosts that already know the answer.
   final bool armed;
 
   /// A card was tapped. What that means is the host's decision, not this
@@ -143,16 +145,12 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
           if (_confirmingDismiss)
             _confirmRow()
           else
-            // Said once, above the button, both ways: a card that sends and a
-            // card that prefills look identical, so the words are the only
-            // thing separating "one tap and this is on its way" from "one tap
-            // and you are editing it" — and guessing wrong in either direction
-            // is the dishonest version of this bar.
+            // Said once, above the button, and the same sentence in every grant
+            // state: what a tap does no longer depends on what Entra consented
+            // to, and a card that read differently in two builds is how a
+            // reader learns not to trust the line at all.
             Text(
-              widget.armed
-                  ? 'Tap a suggestion to send it — you can undo for a few '
-                      'seconds.'
-                  : 'Tap a reply to open it in the composer.',
+              'Tap a reply to put it in the box.',
               style: BondType.caption,
             ),
           const SizedBox(height: BondSpacing.s4),
@@ -213,13 +211,12 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
     );
   }
 
-  /// One suggestion, whole: the full reply is the thing being offered, and a
-  /// tap may SEND it — nobody should commit to words they could only read
-  /// three lines of. No tooltip for the rest; the card just takes the height
-  /// its words need.
+  /// One suggestion, whole: a tap puts the ENTIRE reply in the box, so the whole
+  /// reply is shown — nobody should stage words they could only read three lines
+  /// of. No tooltip for the rest; the card just takes the height its words need.
   ///
-  /// The header is the action: an icon that says what the tap does (send when
-  /// [armed], compose when not) beside the stance in the app's action color.
+  /// The header is the action: the compose icon, because that is what every tap
+  /// does now, beside the stance in the app's action color.
   Widget _card(DraftOption option) {
     return ConstrainedBox(
       constraints: const BoxConstraints(maxWidth: _cardWidth),
@@ -245,10 +242,8 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
               children: [
                 Row(
                   children: [
-                    Icon(
-                      widget.armed
-                          ? Icons.send_outlined
-                          : Icons.edit_outlined,
+                    const Icon(
+                      Icons.edit_outlined,
                       size: 14,
                       color: BondColors.primary,
                     ),

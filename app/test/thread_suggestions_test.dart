@@ -230,14 +230,6 @@ void main() {
     await tester.pump();
   }
 
-  /// Lets the undo window close and the send's own round trips land.
-  Future<void> elapseUndoWindow(WidgetTester tester) async {
-    await tester.pump(const Duration(seconds: 6));
-    for (var i = 0; i < 8; i++) {
-      await tester.pump();
-    }
-  }
-
   /// One message's row, by the key the transcript gives it.
   Finder rowFor(String id) => find.byKey(ValueKey(id));
 
@@ -264,8 +256,10 @@ void main() {
     );
   });
 
-  testWidgets('an older card replies to its OWN message, not the newest',
+  testWidgets('an older card puts ITS OWN words in the box, not the newest',
       (tester) async {
+    // Rewritten: a card stages rather than sends, so what this pins is which
+    // of the two options the box ends up holding.
     await seedThread();
     await pumpScreen(tester);
     await openThread(tester);
@@ -273,28 +267,32 @@ void main() {
     await tester.tap(find.text('Confirm receipt'));
     await tester.pump();
     await tester.pump();
-    await elapseUndoWindow(tester);
 
-    // The whole point: the answer to what was asked first goes to the message
-    // that asked it.
-    expect(mail.calls.first, 'createReply:c1-m1');
-    expect(mail.bodies, ['Got it, thanks.']);
+    expect(
+      tester.widget<Composer>(find.byType(Composer)).suggestedBody,
+      'Got it, thanks.',
+    );
+    // And the box knows which message those words answer: a send resolves to
+    // the newest inbound on its own, so an older card has to say otherwise.
+    expect(find.byKey(const Key('replying-to')), findsOneWidget);
+    expect(find.text('Replying to Eric Vance'), findsOneWidget);
+    // Nothing went out, and neither suggestion was spent.
+    expect(mail.calls, isEmpty);
     expect(
       (await store.getDraftForMessage('email', 'c1-m1'))!['status'],
-      'sent',
+      'suggested',
     );
-    // Nobody answered the newer message, so its suggestion is still on offer.
     expect(
       (await store.getDraftForMessage('email', 'c1-m2'))!['status'],
       'suggested',
     );
   });
 
-  testWidgets('queueing a send closes every card while it is undoable',
+  testWidgets('tapping a card sends nothing and closes no other card',
       (tester) async {
-    // The optimistic bubble is an outbound message after both of them, and a
-    // card that can be tapped is a card that can send: a second reply must not
-    // be one click away from a send the user can still take back.
+    // Rewritten: this used to assert that a queued send closed every card
+    // while it was undoable. A tap queues no send now, so nothing has been
+    // answered and every card stays where it was.
     await seedThread();
     await pumpScreen(tester);
     await openThread(tester);
@@ -303,15 +301,10 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Confirm receipt'), findsNothing);
-    expect(find.text('Say yes'), findsNothing);
-    // Twice over, and both are the point: the reply is in the transcript where
-    // it will land, and the undo row under it is still offering it back.
-    expect(find.text('Sending…'), findsNWidgets(2));
-
-    // Let the queued send land rather than leaving a timer running past the
-    // test.
-    await elapseUndoWindow(tester);
+    expect(find.text('Confirm receipt'), findsOneWidget);
+    expect(find.text('Say yes'), findsOneWidget);
+    expect(find.text('Sending…'), findsNothing);
+    expect(find.text('Reply sending.'), findsNothing);
   });
 
   testWidgets('the × closes one message\'s cards and leaves the other\'s',
@@ -362,10 +355,10 @@ void main() {
     );
   });
 
-  testWidgets('without a send grant a card opens the composer instead',
-      (tester) async {
-    // The honest version of the gesture: nothing in this build could put that
-    // mail in front of anyone, so nothing pretends to.
+  testWidgets('without a send grant a card does the same thing', (tester) async {
+    // Rewritten: this was the honest half of a split. There is no split left —
+    // a tap stages in either grant state — so what it pins now is that the
+    // read-only build behaves exactly like the sending one.
     await seedThread();
     await pumpScreen(tester, grantedScopes: _readGrant);
     await openThread(tester);
@@ -377,5 +370,135 @@ void main() {
 
     expect(mail.calls, isEmpty);
     expect(find.widgetWithText(Composer, 'Got it, thanks.'), findsOneWidget);
+  });
+
+  /// The text the reply box is actually holding, controller and all — the
+  /// `suggestedBody` a `Composer` was handed says what the host offered, not
+  /// what is on screen.
+  String boxText(WidgetTester tester) => tester
+      .widget<TextField>(find.descendant(
+        of: find.byType(Composer),
+        matching: find.byType(TextField),
+      ))
+      .controller!
+      .text;
+
+  testWidgets('the box opens EMPTY even when a suggestion is waiting',
+      (tester) async {
+    // The whole point of staging: a suggestion the pipeline wrote stays on its
+    // card until the reader asks for it, so the box is one empty line and the
+    // reply is not on screen twice.
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    expect(
+      tester.widget<Composer>(find.byType(Composer)).suggestedBody,
+      isNull,
+    );
+    expect(boxText(tester), '');
+    expect(find.byKey(InboxScreen.useSuggestionKey), findsOneWidget);
+    // And the suggestion is still where it was.
+    expect(find.text('Confirm receipt'), findsOneWidget);
+  });
+
+  testWidgets('Use it puts the stored draft in the box', (tester) async {
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    await tester.tap(find.descendant(
+      of: find.byKey(InboxScreen.useSuggestionKey),
+      matching: find.text('Use it'),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    expect(boxText(tester), 'Yes, Friday works for me.');
+    // The hint is the offer, and the offer has been taken.
+    expect(find.byKey(InboxScreen.useSuggestionKey), findsNothing);
+    // The provenance caption is what says these words are the model's.
+    expect(
+      find.text('✨ Suggested reply — drafted from this thread and your past '
+          'mail'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the box\'s ✕ empties the box and keeps the suggestion',
+      (tester) async {
+    // The ✕ used to mark the stored draft dismissed, so closing a box the
+    // reader never asked for deleted the suggestion. It un-stages now.
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    await tester.tap(find.descendant(
+      of: find.byKey(InboxScreen.useSuggestionKey),
+      matching: find.text('Use it'),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('Clear the box'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(boxText(tester), '');
+    expect(find.byKey(InboxScreen.useSuggestionKey), findsOneWidget);
+    // The row the words came from is untouched, and so is the card.
+    expect(
+      (await store.getDraftForMessage('email', 'c1-m2'))!['status'],
+      'suggested',
+    );
+    expect(find.text('Say yes'), findsOneWidget);
+  });
+
+  testWidgets('a card tap stages that option and queues no send',
+      (tester) async {
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    await tester.tap(find.text('Push back'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      tester.widget<Composer>(find.byType(Composer)).suggestedBody,
+      'Friday is tight — could we say Tuesday?',
+    );
+    expect(boxText(tester), 'Friday is tight — could we say Tuesday?');
+    expect(find.text('Reply sending.'), findsNothing);
+    expect(find.text('Sending…'), findsNothing);
+    expect(mail.calls, isEmpty);
+    // The newest message's card names nothing: the send already resolves to
+    // that message, and a caption saying so would be saying nothing.
+    expect(find.byKey(const Key('replying-to')), findsNothing);
+  });
+
+  testWidgets('a send leaves the next box empty rather than re-staging',
+      (tester) async {
+    // The staging map outliving its send would hand the NEXT suggestion to a
+    // box nobody had asked to fill.
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    await tester.tap(find.text('Confirm receipt'));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.widgetWithText(ElevatedButton, 'Send'));
+    for (var i = 0; i < 12; i++) {
+      await tester.pump();
+    }
+
+    expect(mail.bodies, ['Got it, thanks.']);
+    expect(
+      tester.widget<Composer>(find.byType(Composer)).suggestedBody,
+      isNull,
+    );
+    expect(boxText(tester), '');
   });
 }

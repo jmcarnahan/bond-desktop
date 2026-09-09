@@ -94,33 +94,32 @@ void main() {
 
     testWidgets('and says so, so a card cannot look like a send button',
         (tester) async {
+      // Rewritten: a tap no longer sends in any grant state, so the caption
+      // and the icon say "into the box" without a send grant.
       await pumpBar(tester, armed: false);
 
-      expect(find.text('Tap a reply to open it in the composer.'),
-          findsOneWidget);
+      expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
       // The icon agrees with the words: composing, not sending.
       expect(find.byIcon(Icons.edit_outlined), findsNWidgets(2));
       expect(find.byIcon(Icons.send_outlined), findsNothing);
     });
 
-    testWidgets('an armed bar says a tap sends, and wears the send icon',
+    testWidgets('an armed bar says the same thing, and wears the same icon',
         (tester) async {
+      // Rewritten: the send grant used to change both. It changes neither now
+      // — the composer's own button is the only send there is.
       await pumpBar(tester);
 
-      expect(
-        find.text(
-            'Tap a suggestion to send it — you can undo for a few seconds.'),
-        findsOneWidget,
-      );
-      expect(find.text('Tap a reply to open it in the composer.'),
-          findsNothing);
-      expect(find.byIcon(Icons.send_outlined), findsNWidgets(2));
+      expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
+      expect(find.byIcon(Icons.edit_outlined), findsNWidgets(2));
+      expect(find.byIcon(Icons.send_outlined), findsNothing);
     });
 
     testWidgets('the whole reply is visible — no tooltip, no truncation',
         (tester) async {
-      // A tap may SEND these words, so all of them are on screen. The long
-      // body must lay out unclipped rather than hide its tail behind a hover.
+      // A tap STAGES all of these words, so all of them are on screen. The
+      // long body must lay out unclipped rather than hide its tail behind a
+      // hover.
       const long = DraftOption(
         stance: 'Decline politely',
         body: 'Thanks so much for thinking of me — unfortunately I have a '
@@ -202,11 +201,8 @@ void main() {
 
       expect(dismissed, 0);
       expect(find.text('Dismiss these suggestions?'), findsNothing);
-      expect(
-        find.text('Tap a suggestion to send it — you can undo for a few '
-            'seconds.'),
-        findsOneWidget,
-      );
+      // Rewritten: the caption the Keep restores is the new single sentence.
+      expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
     });
 
     testWidgets('a fresh pair is never asked about on the old one\'s behalf',

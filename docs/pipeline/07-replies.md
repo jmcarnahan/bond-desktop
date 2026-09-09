@@ -97,12 +97,25 @@ outcome but a failure, so a name can never outlive the send it was written for.
 
 Unnamed is the ordinary case and the **fallback order is unchanged**: the
 message an inline card belongs to, else the stored draft's `reply_to_message_id`
-row, else the thread's newest inbound message.
+row, else the thread's newest inbound message. A card tapped under an OLDER
+message sets the same `Replying to <who>` override the hover **Reply** sets, so
+the staged words answer the message they were written for; the newest
+message's card sets nothing, because the send already resolves to it.
 
 There is no reply window any more. The composer is docked under every thread a
 reply is possible on, from the moment the thread opens — see
 [../shell.md](../shell.md#room-anatomy). Every ask on the pane, the banner and
 each message's own line, puts the cursor in that box rather than opening one.
+
+**The box opens empty, and a card never sends.** A tapped card puts its whole
+reply in the composer and takes the cursor there, in every grant state; the
+composer's own button is the one send. `DraftNotifier.queueSend`, `PendingSend`
+and `cancelQueuedSend` — the five-second undo window — remain provider API with
+their own tests, but nothing in the shell arms them any more. What gets a
+suggestion into the box is a card tap, a Suggest a reply, the box's Draft reply
+/ Regenerate, a Use in reply on a file, or the `Use it` on the hint above the
+box; that staging is screen state keyed by thread and never touches the stored
+draft, and the box's ✕ only empties it.
 
 ## Drafts & sent
 
@@ -140,9 +153,9 @@ what puts `· syncing` in the row's time caption. The order is
 the server's copy lands and a sort on the null would put the newest thing last.
 
 **Both halves open BESIDE**, never in the main pane. That is the point of the
-pane: the docked composer in a side thread already holds the suggested body, so
-a reader can work down the list — read, send, next — without the list going away
-underneath them.
+pane: the docked composer in a side thread is one `Use it` from holding the
+suggested body, so a reader can work down the list — read, take it, send, next —
+without the list going away underneath them.
 
 **Dismiss** is `updateDraftStatus(status: 'dismissed')`, keyed on the message
 like every other draft write, and it is followed by **two more reloads**. The

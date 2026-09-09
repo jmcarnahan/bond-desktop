@@ -208,8 +208,10 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('a draft row opens its thread BESIDE, composer already full',
+  testWidgets('a draft row opens its thread BESIDE, one Use it from full',
       (tester) async {
+    // Rewritten: the box no longer opens holding the suggestion. The hint
+    // above it is what says one is waiting, and `Use it` is what fills it.
     await seedAll();
     await pumpInbox(tester);
     await openDrafts(tester);
@@ -231,11 +233,21 @@ void main() {
       'c1',
     );
 
-    final composer = tester.widget<Composer>(find.descendant(
-      of: find.byType(SidePanelHost),
-      matching: find.byType(Composer),
+    Composer sideComposer() => tester.widget<Composer>(find.descendant(
+          of: find.byType(SidePanelHost),
+          matching: find.byType(Composer),
+        ));
+    expect(sideComposer().suggestedBody, isNull);
+    expect(find.byKey(InboxScreen.useSuggestionKey), findsOneWidget);
+
+    await tester.tap(find.descendant(
+      of: find.byKey(InboxScreen.useSuggestionKey),
+      matching: find.text('Use it'),
     ));
-    expect(composer.suggestedBody, 'Friday works for me.');
+    await tester.pump();
+    await tester.pump();
+
+    expect(sideComposer().suggestedBody, 'Friday works for me.');
     await settleQueues(tester);
   });
 
