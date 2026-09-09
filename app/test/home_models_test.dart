@@ -38,6 +38,22 @@ void main() {
 
   final now = DateTime.utc(2026, 9, 1, 12);
 
+  group('homeMetricsWindowLabel', () {
+    test('days from two days up, hours below', () {
+      expect(homeMetricsWindowLabel(const Duration(days: 7)), 'Last 7 days');
+      expect(homeMetricsWindowLabel(const Duration(days: 2)), 'Last 2 days');
+      expect(
+        homeMetricsWindowLabel(const Duration(hours: 24)),
+        'Last 24 hours',
+      );
+      expect(homeMetricsWindowLabel(const Duration(hours: 47)), 'Last 47 hours');
+    });
+
+    test('the window in force is a week', () {
+      expect(homeMetricsWindow, const Duration(days: 7));
+    });
+  });
+
   group('isStalled', () {
     test('a pending row nobody is working on goes stalled at the threshold',
         () {

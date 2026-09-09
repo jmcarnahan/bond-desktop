@@ -31,6 +31,23 @@ const Duration homeDropCollapse = Duration(milliseconds: 180);
 /// tile that counted three cannot happen.
 const Duration homeStalledAfter = Duration(minutes: 15);
 
+/// How far back the tiles and the hot strip look.
+///
+/// A week, not a day. The tiles answer "what has the app been doing lately",
+/// and a day is short enough that a quiet Sunday — or a test account — reads
+/// as eight zeros over a table of rows, which looks like a fault rather than
+/// a quiet day. A week is the unit the rest of the app already reasons in
+/// (the needs-you re-judge, the default lookback presets), and the bar names
+/// the window beside the numbers so nobody has to guess it again.
+const Duration homeMetricsWindow = Duration(days: 7);
+
+/// The window, in words, for the caption beside the tiles: `Last 7 days`,
+/// `Last 24 hours`. Hours under two days, days from there — "Last 1 days" is
+/// not a sentence and "Last 168 hours" is not a number anybody reads.
+String homeMetricsWindowLabel(Duration window) => window.inHours < 48
+    ? 'Last ${window.inHours} hours'
+    : 'Last ${window.inDays} days';
+
 /// One message's trip through the pipeline, as one feed row.
 ///
 /// Every stage state is a raw string rather than an enum, for the reason a

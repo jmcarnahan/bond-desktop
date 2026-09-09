@@ -10,9 +10,11 @@ import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
+import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/needs_you_tabs.dart';
+import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -179,6 +181,12 @@ void main() {
     await tester.pump();
   }
 
+  /// The pane's title — the icon rail wears the same words on its stop, so a
+  /// plain text finder would count two.
+  Finder title(String text) => find.byWidgetPredicate(
+        (w) => w is Text && w.data == text && w.style == BondType.title,
+      );
+
   /// Whatever the list pane is drawing, section label and all.
   List<String> rowTitles(WidgetTester tester) {
     final pane = tester.widget<ConversationListPane>(
@@ -189,6 +197,58 @@ void main() {
         for (final c in rows) c.subject ?? '',
     ];
   }
+
+  testWidgets('a source pill names itself on the title, and an empty pane '
+      'says which half it is showing and offers the way back', (tester) async {
+    // Every row here is mail. Under the Teams pill the pane is empty, and an
+    // empty pane titled plain 'Needs You' would be saying nothing needs you.
+    await seedAll();
+    await pumpInbox(tester);
+    expect(title('Needs You'), findsOneWidget);
+    expect(rowTitles(tester), isNotEmpty);
+
+    await tester.tap(find.byKey(SourceFilterBar.teamsKey));
+    for (var i = 0; i < 3; i++) {
+      await tester.pump();
+    }
+
+    expect(title('Needs You · ${sourceFilterLabel('teams')}'), findsOneWidget);
+    expect(title('Needs You'), findsNothing);
+    expect(find.text(NeedsYouTab.all.emptyText), findsOneWidget);
+    expect(
+      find.text('Showing ${sourceFilterLabel('teams')} only.'),
+      findsOneWidget,
+    );
+
+    // Another tab, another sentence — the notice stays.
+    await pickTab(tester, NeedsYouTab.deadlines);
+    expect(find.text(NeedsYouTab.deadlines.emptyText), findsOneWidget);
+    expect(find.text(NeedsYouTab.all.emptyText), findsNothing);
+    expect(find.byKey(InboxScreen.showAllSourcesKey), findsOneWidget);
+
+    await tester.tap(find.byKey(InboxScreen.showAllSourcesKey));
+    for (var i = 0; i < 3; i++) {
+      await tester.pump();
+    }
+
+    expect(title('Needs You'), findsOneWidget);
+    expect(find.textContaining('Showing'), findsNothing);
+    expect(rowTitles(tester), isNotEmpty);
+    await settleQueues(tester);
+  });
+
+  testWidgets('an empty tab with nothing narrowed says only what it means',
+      (tester) async {
+    await seedThread('c1', 'Homepage copy', cta: 'Confirm the launch date');
+    await pumpInbox(tester);
+
+    await pickTab(tester, NeedsYouTab.suggestedDrafts);
+
+    expect(find.text(NeedsYouTab.suggestedDrafts.emptyText), findsOneWidget);
+    expect(find.text('Nothing here.'), findsNothing);
+    expect(find.byKey(InboxScreen.showAllSourcesKey), findsNothing);
+    await settleQueues(tester);
+  });
 
   testWidgets('all five pills are there, on All', (tester) async {
     await seedAll();

@@ -190,6 +190,20 @@ void main() {
       expect(find.text('2'), findsOneWidget);
     });
 
+    testWidgets('the bar names its window beside the numbers',
+        (tester) async {
+      // Eight zeros with no stated period look like a broken pipeline; the
+      // same eight with "Last 7 days" beside them look like a quiet week.
+      await _pump(tester, metrics: const HomeMetrics());
+      expect(
+        find.byKey(HomeMetricsBar.windowKey),
+        findsOneWidget,
+      );
+      expect(find.text(homeMetricsWindowLabel(homeMetricsWindow)),
+          findsOneWidget);
+      expect(find.text('Last 7 days'), findsOneWidget);
+    });
+
     testWidgets('In flight carries the stalled count only when there is one',
         (tester) async {
       await _pump(

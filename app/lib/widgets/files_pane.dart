@@ -100,6 +100,7 @@ class FilesPane extends StatelessWidget {
     required this.onOpenThread,
     required this.onLoadMore,
     required this.now,
+    this.emptyNotice,
     this.error,
     this.search,
     this.searchQuery,
@@ -116,6 +117,10 @@ class FilesPane extends StatelessWidget {
 
   static Key threadLinkKeyFor(FileRow row) =>
       attachmentKey('file-row-thread', row.ref);
+
+  /// Drawn under the empty line — the host's word on why the shelf might be
+  /// empty (a source filter it owns) and the way out. Null draws nothing.
+  final Widget? emptyNotice;
 
   static const Key emptyKey = ValueKey('files-empty');
   static const Key loadMoreKey = ValueKey('files-load-more');
@@ -200,9 +205,20 @@ class FilesPane extends StatelessWidget {
   Widget _shelf() {
     if (!loaded) return const Center(child: CircularProgressIndicator());
     if (rows.isEmpty) {
+      final notice = emptyNotice;
       return Align(
         alignment: Alignment.topLeft,
-        child: Text('No files yet.', key: emptyKey, style: BondType.small),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('No files yet.', key: emptyKey, style: BondType.small),
+            if (notice != null) ...[
+              const SizedBox(height: BondSpacing.s8),
+              notice,
+            ],
+          ],
+        ),
       );
     }
 

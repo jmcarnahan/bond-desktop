@@ -82,6 +82,18 @@ there is nothing here to narrow. The source chips in the column header DO scope
 the shelf — they scope every pane — which is why `FilesPane` has no source bar
 of its own.
 
+**A narrowed pane says so.** While a source pill is down, every overview's
+title carries the connector, spelled exactly as the pill spells it
+(`sourceFilterLabel`): `Needs You · 💬 Teams`, `Files · ✉ Mail`. And an
+overview that is EMPTY under the pill says which half it is showing and offers
+the way back — `Showing 💬 Teams only. Show all` (`InboxScreen.showAllSourcesKey`)
+under the pane's own empty sentence. The pill is a column away from where the
+reader is looking, and without the line an empty Needs You under Teams reads as
+"nothing needs you" when the truth is "nothing on Teams needs you". Each Needs
+You tab has an empty sentence of its own (`NeedsYouTab.emptyText`). Home is not
+narrowed by the pills — its feed reads both connectors — so its title never
+carries one.
+
 On Home the column is the whole stack and every section collapses. On any other
 stop it is that one section, expanded, with its header row and **no chevron** —
 the user picked the stop, and a chevron that emptied the column would be an
@@ -188,8 +200,8 @@ the field may only exist once that overlay has been laid out. Escape clears, and
 is bound inside `FindField` so it only fires while the box holds focus.
 
 **Unread only** is a toggle in the caption row (`Key('unread-toggle')`), not a
-pill under the source chips: three source pills already fill 236px, and a fourth
-would wrap onto a line of its own for one word. It hides read threads and read
+pill under the source chips: a fourth pill on that line would wrap onto a line
+of its own for one word. It hides read threads and read
 rooms and leaves storylines alone — a storyline is not read or unread, and
 hiding one under a filter about mail would make the toggle mean two things. Its
 tooltip names what pressing it would do, so it flips: `Unread only` ↔ `Show

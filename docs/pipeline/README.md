@@ -107,8 +107,10 @@ this order:
 | `Draft ready` | `message_progress.draft_state = 'done'` |
 | `Nothing to do` | nothing above matched; the tooltip carries `needs_you_reason` when the verdict was a no |
 
-The eight tiles above the table read the same columns over the last 24 hours,
-and Retry (`PipelineRepairService`) puts back exactly the stages a row still
+The eight tiles above the table read the same columns over the last seven
+days (`homeMetricsWindow`, `app/lib/models/home_models.dart` — a day made a
+quiet Sunday look like a broken pipeline), and the bar says the window in a
+caption beside the numbers; the hot strip uses the same window. Retry (`PipelineRepairService`) puts back exactly the stages a row still
 owes — never one that finished, and never a dropped row, which is Restore's.
 
 ## Finding out what happened to a message

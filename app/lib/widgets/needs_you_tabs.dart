@@ -19,6 +19,18 @@ extension NeedsYouTabLabel on NeedsYouTab {
         NeedsYouTab.deadlines => 'Deadlines',
         NeedsYouTab.suggestedDrafts => 'Suggested drafts',
       };
+
+  /// What an empty tab says. A sentence per lens rather than one "Nothing
+  /// here." for all five, because an empty Deadlines tab and an empty Asked
+  /// of me tab are different pieces of good news, and the reader picked the
+  /// tab to hear that piece.
+  String get emptyText => switch (this) {
+        NeedsYouTab.all => 'Nothing needs you right now.',
+        NeedsYouTab.askedOfMe => 'Nobody has asked you for anything.',
+        NeedsYouTab.waitingOnOthers => 'You are not waiting on anyone.',
+        NeedsYouTab.deadlines => 'Nothing here names a deadline.',
+        NeedsYouTab.suggestedDrafts => 'No drafts waiting to be sent.',
+      };
 }
 
 /// One tab's rows, out of the Needs You list the rail and the overview share.

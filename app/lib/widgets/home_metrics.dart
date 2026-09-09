@@ -85,7 +85,19 @@ class BondStatTile extends StatelessWidget {
 class HomeMetricsBar extends StatelessWidget {
   final HomeMetrics metrics;
 
-  const HomeMetricsBar({super.key, required this.metrics});
+  /// How far back the numbers reach. A parameter rather than the constant
+  /// read here, so a test can pin the caption's wording without a week's
+  /// worth of fixtures.
+  final Duration window;
+
+  const HomeMetricsBar({
+    super.key,
+    required this.metrics,
+    this.window = homeMetricsWindow,
+  });
+
+  /// The caption naming the window, at the end of the tiles.
+  static const Key windowKey = ValueKey('home-metrics-window');
 
   @override
   Widget build(BuildContext context) {
@@ -95,6 +107,7 @@ class HomeMetricsBar extends StatelessWidget {
     return Wrap(
       spacing: BondSpacing.s8,
       runSpacing: BondSpacing.s8,
+      crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         BondStatTile(value: '${metrics.emails}', label: 'Emails'),
         BondStatTile(value: '${metrics.teams}', label: 'Teams'),
@@ -116,6 +129,18 @@ class HomeMetricsBar extends StatelessWidget {
           value: '${metrics.errored}',
           label: 'Errors',
           valueColor: metrics.errored > 0 ? BondColors.error : null,
+        ),
+        // The window, said once beside the numbers: eight counts with no
+        // stated period are eight counts of nothing in particular, and eight
+        // zeros with no stated period look like a broken pipeline rather
+        // than a quiet week.
+        Padding(
+          padding: const EdgeInsets.only(left: BondSpacing.s4),
+          child: Text(
+            homeMetricsWindowLabel(window),
+            key: windowKey,
+            style: BondType.caption,
+          ),
         ),
       ],
     );

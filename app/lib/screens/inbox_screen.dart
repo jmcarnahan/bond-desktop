@@ -92,6 +92,9 @@ class InboxScreen extends ConsumerStatefulWidget {
   /// swap back to the sign-in screen.
   final VoidCallback? onSignedOut;
 
+  /// The `Show all` under an empty pane while a source pill is down.
+  static const Key showAllSourcesKey = ValueKey('show-all-sources');
+
   /// The three attachment collaborators, injectable for one reason: under
   /// `flutter test` the real pair must never be built. [PreviewEngines] holds
   /// the pdfrx renderer (a native library a test process cannot load), and
@@ -1603,16 +1606,51 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         child: SourceFilterBar(
           selected: _sourceFilter,
           teamsAvailable: snapshot.data ?? true,
-          onSelected: (source) {
-            setState(() => _sourceFilter = source);
-            // Every other pane is built from the already-filtered rows; the
-            // shelf reads the store itself, so the chips have to re-ask it.
-            if (_section == RailSection.files) {
-              ref.read(filesProvider.notifier).load(sources: _activeSources);
-            }
-          },
+          onSelected: _setSourceFilter,
         ),
       ),
+    );
+  }
+
+  /// Narrows every pane to one connector, or widens back to both.
+  ///
+  /// One method for the pills and for the empty pane's `Show all`, so the
+  /// shelf re-read below happens whichever control moved the filter.
+  void _setSourceFilter(String? source) {
+    setState(() => _sourceFilter = source);
+    // Every other pane is built from the already-filtered rows; the shelf
+    // reads the store itself, so the chips have to re-ask it.
+    if (_section == RailSection.files) {
+      ref.read(filesProvider.notifier).load(sources: _activeSources);
+    }
+  }
+
+  /// The line under an empty pane while a source pill is down: which half of
+  /// the mailbox the reader is looking at, and the way back to all of it.
+  ///
+  /// Null when nothing is narrowed, so a pane that is simply empty says so
+  /// and nothing more. The pill that emptied the pane is on the other side of
+  /// the divider, a column away from where the reader is looking; without
+  /// this line an empty Needs You under Teams reads as "nothing needs you"
+  /// when the truth is "nothing on Teams needs you".
+  Widget? _scopeNotice() {
+    final scope = _sourceFilter;
+    if (scope == null) return null;
+    return Wrap(
+      alignment: WrapAlignment.center,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      spacing: BondSpacing.s4,
+      children: [
+        Text(
+          'Showing ${sourceFilterLabel(scope)} only.',
+          style: BondType.caption,
+        ),
+        TextButton(
+          key: InboxScreen.showAllSourcesKey,
+          onPressed: () => _setSourceFilter(null),
+          child: const Text('Show all'),
+        ),
+      ],
     );
   }
 
@@ -3930,9 +3968,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         ? RailSection.archive
         : (_section ?? RailSection.needsYou);
     final day = _selectedLaterDay;
-    final title = (section == RailSection.archive && day != null)
+    final base = (section == RailSection.archive && day != null)
         ? 'Later · ${formatDayLabel(day) ?? day}'
         : section.label;
+    // The narrowing rides on the title, spelled exactly as the pill spells
+    // it: every overview is built from the source-filtered rows, and a pane
+    // titled plain 'Needs You' over a list that was quietly halved is a pane
+    // that lies about what it is. Home is not here on purpose — the feed
+    // reads both connectors whatever the pills say.
+    final scope = _sourceFilter;
+    final title =
+        scope == null ? base : '$base · ${sourceFilterLabel(scope)}';
 
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -4071,6 +4117,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onSelect: (source, id) => _select(id, source: source),
       sectionsOverride: sections,
       processingSince: ref.watch(sessionStartProvider),
+      emptyNotice: _scopeNotice(),
     );
   }
 
@@ -4083,6 +4130,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Widget _filesPane() {
     final files = ref.watch(filesProvider);
     return FilesPane(
+      emptyNotice: _scopeNotice(),
       rows: files.rows,
       loaded: files.loaded,
       loadingMore: files.loadingMore,
@@ -4173,6 +4221,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
                 ? (c) => 'Deadline · ${c.latestDeadline}'
                 : null,
             processingSince: ref.watch(sessionStartProvider),
+            emptyText: tab.emptyText,
+            emptyNotice: _scopeNotice(),
           ),
         ),
       ],

@@ -137,9 +137,14 @@ class BondFilterPill extends StatelessWidget {
         onTap: onTap,
         borderRadius: BondRadii.fullAll,
         hoverColor: hover,
+        // As wide as its label and no wider. A `Container` given an
+        // `alignment` grows to whatever width it is offered, and inside a
+        // `Wrap` — every pill row in the app — that is the whole row: five
+        // tabs became five full-width bars stacked down the pane. `Center`
+        // with a width factor of one centres the label vertically inside the
+        // 32px and takes exactly the label's width.
         child: Container(
           height: 32,
-          alignment: Alignment.center,
           padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s12),
           decoration: outline == null
               ? null
@@ -147,13 +152,16 @@ class BondFilterPill extends StatelessWidget {
                   borderRadius: BondRadii.fullAll,
                   border: Border.all(color: outline),
                 ),
-          child: Text(
-            label,
-            style: TextStyle(
-              fontFamily: BondType.workFamily,
-              fontSize: 13,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
-              color: fg,
+          child: Center(
+            widthFactor: 1,
+            child: Text(
+              label,
+              style: TextStyle(
+                fontFamily: BondType.workFamily,
+                fontSize: 13,
+                fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+                color: fg,
+              ),
             ),
           ),
         ),

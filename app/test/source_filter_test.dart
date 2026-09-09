@@ -30,6 +30,74 @@ Conversation _conv({
 Widget _host(Widget child) => MaterialApp(home: Scaffold(body: child));
 
 void main() {
+  group('pill width', () {
+    testWidgets('a pill is as wide as its label, not as wide as its row',
+        (tester) async {
+      // Every pill row in the app is a Wrap, which offers each child the
+      // whole row. A pill that took the offer was a full-width bar, and five
+      // tabs were five bars stacked down the pane.
+      await tester.pumpWidget(_host(SizedBox(
+        width: 600,
+        child: BondFilterPillRow<String>(
+          options: const ['All', 'Asked of me', 'Deadlines'],
+          selected: 'All',
+          labelOf: (s) => s,
+          onSelected: (_) {},
+        ),
+      )));
+
+      final widths = [
+        for (final pill in find.byType(BondFilterPill).evaluate())
+          (pill.renderObject as RenderBox).size.width,
+      ];
+      expect(widths, hasLength(3));
+      for (final width in widths) {
+        expect(width, lessThan(200), reason: 'a pill took the whole row');
+      }
+      // Three pills of these widths sit on ONE line: the second starts to
+      // the right of the first, not under it.
+      final first = tester.getTopLeft(find.byType(BondFilterPill).first);
+      final second = tester.getTopLeft(find.byType(BondFilterPill).at(1));
+      expect(second.dy, first.dy);
+      expect(second.dx, greaterThan(first.dx));
+      // And each is still 32 tall with the label centred in it.
+      expect(tester.getSize(find.byType(BondFilterPill).first).height, 32);
+    });
+
+    testWidgets('the source pills are chips, not bars', (tester) async {
+      // Whether the three share one line depends on the font — the test
+      // font's square glyphs are wider than Inter's, so that is not pinned
+      // here (the bar is a Wrap for exactly that reason). What is pinned is
+      // that no pill takes the column: each is a chip around its label.
+      await tester.pumpWidget(_host(SizedBox(
+        width: 236,
+        child: SourceFilterBar(selected: null, onSelected: (_) {}),
+      )));
+      for (final key in [
+        SourceFilterBar.allKey,
+        SourceFilterBar.mailKey,
+        SourceFilterBar.teamsKey,
+      ]) {
+        expect(tester.getSize(find.byKey(key)).width, lessThan(160));
+      }
+    });
+  });
+
+  group('sourceFilterLabel', () {
+    test('spells each connector the way its pill does', () {
+      expect(sourceFilterLabel('teams'), '$teamsGlyph Teams');
+      expect(sourceFilterLabel('email'), '$mailGlyph Mail');
+    });
+
+    testWidgets('and the pills use it', (tester) async {
+      await tester.pumpWidget(_host(
+        SourceFilterBar(selected: 'teams', onSelected: (_) {}),
+      ));
+      expect(find.text(sourceFilterLabel('teams')), findsOneWidget);
+      expect(find.text(sourceFilterLabel('email')), findsOneWidget);
+    });
+  });
+
   group('bySource', () {
     final rows = [
       _conv(id: 'c1'),

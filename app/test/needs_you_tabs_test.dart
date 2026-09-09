@@ -130,4 +130,14 @@ void main() {
       expect(needsYouTabRows(tab, const []), isEmpty, reason: '$tab');
     }
   });
+
+  test('every tab has an empty sentence of its own', () {
+    final sentences = {for (final tab in NeedsYouTab.values) tab.emptyText};
+    expect(sentences, hasLength(NeedsYouTab.values.length));
+    for (final s in sentences) {
+      expect(s, endsWith('.'));
+      expect(s, isNot(contains('_')));
+    }
+    expect(NeedsYouTab.all.emptyText, 'Nothing needs you right now.');
+  });
 }

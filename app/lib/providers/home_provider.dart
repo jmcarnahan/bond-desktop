@@ -840,10 +840,6 @@ final homeFeedProvider =
   );
 });
 
-/// How far back the tiles and the hot strip look. A day, because the question
-/// they answer is "what has the app been doing today".
-const Duration homeMetricsWindow = Duration(hours: 24);
-
 /// Through the store's own stamp helper, never `toIso8601String` — the cutoff
 /// is compared against `message_progress.updated_at` as a STRING, and Dart
 /// prints three fractional digits when the microseconds are zero and six
