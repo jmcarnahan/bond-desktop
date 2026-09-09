@@ -39,7 +39,17 @@ void main() {
 
   final now = DateTime.utc(2026, 9, 1, 12);
 
-  group('the hot strip window', () {
+  group('homeMetricsWindowLabel', () {
+    test('days from two days up, hours below', () {
+      expect(homeMetricsWindowLabel(const Duration(days: 7)), 'Last 7 days');
+      expect(homeMetricsWindowLabel(const Duration(days: 2)), 'Last 2 days');
+      expect(
+        homeMetricsWindowLabel(const Duration(hours: 24)),
+        'Last 24 hours',
+      );
+      expect(homeMetricsWindowLabel(const Duration(hours: 47)), 'Last 47 hours');
+    });
+
     test('the window in force is a week', () {
       expect(homeMetricsWindow, const Duration(days: 7));
     });
@@ -222,6 +232,27 @@ void main() {
   });
 
   group('the filters', () {
+    test('the seven are windowed, the pile and the feed are not', () {
+      expect(
+        {
+          for (final filter in HomeFilter.values) filter: filter.windowed,
+        },
+        {
+          // The feed itself, and the pile to burn down — all time, both.
+          HomeFilter.fromOthers: false,
+          HomeFilter.needsYou: false,
+          // A readout of what the app has been doing, over the tiles' week.
+          HomeFilter.urgent: true,
+          HomeFilter.inFlight: true,
+          HomeFilter.errors: true,
+          HomeFilter.dropped: true,
+          HomeFilter.processed: true,
+        },
+        reason: 'work owed since before last Tuesday is exactly what a window '
+            'would hide',
+      );
+    });
+
     test('only the outcome filters can show the dropped pile', () {
       expect(
         {

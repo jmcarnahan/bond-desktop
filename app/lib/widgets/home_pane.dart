@@ -402,7 +402,13 @@ class _HomePaneState extends State<HomePane> {
       children: [
         Flexible(
           child: Text(
-            'Showing ${widget.filter.label}',
+            // The window is named only where it applies: a Dropped list that
+            // stops at last Tuesday has to say so, and a Needs You pile that
+            // reaches back as far as the mail does must not claim a week.
+            widget.filter.windowed
+                ? 'Showing ${widget.filter.label} · '
+                    '${homeMetricsWindowLabel(homeMetricsWindow).toLowerCase()}'
+                : 'Showing ${widget.filter.label}',
             style: BondType.caption,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,

@@ -237,7 +237,7 @@ void main() {
       MessageStore.isoStamp(DateTime.now().subtract(Duration(days: days)));
 
   group('setFilter', () {
-    test('a tile filter has no window: it reads the whole feed', () async {
+    test('a windowed tile filter is read over the tiles own window', () async {
       await seed('recent', receivedAt: daysAgo(1), gateReason: 'newsletter');
       await seed('ancient', receivedAt: daysAgo(30), gateReason: 'newsletter');
       await seed('kept', receivedAt: daysAgo(2));
@@ -247,20 +247,44 @@ void main() {
       await notifier.load();
 
       expect(idsOf(notifier.state.rows), ['kept']);
-      expect(store.lastSinceIso, isNull);
+      expect(
+        store.lastSinceIso,
+        isNull,
+        reason: 'everyone else is the whole history, not the last week',
+      );
 
       await notifier.setFilter(HomeFilter.dropped);
 
       expect(store.lastFilter, HomeFilter.dropped);
+      expect(store.lastSinceIso, isNotNull);
+      expect(
+        idsOf(notifier.state.rows),
+        ['recent'],
+        reason: 'the number on the tile is the number of rows under it',
+      );
+      expect(notifier.state.includeDropped, isTrue);
+    });
+
+    test('the Needs You pile is all time, with no window at all', () async {
+      await seed('kept', receivedAt: daysAgo(2));
+
+      final notifier = HomeFeedNotifier(store);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      await notifier.setFilter(HomeFilter.needsYou);
+
+      expect(store.lastFilter, HomeFilter.needsYou);
       expect(
         store.lastSinceIso,
         isNull,
-        reason: 'the tiles count the whole feed, so the rows under a tile are '
-            'the whole feed too — otherwise the number is not the number of '
-            'rows under it',
+        reason: 'the pile is meant to be burnt down to zero, and a window '
+            'would hide the work owed longest',
       );
-      expect(idsOf(notifier.state.rows), ['recent', 'ancient']);
-      expect(notifier.state.includeDropped, isTrue);
+
+      // The other side of the same rule, from the same notifier.
+      await notifier.setFilter(HomeFilter.dropped);
+      expect(store.lastSinceIso, isNotNull);
     });
 
     test('the filter it is already on is not a second read', () async {

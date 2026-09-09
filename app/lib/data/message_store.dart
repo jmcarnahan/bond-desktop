@@ -5946,14 +5946,17 @@ RETURNING source, source_message_id, received_at
     ];
   }
 
-  /// The home screen's tiles, over everything received since [sinceIso] — or
-  /// over the whole table, which is what null means and what the Inbox passes.
+  /// The home screen's tiles: seven over everything received since [sinceIso],
+  /// and `needs_you` over all time.
   ///
-  /// The tiles ARE the filter, and a filter's number has to be the number of
-  /// rows under it. A window would make that false twice over: the tile would
-  /// count a week of a table that goes back further, and the reader who tapped
-  /// it and reached the bottom would be told "that's everything" about rows the
-  /// number never included.
+  /// The seven are a readout of what the app has been DOING, and those numbers
+  /// only grow — a lifetime total of processed mail is a number nobody can act
+  /// on. Their filters are bounded by the same window, so each tile's number
+  /// stays the number of rows under it.
+  ///
+  /// `needs_you` is the exception because it is not a readout at all: it is a
+  /// pile to burn down to zero, and work owed since before last Tuesday is
+  /// exactly the work a week would hide.
   ///
   /// ONE statement, which is the whole point: read separately, a message
   /// settling between two queries would land in one number and not the other,
@@ -5986,17 +5989,25 @@ RETURNING source, source_message_id, received_at
   /// gone: that column is the settle pass's snapshot of one MESSAGE, and a
   /// three-message thread counted three.
   ///
-  /// The two LEFT JOINs the rule reads through are keyed on
-  /// `(source, conversation_key)`, which is the primary key of both tables, so
-  /// neither can turn one progress row into two — every other number here is
-  /// still a count of messages and is still correct.
+  /// It is a SCALAR SUBQUERY rather than a column of the aggregate, and that
+  /// is what lets one statement answer two questions about two spans of time:
+  /// the subquery has no [sinceIso] in it. Its two LEFT JOINs live inside it
+  /// and are aliased `c` and `ai` because that is what the fragment reads;
+  /// the outer query carries neither, since needs_you was the only reason they
+  /// were ever there. Both are keyed on `(source, conversation_key)`, the
+  /// primary key of both tables, so neither can turn one progress row into two.
+  ///
+  /// Still one statement, which is still the whole point: read separately, a
+  /// thread settling between two queries would land in one number and not the
+  /// other.
   Future<HomeMetrics> homeMetrics({
-    String? sinceIso,
+    required String sinceIso,
     required String stalledBeforeIso,
     required double threshold,
     List<String> sources = const ['email', 'teams'],
   }) async {
     if (sources.isEmpty) return const HomeMetrics();
+    final places = _placeholders(sources.length);
     final row = await db
         .customSelect(
           '''
@@ -6006,9 +6017,14 @@ SELECT
   COALESCE(SUM(CASE WHEN p.urgency IN ('urgent', 'high') THEN 1 ELSE 0 END), 0)
     AS urgent,
   COALESCE(SUM(p.dropped), 0) AS dropped,
-  COUNT(DISTINCT CASE WHEN p.dropped = 0 AND $_liveNeedsYouThread
-                      THEN p.source || char(10) || p.conversation_key END)
-    AS needs_you,
+  (SELECT COUNT(DISTINCT p2.source || char(10) || p2.conversation_key)
+     FROM message_progress p2
+     LEFT JOIN conversations c
+       ON c.source = p2.source AND c.conversation_key = p2.conversation_key
+     LEFT JOIN conversation_ai ai
+       ON ai.source = p2.source AND ai.conversation_key = p2.conversation_key
+    WHERE p2.dropped = 0 AND p2.source IN ($places)
+      AND $_liveNeedsYouThread) AS needs_you,
   COALESCE(SUM(CASE WHEN p.storyline_id IS NOT NULL THEN 1 ELSE 0 END), 0)
     AS storylined,
   COALESCE(SUM(CASE WHEN p.outcome = 'pending' THEN 1 ELSE 0 END), 0)
@@ -6022,24 +6038,20 @@ SELECT
     AS errored,
   COUNT(*) AS total
 FROM message_progress p
-LEFT JOIN conversations c
-  ON c.source = p.source AND c.conversation_key = p.conversation_key
-LEFT JOIN conversation_ai ai
-  ON ai.source = p.source AND ai.conversation_key = p.conversation_key
-WHERE p.source IN (${_placeholders(sources.length)})
-${sinceIso == null ? '' : 'AND p.received_at >= ?'}
+WHERE p.received_at >= ? AND p.source IN ($places)
 ''',
           // In text order, which is the only order sqlite numbers anonymous
-          // placeholders in: the threshold's `?` is inside the SELECT list, so
-          // it binds before the stalled cutoff beside it and before the WHERE
-          // clause's own. Every column is qualified for the same reason the
-          // joins are LEFT — `source`, `updated_at` and the rest exist on all
-          // three tables now, and an unqualified one would be ambiguous.
+          // placeholders in: the needs-you subquery sits in the SELECT list, so
+          // its sources and its threshold bind FIRST, then the stalled cutoff
+          // beside it, and only then the WHERE clause's window and sources.
+          // Every outer column is qualified `p.` so the subquery's own `p2`,
+          // `c` and `ai` cannot be read for it.
           variables: _args([
+            ...sources,
             threshold,
             stalledBeforeIso,
+            sinceIso,
             ...sources,
-            ?sinceIso,
           ]),
         )
         .getSingle();
@@ -6156,10 +6168,11 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// because a gate-dropped message never reached the embedder and there is no
   /// vector to ask about it.
   ///
-  /// [sinceIso] bounds the read by `received_at`. Nothing in the app passes it
-  /// any more — the tiles have no window, so neither do the filters under them
-  /// — but the bound is real and cheap to keep, and a caller that wants a
-  /// week of history should not have to reinvent it.
+  /// [sinceIso] bounds the read by `received_at`, and the Inbox passes the
+  /// tiles' own window under a WINDOWED tile filter and nothing under the
+  /// others: the number on such a tile is only the number of rows under it if
+  /// both are measured over the same week. Needs You passes none, because the
+  /// pile it counts is all time — see [HomeFilterLabel.windowed].
   ///
   /// [threshold] is the attention slider's, and only [HomeFilter.needsYou]
   /// reads it. It defaults to 0 rather than being required because every other

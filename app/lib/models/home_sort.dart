@@ -43,6 +43,30 @@ extension HomeFilterLabel on HomeFilter {
         HomeFilter.processed => 'Processed',
       };
 
+  /// Whether this filter is bounded by the tiles' own window
+  /// (`homeMetricsWindow`), so the number on a tile stays the number of rows
+  /// under it.
+  ///
+  /// True for the five that count what the pipeline has been DOING — urgent,
+  /// in flight, errors, dropped, processed. Those numbers only ever grow, and
+  /// a lifetime total of processed mail is a number nobody can act on; a week
+  /// of it is a readout of how the app has been running.
+  ///
+  /// False for [HomeFilter.fromOthers], which is the feed itself, and false
+  /// for [HomeFilter.needsYou], which is the pile to burn down: work owed
+  /// since before last Tuesday is exactly the work a window would hide, and a
+  /// pile whose count and whose rows both stopped at seven days would read as
+  /// empty while the oldest asks went unanswered.
+  bool get windowed => switch (this) {
+        HomeFilter.urgent ||
+        HomeFilter.inFlight ||
+        HomeFilter.errors ||
+        HomeFilter.dropped ||
+        HomeFilter.processed =>
+          true,
+        HomeFilter.fromOthers || HomeFilter.needsYou => false,
+      };
+
   /// Whether dropped rows can appear under this filter — what the search
   /// runner's `includeDropped` is fed from.
   ///

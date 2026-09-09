@@ -527,14 +527,22 @@ nothing about the next.
 over the feed: the eight numbers were already on screen, and a reader who wants
 to see the twelve dropped messages is already pointing at the twelve. A tile
 taps its filter on, the same tile taps it off, and one is in force at a time
-(`HomeFilter`, `app/lib/models/home_sort.dart`). The tiles have no window —
-every one counts the whole table under the source chips — so the number on
-the tile IS the number of rows under it. Needs You counts THREADS by the
-rail's own rule (`isNeedsYou`, spelled in SQL and bound to the same attention
-threshold), and shows one row per thread under its filter; the rest count
-messages. Emails and Teams are the
-two tiles that write somewhere else — they move the list column's source chips,
-which is the one source selection the app has. While a filter is on, a caption
+(`HomeFilter`, `app/lib/models/home_sort.dart`), so the number on the tile IS
+the number of rows under it.
+
+Seven of the eight are a weekly readout: they count the last seven days
+(`homeMetricsWindow`) under the source chips, the caption after them names the
+week, and their filters are bounded by it too (`HomeFilter.windowed`). Those
+numbers only ever grow, and a lifetime total is a number nobody can act on.
+
+Needs You is the eighth. It stands FIRST, before a vertical rule, counts ALL
+TIME, and draws its count in the attention colour when there is one: it is a
+pile to burn down to zero rather than a reading of activity, and a week around
+it would hide the work owed longest. It also counts THREADS by the rail's own
+rule (`isNeedsYou`, spelled in SQL and bound to the same attention threshold),
+and shows one row per thread under its filter; the rest count messages. Emails
+and Teams are the two tiles that write somewhere else — they move the list
+column's source chips, which is the one source selection the app has. While a filter is on, a caption
 under the tiles names it and offers **Show everyone**
 (`HomePane.filterNoticeKey`, `HomePane.showEveryoneKey`), because a narrowing
 with nothing visible saying so is how a reader comes to believe their mail has

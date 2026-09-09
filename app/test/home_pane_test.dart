@@ -180,6 +180,17 @@ Future<void> _pump(
 
 void main() {
   group('the tiles', () {
+    const numbers = HomeMetrics(
+      emails: 41,
+      teams: 7,
+      urgent: 3,
+      dropped: 12,
+      needsYou: 5,
+      inFlight: 8,
+      errored: 2,
+      total: 48,
+    );
+
     testWidgets('show all eight figures, processed net of what is in flight',
         (tester) async {
       await _pump(
@@ -214,14 +225,53 @@ void main() {
       expect(find.text('2'), findsOneWidget);
     });
 
-    testWidgets('the bar names no window, because it counts everything',
+    testWidgets('the bar names the window the seven are read over',
         (tester) async {
-      // The tiles ARE the filter now, so a number on one is the number of rows
-      // under it — over the whole feed. A caption naming a week would be a
-      // promise the table below no longer keeps.
+      // Seven zeros with no stated period look like a broken pipeline; the
+      // same seven with "Last 7 days" beside them look like a quiet week.
       await _pump(tester, metrics: const HomeMetrics());
-      expect(find.text('Last 7 days'), findsNothing);
-      expect(find.textContaining('Last '), findsNothing);
+      expect(find.byKey(HomeMetricsBar.windowKey), findsOneWidget);
+      expect(
+        find.text(homeMetricsWindowLabel(homeMetricsWindow)),
+        findsOneWidget,
+      );
+      expect(find.text('Last 7 days'), findsOneWidget);
+    });
+
+    testWidgets('Needs You comes first, and a rule separates it from the rest',
+        (tester) async {
+      await _pump(tester, metrics: numbers);
+
+      final pile = tester.getTopLeft(
+        find.byKey(HomeMetricsBar.tileKey('needs-you')),
+      );
+      final rule = tester.getTopLeft(find.byKey(HomeMetricsBar.dividerKey));
+      final firstOfSeven = tester.getTopLeft(
+        find.byKey(HomeMetricsBar.tileKey('emails')),
+      );
+
+      // A pile to burn down and a readout of activity are two kinds of number,
+      // and eight in a row would invite the reader to compare them.
+      expect(pile.dx, lessThan(rule.dx));
+      expect(rule.dx, lessThan(firstOfSeven.dx));
+      // The caption belongs to the seven, so it comes after the rule too.
+      expect(
+        tester.getTopLeft(find.byKey(HomeMetricsBar.windowKey)).dx,
+        greaterThan(rule.dx),
+      );
+    });
+
+    testWidgets('the pile colours its count only when there is one',
+        (tester) async {
+      BondStatTile pileTile(WidgetTester tester) => tester
+          .widget<BondStatTile>(find.byKey(HomeMetricsBar.tileKey('needs-you')));
+
+      await _pump(tester, metrics: numbers);
+      expect(pileTile(tester).valueColor, BondColors.attention);
+
+      // A coloured nought is an alarm about the absence of work.
+      await _pump(tester, metrics: const HomeMetrics(total: 48, inFlight: 8));
+      expect(pileTile(tester).valueColor, isNull);
     });
 
     testWidgets('In flight carries the stalled count only when there is one',
@@ -569,12 +619,23 @@ void main() {
         findsOneWidget,
         reason: 'a narrowing with nothing saying so reads as missing mail',
       );
-      // The filter and nothing else: there is no window to name any more, and
-      // the number on the tile is the number of rows under it.
-      expect(find.text('Showing Urgent'), findsOneWidget);
+      // Urgent is one of the seven, so the week is named beside it.
+      expect(find.text('Showing Urgent · last 7 days'), findsOneWidget);
 
       await tester.tap(find.byKey(HomePane.showEveryoneKey));
       expect(asked, [HomeFilter.fromOthers]);
+    });
+
+    testWidgets('the Needs You pile names no window, because it has none',
+        (tester) async {
+      await _pump(
+        tester,
+        metrics: numbers,
+        filter: HomeFilter.needsYou,
+        onFilter: (_) {},
+      );
+      expect(find.text('Showing Needs you'), findsOneWidget);
+      expect(find.textContaining('last 7 days'), findsNothing);
     });
 
     testWidgets('and says nothing at all under the default', (tester) async {

@@ -504,6 +504,39 @@ void main() {
       await quiet(tester);
     });
 
+    testWidgets('one older than the window never lands under a windowed one',
+        (tester) async {
+      /// Inside and outside the tiles' week, which is measured from the wall
+      /// clock — an absolute fixture would drift out of it as the calendar
+      /// moved.
+      String daysAgo(int days) =>
+          MessageStore.isoStamp(DateTime.now().subtract(Duration(days: days)));
+
+      await seed('m1', receivedAt: daysAgo(1), gateReason: 'newsletter');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.dropped);
+      expect(idsOf(notifier), ['m1']);
+
+      await arrive('ancient', receivedAt: daysAgo(30), gateReason: 'newsletter');
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        ['m1'],
+        reason: 'the tile counted a week, and a row the number never included '
+            'must not appear under it',
+      );
+      expect(notifier.state.pendingNewCount, 0);
+
+      await arrive('fresh', receivedAt: daysAgo(2), gateReason: 'newsletter');
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['m1', 'fresh']);
+      await tester.pump(HomeFeedNotifier.entryClear);
+      await quiet(tester);
+    });
+
     testWidgets('one already on the table stays where it is', (tester) async {
       await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
       final notifier = build();

@@ -309,6 +309,10 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// Whether the viewport is at the top. See [setAnchored].
   bool _anchored = true;
 
+  /// The window a windowed tile filter is bounded by, recomputed once per
+  /// [_apply] so every row in one batch is measured against the same instant.
+  String _windowStartIso = '';
+
   HomeFeedNotifier(
     this._store, {
     HomeSort sort = HomeSort.newest,
@@ -328,6 +332,16 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 
   static Future<void> _forget(HomeSort value) async {}
 
+  /// The tiles' window as the feed reads it, or null under a filter that has
+  /// none.
+  ///
+  /// A windowed tile filter is bounded by the week the tile counted, so the
+  /// number on the tile IS the number of rows under it. [HomeFilter.fromOthers]
+  /// is the whole history because "everyone" is the feed itself, and
+  /// [HomeFilter.needsYou] is the whole history because it is a pile to burn
+  /// down — see [HomeFilterLabel.windowed].
+  String? _filterWindow() => state.filter.windowed ? _windowStart() : null;
+
   /// The newest page. Also what a filter change and a failed read come back
   /// through — there is one first-page path, not three.
   ///
@@ -344,6 +358,7 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
       final rows = await _store.pageHomeFeed(
         limit: pageSize,
         filter: state.filter,
+        sinceIso: _filterWindow(),
         ascending: state.sort == HomeSort.oldest,
         threshold: state.threshold,
         sources: state.sources,
@@ -392,6 +407,7 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
         beforeSourceMessageId: tail.sourceMessageId,
         limit: pageSize,
         filter: state.filter,
+        sinceIso: _filterWindow(),
         ascending: state.sort == HomeSort.oldest,
         threshold: state.threshold,
         sources: state.sources,
@@ -715,7 +731,22 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   ///
   /// Admitting is not the whole answer under that filter — see [_apply], where
   /// an admitted row that is not already on the table is only counted.
-  bool _admits(HomeFeedRow row) => switch (state.filter) {
+  ///
+  /// Plus the window, which the SQL takes as a bound parameter rather than as
+  /// part of the fragment: a windowed tile filter is read over the tiles' own
+  /// week, so a live arrival older than that must not appear under a number
+  /// that never counted it. [_windowStartIso] is computed once per [_apply] so
+  /// every row of one batch is measured against the same instant.
+  bool _admits(HomeFeedRow row) {
+    if (!_matches(row)) return false;
+    return !state.filter.windowed ||
+        row.receivedAt.compareTo(_windowStartIso) >= 0;
+  }
+
+  /// The narrowing alone, without the window — the Dart twin of the SQL
+  /// fragment, kept apart from the bound parameter for the same reason the SQL
+  /// keeps them apart.
+  bool _matches(HomeFeedRow row) => switch (state.filter) {
         HomeFilter.fromOthers => !row.dropped,
         HomeFilter.needsYou => !row.dropped &&
             (row.bucket ?? '') != 'later' &&
@@ -735,6 +766,7 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 
   /// Turns one batch of read-back rows into one new list and one state write.
   void _apply(List<HomeFeedRow> patch) {
+    _windowStartIso = _windowStart();
     final rows = [...state.rows];
     var index = _indexOf(rows);
     final entered = <String>{};
@@ -1043,9 +1075,10 @@ final homeMetricsProvider = FutureProvider.autoDispose<HomeMetrics>((ref) {
   // hiding would be a number nobody can find the rows for.
   final sources = ref.watch(homeFeedProvider.select((s) => s.sources));
   return ref.watch(messageStoreProvider).homeMetrics(
-        // No window at all: the tiles ARE the filter, and a filter's number
-        // has to be the number of rows under it. A week here would count a
-        // week of a table that goes back further.
+        // The seven windowed tiles' week. `needs_you` is read over the whole
+        // table inside that one statement and ignores this — it is a pile to
+        // burn down, not a readout of the last seven days.
+        sinceIso: _windowStart(),
         sources: sources,
         // The rail's own bar, so the Needs You tile and the rail's badge are
         // one number. Watched rather than read: moving the slider has to move

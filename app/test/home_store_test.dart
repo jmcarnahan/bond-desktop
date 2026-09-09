@@ -226,19 +226,26 @@ void main() {
       expect(metrics.total, 1);
     });
 
-    test('no window at all counts the whole table', () async {
-      await seed('old', receivedAt: '2026-08-20T10:00:00Z');
-      await seed('new');
+    test('needs_you ignores the window; the other numbers do not', () async {
+      // A thread owing a reply since well before the window opened. It is a
+      // pile to burn down, and work owed longest is exactly what a week hides.
+      await seed(
+        'ancient',
+        receivedAt: '2026-08-20T10:00:00Z',
+        threadState: 'needs_reply',
+      );
 
-      // What the Inbox passes. The tiles ARE the filter, and a filter's number
-      // has to be the number of rows under it — a week here would count a week
-      // of a table that goes back further.
       final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
         threshold: 0,
       );
 
-      expect(metrics.total, 2);
+      expect(metrics.needsYou, 1);
+      // The same row, under the same read, counted by every windowed column as
+      // nothing at all — which is the whole point of the scalar subquery.
+      expect(metrics.emails, 0);
+      expect(metrics.total, 0);
     });
 
     test('an empty mailbox reads as zeros rather than nulls', () async {
@@ -1026,6 +1033,7 @@ void main() {
       await seedTwoThreads();
 
       final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
         threshold: 0,
       );
@@ -1056,6 +1064,7 @@ void main() {
       );
 
       final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
         threshold: 0,
       );
@@ -1070,6 +1079,7 @@ void main() {
 
       Future<int> counted(double threshold) async =>
           (await store.homeMetrics(
+            sinceIso: '2026-09-01T00:00:00Z',
             stalledBeforeIso: stalledCutoff,
             threshold: threshold,
           ))
@@ -1097,6 +1107,7 @@ void main() {
       await seed('orphan', needsYou: true);
 
       final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
         threshold: 0,
       );

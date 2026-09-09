@@ -117,16 +117,29 @@ That fallback is what a gate-dropped message shows: it never reached triage, so
 it has no summary, and "sender muted" in that space is worth more than a blank.
 `askLine` is the one place that order is written down.
 
-**The eight tiles are the filter.** They read the same columns over the
-WHOLE table under the list column's source chips — no window, because a
-filter's number has to be the number of rows under it, and a week would count
-a week of a table that goes back further (the hot strip alone keeps
-`homeMetricsWindow`). Pressing a tile narrows the table to what that tile
-counted; pressing it again widens back to everyone else's messages, and one
-filter is in force at a time (`HomeFilter`, with `MessageStore.homeFilterSql`
-as the single definition of what each one admits), so **the number on the
-tile is the number of rows under it**. Needs You is the one tile that counts
-THREADS: it is the rail's own rule — `isNeedsYou` spelled in SQL as
+**The eight tiles are the filter.** Pressing a tile narrows the table to what
+that tile counted; pressing it again widens back to everyone else's messages,
+and one filter is in force at a time (`HomeFilter`, with
+`MessageStore.homeFilterSql` as the single definition of what each one
+admits), so **the number on the tile is the number of rows under it**. All
+eight read under the list column's source chips.
+
+**Seven of them are a weekly readout.** Emails, Teams, Processed, Dropped,
+Urgent, In flight and Errors count the last `homeMetricsWindow` (7 days, the
+hot strip's window too), and the caption beside them says so. Those numbers
+only ever grow, and a lifetime total of processed mail is a number nobody can
+act on. Their filters are bounded by the same week — `HomeFilter.windowed`
+names exactly those five that filter (Emails and Teams write the source chips
+instead), and the feed passes the window as `sinceIso` — so each tile's number
+stays the number of rows under it.
+
+**Needs You is the eighth, and stands apart.** It sits FIRST, before a
+vertical rule, and it counts ALL TIME: it is a pile to burn down to zero, not a
+reading of activity, and work owed since before last Tuesday is exactly what a
+week would hide. In `homeMetrics` it is a scalar subquery with no window in it,
+inside the one statement that answers everything else, so a thread settling
+between two reads cannot land in one number and not another. It is also the one
+tile that counts THREADS: the rail's own rule — `isNeedsYou` spelled in SQL as
 `_liveNeedsYouThread` over the thread's live state, bucket, score and ask,
 bound to the same attention threshold the rail reads — and under that filter
 the table shows one row per thread, its newest kept message. Every other tile

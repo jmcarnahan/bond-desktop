@@ -118,11 +118,13 @@ class BondStatTile extends StatelessWidget {
 /// failed outright. Each is coloured only when it is non-zero — a red nought
 /// is an alarm about the absence of a problem.
 ///
-/// The numbers reach back over the WHOLE feed under the source chips, and
-/// there is no window caption because there is no window: every tile is a
-/// filter, and a filter's number has to be the number of rows under it — a
-/// reader who taps a tile and scrolls to the bottom has to find the number
-/// they tapped, and be told that is everything.
+/// Needs You stands APART: first, then a divider, then the other seven and the
+/// caption naming their week. It is a pile to burn down to zero and the seven
+/// are a readout of what the app has been doing — two different kinds of
+/// number, and a row of eight that read as one kind would invite the reader to
+/// compare them. It counts all time for the same reason, and draws its count
+/// in [BondColors.attention] when there is one, because that is the tile the
+/// screen is asking the reader to act on.
 ///
 /// EVERY tile is a filter, and one at a time: pressing a tile narrows the
 /// table to what that tile counted, and pressing it again widens back to
@@ -138,6 +140,11 @@ class BondStatTile extends StatelessWidget {
 /// to the question of which mailbox is being read.
 class HomeMetricsBar extends StatelessWidget {
   final HomeMetrics metrics;
+
+  /// How far back the seven windowed numbers reach. A parameter rather than
+  /// the constant read here, so a test can pin the caption's wording without a
+  /// week's worth of fixtures. Needs You does not read it.
+  final Duration window;
 
   /// The filter in force, and the way to change it. Every tile but Emails and
   /// Teams reports through here.
@@ -156,7 +163,14 @@ class HomeMetricsBar extends StatelessWidget {
     required this.onFilter,
     required this.sourceFilter,
     required this.onSelectSource,
+    this.window = homeMetricsWindow,
   });
+
+  /// The caption naming the window, after the seven tiles it belongs to.
+  static const Key windowKey = ValueKey('home-metrics-window');
+
+  /// The rule between the pile and the readout.
+  static const Key dividerKey = ValueKey('home-metrics-divider');
 
   /// One tile by name, so a test taps the filter rather than the number on it
   /// — the numbers are fixture values and the slugs are the columns.
@@ -212,11 +226,27 @@ class HomeMetricsBar extends StatelessWidget {
       runSpacing: BondSpacing.s8,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
+        // First, and alone on its side of the rule: the one number here that
+        // is work rather than a reading of work.
+        tile(
+          'needs-you',
+          '${metrics.needsYou}',
+          'Needs You',
+          HomeFilter.needsYou,
+          valueColor: metrics.needsYou > 0 ? BondColors.attention : null,
+        ),
+        // Sized to a tile rather than stretched, because a Wrap hands its
+        // children unbounded height and a rule as tall as the row would be a
+        // rule as tall as whatever wrapped beside it.
+        const SizedBox(
+          key: dividerKey,
+          width: 1,
+          height: 40,
+          child: ColoredBox(color: BondColors.border),
+        ),
         sourceTile('emails', 'email', '${metrics.emails}', 'Emails'),
         sourceTile('teams', 'teams', '${metrics.teams}', 'Teams'),
         tile('processed', '$processed', 'Processed', HomeFilter.processed),
-        tile('needs-you', '${metrics.needsYou}', 'Needs You',
-            HomeFilter.needsYou),
         tile('dropped', '${metrics.dropped}', 'Dropped', HomeFilter.dropped),
         tile(
           'urgent',
@@ -239,6 +269,21 @@ class HomeMetricsBar extends StatelessWidget {
           'Errors',
           HomeFilter.errors,
           valueColor: metrics.errored > 0 ? BondColors.error : null,
+        ),
+        // The window, said once after the tiles it bounds: seven counts with
+        // no stated period are seven counts of nothing in particular, and
+        // seven zeros with no stated period look like a broken pipeline rather
+        // than a quiet week. It bounds those seven FILTERS too — each reads
+        // over the week its tile counted, so the number is the number of rows
+        // under it. Needs You is on the other side of the rule and outside
+        // this sentence: it is all time.
+        Padding(
+          padding: const EdgeInsets.only(left: BondSpacing.s4),
+          child: Text(
+            homeMetricsWindowLabel(window),
+            key: windowKey,
+            style: BondType.caption,
+          ),
         ),
       ],
     );

@@ -31,16 +31,18 @@ const Duration homeDropCollapse = Duration(milliseconds: 180);
 /// tile that counted three cannot happen.
 const Duration homeStalledAfter = Duration(minutes: 15);
 
-/// How far back the hot-storylines strip looks.
+/// How far back the hot strip and SEVEN of the eight tiles look.
 ///
-/// A week, not a day. "What has this mailbox been busy with" is a question
-/// about a stretch of time, and a day is short enough that a quiet Sunday —
-/// or a test account — reads as an empty strip, which looks like a fault
-/// rather than a quiet day. A week is the unit the rest of the app already
-/// reasons in (the needs-you re-judge, the default lookback presets).
+/// A week, not a day. Those seven answer "what has the app been doing lately",
+/// and a day is short enough that a quiet Sunday — or a test account — reads
+/// as seven zeros over a table of rows, which looks like a fault rather than
+/// a quiet day. A week is the unit the rest of the app already reasons in
+/// (the needs-you re-judge, the default lookback presets), and the bar names
+/// the window beside the numbers so nobody has to guess it again.
 ///
-/// The tiles no longer read it. They count the whole feed, because every tile
-/// is a filter and a filter's number has to be the number of rows under it.
+/// Needs You is the eighth and does NOT read this. It is a pile to burn down
+/// rather than a readout of activity, and a pile with a week around it hides
+/// exactly the work that has been owed longest.
 const Duration homeMetricsWindow = Duration(days: 7);
 
 /// How far back the pipeline pulse counts as "just now".
@@ -51,6 +53,17 @@ const Duration homeMetricsWindow = Duration(days: 7);
 /// that a quiet stretch is visible as a quiet stretch, short enough that
 /// yesterday's drain is not still being reported as news.
 const Duration homePulseWindow = Duration(minutes: 10);
+
+/// The window, in words, for the caption beside the tiles: `Last 7 days`,
+/// `Last 24 hours`. Hours under two days, days from there — "Last 1 days" is
+/// not a sentence and "Last 168 hours" is not a number anybody reads.
+///
+/// The caption belongs to the SEVEN windowed tiles, and sits after them for
+/// that reason: Needs You is all time and stands before the divider, so a
+/// caption in front of it would claim a week it does not keep.
+String homeMetricsWindowLabel(Duration window) => window.inHours < 48
+    ? 'Last ${window.inHours} hours'
+    : 'Last ${window.inDays} days';
 
 /// One message's trip through the pipeline, as one feed row.
 ///
