@@ -103,6 +103,30 @@ rather than immediately.
 conversationKey)` — a mail thread and a chat with colliding keys can never
 interleave (PR #9).
 
+**Who is on a thread.** The fold writes `conversations.participants_json` as
+`{name, email}` objects: the SENDER of every inbound message, and the To:
+recipients of every outbound one — never the user. `_recipients` carries the
+display name off `toRecipients` alongside the address, so a colleague the user
+wrote to is stored under their name rather than as a bare address; without it
+an outbound-only thread showed an address in the thread header, in the
+recent-people typeahead and on that colleague's own row under People.
+`addParticipant` fills a name in on an address already stored nameless, so a
+later message names somebody an earlier one left bare. A recipient with no
+address is dropped — there is nothing to key a participant on. Nothing is
+looked up per recipient at ingest: the loop stays query-free.
+
+`messages.to_json` is a separate column and a separate shape — a list of
+address STRINGS, which `recipientsFromJson` and the local-echo path both read
+that way. Names ride in `participants_json` and nowhere else.
+
+A one-off behind the `participant_names_backfill` pref fills the stored rows
+that predate this build. `MessageStore.fillParticipantNames` builds
+address → name once, from every participant that carries both and then from
+the newest `from_name` per address, rewrites only the conversations it actually
+fills, and is idempotent — a second run changes nothing and moves no
+`updated_at`. It is reported as `named_participants` on the sync's activity
+row.
+
 **One row builder per channel.** `SyncService.mailRow` and
 `TeamsSync.messageRow` are the only places a message becomes a `messages` row.
 Both are public statics because the send paths call them too — a locally

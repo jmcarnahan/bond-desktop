@@ -2815,6 +2815,121 @@ RETURNING *
     return changed;
   }
 
+  /// Fills the display name on every conversation participant stored with an
+  /// address and no name, from the best source the store has: another
+  /// participant entry with that address and a name, else the newest
+  /// `from_name` on a message from that address. Returns how many
+  /// conversations changed. Idempotent — a second run changes nothing.
+  ///
+  /// The once-over for the rows stored before the ingest carried recipient
+  /// names. Every outbound recipient landed as `{name: null, email}`, so an
+  /// outbound-only thread shows a bare address wherever `participants_json` is
+  /// read — the thread header, the recent-people typeahead, and a colleague's
+  /// own room row. The People layer resolves names across the list at read
+  /// time, but only for what it was handed; this fixes the stored rows.
+  ///
+  /// Candidates are found with a LIKE so the rewrite runs over the few rows
+  /// that can match rather than the whole table, and a row is written only
+  /// when a name was actually filled — [stripSenderIdentificationTips]' shape,
+  /// for its reasons.
+  Future<int> fillParticipantNames() async {
+    // Built ONCE, over the whole store: a per-row lookup would be two queries
+    // per candidate conversation, and the answer is the same every time.
+    final names = <String, String>{};
+    for (final row in await db
+        .customSelect(
+          'SELECT participants_json FROM conversations '
+          'WHERE participants_json IS NOT NULL',
+        )
+        .get()) {
+      for (final p in _decodeParticipantList(row.data['participants_json'])) {
+        final address = (p['email'] as String?)?.trim().toLowerCase() ?? '';
+        final name = (p['name'] as String?)?.trim() ?? '';
+        if (address.isEmpty || name.isEmpty) continue;
+        names.putIfAbsent(address, () => name);
+      }
+    }
+    // Newest first, so the name somebody signs with today wins over one they
+    // used a year ago. `putIfAbsent` keeps the first row seen.
+    for (final row in await db
+        .customSelect(
+          'SELECT from_address, from_name FROM messages '
+          "WHERE from_name IS NOT NULL AND from_name <> '' "
+          '  AND from_address IS NOT NULL '
+          'ORDER BY received_at DESC',
+        )
+        .get()) {
+      final address =
+          (row.data['from_address'] as String?)?.trim().toLowerCase() ?? '';
+      final name = (row.data['from_name'] as String?)?.trim() ?? '';
+      if (address.isEmpty || name.isEmpty) continue;
+      names.putIfAbsent(address, () => name);
+    }
+    if (names.isEmpty) return 0;
+
+    final candidates = await db
+        .customSelect(
+          'SELECT source, conversation_key, participants_json '
+          'FROM conversations '
+          'WHERE participants_json LIKE \'%"name":null%\' '
+          '   OR participants_json LIKE \'%"name":""%\'',
+        )
+        .get();
+
+    var changed = 0;
+    for (final row in candidates) {
+      final participants =
+          _decodeParticipantList(row.data['participants_json']);
+      if (participants.isEmpty) continue;
+      var filled = false;
+      for (final p in participants) {
+        final name = (p['name'] as String?)?.trim() ?? '';
+        if (name.isNotEmpty) continue;
+        final address = (p['email'] as String?)?.trim().toLowerCase() ?? '';
+        if (address.isEmpty) continue;
+        final known = names[address];
+        if (known == null) continue;
+        p['name'] = known;
+        filled = true;
+      }
+      if (!filled) continue;
+      await db.customUpdate(
+        'UPDATE conversations SET participants_json = ?, updated_at = ? '
+        'WHERE source = ? AND conversation_key = ?',
+        variables: _args([
+          jsonEncode(participants),
+          _nowIso(),
+          row.data['source'],
+          row.data['conversation_key'],
+        ]),
+      );
+      changed++;
+    }
+    return changed;
+  }
+
+  /// A `participants_json` blob as mutable `{name, email}` maps. Tolerates
+  /// null, empty, malformed JSON and a payload that decodes to a non-list —
+  /// the same defensiveness every other reader of this column has, because a
+  /// backfill that threw on one bad row would strand every row after it.
+  static List<Map<String, Object?>> _decodeParticipantList(Object? raw) {
+    if (raw is! String || raw.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) return const [];
+      return [
+        for (final entry in decoded)
+          if (entry is Map)
+            {
+              'name': entry['name'] as String?,
+              'email': entry['email'] as String?,
+            },
+      ];
+    } on FormatException {
+      return const [];
+    }
+  }
+
   /// Stores one thread's ranking score. Same targeted insert-then-update as
   /// [setConversationBucket]: the score is recomputed on every list load and
   /// must never disturb an embedding or a bucket sitting on the same row.

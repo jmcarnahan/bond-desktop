@@ -235,6 +235,80 @@ void main() {
       expect(rooms.last.direct, isEmpty);
     });
 
+    test('companions name whoever else was on each thread', () {
+      final group = _conv(id: 'g', people: const [
+        Participant(name: 'Dana Whitfield', email: 'dana@example.com'),
+        Participant(name: 'Eric Nolan'),
+        Participant(name: 'Priya Raman'),
+        Participant(name: 'Tom Alder'),
+      ]);
+      final alone = _conv(
+        id: 'c1',
+        people: const [Participant(name: 'Eric Nolan')],
+        lastMessageAt: '2026-08-01T09:00:00Z',
+      );
+
+      final rooms = peopleRooms([group, alone], owner: _owner);
+      final eric = rooms.firstWhere((r) => r.key == 'eric nolan');
+
+      // Each member's room lists the OTHER two, and never the owner.
+      expect(
+        eric.companions[(source: 'email', conversationKey: 'g')],
+        ['Priya Raman', 'Tom Alder'],
+      );
+      expect(
+        rooms
+            .firstWhere((r) => r.key == 'tom alder')
+            .companions[(source: 'email', conversationKey: 'g')],
+        ['Eric Nolan', 'Priya Raman'],
+      );
+      // A thread with nobody else on it has an empty list, and that is what
+      // makes it direct.
+      expect(eric.companions[(source: 'email', conversationKey: 'c1')], isEmpty);
+      expect(eric.direct, {(source: 'email', conversationKey: 'c1')});
+    });
+
+    test('a companion nobody named on THIS thread still gets their name', () {
+      final named = _conv(id: 'a', people: const [
+        Participant(name: 'Priya Raman', email: 'priya@example.test'),
+      ]);
+      final nameless = _conv(
+        id: 'b',
+        people: const [
+          Participant(name: 'Eric Nolan', email: 'eric@example.test'),
+          Participant(email: 'priya@example.test'),
+        ],
+        lastMessageAt: '2026-08-01T09:00:00Z',
+      );
+
+      final rooms = peopleRooms([named, nameless], owner: _owner);
+      final eric = rooms.firstWhere((r) => r.key == 'eric nolan');
+
+      expect(
+        eric.companions[(source: 'email', conversationKey: 'b')],
+        ['Priya Raman'],
+      );
+    });
+
+    test('the no-sender room has an empty list and no direct thread', () {
+      final rooms = peopleRooms(
+        [
+          _conv(id: 'a', people: const [
+            Participant(name: 'Dana Whitfield', email: 'dana@example.com'),
+          ]),
+        ],
+        owner: _owner,
+      );
+
+      expect(rooms.single.key, noSenderRoom);
+      expect(
+        rooms.single.companions[(source: 'email', conversationKey: 'a')],
+        isEmpty,
+      );
+      // It stands for nobody, so "the only other party" names no one.
+      expect(rooms.single.direct, isEmpty);
+    });
+
     test('a closed thread and a deferred one are still the person\'s', () {
       // They used to be in no room at all, which is how a colleague whose one
       // Teams chat had been marked done disappeared from People entirely.

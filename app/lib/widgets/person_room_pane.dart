@@ -45,7 +45,7 @@ Conversation? directChat(PersonRoom room) {
 }
 
 /// The line under the room's name: how much there is with them, on which
-/// connectors, and how much of it is finished.
+/// connectors, and how much of it is finished or put off.
 ///
 /// Both connectors named where both are present, because that IS the room's
 /// claim — one row standing for one person however they reach this mailbox —
@@ -66,11 +66,43 @@ String roomSubtitle(PersonRoom room) {
   final done = room.threads
       .where((t) => t.state == ConversationState.done)
       .length;
+  // Deferred counted apart from done: a thread in Later is coming back, and
+  // a reader who put it there wants to know it is still in the room.
+  final later = room.threads
+      .where((t) => t.state != ConversationState.done && t.bucket == 'later')
+      .length;
   return [
     threads,
     ?where,
     if (done > 0) '$done done',
+    if (later > 0) '$later later',
   ].join(' · ');
+}
+
+/// How many companions a card spells out before it counts the rest.
+///
+/// Three, the same as everywhere else in this app that has to name a handful
+/// of people on one line. A fourth name would push the subject off a card in
+/// a 420px panel, and `+2` says the same thing in two characters.
+const int _maxWithNames = 3;
+
+/// `with Ada Sun, Bo Vance` — who ELSE was on a thread, or null when nobody
+/// was.
+///
+/// The line exists because one thread with three other parties is now in
+/// three rooms under the same subject: without it a reader in Ada's room and
+/// a reader in Bo's see identical cards, and neither is told the conversation
+/// had a third person in it. Null and not an empty string, so a direct thread
+/// draws no line rather than an empty one.
+String? withLine(List<String> names) {
+  final people = [
+    for (final n in names)
+      if (n.trim().isNotEmpty) n.trim(),
+  ];
+  if (people.isEmpty) return null;
+  if (people.length <= _maxWithNames) return 'with ${people.join(', ')}';
+  final rest = people.length - _maxWithNames;
+  return 'with ${people.take(_maxWithNames).join(', ')} +$rest';
 }
 
 /// One thread, standing for itself in a person's room.
@@ -86,29 +118,32 @@ class RootMessageCard extends StatelessWidget {
   final ProfilePhotos? photos;
   final VoidCallback onOpen;
 
+  /// Who else was on it, already phrased by [withLine]. Null on a direct
+  /// thread, which draws no line at all.
+  final String? withLine;
+
   const RootMessageCard({
     super.key,
     required this.conversation,
     required this.now,
     required this.photos,
     required this.onOpen,
+    this.withLine,
   });
 
   static Key keyFor(String source, String conversationId) =>
       ValueKey('root-card-$source-$conversationId');
 
-  /// Who the card is with. A mail thread has a sender; a CHAT does not — its
-  /// messages come from everyone in it — so a chat names its roster instead of
-  /// picking whoever the participants list happened to start with.
+  /// What a subjectless card falls back to for its title.
+  ///
+  /// A mail thread has a sender and uses them. A CHAT does not — its messages
+  /// come from everyone in it — and it used to spell its whole roster into the
+  /// title, which is now the [withLine]'s job: the line under the title names
+  /// who else was there, and repeating them in the title said it twice and
+  /// pushed everything else off the row.
   String get _who {
     final c = conversation;
-    if (c.source == 'teams') {
-      final people = [
-        for (final p in c.participants)
-          if (p.display.isNotEmpty) p.display,
-      ];
-      if (people.isNotEmpty) return people.join(', ');
-    }
+    if (c.source == 'teams') return 'Chat';
     return c.primaryParticipant?.display ?? noSenderRoom;
   }
 
@@ -178,12 +213,23 @@ class RootMessageCard extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      if (withLine != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          withLine!,
+                          style: BondType.caption.copyWith(
+                            color: BondColors.inkSecondary,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
                       if (preview.isNotEmpty) ...[
                         const SizedBox(height: 2),
                         Text(
-                          // A chat's preview stands alone: the roster is
-                          // already in the title, and `everyone · line` would
-                          // name the wrong person as the one who said it.
+                          // A chat's preview stands alone: its messages come
+                          // from everyone in it, so `who · line` would name
+                          // the wrong person as the one who said it.
                           c.source == 'teams' ? preview : '$who · $preview',
                           style: BondType.caption,
                           maxLines: 2,
@@ -344,6 +390,13 @@ class PersonRoomPane extends StatelessWidget {
                         conversation: thread,
                         now: now,
                         photos: photos,
+                        withLine: withLine(
+                          room.companions[(
+                                source: thread.source,
+                                conversationKey: thread.id,
+                              )] ??
+                              const [],
+                        ),
                         onOpen: () =>
                             onOpenThread(thread.source, thread.id),
                       ),

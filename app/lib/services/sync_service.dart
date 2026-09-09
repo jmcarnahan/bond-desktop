@@ -339,6 +339,17 @@ class SyncService implements MailSync {
         await _store.setPref('sender_tip_strip', '1');
       }
 
+      // The display names of everyone the user has written to, off the rows
+      // stored before the ingest above learned to carry them. Same one-shot
+      // idiom, and null until it runs. Read-time name resolution in the
+      // People layer covers what a build was handed; this fixes what is
+      // stored, which is what the thread header and the typeahead read.
+      int? namedParticipants;
+      if (await _store.getPref('participant_names_backfill') == null) {
+        namedParticipants = await _store.fillParticipantNames();
+        await _store.setPref('participant_names_backfill', '1');
+      }
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -405,6 +416,7 @@ class SyncService implements MailSync {
           'revived_needs_you': ?revivedNeedsYou,
           'backfilled_needs_you': ?backfilledNeedsYou,
           'stripped_sender_tips': ?strippedSenderTips,
+          'named_participants': ?namedParticipants,
           if (inboxResync || sentResync) 'resync': true,
         },
       );
@@ -861,7 +873,7 @@ class SyncService implements MailSync {
         // to the user is not mail aimed at them.
         final soleRecipient = _userAddress != null &&
             recipients.length == 1 &&
-            recipients.first.toLowerCase() == _userAddress!.toLowerCase();
+            recipients.first.$2.toLowerCase() == _userAddress!.toLowerCase();
 
         final (triageStatus, gateReason) = triageStatusOnInsert(
           outbound: outbound,
@@ -898,7 +910,10 @@ class SyncService implements MailSync {
           subject: subject,
           fromName: fromName,
           fromAddress: fromAddress,
-          to: recipients,
+          // Addresses only. `to_json` is a list of address STRINGS — every
+          // reader of it, `recipientsFromJson` included, expects that shape —
+          // so the names ride into `participants_json` below and nowhere else.
+          to: [for (final (_, address) in recipients) address],
           receivedAt: receivedAt,
           isRead: message['isRead'] == true,
           bodyPreview: preview,
@@ -964,8 +979,8 @@ class SyncService implements MailSync {
         // Whoever is on the other end: the sender of mail that came in, the
         // recipients of mail that went out. Never the user.
         if (outbound) {
-          for (final address in recipients) {
-            entry.addParticipant(null, address);
+          for (final (name, address) in recipients) {
+            entry.addParticipant(name, address);
           }
         } else {
           entry.addParticipant(fromName, fromAddress);
@@ -1231,14 +1246,25 @@ class SyncService implements MailSync {
     );
   }
 
-  static List<String> _recipients(Object? raw) {
+  /// `(name, address)` for every To: recipient that has an address.
+  ///
+  /// The NAME is carried, not dropped: it is the only place the display name
+  /// of somebody the user wrote to ever appears, and without it every
+  /// outbound-only thread stores its recipients as a bare address — which is
+  /// what the thread header, the recent-people typeahead and a person's own
+  /// room row then have to show. [_address] already returns it; this used to
+  /// throw it away.
+  ///
+  /// An entry with no address is dropped, as before: there is nothing to key a
+  /// participant on, and a name alone cannot be written to.
+  static List<(String?, String)> _recipients(Object? raw) {
     if (raw is! List) return const [];
-    final addresses = <String>[];
+    final out = <(String?, String)>[];
     for (final entry in raw) {
-      final (_, address) = _address(entry);
-      if (address != null && address.isNotEmpty) addresses.add(address);
+      final (name, address) = _address(entry);
+      if (address != null && address.isNotEmpty) out.add((name, address));
     }
-    return addresses;
+    return out;
   }
 }
 

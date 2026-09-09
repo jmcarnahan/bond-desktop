@@ -218,7 +218,9 @@ void main() {
       of: find.byType(RoomHeader<ThreadTab>),
       matching: find.text('Dana Whitfield'),
     ), findsOneWidget);
-    expect(find.text('3 threads · mail and Teams'), findsOneWidget);
+    // The subtitle counts the deferred thread apart: it is in the room, and
+    // it is coming back.
+    expect(find.text('3 threads · mail and Teams · 1 later'), findsOneWidget);
     expect(find.text('💬 Launch date'), findsOneWidget);
     expect(find.text('Homepage copy'), findsOneWidget);
     // Deferred mail is HERE — it is still a thread with her — and its card
@@ -324,6 +326,9 @@ void main() {
 
     await openRoom(tester, 'Priya Raman');
     expect(find.text('The five of us'), findsOneWidget);
+    // And her card says who else was in it — three rooms hold this thread
+    // under the same subject, so the card has to say which conversation it is.
+    expect(find.text('with Dana Whitfield'), findsOneWidget);
     await settleQueues(tester);
   });
 

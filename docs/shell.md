@@ -401,6 +401,12 @@ are derived from the conversation list on every build.
   bold and the badge, and a finished thread owes nothing. `liveCount` is the
   count they are taken over, and `direct` is the set of threads this person is
   the only other party on.
+- **`companions` says who ELSE was on each thread** — the other parties minus
+  this person and the owner, in thread order — and `direct` is derived from it
+  (an empty list is a 1:1). One thread with three other parties is in three
+  rooms under the same subject, so a card that did not name the rest would be
+  three identical cards and no way to tell which conversation is which. The
+  card draws it as `with Ada Sun, Bo Vance`, up to three names and then `+N`.
 - **`people` is the ONE participant the room is** — across its threads, the
   instance with both a name and a mailable address wins over a `teams:` one,
   which wins over an address alone. It is what the face and the panel's
@@ -439,7 +445,7 @@ is a row nobody was looking for where everybody looks first.
 ### The room
 
 Tapping a room opens `_room()`: a `RoomHeader` titled by the person, subtitled
-`N threads · mail and Teams · 1 done`, and under it a `PersonRoomPane`
+`N threads · mail and Teams · 1 done · 1 later`, and under it a `PersonRoomPane`
 (`app/lib/widgets/person_room_pane.dart`) holding every thread with them as
 `RootMessageCard`s.
 
@@ -451,9 +457,10 @@ Tapping a room opens `_room()`: a `RoomHeader` titled by the person, subtitled
   different things, and the merged timeline it needed was `reverse: true` —
   which left a person with three threads reading as a gap with three cards
   under it. The list is now **top-anchored**.
-- A chat's card names its ROSTER rather than a sender, and its preview stands
-  alone: a chat's messages come from everyone in it, so `who · line` would name
-  the wrong person as the one who said it.
+- A subjectless chat card is titled `💬 Chat` and its people are named by the
+  with-line under it; its preview stands alone, because a chat's messages come
+  from everyone in it and `who · line` would name the wrong person as the one
+  who said it.
 - A done card reads `Done · N messages…` and a deferred one `Later · …`. The
   room holds both, and an unmarked closed thread in a list of live ones is a
   thread the reader answers twice.

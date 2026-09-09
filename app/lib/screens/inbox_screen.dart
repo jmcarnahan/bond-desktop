@@ -4221,37 +4221,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // rather than a `(label, rows)` pair the list pane could draw.
     if (section == RailSection.people) return _peopleDirectory();
 
-    final sections = switch (section) {
-      // Unreachable: [_main] routes Home, Drafts & sent and AI to their own
-      // panes, and the arms above return before this switch. The cases exist
-      // so the analyzer keeps this exhaustive when a stop is added.
-      RailSection.home ||
-      RailSection.drafts ||
-      RailSection.files ||
-      RailSection.archive ||
-      RailSection.storylines ||
-      RailSection.needsYou ||
-      RailSection.people ||
-      RailSection.ai =>
-        const <(String, List<Conversation>)>[],
-    };
-
-    // One rule for every list that lives in MAIN — this one and the Needs You
-    // overview: a row opens BESIDE and is lit here while it is open, because
-    // the list is the room the reader is standing in. The list COLUMN is the
-    // other half of that rule: a row on the rail opens in main, because there
-    // the list is beside the pane rather than in it.
-    return ConversationListPane(
-      sources: _sources,
-      filter: InboxFilter.open,
-      conversations: conversations,
-      selectedId: _threadBeside?.conversationKey,
-      selectedSource: _threadBeside?.source,
-      onSelect: _openThreadBeside,
-      sectionsOverride: sections,
-      processingSince: ref.watch(sessionStartProvider),
-      emptyNotice: _scopeNotice(),
-    );
+    // Unreachable: [_main] routes Home, Drafts & sent and AI to their own
+    // panes, and every stop with an overview returned above. Nothing rather
+    // than a throw, so a stop added without an arm here draws an empty pane
+    // and not a red screen.
+    return const SizedBox.shrink();
   }
 
   /// Everyone, one row each. The People stop's landing: a directory, not the

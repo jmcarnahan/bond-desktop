@@ -70,8 +70,20 @@ class PersonRoom {
 
   /// The threads on which this person is the ONLY other party — their 1:1s,
   /// mail and chat alike. What the `Direct` pill keeps and what the Message
-  /// action writes into.
+  /// action writes into. Derived from [companions]: a thread with nobody else
+  /// on it is a direct one, and two answers to that question would eventually
+  /// disagree.
   final Set<ThreadTarget> direct;
+
+  /// Who ELSE was on each of the room's threads — the resolved display names
+  /// of the other parties, minus this person and minus the owner, in the
+  /// order the thread lists them. An empty list is a direct thread.
+  ///
+  /// It is what the card's `with …` line is drawn from, and the reason it
+  /// exists: one thread with three other parties now sits in three rooms
+  /// under the same subject, and without this the three cards are identical
+  /// and none of them says who the conversation was actually with.
+  final Map<ThreadTarget, List<String>> companions;
 
   const PersonRoom({
     required this.key,
@@ -83,6 +95,7 @@ class PersonRoom {
     required this.latestAt,
     required this.people,
     this.direct = const {},
+    this.companions = const {},
   });
 
   /// How many of the room's threads are still going. The count the room's own
@@ -273,11 +286,22 @@ List<PersonRoom> peopleRooms(
     var needsYou = 0;
     final sources = <String>{};
     final direct = <ThreadTarget>{};
+    final companions = <ThreadTarget, List<String>>{};
     for (final c in threads) {
       sources.add(c.source);
-      if (_others(c, owner, names).length == 1) {
-        direct.add((source: c.source, conversationKey: c.id));
-      }
+      final target = (source: c.source, conversationKey: c.id);
+      // Everyone on it but this room's person — and the owner is already out,
+      // because `_others` dropped them.
+      final others = [
+        for (final p in _others(c, owner, names))
+          if (_displayOf(p).toLowerCase() != key) _displayOf(p),
+      ];
+      companions[target] = others;
+      // A thread with nobody else on it is a 1:1 WITH THIS PERSON — which the
+      // no-sender room has none of, because it stands for nobody: an empty
+      // list there means the thread had no other party at all, not that it
+      // had exactly one.
+      if (others.isEmpty && key != noSenderRoom) direct.add(target);
       if (!isLiveThread(c)) continue;
       unread += c.unreadCount;
       if (isNeedsYou(c, threshold: threshold)) needsYou++;
@@ -295,6 +319,7 @@ List<PersonRoom> peopleRooms(
         latestAt: threads.isEmpty ? null : threads.first.lastMessageAt,
         people: best == null ? const [] : [best],
         direct: direct,
+        companions: companions,
       ),
     ));
   }

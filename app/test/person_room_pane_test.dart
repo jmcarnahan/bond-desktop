@@ -46,6 +46,7 @@ Conversation _thread(
 PersonRoom _room(
   List<Conversation> threads, {
   Set<String>? direct,
+  Map<String, List<String>>? companions,
   int needsYou = 0,
 }) =>
     PersonRoom(
@@ -64,10 +65,48 @@ PersonRoom _room(
           if (direct == null || direct.contains(t.id))
             (source: t.source, conversationKey: t.id),
       },
+      companions: {
+        for (final t in threads)
+          (source: t.source, conversationKey: t.id):
+              companions?[t.id] ?? const [],
+      },
     );
 
 void main() {
   final now = DateTime(2026, 9, 8, 12);
+
+  group('the with-line', () {
+    test('nobody else on it draws no line at all', () {
+      expect(withLine(const []), isNull);
+      expect(withLine(const ['   ']), isNull);
+    });
+
+    test('one, two and three names are spelled out', () {
+      expect(withLine(const ['Ada Sun']), 'with Ada Sun');
+      expect(withLine(const ['Ada Sun', 'Bo Vance']), 'with Ada Sun, Bo Vance');
+      expect(
+        withLine(const ['Ada Sun', 'Bo Vance', 'Cleo Marsh']),
+        'with Ada Sun, Bo Vance, Cleo Marsh',
+      );
+    });
+
+    test('a fourth turns the tail into a count', () {
+      expect(
+        withLine(const ['Ada Sun', 'Bo Vance', 'Cleo Marsh', 'Dev Rao']),
+        'with Ada Sun, Bo Vance, Cleo Marsh +1',
+      );
+      expect(
+        withLine(const [
+          'Ada Sun',
+          'Bo Vance',
+          'Cleo Marsh',
+          'Dev Rao',
+          'Eve Ng',
+        ]),
+        'with Ada Sun, Bo Vance, Cleo Marsh +2',
+      );
+    });
+  });
 
   group('the chat a Message goes into', () {
     test('is the newest DIRECT chat', () {
@@ -132,6 +171,15 @@ void main() {
         _thread('c3', state: ConversationState.done),
       ]);
       expect(roomSubtitle(room), '3 threads · mail · 1 done');
+    });
+
+    test('and how much of it was put off', () {
+      final room = _room([
+        _thread('c1'),
+        _thread('c2', bucket: 'later'),
+        _thread('c3', state: ConversationState.done),
+      ]);
+      expect(roomSubtitle(room), '3 threads · mail · 1 done · 1 later');
     });
   });
 
@@ -232,6 +280,46 @@ void main() {
       expect(find.text('💬 Launch date'), findsOneWidget);
       // No `who ·` prefix: a chat's messages come from everyone in it, so
       // naming one of them as the speaker would name the wrong person.
+      expect(find.text('The fourteenth works.'), findsOneWidget);
+      expect(find.textContaining('with '), findsNothing);
+    });
+
+    testWidgets('a group card says who else was on it; a direct one does not',
+        (tester) async {
+      await pump(
+        tester,
+        room: _room(
+          [
+            _thread('g1', subject: 'The five of us'),
+            _thread('c1', subject: 'Just us', at: '2026-09-01T10:00:00Z'),
+          ],
+          direct: {'c1'},
+          companions: {
+            'g1': const ['Ada Sun', 'Bo Vance'],
+          },
+        ),
+      );
+
+      expect(find.text('with Ada Sun, Bo Vance'), findsOneWidget);
+      expect(find.textContaining('with '), findsOneWidget);
+    });
+
+    testWidgets('a subjectless chat is titled Chat, with the line under it',
+        (tester) async {
+      await pump(
+        tester,
+        room: _room(
+          [_thread('chat-1', source: 'teams', preview: 'The fourteenth works.')],
+          direct: const {},
+          companions: {
+            'chat-1': const ['Ada Sun', 'Bo Vance'],
+          },
+        ),
+      );
+
+      // The roster used to be spelled into the title; it is the line's job now.
+      expect(find.text('💬 Chat'), findsOneWidget);
+      expect(find.text('with Ada Sun, Bo Vance'), findsOneWidget);
       expect(find.text('The fourteenth works.'), findsOneWidget);
     });
 
