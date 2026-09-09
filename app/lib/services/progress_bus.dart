@@ -8,7 +8,7 @@ import 'package:flutter/foundation.dart' show debugPrint, immutable;
 /// path the pipeline runs per message, and a `RETURNING *` on each of them
 /// would buy the screen data it can batch-read for itself the moment the
 /// burst settles. A listener collects the keys it saw, reads
-/// `MessageStore.progressRowsFor` once, and patches.
+/// `MessageStore.progressPatchFor` once, and patches.
 ///
 /// [receivedAt] rides along for the one decision that cannot wait for that
 /// read: whether this tick is about something NEWER than what the screen is

@@ -3306,8 +3306,10 @@ RETURNING *
   /// Done, or the owner's own Later, and nothing else — a question does not
   /// stop being a question because a fortnight went by.
   ///
-  /// "Kept" is spelled once, here as everywhere: [keptMessageSql], not a
-  /// fourth copy of the same predicate that a later change could miss.
+  /// "Kept" is [keptMessageSql] here, as in every reader that means exactly
+  /// that — not a further copy of the predicate a later change could miss.
+  /// (Two transcript readers OR the same two terms with an outbound arm; they
+  /// ask a different question and keep their own spelling.)
   ///
   /// `final` rather than `const` only because a const cannot call a method.
   static final String _openAskWhere = """
@@ -5503,9 +5505,9 @@ COALESCE(p.storyline_id, (
 
   /// Everything a home-feed row needs, in one projection.
   ///
-  /// Shared by the two paging reads and the live patch read on purpose: they
-  /// must return the same shape, or the notifier would be replacing complete
-  /// rows with rows that have holes in them.
+  /// Shared by the paging read, the live patch read and the two search reads
+  /// on purpose: they must return the same shape, or the notifier would be
+  /// replacing complete rows with rows that have holes in them.
   /// The column list alone, so a read that needs the same row shape over a
   /// DIFFERENT set of joins — [semanticSearch] comes in through
   /// `message_vectors` — can have it without copying the column list that
@@ -5541,8 +5543,9 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
        AND sm.conversation_key = p.conversation_key) AS storyline_added_by,
   $_openWorkExists AS work_open''';
 
-  /// The joins [_homeFeedColumns] is written against, so the four readers
-  /// cannot drift apart: a column present on one path and missing on another
+  /// The joins [_homeFeedColumns] is written against, so its readers — the
+  /// page read, the live patch, and the two search hydrations — cannot drift
+  /// apart: a column present on one path and missing on another
   /// is a hole [HomeFeedRow.fromRow] reads as null on that path alone.
   ///
   /// `conversation_ai`'s primary key is `(source, conversation_key)`, so its
@@ -6357,9 +6360,12 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// appear in the text.
   ///
   /// Public and static because it is a definition rather than a query. The
-  /// feed's page read, the tiles and the live patch ([progressPatchFor]) all
-  /// bind this one fragment — there is no Dart copy of it anywhere, which is
-  /// the only arrangement under which they cannot drift.
+  /// feed's page read and the live patch ([progressPatchFor]) both bind this
+  /// fragment through [_feedNarrowing], so the two cannot drift; the tiles
+  /// ([homeMetrics]) mirror it by hand, column by column, and one test walks
+  /// every filter to hold them to it. The rail's own copy of the Needs You
+  /// rule (`isNeedsYou`, in Dart over a `Conversation`) is the one spelling
+  /// that has to stay — see the doc on [_liveNeedsYouThread].
   ///
   /// [HomeFilter.needsYou] is the one filter that counts THREADS. The rail
   /// counts threads, the tile above the table is the same number, and so the
@@ -6424,7 +6430,9 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// The clause that says a progress row belongs under [filter] as the Inbox
   /// is showing it: the filter's own fragment, the source chips, and the
   /// window when there is one. With no chips up nothing belongs — a bare
-  /// `0`, which a WHERE reads as no rows and a CASE reads as not admitted.
+  /// `0`, which the live patch's CASE reads as "not admitted" for every row.
+  /// (The page read never sees that arm: it answers an empty source list with
+  /// an empty page before asking, which saves the round trip.)
   ///
   /// ONE builder for the page read and the live patch, so that "the live path
   /// admits exactly what the page read returns" is a fact about the code's
@@ -6537,34 +6545,19 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
     return [for (final row in result) HomeFeedRow.fromRow(row.data)];
   }
 
-  /// The rows behind a burst of live ticks, in one read per chunk.
+  /// The feed rows for [keys], as they stand.
   ///
-  /// The bus carries keys rather than rows, so this is what turns a debounced
-  /// burst into the patch the table applies. Chunked because a burst is
-  /// unbounded and sqlite's parameter limit is not; 200 pairs is 400
-  /// parameters, comfortably under the 999 an older build could be compiled
-  /// with.
+  /// Once the live patch's read; now the single-row explainers' — the message
+  /// history and the repair service each ask about one message and want the
+  /// same joined shape the table draws. It delegates to [progressPatchFor]
+  /// under the default filter and throws the flag away, so there is ONE
+  /// spelling of this SELECT and one chunk loop, and a column added to the
+  /// projection reaches both readers or neither.
   Future<List<HomeFeedRow>> progressRowsFor(
     List<({String source, String id})> keys,
   ) async {
-    if (keys.isEmpty) return const [];
-    const chunkSize = 200;
-    final rows = <HomeFeedRow>[];
-    for (var start = 0; start < keys.length; start += chunkSize) {
-      final chunk = keys.skip(start).take(chunkSize).toList();
-      final tuples = List.filled(chunk.length, '(?, ?)').join(', ');
-      final result = await db
-          .customSelect(
-            '$_homeFeedSelect '
-            'WHERE (p.source, p.source_message_id) IN (VALUES $tuples)',
-            variables: _args([
-              for (final key in chunk) ...[key.source, key.id],
-            ]),
-          )
-          .get();
-      rows.addAll([for (final row in result) HomeFeedRow.fromRow(row.data)]);
-    }
-    return rows;
+    final patch = await progressPatchFor(keys, filter: HomeFilter.fromOthers);
+    return [for (final entry in patch) entry.row];
   }
 
   /// The feed rows for [keys], each with whether the filter that is up would
@@ -6590,7 +6583,10 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// chip is up, so nothing is admitted, but the rows on the table are still
   /// patched in place.
   ///
-  /// Same 200-key chunking as [progressRowsFor], for the same reason.
+  /// Chunked, because a burst is unbounded and sqlite's parameter limit is
+  /// not: 200 pairs is 400 parameters, comfortably under the 999 an older
+  /// build could be compiled with. The one chunk loop over feed rows —
+  /// [progressRowsFor] delegates here.
   Future<List<({HomeFeedRow row, bool admitted})>> progressPatchFor(
     List<({String source, String id})> keys, {
     required HomeFilter filter,
@@ -6615,8 +6611,8 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
     const chunkSize = 200;
     final patch = <({HomeFeedRow row, bool admitted})>[];
     for (var start = 0; start < keys.length; start += chunkSize) {
-      final end = start + chunkSize > keys.length ? keys.length : start + chunkSize;
-      final chunk = keys.sublist(start, end);
+      final end = start + chunkSize;
+      final chunk = keys.sublist(start, end > keys.length ? keys.length : end);
       final tuples = List.filled(chunk.length, '(?, ?)').join(', ');
       final result = await db
           .customSelect(

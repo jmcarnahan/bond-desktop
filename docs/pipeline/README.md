@@ -171,7 +171,10 @@ or merely counted under `oldest` and under Needs You, where whether a row is
 its thread's newest kept message is a fact about the thread rather than the
 row). A row comes back whatever its flag says, because a row already on the
 table is patched in place even once it stops matching — the table never moves
-under a reader, and the next load reads it out.
+under a reader, and the next load reads it out. The one thing the notifier
+still decides for itself is the drop show: a gate-dropped arrival is never
+admitted, so that branch sits above the flag and asks the default filter and
+the source chips directly — a question of scope, not of filter.
 
 **The pulse strip** under the tiles narrates the work a filter may be hiding,
 in three segments joined by `·` (`app/lib/widgets/home_pulse.dart`):

@@ -49,8 +49,8 @@ void main() {
     required String receivedAt,
     String source = 'email',
     String? gateReason,
-    /// Files the message under another message's thread — the one case a
-    /// test needs two messages on one conversation.
+    // Files the message under another message's thread — the one case a
+    // test needs two messages on one conversation.
     String? conversationKey,
   }) =>
       store.upsertMessage({
