@@ -76,6 +76,13 @@ class RestoreService {
 
     await _store.restoreMessage(source, sourceMessageId);
 
+    // The thread hears about it. Every gate drop folds a thread DOWN; this is
+    // the one path that folds one up, and only up — a message the owner asked
+    // back in is a message the thread can be waiting on again, and never a
+    // reason to quieten it. It cannot lift a `done` thread either: closing a
+    // thread is the owner's other decision, and this one does not overrule it.
+    await _store.refoldThreadState(source, sourceMessageId, restored: true);
+
     // Resets the progress row and ticks the bus, so the home feed sheds the
     // dropped row live rather than at the next read.
     await _progress.noteRestored(source, sourceMessageId);

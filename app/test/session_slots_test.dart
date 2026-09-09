@@ -8,6 +8,7 @@ import 'package:bond_inbox/main.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/screens/sign_in_screen.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
@@ -440,9 +441,12 @@ void main() {
       // Bounded pumps rather than a settle: Settings is INSIDE InboxScreen
       // now, which owns a sixty-second periodic timer, and an unbounded settle
       // would never come back.
-      await tester.tap(find.byTooltip('Settings'));
+      await tester.tap(find.byKey(IconRail.accountMenuKey));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.byKey(IconRail.settingsItemKey));
       await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
       expect(find.byType(SettingsScreen), findsOneWidget);
 
       await tester.tap(

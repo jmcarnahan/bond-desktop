@@ -125,6 +125,13 @@ class ArchivePane extends StatefulWidget {
   /// [HomeFeedRowTile] takes one.
   final DateTime now;
 
+  /// "Bring this deferred thread back on that day" — the Later digest's two
+  /// pills, passed straight through. The pane itself has no opinion about
+  /// dates; it holds the digest, and the digest holds the rows that carry
+  /// them.
+  final void Function(String source, String conversationKey, DateTime until)
+      onSnooze;
+
   /// The tabs⇄results body swap. The home pane's duration, because it is the
   /// same gesture: one body replacing another rather than a page load.
   static const Duration searchSwap = Duration(milliseconds: 160);
@@ -154,6 +161,7 @@ class ArchivePane extends StatefulWidget {
     required this.onSearch,
     required this.onExitSearch,
     required this.now,
+    required this.onSnooze,
   });
 
   @override
@@ -347,6 +355,8 @@ class _ArchivePaneState extends State<ArchivePane> {
             onOpen: widget.onOpen,
             onKeepSender: widget.onKeepSender,
             onKeepThread: widget.onKeepThread,
+            now: widget.now,
+            onSnooze: widget.onSnooze,
           ),
         ArchiveTab.done => ConversationListPane(
             sources: widget.sources,

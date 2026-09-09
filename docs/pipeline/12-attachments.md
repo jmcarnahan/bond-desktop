@@ -619,11 +619,13 @@ nowhere to put a passage, and its selling point is "I know I got that email".
 
 ## What the row and the activity log show
 
-`MessageRow` writes one muted line under the chip row for each file the model
-has read — `AI: <file name>: <summary>`, two lines at most — under the SAME
-`AI:` label the message's own summary wears, and for the same reason: it is
-the model's read of a document, never a sentence the sender wrote. A file
-still being read, refused, or never digested adds nothing; the chip's own
+Each file the model has read carries one muted line **on its own card** —
+`AI: <summary>`, two lines at most — under the SAME `AI:` label the message's
+own summary wears, and for the same reason: it is the model's read of a
+document, never a sentence the sender wrote. The line no longer names the file,
+because the card it sits on IS the file; it keeps its old key,
+`attachmentKey('digest', ref)`, so every finder that reached it still does. A
+file still being read, refused, or never digested adds nothing; the card's own
 `reading…` hint is the whole signal while a digest is pending. The panel's AI
 segment renders the full digest (summary, facts, asks).
 
@@ -651,23 +653,54 @@ was only one of its seven answers.
 
 ## Reading a file on screen
 
-A chip is a tap target. Tapping it puts the file **beside** the thread, because
-a preview is read against the message that carried it: the transcript keeps the
-pane and the panel takes 45 % of it, clamped to 360–640 px, and the transcript
-never goes under 420. When those cannot both be had — a narrow window, or a pane
-under the 960 px two-pane breakpoint — the preview **replaces** the transcript
-rather than squeezing it. The composer stays under either arrangement, so a
-reply is still possible with the file on screen.
+A chip is a tap target. Tapping it puts the file **beside** whatever the reader
+was looking at, because a preview is read against the message that carried it.
+The panel is the shell's now, not the thread pane's: `_side` holds one
+`SidePanel` — a `FilePanel` here; the five kinds are tabled in
+[../shell.md](../shell.md#what-opens-where) — and `_wide()` renders it as
+the last column of the shell's `Row`, so a file opens beside a thread, beside a
+storyline's spine, and beside a thread that is itself in the side panel (where
+it REPLACES that thread, one thing at a time on that side of the seam).
+
+The width is measured **post-rail** — the window less `IconRail.width`,
+`AppRail.width`, the 1 px divider and the 16 px seam — and the two-pane
+breakpoint is applied to that figure, so the split appears from a window of
+1293 px. The panel takes 45 % of
+what is left, clamped to 360–640 px for a file and 420–640 px for a thread (a
+`ThreadDetailPanel` header spends its width on controls before the subject sees
+any), and the main pane never goes under 420. When both cannot be had — a
+narrow window, or a wide one with no room — the panel **replaces** the main
+pane rather than squeezing it. The composer stays under either arrangement, so
+a reply is still possible with the file on screen.
+
+`SidePanelHost` draws the header for whatever is in the panel: the glyph, the
+name, a subtitle, the size, and the ⤢ and ✕ (`SidePanelHost.expandKey` /
+`closeKey`). The preview renders inside it with `showHeader: false`, so its own
+keys never reach the screen — one owner for the two controls.
 
 `Expand` gives the same panel the whole pane, on a `PaneSurface` whose back
-arrow returns to the split with the thread still selected underneath, and whose
-`Home` clears both. The viewer is a rung in `_main()` directly above the
-transcript — the pane it was opened from and the one Back returns to — and a
-viewer whose thread has vanished falls through it rather than stranding the
-screen. `_previewing` and `_viewerFull` are cleared by every selector that
-clears `_replyOpenFor`, and by sign-out beside the thumbnails and the pin keys
-— the ref points into a mailbox that has just been wiped. A preview left
-visible under another pane is exactly the bug that list exists to prevent.
+arrow returns to the split and whose `Home` clears everything. Back drops to
+the split in **every** case, storyline included: the panel belongs to the
+shell, so there is always something underneath it. The viewer is a rung in
+`_main()` directly above the transcript, guarded on the thread OR the storyline
+still existing — a viewer whose thread has vanished falls through it rather
+than stranding the screen. `_side` and `_sideFull` are cleared by
+`_clearOverlays()`, which every one of the seven selection setters calls, and by
+sign-out beside the thumbnails and the pin keys — the panel points into a
+mailbox that has just been wiped. A panel left visible under another pane is
+exactly the bug that list exists to prevent.
+
+A `FilePanel` carries the conversation it was opened **from**. That origin is
+what `Use in reply` writes into — offered on the same ladder the thread pane
+uses, so mail always and a chat only with the send grant — and what a pin
+resolves its storyline through: a thread open beside a storyline is not
+`_selectedId`, so without the origin a file from it would pin to whichever
+storyline the main pane happened to be showing. A document off a storyline's
+shelf carries no origin, and offers no `Use in reply`: the shelf's files belong
+to the storyline rather than to any one conversation. When the file was opened
+from the thread beside — which it replaced — `Use in reply` brings that thread
+back beside with its docked box and the file goes: the draft is what was asked
+for, and a box off screen is nothing happening.
 
 ### Three segments, always all three
 
@@ -729,16 +762,18 @@ all**, not a disabled one: there is nothing safe to do with it, and a greyed
 control invites a second look. `_launchExternal` checks again behind the panel,
 so a second caller cannot get past the rule by not knowing about it.
 
-### Thumbnails in the row
+### Which files are asked for a picture
 
 `layOutBody` reports a fourth list, `thumbnailable`: the non-inline, non-link
 attachments whose kind is `pdf` or `document`. It is a SUBSET of `chips`, not a
-fourth bucket — the file is still named, sized and tapped through its chip, and
-counting it twice would make a folded row claim two files where there is one.
-The row draws a picture only when the host answers one; a document with none
-gets **nothing**, never the dashed frame an image gets, because the chip below
-is already the file. The host memoises one `ImageProvider` per attachment key,
-so a rebuild keeps the decode and asks for the picture once.
+fourth bucket — the file is still named, sized and tapped through its own card,
+and counting it twice would make a folded row claim two files where there is
+one. Nothing else is ever asked: a link asks for no picture at all, and a test
+pins that. The picture, when one arrives, is drawn INSIDE the card rather than
+above it — one thing on screen per file. A file with none gets its glyph on a
+plain band, never the dashed frame an image gets, because the card is already
+the file. The host memoises one `ImageProvider` per attachment key, so a
+rebuild keeps the decode and asks for the picture once.
 
 ### The gatekeepers
 
@@ -792,6 +827,88 @@ control characters become underscores, leading dots come off so the file is not
 hidden, an empty result becomes `attachment`, and the whole is capped at 120
 grapheme clusters with the extension kept — the extension is what the operating
 system opens it by.
+
+## Cards in the transcript
+
+A file under a message is a **card**, not a chip. `AttachmentCard` is 320px
+wide and carries, in order: the file's own rendering (its first page, its
+photograph) or a big glyph on a `previewGround` band when there is none; the
+name, cut on graphemes at `AttachmentChip.nameCap`; a `size · kind` caption
+where the kind is the DIGEST's word for the document (`quote`, `contract`) when
+the model read it and the file extension otherwise — `other` is the digest's "I
+could not say", so it defers; and the `AI:` line above.
+
+**Pictures.** One trailing picture stays the `InlineImageThumb` it always was —
+a lone photograph is the message, and cropping it to a square would throw away
+the half somebody meant to show. Two or more become an `ImageGrid`: up to four
+156px square tiles, and past that the LAST drawn tile wears a `+N` counter over
+a `BondColors.ink` scrim, where N counts the tile under it too. Tapping the
+counter opens that picture; the rest are reached from there.
+
+**Links.** `kind` in `{reference, message_reference, card}` renders as a
+`LinkUnfurl` instead: a 3px accent strip down the left, then `🔗 <site>`, the
+name, the digest line, and an `Open link` button. `linkSiteLabel(url)` is the
+site — `SharePoint`, `OneDrive`, `Teams`, or the bare host with `www.`
+stripped, and `''` for anything `webUriOf` refuses. The site is said BEFORE the
+name because it is the one thing a reader cannot work out from the file name.
+The button obeys the same `webUriOf` guard the preview panel's source link
+does: a non-web url gets no button at all.
+
+**The placed-chip exception.** A file the sender put INSIDE a sentence — a
+`[[att:id]]` marker, so a `BodyAttachmentSegment` with `asImage == false` —
+stays an `AttachmentChip` where it sits. A 320px card halfway through a
+paragraph is not a paragraph. Only the TRAILING files (`layout.chips`) become
+cards, and `layOutBody` is untouched by any of this.
+
+**Use in reply** appears on a card's hover strip (`HoverActions`, the same
+accelerator the message rows wear) whenever the host wired `onUseInReply`. It
+runs `_useAttachmentInReply(from, attachment)` on the screen — the SAME method
+the preview panel's own button calls, so "put this file in the draft" has one
+path however it is asked: the thread comes back beside if a side panel had
+replaced it, `generate(pinnedAttachmentIds: [...])` runs, and the cursor lands
+in the box the words will appear in.
+
+**A thread's Files tab** draws the same cards and unfurls, newest message
+first. The list is `threadFiles(messages)`, derived from the loaded transcript
+rather than queried — see `docs/shell.md`.
+
+## The Files stop
+
+`MessageStore.recentAttachments({sources, kind, limit, offset})` is the one
+read behind it: `attachments` **INNER** joined to `messages`, carrying
+`conversation_key`, `from_name`, `from_address`, `direction`, `received_at` and
+`subject`, ordered newest message first then by `ordinal`. An inner join and
+not the storyline shelf's left one, deliberately: a file whose message is gone
+has no day to file under and no thread to open, and nobody pinned it here.
+Inline images are excluded and nothing else is — there is **no byte-size rule**,
+because `inlineImageMinBytes` is about inline pictures, which are already gone.
+
+The kind runs **in SQL**, as `FilesKind { all, documents, images, links }`:
+images are `kind = 'image' OR lower(content_type) LIKE 'image/%'` (minus the
+three link kinds — a link to a picture is a link), links are the
+three link kinds, documents are everything else. It has to be SQL because the
+read is paged, and a page plus a client-side filter cannot both be honest. The
+edge that buys: a `.png` Graph reported as `application/octet-stream` files
+under **Documents**, because reading the file name in SQL cannot use an index.
+The reader still finds it under All.
+
+`filesProvider` holds the rows, the kind and the search, seq-guarded on both;
+`loadMore` offsets by what is already on screen and a short page is what ends
+the list. `FilesPane` draws a `HomeSearchField`, the four kinds as
+`BondFilterPill`s, then day groups — a `DayDivider` per run of
+`dayKeyOfIso(received_at)`, then a `Wrap` of entries. Each entry is the card,
+`<who> · <when>`, and a quiet button titled by the subject that opens the
+thread BESIDE. A file opens beside too, as `FilePanel(attachment:, from:)` with
+the row's own thread as `from` — which is what makes Use in reply and pinning
+work from the shelf exactly as they do from a transcript.
+
+Search here reuses `MessageSearch.search` through `parseSearchQuery` and shows
+`MessageSearchHits.documents` only, as `AttachmentSearchTile`s: a message that
+mentions a contract is a fine answer somewhere else. A query of nothing but
+facets is refused with the home feed's own sentence. The kind rows on the rail
+and the pills in the pane are two controls over ONE fact, which is why it lives
+in the provider; the source chips in the column header scope the shelf, which
+is why the pane has no source bar of its own.
 
 ## Retrieval into replies
 
@@ -876,6 +993,14 @@ kept.
 which is why `upsertAttachments` never writes it: a re-sync must not un-pin
 what somebody chose.
 
+**The bookmark bar** under a storyline's name (`PinnedDocumentsBar`) draws each
+pin as an `AttachmentCard(compact: true)`: a 200px pill reading
+`📌 <glyph> <name>` with the digest line under it, no picture and no hover
+strip. The digest is the whole reason for the shape — a pinned file is the one
+whose one-sentence read the reader keeps coming back for, and a bar that only
+named it would make them open it to remember. `barKey` and `entryKeyFor` are
+unchanged.
+
 **Pinning** happens from the preview panel and the full viewer, on the
 `Pin to storyline` action. Which storyline it goes to is the host's decision,
 not the panel's: from a thread it is the first id
@@ -917,11 +1042,12 @@ a composer to write into. The full viewer has none, so `AttachmentViewerPane`
 takes no such callback at all. Neither does a thread the pane cannot reply to:
 a chat without `Chat.ReadWrite` shows no composer, so the host passes a null
 target and the offer disappears rather than spending a fast-slot draft on words
-nobody would see. It
-opens the reply box and asks the draft notifier to regenerate with this
+nobody would see. It asks the draft notifier to regenerate with this
 attachment's id in `pinned_attachment_ids`, which is what floats it to the
-front of what the retriever quotes. Opening the box is the point: a regenerate
-whose spinner is off screen is not visible feedback.
+front of what the retriever quotes, and it takes the cursor to the box the
+draft will land in. The box itself is always there — it is docked under every
+thread a reply is possible on — so what has to be brought back is the THREAD:
+a regenerate whose spinner is off screen is not visible feedback.
 
 ## Code
 
@@ -971,16 +1097,27 @@ whose spinner is off screen is not visible feedback.
 - `app/lib/widgets/preview/image_preview.dart`, `sheet_preview.dart`
   (fixed 160 px columns, never `IntrinsicColumnWidth`), `text_preview.dart`,
   `eml_preview.dart`, `unsupported_preview.dart`.
+- `app/lib/widgets/attachment_card.dart` — the 320px file card and its compact
+  bookmark shape; `image_grid.dart` — two or more pictures and the `+N` tile;
+  `link_unfurl.dart` — a file that lives elsewhere, plus the pure
+  `linkSiteLabel`.
+- `app/lib/models/files_models.dart` — `FilesKind` and `FileRow`;
+  `app/lib/providers/files_provider.dart` — the paged shelf and its search;
+  `app/lib/widgets/files_pane.dart` — the Files stop's pane.
 - `app/lib/widgets/attachment_documents_strip.dart` — the storyline's
   documents shelf, pinned first, with Pin and the two-step Remove;
   `app/lib/widgets/storyline_timeline.dart` — the Documents button that unfolds
-  it and the three attachment props the spine's rows forward.
+  it. The spine's cards carry no chips: a card is a root message, and the files
+  on a thread are reached by opening that thread beside the spine.
 - `app/lib/providers/storylines_provider.dart` — `storylineDocumentsProvider`,
   dropped by hand after every pin and unpin.
 - `app/lib/widgets/message_row.dart` — `layOutBody`'s `thumbnailable` list and
   the document pictures it drives.
-- `app/lib/screens/inbox_screen.dart` — `_threadBody` (the split),
-  `_attachmentViewer` (the `_main` rung, which a storyline reaches too),
+- `app/lib/widgets/side_panel.dart` — `SidePanel`/`ThreadPanel`/`FilePanel`,
+  `SidePanelHost` and its width math (`widthFor`, `availableBesideRail`).
+- `app/lib/screens/inbox_screen.dart` — `_wide` (the split), `_sidePanel` and
+  `_filePanel`, `_attachmentViewer` (the `_main` rung, which a storyline
+  reaches too),
   `_thumbnailFor`/`_loadThumb`, `_openAttachmentInOs`, `_saveAttachment`,
   `_launchExternal`, the clear-cache wiring, and the pinning trio
   `_pinTargetFor`/`_pinAttachment`/`_unpinDocument` over `_pinnedKeys`.
@@ -993,9 +1130,10 @@ whose spinner is off screen is not visible feedback.
 - `app/lib/widgets/attachment_search_tile.dart` — one document hit on Home
   search; `app/lib/widgets/home_pane.dart` — the `In documents` block above
   the message table.
-- `app/lib/widgets/message_row.dart` — the per-file `AI:` digest line under
-  the chip row; `app/lib/widgets/activity_log_panel.dart` — the labels and
-  sentences for `attachment_text` and `attachment_digest`.
+- `app/lib/widgets/attachment_card.dart` — the per-file `AI:` digest line on
+  the file's own card (and on `LinkUnfurl`), keyed `attachmentKey('digest',
+  ref)`; `app/lib/widgets/activity_log_panel.dart` — the labels and sentences
+  for `attachment_text` and `attachment_digest`.
 - `app/lib/services/attachments/attachment_retriever.dart` —
   `AttachmentExcerpt`, `AttachmentRetriever.excerptsFor` and
   `renderAttachmentExcerpts`;

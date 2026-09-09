@@ -7,12 +7,17 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
 
-/// The storyline spine's reading direction, as a property of what is STORED.
+/// The two reading-order preferences, as properties of what is STORED.
 ///
 /// `app_prefs` is a TEXT table, so oldest-first has to survive a round trip
 /// through a string — and the state a fresh install is in is an absent key, not
 /// a stored 'false'. Both are pinned here because a preference that parsed the
 /// wrong way would hand every new user a storyline running backwards.
+///
+/// The Needs You order is the same shape with one more failure mode: it is an
+/// enum written by name, so a value nobody here wrote — hand-edited, or a
+/// spelling a later build stopped using — has to read as the ranking rather
+/// than throw.
 
 void main() {
   late BondDatabase db;
@@ -63,5 +68,57 @@ void main() {
 
     expect(await store.getPref(storylineNewestFirstKey), 'false');
     expect(ref.read(appPrefsProvider).storylineNewestFirst, isFalse);
+  });
+
+  group('the Needs You order', () {
+    test('a fresh install reads the ranking, not the clock', () async {
+      final ref = await container();
+
+      expect(await MessageStore(db).getPref(needsYouSortKey), isNull);
+      expect(ref.read(appPrefsProvider).needsYouSort, NeedsYouSort.priority);
+    });
+
+    test('newest lands in app_prefs under its own name and reads back',
+        () async {
+      final store = MessageStore(db);
+      final ref = await container();
+
+      await ref
+          .read(appPrefsProvider.notifier)
+          .setNeedsYouSort(NeedsYouSort.newest);
+
+      expect(await store.getPref(needsYouSortKey), 'newest');
+      expect(ref.read(appPrefsProvider).needsYouSort, NeedsYouSort.newest);
+      // And it is what a cold start would read, not only what the notifier is
+      // holding — the rail is built from the stored value on the first frame.
+      expect(
+        (await AppPrefsNotifier.read(store)).needsYouSort,
+        NeedsYouSort.newest,
+      );
+    });
+
+    test('and back again, so the choice is reversible', () async {
+      final store = MessageStore(db);
+      final ref = await container();
+      final prefs = ref.read(appPrefsProvider.notifier);
+
+      await prefs.setNeedsYouSort(NeedsYouSort.newest);
+      await prefs.setNeedsYouSort(NeedsYouSort.priority);
+
+      expect(await store.getPref(needsYouSortKey), 'priority');
+      expect(ref.read(appPrefsProvider).needsYouSort, NeedsYouSort.priority);
+    });
+
+    test('a value nobody here wrote reads as the ranking', () async {
+      // A bad preference must not be able to reorder Needs You into something
+      // this app has no rule for — or, worse, stop it from starting.
+      final store = MessageStore(db);
+      await store.setPref(needsYouSortKey, 'loudest');
+
+      expect(
+        (await AppPrefsNotifier.read(store)).needsYouSort,
+        NeedsYouSort.priority,
+      );
+    });
   });
 }

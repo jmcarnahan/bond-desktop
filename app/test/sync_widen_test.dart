@@ -374,21 +374,27 @@ void main() {
     });
 
     test('a reply from behind the old floor answers nothing', () async {
-      // The ask is three weeks old and already in the database: an incremental
-      // cursor pass delivered it when it was fresh, back when this mailbox was
-      // set to a fortnight. Nothing has answered it since.
-      await store.setDeltaLink('inbox', deltaCursor('inbox', 'pre'));
-      await store.setDeltaLink('sentitems', deltaCursor('sentitems', 'pre'));
-      graph.queue('inbox', [
-        () => jsonOk(deltaBody([
-              graphMessage(
-                id: 'm1',
-                receivedDateTime: isoAgo(const Duration(days: 20)),
-              ),
-            ], deltaLink: deltaCursor('inbox', 'c1'))),
-      ]);
-      await syncReaching(() => 14).syncNow();
-      graph.requests.clear();
+      // The ask is three weeks old and ALREADY IN THE DATABASE: an
+      // incremental cursor pass delivered it when it was fresh, months before
+      // this mailbox was set to a fortnight. It is seeded rather than synced
+      // for exactly that reason — a message this far behind the pass's own
+      // floor would be stored `skipped`/`backlog` today, and a gated message
+      // does not ask for a reply at all (see `sync_state_test.dart`).
+      await syncedAtAFortnight(const []);
+      final ask = isoAgo(const Duration(days: 20));
+      await store.upsertMessage({
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'direction': 'inbound',
+        'from_address': 'sarah@example.test',
+        'received_at': ask,
+      });
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'state': 'needs_reply',
+        'last_inbound_at': ask,
+        'last_message_at': ask,
+      });
 
       expect((await conversation('c1'))['state'], 'needs_reply');
       await store.updateConversationTriage(

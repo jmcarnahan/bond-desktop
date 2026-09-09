@@ -39,6 +39,7 @@ void main() {
     String receivedAt = '2026-09-01T08:00:00Z',
     String triageStatus = 'triaged',
     String direction = 'inbound',
+    String? gateReason,
   }) =>
       store.upsertMessage({
         'source': source,
@@ -51,6 +52,7 @@ void main() {
         'body_text': 'Could you look at the DPA before Friday?',
         'received_at': receivedAt,
         'triage_status': triageStatus,
+        'gate_reason': ?gateReason,
       });
 
   Future<void> logEvent(
@@ -371,6 +373,51 @@ void main() {
     });
   });
 
+  group('the open-ask predicate', () {
+    /// The one clause the predicate shares with the rest of the app:
+    /// `MessageStore.keptMessageSql`, spliced rather than spelled again. A
+    /// chat stored before chats were triaged was born `skipped` under
+    /// `teams_source` and is a real question from a real person.
+    test('a chat born skipped under teams_source still asks', () async {
+      await seed(
+        'chat-1',
+        source: 'teams',
+        conversationKey: 'chat',
+        triageStatus: 'skipped',
+        gateReason: 'teams_source',
+      );
+      await store.writeNeedsYouVerdict(
+        'teams',
+        'chat-1',
+        verdict: true,
+        reason: 'asks for the DPA by Friday',
+      );
+
+      expect(await store.hasOpenAsk('teams', 'chat'), isTrue);
+      expect(
+        await store.openAskThreads(sources: const ['teams']),
+        contains(MessageStore.openAskKey('teams', 'chat')),
+      );
+    });
+
+    test('a message the gate really threw out asks nothing', () async {
+      await seed(
+        'news',
+        triageStatus: 'skipped',
+        gateReason: 'newsletter',
+      );
+      await store.writeNeedsYouVerdict(
+        'email',
+        'news',
+        verdict: true,
+        reason: 'asks for the DPA by Friday',
+      );
+
+      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+      expect(await store.openAskThreads(), isEmpty);
+    });
+  });
+
   group('dropMessage', () {
     Future<String?> notifyState(String id, {String source = 'email'}) async {
       final rows = await db.customSelect(
@@ -538,6 +585,51 @@ void main() {
       expect(message['triage_status'], 'skipped');
       expect(message['gate_reason'], 'user');
       expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+    });
+
+    test('Ignore of the only kept inbound folds the thread to waiting and '
+        'drops its ask', () async {
+      await seed('m1');
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'subject': 'Renewal paperwork',
+        'state': 'needs_reply',
+        'cta_text': 'Look at the DPA',
+        'cta_urgency': 'high',
+      });
+      await db.customUpdate(
+        "UPDATE message_progress SET needs_you = 1 "
+        "WHERE source = 'email' AND source_message_id = 'm1'",
+      );
+
+      await store.dropMessage('email', 'm1');
+
+      // Ignore is the owner working a gate by hand, so it lowers the thread
+      // exactly as a gate does — and an ask can only come from a kept
+      // message, so the CTA and the chip go with it.
+      final thread = (await store.getConversationRow('email', 'c1'))!;
+      expect(thread['state'], 'waiting');
+      expect(thread['cta_text'], isNull);
+      expect(thread['cta_urgency'], 'normal');
+      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+    });
+
+    test('an Ignore leaves a thread with a kept newer inbound asking',
+        () async {
+      await seed('m1', receivedAt: '2026-09-01T08:00:00Z');
+      await seed('m2', receivedAt: '2026-09-01T09:00:00Z');
+      await store.upsertConversation({
+        'conversation_key': 'c1',
+        'subject': 'Renewal paperwork',
+        'state': 'needs_reply',
+      });
+
+      await store.dropMessage('email', 'm1');
+
+      expect(
+        (await store.getConversationRow('email', 'c1'))!['state'],
+        'needs_reply',
+      );
     });
 
     test('an Ignore settles the pending notify row', () async {

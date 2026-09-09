@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// What a feed row can say about itself without a database.
@@ -37,6 +38,22 @@ void main() {
       );
 
   final now = DateTime.utc(2026, 9, 1, 12);
+
+  group('homeMetricsWindowLabel', () {
+    test('days from two days up, hours below', () {
+      expect(homeMetricsWindowLabel(const Duration(days: 7)), 'Last 7 days');
+      expect(homeMetricsWindowLabel(const Duration(days: 2)), 'Last 2 days');
+      expect(
+        homeMetricsWindowLabel(const Duration(hours: 24)),
+        'Last 24 hours',
+      );
+      expect(homeMetricsWindowLabel(const Duration(hours: 47)), 'Last 47 hours');
+    });
+
+    test('the window in force is a week', () {
+      expect(homeMetricsWindow, const Duration(days: 7));
+    });
+  });
 
   group('isStalled', () {
     test('a pending row nobody is working on goes stalled at the threshold',
@@ -102,6 +119,51 @@ void main() {
       expect(HomeFeedRow.fromRow(base({})).workOpen, false);
     });
 
+    test('the words come through as written, from their own two tables', () {
+      final row = HomeFeedRow.fromRow(base({
+        'summary': 'Confirms the launch is on the 14th',
+        'cta_text': 'Send the signed order form',
+      }));
+
+      expect(row.summary, 'Confirms the launch is on the 14th');
+      expect(row.ctaText, 'Send the signed order form');
+      // A read that selected neither column says nothing rather than empty
+      // string — "nobody has written one" is its own answer.
+      expect(HomeFeedRow.fromRow(base({})).summary, isNull);
+      expect(HomeFeedRow.fromRow(base({})).ctaText, isNull);
+    });
+
+    test('the thread state is read live, beside the frozen verdict', () {
+      final row = HomeFeedRow.fromRow(base({
+        'thread_state': 'needs_reply',
+        'needs_you': 0,
+      }));
+
+      // The two disagree on purpose: the snapshot is what the message was
+      // told at settle time, and the state is what the thread says now — the
+      // fact the rail's Needs You rule stands on.
+      expect(row.threadState, 'needs_reply');
+      expect(row.needsYou, false);
+      // A read that never selected the column says nothing rather than 'done',
+      // which would be a verdict nobody wrote.
+      expect(HomeFeedRow.fromRow(base({})).threadState, isNull);
+    });
+
+    test('the triage status reads, and a read that skipped it says pending',
+        () {
+      // With `gateReason` beside it this IS `MessageStore.keptMessageSql`,
+      // which is what the Needs You filter narrows on.
+      final row = HomeFeedRow.fromRow(base({
+        'triage_status': 'skipped',
+        'gate_reason': 'newsletter',
+      }));
+      expect(row.triageStatus, 'skipped');
+
+      // Never `skipped` by omission: a read that did not select the column
+      // must not read as a message the gate threw out.
+      expect(HomeFeedRow.fromRow(base({})).triageStatus, 'pending');
+    });
+
     test('the reasons come through as written', () {
       final row = HomeFeedRow.fromRow(base({
         'updated_at': '2026-09-01T11:00:00Z',
@@ -125,6 +187,128 @@ void main() {
     });
   });
 
+  group('the pulse', () {
+    test('waiting, working and busy are the two maps added up', () {
+      const pulse = PipelinePulse(
+        queued: {'extract': 2, 'files': 1},
+        running: {'triage': 3},
+      );
+
+      expect(pulse.waiting, 3);
+      expect(pulse.working, 3);
+      expect(pulse.busy, isTrue);
+      expect(pulse.countFor('extract'), 2);
+      expect(pulse.countFor('triage'), 3);
+      // A stage neither map mentions answers zero, so a caller can walk
+      // [PipelinePulse.stages] without asking whether each one is there.
+      expect(pulse.countFor('draft'), 0);
+    });
+
+    test('an empty pulse is idle rather than unknown', () {
+      const pulse = PipelinePulse();
+
+      expect(pulse.busy, isFalse);
+      expect(pulse.waiting, 0);
+      expect(pulse.working, 0);
+    });
+
+    test('a stage that is both waiting and working counts both', () {
+      const pulse = PipelinePulse(
+        queued: {'storyline': 4},
+        running: {'storyline': 1},
+      );
+
+      expect(pulse.countFor('storyline'), 5);
+    });
+
+    test('every storyline pass is one stage, and chores are not stages', () {
+      final storyline = [
+        for (final entry in PipelinePulse.kindStages.entries)
+          if (entry.key.startsWith('storyline')) entry.value,
+      ];
+
+      expect(storyline, hasLength(6));
+      expect(storyline, everyElement('storyline'));
+      // `mark_read` is a chore run on the user's behalf, not a stage of the
+      // pipeline — a pulse that narrated it would be reporting housekeeping.
+      expect(PipelinePulse.kindStages.containsKey('mark_read'), isFalse);
+      // Every stage a kind maps to is one the narration knows how to walk.
+      expect(
+        PipelinePulse.kindStages.values.toSet()
+            .difference(PipelinePulse.stages.toSet()),
+        isEmpty,
+      );
+    });
+
+    test('the window in force is ten minutes', () {
+      expect(homePulseWindow, const Duration(minutes: 10));
+    });
+  });
+
+  group('the filters', () {
+    test('the seven are windowed, the pile and the feed are not', () {
+      expect(
+        {
+          for (final filter in HomeFilter.values) filter: filter.windowed,
+        },
+        {
+          // The feed itself, and the pile to burn down — all time, both.
+          HomeFilter.fromOthers: false,
+          HomeFilter.needsYou: false,
+          // A readout of what the app has been doing, over the tiles' week.
+          HomeFilter.urgent: true,
+          HomeFilter.inFlight: true,
+          HomeFilter.errors: true,
+          HomeFilter.dropped: true,
+          HomeFilter.processed: true,
+        },
+        reason: 'work owed since before last Tuesday is exactly what a window '
+            'would hide',
+      );
+    });
+
+    test('a filter whose list carries dropped rows can search them', () {
+      expect(
+        {
+          for (final filter in HomeFilter.values)
+            filter: filter.showsDropped,
+        },
+        {
+          HomeFilter.fromOthers: false,
+          // The row that stands for a thread is its newest KEPT message, and
+          // a settle-time `not_worthy` drop is a verdict about a message the
+          // gate kept — so this list carries dropped rows and a search under
+          // it has to be able to reach them.
+          HomeFilter.needsYou: true,
+          HomeFilter.urgent: false,
+          HomeFilter.inFlight: true,
+          HomeFilter.errors: true,
+          HomeFilter.dropped: true,
+          HomeFilter.processed: true,
+        },
+      );
+    });
+
+    test('every filter and every order says its own name', () {
+      expect(
+        [for (final filter in HomeFilter.values) filter.label],
+        [
+          'Everyone',
+          'Needs you',
+          'Urgent',
+          'In flight',
+          'Errors',
+          'Dropped',
+          'Processed',
+        ],
+      );
+      expect(
+        [for (final sort in HomeSort.values) sort.label],
+        ['Newest first', 'Oldest first'],
+      );
+    });
+  });
+
   group('restored', () {
     test('the optimistic row is working, not stalled', () {
       final restored = rowAged(600, outcome: 'dropped').restored();
@@ -135,6 +319,29 @@ void main() {
       expect(restored.isStalled(now), false);
       expect(restored.outcome, 'pending');
       expect(restored.dropped, false);
+    });
+
+    test('it keeps the words — Restore does not unsay them', () {
+      final row = HomeFeedRow.fromRow({
+        'source': 'email',
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'received_at': '2026-09-01T10:00:00Z',
+        'outcome': 'dropped',
+        'dropped': 1,
+        'summary': 'A weekly roundup nobody asked for',
+        'cta_text': 'Send the signed order form',
+        'thread_state': 'needs_reply',
+      });
+
+      final restored = row.restored();
+
+      expect(restored.summary, 'A weekly roundup nobody asked for');
+      expect(restored.ctaText, 'Send the signed order form');
+      // The thread's state is a fact about the thread, and Restore reopens one
+      // message. Blanking it would make the restored row invisible to the live
+      // Needs You rule for the frame before the re-read lands.
+      expect(restored.threadState, 'needs_reply');
     });
 
     test('it keeps the reasons — they are why the row was dropped', () {
@@ -149,6 +356,7 @@ void main() {
         'needs_you_verdict': 0,
         'needs_you_reason': 'nobody is waiting on you',
         'gate_reason': 'newsletter',
+        'triage_status': 'skipped',
         'bucket': 'later',
         'bucket_reason': 'low_value',
         'attention_score': 0.1,
@@ -162,6 +370,11 @@ void main() {
       expect(restored.needsYouVerdict, false);
       expect(restored.needsYouReason, 'nobody is waiting on you');
       expect(restored.gateReason, 'newsletter');
+      // The one field the twin does NOT carry over: `restoreMessage` writes
+      // `triage_status = 'pending'`, and the row has to read as KEPT in the
+      // same frame the button was pressed in.
+      expect(row.triageStatus, 'skipped');
+      expect(restored.triageStatus, 'pending');
       expect(restored.bucket, 'later');
       expect(restored.bucketReason, 'low_value');
       expect(restored.attentionScore, closeTo(0.1, 0.0001));

@@ -11,6 +11,12 @@ import '../theme/tokens.dart';
 /// hand that just searched already is, and the only place the key has an
 /// obvious subject.
 ///
+/// The hint names the grammar rather than describing the box. `from:`, `in:`,
+/// `has:file` and the two date facets are the only way a reader finds out they
+/// exist — there is nowhere else to put a legend, and a box that said "Search
+/// your messages" would be a box whose filters nobody ever typed. What the
+/// facets mean lives in `parseSearchQuery` (`lib/services/search_grammar.dart`).
+///
 /// Stateless on purpose: the typed text belongs to the controller its owner
 /// holds, so this widget can be rebuilt with new props without ever losing a
 /// half-typed query.
@@ -55,7 +61,7 @@ class HomeSearchField extends StatelessWidget {
           onSubmitted: onSubmit,
           decoration: InputDecoration(
             isDense: true,
-            hintText: 'Search your messages',
+            hintText: 'Search — from: in: has:file before:',
             suffixIcon: ValueListenableBuilder<TextEditingValue>(
               valueListenable: controller,
               builder: (context, value, _) {

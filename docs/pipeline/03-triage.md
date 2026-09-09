@@ -5,7 +5,10 @@
 loads the prior messages on the conversation (cut off at this message's
 `received_at` so the model never sees the future), runs `TriageTask`, and
 folds the result into `triage_status`, the conversation's CTA rollup, and an
-activity row.
+activity row. A claim that ends in a gate skip instead refolds the thread down
+through `refoldThreadState` before it emits, because the state machine folded
+`needs_reply` on at ingest and the gate is only speaking now — see
+[02-gates.md](02-gates.md).
 
 **The model call.**
 

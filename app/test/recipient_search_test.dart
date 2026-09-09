@@ -35,6 +35,10 @@ class _FakePeople implements PeopleBackend {
     if (thrown != null) throw thrown;
     return people;
   }
+
+  @override
+  Future<ProfilePhoto?> profilePhoto(String user, {String size = '96x96'}) async =>
+      null;
 }
 
 /// A session granting exactly what it was built with.

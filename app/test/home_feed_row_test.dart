@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/source_glyph.dart';
 import 'package:bond_inbox/widgets/stage_bar.dart';
@@ -7,11 +8,13 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// One feed row: what it shows, and what it opens.
 ///
-/// The result cell is where the judgements live — a dropped row says why and
-/// nothing else, a needed one says so, a filed one links where it went — so
-/// most of this file is about which of those a row is allowed to claim at
-/// once. WHICH sentence a row gets is `home_result_test.dart`'s question; this
-/// file is about the dressing and the four nested gestures.
+/// The Result cell is where the judgements live — a dropped row says why and
+/// nothing else, a needed one says so, a filed one links where it went — and
+/// the Ask · Summary cell beside it is where the WORDS live. Most of this file
+/// is about which of those a row is allowed to claim at once. WHICH label and
+/// which reason a row gets is `home_result_test.dart`'s question; this file is
+/// about the dressing, the two extra cells, the fold, and the four nested
+/// gestures.
 
 final DateTime _now = DateTime.utc(2026, 9, 3, 12);
 
@@ -19,6 +22,9 @@ HomeFeedRow _row({
   String source = 'email',
   String id = 'm1',
   String conversationKey = 'c1',
+  String receivedAt = '2026-09-03T09:00:00Z',
+  String? summary,
+  String? ctaText,
   String triage = 'done',
   String extract = 'done',
   String storyline = 'done',
@@ -47,7 +53,9 @@ HomeFeedRow _row({
       source: source,
       sourceMessageId: id,
       conversationKey: conversationKey,
-      receivedAt: '2026-09-03T09:00:00Z',
+      receivedAt: receivedAt,
+      summary: summary,
+      ctaText: ctaText,
       triageState: triage,
       extractState: extract,
       storylineState: storyline,
@@ -90,15 +98,20 @@ Future<void> _pump(
   void Function(String, String)? onRetry,
   void Function(String, String)? onOpenHistory,
   bool animateIn = false,
+  bool compact = false,
+  bool threadNeedsYou = false,
+  DateTime? now,
 }) async {
-  // A desktop pane's width. The row is a fixed grid with two flexible cells,
+  // A desktop pane's width. The row is a fixed grid with three flexible cells,
   // and the default 800px surface is narrower than the grid it is drawn for.
   await tester.binding.setSurfaceSize(const Size(1200, 800));
   addTearDown(() => tester.binding.setSurfaceSize(null));
   await tester.pumpWidget(_host(HomeFeedRowTile(
     row: row,
-    now: _now,
+    now: now ?? _now,
     animateIn: animateIn,
+    compact: compact,
+    threadNeedsYou: threadNeedsYou,
     onOpenThread: onOpenThread ?? (_, _) {},
     onOpenStoryline: onOpenStoryline ?? (_) {},
     onRetry: onRetry,
@@ -107,12 +120,12 @@ Future<void> _pump(
 }
 
 void main() {
-  testWidgets('renders the sender, the subject and the age', (tester) async {
+  testWidgets('renders the sender, the subject and the stamp', (tester) async {
     await _pump(tester, _row());
 
     expect(find.text('Sarah Chen'), findsOneWidget);
     expect(find.text('Launch date'), findsOneWidget);
-    expect(find.text('3h ago'), findsOneWidget);
+    expect(find.byKey(HomeFeedRowTile.whenKey(_row())), findsOneWidget);
   });
 
   testWidgets('falls back through the sender fields to a sentence',
@@ -192,7 +205,7 @@ void main() {
       );
 
       expect(find.text('Newsletter'), findsOneWidget);
-      expect(find.text('Needs You'), findsNothing);
+      expect(find.text('Needs you'), findsNothing);
       expect(find.text('Website redesign'), findsNothing);
     });
 
@@ -225,12 +238,16 @@ void main() {
         ),
       );
 
-      // The sentence is the ask; the filing follows it, still tappable, so a
-      // row that is both does not have to give one of them up.
-      expect(find.text('Needs You'), findsOneWidget);
+      // ONE chip on the Result cell's first line, the reason one column over,
+      // and the filing on the line UNDER the chip — still tappable, so a row
+      // that is both does not have to give one of them up.
+      expect(find.text('Needs you'), findsOneWidget);
       expect(
-        find.text('Needs you — the app thinks this wants you'),
-        findsOneWidget,
+        tester
+            .widget<Text>(find.byKey(HomeFeedRowTile.askKey(_row())))
+            .textSpan!
+            .toPlainText(),
+        'the app thinks this wants you',
       );
       expect(find.text('Website redesign'), findsOneWidget);
     });
@@ -280,22 +297,312 @@ void main() {
       );
     });
 
-    testWidgets('a filed row keeps its evidence beside the link',
+    testWidgets('a filed row is the label and the link, and no evidence',
         (tester) async {
-      await _pump(
-        tester,
-        _row(
-          outcome: 'done',
-          draft: 'skipped',
-          storylineId: 's1',
-          storylineTitle: 'Website redesign',
-          storylineEvidence: 'same launch thread',
-        ),
+      final row = _row(
+        outcome: 'done',
+        draft: 'skipped',
+        storylineId: 's1',
+        storylineTitle: 'Website redesign',
+        storylineEvidence: 'same launch thread',
       );
+      await _pump(tester, row);
 
       expect(find.text('Filed in '), findsOneWidget);
       expect(find.text('Website redesign'), findsOneWidget);
-      expect(find.text(' — same launch thread'), findsOneWidget);
+      // The evidence is the reason clause, and inside a fixed 168 px it only
+      // ever ellipsised the storyline's name away. It is on the tooltip and in
+      // the Ask cell, which is where the row's words live.
+      expect(find.text(' — same launch thread'), findsNothing);
+      expect(
+        tester
+            .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+            .textSpan!
+            .toPlainText(),
+        'same launch thread',
+      );
+    });
+  });
+
+  group('the ask cell', () {
+    /// The cell is a `Text.rich` in both layouts — compact prefixes a tone dot
+    /// — so the words come off the span rather than off `data`, which is null
+    /// on every rich Text.
+    String askText(WidgetTester tester, HomeFeedRow row) => tester
+        .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+        .textSpan!
+        .toPlainText();
+
+    TextStyle askStyle(WidgetTester tester, HomeFeedRow row) => tester
+        .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+        .style!;
+
+    testWidgets('a needs-you row shows the thread\'s ask, drawn as one',
+        (tester) async {
+      final row = _row(
+        outcome: 'done',
+        needsYou: true,
+        needsYouReason: 'asks you to confirm Thursday',
+        ctaText: 'Confirm Thursday with Sarah',
+        summary: 'Sarah proposes moving the launch',
+      );
+      await _pump(tester, row);
+
+      expect(
+        askText(tester, row),
+        'Confirm Thursday with Sarah',
+        reason: 'the ask is per THREAD and outranks both the reason and the '
+            'summary of one message on it',
+      );
+      expect(askStyle(tester, row).fontWeight, FontWeight.w600);
+    });
+
+    testWidgets('a settled row shows the message summary, quietly',
+        (tester) async {
+      final row = _row(
+        outcome: 'done',
+        draft: 'skipped',
+        summary: 'A receipt for the annual licence',
+      );
+      await _pump(tester, row);
+
+      expect(askText(tester, row), 'A receipt for the annual licence');
+      expect(askStyle(tester, row).fontWeight, isNot(FontWeight.w600));
+      expect(askStyle(tester, row).color, BondColors.inkSecondary);
+    });
+
+    testWidgets('a row with neither falls back to the reason clause',
+        (tester) async {
+      // A gate-dropped message never reached triage, so it has no summary at
+      // all — and the gate's own words are worth more here than a blank.
+      final row = _row(
+        outcome: 'dropped',
+        dropped: true,
+        dropReason: 'gated',
+        gateReason: 'sender_muted',
+      );
+      await _pump(tester, row);
+
+      expect(askText(tester, row), 'sender muted');
+    });
+
+    testWidgets('a dropped needs-you row is not an ask', (tester) async {
+      final row = _row(
+        outcome: 'dropped',
+        dropped: true,
+        dropReason: 'newsletter',
+        needsYou: true,
+        ctaText: 'Reply to the newsletter',
+        summary: 'This week in widgets',
+      );
+      await _pump(tester, row);
+
+      expect(askText(tester, row), 'This week in widgets');
+      expect(askStyle(tester, row).fontWeight, isNot(FontWeight.w600));
+    });
+
+    testWidgets('the whole of it is on the tooltip', (tester) async {
+      final row = _row(
+        outcome: 'done',
+        draft: 'skipped',
+        summary: 'A receipt for the annual licence',
+      );
+      await _pump(tester, row);
+
+      expect(
+        find.byTooltip('A receipt for the annual licence'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  group('under the Needs You filter', () {
+    String askText(WidgetTester tester, HomeFeedRow row) => tester
+        .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+        .textSpan!
+        .toPlainText();
+
+    testWidgets('a settle-dropped row wears the chip, not its drop',
+        (tester) async {
+      // The Needs You filter picked this row as the one standing for its
+      // thread: `not_worthy` is a verdict about a message the gate KEPT.
+      // Under its own columns it would read `Nothing to do`.
+      final row = _row(
+        outcome: 'dropped',
+        dropped: true,
+        dropReason: 'not_worthy',
+      );
+      await _pump(tester, row, threadNeedsYou: true);
+
+      expect(find.text('Needs you'), findsOneWidget);
+      expect(find.text('Nothing to do'), findsNothing);
+      expect(
+        tester
+            .widget<Tooltip>(find.ancestor(
+              of: find.byKey(HomeFeedRowTile.resultTextKey(row)),
+              matching: find.byType(Tooltip),
+            ))
+            .message,
+        contains('this message was judged nothing to do'),
+        reason: 'the tooltip still says what happened to THIS message',
+      );
+    });
+
+    testWidgets('the ask cell draws the thread\'s ask on a dropped row',
+        (tester) async {
+      final row = _row(
+        outcome: 'dropped',
+        dropped: true,
+        dropReason: 'not_worthy',
+        ctaText: 'Send the signed order form',
+        summary: 'Sarah proposes moving the launch',
+      );
+      await _pump(tester, row, threadNeedsYou: true);
+
+      expect(askText(tester, row), 'Send the signed order form');
+      expect(
+        tester
+            .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+            .style!
+            .fontWeight,
+        FontWeight.w600,
+        reason: 'an ask is the reader\'s own work and is drawn as such',
+      );
+    });
+
+    testWidgets('a stalled row is still stalled', (tester) async {
+      final row = _row(
+        outcome: 'pending',
+        storyline: 'pending',
+        updatedAt: '2026-09-03T11:00:00Z',
+      );
+      await _pump(tester, row, threadNeedsYou: true, onRetry: (_, _) {});
+
+      expect(find.text('Stalled'), findsOneWidget);
+      expect(find.text('Needs you'), findsNothing);
+      expect(find.byKey(HomeFeedRowTile.retryKey(row)), findsOneWidget);
+    });
+  });
+
+  group('the when cell', () {
+    // Local rather than UTC on purpose: the stamp is formatted in the reader's
+    // own zone, and a fixture pinned in UTC would assert a different string in
+    // every timezone this suite runs in.
+    final noon = DateTime(2026, 9, 3, 12);
+
+    testWidgets('today is the time alone', (tester) async {
+      final row = _row(receivedAt: DateTime(2026, 9, 3, 9, 5).toIso8601String());
+      await _pump(tester, row, now: noon);
+
+      expect(
+        tester.widget<Text>(find.byKey(HomeFeedRowTile.whenKey(row))).data,
+        '9:05 AM',
+        reason: "today's day is the one a reader can infer without being told",
+      );
+    });
+
+    testWidgets('any other day carries the day with it', (tester) async {
+      final row = _row(receivedAt: DateTime(2026, 9, 2, 9, 5).toIso8601String());
+      await _pump(tester, row, now: noon);
+
+      expect(
+        tester.widget<Text>(find.byKey(HomeFeedRowTile.whenKey(row))).data,
+        'Sep 2, 9:05 AM',
+      );
+    });
+
+    testWidgets('the tooltip carries the full stamp AND the age',
+        (tester) async {
+      final row = _row(receivedAt: DateTime(2026, 9, 3, 9, 5).toIso8601String());
+      await _pump(tester, row, now: noon);
+
+      // The age is what "is this current?" is answered with, and the stamp is
+      // what the column is scanned by. The hover is where both live.
+      expect(find.byTooltip('Sep 3, 9:05 AM · 2h ago'), findsOneWidget);
+    });
+  });
+
+  group('the folded row', () {
+    testWidgets('is one line: who, what, the ask, and when', (tester) async {
+      final row = _row(
+        outcome: 'done',
+        needsYou: true,
+        ctaText: 'Confirm Thursday with Sarah',
+        storylineId: 's1',
+        storylineTitle: 'Website redesign',
+      );
+      await _pump(tester, row, compact: true, onOpenHistory: (_, _) {});
+
+      expect(find.text('Sarah Chen'), findsOneWidget);
+      expect(find.text('Launch date'), findsOneWidget);
+      expect(find.byKey(HomeFeedRowTile.askKey(row)), findsOneWidget);
+      expect(find.byKey(HomeFeedRowTile.whenKey(row)), findsOneWidget);
+      // No bar and no verdict: this layout is what the pane folds to with a
+      // thread open beside it, and the thread beside carries both.
+      expect(find.byKey(HomeFeedRowTile.historyBarKey(row)), findsNothing);
+      expect(find.byKey(HomeFeedRowTile.historyCellKey(row)), findsNothing);
+      expect(find.text('Needs you'), findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('its header names four columns and neither of the two it '
+        'drops', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.pumpWidget(_host(const HomeFeedHeaderRow(compact: true)));
+
+      expect(find.text('From'), findsOneWidget);
+      expect(find.text('Subject'), findsOneWidget);
+      expect(find.text('Ask · Summary'), findsOneWidget);
+      expect(find.text('When'), findsOneWidget);
+      // The header is the only thing keeping the grid honest, and a column
+      // named over rows that do not draw it is a table with a lie in it.
+      expect(find.text('Pipeline'), findsNothing);
+      expect(find.text('Result'), findsNothing);
+    });
+
+    testWidgets('an ask carries its tone as a dot, a summary does not',
+        (tester) async {
+      String askText(HomeFeedRow row) => tester
+          .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+          .textSpan!
+          .toPlainText();
+
+      final asking = _row(
+        outcome: 'done',
+        needsYou: true,
+        ctaText: 'Confirm Thursday with Sarah',
+      );
+      await _pump(tester, asking, compact: true);
+      // The chip is what colours a needs-you row in the wide layout, and there
+      // is no Result cell here to put one in.
+      expect(askText(asking), '● Confirm Thursday with Sarah');
+
+      final quiet = _row(
+        outcome: 'done',
+        draft: 'skipped',
+        summary: 'A receipt for the annual licence',
+      );
+      await _pump(tester, quiet, compact: true);
+      expect(askText(quiet), 'A receipt for the annual licence');
+    });
+
+    testWidgets('the wide row keeps the dot off — the chip carries it there',
+        (tester) async {
+      final row = _row(
+        outcome: 'done',
+        needsYou: true,
+        ctaText: 'Confirm Thursday with Sarah',
+      );
+      await _pump(tester, row);
+
+      expect(
+        tester
+            .widget<Text>(find.byKey(HomeFeedRowTile.askKey(row)))
+            .textSpan!
+            .toPlainText(),
+        'Confirm Thursday with Sarah',
+      );
     });
   });
 
@@ -356,7 +663,7 @@ void main() {
         onOpenHistory: (source, id) => histories.add((source, id)),
       );
 
-      expect(find.text('Stalled — waiting on settle'), findsOneWidget);
+      expect(find.text('Stalled'), findsOneWidget);
 
       // All four counted after every tap: the failure worth catching is a
       // gesture that fires its own callback AND the row's underneath it.
@@ -422,7 +729,7 @@ void main() {
         ),
       );
 
-      expect(find.text('Stalled — waiting on settle'), findsOneWidget);
+      expect(find.text('Stalled'), findsOneWidget);
       expect(find.text('Retry'), findsNothing);
     });
   });

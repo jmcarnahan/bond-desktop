@@ -7,6 +7,16 @@ import '../theme/tokens.dart';
 /// re-check pass's — with the ways back in, and the button that runs the
 /// re-check.
 ///
+/// It sits at the HEAD OF THE MESSAGES TAB, above the spine it is about — it
+/// was at the foot first, and the foot of a long spine is where nobody looks.
+/// A reference tab beside the storyline is not where they would go either.
+///
+/// The re-check is a real button and not a quiet text link: a link reads as
+/// a footnote, and the one lever that re-judges the whole group has to look
+/// like a lever. Add back is outlined for the same reason — it is the answer
+/// a reader looking at a removed thread wants — and Allow again stays quiet
+/// beside it, which is also how the two stop reading alike.
+///
 /// Empty is the ordinary state and renders no headings at all. The re-check
 /// button is offered either way: it judges the members, not the blocks.
 class StorylineBlocksSection extends StatelessWidget {
@@ -25,11 +35,24 @@ class StorylineBlocksSection extends StatelessWidget {
   /// Re-judges the threads the model filed here. Null leaves the button inert.
   final VoidCallback? onAudit;
 
+  /// True while a re-check this owner asked for is still in the worker. The
+  /// button goes inert and says so, because pressing *Add back* under a pass
+  /// that is mid-flight is how a thread gets removed and re-filed in the same
+  /// minute.
+  final bool auditing;
+
   static const Key userBlocksHeadingKey =
       ValueKey('storyline-blocks-user-heading');
   static const Key auditBlocksHeadingKey =
       ValueKey('storyline-blocks-audit-heading');
   static const Key auditButtonKey = ValueKey('storyline-audit-button');
+
+  /// The two ways back, keyed by source AND key: two connectors can carry one
+  /// conversation key, and a test that tapped the twin would still pass.
+  static Key addBackKeyFor(String source, String key) =>
+      Key('storyline-add-back-$source-$key');
+  static Key allowAgainKeyFor(String source, String key) =>
+      Key('storyline-allow-again-$source-$key');
 
   /// A member entry carries a whole subject line, which can be arbitrarily
   /// long.
@@ -41,6 +64,7 @@ class StorylineBlocksSection extends StatelessWidget {
     this.onUnblockThread,
     this.onAddBackThread,
     this.onAudit,
+    this.auditing = false,
   });
 
   @override
@@ -49,6 +73,43 @@ class StorylineBlocksSection extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
+        // The lever first, with what it does beside it: this block leads the
+        // Messages tab, and what leads has to say what it is for in one line.
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            OutlinedButton.icon(
+              key: auditButtonKey,
+              onPressed: auditing ? null : onAudit,
+              icon: const Icon(Icons.fact_check_outlined, size: 16),
+              label: Text(auditing ? 'Re-checking…' : 'Re-check members'),
+            ),
+            const SizedBox(width: BondSpacing.s12),
+            Expanded(
+              child: Text(
+                auditing
+                    ? 'The model is re-judging each thread against the '
+                        'charter. This takes a moment per thread; the spine '
+                        'updates as it goes.'
+                    : 'Re-judges the threads the model filed here against '
+                        'the charter and what you kept and removed.',
+                style: BondType.caption,
+              ),
+            ),
+          ],
+        ),
+        // Said once, above both lists: the two buttons on every entry do very
+        // different things, and a reader who pressed the wrong one is the
+        // reader who ends up with three threads missing.
+        if (blocks.isNotEmpty) ...[
+          const SizedBox(height: BondSpacing.s8),
+          Text(
+            'Add back puts a thread on the spine again. Allow again only '
+            'lifts the block — the model may file the thread again on its '
+            'own, or not.',
+            style: BondType.caption,
+          ),
+        ],
         ..._blockList(
           'REMOVED BY YOU',
           [
@@ -64,20 +125,6 @@ class StorylineBlocksSection extends StatelessWidget {
               if (!block.blockedByUser) block,
           ],
           key: auditBlocksHeadingKey,
-        ),
-        Row(
-          children: [
-            _quietButton(
-              'Re-check members',
-              onAudit,
-              key: auditButtonKey,
-            ),
-          ],
-        ),
-        Text(
-          'Re-judges the threads the model filed here against the charter '
-          'and what you kept and removed.',
-          style: BondType.caption,
         ),
       ],
     );
@@ -141,6 +188,31 @@ class StorylineBlocksSection extends StatelessWidget {
           ),
           Row(
             children: [
+              // FIRST and outlined, because it is the one a reader looking at
+              // a thread the re-check took out actually wants: it files the
+              // thread by hand, which clears the block on the way in — a
+              // block of either kind, since both entries offer both buttons.
+              OutlinedButton(
+                key: addBackKeyFor(block.source, block.conversationKey),
+                onPressed: onAddBackThread == null
+                    ? null
+                    : () => onAddBackThread!(
+                          block.source,
+                          block.conversationKey,
+                        ),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: BondSpacing.s8,
+                  ),
+                  minimumSize: const Size(0, 28),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  textStyle: BondType.caption.copyWith(
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                child: const Text('Add back'),
+              ),
+              const SizedBox(width: BondSpacing.s8),
               // Lifts the veto and nothing else: the thread is not filed back,
               // the model is simply allowed to decide about it again.
               _quietButton(
@@ -151,18 +223,7 @@ class StorylineBlocksSection extends StatelessWidget {
                           block.source,
                           block.conversationKey,
                         ),
-              ),
-              const SizedBox(width: BondSpacing.s4),
-              // Files the thread by hand, which clears the block on the way
-              // in — a block of either kind, since both offer both buttons.
-              _quietButton(
-                'Add back',
-                onAddBackThread == null
-                    ? null
-                    : () => onAddBackThread!(
-                          block.source,
-                          block.conversationKey,
-                        ),
+                key: allowAgainKeyFor(block.source, block.conversationKey),
               ),
             ],
           ),

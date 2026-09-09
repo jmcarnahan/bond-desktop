@@ -4,6 +4,13 @@ import '../theme/tokens.dart';
 import 'chips.dart';
 import 'source_glyph.dart';
 
+/// How a narrowed source is named everywhere it is named — on its pill, in
+/// a pane's title, in an empty pane's notice. One spelling, glyph and all,
+/// so the title over an empty pane reads exactly like the pill that emptied
+/// it, and the reader can see the two are the same fact.
+String sourceFilterLabel(String source) =>
+    source == 'teams' ? '$teamsGlyph Teams' : '$mailGlyph Mail';
+
 /// Which connector the inbox is showing: All, Mail, or Teams.
 ///
 /// Null is All and is the value the app starts on. A sealed enum would be
@@ -43,7 +50,7 @@ class SourceFilterBar extends StatelessWidget {
   Widget build(BuildContext context) {
     final teams = BondFilterPill(
       key: teamsKey,
-      label: '$teamsGlyph Teams',
+      label: sourceFilterLabel('teams'),
       selected: selected == 'teams',
       onDark: true,
       // Null is what makes an InkWell unresponsive AND visibly so; a callback
@@ -67,7 +74,7 @@ class SourceFilterBar extends StatelessWidget {
         ),
         BondFilterPill(
           key: mailKey,
-          label: '$mailGlyph Mail',
+          label: sourceFilterLabel('email'),
           selected: selected == 'email',
           onTap: () => onSelected('email'),
           onDark: true,

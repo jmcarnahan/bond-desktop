@@ -50,12 +50,18 @@ class StorylinesLoaded extends StorylinesState {
   /// to have no way back, so the list has to reach a surface.
   final List<Storyline> dismissed;
 
-  /// [dismissed] trails [loadError] positionally so that every existing
-  /// construction of this state keeps its meaning.
+  /// The storylines whose re-check the owner asked for and the worker has not
+  /// yet reported finished. UI state that rides on the read model because the
+  /// panel is pure and the screen holds nothing per storyline.
+  final Set<String> auditing;
+
+  /// [dismissed] and [auditing] trail [loadError] positionally so that every
+  /// existing construction of this state keeps its meaning.
   const StorylinesLoaded(
     this.storylines, [
     this.loadError,
     this.dismissed = const [],
+    this.auditing = const {},
   ]);
 }
 
@@ -107,6 +113,24 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   StreamSubscription<WorkProgress>? _progress;
   Timer? _reload;
 
+  /// The storylines this session asked for a re-check of. Held here rather
+  /// than in the state so the republish below is the only thing that has to
+  /// remember to copy it.
+  final Set<String> _auditing = {};
+
+  /// Releases an id from [_auditing] when nothing ever reports on it. A model
+  /// server that is not running parks the item with work still "remaining",
+  /// and a button left inert until the server comes back is a button that
+  /// lies. Two minutes is longer than any real pass over a room-sized
+  /// storyline. One timer PER storyline: a second re-check asked for a
+  /// minute after the first must not push the first one's release out to a
+  /// fresh two minutes.
+  final Map<String, Timer> _auditBackstops = {};
+
+  /// How long the backstop waits. A constructor argument only so a test can
+  /// prove the release without a two-minute clock.
+  final Duration _auditBackstopAfter;
+
   int _fetchSeq = 0;
 
   StorylinesNotifier(
@@ -114,14 +138,45 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     this._service, {
     AiWorker? aiWorker,
     this._onMembersChanged,
+    Duration auditBackstop = const Duration(minutes: 2),
   })  : _worker = aiWorker,
+        _auditBackstopAfter = auditBackstop,
         super(const StorylinesInitial()) {
     final worker = aiWorker;
     if (worker == null) return;
     _progress = worker.progress.listen((progress) {
       if (!_kinds.contains(progress.kind)) return;
+      // The pass this owner is waiting on has drained. The reload below
+      // republishes with the emptied set, so nothing else is needed here.
+      if (progress.kind == 'storyline_audit' &&
+          progress.remaining == 0 &&
+          _auditing.isNotEmpty) {
+        _auditing.clear();
+        _cancelBackstops();
+      }
       _scheduleReload();
     });
+  }
+
+  void _cancelBackstops() {
+    for (final timer in _auditBackstops.values) {
+      timer.cancel();
+    }
+    _auditBackstops.clear();
+  }
+
+  /// Re-publishes the rows that are already loaded with whatever [_auditing]
+  /// now holds. A no-op before the first load, where there is nothing to
+  /// carry.
+  void _republish() {
+    final current = state;
+    if (current is! StorylinesLoaded) return;
+    state = StorylinesLoaded(
+      current.storylines,
+      current.loadError,
+      current.dismissed,
+      Set.of(_auditing),
+    );
   }
 
   void _scheduleReload() {
@@ -135,6 +190,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   @override
   void dispose() {
     _reload?.cancel();
+    _cancelBackstops();
     _progress?.cancel();
     super.dispose();
   }
@@ -167,6 +223,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
               // Carried through for the same reason the rows above it are: a
               // failed re-read leaves what was on screen where it was.
               current.dismissed,
+              Set.of(_auditing),
             )
           : StorylinesError('Could not read storylines: $e');
       return;
@@ -174,7 +231,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
 
     if (seq != _fetchSeq) return;
     _onMembersChanged?.call();
-    state = StorylinesLoaded(rows, null, dismissed);
+    state = StorylinesLoaded(rows, null, dismissed, Set.of(_auditing));
   }
 
   // ── user actions ───────────────────────────────────────────────────────
@@ -258,7 +315,20 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   /// worker, the way [setCharter] pumps the recruit it queued. Nothing is
   /// re-read here: the audit reports through the worker, and the listener at
   /// the top of this class is what reloads when it has done something.
+  ///
+  /// The id joins [_auditing] first, so the button goes inert before the pump
+  /// rather than after the first report: pressing Add back under a pass that
+  /// is mid-flight is how a thread gets removed and re-filed in one minute.
   Future<void> auditNow(String id) async {
+    _auditing.add(id);
+    _republish();
+    _auditBackstops.remove(id)?.cancel();
+    _auditBackstops[id] = Timer(_auditBackstopAfter, () {
+      _auditBackstops.remove(id);
+      if (!mounted) return;
+      _auditing.remove(id);
+      _republish();
+    });
     await _store.requeueWork('storyline_audit', _source, id);
     unawaited(_worker?.pump());
   }

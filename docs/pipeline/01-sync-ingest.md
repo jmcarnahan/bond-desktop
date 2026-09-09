@@ -99,9 +99,52 @@ backlog enqueue in this same pass. Because that enqueue runs after the drains,
 they settle on the notification coordinator's deadline like any other message
 rather than immediately.
 
+**What the fold reads.** The thread state machine
+(`app/lib/services/conversation_state.dart`) folds only the messages the gate
+KEPT. An inbound the gate throws out AT INSERT — mail from behind the sync
+floor, stored `skipped`/`backlog`; a Teams bot's line under `auto_generated` —
+is history being backfilled rather than news, so both ingests pass it to
+`foldMessage` as `historical`: watermarks, counts, preview and subject move,
+the state does not. A thread must not be made to ask for a reply to a message
+no stage of this app will ever read. The rule is INBOUND-ONLY: every outbound
+is born `skipped`/`outbound`, and reading that stamp as a gate would make every
+reply historical and no thread would ever settle. `resolvesAsk` is unchanged
+for the same reason.
+
+A gate that speaks AFTER ingest tells the thread through
+`MessageStore.refoldThreadState`, in one direction — see
+[02-gates.md](02-gates.md). The one-shot `thread_state_refold` repairs the rows
+written before the fold learned to wait for the gate, walking every
+`needs_reply` thread on every connector with the lowering rule and reporting
+`refolded_threads` on the `sync_mail` event.
+
 **Threading.** Everything downstream keys threads by `(source,
 conversationKey)` — a mail thread and a chat with colliding keys can never
 interleave (PR #9).
+
+**Who is on a thread.** The fold writes `conversations.participants_json` as
+`{name, email}` objects: the SENDER of every inbound message, and the To:
+recipients of every outbound one — never the user. `_recipients` carries the
+display name off `toRecipients` alongside the address, so a colleague the user
+wrote to is stored under their name rather than as a bare address; without it
+an outbound-only thread showed an address in the thread header, in the
+recent-people typeahead and on that colleague's own row under People.
+`addParticipant` fills a name in on an address already stored nameless, so a
+later message names somebody an earlier one left bare. A recipient with no
+address is dropped — there is nothing to key a participant on. Nothing is
+looked up per recipient at ingest: the loop stays query-free.
+
+`messages.to_json` is a separate column and a separate shape — a list of
+address STRINGS, which `recipientsFromJson` and the local-echo path both read
+that way. Names ride in `participants_json` and nowhere else.
+
+A one-off behind the `participant_names_backfill` pref fills the stored rows
+that predate this build. `MessageStore.fillParticipantNames` builds
+address → name once, from every participant that carries both and then from
+the newest `from_name` per address, rewrites only the conversations it actually
+fills, and is idempotent — a second run changes nothing and moves no
+`updated_at`. It is reported as `named_participants` on the sync's activity
+row.
 
 **One row builder per channel.** `SyncService.mailRow` and
 `TeamsSync.messageRow` are the only places a message becomes a `messages` row.
@@ -160,3 +203,15 @@ delimited run in the body — so `_fetchDetailInto` parses it out
 `reference` row numbered after the connector's own, and raises the paperclip
 even though the message said `hasAttachments: false`. See
 [12-attachments.md](12-attachments.md).
+
+It also takes off what the sender never wrote. Exchange prepends its
+first-contact safety tip — *You don't often get email from …. Learn why this
+is important<…>* — to the BODY of the first mail from any new sender, and
+the delta page's `bodyPreview` opens with the same words.
+`stripSenderIdentification` (`app/lib/services/mail_text.dart`) removes it
+from both at ingest, at the head of the text only (a person quoting the
+banner wrote those words on purpose), so the transcript, the preview, the
+search index and every prompt see the sender's own first sentence. A one-off
+behind the `sender_tip_strip` pref rewrites the rows stored before this
+build, reported as `stripped_sender_tips` on the sync's activity row; it
+moves `updated_at` with the text so the keyword index refiles them.

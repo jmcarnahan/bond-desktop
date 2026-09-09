@@ -4,9 +4,29 @@ Everything the owner gets to say about how the app behaves, on one pane.
 
 `SettingsScreen` (`app/lib/widgets/settings_screen.dart`) is a main-pane view,
 hosted the way the activity log is: a `bool _showingSettings` on
-`_InboxScreenState`, set by the rail footer's gear (`_openSettings`), cleared by
-every other selector, and first in the `_main()` ladder. There is no router and
-no `Navigator.push` — nothing is stacked on top of anything.
+`_InboxScreenState`, cleared by every other selector, and first in the
+`_main()` ladder. There is no router and no `Navigator.push` — nothing is
+stacked on top of anything.
+
+**Two ways in**, and one builder behind both (`_settingsScreen`):
+
+- **The avatar menu's Settings.** The icon rail's account button
+  (`IconRail.accountMenuKey`) opens a `PopupMenuButton` whose items are the
+  account, Settings, Activity log and Sign out — see `docs/shell.md`. This is
+  `_openSettings`, the whole screen, `SettingsScope.all`.
+- **The AI stop.** `RailSection.ai` renders the same screen with
+  `SettingsScope.ai`: titled **AI**, and narrowed to the sections that are
+  about how the model reads this mailbox — About me, Models, Needs You,
+  Activity log and Storylines. The Microsoft connection, Notifications,
+  Sync & data and About are about the app or the account rather than the
+  model, and stay behind the avatar menu. Its Back goes to the Inbox rather
+  than to a `_showingSettings`
+  that was never set: the AI pane is a SECTION, not an overlay — nothing opened
+  it, the user is standing on that stop.
+
+A scope rather than a second screen, because every section here is wired
+through forty callbacks the host assembles, and a second screen would be a
+second copy of that wiring drifting out of step with this one.
 
 It replaced an `AlertDialog`, which was the last popup in the app. **The house
 rule is full screens with a back arrow, never popups**, and
@@ -17,10 +37,12 @@ added without deleting that test.
 ## The shape
 
 `PaneSurface` (`app/lib/widgets/pane_surface.dart`) draws the header: a back
-arrow tooltipped **Back**, the title **Settings**, and — because Settings is
-deep enough that Back alone is a poor way out — a labelled **Home** link that
-goes straight to `RailSection.home`. `onHome` is optional on `PaneSurface`; a
-host with no Home to offer passes null and no affordance renders at all.
+arrow tooltipped **Back**, the title (**Settings**, or **AI** under
+`SettingsScope.ai`), and — because Settings is
+deep enough that Back alone is a poor way out — a labelled **Inbox** link that
+goes straight to `RailSection.home` (the enum keeps its name; the label is
+'Inbox'). `onHome` is optional on `PaneSurface`; a host with nowhere to send the
+reader passes null and no affordance renders at all.
 
 Under the header is a `SingleChildScrollView` over a `Column` of sections.
 **Never a `ListView`**: two sections hold a `TextField`, and a lazy list may
@@ -53,17 +75,18 @@ body has the same shape in `settings_models_body.dart`.
 | About me | always | the saved text, whitespace collapsed to one line, cut at 80 characters with `…`; `Not written yet` when empty |
 | Microsoft connection | any of `onBackendModeChanged`, `connectionStatus`, `hasScope`, `onSignIn` is wired | `MCP` or `This device`, then (MCP only) `Deployed` / `Local` / `Custom`, then `Checking…` / `Not signed in` / `Signed in as <label>` / `Signed in`, joined by ` · ` |
 | Models | `onSlotTargetChanged` wired | `Fast <model> @ <host:port> · Prose <model> @ <host:port> · Embeddings <host:port>` |
-| Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired |
+| Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
-| Home & feed | `onHomeShowDroppedChanged` wired | `Dropped messages shown` / `Dropped messages hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
 | Sync & data | `onRefreshNow` wired | `Not synced yet`; `Mail synced <rel> · Teams <rel>`; a side that never ran says `not synced yet` in words (`Mail synced 4m ago · Teams not synced yet`, `Mail not synced yet · Teams synced 2h ago`) |
 | About | `appVersion` or `databasePath` is known | `Bond <version>` / `Version unknown` |
 
 **A section whose wiring is absent is absent** — the same discipline every
 optional row in the old dialog followed, and what lets the permissions tests
-wire `hasScope` alone.
+wire `hasScope` alone. Under `SettingsScope.ai` four of them are absent for a
+second reason: the AI pane keeps About me, Models, Needs You, Activity log and
+Storylines, in this same order, and drops the rest.
 
 **These strings are pinned by tests** (`settings_screen_test.dart`,
 `settings_connection_test.dart`, `settings_models_test.dart`,
@@ -112,19 +135,19 @@ never overwritten.
 
 **The custom server URL is the exception**, because it has no Save of its own.
 It commits on Enter, on focus leaving the field, and on the three clicks that
-take the field off the screen without moving focus: Back, Home, and collapsing
+take the field off the screen without moving focus: Back, Inbox, and collapsing
 the section. Flutter fires no unfocus when a subtree is disposed — measured, not
 assumed — so `Focus.onFocusChange` alone would lose a typed URL on the way out.
 `MicrosoftConnectionSectionState.commitPendingServerUrl` runs in those three
 event handlers rather than in `dispose`, so the provider write it causes happens
 outside the frame that is unmounting the tree. The section calls it itself on
-Collapse; Back and Home are the screen's, which reaches it through a `GlobalKey`
+Collapse; Back and Inbox are the screen's, which reaches it through a `GlobalKey`
 on the section — the state is the only thing that knows whether the field is
 showing and what is in it.
 
 **The custom lookback date keeps the same contract**, through
 `LookbackFieldState.commitPending` and a `GlobalKey` per side. Enter, focus
-leaving the field, and the same three clicks — Back, Home, collapsing **Sync &
+leaving the field, and the same three clicks — Back, Inbox, collapsing **Sync &
 data** — with one difference from the URL above it: **a date that does not parse
 commits nothing.** A half-typed URL is still a server somebody could mean, but
 `2026-08` is a year and a month with nothing to sync between them, so the field
@@ -180,12 +203,6 @@ underneath and the section re-asks, so the user sees what their own click did.
 the stored rules to say whether they are custom, so a Save inside the screen
 only moves that line because the host rebuilds. Optimising the watch back to a
 read would silently stop the summary following saves.
-
-`onHomeShowDroppedChanged` writes **twice**: the preference, and
-`ref.read(homeFeedProvider.notifier).setIncludeDropped(on)`. The feed reads that
-preference once, when its notifier is built, so the pref alone would leave Home
-unchanged until the next launch. `settings_needs_you_test.dart` pins both
-halves.
 
 Every closure that touches `ref` keeps its `mounted` guard. The work behind them
 outlives the pane — a sign-in still out in the browser, a sign-out from the rail
@@ -278,7 +295,7 @@ starts on. Both halves come from the same arithmetic the sync uses — UTC
 midnight minus the count — so the day named here is the day the window reaches.
 
 A preset commits the instant it is picked. The custom date commits on Enter, on
-focus leaving the field, and on Back / Home / collapsing the section (see **What
+focus leaving the field, and on Back / Inbox / collapsing the section (see **What
 commits, and when**). A date that does not parse, one today or later, or one
 further back than a year commits nothing and shows `Use YYYY-MM-DD, a past date
 within the last year` — refused rather than clamped, because silently syncing a
@@ -300,13 +317,18 @@ behind it, paced by the backlog caps rather than truncated by them — see
 a second clause about the window would make the summary two reports instead of
 one, and the table above is pinned verbatim by tests either way.
 
-The three stamps come from `syncStampsProvider`
-(`app/lib/providers/activity_provider.dart`), which `_settings()` **watches** —
-it re-reads on every recorded event, so a sync landing behind an open Settings
-pane moves the numbers in it. It is split from `activitySnapshotProvider` on
-purpose: the snapshot pays for the whole activity pane (three hundred events
-and every conversation subject) per event, and this section needs three
-preference reads. `sync_stamps_provider_test.dart` pins it. Times are relative
+The four stamps — `Mail`, `Mail reconcile`, `Teams`, `Storyline sweep` — come
+from `syncStampsProvider` (`app/lib/providers/activity_provider.dart`), which
+`_settings()` **watches** — it re-reads on every recorded event, so a sync
+landing behind an open Settings pane moves the numbers in it. `Mail reconcile`
+sits directly under `Mail` because it qualifies it: the 24-hour re-enumeration
+that catches what the delta feed skipped runs on its own cadence, and a mail
+sync minutes fresher than it is the normal state (see
+[pipeline/01-sync-ingest.md](pipeline/01-sync-ingest.md)). The provider is
+split from `activitySnapshotProvider` on purpose: the snapshot pays for the
+whole activity pane (three hundred events and every conversation subject) per
+event, and this section needs four preference reads.
+`sync_stamps_provider_test.dart` pins it. Times are relative
 and in one unit (`relativeTime` in `app/lib/widgets/time_format.dart`), and
 `null` reads as `never` in the rows. The clock is a `now` parameter rather than
 a call to `DateTime.now`, so a test can pin it and assert an exact string.

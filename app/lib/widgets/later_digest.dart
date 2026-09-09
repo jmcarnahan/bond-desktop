@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/message_models.dart';
 import '../services/conversation_state.dart';
+import '../services/deadline_parse.dart';
 import '../theme/tokens.dart';
 import 'app_rail.dart';
 import 'time_format.dart';
@@ -41,6 +42,17 @@ class LaterDigestPanel extends StatelessWidget {
   /// one, for when the sender rule is right and this message is the exception.
   final void Function(String source, String conversationKey) onKeepThread;
 
+  /// Now, passed rather than read from the clock so "Back tomorrow" can be
+  /// pinned by a test — the rule every relative caption in this app follows.
+  final DateTime now;
+
+  /// "Bring this one thread back on that day." Both pills route here, and the
+  /// host writes it as a per-thread deferral: a date on a row a SENDER rule
+  /// filed promotes it to a deferral of its own, which is what naming a day
+  /// for one thread means.
+  final void Function(String source, String conversationKey, DateTime until)
+      onSnooze;
+
   const LaterDigestPanel({
     super.key,
     required this.conversations,
@@ -48,7 +60,20 @@ class LaterDigestPanel extends StatelessWidget {
     required this.onOpen,
     required this.onKeepSender,
     required this.onKeepThread,
+    required this.now,
+    required this.onSnooze,
   });
+
+  /// The `Back <when>` caption on one row — what a test asks for to say this
+  /// thread has a date on it at all.
+  static Key backKeyFor(String source, String conversationId) =>
+      ValueKey('later-back-$source-$conversationId');
+
+  static Key snoozeTomorrowKeyFor(String source, String conversationId) =>
+      ValueKey('later-tomorrow-$source-$conversationId');
+
+  static Key snoozeNextWeekKeyFor(String source, String conversationId) =>
+      ValueKey('later-next-week-$source-$conversationId');
 
   /// Namespaced so it cannot collide with anything a menu might carry later.
   static const String _justThisThread = '__just_this_thread__';
@@ -187,6 +212,7 @@ class LaterDigestPanel extends StatelessWidget {
   /// One thread: subject, then whatever it was last saying. Both visible, both
   /// full-width — this is the reading view, not a preview of one.
   Widget _line(Conversation c) {
+    final back = untilLabel(c.snoozedUntil, now);
     final subject = stripReFw(c.subject);
     final cta = c.ctaText;
     final secondary =
@@ -224,6 +250,21 @@ class LaterDigestPanel extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ],
+                    // Only a row that HAS a date says when it comes back. A
+                    // sender rule writes none, and inventing one here would
+                    // promise a return nothing is going to make.
+                    if (back != null) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        'Back $back',
+                        key: backKeyFor(c.source, c.id),
+                        style: BondType.caption.copyWith(
+                          color: BondColors.onAttentionTint,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                    _pills(c),
                   ],
                 ),
               ),
@@ -243,6 +284,56 @@ class LaterDigestPanel extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+
+  /// The two dates a deferral can be rewritten to in one tap.
+  ///
+  /// Two, not a picker: these sit on every row of a list the reader is working
+  /// DOWN, and a row offering a calendar would stop being a row. Anything more
+  /// specific is a day the sender already named, which the default deferral
+  /// reads for itself.
+  Widget _pills(Conversation c) {
+    return Wrap(
+      spacing: BondSpacing.s4,
+      children: [
+        _pill(
+          key: snoozeTomorrowKeyFor(c.source, c.id),
+          label: 'Tomorrow',
+          onTap: () => onSnooze(
+            c.source,
+            c.id,
+            snoozePreset(SnoozePreset.tomorrow, now),
+          ),
+        ),
+        _pill(
+          key: snoozeNextWeekKeyFor(c.source, c.id),
+          label: 'Next week',
+          onTap: () => onSnooze(
+            c.source,
+            c.id,
+            snoozePreset(SnoozePreset.nextWeek, now),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _pill({
+    required Key key,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return TextButton(
+      key: key,
+      onPressed: onTap,
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: BondSpacing.s8),
+        minimumSize: const Size(0, 28),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        textStyle: BondType.caption,
+      ),
+      child: Text(label),
     );
   }
 }

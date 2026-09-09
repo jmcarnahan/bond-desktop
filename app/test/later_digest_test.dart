@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/deadline_parse.dart';
 import 'package:bond_inbox/widgets/later_digest.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,6 +14,7 @@ Conversation _conv({
   String bucket = 'later',
   ConversationState state = ConversationState.waiting,
   String lastMessageAt = '2026-01-14T10:00:00',
+  String? snoozedUntil,
 }) {
   return Conversation(
     id: id,
@@ -24,8 +26,13 @@ Conversation _conv({
     lastMessagePreview: preview,
     bucket: bucket,
     lastMessageAt: lastMessageAt,
+    snoozedUntil: snoozedUntil,
   );
 }
+
+/// Every relative caption in this panel is measured from here, so nothing in
+/// this file moves with the calendar.
+final _now = DateTime(2026, 1, 14, 9);
 
 void main() {
   Future<void> pump(
@@ -35,6 +42,7 @@ void main() {
     void Function(String, String)? onOpen,
     void Function(String, String)? onKeepSender,
     void Function(String, String)? onKeepThread,
+    void Function(String, String, DateTime)? onSnooze,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 1200));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -46,6 +54,8 @@ void main() {
           onOpen: onOpen ?? (_, _) {},
           onKeepSender: onKeepSender ?? (_, _) {},
           onKeepThread: onKeepThread ?? (_, _) {},
+          now: _now,
+          onSnooze: onSnooze ?? (_, _, _) {},
         ),
       ),
     ));
@@ -243,6 +253,70 @@ void main() {
       // With the source, for the same reason the keep-thread action carries
       // one: the id alone does not say which connector's thread this is.
       expect(opened, [('email', 'a')]);
+    });
+  });
+
+  group('when it comes back', () {
+    testWidgets('a row with a date says when, and one without says nothing',
+        (tester) async {
+      await pump(tester, conversations: [
+        _conv(
+          id: 'a',
+          who: 'Alice',
+          email: 'alice@x.com',
+          subject: 'Dated',
+          snoozedUntil: '2026-01-15T09:00:00.000000Z',
+        ),
+        // Every thread a SENDER rule filed is this shape: a standing rule has
+        // no "when" in it, so the row promises no return.
+        _conv(id: 'b', who: 'Alice', email: 'alice@x.com', subject: 'Undated'),
+      ]);
+
+      expect(find.byKey(LaterDigestPanel.backKeyFor('email', 'a')),
+          findsOneWidget);
+      expect(find.text('Back tomorrow'), findsOneWidget);
+      expect(
+          find.byKey(LaterDigestPanel.backKeyFor('email', 'b')), findsNothing);
+    });
+
+    testWidgets('the two pills hand back the days they name', (tester) async {
+      final asked = <(String, String, DateTime)>[];
+      await pump(
+        tester,
+        conversations: [
+          _conv(id: 'a', who: 'Alice', email: 'alice@x.com', subject: 'One'),
+        ],
+        onSnooze: (source, key, until) => asked.add((source, key, until)),
+      );
+
+      await tester.tap(
+          find.byKey(LaterDigestPanel.snoozeTomorrowKeyFor('email', 'a')));
+      await tester.pump();
+      await tester.tap(
+          find.byKey(LaterDigestPanel.snoozeNextWeekKeyFor('email', 'a')));
+      await tester.pump();
+
+      expect(asked, [
+        ('email', 'a', snoozePreset(SnoozePreset.tomorrow, _now)),
+        ('email', 'a', snoozePreset(SnoozePreset.nextWeek, _now)),
+      ]);
+    });
+
+    testWidgets('a date already past reads as today rather than a countdown',
+        (tester) async {
+      await pump(tester, conversations: [
+        _conv(
+          id: 'a',
+          who: 'Alice',
+          email: 'alice@x.com',
+          subject: 'Overdue',
+          snoozedUntil: '2025-12-01T09:00:00.000000Z',
+        ),
+      ]);
+
+      // The next list load hands it back anyway; a negative countdown would be
+      // a number nobody can act on.
+      expect(find.text('Back today'), findsOneWidget);
     });
   });
 }

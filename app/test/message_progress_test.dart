@@ -969,6 +969,48 @@ void main() {
       expect(ticks.single.stage, 'settle');
     });
 
+    test('the one-thread raise reaches that thread and no other', () async {
+      // The same statement scoped to one conversation: what lifts a thread
+      // out of Later calls this for that thread alone, and a judged yes on
+      // some OTHER thread is not its business.
+      await seedJudged();
+      await store.upsertConversation({
+        'source': 'email',
+        'conversation_key': 'c2',
+        'subject': 'Parking',
+        'state': 'needs_reply',
+        'last_message_at': '2026-09-01T10:00:00Z',
+      });
+      await ingest('m2', conversationKey: 'c2');
+      await store.writeNeedsYouVerdict('email', 'm2',
+          verdict: true, reason: 'names the owner');
+      await progress.noteSettled(
+        'email',
+        'm2',
+        needsYou: false,
+        reason: 'not_worthy',
+        dropped: false,
+      );
+      await store.writeAttentionScore('email', 'c2', 0.9);
+      ticks.clear();
+
+      expect(
+        await progress.raiseNeedsYouForThread('email', 'c1', threshold: 0.5),
+        1,
+      );
+      expect((await progressOf('m1'))['needs_you'], 1);
+      expect((await progressOf('m2'))['needs_you'], 0);
+      await pumpEventQueue();
+      expect(ticks.single.sourceMessageId, 'm1');
+
+      // Still under the same guards: a thread parked in Later gets nothing.
+      await store.setConversationBucket('email', 'c2', bucket: 'later');
+      expect(
+        await progress.raiseNeedsYouForThread('email', 'c2', threshold: 0.5),
+        0,
+      );
+    });
+
     test('a thread the user has already answered does not', () async {
       // `notifyWorthy` has no outbound clause because the coordinator settles
       // before any reply can exist. A chip raised months later has to carry

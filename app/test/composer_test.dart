@@ -21,6 +21,8 @@ void main() {
     VoidCallback? onGenerate,
     VoidCallback? onDismiss,
     void Function(String)? onEdited,
+    String? hint,
+    FocusNode? focusNode,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -36,6 +38,8 @@ void main() {
           onGenerate: onGenerate,
           onDismiss: onDismiss,
           onEdited: onEdited,
+          hint: hint ?? 'Write a reply…',
+          focusNode: focusNode,
         ),
       ),
     ));
@@ -314,6 +318,50 @@ void main() {
       await tester.pump(const Duration(seconds: 10));
 
       expect(sent, isEmpty);
+    });
+  });
+
+  group('the placeholder and the cursor', () {
+    testWidgets('the empty box says the generic thing by default',
+        (tester) async {
+      await pumpComposer(tester, onSend: (_) {});
+
+      expect(
+        tester
+            .widget<TextField>(find.byType(TextField))
+            .decoration
+            ?.hintText,
+        'Write a reply…',
+      );
+    });
+
+    testWidgets('a host that knows who is being answered says so instead',
+        (tester) async {
+      await pumpComposer(
+        tester,
+        hint: 'Reply to Eric Vance…',
+        onSend: (_) {},
+      );
+
+      expect(find.text('Reply to Eric Vance…'), findsOneWidget);
+    });
+
+    testWidgets("the host's focus node is the field's", (tester) async {
+      // The node belongs to the host because this widget is rebuilt with a new
+      // key on every send epoch, and the cursor has to survive that.
+      final node = FocusNode();
+      addTearDown(node.dispose);
+      await pumpComposer(tester, focusNode: node, onSend: (_) {});
+
+      expect(
+        tester.widget<TextField>(find.byType(TextField)).focusNode,
+        same(node),
+      );
+
+      node.requestFocus();
+      await tester.pump();
+
+      expect(node.hasFocus, isTrue);
     });
   });
 }

@@ -88,28 +88,112 @@ The home screen's five-segment stage bar (triage · extract · storyline ·
 draft · settle) is this pipeline rendered per row; `pipeline_progress.dart`
 records the transitions it draws.
 
-## What the home screen shows
+## What the Inbox shows
 
-Every row's Result cell is one sentence with the reason in it, and every
-reason is a column this pipeline already writes. `resultLine` in
-`app/lib/widgets/home_result.dart` picks the first sentence that matches, in
-this order:
+Every row's verdict is TWO CELLS. The **Result** cell is the label — `Needs
+you`, `Newsletter`, `Filed in <storyline>`, `Stalled` — and the **Ask ·
+Summary** cell beside it carries the words. `resultLine` in
+`app/lib/widgets/home_result.dart` picks the first label that matches, in this
+order, and writes the reason clause into `HomeResult.detail`; the whole
+sentence, both halves joined, is the tooltip.
 
-| Sentence | Columns behind it |
-|----------|-------------------|
-| `Filtered — …`, `Newsletter`, `Nothing to do — …` | `message_progress.drop_reason`, plus `messages.gate_reason` for a gated drop; for `not_worthy` the judge's `needs_you_reason` when the verdict was a no, or "the thread is in Later" / "below the attention threshold" when it was a yes |
-| `Failed at <stage>` | the first `message_progress.<stage>_state` that is `error` |
-| `Stalled — waiting on <stage>` | `message_progress.outcome = 'pending'`, no open `work_items` for the message, its thread or its documents, `messages.triage_status` neither pending nor processing, and `message_progress.updated_at` older than 15 minutes |
-| `Triaging…` / `Waiting on <stage>` | the five stage states, and whether any `work_items` row is open ("not queued yet" when none is) |
-| `Needs you — …` | `message_progress.needs_you` with `messages.needs_you_reason` |
-| `Filed in <storyline>` | the row's storyline pointer, or the thread's newest `storyline_members` row, with its `evidence` — or "filed by you" when `added_by = 'user'` |
-| `Later — …` | `conversation_ai.bucket` with `conversation_ai.bucket_reason` |
-| `Draft ready` | `message_progress.draft_state = 'done'` |
-| `Nothing to do` | nothing above matched; the tooltip carries `needs_you_reason` when the verdict was a no |
+| Result | Detail / Ask | Columns behind it |
+|--------|--------------|-------------------|
+| `Filtered`, `Newsletter`, `Nothing to do` (dropped) | the gate words, or the not-worthy reason | `message_progress.drop_reason`, plus `messages.gate_reason` for a gated drop; for `not_worthy` the judge's `needs_you_reason` when the verdict was a no, or "the thread is in Later" / "below the attention threshold" when it was a yes |
+| `Failed at <stage>` | `The <stage> stage ended in an error.` | the first `message_progress.<stage>_state` that is `error` |
+| `Stalled` | `No progress for 15 minutes and nothing is queued — waiting on <stage>.` | `message_progress.outcome = 'pending'`, no open `work_items` for the message, its thread or its documents, `messages.triage_status` neither pending nor processing, and `message_progress.updated_at` older than 15 minutes |
+| `Triaging…` / `Waiting on <stage>` | `Not queued yet` when nothing is | the five stage states, and whether any `work_items` row is open |
+| `Needs you` | the thread's `conversations.cta_text`, else `messages.needs_you_reason` | `message_progress.needs_you` |
+| `Filed in <storyline>` | the membership's `evidence`, or "filed by you" | the row's storyline pointer, or the thread's newest `storyline_members` row |
+| `Later` | the bucket reason in words | `conversation_ai.bucket` with `conversation_ai.bucket_reason` |
+| `Draft ready` | — | `message_progress.draft_state = 'done'` |
+| `Nothing to do` | `needs_you_reason` when the verdict was a no | nothing above matched |
 
-The eight tiles above the table read the same columns over the last 24 hours,
-and Retry (`PipelineRepairService`) puts back exactly the stages a row still
-owes — never one that finished, and never a dropped row, which is Restore's.
+The Ask · Summary cell prefers the THREAD's ask on a needs-you row and the
+MESSAGE's `messages.summary` everywhere else — an ask is per thread and a
+summary is per message, which is why they are two columns in the store and one
+on screen — and falls back to the Detail column above when a row has neither.
+That fallback is what a gate-dropped message shows: it never reached triage, so
+it has no summary, and "sender muted" in that space is worth more than a blank.
+`askLine` is the one place that order is written down.
+
+**Six of the eight tiles are the filter.** Pressing one narrows the table to
+what that tile counted; pressing it again widens back to everyone else's
+messages, and one filter is in force at a time (`HomeFilter`, with
+`MessageStore.homeFilterSql` as the single definition of what each one
+admits), so **the number on the tile is the number of rows under it**. Emails
+and Teams are the other two: they set the list column's source chips rather
+than a filter, and everything else on the bar reads under those chips.
+
+**Seven of them are a weekly readout.** Emails, Teams, Processed, Dropped,
+Urgent, In flight and Errors count the last `homeMetricsWindow` (7 days, the
+hot strip's window too), and the caption beside them says so. Those numbers
+only ever grow, and a lifetime total of processed mail is a number nobody can
+act on. Their filters are bounded by the same week — `HomeFilter.windowed`
+names exactly those five that filter — and the feed passes the window as
+`sinceIso`, so each tile's number stays the number of rows under it. Urgent
+carries the kept clause its filter carries (`p.dropped = 0`), because triage's
+urgency survives a later drop and a count without it would sit over a table
+that cannot show the rows.
+
+Emails and Teams count their connector **whatever the chips say**: they are
+scalar subqueries over the window with no source clause, where every other
+column is narrowed. Those two tiles are the selector, and a Teams tile reading
+`0` because Teams is switched off would be the control claiming there is
+nothing to switch to.
+
+**Needs You is the eighth, and stands apart.** It sits FIRST, before a
+vertical rule, and it counts ALL TIME: it is a pile to burn down to zero, not a
+reading of activity, and work owed since before last Tuesday is exactly what a
+week would hide. In `homeMetrics` it is a scalar subquery with no window in it,
+inside the one statement that answers everything else, so a thread settling
+between two reads cannot land in one number and not another. It is also the one
+tile that counts THREADS: the rail's own rule — `isNeedsYou` spelled in SQL as
+`_liveNeedsYouThread` over the thread's live state, bucket, score and ask,
+bound to the same attention threshold the rail reads — and under that filter
+the table shows one row per thread, its newest kept message. "Kept" is
+`MessageStore.keptMessageSql` on `messages` (`triage_status <> 'skipped' OR
+gate_reason = 'teams_source'`), a fact about the message the gate judged rather
+than about the progress row that recorded the judgement, and two readers say it
+one way: this filter and the tile's own count. Every other tile counts
+messages. Emails and Teams are
+the two tiles that write elsewhere: they move the list column's source chips,
+which every pane reads.
+
+**The store admits, the notifier orders.** A stage write ticks the bus, the
+notifier collects a burst of keys, and `MessageStore.progressPatchFor` reads
+those rows back with a flag saying whether the filter that is up would have
+returned each one — the same `homeFilterSql` fragment the page read is built
+from, over the same source chips and the same window. There is no second
+spelling of the filter in Dart: `home_provider.dart` decides only where an
+admitted row goes (replaced in place, prepended, held behind the pending count,
+or merely counted under `oldest` and under Needs You, where whether a row is
+its thread's newest kept message is a fact about the thread rather than the
+row). A row comes back whatever its flag says, because a row already on the
+table is patched in place even once it stops matching — the table never moves
+under a reader, and the next load reads it out. The one thing the notifier
+still decides for itself is the drop show: a gate-dropped arrival is never
+admitted, so that branch sits above the flag and asks the default filter and
+the source chips directly — a question of scope, not of filter.
+
+**The pulse strip** under the tiles narrates the work a filter may be hiding,
+in three segments joined by `·` (`app/lib/widgets/home_pulse.dart`):
+
+- what is moving — `triaging 2 · grouping 1`, in pipeline order, off
+  `work_items.task_kind` for every stage and off `messages.triage_status` for
+  triage, which has no queue row of its own;
+- what just finished — `Last 10 min: 5 settled · 2 dropped · 1 needs you`, from
+  `message_progress.updated_at` inside `homePulseWindow`;
+- where the mail is coming from — `Syncing mail…` while a pull is out, else
+  `Mail 2m ago · Teams 4m ago · Sweep 12m ago` from the stored stamps, with
+  `never` for a pass that has not run.
+
+It has no timer of its own: `pipelinePulseProvider` re-reads behind the feed's
+metrics epoch, the activity log's events, and the screen's own sixty-second
+invalidate. Words and one dot, never a spinner — the stage bar's rule.
+
+Retry (`PipelineRepairService`) puts back exactly the stages a row still owes —
+never one that finished, and never a dropped row, which is Restore's.
 
 ## Finding out what happened to a message
 
@@ -120,26 +204,37 @@ once, behind `messageHistoryProvider`, which folds those eight reads into one
 `MessageHistory` and re-reads it behind the progress ticks the message's own
 stages publish. `MessageHistoryHost` (`app/lib/widgets/message_history_host.dart`)
 is the one place that provider is read and every lever below is wired; the
-screen itself is prop-driven, and a host that draws its own header seats it
-with `chrome: false`.
+screen itself is prop-driven. The shell seats it BESIDE the main pane, as the
+`HistoryPanel` kind of side panel inside a `SidePanelHost` (`chrome: false`, the
+host draws the header), so whatever the question was asked from — the home
+table, a thread, the archive — stays on screen, and the storyline picker its
+`Add to storyline…` opens draws in the main pane while the story stays beside.
+See [../shell.md](../shell.md#what-opens-where).
 
 Four doors reach it, and all four hand it the same `(source,
 source_message_id)` pair:
 
-- **A home row's stage bar or its Result cell.** Two targets on the row rather
-  than one, because those are the two places a reader looks when the sentence
-  is not the one they expected. They nest inside the row's own tap and outside
-  the storyline link and Retry, so each gesture fires exactly one thing.
+- **An Inbox row's stage bar or its Result cell.** Two targets on the row
+  rather than one, because those are the two places a reader looks when the
+  verdict is not the one they expected. They nest inside the row's own tap and
+  outside the storyline link and Retry, so each gesture fires exactly one
+  thing. A row folded to one line (a thread open beside the table) draws
+  neither; its door is the thread beside, through the Why panel.
 - **A home search result.** Home search runs a meaning pass and a word pass
   and fuses them into ONE ranking, best first — no *Text matches* heading, and
   one count that is the rows on screen. Gate-dropped mail has no vector at all
   and is unreachable by meaning, so the words are the only way it is ever
-  found, whenever *Show dropped* is on. A notice above the rows says when only
-  one of the two halves ran. See [05-embeddings.md](05-embeddings.md).
+  found — which matters under a filter whose `showsDropped` is true (Dropped,
+  Processed, In flight, Errors, Needs You), the filters whose lists carry
+  dropped rows. A notice above the rows says when only one of the two halves
+  ran. See [05-embeddings.md](05-embeddings.md).
 - **An Archive row**, in the Dropped pile or in an archive search.
-- **"What happened" on a message in a thread**, on the header of each message
-  in the transcript. Per message and not per thread: the pipeline decides one
-  message at a time.
+- **"What happened" on a message in a thread**, the fourth button on an
+  inbound row's hover strip, after Why — and the `What happened ›` door at the
+  foot of the Why panel, which swaps the history into the same side slot. Per
+  message and not per thread: the pipeline decides one message at a time. The
+  strip is drawn on inbound rows only, so the owner's own messages reach their
+  history through the home feed.
 
 The screen is one column of sections, in the order the question gets asked:
 the header (subject, sender, source, age, and a link into the thread); the

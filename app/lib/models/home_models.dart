@@ -31,6 +31,40 @@ const Duration homeDropCollapse = Duration(milliseconds: 180);
 /// tile that counted three cannot happen.
 const Duration homeStalledAfter = Duration(minutes: 15);
 
+/// How far back the hot strip and SEVEN of the eight tiles look.
+///
+/// A week, not a day. Those seven answer "what has the app been doing lately",
+/// and a day is short enough that a quiet Sunday — or a test account — reads
+/// as seven zeros over a table of rows, which looks like a fault rather than
+/// a quiet day. A week is the unit the rest of the app already reasons in
+/// (the needs-you re-judge, the default lookback presets), and the bar names
+/// the window beside the numbers so nobody has to guess it again.
+///
+/// Needs You is the eighth and does NOT read this. It is a pile to burn down
+/// rather than a readout of activity, and a pile with a week around it hides
+/// exactly the work that has been owed longest.
+const Duration homeMetricsWindow = Duration(days: 7);
+
+/// How far back the pipeline pulse counts as "just now".
+///
+/// Ten minutes, where the tiles look back a week. The pulse is a reading of
+/// what the machine is doing at this moment, and a pipeline that takes
+/// seventeen seconds a message fills ten minutes with real work — long enough
+/// that a quiet stretch is visible as a quiet stretch, short enough that
+/// yesterday's drain is not still being reported as news.
+const Duration homePulseWindow = Duration(minutes: 10);
+
+/// The window, in words, for the caption beside the tiles: `Last 7 days`,
+/// `Last 24 hours`. Hours under two days, days from there — "Last 1 days" is
+/// not a sentence and "Last 168 hours" is not a number anybody reads.
+///
+/// The caption belongs to the SEVEN windowed tiles, and sits after them for
+/// that reason: Needs You is all time and stands before the divider, so a
+/// caption in front of it would claim a week it does not keep.
+String homeMetricsWindowLabel(Duration window) => window.inHours < 48
+    ? 'Last ${window.inHours} hours'
+    : 'Last ${window.inDays} days';
+
 /// One message's trip through the pipeline, as one feed row.
 ///
 /// Every stage state is a raw string rather than an enum, for the reason a
@@ -99,6 +133,41 @@ class HomeFeedRow {
   final String? fromName;
   final String? fromAddress;
 
+  /// What triage said this message was about, in its own words
+  /// (`messages.summary`). Null until triage has run, and null for good on a
+  /// message the gate threw out before reading it.
+  final String? summary;
+
+  /// The ask the app wrote for this row's THREAD (`conversations.cta_text`).
+  ///
+  /// Per thread where [summary] is per message, which is exactly why they are
+  /// two fields and not one: the ask is restated every time the thread moves,
+  /// so a row can carry an ask that was written about a message NEWER than
+  /// itself. That is the honest reading — the thread is still owed the same
+  /// thing — and collapsing the two would make an old row claim a new
+  /// message's words as its own summary.
+  final String? ctaText;
+
+  /// The thread's live state (`conversations.state`) — `needs_reply`, `done`,
+  /// and the rest of the rail's vocabulary. Null when the message has no
+  /// thread row yet.
+  ///
+  /// The rail's Needs You rule reads it, and [needsYou] — the settle pass's
+  /// snapshot, frozen on the message — does not. Both are on the row on
+  /// purpose: the snapshot is the verdict the reader was given at the time,
+  /// and this is what is true now, which is what the tile counting threads has
+  /// to agree with.
+  final String? threadState;
+
+  /// Whether the message carried anything attached, straight off
+  /// `messages.has_attachments`. False on any read that did not select the
+  /// column — which reads as "nothing attached" rather than as a paperclip on
+  /// a message that has none.
+  ///
+  /// It is here so `has:file` can be answered without a second query per hit:
+  /// a search returns fifty rows and a per-row attachment lookup would be
+  /// fifty reads to decide which ones to throw away.
+  final bool hasAttachments;
   /// When the pipeline last wrote anything about this row. The stalled
   /// clock's zero, and empty only on a path that predates the column.
   final String updatedAt;
@@ -114,6 +183,17 @@ class HomeFeedRow {
   /// Why triage let the message through, or did not. Distinct from
   /// [dropReason], which is the gate's verdict recorded on the progress row.
   final String? gateReason;
+
+  /// `messages.triage_status` — `pending`, `triaged`, `skipped`. With
+  /// [gateReason] it is the whole of `MessageStore.keptMessageSql`, the one
+  /// definition of "kept" the Needs You filter narrows on. The judging
+  /// happens in SQL and nothing in Dart re-derives it; the column rides on
+  /// the row beside [gateReason] as a fact about the message, with no reader
+  /// of its own today.
+  ///
+  /// Defaults to `pending` on any read that did not select it — which reads
+  /// as "kept, nothing judged yet", never as a message the gate threw out.
+  final String triageStatus;
 
   /// Where the attention sweep filed the thread — `later`, `done`, and the
   /// rest of the archive rail's vocabulary. Null when nothing has ruled.
@@ -157,10 +237,15 @@ class HomeFeedRow {
     this.subject,
     this.fromName,
     this.fromAddress,
+    this.summary,
+    this.ctaText,
+    this.threadState,
+    this.hasAttachments = false,
     this.updatedAt = '',
     this.needsYouVerdict,
     this.needsYouReason,
     this.gateReason,
+    this.triageStatus = 'pending',
     this.bucket,
     this.bucketReason,
     this.attentionScore,
@@ -189,15 +274,23 @@ class HomeFeedRow {
         subject: row['subject'] as String?,
         fromName: row['from_name'] as String?,
         fromAddress: row['from_address'] as String?,
+        summary: row['summary'] as String?,
+        ctaText: row['cta_text'] as String?,
+        threadState: row['thread_state'] as String?,
+        hasAttachments: (row['has_attachments'] as num?)?.toInt() == 1,
         updatedAt: row['updated_at'] as String? ?? '',
         // Three-valued on purpose: null stays null, and only a stored 1 is a
-        // yes. Anything else the column could hold is a no.
+        // yes. Anything else the column could hold is a no. `Message.fromRow`
+        // reads the same column through its `_boolFromInt` (non-zero is a
+        // yes); the store normalises the column to 0/1/NULL, so the two agree
+        // on every value it can hold — keep them agreeing if either moves.
         needsYouVerdict: switch (row['needs_you_verdict'] as num?) {
           null => null,
           final n => n.toInt() == 1,
         },
         needsYouReason: row['needs_you_reason'] as String?,
         gateReason: row['gate_reason'] as String?,
+        triageStatus: row['triage_status'] as String? ?? 'pending',
         bucket: row['bucket'] as String?,
         bucketReason: row['bucket_reason'] as String?,
         attentionScore: (row['attention_score'] as num?)?.toDouble(),
@@ -249,10 +342,20 @@ class HomeFeedRow {
         subject: subject,
         fromName: fromName,
         fromAddress: fromAddress,
+        summary: summary,
+        ctaText: ctaText,
+        threadState: threadState,
+        hasAttachments: hasAttachments,
         updatedAt: updatedAt,
         needsYouVerdict: needsYouVerdict,
         needsYouReason: needsYouReason,
         gateReason: gateReason,
+        // Not carried over, unlike the reason beside it: `restoreMessage`
+        // writes `triage_status = 'pending'`, and this row has to read as
+        // KEPT in the same frame the button was pressed in — a twin still
+        // saying `skipped` is a row the Needs You filter would refuse until
+        // the re-read caught up.
+        triageStatus: 'pending',
         bucket: bucket,
         bucketReason: bucketReason,
         attentionScore: attentionScore,
@@ -388,7 +491,7 @@ class HomeSearch {
   /// so a row found both ways sits above the rows found one way instead of
   /// appearing twice under two headings. Gate-dropped mail was never embedded
   /// and can only ever arrive here by its words, which is what makes it
-  /// findable at all when *Show dropped* is on.
+  /// findable at all under a filter whose `showsDropped` is true.
   final List<SearchHit> hits;
 
   /// The passages of attached documents that answer the same query. Never
@@ -440,7 +543,19 @@ class ArchiveSearch {
   const ArchiveSearch(this.query, this.rows, this.notice);
 }
 
-/// The numbers over the feed, all of them over one window.
+/// The numbers over the feed: SEVEN over one window, and [needsYou] over all
+/// time.
+///
+/// The seven are a readout of what the app has been doing lately and are
+/// bounded by [homeMetricsWindow], which the bar names in a caption beside
+/// them. [needsYou] is a pile to burn down rather than a readout, and a week
+/// around it would hide exactly the work that has been owed longest — so it
+/// is counted over the whole table, and the tile stands on the other side of
+/// a divider for saying so.
+///
+/// [emails] and [teams] are counted over BOTH connectors whatever the source
+/// chips say, because those two tiles ARE the source selector — see
+/// `MessageStore.homeMetrics`.
 ///
 /// One statement writes every field, which is what makes them agree with each
 /// other: read separately, a message settling between two queries would be
@@ -451,11 +566,14 @@ class HomeMetrics {
   final int emails;
   final int teams;
 
-  /// `urgent` or `high` — the same pair the notify sweep treats as an ask.
+  /// `urgent` or `high` — the same pair the notify sweep treats as an ask —
+  /// among the rows the app KEPT. A dropped row keeps the urgency triage gave
+  /// it, and `HomeFilter.urgent` excludes it, so counting it here would put a
+  /// number over a table that cannot show it.
   final int urgent;
 
-  /// What the app decided the user did not need. The same number the "Show
-  /// dropped" toggle reveals, so the tile is a promise the toggle keeps.
+  /// What the app decided the user did not need. The same number the Dropped
+  /// tile's own filter lists, so the tile is a promise the filter keeps.
   final int dropped;
 
   final int needsYou;
@@ -535,4 +653,91 @@ class HotStoryline {
         messageCount: (row['message_count'] as num?)?.toInt() ?? 0,
         lastAt: row['last_at'] as String? ?? '',
       );
+}
+
+/// What the pipeline is doing right now, and what it has just finished.
+///
+/// The tiles answer "what has the app been doing lately" over a week; this
+/// answers "is anything happening" over ten minutes, which is a different
+/// question and the one a reader asks when the table under a filter looks
+/// emptier than they expected. The filter may be hiding the work — the pulse
+/// is what says so.
+///
+/// The stage words are keys rather than an enum for [HomeFeedRow]'s reason:
+/// they are read out of `work_items.task_kind` and `messages.triage_status`,
+/// and a kind a newer build introduces must be skippable rather than a crash.
+@immutable
+class PipelinePulse {
+  /// Stage word → items waiting, keyed by [stages]. A stage nothing is queued
+  /// for is ABSENT rather than zero, so a caller can tell "nothing waiting"
+  /// from "this stage was never asked about".
+  final Map<String, int> queued;
+
+  /// Stage word → items being worked, keyed the same way.
+  final Map<String, int> running;
+
+  /// Settled, dropped and judged-needs-you inside [homePulseWindow] — measured
+  /// on `message_progress.updated_at`, which is when the pipeline last wrote
+  /// about the row rather than when the message arrived.
+  final int recentSettled;
+  final int recentDropped;
+  final int recentNeedsYou;
+
+  const PipelinePulse({
+    this.queued = const {},
+    this.running = const {},
+    this.recentSettled = 0,
+    this.recentDropped = 0,
+    this.recentNeedsYou = 0,
+  });
+
+  /// Pipeline order — the order any narration walks. Triage first because it
+  /// is the gate everything else is downstream of, files last because a
+  /// document's text is read after the message it hangs off has been handled.
+  static const List<String> stages = [
+    'triage',
+    'extract',
+    'needs_you',
+    'storyline',
+    'draft',
+    'embed',
+    'files',
+  ];
+
+  /// `work_items.task_kind` → stage word.
+  ///
+  /// Several kinds collapse onto one stage on purpose: the six storyline
+  /// passes are one thing to a reader, and both attachment kinds are "files".
+  /// A kind that is not here is not pipeline work and is not counted —
+  /// `mark_read` is a chore the app runs on the user's behalf, and a pulse
+  /// that reported it as a stage would be narrating housekeeping.
+  static const Map<String, String> kindStages = {
+    'extract': 'extract',
+    'needs_you': 'needs_you',
+    'draft': 'draft',
+    'embed_message': 'embed',
+    'attachment_text': 'files',
+    'attachment_digest': 'files',
+    'storyline': 'storyline',
+    'storyline_sweep': 'storyline',
+    'storyline_recruit': 'storyline',
+    'storyline_refresh': 'storyline',
+    'storyline_audit': 'storyline',
+    'storyline_recap': 'storyline',
+  };
+
+  int get working =>
+      running.values.fold(0, (total, count) => total + count);
+
+  int get waiting => queued.values.fold(0, (total, count) => total + count);
+
+  /// Whether anything is moving at all — what decides between narrating the
+  /// stages and saying the pipeline is idle.
+  bool get busy => working + waiting > 0;
+
+  /// Everything outstanding for one stage, waiting and working together. Zero
+  /// for a stage neither map mentions, so a caller can walk [stages]
+  /// unconditionally.
+  int countFor(String stage) =>
+      (queued[stage] ?? 0) + (running[stage] ?? 0);
 }

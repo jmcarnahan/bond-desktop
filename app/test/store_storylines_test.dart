@@ -23,8 +23,10 @@ void main() {
     String state = 'waiting',
     String? lastMessageAt = '2026-08-28T10:00:00Z',
     String? subject,
+    String source = 'email',
   }) async {
     await store.upsertConversation({
+      'source': source,
       'conversation_key': key,
       'subject': subject ?? key,
       'state': state,
@@ -148,6 +150,36 @@ void main() {
         ['sl-2'],
       );
       expect(await store.loadStorylines(statuses: const []), isEmpty);
+    });
+
+    test('the sources ride on the row', () async {
+      await seedConversation('c1');
+      await seedConversation('c2', source: 'teams');
+      await seedConversation('c3');
+      await seedStoryline('sl-both', status: 'active');
+      await seedStoryline('sl-mail', status: 'active');
+      await seedStoryline('sl-empty', status: 'active');
+      await store.addStorylineMember('sl-both', 'email', 'c1',
+          addedBy: 'auto');
+      await store.addStorylineMember('sl-both', 'teams', 'c2',
+          addedBy: 'auto');
+      await store.addStorylineMember('sl-mail', 'email', 'c3',
+          addedBy: 'auto');
+
+      final byId = {
+        for (final s in await store.loadStorylines()) s.id: s,
+      };
+      expect(byId['sl-both']!.sources, {'email', 'teams'});
+      expect(byId['sl-mail']!.sources, {'email'});
+      expect(byId['sl-empty']!.sources, isEmpty);
+    });
+
+    test('getStoryline reads the same set', () async {
+      await seedConversation('c1', source: 'teams');
+      await seedStoryline('sl-1', status: 'active');
+      await store.addStorylineMember('sl-1', 'teams', 'c1', addedBy: 'auto');
+
+      expect((await store.getStoryline('sl-1'))!.sources, {'teams'});
     });
   });
 

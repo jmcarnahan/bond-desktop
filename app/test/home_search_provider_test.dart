@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/services/message_search.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
@@ -27,7 +28,8 @@ import 'fixtures/test_db.dart';
 /// state most of these tests are about, so the completer has to be reachable
 /// from outside.
 class _FakeRunner {
-  final List<({String query, bool includeDropped})> calls = [];
+  final List<({String query, bool includeDropped, List<String> sources})>
+      calls = [];
   final List<Completer<MessageSearchResult>> pending = [];
 
   Future<MessageSearchResult> call(
@@ -35,7 +37,7 @@ class _FakeRunner {
     bool includeDropped = false,
     List<String> sources = const ['email', 'teams'],
   }) {
-    calls.add((query: query, includeDropped: includeDropped));
+    calls.add((query: query, includeDropped: includeDropped, sources: sources));
     final completer = Completer<MessageSearchResult>();
     pending.add(completer);
     return completer.future;
@@ -46,11 +48,18 @@ class _FakeRunner {
       pending[index].complete(result);
 }
 
-HomeFeedRow _row(String id, {String subject = 'Subject'}) => HomeFeedRow(
+HomeFeedRow _row(
+  String id, {
+  String subject = 'Subject',
+  String? fromName = 'Dana Whitfield',
+  String receivedAt = '2026-09-03T09:00:00Z',
+  bool hasAttachments = false,
+}) =>
+    HomeFeedRow(
       source: 'email',
       sourceMessageId: id,
       conversationKey: 'c-$id',
-      receivedAt: '2026-09-03T09:00:00Z',
+      receivedAt: receivedAt,
       triageState: 'done',
       extractState: 'done',
       storylineState: 'done',
@@ -59,6 +68,8 @@ HomeFeedRow _row(String id, {String subject = 'Subject'}) => HomeFeedRow(
       outcome: 'done',
       dropped: false,
       subject: subject,
+      fromName: fromName,
+      hasAttachments: hasAttachments,
     );
 
 MessageSearchHits _hits(String query, List<String> ids) => MessageSearchHits(
@@ -98,7 +109,7 @@ void main() {
     final notifier = HomeFeedNotifier(
       store,
       searchRunner: runner.call,
-      persistIncludeDropped: (_) async {},
+      persistSort: (_) async {},
       bus: live ? bus : null,
     );
     addTearDown(notifier.dispose);
@@ -119,16 +130,31 @@ void main() {
   test('a submitted query runs trimmed, against the current filter', () async {
     final notifier = build();
     final search = notifier.submitSearch('  invoice  ');
-    expect(runner.calls, [(query: 'invoice', includeDropped: false)]);
+    expect(runner.calls, [
+      (
+        query: 'invoice',
+        includeDropped: false,
+        sources: const ['email', 'teams'],
+      ),
+    ]);
     runner.answer(0, _hits('invoice', const []));
     await search;
     // Left first, so the filter change is a filter change and not the re-ask
     // that has its own test below.
     notifier.exitSearch();
 
-    await notifier.setIncludeDropped(true);
+    // Dropped is one of the filters that shows the pile, so the runner's
+    // `includeDropped` follows it.
+    await notifier.setFilter(HomeFilter.dropped);
     final second = notifier.submitSearch('invoice');
-    expect(runner.calls.last, (query: 'invoice', includeDropped: true));
+    expect(
+      runner.calls.last,
+      (
+        query: 'invoice',
+        includeDropped: true,
+        sources: const ['email', 'teams'],
+      ),
+    );
     runner.answer(runner.pending.length - 1, _hits('invoice', const []));
     await second;
   });
@@ -291,33 +317,44 @@ void main() {
     await second;
   });
 
-  test('the dropped toggle re-asks the question', () async {
+  test('a filter change re-asks the question', () async {
     final notifier = build();
     final first = notifier.submitSearch('invoice');
     runner.answer(0, _hits('invoice', ['a']));
     await first;
 
-    final toggled = notifier.setIncludeDropped(true);
+    final toggled = notifier.setFilter(HomeFilter.dropped);
     // The reload runs first, so the re-ask is queued behind it: the answer is
     // completed once the call has actually been made.
     await pumpEventQueue();
     runner.answer(runner.pending.length - 1, _hits('invoice', ['a', 'b']));
     await toggled;
 
-    expect(runner.calls.last, (query: 'invoice', includeDropped: true));
+    expect(
+      runner.calls.last,
+      (
+        query: 'invoice',
+        includeDropped: true,
+        sources: const ['email', 'teams'],
+      ),
+    );
     expect(notifier.state.search!.hits, hasLength(2));
   });
 
-  test('the toggle re-asks even a question still in flight', () async {
+  test('a filter change re-asks even a question still in flight', () async {
     final notifier = build();
     // Never answered: the toggle flips while the index is still thinking.
     final first = notifier.submitSearch('invoice');
 
-    final toggled = notifier.setIncludeDropped(true);
+    final toggled = notifier.setFilter(HomeFilter.dropped);
     await pumpEventQueue();
     expect(
       runner.calls.last,
-      (query: 'invoice', includeDropped: true),
+      (
+        query: 'invoice',
+        includeDropped: true,
+        sources: const ['email', 'teams'],
+      ),
       reason: 'the answer on its way back was asked under the other filter',
     );
 
@@ -358,5 +395,98 @@ void main() {
     // Runs out what the batch left armed, so the test ends clean.
     await tester.pump(HomeFeedNotifier.entryClear);
     await tester.pump(HomeFeedNotifier.metricsDebounce);
+  });
+
+  group('the search grammar', () {
+    test('facets alone are not a question, and never reach the index',
+        () async {
+      final notifier = build();
+
+      await notifier.submitSearch('from:dana has:file');
+
+      // Embedding the empty string would rank the whole mailbox by its
+      // distance from nothing at all.
+      expect(runner.calls, isEmpty);
+      expect(notifier.state.searching, isFalse);
+      expect(notifier.state.searchNotice, contains('Add a word or two'));
+      expect(notifier.state.search, isNull);
+    });
+
+    test('the sentence goes down without its facets', () async {
+      final notifier = build();
+      final search = notifier.submitSearch('hero copy from:dana');
+
+      expect(runner.calls.single.query, 'hero copy');
+
+      runner.answer(0, _hits('hero copy', const []));
+      await search;
+    });
+
+    test('in: is what narrows the store', () async {
+      final notifier = build();
+      final search = notifier.submitSearch('invoice in:teams');
+
+      expect(runner.calls.single.sources, ['teams']);
+
+      runner.answer(0, _hits('invoice', const []));
+      await search;
+    });
+
+    test('from: drops the hits it does not name', () async {
+      final notifier = build();
+      final search = notifier.submitSearch('invoice from:dana');
+      runner.answer(
+        0,
+        MessageSearchHits('invoice', [
+          SearchHit(row: _row('a'), score: 0.5, matchedBy: MatchedBy.meaning),
+          SearchHit(
+            row: _row('b', fromName: 'Eric Vance'),
+            score: 0.5,
+            matchedBy: MatchedBy.meaning,
+          ),
+        ]),
+      );
+      await search;
+
+      expect(
+        [for (final hit in notifier.state.search!.hits) hit.row.sourceMessageId],
+        ['a'],
+      );
+    });
+
+    test('has:file keeps only the hits carrying something', () async {
+      final notifier = build();
+      final search = notifier.submitSearch('invoice has:file');
+      runner.answer(
+        0,
+        MessageSearchHits('invoice', [
+          SearchHit(row: _row('plain'), score: 0.5, matchedBy: MatchedBy.meaning),
+          SearchHit(
+            row: _row('attached', hasAttachments: true),
+            score: 0.5,
+            matchedBy: MatchedBy.meaning,
+          ),
+        ]),
+      );
+      await search;
+
+      expect(
+        [for (final hit in notifier.state.search!.hits) hit.row.sourceMessageId],
+        ['attached'],
+      );
+    });
+
+    test('the results are labelled with what the reader actually typed',
+        () async {
+      final notifier = build();
+      final search = notifier.submitSearch('  invoice from:dana  ');
+      runner.answer(0, _hits('invoice', const ['a']));
+      await search;
+
+      // The box still shows the facets. Labelling the results with the
+      // stripped sentence would make them look like an answer to a question
+      // nobody asked.
+      expect(notifier.state.search!.query, 'invoice from:dana');
+    });
   });
 }

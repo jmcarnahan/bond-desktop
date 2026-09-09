@@ -28,6 +28,62 @@ With headers in hand, the list/auto-generated checks run: `List-Unsubscribe`
 / `List-Id`, `Precedence: bulk|list|junk|auto_reply`, `Auto-Submitted`, and
 `X-Auto-Response-Suppress`. Also in `gates.dart`.
 
+## A gate drop and the thread
+
+The thread state machine folds `needs_reply` onto a thread the moment an
+inbound lands, and every gate above speaks afterwards. `refoldThreadState`
+(`app/lib/data/message_store.dart`) is how the thread finds out. It re-derives
+the state from the messages the gate KEPT — `keptMessageSql`, which is
+`messages.triage_status <> 'skipped' OR gate_reason = 'teams_source'` — and
+writes it through `setConversationState`, so `state_changed_at` is stamped.
+
+"Kept" has two edges worth stating. A chat stored before chats were triaged was
+born `skipped` under the retired `teams_source` reason and is a real message
+from a real person. And a settle-time `not_worthy` drop is a verdict ABOUT a
+kept message: it lives on `message_progress` and never touches
+`triage_status`, so it never moves a thread.
+
+The rule is the fold's own, re-read off the table: `needs_reply` iff a kept
+inbound exists and is STRICTLY newer than the newest outbound (no outbound at
+all counts as newer), else `waiting`. Ties settle the thread. Outbound carries
+no kept clause — every outbound is born `skipped`/`outbound`, and an outbound
+is the owner's own word whatever the gate stamped on it.
+
+It moves in ONE direction, and the caller says which:
+
+- `restored: false` may only lower `needs_reply → waiting`. A gate drop can
+  only take an obligation away. Raising here would let a widened sync window
+  reopen threads the user closed months ago — exactly what the fold's
+  `historical` flag exists to prevent, and the store does not remember which
+  rows were historical, so the only way to honour that flag is never to raise
+  on this path. The flag is honoured for RAISING and is not consulted when
+  lowering, which is deliberate: a Sent copy a widened window backfilled — an
+  outbound newer than an ask the store already held — settles the thread on
+  the next lowering refold, where `foldMessage(historical: true)` refused to
+  at ingest. The user did answer that ask; the incremental fold could not know
+  it because `historical` says which sync pass carried the row rather than
+  what the row says, and the refold answers from the whole mailbox as stored.
+- `restored: true` may only raise `waiting → needs_reply`. The owner pulling a
+  message back out of the dropped pile is a reason for the thread to ask again
+  and never a reason to quieten it.
+
+`done` is a human's decision and neither direction moves it. A lowering refold
+that finds NO kept inbound at all also clears `cta_text` / `cta_urgency` and
+the thread's Needs You chips: an ask can only come from a kept message.
+
+Four writers call it. `TriageQueue._triageClaimed` after either tier's skip,
+before `_emit()`, so the rails' reload behind that tick reads the new state.
+`dropMessage` (Ignore) inside its own transaction. `capPendingTriage`, which
+now returns the demoted messages' `conversation_key`s and refolds each thread
+once. And `RestoreService._restore` with `restored: true`, after
+`restoreMessage`.
+
+The consequence upstream is that the rail's `isNeedsYou` has three tests again
+— Later, done, threshold — with no "everything was dropped" mask: the ingest
+and the gates keep the state honest, so a thread with nothing kept cannot
+reach the rail saying `needs_reply`. See [01-sync-ingest.md](01-sync-ingest.md)
+for the ingest half and the one-shot repair.
+
 ## Reading the file
 
 The header comment in `gates.dart` is the real documentation: it explains the
@@ -35,8 +91,8 @@ two-tier split, an anchoring subtlety in the local-part regexes, and — most
 usefully — two gates that deliberately do **not** exist. Keep that comment
 authoritative; this page is the map to it.
 
-A gated message is not hidden: it lands with a drop reason, visible via the
-home screen's "Show dropped" toggle (PR #10) and the Archive section's
+A gated message is not hidden: it lands with a drop reason, visible under the
+Inbox's Dropped tile (`HomeFilter.dropped`) and in the Archive section's
 Dropped tab, which is also where Restore lives.
 
 ## Restoring a gated message
@@ -70,8 +126,10 @@ writes `messages.triage_status = 'skipped'` with `gate_reason = 'user'`,
 clears `triage_error`, and runs the SAME progress cascade a gate does through
 `writeTriageProgress` — pending stages close as `skipped`, the row settles
 `dropped` under that reason, and a stage that already finished keeps what it
-did. It also clears the thread's needs-you chips and records a `down` /
-`explicit` row in `feedback_events`, because a button press is exactly that.
+did. It also refolds the thread through `refoldThreadState` (above) — Ignore
+is the owner working a gate by hand, so it lowers the thread exactly as a gate
+does — clears the thread's needs-you chips, and records a `down` / `explicit`
+row in `feedback_events`, because a button press is exactly that.
 The message's pending `message_notify` row is settled `suppressed`/`gated` in
 the same transaction, so a later coordinator sweep cannot re-decide a message
 the owner has already thrown out. And a triage answer that lands after the

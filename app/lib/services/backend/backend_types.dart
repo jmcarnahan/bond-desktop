@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/foundation.dart' show immutable;
 
 /// The types every Microsoft backend implementation speaks, held apart from
@@ -178,6 +180,23 @@ class DirectoryUnavailable implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// One profile photo as the directory served it: the bytes and the MIME type
+/// the server put on them, and nothing decoded.
+///
+/// Deliberately not an `ImageProvider`. A backend lives below `widgets/` and
+/// must not depend on a rendering library to answer a question about a person;
+/// turning bytes into something paintable is the one job the widget layer keeps
+/// for itself. [contentType] rides along because Graph serves whatever the
+/// person uploaded — jpeg for most, png for some — and a caller writing the
+/// bytes to disk or into an `<img>` needs to be told which.
+@immutable
+class ProfilePhoto {
+  final Uint8List bytes;
+  final String contentType;
+
+  const ProfilePhoto({required this.bytes, required this.contentType});
 }
 
 /// A Teams chat that is now known to exist and can be posted to.

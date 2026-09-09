@@ -8,8 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// The short answers under the transcript.
 ///
-/// The bar decides nothing: a tap reports which option it was and the host
-/// decides whether that is a send or a prefill. These tests pin what it draws
+/// The bar decides nothing: a tap asks where the host handed it a send, and
+/// reports which option it was where it did not. These tests pin what it draws
 /// and that every affordance reports exactly once.
 
 const DraftOption _confirm = DraftOption(
@@ -28,13 +28,12 @@ void main() {
     List<DraftOption> options = const [_confirm, _propose],
     bool armed = true,
     void Function(DraftOption)? onPick,
-    VoidCallback? onReply,
+    void Function(DraftOption)? onSend,
     VoidCallback? onDismiss,
     PendingSend? pending,
     VoidCallback? onUndo,
     VoidCallback? onSuggest,
     bool suggesting = false,
-    bool showReplyRow = true,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -44,13 +43,12 @@ void main() {
           options: options,
           armed: armed,
           onPick: onPick ?? (_) {},
-          onReply: onReply ?? () {},
+          onSend: onSend,
           onDismiss: onDismiss,
           pending: pending,
           onUndo: onUndo,
           onSuggest: onSuggest,
           suggesting: suggesting,
-          showReplyRow: showReplyRow,
         ),
       ),
     ));
@@ -75,6 +73,8 @@ void main() {
     });
 
     testWidgets('a tap reports which option it was', (tester) async {
+      // `pumpBar` hands over no `onSend`, so this bar has nothing to
+      // confirm: a tap stages at once and asks nothing.
       final picked = <String>[];
       await pumpBar(tester, onPick: (o) => picked.add(o.stance));
 
@@ -82,11 +82,12 @@ void main() {
       await tester.pump();
 
       expect(picked, ['Propose Tuesday']);
+      expect(find.text('Send this reply?'), findsNothing);
     });
 
     testWidgets('an unarmed bar still reports the tap', (tester) async {
       // Whether a tap sends or prefills is the host's decision, not this
-      // widget's — it reports the same either way.
+      // widget's — with no send to offer it reports the same either way.
       final picked = <String>[];
       await pumpBar(tester, armed: false, onPick: (o) => picked.add(o.stance));
 
@@ -94,37 +95,40 @@ void main() {
       await tester.pump();
 
       expect(picked, ['Confirm Friday']);
+      expect(find.text('Send this reply?'), findsNothing);
     });
 
-    testWidgets('and says so, so a card cannot look like a send button',
+    testWidgets('with no send to offer, a card says it only composes',
         (tester) async {
+      // Rewritten: what a tap does depends on whether the host can send, so
+      // the caption and the icon do too. With no send, both say "into the
+      // box".
       await pumpBar(tester, armed: false);
 
-      expect(find.text('Tap a reply to open it in the composer.'),
-          findsOneWidget);
+      expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
       // The icon agrees with the words: composing, not sending.
       expect(find.byIcon(Icons.edit_outlined), findsNWidgets(2));
       expect(find.byIcon(Icons.send_outlined), findsNothing);
     });
 
-    testWidgets('an armed bar says a tap sends, and wears the send icon',
-        (tester) async {
-      await pumpBar(tester);
+    testWidgets('with a send to offer, it says the tap sends', (tester) async {
+      // Rewritten: a real send grant changes both, because the tap it labels
+      // now leads to a send rather than to the box.
+      await pumpBar(tester, onSend: (_) {});
 
       expect(
-        find.text(
-            'Tap a suggestion to send it — you can undo for a few seconds.'),
+        find.text('Tap a reply to send it — you can edit it first.'),
         findsOneWidget,
       );
-      expect(find.text('Tap a reply to open it in the composer.'),
-          findsNothing);
       expect(find.byIcon(Icons.send_outlined), findsNWidgets(2));
+      expect(find.byIcon(Icons.edit_outlined), findsNothing);
     });
 
     testWidgets('the whole reply is visible — no tooltip, no truncation',
         (tester) async {
-      // A tap may SEND these words, so all of them are on screen. The long
-      // body must lay out unclipped rather than hide its tail behind a hover.
+      // A tap ACTS on all of these words, so all of them are on screen. The
+      // long body must lay out unclipped rather than hide its tail behind a
+      // hover.
       const long = DraftOption(
         stance: 'Decline politely',
         body: 'Thanks so much for thinking of me — unfortunately I have a '
@@ -172,37 +176,159 @@ void main() {
     });
   });
 
-  group('the way into the composer', () {
-    testWidgets('Reply… is there beside the cards', (tester) async {
-      var replies = 0;
-      await pumpBar(tester, onReply: () => replies++);
+  group('send from a card', () {
+    testWidgets('a tap asks nothing where the host has no real send to offer',
+        (tester) async {
+      // A question that says Send and saves to Outlook drafts instead is a
+      // lie, so the lower rungs ask nothing: the tap stages, at once.
+      final picked = <String>[];
+      await pumpBar(tester, onPick: (o) => picked.add(o.stance));
 
-      await tester.tap(find.text('Reply…'));
+      await tester.tap(find.text('Confirm Friday'));
       await tester.pump();
 
-      expect(replies, 1);
+      expect(picked, ['Confirm Friday']);
+      expect(find.text('Send this reply?'), findsNothing);
+      expect(find.byIcon(Icons.send_outlined), findsNothing);
+      expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
     });
 
-    testWidgets('with no options, the bar is the Reply… affordance alone',
+    testWidgets('a tap asks where there is one, and says so in the caption',
         (tester) async {
-      // The bar is also how a thread the model wrote nothing for reaches the
-      // composer.
-      var replies = 0;
+      final picked = <String>[];
       await pumpBar(
         tester,
-        options: const [],
-        onDismiss: () {},
-        onReply: () => replies++,
+        onPick: (o) => picked.add(o.stance),
+        onSend: (_) {},
       );
 
-      expect(find.text('Reply…'), findsOneWidget);
-      expect(find.byIcon(Icons.close), findsNothing);
-
-      await tester.tap(find.text('Reply…'));
+      await tester.tap(find.text('Confirm Friday'));
       await tester.pump();
-      expect(replies, 1);
+
+      expect(find.text('Send this reply?'), findsOneWidget);
+      expect(find.byKey(QuickReplyBar.editKeyFor(0)), findsOneWidget);
+      // Asking is not staging: nothing has been put in the box yet.
+      expect(picked, isEmpty);
+      expect(
+        find.text('Tap a reply to send it — you can edit it first.'),
+        findsOneWidget,
+      );
     });
 
+    testWidgets('Edit first puts the words in the box and sends nothing',
+        (tester) async {
+      final picked = <String>[];
+      final sent = <String>[];
+      await pumpBar(
+        tester,
+        onPick: (o) => picked.add(o.stance),
+        onSend: (o) => sent.add(o.stance),
+      );
+
+      await tester.tap(find.text('Propose Tuesday'));
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBar.editKeyFor(1)));
+      await tester.pump();
+
+      expect(picked, ['Propose Tuesday']);
+      expect(sent, isEmpty);
+      expect(find.text('Send this reply?'), findsNothing);
+    });
+
+    testWidgets('a send that goes away takes its question with it',
+        (tester) async {
+      // The screen wires onSend from the draft's capability, which the poll's
+      // re-read can drop a rung — a keychain that would not open, say. The
+      // armed question must not stand over a callback that is no longer
+      // there, or the Send button throws on the tap.
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+      await tester.tap(find.text('Confirm Friday'));
+      await tester.pump();
+      expect(find.byKey(QuickReplyBar.confirmSendKeyFor(0)), findsOneWidget);
+
+      // Same two options, no send: the widget updates in place.
+      await pumpBar(tester, onSend: null);
+
+      expect(find.byKey(QuickReplyBar.confirmSendKeyFor(0)), findsNothing);
+      expect(find.text('Send this reply?'), findsNothing);
+      expect(tester.takeException(), isNull);
+      expect(sent, isEmpty);
+    });
+
+    testWidgets('a tap asks on that card and no other', (tester) async {
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+
+      await tester.tap(find.text('Confirm Friday'));
+      await tester.pump();
+
+      expect(sent, isEmpty);
+      expect(find.text('Send this reply?'), findsOneWidget);
+      expect(find.byKey(QuickReplyBar.confirmSendKeyFor(0)), findsOneWidget);
+      // One question at a time: the other card is not being asked about.
+      expect(find.byKey(QuickReplyBar.confirmSendKeyFor(1)), findsNothing);
+      // And the words the question is about stay on screen while it stands.
+      expect(find.text(_confirm.body), findsOneWidget);
+    });
+
+    testWidgets('Cancel puts the card back and sends nothing', (tester) async {
+      final picked = <String>[];
+      final sent = <String>[];
+      await pumpBar(
+        tester,
+        onPick: (o) => picked.add(o.stance),
+        onSend: (o) => sent.add(o.stance),
+      );
+
+      await tester.tap(find.text('Confirm Friday'));
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBar.cancelSendKeyFor(0)));
+      await tester.pump();
+
+      expect(sent, isEmpty);
+      expect(picked, isEmpty);
+      expect(find.text('Send this reply?'), findsNothing);
+      expect(find.text('Confirm Friday'), findsOneWidget);
+    });
+
+    testWidgets('the confirm reports that option once, and disarms',
+        (tester) async {
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+
+      await tester.tap(find.text('Propose Tuesday'));
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBar.confirmSendKeyFor(1)));
+      await tester.pump();
+
+      expect(sent, ['Propose Tuesday']);
+      expect(find.text('Send this reply?'), findsNothing);
+    });
+
+    testWidgets('a fresh pair is never sent on the old one\'s behalf',
+        (tester) async {
+      // The same rule the ×'s question follows: the card the reader was being
+      // asked about is not the card in front of them now.
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+      await tester.tap(find.text('Confirm Friday'));
+      await tester.pump();
+
+      await pumpBar(
+        tester,
+        options: const [
+          DraftOption(stance: 'Ask for Wednesday', body: 'Wednesday?'),
+        ],
+        onSend: (o) => sent.add(o.stance),
+      );
+
+      expect(find.text('Send this reply?'), findsNothing);
+      expect(sent, isEmpty);
+    });
+  });
+
+  group('closing the suggestions', () {
     testWidgets('the × asks before it closes the suggestions', (tester) async {
       var dismissed = 0;
       await pumpBar(tester, onDismiss: () => dismissed++);
@@ -236,11 +362,8 @@ void main() {
 
       expect(dismissed, 0);
       expect(find.text('Dismiss these suggestions?'), findsNothing);
-      expect(
-        find.text('Tap a suggestion to send it — you can undo for a few '
-            'seconds.'),
-        findsOneWidget,
-      );
+      // Rewritten: the caption the Keep restores is the new single sentence.
+      expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
     });
 
     testWidgets('a fresh pair is never asked about on the old one\'s behalf',
@@ -302,29 +425,32 @@ void main() {
     });
   });
 
-  /// The same bar drawn under one MESSAGE rather than under the transcript.
-  /// The way into the composer belongs to the thread and sits once, at the
-  /// bottom; an inline card carries the cards and the × that closes them.
-  group('an inline card', () {
-    testWidgets('carries no Reply… beside the cards', (tester) async {
-      await pumpBar(tester, showReplyRow: false, onSuggest: () {});
+  /// The bar is drawn under one MESSAGE and again at the end of the
+  /// transcript, and it is the same widget both times. There is no doorway on
+  /// it any more: the composer is docked under every thread that can be
+  /// answered, so what is left is the cards, the × and the ask.
+  group('no doorway anywhere', () {
+    testWidgets('the cards carry no Reply… of their own', (tester) async {
+      await pumpBar(tester, onSuggest: () {});
 
       expect(find.text('Confirm Friday'), findsOneWidget);
       expect(find.text('Reply…'), findsNothing);
+      // Never beside cards that are already there: the composer's Regenerate
+      // is where a different pair comes from.
       expect(find.text('Suggest a reply'), findsNothing);
     });
 
-    testWidgets('and the bar under the transcript still does', (tester) async {
-      await pumpBar(tester);
+    testWidgets('nor does a bar with no cards at all', (tester) async {
+      await pumpBar(tester, options: const [], onSuggest: () {});
 
-      expect(find.text('Reply…'), findsOneWidget);
+      expect(find.text('Reply…'), findsNothing);
+      expect(find.text('Suggest a reply'), findsOneWidget);
     });
 
     testWidgets('keeps the × — it closes THESE cards', (tester) async {
       var dismissed = 0;
       await pumpBar(
         tester,
-        showReplyRow: false,
         onDismiss: () => dismissed++,
       );
 
@@ -340,14 +466,12 @@ void main() {
 
     testWidgets('with nothing to offer it draws nothing at all',
         (tester) async {
-      // Not an empty state: a card with no options is a card that should not
-      // be on screen, and the bottom of the transcript owns the empty case.
+      // No cards, and nothing to ask with: a bar in that state is one that
+      // should not be on screen at all.
       await pumpBar(
         tester,
         options: const [],
-        showReplyRow: false,
         onDismiss: () {},
-        onSuggest: () {},
       );
 
       expect(find.byType(TextButton), findsNothing);
@@ -376,7 +500,6 @@ void main() {
     testWidgets('is absent when the host cannot ask for one', (tester) async {
       await pumpBar(tester, options: const []);
 
-      expect(find.text('Reply…'), findsOneWidget);
       expect(find.text('Suggest a reply'), findsNothing);
       expect(find.byIcon(Icons.auto_awesome), findsNothing);
     });
@@ -467,7 +590,7 @@ void main() {
       );
 
       expect(find.text('Sending…'), findsOneWidget);
-      expect(find.text('Reply…'), findsNothing);
+      expect(find.text('Undo'), findsOneWidget);
     });
   });
 }

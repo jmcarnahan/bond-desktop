@@ -30,7 +30,11 @@ enum SendCapability {
 /// send, and no "accept" that turns into a send. A draft the user never clicks
 /// stays text in a box.
 ///
-/// The suggested state is drawn as visibly *not yet theirs*: the text sits at
+/// The box starts EMPTY and one line tall, and grows as it is written in. A
+/// suggestion is in it only because the HOST put it there — a card the reader
+/// tapped, a draft they asked for — never because one happened to exist.
+///
+/// That suggested state is drawn as visibly *not yet theirs*: the text sits at
 /// reduced opacity behind an accent rule, with a caption saying where it came
 /// from. The first keystroke takes all of that away, because from that point on
 /// the words are the user's and dressing them as a machine's suggestion would be
@@ -59,8 +63,21 @@ class Composer extends StatefulWidget {
   /// host with no model wired.
   final VoidCallback? onGenerate;
 
-  /// Throws the suggestion away and leaves an empty box.
+  /// The ✕ was pressed: this empties the box. What that means for the STORED
+  /// draft is the host's decision, not this widget's — today it means nothing,
+  /// and the suggestion stays on its card in the transcript.
   final VoidCallback? onDismiss;
+
+  /// Takes the cursor the moment the field MOUNTS. For the host that opened a
+  /// thread beside and wants the reader typing in it at once: the box appears
+  /// only after the draft's capability has been read, which is an async
+  /// keychain read, so a focus requested on the frame after the open lands on
+  /// a node that has nothing to attach to yet. Mount-time focus cannot miss.
+  ///
+  /// An explicit request rather than the field's own `autofocus`, which
+  /// yields to whatever already holds focus — and on this screen something
+  /// always does.
+  final bool focusOnMount;
 
   /// The user started editing. Debounced, so it fires on pauses rather than on
   /// keystrokes.
@@ -69,6 +86,18 @@ class Composer extends StatefulWidget {
   /// True while a send is in flight: the primary button disables and shows a
   /// spinner, so a second click cannot send the same reply twice.
   final bool sending;
+
+  /// The empty field's placeholder. The default is generic; a host that knows
+  /// who is being answered says so instead, which is the difference between a
+  /// box and a box addressed to somebody.
+  final String hint;
+
+  /// The HOST's focus node, never one of ours. This widget is rebuilt with a
+  /// new key on every send epoch and on every change of thread, so a node owned
+  /// here would be thrown away exactly when the cursor is meant to survive —
+  /// after a send, or when a hover Reply asks for the box. Never disposed here
+  /// for the same reason: it belongs to whoever passed it.
+  final FocusNode? focusNode;
 
   const Composer({
     super.key,
@@ -79,8 +108,11 @@ class Composer extends StatefulWidget {
     required this.onSend,
     this.onGenerate,
     this.onDismiss,
+    this.focusOnMount = false,
     this.onEdited,
     this.sending = false,
+    this.hint = 'Write a reply…',
+    this.focusNode,
   });
 
   /// Long enough that a normal typing rhythm does not write to sqlite between
@@ -106,6 +138,18 @@ class _ComposerState extends State<Composer> {
   /// The suggestion was closed here, this frame. The host clears its own copy
   /// a beat later; without this the caption would flash back on in between.
   bool _dismissed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.focusOnMount) {
+      // After the first frame, so the node is attached to a scope by the
+      // time it is asked for.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.focusNode?.requestFocus();
+      });
+    }
+  }
 
   Timer? _editDebounce;
 
@@ -199,7 +243,7 @@ class _ComposerState extends State<Composer> {
           onPressed: widget.onDismiss == null ? null : _dismiss,
           icon: const Icon(Icons.close),
           iconSize: 16,
-          tooltip: 'Dismiss this suggestion',
+          tooltip: 'Clear the box',
           padding: const EdgeInsets.all(BondSpacing.s4),
           constraints: const BoxConstraints(),
           visualDensity: VisualDensity.compact,
@@ -211,16 +255,19 @@ class _ComposerState extends State<Composer> {
   Widget _field() {
     final field = TextField(
       controller: _body,
+      focusNode: widget.focusNode,
       onChanged: _onChanged,
-      minLines: 3,
+      // One line until there is something to hold: an empty box that opened
+      // three lines tall claimed the space of a reply nobody had written yet.
+      minLines: 1,
       maxLines: 10,
       style: _showingSuggestion
           ? BondType.body.copyWith(
               color: BondColors.ink.withValues(alpha: Composer.suggestedOpacity),
             )
           : BondType.body,
-      decoration: const InputDecoration(
-        hintText: 'Write a reply…',
+      decoration: InputDecoration(
+        hintText: widget.hint,
         border: InputBorder.none,
       ),
     );

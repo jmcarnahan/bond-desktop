@@ -3,6 +3,7 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
@@ -48,11 +49,14 @@ void main() {
     required String receivedAt,
     String source = 'email',
     String? gateReason,
+    // Files the message under another message's thread — the one case a
+    // test needs two messages on one conversation.
+    String? conversationKey,
   }) =>
       store.upsertMessage({
         'source': source,
         'source_message_id': id,
-        'conversation_key': 'c-$id',
+        'conversation_key': conversationKey ?? 'c-$id',
         'direction': 'inbound',
         'subject': 'Subject $id',
         'from_name': 'Sender $id',
@@ -68,18 +72,20 @@ void main() {
     required String receivedAt,
     String source = 'email',
     String? gateReason,
+    String? conversationKey,
   }) async {
     final ingested = await seed(
       id,
       receivedAt: receivedAt,
       source: source,
       gateReason: gateReason,
+      conversationKey: conversationKey,
     );
     progress.noteIngest(source, id, receivedAt: ingested!);
   }
 
-  HomeFeedNotifier build() {
-    final notifier = HomeFeedNotifier(store, bus: bus);
+  HomeFeedNotifier build({HomeSort sort = HomeSort.newest}) {
+    final notifier = HomeFeedNotifier(store, bus: bus, sort: sort);
     addTearDown(notifier.dispose);
     return notifier;
   }
@@ -196,6 +202,39 @@ void main() {
       expect(idsOf(notifier), ['m10', 'm9', 'm3', 'm2', 'm1']);
       expect(notifier.state.pendingNewCount, 0);
       expect(notifier.state.entering, {keyOf('m9'), keyOf('m10')});
+      await quiet(tester);
+    });
+
+    testWidgets('a held arrival the gate then drops leaves the count',
+        (tester) async {
+      // The buffer's eviction branch, now answered by the store's flag: a row
+      // nobody has seen yet stops matching, so it stops being one of the rows
+      // the count is promising — and nothing is shown leaving, because
+      // nothing was ever shown.
+      await seedThree();
+      final notifier = build();
+      await notifier.load();
+      notifier.setAnchored(false);
+
+      await arrive('m9', receivedAt: '2026-09-03T12:00:00Z');
+      await settleTicks(tester);
+      expect(notifier.state.pendingNewCount, 1);
+
+      await progress.noteTriage(
+        'email',
+        'm9',
+        state: 'skipped',
+        gateReason: 'newsletter',
+      );
+      await settleTicks(tester);
+
+      expect(notifier.state.pendingNewCount, 0);
+      expect(idsOf(notifier), ['m3', 'm2', 'm1']);
+      expect(notifier.state.fading, isEmpty);
+
+      await notifier.releasePending();
+      expect(idsOf(notifier), ['m3', 'm2', 'm1'],
+          reason: 'releasing an empty buffer changes nothing');
       await quiet(tester);
     });
 
@@ -374,6 +413,30 @@ void main() {
       await quiet(tester);
     });
 
+    testWidgets('is not performed for a connector whose chip is down',
+        (tester) async {
+      // The show sits above the admission gate on purpose — a dropped row is
+      // never admitted — so it has to ask about the chips itself. A Teams
+      // newsletter must not be seen leaving a table that is showing mail.
+      await seedThree();
+      final notifier = build();
+      await notifier.load();
+      await notifier.setSources(const ['email']);
+
+      await arrive(
+        'n1',
+        receivedAt: '2026-09-03T12:00:00Z',
+        source: 'teams',
+        gateReason: 'newsletter',
+      );
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['m3', 'm2', 'm1']);
+      expect(notifier.state.fading, isEmpty);
+      expect(notifier.state.entering, isEmpty);
+      await quiet(tester);
+    });
+
     testWidgets('is not performed for a reader who is looking elsewhere',
         (tester) async {
       await seedThree();
@@ -426,6 +489,291 @@ void main() {
       // survived the reload.
       await tester.pump(homeDropLinger);
       await tester.pump(homeDropCollapse);
+      await quiet(tester);
+    });
+  });
+
+  group('an arrival under a tile filter', () {
+    /// Puts the message on the table and then says whether the app is owed
+    /// something for it — the pair a settle writes.
+    Future<void> settle(String id, {required bool needsYou}) =>
+        progress.noteSettled(
+          'email',
+          id,
+          needsYou: needsYou,
+          reason: needsYou ? 'asks for the dates' : 'nothing to do',
+          dropped: false,
+        );
+
+    /// What the rail's rule actually reads: the THREAD's state, not the
+    /// message's settled snapshot. `seed` files every message under its own
+    /// `c-<id>`, so one of these is one thread.
+    Future<void> thread(String id, {required bool owed}) =>
+        store.upsertConversation({
+          'source': 'email',
+          'conversation_key': 'c-$id',
+          'subject': 'Subject $id',
+          'state': owed ? 'needs_reply' : 'done',
+        });
+
+    testWidgets('one the filter does not name is not even counted',
+        (tester) async {
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.needsYou);
+      expect(idsOf(notifier), isEmpty);
+
+      await arrive('quiet', receivedAt: '2026-09-03T10:00:00Z');
+      await thread('quiet', owed: false);
+      await settle('quiet', needsYou: true);
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        isEmpty,
+        reason: 'the thread owes nothing, whatever the settled snapshot on '
+            'the message says',
+      );
+      expect(notifier.state.pendingNewCount, 0);
+      await quiet(tester);
+    });
+
+    testWidgets('one the filter names is counted, and releasing reloads',
+        (tester) async {
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.needsYou);
+
+      await arrive('loud', receivedAt: '2026-09-03T10:00:00Z');
+      await thread('loud', owed: true);
+      await settle('loud', needsYou: true);
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        isEmpty,
+        reason: 'this filter shows one row per thread — its newest kept '
+            'message — and one patched row cannot say whether it is that one',
+      );
+      expect(notifier.state.pendingNewCount, 1);
+
+      await notifier.releasePending();
+
+      expect(idsOf(notifier), ['loud']);
+      expect(notifier.state.pendingNewCount, 0);
+      await quiet(tester);
+    });
+
+    testWidgets('an older message of a thread already shown is not counted',
+        (tester) async {
+      // The store's flag carries the newest-kept-in-thread clause the page
+      // read has, which one row alone never could: a backfilled older message
+      // of a thread whose newest row is on the table is refused the count,
+      // where a Dart twin reading the row alone would have promised a row the
+      // release could not show.
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.needsYou);
+
+      await arrive('loud', receivedAt: '2026-09-03T10:00:00Z');
+      await thread('loud', owed: true);
+      await settle('loud', needsYou: true);
+      await settleTicks(tester);
+      await notifier.releasePending();
+      expect(idsOf(notifier), ['loud']);
+
+      await arrive(
+        'loud-older',
+        receivedAt: '2026-09-03T08:00:00Z',
+        conversationKey: 'c-loud',
+      );
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['loud']);
+      expect(
+        notifier.state.pendingNewCount,
+        0,
+        reason: 'the thread is already standing for itself on the table',
+      );
+      await quiet(tester);
+    });
+
+    testWidgets('a teams_source row is admitted and a gated one refused',
+        (tester) async {
+      // "Kept" is `MessageStore.keptMessageSql`, and the live path now asks
+      // the store rather than re-deciding: whatever admits a row into the page
+      // read admits it into the patch, because it is the same SQL.
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.needsYou);
+
+      // Born `skipped` before chats were triaged, and a real message.
+      await arrive(
+        'legacy-chat',
+        receivedAt: '2026-09-03T10:00:00Z',
+        gateReason: 'teams_source',
+      );
+      await thread('legacy-chat', owed: true);
+      await settleTicks(tester);
+      expect(notifier.state.pendingNewCount, 1);
+
+      // And one the gate genuinely threw out, on a thread that still says it
+      // owes a reply.
+      await arrive(
+        'gated',
+        receivedAt: '2026-09-03T11:00:00Z',
+        gateReason: 'newsletter',
+      );
+      await thread('gated', owed: true);
+      await settleTicks(tester);
+      expect(notifier.state.pendingNewCount, 1,
+          reason: 'the newsletter is not admitted, so nothing was added');
+
+      await quiet(tester);
+    });
+
+    testWidgets('a tick for the other connector never lands under a chip',
+        (tester) async {
+      // The live path used to narrow by nothing on sources, so a chat ticked
+      // its way onto a table showing mail alone. The store's flag reads the
+      // chips the page read reads.
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setSources(const ['email']);
+      expect(idsOf(notifier), ['m1']);
+
+      await arrive(
+        'chat',
+        receivedAt: '2026-09-03T12:00:00Z',
+        source: 'teams',
+      );
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        ['m1'],
+        reason: 'the Teams chip is down, so the chat is not on the table',
+      );
+      expect(
+        notifier.state.pendingNewCount,
+        0,
+        reason: 'nor behind the count, which promises rows the reader can see',
+      );
+      await quiet(tester);
+    });
+
+    testWidgets('one older than the window never lands under a windowed one',
+        (tester) async {
+      /// Inside and outside the tiles' week, which is measured from the wall
+      /// clock — an absolute fixture would drift out of it as the calendar
+      /// moved.
+      String daysAgo(int days) =>
+          MessageStore.isoStamp(DateTime.now().subtract(Duration(days: days)));
+
+      await seed('m1', receivedAt: daysAgo(1), gateReason: 'newsletter');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.dropped);
+      expect(idsOf(notifier), ['m1']);
+
+      await arrive('ancient', receivedAt: daysAgo(30), gateReason: 'newsletter');
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        ['m1'],
+        reason: 'the tile counted a week, and a row the number never included '
+            'must not appear under it',
+      );
+      expect(notifier.state.pendingNewCount, 0);
+
+      await arrive('fresh', receivedAt: daysAgo(2), gateReason: 'newsletter');
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['m1', 'fresh']);
+      await tester.pump(HomeFeedNotifier.entryClear);
+      await quiet(tester);
+    });
+
+    testWidgets('one already on the table stays where it is', (tester) async {
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await arrive('m2', receivedAt: '2026-09-03T10:00:00Z');
+      await thread('m2', owed: true);
+      await settle('m2', needsYou: true);
+      await settleTicks(tester);
+      await tester.pump(HomeFeedNotifier.entryClear);
+
+      await notifier.setFilter(HomeFilter.needsYou);
+      expect(idsOf(notifier), ['m2']);
+
+      // The thread is closed: the row no longer matches, and it stays put.
+      await thread('m2', owed: false);
+      await settle('m2', needsYou: false);
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        ['m2'],
+        reason: 'the table never moves under a reader; the next load reads it '
+            'out',
+      );
+      expect(notifier.state.rows.single.threadState, 'done');
+      expect(notifier.state.fading, isEmpty);
+      await quiet(tester);
+    });
+  });
+
+  group('an arrival under oldest first', () {
+    testWidgets('is counted rather than inserted, and releasing reloads',
+        (tester) async {
+      await seedThree();
+      final notifier = build(sort: HomeSort.oldest);
+      await notifier.load();
+      expect(idsOf(notifier), ['m1', 'm2', 'm3']);
+
+      await arrive('m9', receivedAt: '2026-09-03T12:00:00Z');
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        ['m1', 'm2', 'm3'],
+        reason: 'the prepend arithmetic is newest-first',
+      );
+      expect(notifier.state.pendingNewCount, 1);
+
+      await notifier.releasePending();
+
+      expect(idsOf(notifier), ['m1', 'm2', 'm3', 'm9']);
+      expect(notifier.state.pendingNewCount, 0);
+      await quiet(tester);
+    });
+
+    testWidgets('a gate-dropped one is not performed either', (tester) async {
+      await seedThree();
+      final notifier = build(sort: HomeSort.oldest);
+      await notifier.load();
+
+      await arrive(
+        'n1',
+        receivedAt: '2026-09-03T12:00:00Z',
+        gateReason: 'newsletter',
+      );
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['m1', 'm2', 'm3']);
+      expect(notifier.state.fading, isEmpty);
+      expect(
+        notifier.state.pendingNewCount,
+        0,
+        reason: 'a count that promised a dropped row would promise nothing',
+      );
       await quiet(tester);
     });
   });

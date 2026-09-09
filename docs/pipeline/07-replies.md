@@ -87,6 +87,118 @@ Until the stored row is on screen, `DraftState.inFlightBody` keeps the
 optimistic bubble up; the screen's `_reloadOpenThread` is what swaps it for the
 row, on the send path and after each poll's sync.
 
+### Reply-to from the transcript
+
+`DraftNotifier.send` takes an optional `replyTo`, and the shell's hover
+**Reply** is what fills it: naming a message in the transcript writes a
+`Replying to <who>` caption over the docked composer, and the next send goes
+out as `send(body, replyTo: <that message id>)`. The caption clears on any
+outcome but a failure, so a name can never outlive the send it was written for.
+
+Unnamed is the ordinary case and the **fallback order is unchanged**: the
+message an inline card belongs to, else the stored draft's `reply_to_message_id`
+row, else the thread's newest inbound message. A card tapped under an OLDER
+message sets the same `Replying to <who>` override the hover **Reply** sets, so
+the staged words answer the message they were written for; the newest
+message's card sets nothing, because the send already resolves to it.
+
+There is no reply window any more. The composer is docked under every thread a
+reply is possible on, from the moment the thread opens — see
+[../shell.md](../shell.md#room-anatomy). Every ask on the pane, the banner and
+each message's own line, puts the cursor in that box rather than opening one.
+
+**The box opens empty, and a card TAP asks before it does anything.** Where
+this build can really send (`SendCapability.send`), tapping a card arms an
+inline `Send this reply?` under the words it is about — `Send`
+(`QuickReplyBar.confirmSendKeyFor(i)`), `Edit first` (`editKeyFor(i)`) or
+`Cancel` (`cancelSendKeyFor(i)`), never a dialog, and the body stays visible
+while the question stands. Nothing goes and nothing is staged until one of the
+three is answered. The tap is the only control on a card; a separate Send
+button beside the stance was how one gesture came to mean two things about the
+same words.
+
+`Send` goes through the SAME path as the composer's button,
+`_send(target, option.body, replyTo: m.id)`: addressed to the card's own
+message rather than to whatever the box above was pointed at, and staging
+nothing on the way. `Edit first` is the old tap — it puts the whole reply in
+the composer, takes the cursor there, and sets the `Replying to <who>` override
+under an older message. `Cancel` leaves the card exactly as it was.
+
+Where the build CANNOT send, there is nothing to confirm: a tap stages at once
+and asks nothing, because the lower rungs save to Outlook or copy to the
+clipboard and a question that said `Send` and did either would be a lie. The
+caption above the cards says which build the reader is in — `Tap a reply to
+send it — you can edit it first.` where the send is real, `Tap a reply to put
+it in the box.` where it is not — and the card's header glyph agrees with it.
+
+`DraftNotifier.queueSend`, `PendingSend` and `cancelQueuedSend` — the
+five-second undo window — remain provider API with their own tests, but nothing
+in the shell arms them any more. What gets a suggestion into the box is a
+card's `Edit first` (or its plain tap on a read-only build), a Suggest a reply,
+the box's Draft reply / Regenerate, a Use in reply on a file, or the `Use it`
+on the hint above the box; that staging is screen state keyed by thread and
+never touches the stored draft, and the box's ✕ only empties it.
+
+## Drafts & sent
+
+Every suggestion still waiting, and everything already sent, on one pane —
+reached from the **Drafts & sent** row in the Home stack (see
+[../shell.md](../shell.md#the-stops)). The two halves belong together because
+they are two ends of one question: what have I said, and what has something
+offered to say for me. Slack has a Drafts & sent view for the first half; this
+one has a second half because the drafts here were not written by the user.
+
+**What the suggested half lists** is `MessageStore.pendingDrafts`, and three
+narrowings make it work rather than a dump of the table:
+
+- **status** `suggested` or `edited` only. `sent` is history, and `dismissed` is
+  a row kept alive purely so the enqueue does not write the identical
+  suggestion straight back.
+- **the newest-inbound rule** — the `reply_to_message_id` subselect is the one
+  `getDraft` uses, character for character. A suggestion against an older
+  message is still stored and still readable in its thread, but it is not what
+  the composer would offer, so listing it would send the reader to a thread with
+  an empty box. `loadConversations`' `pending_draft_count` column keys off the
+  same subselect, which is what makes the rail's badge and this list the same
+  set of threads by construction.
+- **done threads** are excluded. A suggestion sitting against a closed thread is
+  the model having written something before the user decided the conversation
+  was over.
+
+**The sent half** is `MessageStore.recentOutbound` — there is no `sent` table
+and there does not need to be, because a send writes an outbound row into
+`messages`. Echo rows are included rather than filtered out: the user watched
+the reply leave, and a list that hid it until the Sent Items copy synced would
+disagree with what they just did. `SentRow.echo` (the `local:` id prefix) is
+what puts `· syncing` in the row's time caption. The order is
+`COALESCE(received_at, created_at)`, because an echo has no `received_at` until
+the server's copy lands and a sort on the null would put the newest thing last.
+
+**Both halves open BESIDE**, never in the main pane. That is the point of the
+pane: the docked composer in a side thread is one `Use it` from holding the
+suggested body, so a reader can work down the list — read, take it, send, next —
+without the list going away underneath them.
+
+**Dismiss** is `updateDraftStatus(status: 'dismissed')`, keyed on the message
+like every other draft write, and it is followed by **two more reloads**. The
+thread's own `draftProvider` is what a composer open beside the pane is reading,
+and it would still be holding the suggestion just thrown away; the conversation
+list carries `pending_draft_count`, which is the rail's badge. Without them the
+pane, the composer and the badge would each be saying something different about
+one row.
+
+**When it refreshes**: arriving on the stop (`_selectSection`), every
+sixty-second `_refresh` — two indexed reads on the tick that brought the mail in
+— the end of `_send`, and both `sendEpoch` listeners, which is the only place a
+QUEUED reply's send can be noticed at all. A re-read that fails leaves the rows
+already on screen where they are and says so in an `InlineAlert` over them
+(`DraftsInboxState.error` → `DraftsPane.error`): a pane that blanked on a failed
+re-read would throw away a list that is still perfectly true.
+
+A sent row with nobody in `to` is titled by its subject alone. That is the
+ordinary shape of a chat — the Teams connector stores no recipients on a
+message, because the chat's own subject already names everyone in it.
+
 ## Composing a new message
 
 `ComposeNotifier.send` (`app/lib/providers/compose_provider.dart`) is the
@@ -130,6 +242,45 @@ work without it. A tenant that granted the wider `User.Read.All` or
 `Directory.Read.All` satisfies it too — Entra's consent hierarchy puts the
 basic read inside both, and the app reads them that way rather than insisting
 on the narrow name an admin rarely picks.
+
+## Profile photos
+
+Avatars draw a real face when the directory has one. The photo rides on the
+SAME `get_profile` tool the account header already reads — no new tool name —
+given its photo arguments: `photo: 'bytes'`, `photo_size: '96x96'`, and `user`
+as a Graph user id or a UPN. `user` omitted is the signed-in user, which needs
+only `User.Read`; anybody else needs the same `User.ReadBasic.All` the org
+search does. The SDK twin is
+`GET /users/{id}/photos/{size}/$value` (or `/me/…`), read as bytes.
+
+`PeopleBackend.profilePhoto` (`app/lib/services/backend/people_backend.dart`)
+answers a `ProfilePhoto` — bytes plus content type — or **null**, and null is
+the everyday answer rather than a failure: every sender outside the tenant,
+everyone who uploaded no picture, and every person Graph cannot find all reach
+the same initials. Only two things throw, both `DirectoryUnavailable`:
+`directory_scope_missing` / HTTP 403, which no retry can fix, and everything
+else, which the next ask might.
+
+`ProfilePhotos` (`app/lib/services/profile_photos.dart`) is the seam the
+widgets hold, with `DirectoryProfilePhotos` over a backend and
+`NoProfilePhotos` — the default — for tests and signed-out sessions. Its rules:
+
+- `photoKeyFor(address:, id:)` decides the cache key, so one person is one
+  entry however they were learned: a Graph id when there is one, the id inside
+  a `teams:<id>` address, else the lowercased mail address.
+- One fetch per key per session, positive **and** negative. Most senders have
+  no photo, so remembering "no face" is what keeps a transcript from asking the
+  same nothing on every rebuild.
+- A missing scope disables the service for the session; any other failure
+  leaves the key askable again.
+- At most four calls in flight, since a transcript can mount thirty avatars in
+  one frame and thirty parallel Graph calls is how a session earns a throttle.
+- The cache is in MEMORY only. A disk cache is a follow-up.
+
+`BondAvatar` (`app/lib/widgets/bond_avatar.dart`) draws initials first and
+always, and swaps in the picture when it lands — never a spinner, never a hole.
+It appears in the transcript (`MessageRow`, `ThreadDetailPanel`) and the
+recipients typeahead; `AvatarStack` draws a room's first few faces and a `+N`.
 
 ## Documents in the prompt
 

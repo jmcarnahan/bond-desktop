@@ -1,6 +1,7 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -43,12 +44,26 @@ void main() {
     String triageState = 'done',
     String extractState = 'done',
     String storylineState = 'done',
+    bool hasAttachments = false,
     String? updatedAt,
+    String? summary,
+    String? ctaText,
+    // The THREAD's live state and score, which is what the rail's Needs You
+    // rule reads — `message_progress.needs_you` is the settle pass's snapshot
+    // of one message and the rule deliberately ignores it.
+    String? threadState,
+    double? attentionScore,
+    String? bucket,
     // Triaged by default: `work_open` reads a pending triage as work in
     // flight (the queue claims `messages.triage_status` directly, there is
     // no work row), so a seed that left the column at its default would make
     // every row here look busy.
+    //
+    // These two ARE `MessageStore.keptMessageSql`, which is what the Needs
+    // You filter and tile narrow on — a fact about the message the gate
+    // judged, not about the progress row that recorded the judgement.
     String triageStatus = 'triaged',
+    String? gateReason,
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -61,8 +76,45 @@ void main() {
       'received_at': receivedAt,
       'created_at': receivedAt,
       'updated_at': receivedAt,
+      'has_attachments': hasAttachments ? 1 : 0,
       'triage_status': triageStatus,
+      'gate_reason': gateReason,
     });
+    // Written straight onto the row: `upsertMessage` never touches the triage
+    // columns — that belongs to `writeTriage`, which wants a whole
+    // `TriageResult` to say one sentence.
+    if (summary != null) {
+      await db.customUpdate(
+        'UPDATE messages SET summary = ? '
+        'WHERE source = ? AND source_message_id = ?',
+        variables: [Variable(summary), Variable(source), Variable(id)],
+      );
+    }
+    // The ask is a fact about the THREAD, so it is written on the thread row
+    // rather than on the message — which is the whole reason the feed joins
+    // `conversations` at all.
+    if (ctaText != null || threadState != null) {
+      await store.upsertConversation({
+        'source': source,
+        'conversation_key': conversationKey,
+        'subject': subject,
+        'cta_text': ctaText,
+        // The column's own default, so a seed that only wanted an ask still
+        // reads as a closed thread rather than as one owing a reply.
+        'state': threadState ?? 'done',
+      });
+    }
+    if (attentionScore != null) {
+      await store.writeAttentionScore(source, conversationKey, attentionScore);
+    }
+    if (bucket != null) {
+      await store.setConversationBucket(
+        source,
+        conversationKey,
+        bucket: bucket,
+        reason: 'sweep',
+      );
+    }
     await db.customUpdate(
       'UPDATE message_progress SET outcome = ?, dropped = ?, drop_reason = ?, '
       'needs_you = ?, urgency = ?, storyline_id = ?, triage_state = ?, '
@@ -112,9 +164,43 @@ void main() {
   /// as stalled unless a test says so.
   const stalledCutoff = '2026-09-01T09:45:00Z';
 
+  /// One row that matches [filter] and one that does not, so a filter that
+  /// let everything through would fail as loudly as one that let nothing.
+  ///
+  /// Shared by the page read's loop and the live patch's, because the whole
+  /// point of the patch's flag is that it answers the page read's question.
+  Future<void> seedPair(HomeFilter filter) async {
+    switch (filter) {
+      case HomeFilter.fromOthers:
+        await seed('yes');
+        await seed('no', dropped: true, conversationKey: 'c2');
+      case HomeFilter.needsYou:
+        // The THREAD owes a reply, which is the rail's rule; the other
+        // thread carries the message-level snapshot and nothing else, so a
+        // filter still reading that column would fail here.
+        await seed('yes', threadState: 'needs_reply');
+        await seed('no', needsYou: true, conversationKey: 'c2');
+      case HomeFilter.urgent:
+        await seed('yes', urgency: 'high');
+        await seed('no', urgency: 'normal', conversationKey: 'c2');
+      case HomeFilter.inFlight:
+        await seed('yes', outcome: 'pending');
+        await seed('no', conversationKey: 'c2');
+      case HomeFilter.errors:
+        await seed('yes', storylineState: 'error');
+        await seed('no', conversationKey: 'c2');
+      case HomeFilter.dropped:
+        await seed('yes', dropped: true);
+        await seed('no', conversationKey: 'c2');
+      case HomeFilter.processed:
+        await seed('yes');
+        await seed('no', outcome: 'pending', conversationKey: 'c2');
+    }
+  }
+
   group('the tiles', () {
-    test('every number comes off the same window', () async {
-      await seed('m1', urgency: 'high', needsYou: true);
+    test('every number comes off the same read', () async {
+      await seed('m1', urgency: 'high', threadState: 'needs_reply');
       await seed('m2', source: 'teams', conversationKey: 'chat-1');
       await seed('m3', dropped: true, dropReason: 'newsletter');
       await seed('m4', outcome: 'pending');
@@ -124,6 +210,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.total, 6);
@@ -131,6 +218,8 @@ void main() {
       expect(metrics.teams, 1);
       expect(metrics.urgent, 1);
       expect(metrics.dropped, 1);
+      // The thread owing a reply, counted once — the rail's rule, not the
+      // message-level snapshot.
       expect(metrics.needsYou, 1);
       expect(metrics.storylined, 1);
       expect(metrics.inFlight, 1);
@@ -146,9 +235,46 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.urgent, 2);
+    });
+
+    test('the Urgent tile leaves out a dropped row, the way its filter does',
+        () async {
+      // Urgency is triage's word about the message and a later drop never
+      // rewrites it, so a `not_worthy` verdict at the settle pass leaves a
+      // `high` sitting on a row the Urgent filter refuses to show.
+      await seed('kept', urgency: 'high');
+      await seed(
+        'gone',
+        urgency: 'high',
+        dropped: true,
+        dropReason: 'not_worthy',
+        conversationKey: 'c2',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+      final rows = await store.pageHomeFeed(
+        filter: HomeFilter.urgent,
+        sinceIso: '2026-09-01T00:00:00Z',
+      );
+
+      expect(metrics.urgent, 1);
+      expect(
+        rows.map((r) => r.sourceMessageId),
+        ['kept'],
+      );
+      expect(
+        metrics.urgent,
+        rows.length,
+        reason: 'the tile is a promise the filter keeps',
+      );
     });
 
     test('a message errored in two stages is still one message', () async {
@@ -157,6 +283,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.errored, 1);
@@ -169,15 +296,39 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.total, 1);
+    });
+
+    test('needs_you ignores the window; the other numbers do not', () async {
+      // A thread owing a reply since well before the window opened. It is a
+      // pile to burn down, and work owed longest is exactly what a week hides.
+      await seed(
+        'ancient',
+        receivedAt: '2026-08-20T10:00:00Z',
+        threadState: 'needs_reply',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 1);
+      // The same row, under the same read, counted by every windowed column as
+      // nothing at all — which is the whole point of the scalar subquery.
+      expect(metrics.emails, 0);
+      expect(metrics.total, 0);
     });
 
     test('an empty mailbox reads as zeros rather than nulls', () async {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.total, 0);
@@ -192,6 +343,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.inFlight, 1);
@@ -205,6 +357,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.inFlight, 1);
@@ -217,6 +370,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.stalled, 0);
@@ -228,6 +382,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: stalledCutoff,
+        threshold: 0,
       );
 
       expect(metrics.inFlight, 1);
@@ -294,7 +449,9 @@ void main() {
         ['kept'],
       );
 
-      final all = await store.pageHomeFeed(includeDropped: true);
+      // `processed` is the filter that shows both piles: everything the app
+      // has finished with, whichever side of the gate it ended on.
+      final all = await store.pageHomeFeed(filter: HomeFilter.processed);
       expect(all.map((r) => r.sourceMessageId), ['kept', 'gone']);
       expect(all.last.dropped, true);
       expect(all.last.dropReason, 'newsletter');
@@ -315,7 +472,7 @@ void main() {
       expect(second.map((r) => r.sourceMessageId), ['m3']);
     });
 
-    test('onlyDropped answers with the filtered pile, newest first', () async {
+    test('the dropped filter answers with that pile, newest first', () async {
       await seed('kept', receivedAt: '2026-09-01T13:00:00Z');
       await seed(
         'older',
@@ -330,7 +487,7 @@ void main() {
         dropReason: 'fyi',
       );
 
-      final pile = await store.pageHomeFeed(onlyDropped: true);
+      final pile = await store.pageHomeFeed(filter: HomeFilter.dropped);
 
       expect(pile.map((r) => r.sourceMessageId), ['newer', 'older']);
       expect(pile.map((r) => r.dropReason), ['fyi', 'newsletter']);
@@ -345,12 +502,13 @@ void main() {
       await seed('live', receivedAt: '2026-09-01T12:00:00Z');
       await seed('d3', receivedAt: '2026-09-01T11:00:00Z', dropped: true);
 
-      final first = await store.pageHomeFeed(limit: 1, onlyDropped: true);
+      final first =
+          await store.pageHomeFeed(limit: 1, filter: HomeFilter.dropped);
       final second = await store.pageHomeFeed(
         beforeReceivedAt: first.last.receivedAt,
         beforeSourceMessageId: first.last.sourceMessageId,
         limit: 5,
-        onlyDropped: true,
+        filter: HomeFilter.dropped,
       );
 
       expect(first.map((r) => r.sourceMessageId), ['d2']);
@@ -362,7 +520,7 @@ void main() {
       await seed('gone', receivedAt: '2026-09-01T12:00:00Z', dropped: true);
 
       expect(
-        (await store.pageHomeFeed(onlyDropped: true))
+        (await store.pageHomeFeed(filter: HomeFilter.dropped))
             .map((r) => r.sourceMessageId),
         ['gone'],
       );
@@ -493,6 +651,182 @@ void main() {
       ]);
 
       expect(rows, hasLength(250));
+    });
+  });
+
+  group('progressPatchFor', () {
+    /// The flag is the page read's own answer, so it is asked the page read's
+    /// own question: for every filter, the row it keeps and the row it throws
+    /// away — and BOTH rows come back either way, because a row already on the
+    /// table is patched in place whatever the filter now says about it.
+    for (final filter in HomeFilter.values) {
+      test('${filter.name} flags what it admits and returns what it refuses',
+          () async {
+        await seedPair(filter);
+
+        final patch = await store.progressPatchFor(
+          [(source: 'email', id: 'yes'), (source: 'email', id: 'no')],
+          filter: filter,
+        );
+
+        expect(patch, hasLength(2));
+        expect(
+          patch.firstWhere((e) => e.row.sourceMessageId == 'yes').admitted,
+          isTrue,
+        );
+        expect(
+          patch.firstWhere((e) => e.row.sourceMessageId == 'no').admitted,
+          isFalse,
+        );
+      });
+    }
+
+    test('a tick for the other connector is not admitted', () async {
+      // The gap this closed: the live path narrowed by nothing on sources, so
+      // a chat ticked its way onto the table while the Mail chip alone was up.
+      await seed('m1', source: 'teams', conversationKey: 'chat-1');
+
+      final patch = await store.progressPatchFor(
+        [(source: 'teams', id: 'm1')],
+        filter: HomeFilter.fromOthers,
+        sources: const ['email'],
+      );
+
+      expect(patch.single.row.source, 'teams');
+      expect(patch.single.admitted, isFalse);
+    });
+
+    test('a row from before the window is not admitted', () async {
+      await seed('recent', urgency: 'high');
+      await seed(
+        'old',
+        conversationKey: 'c2',
+        receivedAt: '2026-08-01T10:00:00Z',
+        urgency: 'high',
+      );
+
+      final patch = await store.progressPatchFor(
+        [(source: 'email', id: 'recent'), (source: 'email', id: 'old')],
+        filter: HomeFilter.urgent,
+        sinceIso: '2026-09-01T00:00:00Z',
+      );
+
+      expect(
+        patch.firstWhere((e) => e.row.sourceMessageId == 'recent').admitted,
+        isTrue,
+      );
+      expect(
+        patch.firstWhere((e) => e.row.sourceMessageId == 'old').admitted,
+        isFalse,
+      );
+    });
+
+    test('under Needs You only the thread\'s newest kept message is admitted',
+        () async {
+      // The question one row cannot answer about itself, which is exactly why
+      // it is the store's to answer.
+      await seed(
+        'live-old',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T09:00:00Z',
+        threadState: 'needs_reply',
+      );
+      await seed(
+        'live-new',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T11:00:00Z',
+        threadState: 'needs_reply',
+      );
+
+      final patch = await store.progressPatchFor(
+        [
+          (source: 'email', id: 'live-old'),
+          (source: 'email', id: 'live-new'),
+        ],
+        filter: HomeFilter.needsYou,
+      );
+
+      expect(
+        patch.firstWhere((e) => e.row.sourceMessageId == 'live-new').admitted,
+        isTrue,
+      );
+      expect(
+        patch.firstWhere((e) => e.row.sourceMessageId == 'live-old').admitted,
+        isFalse,
+      );
+    });
+
+    test('under Needs You the threshold binds, and binds where it should',
+        () async {
+      // The one filter that carries an argument. A thread scoring 0.3 is
+      // admitted under a bar of 0.3 and refused under 0.5 — and a mis-bind of
+      // the number into the source list would fail this loudly rather than
+      // quietly admit everything.
+      await seed(
+        'scored',
+        conversationKey: 'scored',
+        receivedAt: '2026-09-01T09:00:00Z',
+        threadState: 'needs_reply',
+        attentionScore: 0.3,
+      );
+      final keys = [(source: 'email', id: 'scored')];
+
+      final under = await store.progressPatchFor(
+        keys,
+        filter: HomeFilter.needsYou,
+        threshold: 0.3,
+      );
+      expect(under.single.admitted, isTrue);
+
+      final over = await store.progressPatchFor(
+        keys,
+        filter: HomeFilter.needsYou,
+        threshold: 0.5,
+      );
+      expect(over.single.admitted, isFalse);
+      expect(over.single.row.sourceMessageId, 'scored',
+          reason: 'refused rows still come back — the table patches in place');
+    });
+
+    test('no chips up admits nothing and still hands back the rows', () async {
+      await seed('m1');
+
+      final patch = await store.progressPatchFor(
+        [(source: 'email', id: 'm1')],
+        filter: HomeFilter.fromOthers,
+        sources: const [],
+      );
+
+      // Not an empty result: the table's own rows still have to be patched in
+      // place, and a read that returned nothing would freeze them.
+      expect(patch, hasLength(1));
+      expect(patch.single.admitted, isFalse);
+    });
+
+    test('a burst larger than one chunk comes back whole', () async {
+      // The flag rides on every chunk's SQL, so the arguments have to bind the
+      // same way 250 keys in as they do 200.
+      for (var i = 0; i < 250; i++) {
+        await seed('m$i', conversationKey: 'c$i');
+      }
+
+      final patch = await store.progressPatchFor(
+        [for (var i = 0; i < 250; i++) (source: 'email', id: 'm$i')],
+        filter: HomeFilter.fromOthers,
+      );
+
+      expect(patch, hasLength(250));
+      expect(patch.every((e) => e.admitted), isTrue);
+    });
+
+    test('an empty key list costs nothing', () async {
+      expect(
+        await store.progressPatchFor(
+          const [],
+          filter: HomeFilter.fromOthers,
+        ),
+        isEmpty,
+      );
     });
   });
 
@@ -715,6 +1049,7 @@ void main() {
       final metrics = await store.homeMetrics(
         sinceIso: '2026-09-01T00:00:00Z',
         stalledBeforeIso: '2026-09-01T09:45:00Z',
+        threshold: 0,
       );
 
       expect(metrics.inFlight, 1);
@@ -796,6 +1131,631 @@ void main() {
       );
 
       expect(hot.map((s) => s.id), ['sl-9', 'sl-8', 'sl-7']);
+    });
+  });
+
+  group('the words the row carries', () {
+    test('the summary is the message and the ask is the thread', () async {
+      await seed(
+        'm1',
+        summary: 'Confirms the launch is on the 14th',
+        ctaText: 'Send the signed order form',
+      );
+
+      final row = (await store.pageHomeFeed()).single;
+
+      expect(row.summary, 'Confirms the launch is on the 14th');
+      expect(row.ctaText, 'Send the signed order form');
+
+      // The same projection feeds the live patch, which is the only path that
+      // ever fills these in without a reload.
+      final patched = await store.progressRowsFor([
+        (source: 'email', id: 'm1'),
+      ]);
+      expect(patched.single.summary, 'Confirms the launch is on the 14th');
+      expect(patched.single.ctaText, 'Send the signed order form');
+    });
+
+    test('one ask over a thread of three is still three rows', () async {
+      // The join is on the conversations PRIMARY KEY, so it cannot multiply a
+      // row — the thing that made the storyline memberships stay subqueries.
+      await seed('m1', receivedAt: '2026-09-01T09:00:00Z');
+      await seed('m2', receivedAt: '2026-09-01T10:00:00Z');
+      await seed(
+        'm3',
+        receivedAt: '2026-09-01T11:00:00Z',
+        ctaText: 'Reply with the dates',
+      );
+
+      final page = await store.pageHomeFeed();
+
+      expect(page, hasLength(3));
+      expect(
+        page.map((r) => r.ctaText),
+        everyElement('Reply with the dates'),
+        reason: 'the ask is the thread\'s, so every row on it carries it',
+      );
+    });
+
+    test('a message nobody triaged and a thread with no ask read null',
+        () async {
+      await seed('m1');
+
+      final row = (await store.pageHomeFeed()).single;
+
+      expect(row.summary, isNull);
+      expect(row.ctaText, isNull);
+    });
+  });
+
+  group('one filter at a time', () {
+    for (final filter in HomeFilter.values) {
+      test('${filter.name} keeps exactly what it names', () async {
+        await seedPair(filter);
+
+        final page = await store.pageHomeFeed(filter: filter);
+
+        expect(page.map((r) => r.sourceMessageId), ['yes']);
+      });
+    }
+
+    /// H3 as ONE loop: every tile's number is the number of rows under it.
+    ///
+    /// Seven tiles and seven filters is fourteen chances for a count and a
+    /// list to be narrowed on different things, and the two that drifted —
+    /// Urgent counting a dropped row its filter refuses, needs-you counting
+    /// messages where the filter counts threads — both read fine on their own
+    /// tests. This one seeds a mailbox with every awkward row in it and makes
+    /// each pair answer the same question.
+    ///
+    /// `fromOthers` is out because it is the whole feed rather than a tile.
+    test('every tile counts exactly the rows its filter shows', () async {
+      const window = '2026-09-01T00:00:00Z';
+      const threshold = 0.5;
+
+      // A plain kept row, loud.
+      await seed('kept', urgency: 'high');
+      // Thrown out by the gate before triage ever read it.
+      await seed(
+        'gated',
+        conversationKey: 'c-gated',
+        dropped: true,
+        dropReason: 'gated',
+        triageStatus: 'skipped',
+        gateReason: 'sender_muted',
+      );
+      // Dropped at the SETTLE pass, which is a verdict about a message the
+      // gate kept — and still carrying the urgency triage gave it.
+      await seed(
+        'not-worthy',
+        conversationKey: 'c-nw',
+        urgency: 'high',
+        dropped: true,
+        dropReason: 'not_worthy',
+      );
+      // A thread the rail says is owed an answer.
+      await seed(
+        'ask',
+        conversationKey: 'c-ask',
+        threadState: 'needs_reply',
+        attentionScore: 0.9,
+      );
+      // The same shape, deferred — which is the rail's first test.
+      await seed(
+        'later',
+        conversationKey: 'c-later',
+        threadState: 'needs_reply',
+        attentionScore: 0.9,
+        bucket: 'later',
+      );
+      await seed('err', conversationKey: 'c-err', storylineState: 'error');
+      await seed('busy', conversationKey: 'c-busy', outcome: 'pending');
+
+      final metrics = await store.homeMetrics(
+        sinceIso: window,
+        stalledBeforeIso: stalledCutoff,
+        threshold: threshold,
+      );
+
+      for (final filter in HomeFilter.values) {
+        if (filter == HomeFilter.fromOthers) continue;
+        final rows = await store.pageHomeFeed(
+          filter: filter,
+          // The window a windowed tile counts over, and nothing under the two
+          // that count all time — the same pairing the Inbox passes.
+          sinceIso: filter.windowed ? window : null,
+          threshold: threshold,
+        );
+        final tile = switch (filter) {
+          HomeFilter.needsYou => metrics.needsYou,
+          HomeFilter.urgent => metrics.urgent,
+          HomeFilter.inFlight => metrics.inFlight,
+          HomeFilter.errors => metrics.errored,
+          HomeFilter.dropped => metrics.dropped,
+          HomeFilter.processed => metrics.total - metrics.inFlight,
+          HomeFilter.fromOthers => -1,
+        };
+        expect(
+          tile,
+          rows.length,
+          reason: 'the ${filter.name} tile says $tile and its filter shows '
+              '${rows.length}',
+        );
+      }
+
+      // And the mailbox really did hold every awkward row — a mix that
+      // narrowed to nothing would pass the loop above by counting zeros.
+      expect(metrics.needsYou, 1);
+      expect(metrics.urgent, 1);
+      expect(metrics.dropped, 2);
+      expect(metrics.errored, 1);
+      expect(metrics.inFlight, 1);
+      expect(metrics.total, 7);
+    });
+
+    test('processed counts the dropped pile too', () async {
+      // The tile above it is `total − in_flight`, and a filter showing fewer
+      // rows than its own tile is a tile nobody believes twice.
+      await seed('kept', receivedAt: '2026-09-01T11:00:00Z');
+      await seed(
+        'gone',
+        receivedAt: '2026-09-01T10:00:00Z',
+        dropped: true,
+        conversationKey: 'c2',
+      );
+
+      final page = await store.pageHomeFeed(filter: HomeFilter.processed);
+
+      expect(page.map((r) => r.sourceMessageId), ['kept', 'gone']);
+    });
+  });
+
+  group('Needs You counts threads by the rail rule', () {
+    /// One live thread of three messages — two kept, one the user sent — and
+    /// one closed thread that still carries an ask. The rail counts the first
+    /// and not the second, and everything here is about the tile and the table
+    /// agreeing with it.
+    Future<void> seedTwoThreads() async {
+      await seed(
+        'live-old',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T09:00:00Z',
+        threadState: 'needs_reply',
+      );
+      await seed(
+        'live-new',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T11:00:00Z',
+        threadState: 'needs_reply',
+      );
+      await seed(
+        'live-sent',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T12:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'outbound',
+        dropped: true,
+        dropReason: 'outbound',
+        threadState: 'needs_reply',
+      );
+      await seed(
+        'closed',
+        conversationKey: 'closed',
+        receivedAt: '2026-09-01T10:00:00Z',
+        ctaText: 'Send the signed order form',
+      );
+    }
+
+    test('the tile counts one thread, not three messages', () async {
+      await seedTwoThreads();
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      // The rail's own rule: the closed thread is out however loud its ask is,
+      // and the live one is counted once however many messages hang off it.
+      expect(metrics.needsYou, 1);
+    });
+
+    test('the table shows the newest KEPT message of that thread', () async {
+      await seedTwoThreads();
+
+      final page = await store.pageHomeFeed(filter: HomeFilter.needsYou);
+
+      // Not `live-sent`: the user's own message is dropped as outbound, and a
+      // thread stands for itself through the newest message the app kept.
+      expect(page.map((r) => r.sourceMessageId), ['live-new']);
+      expect(page.single.threadState, 'needs_reply');
+    });
+
+    test('a thread deferred to Later is out of both', () async {
+      await seedTwoThreads();
+      await store.setConversationBucket(
+        'email',
+        'live',
+        bucket: 'later',
+        reason: 'sweep',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 0);
+      expect(await store.pageHomeFeed(filter: HomeFilter.needsYou), isEmpty);
+    });
+
+    test('a thread under the bar is out, and in when the bar drops', () async {
+      await seedTwoThreads();
+      await store.writeAttentionScore('email', 'live', 0.3);
+
+      Future<int> counted(double threshold) async =>
+          (await store.homeMetrics(
+            sinceIso: '2026-09-01T00:00:00Z',
+            stalledBeforeIso: stalledCutoff,
+            threshold: threshold,
+          ))
+              .needsYou;
+
+      Future<List<String>> listed(double threshold) async => [
+            for (final row in await store.pageHomeFeed(
+              filter: HomeFilter.needsYou,
+              threshold: threshold,
+            ))
+              row.sourceMessageId,
+          ];
+
+      expect(await counted(0.5), 0);
+      expect(await listed(0.5), isEmpty);
+      // The same slider the rail reads: moving it has to move the tile and the
+      // rows under it together, or one of the two is lying.
+      expect(await counted(0.2), 1);
+      expect(await listed(0.2), ['live-new']);
+    });
+
+    test('a chat born skipped under teams_source is kept by both', () async {
+      // The one tolerance `MessageStore.keptMessageSql` carries: a chat
+      // stored before chats were triaged is `skipped` for a pipeline that did
+      // not exist yet, not for anything about the words.
+      await seed(
+        'chat',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        receivedAt: '2026-09-01T10:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'teams_source',
+        threadState: 'needs_reply',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 1);
+      expect(
+        (await store.pageHomeFeed(filter: HomeFilter.needsYou))
+            .map((r) => r.sourceMessageId),
+        ['chat'],
+      );
+    });
+
+    test('a settle-time not_worthy drop is still the thread\'s row', () async {
+      // `not_worthy` is a verdict ABOUT a kept message — it lives on the
+      // progress row and leaves `triage_status` alone — so the thread still
+      // has a message anybody could answer.
+      await seed(
+        'quiet',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T10:00:00Z',
+        dropped: true,
+        dropReason: 'not_worthy',
+        threadState: 'needs_reply',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 1);
+      expect(
+        (await store.pageHomeFeed(filter: HomeFilter.needsYou))
+            .map((r) => r.sourceMessageId),
+        ['quiet'],
+      );
+    });
+
+    test('a gate-skipped message is refused by both', () async {
+      await seed(
+        'gated',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T10:00:00Z',
+        triageStatus: 'skipped',
+        gateReason: 'newsletter',
+        threadState: 'needs_reply',
+      );
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 0);
+      expect(await store.pageHomeFeed(filter: HomeFilter.needsYou), isEmpty);
+    });
+
+    test('a thread with no conversation row is nobody\'s to answer', () async {
+      // `message_progress.needs_you` is the settle pass's snapshot of one
+      // message; the rule reads the thread, and there is no thread here.
+      await seed('orphan', needsYou: true);
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+      );
+
+      expect(metrics.needsYou, 0);
+      expect(await store.pageHomeFeed(filter: HomeFilter.needsYou), isEmpty);
+    });
+  });
+
+  group('the window and the direction', () {
+    test('sinceIso bounds the read', () async {
+      await seed('inside', receivedAt: '2026-09-01T10:00:00Z');
+      await seed('outside', receivedAt: '2026-08-01T10:00:00Z');
+
+      final page = await store.pageHomeFeed(
+        sinceIso: '2026-08-25T00:00:00Z',
+      );
+
+      expect(page.map((r) => r.sourceMessageId), ['inside']);
+    });
+
+    test('the window rides the cursor onto the second page', () async {
+      await seed('a', receivedAt: '2026-09-03T10:00:00Z');
+      await seed('b', receivedAt: '2026-09-02T10:00:00Z');
+      await seed('old', receivedAt: '2026-08-01T10:00:00Z');
+
+      final first = await store.pageHomeFeed(
+        limit: 1,
+        sinceIso: '2026-08-25T00:00:00Z',
+      );
+      final second = await store.pageHomeFeed(
+        beforeReceivedAt: first.last.receivedAt,
+        beforeSourceMessageId: first.last.sourceMessageId,
+        limit: 5,
+        sinceIso: '2026-08-25T00:00:00Z',
+      );
+
+      expect(first.map((r) => r.sourceMessageId), ['a']);
+      expect(second.map((r) => r.sourceMessageId), ['b']);
+    });
+
+    test('ascending walks oldest first, and its cursor walks forward',
+        () async {
+      await seed('a', receivedAt: '2026-09-01T09:00:00Z');
+      await seed('b', receivedAt: '2026-09-01T10:00:00Z');
+      await seed('c', receivedAt: '2026-09-01T11:00:00Z');
+
+      final first = await store.pageHomeFeed(limit: 2, ascending: true);
+      final second = await store.pageHomeFeed(
+        beforeReceivedAt: first.last.receivedAt,
+        beforeSourceMessageId: first.last.sourceMessageId,
+        limit: 2,
+        ascending: true,
+      );
+
+      expect(first.map((r) => r.sourceMessageId), ['a', 'b']);
+      // A `<` cursor here would hand back the page that was just read.
+      expect(second.map((r) => r.sourceMessageId), ['c']);
+    });
+  });
+
+  group('the connector chips reach every number', () {
+    Future<void> seedBoth() async {
+      await seedStoryline('sl-1');
+      await seed('mail', storylineId: 'sl-1');
+      await seed(
+        'chat',
+        source: 'teams',
+        conversationKey: 'chat-1',
+        storylineId: 'sl-1',
+      );
+    }
+
+    test('the tiles count only what the table is showing', () async {
+      await seedBoth();
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+        sources: const ['teams'],
+      );
+
+      expect(metrics.total, 1);
+    });
+
+    test('except Emails and Teams, which count their connector whatever the '
+        'chips say', () async {
+      await seedBoth();
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+        sources: const ['email'],
+      );
+
+      expect(
+        metrics.teams,
+        1,
+        reason: 'those two tiles ARE the source selector, and a Teams tile '
+            'reading 0 because Teams is switched off would be the control '
+            'claiming there is nothing to switch to',
+      );
+      expect(metrics.emails, 1);
+      expect(
+        metrics.total,
+        1,
+        reason: 'every other column stays narrowed to the chips',
+      );
+    });
+
+    test('the hot strip ranks only what the table is showing', () async {
+      await seedBoth();
+
+      final hot = await store.hotStorylines(
+        sinceIso: '2026-09-01T00:00:00Z',
+        sources: const ['teams'],
+      );
+
+      expect(hot.single.messageCount, 1);
+    });
+
+    test('no connector at all is zeros and empties, never everything',
+        () async {
+      await seedBoth();
+
+      final metrics = await store.homeMetrics(
+        sinceIso: '2026-09-01T00:00:00Z',
+        stalledBeforeIso: stalledCutoff,
+        threshold: 0,
+        sources: const [],
+      );
+
+      expect(metrics.total, 0);
+      expect(
+        await store.hotStorylines(
+          sinceIso: '2026-09-01T00:00:00Z',
+          sources: const [],
+        ),
+        isEmpty,
+      );
+      expect(await store.pageHomeFeed(sources: const []), isEmpty);
+    });
+  });
+
+  group('the pipeline pulse', () {
+    test('it reads the queue, the triage column and the progress rows',
+        () async {
+      // Inside the window: settled, dropped, and one the app says is owed.
+      await seed('done1', updatedAt: '2026-09-01T09:55:00Z');
+      await seed(
+        'gone1',
+        conversationKey: 'c2',
+        dropped: true,
+        outcome: 'dropped',
+        updatedAt: '2026-09-01T09:56:00Z',
+      );
+      await seed(
+        'owed1',
+        conversationKey: 'c3',
+        needsYou: true,
+        updatedAt: '2026-09-01T09:57:00Z',
+      );
+      // Outside it, and still pending — so it counts as in flight and as
+      // nothing else.
+      await seed(
+        'stale',
+        conversationKey: 'c4',
+        outcome: 'pending',
+        updatedAt: '2026-09-01T08:00:00Z',
+      );
+
+      await store.enqueueWork('extract', 'email', 'e1');
+      await store.enqueueWork('extract', 'email', 'e2');
+      await store.enqueueWork('draft', 'email', 'd1');
+      await store.writeWork('draft', 'email', 'd1', status: 'processing');
+      await store.enqueueWork('storyline_sweep', 'email', 'c9');
+      // Not pipeline work: a chore run on the user's behalf.
+      await store.enqueueWork('mark_read', 'email', 'r1');
+      // Outside the window as well, so the counts below are about the three
+      // rows that moved inside it.
+      await seed(
+        'untriaged',
+        conversationKey: 'c5',
+        triageStatus: 'processing',
+        updatedAt: '2026-09-01T08:00:00Z',
+      );
+
+      final pulse = await store.pipelinePulse(
+        sinceIso: '2026-09-01T09:50:00Z',
+      );
+
+      expect(pulse.queued, {'extract': 2, 'storyline': 1});
+      expect(pulse.running, {'draft': 1, 'triage': 1});
+      expect(pulse.countFor('extract'), 2);
+      expect(pulse.countFor('embed'), 0);
+      expect(pulse.waiting, 3);
+      expect(pulse.working, 2);
+      expect(pulse.busy, isTrue);
+
+      // Two: the plain one and the one the app says is owed. A needs-you
+      // message is a SETTLED message — the pipeline finished with it and had
+      // something to say.
+      expect(pulse.recentSettled, 2);
+      expect(pulse.recentDropped, 1);
+      expect(pulse.recentNeedsYou, 1);
+    });
+
+    test('a quiet pipeline reads as quiet rather than as nothing', () async {
+      await seed('m1', updatedAt: '2026-09-01T08:00:00Z');
+
+      final pulse = await store.pipelinePulse(
+        sinceIso: '2026-09-01T09:50:00Z',
+      );
+
+      expect(pulse.queued, isEmpty);
+      expect(pulse.running, isEmpty);
+      expect(pulse.busy, isFalse);
+      expect(pulse.recentSettled, 0);
+    });
+
+    test('it counts only the connectors the table is showing', () async {
+      await store.enqueueWork('extract', 'email', 'e1');
+      await store.enqueueWork('extract', 'teams', 't1');
+
+      final pulse = await store.pipelinePulse(
+        sinceIso: '2026-09-01T09:50:00Z',
+        sources: const ['teams'],
+      );
+
+      expect(pulse.queued, {'extract': 1});
+      expect(
+        await store.pipelinePulse(
+          sinceIso: '2026-09-01T09:50:00Z',
+          sources: const [],
+        ),
+        isA<PipelinePulse>().having((p) => p.busy, 'busy', isFalse),
+      );
+    });
+  });
+
+  group('has_attachments rides the shared projection', () {
+    test('a feed row says whether its message carried anything', () async {
+      await seed('plain');
+      await seed('attached', receivedAt: '2026-09-02T10:00:00Z', hasAttachments: true);
+
+      final rows = await store.pageHomeFeed();
+
+      // The column is on `_homeFeedColumns`, which every read of this shape
+      // shares — so `has:file` can be answered off a hit without a second
+      // query per row.
+      expect(
+        {for (final row in rows) row.sourceMessageId: row.hasAttachments},
+        {'attached': true, 'plain': false},
+      );
     });
   });
 }

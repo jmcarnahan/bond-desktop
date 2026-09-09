@@ -1,7 +1,9 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
-import 'package:bond_inbox/widgets/attachment_chip.dart';
+import 'package:bond_inbox/widgets/attachment_card.dart';
+import 'package:bond_inbox/widgets/hover_actions.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -65,6 +67,10 @@ void main() {
     void Function(AttachmentRef attachment)? onOpenAttachment,
     AttachmentRef? selectedAttachment,
     ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
+    void Function(Message message)? onReplyTo,
+    void Function(Message message)? onSuggestFor,
+    void Function(Message message)? onWhy,
+    void Function(Message message)? onWhatHappened,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -86,6 +92,10 @@ void main() {
           onOpenAttachment: onOpenAttachment,
           selectedAttachment: selectedAttachment,
           thumbnailFor: thumbnailFor,
+          onReplyTo: onReplyTo,
+          onSuggestFor: onSuggestFor,
+          onWhy: onWhy,
+          onWhatHappened: onWhatHappened,
         ),
       ),
     ));
@@ -176,7 +186,36 @@ void main() {
   });
 
   group('an ask is a call to action', () {
-    testWidgets('the banner opens the reply', (tester) async {
+    testWidgets('the banner explains the newest inbound ask', (tester) async {
+      // Rewritten in Phase 6: the composer is docked and always visible, so
+      // "put the cursor in the box" is a click nobody needed help with, while
+      // "where did this ask come from" had no answer anywhere.
+      final asked = <String>[];
+      var opened = 0;
+      await pump(
+        tester,
+        onOpenReply: () => opened++,
+        onWhy: (m) => asked.add(m.id),
+        messages: [
+          _msg(
+            id: 'a',
+            receivedAt: '2026-08-25T09:00:00',
+            needsAction: true,
+            actionItems: const ['Send the deck'],
+          ),
+          _msg(id: 'b', receivedAt: '2026-08-25T11:00:00'),
+        ],
+      );
+
+      await tester.tap(find.text('Reply to Dana'));
+      await tester.pump();
+
+      expect(asked, ['b']);
+      expect(opened, 0);
+    });
+
+    testWidgets('with no Why to open, the banner still opens the reply',
+        (tester) async {
       var opened = 0;
       await pump(
         tester,
@@ -188,6 +227,26 @@ void main() {
             needsAction: true,
             actionItems: const ['Send the deck'],
           ),
+        ],
+      );
+
+      await tester.tap(find.text('Reply to Dana'));
+      await tester.pump();
+
+      expect(opened, 1);
+    });
+
+    testWidgets('a thread with nothing inbound falls back to the reply',
+        (tester) async {
+      // Nothing to explain: the banner's ask is about a message somebody sent
+      // the reader, and there is none.
+      var opened = 0;
+      await pump(
+        tester,
+        onOpenReply: () => opened++,
+        onWhy: (_) => fail('there is no inbound message to explain'),
+        messages: [
+          _msg(id: 'mine', outbound: true, receivedAt: '2026-08-25T09:00:00'),
         ],
       );
 
@@ -577,7 +636,7 @@ void main() {
       );
 
       final chips =
-          tester.widgetList<AttachmentChip>(find.byType(AttachmentChip));
+          tester.widgetList<AttachmentCard>(find.byType(AttachmentCard));
       expect(chips.where((c) => c.selected).length, 1);
       expect(chips.firstWhere((c) => c.selected).attachment.attachmentId, 'a1');
     });
@@ -597,9 +656,208 @@ void main() {
 
       expect(find.text('Terms.pdf'), findsOneWidget);
       expect(
-        tester.widget<AttachmentChip>(find.byType(AttachmentChip)).onTap,
+        tester.widget<AttachmentCard>(find.byType(AttachmentCard)).onTap,
         isNull,
       );
+    });
+  });
+
+  /// The strip that appears at a row's top-right under the mouse.
+  ///
+  /// It is an accelerator and never the only way to do a thing, which is why
+  /// every assertion here is about WHICH message a button carries: a Reply
+  /// that fired for its neighbour would answer Thursday's mail with Monday's
+  /// words.
+  group('the hover strip', () {
+    /// Puts a MOUSE over one row. Touch never enters a `MouseRegion`.
+    Future<void> hover(WidgetTester tester, String id) async {
+      final gesture = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await gesture.addPointer(location: Offset.zero);
+      addTearDown(gesture.removePointer);
+      await gesture.moveTo(tester.getCenter(rowFor(id)));
+      await tester.pump();
+    }
+
+    final two = [
+      _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+      _msg(id: 'b', receivedAt: '2026-08-25T15:00:00'),
+    ];
+
+    testWidgets('offers Reply and Suggest on the message under the pointer',
+        (tester) async {
+      final replied = <String>[];
+      final suggested = <String>[];
+      await pump(
+        tester,
+        messages: two,
+        onReplyTo: (m) => replied.add(m.id),
+        onSuggestFor: (m) => suggested.add(m.id),
+      );
+
+      // Nothing until a pointer arrives.
+      expect(find.byKey(HoverActions.replyKeyFor('a')), findsNothing);
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.replyKeyFor('a')), findsOneWidget);
+      // One row at a time: the strip belongs to the message under the mouse.
+      expect(find.byKey(HoverActions.replyKeyFor('b')), findsNothing);
+
+      await tester.tap(find.byKey(HoverActions.replyKeyFor('a')));
+      await tester.pump();
+      await tester.tap(find.byKey(HoverActions.suggestKeyFor('a')));
+      await tester.pump();
+
+      expect(replied, ['a']);
+      expect(suggested, ['a']);
+    });
+
+    testWidgets('and reports the OLDER message when that is the one hovered',
+        (tester) async {
+      final replied = <String>[];
+      await pump(tester, messages: two, onReplyTo: (m) => replied.add(m.id));
+
+      await hover(tester, 'b');
+      await tester.tap(find.byKey(HoverActions.replyKeyFor('b')));
+      await tester.pump();
+
+      expect(replied, ['b']);
+    });
+
+    testWidgets('an outbound row wears nothing', (tester) async {
+      // There is nothing to reply to on the user's own message, and nothing to
+      // draft an answer to either.
+      await pump(
+        tester,
+        messages: [
+          _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+          _msg(id: 'mine', outbound: true, receivedAt: '2026-08-25T16:00:00'),
+        ],
+        onReplyTo: (_) {},
+        onSuggestFor: (_) {},
+      );
+
+      await hover(tester, 'mine');
+
+      expect(find.byKey(HoverActions.replyKeyFor('mine')), findsNothing);
+      expect(find.byKey(HoverActions.suggestKeyFor('mine')), findsNothing);
+    });
+
+    testWidgets('one callback draws one button', (tester) async {
+      await pump(tester, messages: two, onReplyTo: (_) {});
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.replyKeyFor('a')), findsOneWidget);
+      expect(find.byKey(HoverActions.suggestKeyFor('a')), findsNothing);
+    });
+
+    testWidgets('a panel wired with neither wraps nothing at all',
+        (tester) async {
+      await pump(tester, messages: two);
+
+      await hover(tester, 'a');
+
+      // The wrapper hands the row straight through — `hover_actions_test`
+      // pins that there is not even a MouseRegion left behind.
+      expect(find.byKey(HoverActions.replyKeyFor('a')), findsNothing);
+      expect(find.byKey(HoverActions.suggestKeyFor('a')), findsNothing);
+      expect(find.byKey(HoverActions.whyKeyFor('a')), findsNothing);
+      expect(find.byIcon(Icons.reply_outlined), findsNothing);
+      expect(find.text('Body of a.'), findsOneWidget);
+    });
+
+    testWidgets('Why joins the strip, on the row under the pointer',
+        (tester) async {
+      final asked = <String>[];
+      await pump(tester, messages: two, onWhy: (m) => asked.add(m.id));
+
+      expect(find.byKey(HoverActions.whyKeyFor('a')), findsNothing);
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.whyKeyFor('a')), findsOneWidget);
+      expect(find.byKey(HoverActions.whyKeyFor('b')), findsNothing);
+
+      await tester.tap(find.byKey(HoverActions.whyKeyFor('a')));
+      await tester.pump();
+
+      expect(asked, ['a']);
+    });
+
+    testWidgets('an outbound row is not explained either', (tester) async {
+      await pump(
+        tester,
+        messages: [
+          _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+          _msg(id: 'mine', outbound: true, receivedAt: '2026-08-25T16:00:00'),
+        ],
+        onWhy: (_) {},
+      );
+
+      await hover(tester, 'mine');
+
+      expect(find.byKey(HoverActions.whyKeyFor('mine')), findsNothing);
+    });
+
+    testWidgets('What happened is the fourth button, and names its message',
+        (tester) async {
+      // The door into a message's history rides the hover strip with the
+      // other per-message actions, not the row's header: the row renders one
+      // message and does not know what a history is.
+      final asked = <String>[];
+      await pump(
+        tester,
+        messages: two,
+        onReplyTo: (_) {},
+        onSuggestFor: (_) {},
+        onWhy: (_) {},
+        onWhatHappened: (m) => asked.add(m.id),
+      );
+
+      expect(find.byKey(HoverActions.historyKeyFor('a')), findsNothing);
+      expect(find.text('What happened'), findsNothing);
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.historyKeyFor('a')), findsOneWidget);
+      expect(find.byKey(HoverActions.historyKeyFor('b')), findsNothing);
+      expect(find.byTooltip('What happened'), findsOneWidget);
+
+      await tester.tap(find.byKey(HoverActions.historyKeyFor('a')));
+      await tester.pump();
+
+      expect(asked, ['a']);
+      expect(
+        find.text('Body of a.'),
+        findsOneWidget,
+        reason: 'asking what happened must not fold the message asked about',
+      );
+    });
+
+    testWidgets('no What happened without a handler', (tester) async {
+      await pump(tester, messages: two, onWhy: (_) {});
+
+      await hover(tester, 'a');
+
+      expect(find.byKey(HoverActions.whyKeyFor('a')), findsOneWidget);
+      expect(find.byKey(HoverActions.historyKeyFor('a')), findsNothing);
+    });
+
+    testWidgets('an outbound row has no history to ask about either',
+        (tester) async {
+      await pump(
+        tester,
+        messages: [
+          _msg(id: 'a', receivedAt: '2026-08-25T09:00:00'),
+          _msg(id: 'mine', outbound: true, receivedAt: '2026-08-25T16:00:00'),
+        ],
+        onWhatHappened: (_) {},
+      );
+
+      await hover(tester, 'mine');
+
+      expect(find.byKey(HoverActions.historyKeyFor('mine')), findsNothing);
     });
   });
 }

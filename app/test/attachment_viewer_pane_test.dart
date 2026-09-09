@@ -97,15 +97,15 @@ void main() {
     expect(find.byKey(AttachmentPreviewPanel.useInReplyKey), findsNothing);
   });
 
-  testWidgets('Home renders only when it is wired', (tester) async {
+  testWidgets('the Inbox link renders only when it is wired', (tester) async {
     await pump(tester);
-    expect(find.text('Home'), findsNothing);
+    expect(find.text('Inbox'), findsNothing);
 
     var home = 0;
     await pump(tester, onHome: () => home++);
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Inbox'), findsOneWidget);
 
-    await tester.tap(find.text('Home'));
+    await tester.tap(find.text('Inbox'));
     expect(home, 1);
   });
 }

@@ -94,6 +94,30 @@ abstract final class BondColors {
   /// Sea-glass accent on dark surfaces.
   static const Color seaGlassOnDark = Color(0xFF7FBAAE);
 
+  // ── Rail (burgundy) ───────────────────────────────────────────────────
+  //
+  // The rail is the one dark surface in a light app, and it is warm rather
+  // than a darker copy of the main pane's slate: the sidebar is where you
+  // are, and the mail is what you are reading. The [onDarkFaint]…
+  // [onDarkPrimary] alphas are white over whatever is underneath, so they
+  // ride these fills unchanged — only the accent and the badge, which are
+  // real colours rather than alphas, need a burgundy-legible pair.
+
+  /// List-column fill — very dark burgundy.
+  static const Color rail = Color(0xFF2A1219);
+
+  /// Icon-rail fill, one step darker than [rail].
+  static const Color railDeep = Color(0xFF1E0B10);
+
+  /// Live dot and suggestion mark on the rail (dusty rose). [seaGlassOnDark]
+  /// stays what it is — it is still the machine-text accent in the light main
+  /// pane, and green on burgundy is not the same colour twice.
+  static const Color railAccent = Color(0xFFD9A0A8);
+
+  /// The attention count pill on the rail — brighter than [error], which
+  /// disappears into the fill it would sit on.
+  static const Color railBadge = Color(0xFFD64B52);
+
   // ── §14 expansion: governed off-palette channel color (decision 9) ────
   static const Color channelVideo = Color(0xFF6D5BA6);
   static const Color channelVideoTint = Color(0xFFEFE9F6);

@@ -477,6 +477,23 @@ void main() {
       );
     });
 
+    test("Exchange's first-contact tip comes off the preview and the body",
+        () async {
+      const tip = "You don't often get email from dana@example.com. Learn why "
+          'this is important<https://aka.ms/LearnAboutSenderIdentification>';
+      graph.deltaMessages = [
+        _deltaMessage(id: 'm1', bodyPreview: '$tip\nSigned copy attached.'),
+      ];
+      graph.bodies['m1'] = '$tip\nSigned copy attached.\n\nDana';
+
+      await sync.syncNow();
+      await sync.ensureBodies('conv-1');
+
+      final row = (await store.getMessageRow('email', 'm1'))!;
+      expect(row['body_preview'], 'Signed copy attached.');
+      expect(row['body_text'], 'Signed copy attached.\n\nDana');
+    });
+
     test('a link beside a real attachment is numbered after it', () async {
       graph.deltaMessages = [_deltaMessage(id: 'm1', hasAttachments: true)];
       graph.attachments['m1'] = [_graphAttachment(id: 'att-1')];

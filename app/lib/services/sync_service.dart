@@ -13,6 +13,7 @@ import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'graph_mail.dart';
+import 'mail_text.dart';
 import 'pipeline_progress.dart';
 
 /// How far back a mailbox that has never synced reaches. Two weeks is enough
@@ -329,6 +330,38 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_flag_backfill', '1');
       }
 
+      // Exchange's first-contact tip, off the rows stored before the ingest
+      // learned to strip it. Once, on the same one-shot idiom as the two
+      // above. Null until it runs.
+      int? strippedSenderTips;
+      if (await _store.getPref('sender_tip_strip') == null) {
+        strippedSenderTips = await _store.stripSenderIdentificationTips();
+        await _store.setPref('sender_tip_strip', '1');
+      }
+
+      // The display names of everyone the user has written to, off the rows
+      // stored before the ingest above learned to carry them. Same one-shot
+      // idiom, and null until it runs. Read-time name resolution in the
+      // People layer covers what a build was handed; this fixes what is
+      // stored, which is what the thread header and the typeahead read.
+      int? namedParticipants;
+      if (await _store.getPref('participant_names_backfill') == null) {
+        namedParticipants = await _store.fillParticipantNames();
+        await _store.setPref('participant_names_backfill', '1');
+      }
+
+      // The threads written before the fold learned to wait for the gate.
+      // An inbound landed, the thread said `needs_reply`, and the gate that
+      // threw that message out a moment later told nobody — so the rail has
+      // been listing threads holding nothing anyone could answer. Same
+      // one-shot idiom as the three above, and null until it runs. Every
+      // connector at once, because the lie is not the mail sync's alone.
+      int? refoldedThreads;
+      if (await _store.getPref('thread_state_refold') == null) {
+        refoldedThreads = await _store.refoldAllThreadStates();
+        await _store.setPref('thread_state_refold', '1');
+      }
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -394,6 +427,9 @@ class SyncService implements MailSync {
           'backfilled_addressed_me': ?backfilled,
           'revived_needs_you': ?revivedNeedsYou,
           'backfilled_needs_you': ?backfilledNeedsYou,
+          'stripped_sender_tips': ?strippedSenderTips,
+          'named_participants': ?namedParticipants,
+          'refolded_threads': ?refoldedThreads,
           if (inboxResync || sentResync) 'resync': true,
         },
       );
@@ -830,8 +866,12 @@ class SyncService implements MailSync {
         // Graph's preview of a link-attachment message is the file name
         // wrapped in zero-width spaces; search and cards must never carry an
         // invisible character.
-        final preview =
+        // And Exchange's first-contact tip, which the preview opens with for
+        // any sender the mailbox has not seen — see `mail_text.dart`.
+        final rawPreview =
             (message['bodyPreview'] as String?)?.replaceAll('\u200b', '');
+        final preview =
+            rawPreview == null ? null : stripSenderIdentification(rawPreview);
         final key = conversationKeyFor(
           message['conversationId'] as String?,
           id,
@@ -846,13 +886,26 @@ class SyncService implements MailSync {
         // to the user is not mail aimed at them.
         final soleRecipient = _userAddress != null &&
             recipients.length == 1 &&
-            recipients.first.toLowerCase() == _userAddress!.toLowerCase();
+            recipients.first.$2.toLowerCase() == _userAddress!.toLowerCase();
 
         final (triageStatus, gateReason) = triageStatusOnInsert(
           outbound: outbound,
           receivedAt: receivedAt,
           backlogCutoff: backlogCutoff,
         );
+
+        // An inbound the gate throws out AT INSERT — mail from behind the
+        // sync floor, stored `skipped`/`backlog` — is history being
+        // backfilled, not news arriving: nothing will ever read it, and a
+        // thread must not be made to ask for a reply to a message no stage of
+        // this app will look at. So it folds as `historical`, which moves the
+        // watermarks and the counts and leaves the state where it stands.
+        //
+        // Inbound only. An outbound is ALWAYS `skipped`/`outbound` at insert
+        // — triage answers "does this need me?" and the user's own send never
+        // does — so folding on that stamp would make every reply historical
+        // and no thread would ever settle.
+        final gatedAtInsert = !outbound && triageStatus == 'skipped';
 
         // Asked before the write, because the fold below must see each
         // message exactly once. Delta feeds legitimately replay messages —
@@ -883,7 +936,10 @@ class SyncService implements MailSync {
           subject: subject,
           fromName: fromName,
           fromAddress: fromAddress,
-          to: recipients,
+          // Addresses only. `to_json` is a list of address STRINGS — every
+          // reader of it, `recipientsFromJson` included, expects that shape —
+          // so the names ride into `participants_json` below and nowhere else.
+          to: [for (final (_, address) in recipients) address],
           receivedAt: receivedAt,
           isRead: message['isRead'] == true,
           bodyPreview: preview,
@@ -937,7 +993,9 @@ class SyncService implements MailSync {
           receivedAt: receivedAt,
           subject: subject,
           preview: preview,
-          historical: historical,
+          // And NOT into `resolvesAsk` above, which is outbound-only and so
+          // can never see this flag set — see where it is computed.
+          historical: historical || gatedAtInsert,
         );
         if (resolvesAsk) {
           entry.clearCta();
@@ -949,8 +1007,8 @@ class SyncService implements MailSync {
         // Whoever is on the other end: the sender of mail that came in, the
         // recipients of mail that went out. Never the user.
         if (outbound) {
-          for (final address in recipients) {
-            entry.addParticipant(null, address);
+          for (final (name, address) in recipients) {
+            entry.addParticipant(name, address);
           }
         } else {
           entry.addParticipant(fromName, fromAddress);
@@ -1051,8 +1109,12 @@ class SyncService implements MailSync {
     }
 
     final uniqueBody = detail['uniqueBody'];
-    final bodyText =
+    final rawBody =
         uniqueBody is Map<String, dynamic> ? uniqueBody['content'] as String? : null;
+    // Exchange's first-contact tip comes off HERE, where the body first
+    // exists, so nothing downstream — the transcript, the index, the prompts
+    // — ever sees a sentence the sender did not write. See `mail_text.dart`.
+    final bodyText = rawBody == null ? null : stripSenderIdentification(rawBody);
     final headers = _headers(detail['internetMessageHeaders']);
 
     final rawAttachments = detail['attachments'];
@@ -1212,14 +1274,25 @@ class SyncService implements MailSync {
     );
   }
 
-  static List<String> _recipients(Object? raw) {
+  /// `(name, address)` for every To: recipient that has an address.
+  ///
+  /// The NAME is carried, not dropped: it is the only place the display name
+  /// of somebody the user wrote to ever appears, and without it every
+  /// outbound-only thread stores its recipients as a bare address — which is
+  /// what the thread header, the recent-people typeahead and a person's own
+  /// room row then have to show. [_address] already returns it; this used to
+  /// throw it away.
+  ///
+  /// An entry with no address is dropped, as before: there is nothing to key a
+  /// participant on, and a name alone cannot be written to.
+  static List<(String?, String)> _recipients(Object? raw) {
     if (raw is! List) return const [];
-    final addresses = <String>[];
+    final out = <(String?, String)>[];
     for (final entry in raw) {
-      final (_, address) = _address(entry);
-      if (address != null && address.isNotEmpty) addresses.add(address);
+      final (name, address) = _address(entry);
+      if (address != null && address.isNotEmpty) out.add((name, address));
     }
-    return addresses;
+    return out;
   }
 }
 

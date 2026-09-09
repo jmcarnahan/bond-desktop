@@ -2,12 +2,31 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
+import '../models/home_sort.dart';
+import '../models/needs_you_sort.dart';
+import '../models/people_sort.dart';
 import '../services/attention.dart';
 import '../services/llm/model_slots.dart';
 import '../services/sync_service.dart';
 import 'app_providers.dart';
 
 export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
+
+/// The setter below takes a [NeedsYouSort], so whoever reads this file for the
+/// preference has the vocabulary to change it in the same import.
+export '../models/needs_you_sort.dart' show NeedsYouSort, NeedsYouSortLabel;
+
+/// The two People orders, for the same reason: the directory and a person's
+/// room read their order from here, and the menus that write it need the
+/// vocabulary in the same import.
+export '../models/people_sort.dart'
+    show PeopleSort, PeopleSortLabel, RoomSort, RoomSortLabel;
+
+/// The Inbox's order and its tile filters, for the same reason again: the
+/// feed's notifier reads the stored order out of here, and the sort menu and
+/// the tiles that write it need the vocabulary in the same import.
+export '../models/home_sort.dart'
+    show HomeSort, HomeSortLabel, HomeFilter, HomeFilterLabel;
 
 /// So the settings screen reaches a slot's value and its name through one
 /// import — the prefs are where both are composed.
@@ -97,16 +116,32 @@ class AppPrefs {
   /// someone who wants the latest at the top wants it everywhere.
   final bool storylineNewestFirst;
 
+  /// How the Needs You pile is ordered, everywhere it is drawn — the rail,
+  /// the overview and the row Enter opens. [NeedsYouSort.priority] by default,
+  /// because that is the ranking the app is FOR: the reader who wants the
+  /// clock instead asks for it once, and gets it in all three places.
+  final NeedsYouSort needsYouSort;
+
+  /// How the People directory is ordered. [PeopleSort.recent] by default,
+  /// which is the order [peopleRooms] already hands it in: the person who
+  /// spoke last is the person most likely to be looked for.
+  final PeopleSort peopleSort;
+
+  /// How one person's threads are ordered inside their room.
+  /// [RoomSort.newest] by default — a room opens on what just happened, the
+  /// way every other list in this app does.
+  final RoomSort roomSort;
+
   /// How a settled message announces itself. [NotifyStyle.native] by default,
   /// unlike every other switch here: the app spends minutes deciding a message
   /// needs the user, and finishing that in silence unless someone goes looking
   /// for a setting would waste the whole point of it.
   final NotifyStyle notifyStyle;
 
-  /// Whether the home feed lists the messages the app decided the user does
-  /// not need. Off by default — that decision is the product — and the toggle
-  /// is what makes it auditable rather than hidden.
-  final bool homeShowDropped;
+  /// How the Inbox feed is ordered. [HomeSort.newest] by default, which is
+  /// the order the store's keyset walk already hands it over in and the order
+  /// every other list in this app opens on.
+  final HomeSort homeSort;
 
   /// The bulk slot's server and model, or EMPTY for "whatever this build was
   /// compiled with".
@@ -140,8 +175,11 @@ class AppPrefs {
     this.mcpServerUrl = defaultMcpServerUrl,
     this.showActivityLog = false,
     this.storylineNewestFirst = false,
+    this.needsYouSort = NeedsYouSort.priority,
+    this.peopleSort = PeopleSort.recent,
+    this.roomSort = RoomSort.newest,
     this.notifyStyle = NotifyStyle.native,
-    this.homeShowDropped = false,
+    this.homeSort = HomeSort.newest,
     this.fastLlmUrl = '',
     this.fastLlmModel = '',
     this.proseLlmUrl = '',
@@ -191,8 +229,11 @@ class AppPrefs {
     String? mcpServerUrl,
     bool? showActivityLog,
     bool? storylineNewestFirst,
+    NeedsYouSort? needsYouSort,
+    PeopleSort? peopleSort,
+    RoomSort? roomSort,
     NotifyStyle? notifyStyle,
-    bool? homeShowDropped,
+    HomeSort? homeSort,
     String? fastLlmUrl,
     String? fastLlmModel,
     String? proseLlmUrl,
@@ -209,8 +250,11 @@ class AppPrefs {
         showActivityLog: showActivityLog ?? this.showActivityLog,
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
+        needsYouSort: needsYouSort ?? this.needsYouSort,
+        peopleSort: peopleSort ?? this.peopleSort,
+        roomSort: roomSort ?? this.roomSort,
         notifyStyle: notifyStyle ?? this.notifyStyle,
-        homeShowDropped: homeShowDropped ?? this.homeShowDropped,
+        homeSort: homeSort ?? this.homeSort,
         fastLlmUrl: fastLlmUrl ?? this.fastLlmUrl,
         fastLlmModel: fastLlmModel ?? this.fastLlmModel,
         proseLlmUrl: proseLlmUrl ?? this.proseLlmUrl,
@@ -230,8 +274,11 @@ const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
 const String storylineNewestFirstKey = 'storyline_newest_first';
+const String needsYouSortKey = 'needs_you_sort';
+const String peopleSortKey = 'people_sort';
+const String roomSortKey = 'person_room_sort';
 const String notifyStyleKey = 'notify_style';
-const String homeShowDroppedKey = 'home_show_dropped';
+const String homeSortKey = 'home_sort';
 const String fastLlmUrlKey = 'fast_llm_url';
 const String fastLlmModelKey = 'fast_llm_model';
 const String proseLlmUrlKey = 'prose_llm_url';
@@ -287,13 +334,16 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       showActivityLog: await store.getPref(showActivityLogKey) == 'true',
       storylineNewestFirst:
           await store.getPref(storylineNewestFirstKey) == 'true',
+      needsYouSort: _needsYouSort(await store.getPref(needsYouSortKey)),
+      peopleSort: _peopleSort(await store.getPref(peopleSortKey)),
+      roomSort: _roomSort(await store.getPref(roomSortKey)),
       // The one setting here that DEFAULTS ON, so its read is the inverse of
       // the two above — see [_style].
       notifyStyle: _style(
         await store.getPref(notifyStyleKey),
         await store.getPref(notifyRibbonKey),
       ),
-      homeShowDropped: await store.getPref(homeShowDroppedKey) == 'true',
+      homeSort: _homeSort(await store.getPref(homeSortKey)),
       fastLlmUrl: _slotValue(await store.getPref(fastLlmUrlKey)),
       fastLlmModel: _slotValue(await store.getPref(fastLlmModelKey)),
       proseLlmUrl: _slotValue(await store.getPref(proseLlmUrlKey)),
@@ -314,6 +364,37 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// Trimmed on the way in as well as on the way out, because a URL with a
   /// trailing newline is a `SocketException` nobody can read.
   static String _slotValue(String? raw) => raw?.trim() ?? '';
+
+  /// The stored order, or the ranking. Only the one spelling this notifier
+  /// writes reads as the clock — an absent key, a hand-edited value, or a name
+  /// a later build stopped using all leave the reader on the priority order
+  /// the app decides, which is the state every install starts in.
+  static NeedsYouSort _needsYouSort(String? raw) =>
+      raw == NeedsYouSort.newest.name
+          ? NeedsYouSort.newest
+          : NeedsYouSort.priority;
+
+  /// The stored People order, or recency. Anything this notifier did not write
+  /// — an absent key, a hand-edited value, a name a later build stopped using
+  /// — leaves the reader on the order every install starts in, rather than
+  /// throwing on the first frame of the People stop.
+  static PeopleSort _peopleSort(String? raw) {
+    for (final option in PeopleSort.values) {
+      if (option.name == raw) return option;
+    }
+    return PeopleSort.recent;
+  }
+
+  /// The stored room order, or newest first. [_peopleSort]'s rule exactly.
+  static RoomSort _roomSort(String? raw) =>
+      raw == RoomSort.oldest.name ? RoomSort.oldest : RoomSort.newest;
+
+  /// The stored Inbox order, or newest first. [_roomSort]'s rule exactly: only
+  /// the one spelling this notifier writes reads as oldest, so an absent key
+  /// or a hand-edited value leaves the reader on the order every install
+  /// starts in rather than throwing on the Inbox's first frame.
+  static HomeSort _homeSort(String? raw) =>
+      raw == HomeSort.oldest.name ? HomeSort.oldest : HomeSort.newest;
 
   /// The stored style, or what the switch it replaced said, or on.
   ///
@@ -406,14 +487,37 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
     await _store.setPref(storylineNewestFirstKey, value.toString());
   }
 
+  /// Orders the Needs You pile, in all three places it is drawn. Written as
+  /// the enum's own name, which is what [_needsYouSort] parses back.
+  Future<void> setNeedsYouSort(NeedsYouSort value) async {
+    state = state.copyWith(needsYouSort: value);
+    await _store.setPref(needsYouSortKey, value.name);
+  }
+
+  /// Orders the People directory. Written as the enum's own name, which is
+  /// what [_peopleSort] parses back.
+  Future<void> setPeopleSort(PeopleSort value) async {
+    state = state.copyWith(peopleSort: value);
+    await _store.setPref(peopleSortKey, value.name);
+  }
+
+  /// Orders the threads inside every person's room — one habit, not a setting
+  /// per colleague.
+  Future<void> setRoomSort(RoomSort value) async {
+    state = state.copyWith(roomSort: value);
+    await _store.setPref(roomSortKey, value.name);
+  }
+
   Future<void> setNotifyStyle(NotifyStyle value) async {
     state = state.copyWith(notifyStyle: value);
     await _store.setPref(notifyStyleKey, _styleName(value));
   }
 
-  Future<void> setHomeShowDropped(bool value) async {
-    state = state.copyWith(homeShowDropped: value);
-    await _store.setPref(homeShowDroppedKey, value.toString());
+  /// Orders the Inbox feed. Written as the enum's own name, which is what
+  /// [_homeSort] parses back.
+  Future<void> setHomeSort(HomeSort value) async {
+    state = state.copyWith(homeSort: value);
+    await _store.setPref(homeSortKey, value.name);
   }
 
   /// Points the bulk slot somewhere. Empty for either field means the compiled

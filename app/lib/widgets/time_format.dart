@@ -11,6 +11,32 @@ String? formatTimestamp(String? iso) {
   return DateFormat('MMM d, h:mm a').format(parsed.toLocal());
 }
 
+/// The Inbox table's stamp: `h:mm a` for something that arrived today,
+/// `MMM d, h:mm a` for anything else. Null for anything unparseable, exactly as
+/// [formatTimestamp] is.
+///
+/// [formatTimestamp]'s neighbour rather than a flag on it, because they answer
+/// different questions. That one is the stamp on a message in a thread, where
+/// the day is always worth stating; this one is a column in a table a reader
+/// scans, and the day is dropped ONLY when it is today's — which is the one day
+/// they can infer without being told.
+///
+/// The comparison is on the LOCAL calendar day for [dayKeyOfIso]'s reason: the
+/// day a message belongs to is the day the reader was living in when it
+/// arrived, and a UTC comparison would print this evening's mail with
+/// tomorrow's date on it for anyone west of Greenwich.
+String? feedStamp(String? iso, DateTime now) {
+  if (iso == null || iso.isEmpty) return null;
+  final parsed = DateTime.tryParse(iso);
+  if (parsed == null) return null;
+  final local = parsed.toLocal();
+  final today = now.toLocal();
+  final sameDay = local.year == today.year &&
+      local.month == today.month &&
+      local.day == today.day;
+  return DateFormat(sameDay ? 'h:mm a' : 'MMM d, h:mm a').format(local);
+}
+
 /// How long ago [iso] was, in the one unit that matters at that distance —
 /// "just now", "4m ago", "3h ago", "2d ago". Null for null and for anything
 /// unparseable, which reads as "never" upstream.
@@ -82,4 +108,39 @@ String? formatDayLabel(String? iso) {
   if (delta == 0) return 'Today';
   if (delta == 1) return 'Yesterday';
   return DateFormat('EEE, MMM d').format(local);
+}
+
+/// How far ahead [iso] is, in the words a reminder is read in — "tomorrow",
+/// "in 3 days", "in 2 weeks" — and the absolute day once it is far enough out
+/// that a count of days stops meaning anything.
+///
+/// [relativeTime]'s mirror, and a separate function rather than a sign flip on
+/// it: that one answers "is what I am looking at current?" in units of hours,
+/// while this one answers "when does this come back?" in units of days, and no
+/// reminder is ever usefully "in 14h".
+///
+/// A date already past reads as "today" rather than as a negative age. Such a
+/// row is on its way back on the next list load anyway, and a countdown into
+/// the negative would be a number nobody can act on. Null for null and for
+/// anything unparseable, which drops the caption upstream.
+String? untilLabel(String? iso, DateTime now) {
+  if (iso == null || iso.isEmpty) return null;
+  final parsed = DateTime.tryParse(iso);
+  if (parsed == null) return null;
+
+  // Whole calendar days apart, not elapsed hours: something due at nine
+  // tomorrow morning is "tomorrow" whether it is now midnight or now noon.
+  final local = parsed.toLocal();
+  final day = DateTime(local.year, local.month, local.day);
+  final today = DateTime(now.year, now.month, now.day);
+  final delta = day.difference(today).inDays;
+
+  if (delta <= 0) return 'today';
+  if (delta == 1) return 'tomorrow';
+  if (delta < 7) return 'in $delta days';
+  if (delta < 28) {
+    final weeks = delta ~/ 7;
+    return weeks == 1 ? 'in 1 week' : 'in $weeks weeks';
+  }
+  return absoluteDay(day);
 }

@@ -338,6 +338,49 @@ void main() {
       expect((await row('human'))['gate_reason'], isNull);
     });
 
+    test('a bot’s message does not ask for a reply', () async {
+      // The fold reads only the messages the gate kept, and a bot's is thrown
+      // out at insert: a build notification asks the reader for nothing, so
+      // the chat it lands in must not go on asking for an answer to it.
+      graph.messages['chat-1'] = [
+        _message(
+          id: 'bot',
+          userId: null,
+          applicationId: 'app-9',
+          displayName: 'Pipeline Bot',
+        ),
+      ];
+      await build().syncNow();
+
+      final chat = (await store.getConversationRow('teams', 'chat-1'))!;
+      expect(chat['state'], 'waiting');
+      // The chat's RECORD is genuinely more complete; only its state is
+      // withheld.
+      expect(chat['message_count'], 1);
+      expect(chat['last_inbound_at'], isNotNull);
+    });
+
+    test('a person’s message beside a bot’s still asks', () async {
+      graph.messages['chat-1'] = [
+        _message(
+          id: 'bot',
+          userId: null,
+          applicationId: 'app-9',
+          displayName: 'Pipeline Bot',
+          at: _iso(const Duration(hours: 2)),
+        ),
+        _message(id: 'human', at: _iso(const Duration(hours: 1))),
+      ];
+      await build().syncNow();
+
+      // Scoped by the gate's own verdict, not by the pass: one drain carries
+      // both, and only the bot's line is quiet.
+      expect(
+        (await store.getConversationRow('teams', 'chat-1'))!['state'],
+        'needs_reply',
+      );
+    });
+
     test('system events never become rows', () async {
       graph.messages['chat-1'] = [
         _message(id: 'joined', messageType: 'systemEventMessage'),

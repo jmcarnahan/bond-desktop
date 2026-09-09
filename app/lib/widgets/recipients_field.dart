@@ -6,9 +6,11 @@ import 'package:flutter/services.dart';
 
 import '../models/message_models.dart' show Conversation;
 import '../models/person.dart';
+import '../services/profile_photos.dart';
 import '../providers/recipient_search_provider.dart' show RecipientResults;
 import '../theme/tokens.dart';
 import '../utils/debounced.dart';
+import 'bond_avatar.dart';
 import 'chips.dart';
 
 /// One row the typeahead can offer. Sealed because the two halves are not
@@ -83,6 +85,10 @@ class RecipientsField extends StatefulWidget {
 
   final Duration debounce;
 
+  /// Where an offered person's face comes from. Null draws initials and asks
+  /// nothing — a chat row keeps its icon either way.
+  final ProfilePhotos? photos;
+
   const RecipientsField({
     super.key,
     required this.value,
@@ -95,6 +101,7 @@ class RecipientsField extends StatefulWidget {
     this.focusNode,
     this.onChatPicked,
     this.debounce = const Duration(milliseconds: 250),
+    this.photos,
   });
 
   @override
@@ -106,6 +113,10 @@ class _RecipientsFieldState extends State<RecipientsField> {
   static const String directorySection = 'Directory';
   static const String typedSection = 'Address';
   static const String chatsSection = 'Chats';
+
+  /// The face on an offered person. Small enough that the row's height is
+  /// still set by its two lines of text.
+  static const double _optionAvatarSize = 24;
 
   /// Tall enough for about five rows; past that the list scrolls rather than
   /// swallowing the screen.
@@ -521,19 +532,34 @@ class _RecipientsFieldState extends State<RecipientsField> {
     AutocompleteOnSelected<_RecipientOption> onSelected,
     bool highlighted,
   ) {
-    final (Key key, String primary, String? secondary, IconData? icon) =
+    final (Key key, String primary, String? secondary, Widget leading) =
         switch (option) {
+      // A person leads with their face; a chat leads with the icon that says
+      // it is a room rather than somebody.
       _PersonOption(:final person) => (
           Key('recipient-option-${person.id}'),
           person.displayName.isNotEmpty ? person.displayName : person.address,
           _personSecondary(person),
-          null,
+          BondAvatar(
+            name: person.displayName,
+            address: person.address,
+            size: _optionAvatarSize,
+            photoKey: photoKeyFor(
+              id: person.hasGraphId ? person.id : null,
+              address: person.address,
+            ),
+            photos: widget.photos,
+          ),
         ),
       _ChatOption(:final chat) => (
           Key('recipient-chat-${chat.id}'),
           _chatPrimary(chat),
           _chatSecondary(chat),
-          Icons.groups_outlined,
+          const Icon(
+            Icons.groups_outlined,
+            size: 16,
+            color: BondColors.inkSecondary,
+          ),
         ),
     };
 
@@ -549,10 +575,8 @@ class _RecipientsFieldState extends State<RecipientsField> {
         ),
         child: Row(
           children: [
-            if (icon != null) ...[
-              Icon(icon, size: 16, color: BondColors.inkSecondary),
-              const SizedBox(width: BondSpacing.s8),
-            ],
+            leading,
+            const SizedBox(width: BondSpacing.s8),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,

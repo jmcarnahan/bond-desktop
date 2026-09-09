@@ -11,10 +11,14 @@ import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/attachment_documents_strip.dart';
+import 'package:bond_inbox/widgets/preview/attachment_preview_panel.dart';
 import 'package:bond_inbox/widgets/preview/attachment_viewer_pane.dart';
 import 'package:bond_inbox/widgets/preview/preview_engines.dart';
+import 'package:bond_inbox/widgets/side_panel.dart';
+import 'package:bond_inbox/widgets/room_header.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/services/attachments/xlsx_reader.dart';
 import 'package:flutter/material.dart';
@@ -182,14 +186,24 @@ void main() {
   /// Opens the storyline in the main pane and unfolds its shelf.
   Future<void> openShelf(WidgetTester tester) async {
     await pumpInbox(tester);
-    // The rail's storylines section is expanded by default, so the row is
-    // already on screen.
-    await tester.tap(find.text('Website redesign'));
+    // The list column shows the stop that is lit, so the icon rail comes
+    // first; the row is tapped inside the column, because the overview beside
+    // it names the same storylines.
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('Storylines'),
+    ));
+    await tester.pump();
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: find.byType(AppRail),
+      matching: find.text('Website redesign'),
+    ));
     await tester.pump();
     await tester.pump();
     await tester.pump();
 
-    await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
+    await tester.tap(find.byKey(RoomHeader.tabKey(StorylineTab.files)));
     await tester.pump();
     await tester.pump();
   }
@@ -211,7 +225,7 @@ void main() {
 
     // Nobody pinned Brief.pdf and it is on the shelf all the same: membership
     // is the ordinary way a document gets here.
-    expect(find.text('2 documents'), findsOneWidget);
+    expect(find.text('Files (2)'), findsOneWidget);
     expect(find.text('📌 📕 Quote.pdf'), findsOneWidget);
     expect(find.text('📕 Brief.pdf'), findsOneWidget);
 
@@ -295,13 +309,21 @@ void main() {
 
     await openShelf(tester);
 
-    expect(find.text('Documents'), findsOneWidget);
+    // The bare label, because there is no count to give. Scoped to the tab
+    // itself: the icon rail's own Files stop wears the same word.
+    expect(
+      find.descendant(
+        of: find.byKey(RoomHeader.tabKey(StorylineTab.files)),
+        matching: find.text('Files'),
+      ),
+      findsOneWidget,
+    );
     expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsOneWidget);
     await settleQueues(tester);
   });
 
-  testWidgets('opening one fills the pane and Back returns to the storyline',
-      (tester) async {
+  testWidgets('opening one puts it beside the storyline, and Expand and Back '
+      'move between the two', (tester) async {
     await seedThread();
     await seedStoryline(pinned: 'c1/a1');
 
@@ -311,7 +333,15 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // There is no split on this pane, so a document opens the whole thing.
+    // Beside the spine, not over it: the storyline is the room the reader is
+    // in, and the document is read against it.
+    expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
+    expect(find.byType(StorylineTimelinePanel), findsOneWidget);
+
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
+    await tester.pump();
+    await tester.pump();
+
     expect(find.byType(AttachmentViewerPane), findsOneWidget);
     expect(find.byType(StorylineTimelinePanel), findsNothing);
 
@@ -319,9 +349,10 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // Back has nowhere to drop to here, so the preview leaves with the pane
-    // and the storyline is what is underneath.
+    // There is always somewhere to drop back to now — the side panel is the
+    // shell's, so Back returns to the split whatever the pane underneath is.
     expect(find.byType(AttachmentViewerPane), findsNothing);
+    expect(find.byType(AttachmentPreviewPanel), findsOneWidget);
     expect(find.byType(StorylineTimelinePanel), findsOneWidget);
     await settleQueues(tester);
   });
@@ -331,7 +362,7 @@ void main() {
     await seedStoryline(pinned: 'c1/a1');
 
     await openShelf(tester);
-    expect(find.text('1 document'), findsOneWidget);
+    expect(find.text('Files (1)'), findsOneWidget);
 
     await tester.tap(find.text('Remove'));
     await tester.pump();
@@ -347,7 +378,7 @@ void main() {
 
     // What leaves is the PIN, not the file: the thread is still a member, so
     // the document is still on the shelf — just no longer floated to the top.
-    expect(find.text('1 document'), findsOneWidget);
+    expect(find.text('Files (1)'), findsOneWidget);
     expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsNothing);
     expect(find.text('📕 Quote.pdf'), findsOneWidget);
     expect(

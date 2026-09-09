@@ -45,3 +45,82 @@ scoring formula itself is under-commented — `recomputeAll` is the place to
 add prose if the formula changes. Also a recorded residual from PR #9:
 `latestInboundMeta` and attention still key on bare conversation keys rather
 than `(source, conversationKey)`.
+
+## Snooze and resurface
+
+`conversation_ai.snoozed_until` — a column that existed with no reader and no
+writer since the migration that added it — is now what Later's "when" is stored
+in. UTC ISO in `MessageStore.isoStamp`'s exact six-digit shape, because every
+comparison against it is lexicographic over that one form.
+
+**Only per-thread deferrals carry a date.** `sendThreadToLater(source, key,
+{until})` writes one; `keepThreadInInbox` clears it; `sendSenderToLater`,
+`rebucketSender` and `restoreSenderPref` write none at all. A standing rule
+about a sender has no "when" in it, and handing its threads back one at a time
+would quietly exempt them from the rule the user had just made. A thread a
+sender rule swept up that the reader then gives a date to is therefore
+**promoted** to a deferral of its own, which is what naming a day for one
+thread means.
+
+**The default is the sender's own words.** `snoozeUntilFor` (in
+`lib/services/deadline_parse.dart`) reads the thread's `latest_deadline` — the
+newest inbound message's `deadline`, in the language triage stored it in — and
+returns that day at 09:00 local. Seven days when there is no deadline, when it
+does not parse, and when the day it names is **not after today**: a deadline
+already past would hand the thread straight back on the next list load, which
+is a Later button that visibly does nothing. Nine in the morning rather than
+midnight, so a resurfaced thread arrives on the day it names instead of
+overnight.
+
+`parseDeadline` is pure and takes `now`, so every answer is testable and the
+anchor is the reader's local day. It reads ISO dates, `Month D` / `D Month` in
+either order, `M/D` US order, `today` / `tomorrow` / `day after tomorrow`,
+weekday names (the next occurrence strictly after today, so today's own weekday
+is a week off), `end of week` / `eow`, `end of month` / `eom`, `next week`, and
+`eod` / `tonight`. Anything else is null, which reads upstream as "the message
+named no date anyone can act on" rather than as a guess.
+
+**Two pills, and one method behind them.** Each Later digest line gains a
+`Back <when>` caption when it has a date (`untilLabel` in `time_format.dart` —
+`tomorrow`, `in 3 days`, `in 2 weeks`, then the absolute day) and two quiet
+buttons, **Tomorrow** and **Next week**. Both call `snoozePreset` and route
+through `sendThreadToLater(…, until:)`, so there is exactly one path that means
+"this thread, until then". Two presets and not a picker: these sit on every row
+of a list the reader is working down, and no dialogs.
+
+**Resurfacing is the user's own decision.** `MessageStore.resurfaceDue(nowIso)`
+sets `bucket = NULL, bucket_reason = 'user', snoozed_until = NULL` on every
+`later` row **the user deferred by hand** (`bucket_reason = 'user'`) whose date
+has arrived, and returns how many moved. The reason is part of the match: a
+thread a sender rule owns is the rule's until the rule goes, and a date it
+inherited from an earlier hand-deferral must not hand it back behind the
+rule's back — so `rebucketSender` also clears `snoozed_until`, in both
+directions. The reason it writes is
+`'user'` and not a word of its own **because `_sweepBucket` above re-files any
+thread whose reason is not `'user'`** — a `'due'` or a NULL would send a
+resurfaced thread straight back to Later on the very next pass, and the date
+would look ignored with nothing on screen to say why. A date the user set is
+the user's instruction; when it fires, the result is exactly what "keep this
+thread in my inbox" writes.
+
+It is called from **one** place: `ConversationsNotifier.load()`, immediately
+before `recomputeAll` and so immediately before the read that renders the rows.
+Every path that refreshes the list runs `load()` — the sixty-second poll, the
+refresh button, every Later action — so one call site covers them all, and the
+sweep that follows sees the `'user'` reason and leaves the row alone. It
+returns the `(source, conversation_key)` pairs it moved rather than a count,
+because the caller has one more thing to do with them.
+
+**The chips come back with the thread.** `message_progress.needs_you` is a
+snapshot taken at settle, and a message that settles while its thread sits in
+Later takes a 0 on the strength of the bucket alone — `notifyWorthy`'s Later
+clause. Afterwards the snapshot follows the *verdict* only (see
+[11-needs-you.md](11-needs-you.md#the-chip-follows-the-verdict)), and lifting
+a bucket moves no verdict. So both ways out of Later for one thread — a date
+that arrived, and Keep in inbox — run
+`PipelineProgress.raiseNeedsYouForThread`, which is the one-shot backfill's
+own raise-only statement scoped to that thread, under the same guards (the
+thread's `done`, its last reply, the attention floor), ticking each row it
+raises. Without it a message judged yes came back to the inbox with no chip,
+for good. A sender rule lifting (`restoreSenderPref`) does not yet do this —
+recorded as a follow-up.

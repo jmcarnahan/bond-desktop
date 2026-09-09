@@ -6,6 +6,8 @@ import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/providers/recipient_search_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart';
+import 'package:bond_inbox/widgets/pane_surface.dart';
 import 'package:bond_inbox/screens/new_message_screen.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
@@ -63,6 +65,10 @@ class _FakePeople implements PeopleBackend {
   @override
   Future<List<Person>> searchPeople(String query, {int top = 10}) async =>
       const [];
+
+  @override
+  Future<ProfilePhoto?> profilePhoto(String user, {String size = '96x96'}) async =>
+      null;
 }
 
 /// A directory this account is not allowed to read — the server's own verdict,
@@ -75,6 +81,10 @@ class _RefusedPeople implements PeopleBackend {
       message: 'directory scope missing',
     );
   }
+
+  @override
+  Future<ProfilePhoto?> profilePhoto(String user, {String size = '96x96'}) async =>
+      null;
 }
 
 /// An account that DOES hold the directory grant, so the refusal above can
@@ -213,7 +223,11 @@ void main() {
     await pumpInbox(tester);
     await openCompose(tester);
 
-    await tester.tap(find.byTooltip('Home'));
+    // Scoped: the icon rail's Inbox stop wears the same tooltip.
+    await tester.tap(find.descendant(
+      of: find.byType(PaneSurface),
+      matching: find.byTooltip('Inbox'),
+    ));
     await tester.pump();
     await tester.pump();
     await tester.pump();
@@ -280,9 +294,15 @@ void main() {
     await pumpInbox(tester);
     await openCompose(tester);
 
-    await tester.tap(find.byTooltip('Settings'));
+    // Settings and the activity log live in the icon rail's account menu now
+    // (D8), so getting there is two taps. Bounded pumps throughout —
+    // `pumpAndSettle` never comes back with InboxScreen's timer running.
+    await tester.tap(find.byKey(IconRail.accountMenuKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(IconRail.settingsItemKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byType(NewMessageScreen), findsNothing);
     expect(find.byType(SettingsScreen), findsOneWidget);
@@ -303,9 +323,15 @@ void main() {
     expect(search.scopeMissing, isTrue);
 
     await pumpInbox(tester, search: search);
-    await tester.tap(find.byTooltip('Settings'));
+    // Settings and the activity log live in the icon rail's account menu now
+    // (D8), so getting there is two taps. Bounded pumps throughout —
+    // `pumpAndSettle` never comes back with InboxScreen's timer running.
+    await tester.tap(find.byKey(IconRail.accountMenuKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.tap(find.byKey(IconRail.settingsItemKey));
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
 
     final toggle =
         find.byKey(SettingsSection.toggleKey(MicrosoftConnectionSection.title));

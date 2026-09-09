@@ -84,6 +84,10 @@ class _FakePeople implements PeopleBackend {
   @override
   Future<List<Person>> searchPeople(String query, {int top = 10}) async =>
       const [];
+
+  @override
+  Future<ProfilePhoto?> profilePhoto(String user, {String size = '96x96'}) async =>
+      null;
 }
 
 class _FakeAuth implements AuthSession {
@@ -232,7 +236,7 @@ void main() {
     await tester.pump();
     expect(backs, 1);
 
-    await tester.tap(find.byTooltip('Home'));
+    await tester.tap(find.byTooltip('Inbox'));
     await tester.pump();
     expect(homes, 1);
 

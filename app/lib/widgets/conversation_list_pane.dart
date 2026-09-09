@@ -63,6 +63,23 @@ class ConversationListPane extends StatelessWidget {
   /// thread is an action with nothing to undo.
   final void Function(String source, String conversationKey)? onReopen;
 
+  /// A second line for one row, in place of the one it would draw for itself —
+  /// see [ConversationRow.caption]. Null, the default, leaves every row saying
+  /// what it always says; a builder that answers null for a given row does the
+  /// same for that one.
+  final String? Function(Conversation)? captionFor;
+
+  /// What an empty pane says. The default is the plain fact; a host with a
+  /// narrower list to draw — one tab of Needs You — says what that tab's
+  /// emptiness means.
+  final String emptyText;
+
+  /// Drawn under [emptyText] when the pane is empty — the host's line about
+  /// WHY it might be, and the way out. Null draws nothing. Here rather than
+  /// in the sentence because the reason is the host's (a source filter it
+  /// owns) and the pane must not pretend to know it.
+  final Widget? emptyNotice;
+
   const ConversationListPane({
     super.key,
     required this.sources,
@@ -74,6 +91,9 @@ class ConversationListPane extends StatelessWidget {
     this.sectionsOverride,
     this.processingSince,
     this.onReopen,
+    this.captionFor,
+    this.emptyText = 'Nothing here.',
+    this.emptyNotice,
   });
 
   List<Conversation> _inState(ConversationState state) => [
@@ -130,13 +150,23 @@ class ConversationListPane extends StatelessWidget {
     final total = sections.fold<int>(0, (n, s) => n + s.$2.length);
 
     if (total == 0) {
+      final notice = emptyNotice;
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(BondSpacing.s32),
-          child: Text(
-            'Nothing here.',
-            style: BondType.small,
-            textAlign: TextAlign.center,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                emptyText,
+                style: BondType.small,
+                textAlign: TextAlign.center,
+              ),
+              if (notice != null) ...[
+                const SizedBox(height: BondSpacing.s8),
+                notice,
+              ],
+            ],
           ),
         ),
       );
@@ -186,6 +216,7 @@ class ConversationListPane extends StatelessWidget {
           (selectedSource == null || selectedSource == c.source),
       onTap: () => onSelect(c.source, c.id),
       processingSince: processingSince,
+      caption: captionFor?.call(c),
     );
     if (!_showReopen) return row;
 

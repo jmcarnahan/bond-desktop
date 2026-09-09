@@ -95,6 +95,7 @@ void main() {
           onOpen: onOpen ?? (_, _) {},
           onKeepSender: (_, _) {},
           onKeepThread: (_, _) {},
+          onSnooze: (_, _, _) {},
           onReopen: onReopen ?? (_, _) {},
           droppedRows: droppedRows,
           droppedLoaded: droppedLoaded,

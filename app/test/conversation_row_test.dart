@@ -155,4 +155,42 @@ void main() {
 
     expect(find.textContaining('📎'), findsNothing);
   });
+
+  testWidgets('a caption replaces the second line the row would draw itself',
+      (tester) async {
+    await tester.pumpWidget(_host(ConversationRow(
+      conversation: _conv(cta: 'Confirm the launch date'),
+      selected: false,
+      onTap: () {},
+      caption: 'Deadline · by Friday',
+    )));
+
+    // On a list the reader picked BECAUSE every row has a date on it, the date
+    // in the sender's words is worth more than another copy of the ask — which
+    // the title already carries.
+    expect(find.text('Deadline · by Friday'), findsOneWidget);
+    expect(find.text('Confirm the launch date'), findsNothing);
+  });
+
+  testWidgets('and it beats the preview on a row with no ask', (tester) async {
+    await tester.pumpWidget(_host(ConversationRow(
+      conversation: _conv(),
+      selected: false,
+      onTap: () {},
+      caption: 'Deadline · end of month',
+    )));
+
+    expect(find.text('Deadline · end of month'), findsOneWidget);
+    expect(find.text('Are we still on for Friday?'), findsNothing);
+  });
+
+  testWidgets('no caption leaves the ordinary row alone', (tester) async {
+    await tester.pumpWidget(_host(ConversationRow(
+      conversation: _conv(cta: 'Confirm the launch date'),
+      selected: false,
+      onTap: () {},
+    )));
+
+    expect(find.text('Confirm the launch date'), findsOneWidget);
+  });
 }

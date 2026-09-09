@@ -9,6 +9,7 @@ import '../services/ai_worker.dart';
 import '../services/attention.dart';
 import '../services/attention_service.dart';
 import '../services/backend/backend_types.dart';
+import '../services/deadline_parse.dart';
 import '../services/notification_coordinator.dart';
 import '../services/pipeline_progress.dart';
 import '../services/read_ack_queue.dart';
@@ -266,6 +267,19 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
 
     final List<Conversation> rows;
     try {
+      // Deferrals whose date has arrived come back HERE, in front of the read
+      // that is about to render them. Every path that refreshes the list runs
+      // this method — the sixty-second poll, the refresh button, every Later
+      // action — so one call site covers them all, and the sweep immediately
+      // below sees the `'user'` reason it writes and leaves the row alone.
+      final resurfaced =
+          await _store.resurfaceDue(MessageStore.isoStamp(DateTime.now()));
+      // And their chips come back with them — see [_raiseNeedsYou]. Before
+      // the read below for the same reason the resurfacing is: the rows
+      // about to render must not carry a chip the row beside them just lost.
+      for (final key in resurfaced) {
+        await _raiseNeedsYou(key.source, key.conversationKey);
+      }
       // Immediately before the read rather than on a timer of its own: it is
       // four indexed queries and some arithmetic, and running it anywhere
       // else would mean the rows about to render could carry scores
@@ -680,12 +694,52 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       bucket: null,
       reason: 'user',
     );
+    // The date goes with the deferral it belonged to. A thread the user has
+    // just pulled back has no "when" any more, and a stale date left on the
+    // row would do nothing until the thread was deferred again — at which
+    // point it would fire against a decision nobody made.
+    await _store.setSnoozedUntil(source, conversationKey, null);
+    await _raiseNeedsYou(source, conversationKey);
     await load(syncFirst: false);
   }
 
-  /// This one thread belongs in Later. The `user` reason is what tells the
-  /// scoring sweep to leave it alone in both directions.
-  Future<void> sendThreadToLater(String source, String conversationKey) async {
+  /// Gives a thread that has just left Later the Needs You chips its messages
+  /// were denied while it was there.
+  ///
+  /// `message_progress.needs_you` is a snapshot, and a message that settled
+  /// while its thread sat in Later took a 0 on the strength of the bucket
+  /// alone. The snapshot follows the VERDICT afterwards, and lifting a bucket
+  /// moves no verdict — so without this the message is back in the inbox with
+  /// a judged yes one table over and no chip, for good. Raise-only, through
+  /// the pipeline's own statement and guards, so what earns a chip here is
+  /// exactly what earns one at settle.
+  Future<void> _raiseNeedsYou(String source, String conversationKey) async {
+    await _pipeline.raiseNeedsYouForThread(
+      source,
+      conversationKey,
+      threshold: await _attentionThreshold(),
+    );
+  }
+
+  /// This one thread belongs in Later, until [until]. The `user` reason is what
+  /// tells the scoring sweep to leave it alone in both directions.
+  ///
+  /// Every per-thread deferral carries a date, and [until] is how a caller
+  /// names one: the digest's two pills pass a preset, and everything else
+  /// leaves it null and gets [snoozeUntilFor]'s answer — the deadline the
+  /// thread's newest inbound message named, else seven days out. Sender rules
+  /// deliberately write no date at all: a standing rule about a person has no
+  /// "when", and resurfacing its threads one by one would quietly exempt them
+  /// from the rule that had just been made.
+  ///
+  /// A pill on a thread a sender rule filed therefore PROMOTES it to a
+  /// per-thread deferral, which is exactly what the user asked for by naming a
+  /// day for this one thread.
+  Future<void> sendThreadToLater(
+    String source,
+    String conversationKey, {
+    DateTime? until,
+  }) async {
     await _store.recordFeedback(
       scope: 'thread',
       scopeKey: conversationKey,
@@ -698,7 +752,35 @@ class ConversationsNotifier extends StateNotifier<ConversationsState> {
       bucket: 'later',
       reason: 'user',
     );
+    final now = DateTime.now();
+    final date = until ??
+        snoozeUntilFor(
+          deadline: _deadlineOf(source, conversationKey),
+          now: now,
+        );
+    // UTC, in the store's own stamp shape: every comparison against this
+    // column is lexicographic over exactly that form.
+    await _store.setSnoozedUntil(
+      source,
+      conversationKey,
+      MessageStore.isoStamp(date.toUtc()),
+    );
     await load(syncFirst: false);
+  }
+
+  /// The date the thread's newest inbound message named, in the sender's own
+  /// words — read off the row already in hand rather than re-queried, since
+  /// `loadConversations` computes it for every row on every load.
+  ///
+  /// Null for a thread that is not in the loaded list, which reads as "nobody
+  /// named a day" and lands on the seven-day default.
+  String? _deadlineOf(String source, String conversationKey) {
+    final current = state;
+    if (current is! ConversationsLoaded) return null;
+    for (final c in current.conversations) {
+      if (c.id == conversationKey && c.source == source) return c.latestDeadline;
+    }
+    return null;
   }
 
   /// The sender's rule as it stands, so a caller can capture it before

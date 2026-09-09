@@ -326,6 +326,13 @@ class TriageQueue {
         status: 'skipped',
         gateReason: senderGate,
       );
+      // The thread hears about the gate. The fold at ingest reads only kept
+      // messages, and this message was kept until a moment ago — so the
+      // thread may be asking for a reply to something that will never reach
+      // a model. One direction: a gate can only take an obligation away.
+      // BEFORE `_emit()`, so the reload the rails do behind that tick reads
+      // the state this just wrote rather than the one it replaced.
+      await _store.refoldThreadState(source, id, restored: false);
       await _emit();
       return true;
     }
@@ -368,6 +375,10 @@ class TriageQueue {
         status: 'skipped',
         gateReason: headerGate,
       );
+      // Same as tier one, and for every reason it gives — including the
+      // chat gate, which reaches here too: a message that stripped down to
+      // nothing is a message the model will never read.
+      await _store.refoldThreadState(source, id, restored: false);
       await _emit();
       return true;
     }

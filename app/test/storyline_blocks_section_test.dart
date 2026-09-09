@@ -10,6 +10,7 @@ Future<void> pumpSection(
   void Function(String source, String conversationKey)? onUnblockThread,
   void Function(String source, String conversationKey)? onAddBackThread,
   VoidCallback? onAudit,
+  bool auditing = false,
 }) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -21,6 +22,7 @@ Future<void> pumpSection(
             onUnblockThread: onUnblockThread,
             onAddBackThread: onAddBackThread,
             onAudit: onAudit,
+            auditing: auditing,
           ),
         ),
       ),
@@ -91,9 +93,16 @@ void main() {
         onAddBackThread: (source, key) => added.add((source, key)),
       );
 
-      await tester.tap(find.text('Allow again'));
+      // By key, not by position: the two buttons swapped places and a test
+      // that found them by order would have kept passing while calling the
+      // wrong one.
+      await tester.tap(
+        find.byKey(StorylineBlocksSection.allowAgainKeyFor('teams', 'c8')),
+      );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Add back'));
+      await tester.tap(
+        find.byKey(StorylineBlocksSection.addBackKeyFor('teams', 'c8')),
+      );
       await tester.pumpAndSettle();
 
       expect(allowed, [('teams', 'c8')]);
@@ -110,10 +119,45 @@ void main() {
       );
 
       expect(find.text('Add back'), findsOneWidget);
-      await tester.tap(find.text('Allow again'));
+      await tester.tap(
+        find.byKey(StorylineBlocksSection.allowAgainKeyFor('email', 'c9')),
+      );
       await tester.pumpAndSettle();
 
       expect(allowed, [('email', 'c9')]);
+    });
+
+    testWidgets('Add back stands before Allow again', (tester) async {
+      // The reader looking at a thread the re-check took out wants it BACK.
+      // Allow again reads like "put it back" and does not, so it cannot be
+      // the button their thumb lands on first.
+      await pumpSection(
+        tester,
+        blocks: [userBlock],
+        onUnblockThread: (_, _) {},
+        onAddBackThread: (_, _) {},
+      );
+
+      final addBack = tester.getTopLeft(
+        find.byKey(StorylineBlocksSection.addBackKeyFor('email', 'c9')),
+      );
+      final allowAgain = tester.getTopLeft(
+        find.byKey(StorylineBlocksSection.allowAgainKeyFor('email', 'c9')),
+      );
+      expect(addBack.dx, lessThan(allowAgain.dx));
+    });
+
+    testWidgets('the caption explains the two ways back', (tester) async {
+      const caption = 'Add back puts a thread on the spine again. Allow again '
+          'only lifts the block — the model may file the thread again on its '
+          'own, or not.';
+
+      await pumpSection(tester, blocks: [userBlock]);
+      expect(find.text(caption), findsOneWidget);
+
+      // Nothing was removed, so there is nothing to explain.
+      await pumpSection(tester);
+      expect(find.text(caption), findsNothing);
     });
 
     testWidgets('Re-check members asks for the audit', (tester) async {
@@ -124,6 +168,30 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(audits, 1);
+    });
+
+    testWidgets('a running re-check is inert and says so', (tester) async {
+      var audits = 0;
+      await pumpSection(
+        tester,
+        blocks: [auditBlock],
+        onAudit: () => audits++,
+        auditing: true,
+      );
+
+      expect(find.text('Re-checking…'), findsOneWidget);
+      expect(find.text('Re-check members'), findsNothing);
+      expect(
+        find.text('The model is re-judging each thread against the charter. '
+            'This takes a moment per thread; the spine updates as it goes.'),
+        findsOneWidget,
+      );
+
+      // Pressing it under a pass that is mid-flight is how a thread gets
+      // removed and re-filed in the same minute.
+      await tester.tap(find.byKey(StorylineBlocksSection.auditButtonKey));
+      await tester.pumpAndSettle();
+      expect(audits, 0);
     });
   });
 }

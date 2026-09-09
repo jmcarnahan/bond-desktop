@@ -180,6 +180,46 @@ void main() {
       expect((await messageOf('t1', source: 'teams'))['gate_override'], 'user');
     });
 
+    test('restoring the newest inbound raises its thread to needs_reply',
+        () async {
+      await seed();
+      // The gate had the last word, so the thread went quiet.
+      await store.upsertConversation({
+        'conversation_key': 'c-m1',
+        'subject': 'This week at Northwind',
+        'state': 'waiting',
+      });
+
+      await RestoreService(store).restore('email', 'm1');
+      await Future<void>.delayed(Duration.zero);
+
+      // The one path that folds a thread UP: the owner asking for a message
+      // back is the owner saying it was worth answering.
+      expect(
+        (await store.getConversationRow('email', 'c-m1'))!['state'],
+        'needs_reply',
+      );
+    });
+
+    test('restoring onto a done thread leaves it done', () async {
+      await seed();
+      await store.upsertConversation({
+        'conversation_key': 'c-m1',
+        'subject': 'This week at Northwind',
+        'state': 'done',
+      });
+
+      await RestoreService(store).restore('email', 'm1');
+      await Future<void>.delayed(Duration.zero);
+
+      // Closing a thread is the owner's other decision, and pulling one
+      // message back out of the dropped pile does not overrule it.
+      expect(
+        (await store.getConversationRow('email', 'c-m1'))!['state'],
+        'done',
+      );
+    });
+
     test('a local echo is left exactly as it is', () async {
       // The row a mail send writes for itself: gated `outbound`, so the
       // Dropped tab lists it, with an id no server knows.

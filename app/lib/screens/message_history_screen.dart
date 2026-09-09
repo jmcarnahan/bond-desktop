@@ -306,9 +306,9 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
 
   /// The feed's own sentence about this row, in full.
   ///
-  /// [resultLine]'s tooltip rather than its text: the cell on the home screen
-  /// ellipsises at two flexible columns, and the whole reason somebody is here
-  /// is the half that got cut.
+  /// [resultLine]'s label AND its reason clause, one under the other: the Inbox
+  /// splits them across two cells and ellipsises both, and the whole reason
+  /// somebody is on this screen is the half that got cut.
   List<Widget> _outcome(MessageHistory history) {
     final row = history.row;
     if (row == null) {
@@ -339,15 +339,16 @@ class _MessageHistoryScreenState extends State<MessageHistoryScreen> {
       ]);
     }
 
+    final detail = result.detail;
     return _section('Outcome', [
       Text(result.text, style: style),
-      // The feed's tooltip under the feed's sentence, whenever it says
-      // something more. On the table the sentence is ellipsised into two
-      // flexible columns and the explanation is a hover away; here there is
-      // room for both, and the explanation is the half somebody came for.
-      if (result.tooltip != result.text)
+      // The verdict's own reason clause under it, whenever there is one. On the
+      // table those are two columns and the reason may be ellipsised or one
+      // hover away; here there is room for both, and the reason is the half
+      // somebody came for.
+      if (detail != null)
         Text(
-          result.tooltip,
+          detail,
           style: BondType.caption.copyWith(color: BondColors.inkMuted),
         ),
     ]);

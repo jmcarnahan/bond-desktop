@@ -1,18 +1,20 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
+import 'package:bond_inbox/providers/activity_provider.dart' show SyncStamps;
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/attachment_search_tile.dart';
-import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/home_metrics.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
+import 'package:bond_inbox/widgets/home_pulse.dart';
 import 'package:bond_inbox/widgets/stage_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The home pane as a whole: the numbers over the table, the strip between
-/// them, and what the table does at its two ends.
+/// The Inbox pane as a whole: the numbers over the table — which are also its
+/// filter — the strips between them, and what the table does at its two ends.
 ///
 /// Pure — every value is a prop, so nothing here needs a container or a
 /// database.
@@ -95,7 +97,19 @@ Future<void> _pump(
   List<HomeFeedRow> rows = const [],
   HomeMetrics? metrics,
   List<HotStoryline> hot = const [],
-  bool includeDropped = false,
+  HomeFilter filter = HomeFilter.fromOthers,
+  HomeSort sort = HomeSort.newest,
+  String? sourceFilter,
+  ValueChanged<HomeFilter>? onFilter,
+  ValueChanged<HomeSort>? onSort,
+  ValueChanged<String?>? onSelectSource,
+  PipelinePulse? pulse,
+  bool mailSyncing = false,
+  bool teamsSyncing = false,
+  SyncStamps? stamps,
+  /// Narrows the pane itself rather than the window: the fold is decided on
+  /// the width the TABLE gets, which is what a thread beside it takes away.
+  double? paneWidth,
   bool loaded = true,
   bool loadingMore = false,
   bool atEnd = false,
@@ -107,7 +121,6 @@ Future<void> _pump(
   void Function(String, String)? onOpenThread,
   void Function(String)? onOpenStoryline,
   VoidCallback? onLoadMore,
-  VoidCallback? onToggleDropped,
   VoidCallback? onReleasePending,
   void Function(bool)? onAnchoredChanged,
   HomeSearch? search,
@@ -120,13 +133,20 @@ Future<void> _pump(
 }) async {
   await tester.binding.setSurfaceSize(const Size(1400, 900));
   addTearDown(() => tester.binding.setSurfaceSize(null));
-  await tester.pumpWidget(MaterialApp(
-    home: Scaffold(
-      body: HomePane(
+  final pane = HomePane(
         rows: rows,
         metrics: metrics,
         hotStorylines: hot,
-        includeDropped: includeDropped,
+        filter: filter,
+        onFilter: onFilter ?? (_) {},
+        sort: sort,
+        onSort: onSort ?? (_) {},
+        sourceFilter: sourceFilter,
+        onSelectSource: onSelectSource ?? (_) {},
+        pulse: pulse,
+        mailSyncing: mailSyncing,
+        teamsSyncing: teamsSyncing,
+        stamps: stamps,
         loaded: loaded,
         loadingMore: loadingMore,
         atEnd: atEnd,
@@ -139,7 +159,6 @@ Future<void> _pump(
         onOpenThread: onOpenThread ?? (_, _) {},
         onOpenStoryline: onOpenStoryline ?? (_) {},
         onLoadMore: onLoadMore ?? () {},
-        onToggleDropped: onToggleDropped ?? () {},
         onReleasePending: onReleasePending,
         onAnchoredChanged: onAnchoredChanged,
         search: search,
@@ -149,13 +168,29 @@ Future<void> _pump(
         onExitSearch: onExitSearch,
         onRetry: onRetry,
         onOpenHistory: onOpenHistory,
-      ),
+      );
+  await tester.pumpWidget(MaterialApp(
+    home: Scaffold(
+      body: paneWidth == null
+          ? pane
+          : Row(children: [SizedBox(width: paneWidth, child: pane)]),
     ),
   ));
 }
 
 void main() {
   group('the tiles', () {
+    const numbers = HomeMetrics(
+      emails: 41,
+      teams: 7,
+      urgent: 3,
+      dropped: 12,
+      needsYou: 5,
+      inFlight: 8,
+      errored: 2,
+      total: 48,
+    );
+
     testWidgets('show all eight figures, processed net of what is in flight',
         (tester) async {
       await _pump(
@@ -188,6 +223,55 @@ void main() {
       expect(find.text('8'), findsOneWidget);
       expect(find.text('Errors'), findsOneWidget);
       expect(find.text('2'), findsOneWidget);
+    });
+
+    testWidgets('the bar names the window the seven are read over',
+        (tester) async {
+      // Seven zeros with no stated period look like a broken pipeline; the
+      // same seven with "Last 7 days" beside them look like a quiet week.
+      await _pump(tester, metrics: const HomeMetrics());
+      expect(find.byKey(HomeMetricsBar.windowKey), findsOneWidget);
+      expect(
+        find.text(homeMetricsWindowLabel(homeMetricsWindow)),
+        findsOneWidget,
+      );
+      expect(find.text('Last 7 days'), findsOneWidget);
+    });
+
+    testWidgets('Needs You comes first, and a rule separates it from the rest',
+        (tester) async {
+      await _pump(tester, metrics: numbers);
+
+      final pile = tester.getTopLeft(
+        find.byKey(HomeMetricsBar.tileKey('needs-you')),
+      );
+      final rule = tester.getTopLeft(find.byKey(HomeMetricsBar.dividerKey));
+      final firstOfSeven = tester.getTopLeft(
+        find.byKey(HomeMetricsBar.tileKey('emails')),
+      );
+
+      // A pile to burn down and a readout of activity are two kinds of number,
+      // and eight in a row would invite the reader to compare them.
+      expect(pile.dx, lessThan(rule.dx));
+      expect(rule.dx, lessThan(firstOfSeven.dx));
+      // The caption belongs to the seven, so it comes after the rule too.
+      expect(
+        tester.getTopLeft(find.byKey(HomeMetricsBar.windowKey)).dx,
+        greaterThan(rule.dx),
+      );
+    });
+
+    testWidgets('the pile colours its count only when there is one',
+        (tester) async {
+      BondStatTile pileTile(WidgetTester tester) => tester
+          .widget<BondStatTile>(find.byKey(HomeMetricsBar.tileKey('needs-you')));
+
+      await _pump(tester, metrics: numbers);
+      expect(pileTile(tester).valueColor, BondColors.attention);
+
+      // A coloured nought is an alarm about the absence of work.
+      await _pump(tester, metrics: const HomeMetrics(total: 48, inFlight: 8));
+      expect(pileTile(tester).valueColor, isNull);
     });
 
     testWidgets('In flight carries the stalled count only when there is one',
@@ -400,30 +484,279 @@ void main() {
       expect(find.text('Could not read the feed.'), findsOneWidget);
       expect(find.byType(HomeFeedRowTile), findsOneWidget);
     });
+
+    testWidgets('names all seven columns when it has the width', (tester) async {
+      await _pump(tester, rows: [_row(1)]);
+
+      for (final column in const [
+        'From',
+        'Subject',
+        'Pipeline',
+        'Result',
+        'Ask · Summary',
+        'When',
+      ]) {
+        expect(find.text(column), findsOneWidget, reason: column);
+      }
+    });
+
+    testWidgets('folds to one line when the table is narrow', (tester) async {
+      // Under [HomePane.compactBelow], which is what a thread open beside this
+      // pane leaves it.
+      await _pump(tester, rows: [_row(1)], paneWidth: 700);
+
+      // Four columns, all named: the folded row still lines up, it is just
+      // shorter.
+      for (final column in ['From', 'Subject', 'Ask · Summary', 'When']) {
+        expect(find.text(column), findsOneWidget, reason: column);
+      }
+      expect(
+        find.text('Result'),
+        findsNothing,
+        reason: 'with a thread beside there is no width for a bar and a '
+            'verdict, and the thread beside carries both',
+      );
+      expect(find.text('Pipeline'), findsNothing);
+
+      expect(find.byKey(HomeFeedRowTile.askKey(_row(1))), findsOneWidget);
+      expect(find.byKey(HomeFeedRowTile.whenKey(_row(1))), findsOneWidget);
+      // The bar and the Result cell are the two history doors, and neither is
+      // drawn here — the door in compact is the thread beside.
+      expect(find.byType(HomeStageBar), findsNothing);
+      expect(
+        find.byKey(HomeFeedRowTile.historyBarKey(_row(1))),
+        findsNothing,
+      );
+      expect(
+        find.byKey(HomeFeedRowTile.historyCellKey(_row(1))),
+        findsNothing,
+      );
+    });
   });
 
-  testWidgets('the dropped toggle reports the tap and shows its state',
-      (tester) async {
-    var taps = 0;
-    await _pump(tester, onToggleDropped: () => taps++);
-
-    final pill = tester.widget<BondFilterPill>(
-      find.widgetWithText(BondFilterPill, 'Show dropped'),
+  group('the tiles are the filter', () {
+    const numbers = HomeMetrics(
+      emails: 41,
+      teams: 7,
+      urgent: 3,
+      dropped: 12,
+      needsYou: 5,
+      inFlight: 8,
+      errored: 2,
+      total: 48,
     );
-    expect(pill.selected, isFalse);
 
-    await tester.tap(find.text('Show dropped'));
-    expect(taps, 1);
+    BondStatTile tileFor(WidgetTester tester, String slug) => tester
+        .widget<BondStatTile>(find.byKey(HomeMetricsBar.tileKey(slug)));
 
-    await _pump(tester, includeDropped: true);
-    expect(
-      tester
-          .widget<BondFilterPill>(
-            find.widgetWithText(BondFilterPill, 'Show dropped'),
-          )
-          .selected,
-      isTrue,
-    );
+    testWidgets('a tile turns its own filter on', (tester) async {
+      final asked = <HomeFilter>[];
+      await _pump(tester, metrics: numbers, onFilter: asked.add);
+
+      await tester.tap(find.byKey(HomeMetricsBar.tileKey('needs-you')));
+      expect(asked, [HomeFilter.needsYou]);
+    });
+
+    testWidgets('the same tile turns it off again', (tester) async {
+      final asked = <HomeFilter>[];
+      await _pump(
+        tester,
+        metrics: numbers,
+        filter: HomeFilter.needsYou,
+        onFilter: asked.add,
+      );
+
+      await tester.tap(find.byKey(HomeMetricsBar.tileKey('needs-you')));
+      expect(
+        asked,
+        [HomeFilter.fromOthers],
+        reason: 'one filter at a time, and the tile is the way out of its own',
+      );
+    });
+
+    testWidgets('the tile in force looks held down', (tester) async {
+      await _pump(tester, metrics: numbers, filter: HomeFilter.dropped);
+
+      expect(tileFor(tester, 'dropped').selected, isTrue);
+      expect(tileFor(tester, 'needs-you').selected, isFalse);
+    });
+
+    testWidgets('Emails and Teams move the source chips instead',
+        (tester) async {
+      final sources = <String?>[];
+      await _pump(tester, metrics: numbers, onSelectSource: sources.add);
+
+      await tester.tap(find.byKey(HomeMetricsBar.tileKey('emails')));
+      expect(sources, ['email']);
+
+      // Already down, so the tile widens back to both connectors — the one
+      // source selection the app has, and this is one of the two controls on
+      // it.
+      await _pump(
+        tester,
+        metrics: numbers,
+        sourceFilter: 'email',
+        onSelectSource: sources.add,
+      );
+      expect(tileFor(tester, 'emails').selected, isTrue);
+      await tester.tap(find.byKey(HomeMetricsBar.tileKey('emails')));
+      expect(sources, ['email', null]);
+    });
+
+    testWidgets('a filter in force says so, and offers the way out',
+        (tester) async {
+      final asked = <HomeFilter>[];
+      await _pump(
+        tester,
+        metrics: numbers,
+        filter: HomeFilter.urgent,
+        onFilter: asked.add,
+      );
+
+      expect(find.byKey(HomePane.filterNoticeKey), findsOneWidget);
+      expect(
+        find.textContaining('Showing Urgent'),
+        findsOneWidget,
+        reason: 'a narrowing with nothing saying so reads as missing mail',
+      );
+      // Urgent is one of the seven, so the week is named beside it.
+      expect(find.text('Showing Urgent · last 7 days'), findsOneWidget);
+
+      await tester.tap(find.byKey(HomePane.showEveryoneKey));
+      expect(asked, [HomeFilter.fromOthers]);
+    });
+
+    testWidgets('the Needs You pile names no window, because it has none',
+        (tester) async {
+      await _pump(
+        tester,
+        metrics: numbers,
+        filter: HomeFilter.needsYou,
+        onFilter: (_) {},
+      );
+      expect(find.text('Showing Needs you'), findsOneWidget);
+      expect(find.textContaining('last 7 days'), findsNothing);
+    });
+
+    testWidgets('and says nothing at all under the default', (tester) async {
+      await _pump(tester, metrics: numbers);
+      expect(find.byKey(HomePane.filterNoticeKey), findsNothing);
+      expect(find.byKey(HomePane.showEveryoneKey), findsNothing);
+    });
+
+    testWidgets('under Needs You the pane tells each live row its thread is '
+        'owed an answer', (tester) async {
+      bool told(WidgetTester tester, Key key) =>
+          tester.widget<HomeFeedRowTile>(find.byKey(key)).threadNeedsYou;
+
+      await _pump(
+        tester,
+        metrics: numbers,
+        rows: [_row(1)],
+        filter: HomeFilter.needsYou,
+        onFilter: (_) {},
+      );
+
+      expect(
+        told(tester, ValueKey<String>(_row(1).feedKey)),
+        isTrue,
+        reason: 'every row this filter returns is the newest kept message of '
+            'a thread the rail says needs the reader, by construction — and '
+            'the row cannot read that off its own columns',
+      );
+
+      // Any other filter, and the row is back to speaking for itself.
+      await _pump(
+        tester,
+        metrics: numbers,
+        rows: [_row(1)],
+        filter: HomeFilter.dropped,
+        onFilter: (_) {},
+      );
+      expect(told(tester, ValueKey<String>(_row(1).feedKey)), isFalse);
+    });
+
+    testWidgets('a search result under the same filter is told nothing',
+        (tester) async {
+      await _pump(
+        tester,
+        metrics: numbers,
+        filter: HomeFilter.needsYou,
+        onFilter: (_) {},
+        search: HomeSearch('invoice', [_hit(7)]),
+      );
+
+      expect(
+        tester
+            .widget<HomeFeedRowTile>(
+              find.byKey(ValueKey<String>('search-${_row(7).feedKey}')),
+            )
+            .threadNeedsYou,
+        isFalse,
+        reason: 'a hit is whatever the query found, and nothing about the '
+            'list it landed in says its thread owes anything',
+      );
+    });
+  });
+
+  group('the order menu', () {
+    testWidgets('sits beside the box and names the order it is in',
+        (tester) async {
+      await _pump(tester, sort: HomeSort.oldest);
+
+      expect(find.byKey(HomePane.sortKey), findsOneWidget);
+      expect(find.text('Oldest first'), findsOneWidget);
+    });
+
+    testWidgets('a pick reports it', (tester) async {
+      final asked = <HomeSort>[];
+      await _pump(tester, onSort: asked.add);
+
+      await tester.tap(find.byKey(HomePane.sortKey));
+      // The menu is a route: one frame to push it, then its own animation.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      await tester.tap(
+        find.byKey(HomePane.sortItemKeyFor(HomeSort.oldest)).last,
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      expect(asked, [HomeSort.oldest]);
+    });
+  });
+
+  group('the pulse strip', () {
+    testWidgets('narrates the work, the last ten minutes, and the sync',
+        (tester) async {
+      await _pump(
+        tester,
+        pulse: const PipelinePulse(
+          queued: {'triage': 2},
+          running: {'storyline': 1},
+          recentSettled: 5,
+          recentDropped: 2,
+        ),
+        stamps: const SyncStamps(mailIso: '2026-09-03T11:58:00Z'),
+      );
+
+      expect(find.byKey(PipelinePulseStrip.stripKey), findsOneWidget);
+      expect(find.byKey(PipelinePulseStrip.workKey), findsOneWidget);
+      expect(find.byKey(PipelinePulseStrip.recentKey), findsOneWidget);
+      expect(find.byKey(PipelinePulseStrip.syncKey), findsOneWidget);
+      expect(find.text('triaging 2 · grouping 1'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsNothing);
+    });
+
+    testWidgets('an idle pipeline says so in one word, and still syncs',
+        (tester) async {
+      await _pump(tester, pulse: const PipelinePulse(), mailSyncing: true);
+
+      expect(find.text('Idle'), findsOneWidget);
+      expect(find.byKey(PipelinePulseStrip.recentKey), findsNothing);
+      expect(find.text('Syncing mail…'), findsOneWidget);
+    });
   });
 
   group('while the reader is away from the top', () {
@@ -523,7 +856,7 @@ void main() {
 
   testWidgets('the title says where you are', (tester) async {
     await _pump(tester);
-    expect(find.text('Home'), findsOneWidget);
+    expect(find.text('Inbox'), findsOneWidget);
   });
 
   group('search', () {

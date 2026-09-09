@@ -1,11 +1,13 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
-import 'package:bond_inbox/widgets/attachment_chip.dart';
 import 'package:bond_inbox/widgets/attachment_documents_strip.dart';
 import 'package:bond_inbox/widgets/chips.dart';
 import 'package:bond_inbox/widgets/inline_alert.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
+import 'package:bond_inbox/widgets/pinned_documents_bar.dart';
+import 'package:bond_inbox/widgets/room_header.dart';
+import 'package:bond_inbox/widgets/storyline_blocks_section.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -61,13 +63,6 @@ StorylineEpisode _episode({
       state: state,
       ctaText: ctaText,
     );
-
-/// The messages actually on screen, in order — which is what "expanded" means
-/// here. A shut card renders a preview and no [MessageRow].
-List<String> _renderedIds(WidgetTester tester) => tester
-    .widgetList<MessageRow>(find.byType(MessageRow))
-    .map((row) => row.message.id)
-    .toList();
 
 const _storyline = Storyline(
   id: 'sl-1',
@@ -161,6 +156,7 @@ void main() {
     VoidCallback? onDismissSuggestion,
     void Function(String source, String key)? onRemoveThread,
     void Function(String source, String key)? onOpenThread,
+    void Function(StorylineEpisode episode)? onOpenEpisode,
     VoidCallback? onBack,
     VoidCallback? onAddThread,
     bool newestFirst = false,
@@ -168,19 +164,15 @@ void main() {
     VoidCallback? onDismiss,
     Future<void> Function()? onSync,
     bool syncing = false,
-    Widget Function(StorylineEpisode episode)? episodeFooter,
-    void Function(StorylineEpisode episode)? onAskTap,
     List<AttachmentRef> documents = const [],
     void Function(AttachmentRef attachment)? onOpenDocument,
     void Function(AttachmentRef attachment)? onPinDocument,
     void Function(AttachmentRef attachment)? onUnpinDocument,
-    void Function(AttachmentRef attachment)? onOpenAttachment,
-    AttachmentRef? selectedAttachment,
-    ImageProvider? Function(AttachmentRef attachment)? thumbnailFor,
     List<StorylineBlock> blocks = const [],
     void Function(String source, String key)? onUnblockThread,
     void Function(String source, String key)? onAddBackThread,
     VoidCallback? onAudit,
+    bool auditing = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1000, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -197,39 +189,84 @@ void main() {
           onDismissSuggestion: onDismissSuggestion ?? () {},
           onRemoveThread: onRemoveThread ?? (_, _) {},
           onOpenThread: onOpenThread ?? (_, _) {},
+          onOpenEpisode: onOpenEpisode ?? (_) {},
           onAddThread: onAddThread ?? () {},
           newestFirst: newestFirst,
           onToggleSort: onToggleSort ?? () {},
           onDismiss: onDismiss ?? () {},
           onSync: onSync ?? () async {},
           syncing: syncing,
-          episodeFooter: episodeFooter,
-          onAskTap: onAskTap,
           documents: documents,
           onOpenDocument: onOpenDocument,
           onPinDocument: onPinDocument,
           onUnpinDocument: onUnpinDocument,
-          onOpenAttachment: onOpenAttachment,
-          selectedAttachment: selectedAttachment,
-          thumbnailFor: thumbnailFor,
           blocks: blocks,
           onUnblockThread: onUnblockThread,
           onAddBackThread: onAddBackThread,
           onAudit: onAudit,
+          auditing: auditing,
         ),
       ),
     ));
   }
 
+  /// Opens the header's ⋯ and waits for the menu route to arrive. Sort, Sync
+  /// and Dismiss live in there now: they are corrections and housekeeping, not
+  /// part of reading a storyline.
+  Future<void> openMore(WidgetTester tester) async {
+    await tester.tap(find.byKey(RoomHeader.moreKey));
+    await tester.pumpAndSettle();
+  }
+
+  /// Selects one of the header's tabs.
+  Future<void> openTab(WidgetTester tester, StorylineTab tab) async {
+    await tester.tap(find.byKey(RoomHeader.tabKey(tab)));
+    await tester.pumpAndSettle();
+  }
+
   group('header', () {
-    testWidgets('shows the title, the summary and the thread count',
+    testWidgets('shows the title and what the storyline holds',
         (tester) async {
       await pumpPanel(tester);
 
       expect(find.text('Website redesign'), findsOneWidget);
+      // The subtitle is the room's size, in one line. The summary moved to the
+      // Messages tab, where it is the first thing read rather than a caption
+      // wedged under the name.
+      expect(find.text('2 threads · 0 open'), findsOneWidget);
       expect(find.text('The studio is reviewing the homepage copy.'),
           findsOneWidget);
-      expect(find.text('2 threads'), findsOneWidget);
+    });
+
+    testWidgets('the three tabs are there and Messages is the one that opens',
+        (tester) async {
+      await pumpPanel(tester);
+
+      expect(find.text('Messages'), findsOneWidget);
+      expect(find.text('Files'), findsOneWidget);
+      expect(find.text('About'), findsOneWidget);
+      // Messages is what a storyline is for; the other two are reference.
+      expect(find.text('✉ Homepage copy'), findsOneWidget);
+    });
+
+    testWidgets('a tab swaps the body rather than stacking on it',
+        (tester) async {
+      await pumpPanel(tester, documents: [ref(name: 'Quote.pdf')]);
+
+      await openTab(tester, StorylineTab.files);
+      expect(find.byKey(StorylineTimelinePanel.documentsStripKey),
+          findsOneWidget);
+      expect(find.text('✉ Homepage copy'), findsNothing);
+
+      await openTab(tester, StorylineTab.about);
+      expect(find.byKey(StorylineTimelinePanel.documentsStripKey), findsNothing);
+      // About is the charter alone now: the membership is read on the spine,
+      // one line per card.
+      expect(find.text('CHARTER'), findsOneWidget);
+      expect(find.textContaining('THREADS ·'), findsNothing);
+
+      await openTab(tester, StorylineTab.messages);
+      expect(find.text('✉ Homepage copy'), findsOneWidget);
     });
 
     testWidgets('the back arrow is absent when there is nowhere to go back to',
@@ -241,10 +278,15 @@ void main() {
       expect(find.byIcon(Icons.arrow_back), findsOneWidget);
     });
 
-    testWidgets('the header offers Sync and fires it', (tester) async {
+    testWidgets('the ⋯ offers Sync and fires it', (tester) async {
       var synced = 0;
       await pumpPanel(tester, onSync: () async => synced++);
 
+      // Not on the header itself: it is the only control here that is not
+      // about this storyline in particular.
+      expect(find.text('Sync'), findsNothing);
+
+      await openMore(tester);
       expect(find.text('Sync'), findsOneWidget);
 
       await tester.tap(find.text('Sync'));
@@ -256,6 +298,8 @@ void main() {
     testWidgets('a running sync is inert and says so', (tester) async {
       var synced = 0;
       await pumpPanel(tester, onSync: () async => synced++, syncing: true);
+
+      await openMore(tester);
 
       // The screen owns the flag, so the panel's only job is to say what it
       // is being told and to stop asking for a second pull.
@@ -286,8 +330,7 @@ void main() {
       );
     });
 
-    testWidgets('newest first flips the spine, not the default expansion',
-        (tester) async {
+    testWidgets('newest first flips the spine', (tester) async {
       await pumpPanel(tester, newestFirst: true);
 
       final homepageCard = find.text('✉ Homepage copy');
@@ -296,20 +339,20 @@ void main() {
         tester.getTopLeft(launchCard).dy,
         lessThan(tester.getTopLeft(homepageCard).dy),
       );
-      // The preference is a reading direction and nothing more: the newest
-      // thread is still the one the reader lands in, now at the top.
-      expect(_renderedIds(tester), ['m2']);
     });
 
-    testWidgets('the sort button names the current order and reports a toggle',
+    testWidgets('the sort item names the order it switches TO',
         (tester) async {
       var toggled = 0;
       await pumpPanel(tester, onToggleSort: () => toggled++);
 
-      expect(find.text('Oldest first'), findsOneWidget);
-      expect(find.text('Newest first'), findsNothing);
+      // A menu item says what it DOES. The old button named the order the
+      // spine was already in, which read as a statement you could not act on.
+      await openMore(tester);
+      expect(find.text('Newest first'), findsOneWidget);
+      expect(find.text('Oldest first'), findsNothing);
 
-      await tester.tap(find.text('Oldest first'));
+      await tester.tap(find.text('Newest first'));
       await tester.pumpAndSettle();
 
       // The host owns the preference, so the label only follows a rebuild
@@ -317,42 +360,43 @@ void main() {
       expect(toggled, 1);
 
       await pumpPanel(tester, newestFirst: true);
-      expect(find.text('Newest first'), findsOneWidget);
+      await openMore(tester);
+      expect(find.text('Oldest first'), findsOneWidget);
     });
 
-    testWidgets('the newest episode is the one that opens', (tester) async {
-      await pumpPanel(tester);
-
-      // The last card holds the newest message, so it is the one the reader
-      // lands in. Everything above it is a headline until they ask for more.
-      expect(_renderedIds(tester), ['m2']);
-    });
-
-    testWidgets('tapping a card header opens it, and tapping again shuts it',
+    testWidgets('tapping a card opens the thread it stands for',
         (tester) async {
-      await pumpPanel(tester);
+      final opened = <String>[];
+      await pumpPanel(
+        tester,
+        onOpenEpisode: (episode) => opened.add(episode.conversationKey),
+      );
 
       await tester.tap(find.text('✉ Homepage copy'));
-      await tester.pumpAndSettle();
+      await tester.pump();
 
-      // Opening one leaves the other where it was: this is skimming, not a
-      // single-expansion accordion.
-      expect(_renderedIds(tester), ['m1', 'm3', 'm2']);
-
-      await tester.tap(find.text('✉ Launch date'));
-      await tester.pumpAndSettle();
-
-      expect(_renderedIds(tester), ['m1', 'm3']);
+      // A card is a root message, not a drawer: the tap opens the thread
+      // beside the spine, where the transcript and the reply box are.
+      expect(opened, ['c1']);
+      expect(find.byType(MessageRow), findsNothing);
     });
 
-    testWidgets('a shut card previews the newest message in its thread',
+    testWidgets('and says how much of the thread is behind it', (tester) async {
+      await pumpPanel(tester);
+
+      expect(find.text('2 messages · open ›'), findsOneWidget);
+      expect(find.text('1 message · open ›'), findsOneWidget);
+    });
+
+    testWidgets('every card previews the newest message in its thread',
         (tester) async {
       await pumpPanel(tester);
 
-      // m3 is the homepage thread's last message, and the card is shut, so the
-      // preview is the only place it appears.
-      expect(_renderedIds(tester), ['m2']);
+      // m3 is the homepage thread's last message and m2 the launch thread's.
+      // Both cards carry their own, always: there is no open state left for a
+      // preview to be the alternative to.
       expect(find.text('body of m3'), findsOneWidget);
+      expect(find.text('body of m2'), findsOneWidget);
       expect(find.text('body of m1'), findsNothing);
     });
 
@@ -368,27 +412,20 @@ void main() {
       expect(find.text('✉ Launch date'), findsOneWidget);
     });
 
-    testWidgets('day dividers live inside an episode', (tester) async {
-      final overnight = _episode(
-        key: 'c3',
-        subject: 'Overnight',
-        messages: [
-          _message(id: 'n1', receivedAt: '2026-08-01T09:00:00Z'),
-          _message(id: 'n2', receivedAt: '2026-08-02T09:00:00Z'),
-        ],
-      );
-      await pumpPanel(tester, only: [overnight]);
-
-      expect(find.byType(MessageRow), findsNWidgets(2));
-      expect(find.byType(DayDivider), findsNWidgets(2));
-    });
-
     testWidgets('nothing left of the seam pills', (tester) async {
       await pumpPanel(tester);
 
       // The seam is the card boundary now. A pill at every thread change was
-      // the merged transcript's way of coping and it went with it.
-      expect(find.byType(BondFilterPill), findsNothing);
+      // the merged transcript's way of coping and it went with it. The only
+      // pills left on this panel are the header's three tabs.
+      expect(find.byType(BondFilterPill), findsNWidgets(3));
+      expect(
+        find.descendant(
+          of: find.byType(ListView),
+          matching: find.byType(BondFilterPill),
+        ),
+        findsNothing,
+      );
     });
 
     testWidgets('an empty storyline says so rather than going blank',
@@ -503,7 +540,7 @@ void main() {
       expect(find.textContaining('open asks'), findsNothing);
     });
 
-    testWidgets('and the banner is the way into the reply', (tester) async {
+    testWidgets('and the banner does not swallow the card', (tester) async {
       final asking = _episode(
         key: 'c1',
         subject: 'Homepage copy',
@@ -511,167 +548,20 @@ void main() {
         ctaText: 'Confirm attendance',
         messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
       );
-      final tapped = <String>[];
+      final opened = <String>[];
       await pumpPanel(
         tester,
         only: [asking],
-        onAskTap: (episode) => tapped.add(episode.conversationKey),
+        onOpenEpisode: (episode) => opened.add(episode.conversationKey),
       );
 
+      // The ask used to take its own tap, to reach a reply box on the spine.
+      // There is no box there now, so the banner is a statement and the tap
+      // means what every other part of the card means: open the thread.
       await tester.tap(find.text('Confirm attendance'));
-      await tester.pumpAndSettle();
-
-      expect(tapped, ['c1']);
-      // And NOT the header's collapse: the same copper text on the thread pane
-      // opens the reply, and it must not mean "shut the card" here.
-      expect(_renderedIds(tester), ['m1']);
-    });
-
-    testWidgets('and still collapses the card where there is no reply to open',
-        (tester) async {
-      final asking = _episode(
-        key: 'c1',
-        subject: 'Homepage copy',
-        state: ConversationState.needsReply,
-        ctaText: 'Confirm attendance',
-        messages: [_message(id: 'm1', receivedAt: '2026-08-01T09:00:00Z')],
-      );
-      await pumpPanel(tester, only: [asking]);
-      expect(_renderedIds(tester), ['m1']);
-
-      await tester.tap(find.text('Confirm attendance'));
-      await tester.pumpAndSettle();
-
-      // Nothing absorbs the tap, so it reaches the header the banner sits in.
-      expect(_renderedIds(tester), isEmpty);
-    });
-  });
-
-  group('open asks in an episode', () {
-    testWidgets('an unanswered message carries its own ask', (tester) async {
-      final asking = _episode(
-        key: 'c1',
-        subject: 'Homepage copy',
-        state: ConversationState.needsReply,
-        messages: [
-          _message(
-            id: 'm1',
-            receivedAt: '2026-08-01T09:00:00Z',
-            needsAction: true,
-            actionItems: ['Send the deck'],
-          ),
-        ],
-      );
-      await pumpPanel(tester, only: [asking]);
-
-      expect(find.text('Send the deck'), findsOneWidget);
-    });
-
-    testWidgets('a thread that is no longer waiting on the user carries none',
-        (tester) async {
-      // The reply went, the thread folded to waiting and the CTA was cleared in
-      // the same pass. The ask lines must not outlive that banner.
-      final answered = _episode(
-        key: 'c1',
-        subject: 'Homepage copy',
-        messages: [
-          _message(
-            id: 'm1',
-            receivedAt: '2026-08-01T09:00:00Z',
-            needsAction: true,
-            actionItems: ['Send the deck'],
-          ),
-        ],
-      );
-      await pumpPanel(tester, only: [answered]);
-
-      expect(find.text('Send the deck'), findsNothing);
-    });
-
-    testWidgets('a later reply closes it', (tester) async {
-      final answered = _episode(
-        key: 'c1',
-        subject: 'Homepage copy',
-        state: ConversationState.needsReply,
-        messages: [
-          _message(
-            id: 'm1',
-            receivedAt: '2026-08-01T09:00:00Z',
-            needsAction: true,
-            actionItems: ['Send the deck'],
-          ),
-          _message(
-            id: 'm2',
-            receivedAt: '2026-08-01T09:30:00Z',
-            outbound: true,
-            from: 'You',
-            address: 'me@example.com',
-          ),
-        ],
-      );
-      await pumpPanel(tester, only: [answered]);
-
-      expect(find.text('Send the deck'), findsNothing);
-    });
-
-    testWidgets('and a tap on one names the thread it is in', (tester) async {
-      final asking = _episode(
-        key: 'c2',
-        subject: 'Launch date',
-        state: ConversationState.needsReply,
-        messages: [
-          _message(
-            id: 'm2',
-            receivedAt: '2026-08-01T10:00:00Z',
-            needsAction: true,
-            actionItems: ['Send the deck'],
-          ),
-        ],
-      );
-      final tapped = <String>[];
-      await pumpPanel(
-        tester,
-        only: [homepage, asking],
-        onAskTap: (episode) => tapped.add(episode.conversationKey),
-      );
-
-      await tester.tap(find.text('Send the deck'));
       await tester.pump();
 
-      // The answer goes to the conversation the ask is in, not to whichever
-      // one the storyline happens to end on.
-      expect(tapped, ['c2']);
-    });
-  });
-
-  group('the episode footer', () {
-    Widget footer(StorylineEpisode episode) =>
-        Text('footer for ${episode.conversationKey}');
-
-    testWidgets('rides at the end of an open card', (tester) async {
-      await pumpPanel(tester, episodeFooter: footer);
-
-      // The newest card is the one that opens on its own.
-      expect(find.text('footer for c2'), findsOneWidget);
-
-      // And it sits under the messages, where a reply to them belongs.
-      final message = tester.getBottomLeft(find.text('body of m2'));
-      expect(
-        tester.getTopLeft(find.text('footer for c2')).dy,
-        greaterThanOrEqualTo(message.dy),
-      );
-    });
-
-    testWidgets('and a shut card carries none', (tester) async {
-      await pumpPanel(tester, episodeFooter: footer);
-
-      expect(find.text('footer for c1'), findsNothing);
-    });
-
-    testWidgets('a panel given none renders none', (tester) async {
-      await pumpPanel(tester);
-
-      expect(find.textContaining('footer for'), findsNothing);
+      expect(opened, ['c1']);
     });
   });
 
@@ -772,9 +662,14 @@ void main() {
       var dismissed = 0;
       await pumpPanel(tester, onDismiss: () => dismissed++);
 
-      await tester.tap(find.text('Dismiss'));
+      await openMore(tester);
+      await tester.tap(find.text('Dismiss…'));
       await tester.pumpAndSettle();
 
+      // The question stands under the header, not inside the menu: a two-step
+      // that asked its second question in a popup would ask it somewhere the
+      // first answer is no longer visible.
+      expect(find.text('Dismiss this storyline?'), findsOneWidget);
       expect(find.text('Dismiss storyline'), findsOneWidget);
       expect(find.text('Cancel'), findsOneWidget);
       expect(dismissed, 0);
@@ -782,7 +677,7 @@ void main() {
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
 
-      expect(find.text('Dismiss'), findsOneWidget);
+      expect(find.text('Dismiss this storyline?'), findsNothing);
       expect(find.text('Dismiss storyline'), findsNothing);
       expect(dismissed, 0);
       expect(find.byType(AlertDialog), findsNothing);
@@ -792,14 +687,15 @@ void main() {
       var dismissed = 0;
       await pumpPanel(tester, onDismiss: () => dismissed++);
 
-      await tester.tap(find.text('Dismiss'));
+      await openMore(tester);
+      await tester.tap(find.text('Dismiss…'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Dismiss storyline'));
       await tester.pumpAndSettle();
 
       expect(dismissed, 1);
-      // The confirmation is a pair of buttons in the header, not a popup over
-      // it — the same rule the rest of this panel follows.
+      // The confirmation is a pair of buttons under the header, not a popup
+      // over it — the same rule the rest of this panel follows.
       expect(find.byType(AlertDialog), findsNothing);
     });
   });
@@ -848,46 +744,85 @@ void main() {
     });
   });
 
-  group('member strip evidence', () {
+  group('evidence on the card', () {
     testWidgets('the model reasoning reads inline, not in a dialog',
         (tester) async {
+      // On the spine, where the thread it explains is — the strip on a
+      // reference tab said the same thing a tab away from the cards.
       await pumpPanel(tester);
 
-      // Shut until asked — the strip is an explanation, not a fixture.
-      expect(find.text('Both concern the website redesign.'), findsNothing);
+      final evidence =
+          find.byKey(StorylineTimelinePanel.evidenceKeyFor('email', 'c1'));
+      expect(evidence, findsOneWidget);
+      expect(
+        tester.widget<Text>(evidence).data,
+        'Both concern the website redesign.',
+      );
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byType(Dialog), findsNothing);
+    });
 
-      await tester.tap(find.text('2 threads'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Both concern the website redesign.'), findsOneWidget);
+    testWidgets('a hand-filed thread says so', (tester) async {
       // A thread a person filed has no model reasoning to show, and inventing
       // one would be worse than saying who did it.
-      expect(find.text('Filed by you'), findsOneWidget);
-      expect(find.text('Homepage copy'), findsOneWidget);
-      expect(find.text('Launch date'), findsOneWidget);
-      // The explanation is the strip itself now. Nothing here opens a popup.
-      expect(find.byType(AlertDialog), findsNothing);
+      await pumpPanel(tester);
+
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(StorylineTimelinePanel.evidenceKeyFor('email', 'c2')),
+            )
+            .data,
+        'Filed by you',
+      );
+    });
+
+    testWidgets('an automatic member with no sentence says nothing',
+        (tester) async {
+      // 'Grouped automatically.' was filler: it said only what the absence of
+      // a name already said.
+      await pumpPanel(
+        tester,
+        withMembers: const [
+          StorylineMember(
+            storylineId: 'sl-1',
+            conversationKey: 'c1',
+            addedBy: 'auto',
+          ),
+        ],
+      );
+
+      expect(
+        find.byKey(StorylineTimelinePanel.evidenceKeyFor('email', 'c1')),
+        findsNothing,
+      );
     });
 
     testWidgets('is a read-only explanation — no tick, no way out',
         (tester) async {
       await pumpPanel(tester);
-      await tester.tap(find.text('2 threads'));
-      await tester.pumpAndSettle();
 
       // Hiding a thread was a view filter nobody could tell from a removal.
-      // Both gestures live on the episode cards now.
+      // The removal gesture is the card's own ×, beside the messages that show
+      // whether the thread belongs; the evidence line itself answers nothing.
       expect(find.byType(Checkbox), findsNothing);
-      // Two cards carry one each; the strip adds none.
+      expect(
+        find.ancestor(
+          of: find.byKey(StorylineTimelinePanel.evidenceKeyFor('email', 'c1')),
+          matching: find.byType(TextButton),
+        ),
+        findsNothing,
+      );
+      // Two cards carry one remove each.
       expect(find.byTooltip('Remove from storyline'), findsNWidgets(2));
     });
 
-    testWidgets('labels a member by its own connector, not by a key twin',
+    testWidgets('reads a member by its own connector, not by a key twin',
         (tester) async {
       // One conversation key under two connectors — legal, since keys are
-      // only unique within the connector that issued them. Each member row
-      // must take its subject from ITS episode, not whichever twin a lookup
-      // on the bare key happens to find first.
+      // only unique within the connector that issued them. Each card must
+      // take its reason from ITS member row, not whichever twin a lookup on
+      // the bare key happens to find first.
       final mailTwin = _episode(
         key: 'shared-1',
         subject: 'Homepage copy',
@@ -907,21 +842,32 @@ void main() {
             storylineId: 'sl-1',
             conversationKey: 'shared-1',
             addedBy: 'auto',
+            evidence: 'The mail thread carries the copy.',
           ),
           StorylineMember(
             storylineId: 'sl-1',
             source: 'teams',
             conversationKey: 'shared-1',
             addedBy: 'auto',
+            evidence: 'The chat is where the launch was agreed.',
           ),
         ],
       );
 
-      await tester.tap(find.text('2 threads'));
-      await tester.pumpAndSettle();
-
-      expect(find.text('Homepage copy'), findsOneWidget);
-      expect(find.text('Sarah Whitfield'), findsOneWidget);
+      expect(
+        tester
+            .widget<Text>(find
+                .byKey(StorylineTimelinePanel.evidenceKeyFor('email', 'shared-1')))
+            .data,
+        'The mail thread carries the copy.',
+      );
+      expect(
+        tester
+            .widget<Text>(find
+                .byKey(StorylineTimelinePanel.evidenceKeyFor('teams', 'shared-1')))
+            .data,
+        'The chat is where the launch was agreed.',
+      );
     });
   });
 
@@ -935,8 +881,7 @@ void main() {
       await pumpPanel(tester);
       expect(find.text(placeholder), findsNothing);
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
 
       expect(find.text(placeholder), findsOneWidget);
     });
@@ -944,10 +889,45 @@ void main() {
     testWidgets('and shows the charter once there is one', (tester) async {
       await pumpPanel(tester, storyline: _chartered);
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
 
       expect(find.text(charter), findsOneWidget);
+    });
+
+    testWidgets('is labelled, and Edit opens the field', (tester) async {
+      // A sentence that reads as prose is not an invitation. The tap still
+      // works — two doors, one action — but this is the door that says so.
+      await pumpPanel(tester, storyline: _chartered);
+
+      await openTab(tester, StorylineTab.about);
+      expect(find.text('CHARTER'), findsOneWidget);
+      expect(find.byType(TextField), findsNothing);
+
+      await tester.tap(find.byKey(StorylineTimelinePanel.charterEditKey));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(TextField), findsOneWidget);
+      // Nothing to open while it is already open.
+      expect(
+        find.byKey(StorylineTimelinePanel.charterEditKey),
+        findsNothing,
+      );
+    });
+
+    testWidgets('the caption explains what saving does', (tester) async {
+      const caption = 'What belongs in this storyline, in a sentence. Edit it '
+          'to narrow or widen the group — saving pins it and hunts for '
+          'matching threads.';
+      await pumpPanel(tester, storyline: _chartered);
+
+      await openTab(tester, StorylineTab.about);
+      expect(find.text(caption), findsOneWidget);
+
+      // The field carries its own caption about saving; two at once would be
+      // one too many.
+      await tester.tap(find.byKey(StorylineTimelinePanel.charterEditKey));
+      await tester.pumpAndSettle();
+      expect(find.text(caption), findsNothing);
     });
 
     testWidgets('tapping it opens a prefilled field that saves what it holds',
@@ -959,8 +939,7 @@ void main() {
         onSetCharter: saved.add,
       );
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
       await tester.tap(find.text(charter));
       await tester.pumpAndSettle();
 
@@ -988,8 +967,7 @@ void main() {
         onSetCharter: saved.add,
       );
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
       await tester.tap(find.text(charter));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'Something else.');
@@ -1004,7 +982,9 @@ void main() {
       var asked = 0;
       await pumpPanel(tester, onAddThread: () => asked++);
 
-      await tester.tap(find.text('Add thread'));
+      // A header action rather than a menu item: filing a thread here is
+      // something you come to this screen to do.
+      await tester.tap(find.byTooltip('Add thread'));
       await tester.pumpAndSettle();
 
       expect(asked, 1);
@@ -1122,6 +1102,40 @@ void main() {
       expect(find.textContaining('DECIDED'), findsNothing);
     });
 
+    testWidgets('a short recap needs no Show more', (tester) async {
+      await pumpPanel(tester, storyline: _recapped());
+
+      expect(find.text('Show more'), findsNothing);
+      expect(find.text('Show less'), findsNothing);
+    });
+
+    testWidgets('a long one is clamped, and Show more unfolds it',
+        (tester) async {
+      // Past the clamp: the recap is the pinned topic at the top of the
+      // reading, and six lines of it is a header nobody scrolls past.
+      const long =
+          'The studio cut the hero paragraph, moved the launch a week, and '
+          'asked for a second round of photography before anything else is '
+          'signed off. Legal still owe the press briefing wording, and the '
+          'agency want a decision on the pricing table by Thursday.';
+      await pumpPanel(tester, storyline: _recapped(recapText: long));
+
+      final clamped = tester.widget<Text>(find.text(long));
+      expect(clamped.maxLines, 2);
+      expect(find.text('Show more'), findsOneWidget);
+
+      await tester.tap(find.text('Show more'));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Text>(find.text(long)).maxLines, isNull);
+      expect(find.text('Show less'), findsOneWidget);
+
+      await tester.tap(find.text('Show less'));
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Text>(find.text(long)).maxLines, 2);
+    });
+
     testWidgets('a column that is not a list of strings shows nothing',
         (tester) async {
       await pumpPanel(
@@ -1150,8 +1164,7 @@ void main() {
         storyline: _recapped(charterSuggestion: suggestion),
       );
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
 
       expect(find.text('SUGGESTED UPDATE'), findsOneWidget);
       expect(find.text(suggestion), findsOneWidget);
@@ -1170,8 +1183,7 @@ void main() {
         onAcceptSuggestion: accepted.add,
       );
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
       await tester.tap(find.text('Use this'));
       await tester.pumpAndSettle();
 
@@ -1195,8 +1207,7 @@ void main() {
         onAcceptSuggestion: accepted.add,
       );
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
       await tester.tap(find.text('Use this'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Cancel'));
@@ -1214,8 +1225,7 @@ void main() {
         onDismissSuggestion: () => dismissed++,
       );
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
       await tester.tap(find.text('Discard'));
       await tester.pumpAndSettle();
 
@@ -1227,8 +1237,7 @@ void main() {
     testWidgets('no suggestion, no block', (tester) async {
       await pumpPanel(tester, storyline: _chartered);
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
 
       expect(find.text('SUGGESTED UPDATE'), findsNothing);
       expect(find.text('Use this'), findsNothing);
@@ -1240,8 +1249,7 @@ void main() {
         storyline: _recapped(charterSuggestion: suggestion),
       );
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
+      await openTab(tester, StorylineTab.about);
       await tester.tap(find.text(charter));
       await tester.pumpAndSettle();
 
@@ -1253,12 +1261,15 @@ void main() {
     });
   });
 
-  group('removed threads in About', () {
+  group('removed threads above the spine', () {
     final userBlock = StorylineBlock(
       storylineId: 'sl-1',
       conversationKey: 'c9',
       blockedBy: 'user',
-      evidence: 'Both concern the website redesign.',
+      // Not the c1 member's sentence: the spine draws the evidence lines and
+      // the removed lists together now, and one string on both would count
+      // twice.
+      evidence: 'The lease is a facilities matter, not the redesign.',
       subject: 'Office move',
       blockedAt: '2026-09-02T10:00:00Z',
     );
@@ -1272,11 +1283,38 @@ void main() {
       blockedAt: '2026-09-01T10:00:00Z',
     );
 
-    testWidgets('nothing shows until About is opened', (tester) async {
-      await pumpPanel(tester, blocks: [userBlock]);
+    testWidgets('they lead Messages, above the first card, not on About',
+        (tester) async {
+      // The foot of a long spine is where nobody looks, and a reference tab
+      // is not where a reader doubting three cards would go either.
+      await pumpPanel(tester, blocks: [userBlock, auditBlock]);
+
+      expect(find.text('REMOVED BY YOU'), findsOneWidget);
+      expect(find.text('REMOVED BY RE-CHECK'), findsOneWidget);
+      expect(find.text('Office move'), findsOneWidget);
+      expect(find.text('Re-check members'), findsOneWidget);
+      // Above the spine: the button's top edge is higher than the first
+      // card's, and the button is a real one rather than a text link.
+      final button = find.byKey(StorylineBlocksSection.auditButtonKey);
+      expect(tester.widget(button), isA<OutlinedButton>());
+      expect(
+        tester.getTopLeft(button).dy,
+        lessThan(
+          tester.getTopLeft(find.textContaining('· open \u203a').first).dy,
+        ),
+      );
+
+      await openTab(tester, StorylineTab.about);
 
       expect(find.text('REMOVED BY YOU'), findsNothing);
-      expect(find.text('Office move'), findsNothing);
+      expect(find.text('REMOVED BY RE-CHECK'), findsNothing);
+      expect(find.text('Re-check members'), findsNothing);
+    });
+
+    testWidgets('a running re-check says so above the spine', (tester) async {
+      await pumpPanel(tester, blocks: [auditBlock], auditing: true);
+
+      expect(find.text('Re-checking…'), findsOneWidget);
       expect(find.text('Re-check members'), findsNothing);
     });
 
@@ -1284,14 +1322,14 @@ void main() {
         (tester) async {
       await pumpPanel(tester, blocks: [userBlock, auditBlock]);
 
-      await tester.tap(find.text('About'));
-      await tester.pumpAndSettle();
-
       expect(find.text('REMOVED BY YOU'), findsOneWidget);
       expect(find.text('REMOVED BY RE-CHECK'), findsOneWidget);
       expect(find.text('Office move'), findsOneWidget);
       expect(find.text('Interview loop'), findsOneWidget);
-      expect(find.text('Both concern the website redesign.'), findsOneWidget);
+      expect(
+        find.text('The lease is a facilities matter, not the redesign.'),
+        findsOneWidget,
+      );
       expect(
         find.text('The charter is about the homepage, this is hiring.'),
         findsOneWidget,
@@ -1309,25 +1347,20 @@ void main() {
         ref(name: 'Quote.pdf', size: 240 * 1024, pinnedStorylineId: 'sl-1');
     final photo = imageRef(name: 'Site.png', attachmentId: 'i9');
 
-    testWidgets('the button counts every document, pinned or not',
+    testWidgets('the tab counts every document, pinned or not',
         (tester) async {
       await pumpPanel(tester, documents: [quote, photo]);
 
-      expect(find.text('2 documents'), findsOneWidget);
+      // The count is the label, the way the thread count reads: a storyline
+      // with no files should not need a tap to find that out.
+      expect(find.text('Files (2)'), findsOneWidget);
       expect(find.byType(AttachmentDocumentsStrip), findsNothing);
 
-      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
-      await tester.pump();
+      await openTab(tester, StorylineTab.files);
 
       expect(find.byKey(StorylineTimelinePanel.documentsStripKey),
           findsOneWidget);
       expect(find.textContaining('Quote.pdf'), findsOneWidget);
-    });
-
-    testWidgets('one document is counted in the singular', (tester) async {
-      await pumpPanel(tester, documents: [quote]);
-
-      expect(find.text('1 document'), findsOneWidget);
     });
 
     testWidgets('a storyline with no documents still says so', (tester) async {
@@ -1335,10 +1368,9 @@ void main() {
 
       // The bare label, because there is no count to give — and the shelf
       // behind it explains itself rather than opening empty.
-      expect(find.text('Documents'), findsOneWidget);
+      expect(find.text('Files'), findsOneWidget);
 
-      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
-      await tester.pump();
+      await openTab(tester, StorylineTab.files);
 
       expect(find.byKey(AttachmentDocumentsStrip.emptyKey), findsOneWidget);
     });
@@ -1351,8 +1383,7 @@ void main() {
         onOpenDocument: (attachment) => opened.add(attachment.attachmentId),
       );
 
-      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
-      await tester.pump();
+      await openTab(tester, StorylineTab.files);
       await tester.tap(find.byKey(AttachmentDocumentsStrip.entryKeyFor(quote)));
       await tester.pump();
 
@@ -1368,8 +1399,7 @@ void main() {
         onUnpinDocument: (attachment) => removed.add(attachment.attachmentId),
       );
 
-      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
-      await tester.pump();
+      await openTab(tester, StorylineTab.files);
       await tester.tap(find.byKey(AttachmentDocumentsStrip.unpinKeyFor(quote)));
       await tester.pump();
 
@@ -1386,8 +1416,7 @@ void main() {
         (tester) async {
       await pumpPanel(tester, documents: [quote]);
 
-      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
-      await tester.pump();
+      await openTab(tester, StorylineTab.files);
 
       expect(find.byKey(AttachmentDocumentsStrip.unpinKeyFor(quote)),
           findsNothing);
@@ -1405,12 +1434,59 @@ void main() {
         onPinDocument: (attachment) => pinned.add(attachment.attachmentId),
       );
 
-      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
-      await tester.pump();
+      await openTab(tester, StorylineTab.files);
       await tester.tap(find.byKey(AttachmentDocumentsStrip.pinKeyFor(loose)));
       await tester.pump();
 
       expect(pinned, ['a7']);
+    });
+
+    testWidgets('the pinned ones ride on a bar above the spine',
+        (tester) async {
+      // Slack's bookmark bar: what this room keeps coming back to, under its
+      // name, without opening the Files tab to find it.
+      await pumpPanel(tester, documents: [quote, photo]);
+
+      expect(find.byKey(PinnedDocumentsBar.barKey), findsOneWidget);
+      expect(find.byKey(PinnedDocumentsBar.entryKeyFor(quote)), findsOneWidget);
+      // A document that arrived by membership is not pinned, and the bar is a
+      // statement about pins.
+      expect(find.byKey(PinnedDocumentsBar.entryKeyFor(photo)), findsNothing);
+    });
+
+    testWidgets('a pin to ANOTHER storyline is not on this one\'s bar',
+        (tester) async {
+      final elsewhere = ref(
+        name: 'Other.pdf',
+        attachmentId: 'a9',
+        pinnedStorylineId: 'sl-2',
+      );
+      await pumpPanel(tester, documents: [elsewhere]);
+
+      expect(find.byKey(PinnedDocumentsBar.barKey), findsNothing);
+      // It is still one of the storyline's files, and the Files tab says so.
+      expect(find.text('Files (1)'), findsOneWidget);
+    });
+
+    testWidgets('nothing pinned draws no bar at all', (tester) async {
+      await pumpPanel(tester, documents: [photo]);
+
+      expect(find.byKey(PinnedDocumentsBar.barKey), findsNothing);
+    });
+
+    testWidgets('a tap on the bar reports through onOpenDocument',
+        (tester) async {
+      final opened = <String>[];
+      await pumpPanel(
+        tester,
+        documents: [quote],
+        onOpenDocument: (attachment) => opened.add(attachment.attachmentId),
+      );
+
+      await tester.tap(find.byKey(PinnedDocumentsBar.entryKeyFor(quote)));
+      await tester.pump();
+
+      expect(opened, ['a1']);
     });
 
     testWidgets('the panel tells the shelf which storyline it is', (tester) async {
@@ -1423,67 +1499,12 @@ void main() {
         onUnpinDocument: (_) {},
       );
 
-      await tester.tap(find.byKey(StorylineTimelinePanel.documentsButtonKey));
-      await tester.pump();
+      await openTab(tester, StorylineTab.files);
 
       expect(find.byKey(AttachmentDocumentsStrip.unpinKeyFor(quote)),
           findsOneWidget);
       expect(find.byKey(AttachmentDocumentsStrip.pinKeyFor(quote)),
           findsNothing);
-    });
-  });
-
-  group('files in the spine', () {
-    final quote = ref(name: 'Quote.pdf');
-
-    StorylineEpisode withFile() => _episode(
-          key: 'c1',
-          subject: 'Homepage copy',
-          messages: [
-            _message(
-              id: 'm1',
-              receivedAt: '2026-08-01T09:00:00Z',
-              attachments: [quote],
-            ),
-          ],
-        );
-
-    testWidgets('a chip in a message opens through the panel', (tester) async {
-      final opened = <String>[];
-      await pumpPanel(
-        tester,
-        only: [withFile()],
-        onOpenAttachment: (attachment) => opened.add(attachment.attachmentId),
-      );
-
-      await tester.tap(find.byKey(AttachmentChip.keyFor(quote)));
-      await tester.pump();
-
-      expect(opened, ['a1']);
-    });
-
-    testWidgets('the file the host is showing is the one marked',
-        (tester) async {
-      await pumpPanel(
-        tester,
-        only: [withFile()],
-        onOpenAttachment: (_) {},
-        selectedAttachment: quote,
-      );
-
-      final chip = tester.widget<AttachmentChip>(
-        find.byKey(AttachmentChip.keyFor(quote)),
-      );
-      expect(chip.selected, isTrue);
-    });
-
-    testWidgets('no host to open into leaves the chips inert', (tester) async {
-      await pumpPanel(tester, only: [withFile()]);
-
-      final chip = tester.widget<AttachmentChip>(
-        find.byKey(AttachmentChip.keyFor(quote)),
-      );
-      expect(chip.onTap, isNull);
     });
   });
 }

@@ -222,6 +222,15 @@ run). Raise-only, and carrying the same guards as the live path — both guard o
 `dropped = 0`, so a gate cascade, which also writes `settle_state = 'done'`,
 stays dropped either way.
 
+**The chip follows the thread out of Later, too.** The verdict rule above has
+a hole the two rules before it cannot see: a message that settles while its
+thread sits in Later takes a 0 on the strength of the bucket alone, and
+lifting the bucket moves no verdict, so nothing would ever re-ask. Both ways
+out of Later for one thread — a deferral whose date arrived, and Keep in inbox
+— run `PipelineProgress.raiseNeedsYouForThread`, the backfill's statement
+scoped to that thread, ticking each row it raises. See
+[08-attention.md](08-attention.md) for the resurfacing itself.
+
 **Queueing.** `MessageStore.enqueueNeedsYouBacklog` is
 `enqueueExtractBacklog`'s twin — same filter, same caps, same `OR IGNORE`
 idempotence, one shared private statement — and both syncs call the two side
@@ -253,6 +262,68 @@ when the worker rather than the handler decides how an exception ended;
 needs-you has no stage column, so an arm there would write nothing. The generic
 parking above those ladders still applies: a fast server that is not running
 parks the whole kind rather than burning attempts on it.
+
+## Activity tabs on the overview
+
+The Needs You overview is five lenses on one pile, as a
+`BondFilterPillRow<NeedsYouTab>` (`Key('needs-you-tabs')`) above the list:
+**All · Asked of me · Waiting on others · Deadlines · Suggested drafts**.
+
+`All` leads and is the default, so arriving at the stop shows exactly what the
+stop always showed — the ranked list, at the same threshold as the rail, so the
+`+N more` row opens the list it promised. The other four are **filters over that
+same list** (`needsYouTabRows`, pure, in
+`app/lib/widgets/needs_you_tabs.dart`), never a second query: the ranking was
+decided once, and a tab that re-read the store would eventually rank differently
+from the column beside it. The order survives every tab, so the third row on
+Deadlines is the same thread it was on All.
+
+Asked of me and Waiting on others are **complements of one predicate**
+(`isWaitingRow`), the same way Needs You itself partitions the inbox — every row
+is on exactly one of the two, and their counts add back up to All.
+
+The other two read **two read-time columns on `loadConversations`**, and no
+schema changed for either:
+
+- `latest_deadline` — the newest inbound message's `deadline`, in the sender's
+  own words. The newest one's and nobody else's: a date named three replies ago
+  has already been answered or overtaken.
+- `pending_draft_count` — suggestions in `('suggested','edited')` against that
+  same newest inbound message. The subselect is `getDraft`'s, so a thread this
+  counts and a thread whose composer is full are the same thread.
+
+Both are null/zero on any read that does not run the subqueries, which reads as
+"no date named" and "nothing suggested" rather than inventing either.
+
+On the Deadlines tab each row's second line becomes `Deadline · <the text>`
+(`ConversationListPane.captionFor` → `ConversationRow.caption`), replacing the
+ask. On a list the reader picked BECAUSE every row has a date on it, the date is
+worth more than another copy of an ask the row's title already carries.
+
+A row tapped on this overview opens **beside** the list rather than over it,
+highlighted here while it is open — the overview is a room the reader is
+standing in, and ⤢ on the panel is how a thread gets the whole pane. See
+`docs/shell.md`, "What opens where".
+
+### Order
+
+The pile has ONE order everywhere it is drawn — the rail's Needs You section,
+this overview, and the row Enter opens from Find — and the reader chooses it:
+`By priority` (`needsYouRows`' own ranking: needs-reply first, then attention
+score; the default) or `Newest first` (`lastMessageAt` descending, stable, an
+undated row last). The choice lives on the overview's order control
+(`Key('needs-you-sort')`, a `PopupMenuButton` beside the pills) and is kept in
+the `needs_you_sort` preference, so it survives a restart and reaches every
+place the pile is drawn.
+
+`sortNeedsYou` (pure, in `app/lib/models/needs_you_sort.dart`, re-exported by
+`needs_you_tabs.dart`) is the one implementation. It is applied to the WHOLE
+pile — before Find's matching, before the rail's `AttentionTuning.topCount`
+truncation, and before the tabs filter — which is what keeps the three views
+agreeing: `+N more` opens the list in the order the rail showed, Enter opens the
+row under the reader's eyes, and a tab filters an ordered pile rather than
+reordering it. It never adds or drops a row, so the badge over the section is
+unaffected by it.
 
 ## What the documents on a message say
 
@@ -328,3 +399,64 @@ The activity row for the digest notes `requeued: needs_you`
 This was deferred out of Phase 3 on purpose: a re-verdict before the
 `attachment_digests` fence existed would have spent a model call on a
 re-judgement that could not see what changed.
+
+## The Why panel
+
+This section supersedes the position this file took until now, that
+`needs_you_reason` was stored against a future reader: it has one. The Why
+panel (`lib/widgets/why_panel.dart`, `WhyPanelBody`) is the explanation beside
+a message, and the reason is the first thing on it.
+
+**What it reads.** Five blocks, in this order.
+
+| Block | Source |
+|---|---|
+| Verdict | `Message.needsYouVerdict` / `needsYouReason`, now parsed in `Message.fromRow`; `gateReason` when the gate took the message |
+| Triage | the message's `triageStatus`, `summary`, `urgency`, `category`, `label` |
+| Asks | `needsAction`, `replyExpected`, `deadline`, `addressedMe`, `actionItems` |
+| Attention | the thread's `attentionScore` against the reader's own threshold, then `conversation_ai`'s `bucket`, `bucket_reason` and `snoozed_until` |
+| What it is about | `MessageStore.extractionFor(source, messageId)` — `getExtraction` decoded through `ExtractionResult.fromJson`, and null on a blob that will not parse |
+
+The facts come from `whyFactsProvider` (`lib/providers/why_provider.dart`), a
+`FutureProvider.autoDispose.family` keyed by the record
+`({source, conversationKey, messageId})`. Deliberately not a slice of the open
+thread: the panel has to work for a message whose transcript is not the one
+loaded — opened from a side thread, from a room — and a provider that depended
+on the thread provider would show an empty panel exactly then.
+
+**The tri-state survives into the copy.** `true` reads *Needs you*, `false`
+reads *Not flagged*, and NULL reads *Not judged yet* with the line "The
+needs-you pass has not reached this message." Three answers, never two: a panel
+that rendered NULL as "not flagged" would be claiming a judgement the pass has
+not made, which is exactly the confusion the tri-state column exists to
+prevent.
+
+**How it opens.** Two gestures, both in `ThreadDetailPanel`. Hovering an
+inbound transcript row gives a third button on the strip, **Why**
+(`HoverActions.whyKeyFor(messageId)`), beside Reply and Suggest. And the CTA
+banner above the transcript now opens Why on the **newest inbound** message
+rather than focusing the composer — the box is docked and always visible, so
+"put the cursor in it" was a click nobody needed help with, while "where did
+this ask come from" had no answer anywhere. With no Why wired, or on a thread
+with nothing inbound in it, the banner falls back to focusing the composer as
+it always did. Every per-message ask line still focuses the box.
+
+**What it never does.** It feeds nothing back. This reads model OUTPUT that
+has already been through the untrusted-data fence upstream; it writes nothing,
+sends nothing and prompts nothing, so there is no second fence here. And it
+renders sentences, never stored shapes — no JSON, no enum names dressed as
+prose, no field names. `teams_direct` reads "A direct message to you on
+Teams."; `sender_pref` reads "a rule about the sender". `why_panel_test`
+asserts no brace and no underscore ever reaches the screen.
+
+**The door to the history.** `WhyPanelBody.onWhatHappened` draws one final
+quiet `What happened ›` button (`WhyPanelBody.whatHappenedKey`) when it is set,
+and nothing at all when it is null — a dead link is worse than no link. The
+shell wires it to the message's history, which opens in the SAME side slot in
+place of the Why panel: Why is the verdict in a paragraph, the history is every
+stage, judgement and queue row behind it, with the levers — see
+[README.md](README.md#finding-out-what-happened-to-a-message). The two read the
+same rows (`needs_you_verdict`, `needs_you_reason`, the extraction, the
+attention row) through their own reads, by decision: `whyFactsProvider` is
+three store calls and `messageHistoryProvider` is nine (over eight tables),
+and the smaller one is what makes Why cheap enough to open from a hover.

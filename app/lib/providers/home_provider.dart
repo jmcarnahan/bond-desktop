@@ -7,11 +7,14 @@ import '../data/message_store.dart';
 import '../models/home_models.dart';
 import '../services/message_search.dart';
 import '../services/progress_bus.dart';
+import '../services/search_grammar.dart';
+import 'activity_provider.dart';
 import 'app_providers.dart';
 import 'prefs_provider.dart';
 
-/// The home feed's read model: one page of the pipeline table at a time,
-/// newest first, kept current by the bus the stages tick on.
+/// The Inbox feed's read model: one page of the pipeline table at a time, in
+/// the reader's own order and under the reader's own filter, kept current by
+/// the bus the stages tick on.
 ///
 /// Two rules shape it, both borrowed from `conversations_provider.dart`.
 ///
@@ -25,10 +28,19 @@ import 'prefs_provider.dart';
 /// newer one that already landed. The live patch obeys the same stamp: a batch
 /// that comes back after a reload belongs to a list that no longer exists.
 ///
-/// The liveness is three more rules on top of those.
+/// The liveness is four more rules on top of those.
 ///
 /// **A burst is read once.** The bus carries keys rather than rows, so ticks
 /// pile into a window and one batch read turns the window into a patch.
+///
+/// **The store admits, this orders.** Whether a ticked row belongs under the
+/// filter that is up is answered by [MessageStore.progressPatchFor], in the
+/// same SQL the page read is written in; what this does with an admitted row —
+/// replace it, prepend it, hold it behind the count, or only count it — is the
+/// list's own arithmetic and lives here. A second spelling of the filter in
+/// Dart used to sit in this file, and two spellings of one rule drift: the
+/// table would then hold rows a reload deletes, or hide rows a reload brings
+/// back, with nothing on screen to say which read was lying.
 ///
 /// **The table never moves under a reader.** Arrivals go to the top only while
 /// the viewport is anchored there; otherwise they wait behind a count the
@@ -59,7 +71,7 @@ typedef HomeSearchRunner = Future<MessageSearchResult> Function(
 
 @immutable
 class HomeFeedState {
-  /// Newest first, the order the store hands them over.
+  /// In [sort]'s order, which is the order the store hands them over.
   final List<HomeFeedRow> rows;
 
   /// Whether a first page has come back at all — success or failure. What
@@ -77,7 +89,18 @@ class HomeFeedState {
   /// just older than the user asked for.
   final String? loadError;
 
-  final bool includeDropped;
+  /// Which rows the table keeps. One at a time — the tiles above it are the
+  /// control, and a tile taps its own filter off again.
+  final HomeFilter filter;
+
+  /// Which way the table runs. Seeded from the stored preference and written
+  /// back through it, so the choice is a habit rather than a session.
+  final HomeSort sort;
+
+  /// Which connectors are in the table, the list column's source chips as the
+  /// feed reads them. The tiles, the hot strip and the pulse read the same
+  /// list, so every number on the screen is about the same mail.
+  final List<String> sources;
 
   /// Rows that arrived while the user was scrolled away from the top, held
   /// back so the table never moves under a reader.
@@ -113,13 +136,22 @@ class HomeFeedState {
   /// feature is off.
   final String? searchNotice;
 
+  /// The attention slider's setting, as the feed reads it.
+  ///
+  /// Only [HomeFilter.needsYou] uses it, and it is here rather than read from
+  /// the prefs at the call site because the page read and the live patch both
+  /// hand it to the store — one number, read once, bound by both queries.
+  final double threshold;
+
   const HomeFeedState({
     this.rows = const [],
     this.loaded = false,
     this.loadingMore = false,
     this.atEnd = false,
     this.loadError,
-    this.includeDropped = false,
+    this.filter = HomeFilter.fromOthers,
+    this.sort = HomeSort.newest,
+    this.sources = const ['email', 'teams'],
     this.pendingNewCount = 0,
     this.entering = const {},
     this.fading = const {},
@@ -128,7 +160,15 @@ class HomeFeedState {
     this.search,
     this.searching = false,
     this.searchNotice,
+    this.threshold = 0,
   });
+
+  /// Whether dropped rows can be in this answer — DERIVED from [filter] rather
+  /// than stored beside it, because two copies of one fact is how a table and
+  /// the search over it come to disagree. It is what the search runner's own
+  /// `includeDropped` is fed from: a search under the Dropped tile has to be
+  /// able to reach the pile the tile is showing.
+  bool get includeDropped => filter.showsDropped;
 
   /// [clearLoadError] rather than a nullable-means-keep [loadError]: a banner
   /// that could only be set and never cleared would outlive the failure it
@@ -141,7 +181,9 @@ class HomeFeedState {
     bool? atEnd,
     String? loadError,
     bool clearLoadError = false,
-    bool? includeDropped,
+    HomeFilter? filter,
+    HomeSort? sort,
+    List<String>? sources,
     int? pendingNewCount,
     Set<String>? entering,
     Set<String>? fading,
@@ -152,6 +194,7 @@ class HomeFeedState {
     bool? searching,
     String? searchNotice,
     bool clearSearchNotice = false,
+    double? threshold,
   }) =>
       HomeFeedState(
         rows: rows ?? this.rows,
@@ -159,7 +202,9 @@ class HomeFeedState {
         loadingMore: loadingMore ?? this.loadingMore,
         atEnd: atEnd ?? this.atEnd,
         loadError: clearLoadError ? null : (loadError ?? this.loadError),
-        includeDropped: includeDropped ?? this.includeDropped,
+        filter: filter ?? this.filter,
+        sort: sort ?? this.sort,
+        sources: sources ?? this.sources,
         pendingNewCount: pendingNewCount ?? this.pendingNewCount,
         entering: entering ?? this.entering,
         fading: fading ?? this.fading,
@@ -169,8 +214,17 @@ class HomeFeedState {
         searching: searching ?? this.searching,
         searchNotice:
             clearSearchNotice ? null : (searchNotice ?? this.searchNotice),
+        threshold: threshold ?? this.threshold,
       );
 }
+
+/// Through the store's own stamp helper, never `toIso8601String` — the cutoff
+/// is compared against `message_progress.updated_at` as a STRING, and Dart
+/// prints three fractional digits when the microseconds are zero and six
+/// otherwise. Two widths do not sort against each other; see
+/// [MessageStore.isoStamp].
+String _windowStart() =>
+    MessageStore.isoStamp(DateTime.now().subtract(homeMetricsWindow));
 
 class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// One screen of history per read. Big enough that the first page fills a
@@ -202,10 +256,10 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 
   final MessageStore _store;
 
-  /// Where the "Show dropped" choice is written down. A callback rather than
-  /// the prefs notifier itself, so this class can be built in a test with no
-  /// provider container around it.
-  final Future<void> Function(bool value) _persistIncludeDropped;
+  /// Where the reading order is written down. A callback rather than the prefs
+  /// notifier itself, so this class can be built in a test with no provider
+  /// container around it.
+  final Future<void> Function(HomeSort value) _persistSort;
 
   /// How a query is answered. Null in a test that never searches, and nowhere
   /// else — [submitSearch] without one is a no-op rather than a crash.
@@ -266,16 +320,32 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 
   HomeFeedNotifier(
     this._store, {
-    bool includeDropped = false,
-    Future<void> Function(bool value)? persistIncludeDropped,
+    HomeSort sort = HomeSort.newest,
+    List<String> sources = const ['email', 'teams'],
+    double threshold = 0,
+    Future<void> Function(HomeSort value)? persistSort,
     this._searchRunner,
     ProgressBus? bus,
-  })  : _persistIncludeDropped = persistIncludeDropped ?? _forget,
-        super(HomeFeedState(includeDropped: includeDropped)) {
+  })  : _persistSort = persistSort ?? _forget,
+        super(HomeFeedState(
+          sort: sort,
+          sources: sources,
+          threshold: threshold,
+        )) {
     if (bus != null) _ticks = bus.ticks.listen(_onTick);
   }
 
-  static Future<void> _forget(bool value) async {}
+  static Future<void> _forget(HomeSort value) async {}
+
+  /// The tiles' window as the feed reads it, or null under a filter that has
+  /// none.
+  ///
+  /// A windowed tile filter is bounded by the week the tile counted, so the
+  /// number on the tile IS the number of rows under it. [HomeFilter.fromOthers]
+  /// is the whole history because "everyone" is the feed itself, and
+  /// [HomeFilter.needsYou] is the whole history because it is a pile to burn
+  /// down — see [HomeFilterLabel.windowed].
+  String? _filterWindow() => state.filter.windowed ? _windowStart() : null;
 
   /// The newest page. Also what a filter change and a failed read come back
   /// through — there is one first-page path, not three.
@@ -292,7 +362,11 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     try {
       final rows = await _store.pageHomeFeed(
         limit: pageSize,
-        includeDropped: state.includeDropped,
+        filter: state.filter,
+        sinceIso: _filterWindow(),
+        ascending: state.sort == HomeSort.oldest,
+        threshold: state.threshold,
+        sources: state.sources,
       );
       if (seq != _fetchSeq || !mounted) return;
       state = state.copyWith(
@@ -337,7 +411,11 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
         beforeReceivedAt: tail.receivedAt,
         beforeSourceMessageId: tail.sourceMessageId,
         limit: pageSize,
-        includeDropped: state.includeDropped,
+        filter: state.filter,
+        sinceIso: _filterWindow(),
+        ascending: state.sort == HomeSort.oldest,
+        threshold: state.threshold,
+        sources: state.sources,
       );
       if (seq != _fetchSeq || !mounted) return;
       state = state.copyWith(
@@ -357,28 +435,83 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     }
   }
 
-  /// Shows or hides what the app decided the user did not need.
+  /// Narrows the table to one tile's worth of rows, or back to everyone's
+  /// messages.
   ///
-  /// The pages already walked are the wrong pages the moment this flips — they
-  /// were read against the other index — so this goes back to page one rather
-  /// than trying to merge dropped rows into what is on screen. The rows stay
-  /// up until the new first page lands: once loaded, never blank.
-  Future<void> setIncludeDropped(bool value) async {
-    state = state.copyWith(includeDropped: value, atEnd: false);
+  /// The pages already walked are the wrong pages the moment this changes —
+  /// they were read against another WHERE clause, and usually another index —
+  /// so this goes back to page one rather than trying to merge rows into what
+  /// is on screen. The rows stay up until the new first page lands: once
+  /// loaded, never blank.
+  Future<void> setFilter(HomeFilter value) async {
+    if (state.filter == value) return;
+    state = state.copyWith(filter: value, atEnd: false);
+    await load();
+    await _reaskStandingSearch();
+  }
+
+  /// Turns the table around, and writes the choice down.
+  ///
+  /// The order is a habit rather than a session, so it persists; the write is
+  /// guarded because a failed one costs the reader their setting at the next
+  /// launch and must not cost them the reload now.
+  Future<void> setSort(HomeSort value) async {
+    if (state.sort == value) return;
+    state = state.copyWith(sort: value, atEnd: false);
     try {
-      await _persistIncludeDropped(value);
+      await _persistSort(value);
     } catch (e) {
-      // The toggle is what the user asked for; a failed write costs them the
-      // setting next launch and must not cost them the reload now.
-      debugPrint('storing the home dropped filter failed: $e');
+      debugPrint('storing the inbox order failed: $e');
     }
     await load();
-    // The results on screen were read against the other filter, so they are
-    // the wrong answer the moment it flips — the same fact that sends the feed
-    // back to page one. The question is re-asked rather than dropped, because
-    // the reader changed the filter, not their mind about the query. A query
-    // still in flight counts as the standing question too: its answer is
-    // about to land under a toggle it never saw.
+  }
+
+  /// Follows the list column's source chips.
+  ///
+  /// Compared BY VALUE rather than by identity: the chips hand over a fresh
+  /// list every rebuild, and an identity test would reload the feed on every
+  /// one of them.
+  Future<void> setSources(List<String> value) async {
+    if (_sameSources(state.sources, value)) return;
+    state = state.copyWith(sources: value, atEnd: false);
+    await load();
+    await _reaskStandingSearch();
+  }
+
+  /// Follows the attention slider.
+  ///
+  /// The rows on screen were read against the old number, so this goes back to
+  /// page one exactly as a filter change does — under Needs You a thread that
+  /// no longer clears the bar is no longer in the answer. It reloads under
+  /// every filter rather than only that one, because the notifier's own state
+  /// has to be the number the next read binds whichever tile is up.
+  ///
+  /// A standing search is NOT re-asked: the search runner never reads the
+  /// threshold, so its answer is the same answer it just gave.
+  Future<void> setThreshold(double value) async {
+    if (state.threshold == value) return;
+    state = state.copyWith(threshold: value, atEnd: false);
+    await load();
+  }
+
+  static bool _sameSources(List<String> a, List<String> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Asks the standing question again under the narrowing that just changed.
+  ///
+  /// The results on screen were read against the other one, so they are the
+  /// wrong answer the moment it moves — the same fact that sends the feed back
+  /// to page one. The question is re-asked rather than dropped, because the
+  /// reader changed the filter, not their mind about the query. A query still
+  /// in flight counts as the standing question too: its answer is about to
+  /// land under a narrowing it never saw.
+  Future<void> _reaskStandingSearch() async {
     final query = _inFlightQuery ?? state.search?.query;
     if (query != null) await submitSearch(query);
   }
@@ -399,13 +532,32 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     final runner = _searchRunner;
     if (runner == null) return;
 
+    // The facets come off first, and what is left is the question. A query of
+    // nothing but filters is not one: there is no sentence to embed, and
+    // embedding the empty string would rank the whole mailbox by its distance
+    // from nothing at all.
+    final parsed = parseSearchQuery(text);
+    if (parsed.text.isEmpty) {
+      state = state.copyWith(
+        searching: false,
+        searchNotice:
+            'Add a word or two to search for — the filters alone are not a '
+            'question.',
+      );
+      return;
+    }
+
     final seq = ++_searchSeq;
     _inFlightQuery = text;
     state = state.copyWith(searching: true, clearSearchNotice: true);
 
     final MessageSearchResult result;
     try {
-      result = await runner(text, includeDropped: state.includeDropped);
+      result = await runner(
+        parsed.text,
+        includeDropped: state.includeDropped,
+        sources: parsed.sources,
+      );
     } catch (e) {
       // [MessageSearch] answers rather than throws, by contract — but the
       // runner crosses the database on its way there, and a screen left
@@ -426,8 +578,16 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
       case MessageSearchHits():
         state = state.copyWith(
           search: HomeSearch(
-            result.query,
-            result.hits,
+            // The RAW query, facets and all — it is what the reader typed and
+            // what the box still shows, and labelling the results with the
+            // stripped sentence would make them look like an answer to a
+            // question nobody asked.
+            text,
+            filterHits(parsed, result.hits),
+            // Documents are NOT facet-filtered. `in:` already narrowed them in
+            // SQL, and `has:file` is trivially true of every one of them — a
+            // passage out of an attachment IS a file. Sender and date live on
+            // the message a chunk came from, which this list does not carry.
             documents: result.documents,
             notice: result.notice,
           ),
@@ -466,9 +626,16 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// Lets the held-back rows onto the table, newest first, above what is
   /// already there.
   Future<void> releasePending() async {
-    if (_bufferOverflowed) {
+    if (_bufferOverflowed ||
+        state.sort == HomeSort.oldest ||
+        state.filter == HomeFilter.needsYou) {
       // More arrived than were kept, so prepending what survived would show a
-      // feed with a hole in it. The newest page IS the newest fifty.
+      // feed with a hole in it. Oldest-first lands in the same branch for a
+      // different reason: nothing was ever buffered under it, because the
+      // prepend arithmetic below is newest-first. Needs You for a third: an
+      // arrival there was only counted, because one row cannot say whether it
+      // is the newest of its thread — and a re-read is what can. Either way
+      // the newest page IS the answer.
       _buffer.clear();
       _bufferOverflowed = false;
       _pendingCount = 0;
@@ -541,9 +708,15 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     _pendingTicks.clear();
 
     final seq = _fetchSeq;
-    final List<HomeFeedRow> patch;
+    final List<({HomeFeedRow row, bool admitted})> patch;
     try {
-      patch = await _store.progressRowsFor(keys);
+      patch = await _store.progressPatchFor(
+        keys,
+        filter: state.filter,
+        threshold: state.threshold,
+        sinceIso: _filterWindow(),
+        sources: state.sources,
+      );
     } catch (e) {
       // Nothing to say to the user about this: the next stage write ticks the
       // same rows and the read runs again. A table one beat behind is not
@@ -558,7 +731,7 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   }
 
   /// Turns one batch of read-back rows into one new list and one state write.
-  void _apply(List<HomeFeedRow> patch) {
+  void _apply(List<({HomeFeedRow row, bool admitted})> patch) {
     final rows = [...state.rows];
     var index = _indexOf(rows);
     final entered = <String>{};
@@ -568,9 +741,11 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     // and every one is marked as arriving. Newest first, only the first would
     // be: each later row would find a newer head above it and be filed under
     // it as history.
-    final incoming = [...patch]..sort(_compare);
+    final incoming = [...patch]..sort((a, b) => _compare(a.row, b.row));
 
-    for (final row in incoming) {
+    for (final entry in incoming) {
+      final row = entry.row;
+      final admitted = entry.admitted;
       final key = row.feedKey;
 
       // Already on its way out. A patch must not resurrect a row whose removal
@@ -585,13 +760,20 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
         // not a message that arrived, and a table that resorted itself every
         // time a stage finished would be unreadable.
         rows[at] = row;
-        if (row.dropped && !state.includeDropped) dropping.add(key);
+        // The drop show is the ONE reason a row leaves the table in place, and
+        // only under the default filter, where a message the app threw away is
+        // news. A row that stops matching any other filter is left exactly
+        // where it is: the table never moves under a reader, and the next load
+        // reads it out.
+        if (state.filter == HomeFilter.fromOthers && row.dropped) {
+          dropping.add(key);
+        }
         continue;
       }
 
       final held = _buffer.indexWhere((waiting) => waiting.feedKey == key);
       if (held >= 0) {
-        if (row.dropped && !state.includeDropped) {
+        if (!admitted) {
           // Nobody ever saw it, so there is nothing to show leaving: it just
           // stops being one of the messages the count is promising.
           _buffer.removeAt(held);
@@ -602,17 +784,52 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
         continue;
       }
 
-      if (row.dropped && !state.includeDropped) {
+      if (state.filter == HomeFilter.fromOthers &&
+          row.dropped &&
+          state.sources.contains(row.source)) {
         // The gate's own show: a newsletter appears, grays, and is gone — the
         // one way a reader ever sees what the app is throwing away. Only for a
         // reader who is at the top and can watch it happen; anywhere else it
-        // would be a row that flickered past the corner of their eye.
-        if (!_anchored) continue;
+        // would be a row that flickered past the corner of their eye. And only
+        // newest-first, because the head of an oldest-first table is the OLDEST
+        // row and putting an arrival there would be a lie about its place.
+        //
+        // The source test is the show's own, because this branch sits ABOVE
+        // the admission gate on purpose — a dropped row is never admitted —
+        // and so is the one place the store's answer does not reach. It is a
+        // question of scope, not of filter: a newsletter from a connector
+        // whose chip is down is not on this table to be seen leaving it.
+        if (!_anchored || state.sort == HomeSort.oldest) continue;
         if (rows.isNotEmpty && _compare(row, rows.first) <= 0) continue;
         rows.insert(0, row);
         index = _indexOf(rows);
         entered.add(key);
         dropping.add(key);
+        continue;
+      }
+
+      // Anything the filter would not have returned is not put on the table by
+      // the live path either: a row nobody can see arriving is a row the reader
+      // would have to reload to explain. Below the drop show deliberately — a
+      // dropped arrival is NOT admitted under the default filter, and the show
+      // is the one exception to this line.
+      if (!admitted) continue;
+
+      if (state.sort == HomeSort.oldest ||
+          state.filter == HomeFilter.needsYou) {
+        // Everything below is newest-first arithmetic — the head is the newest
+        // row, arrivals are prepended, and the buffer is sorted the same way.
+        // Under oldest-first an arrival belongs at the far END of a history the
+        // reader has not walked to, so it is only ever COUNTED, and the pill's
+        // release re-reads page one.
+        //
+        // Needs You lands in the same branch for a different reason. That
+        // filter shows one row per thread — its newest kept message — and
+        // whether a row IS that message is a fact about its whole thread,
+        // which one patched row cannot answer. Putting it on the table would
+        // show the thread twice; counting it and re-reading page one on
+        // release shows it once.
+        _pendingCount++;
         continue;
       }
 
@@ -787,14 +1004,18 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 /// the same table rather than to a re-read first page.
 final homeFeedProvider =
     StateNotifierProvider<HomeFeedNotifier, HomeFeedState>((ref) {
-  return HomeFeedNotifier(
+  final notifier = HomeFeedNotifier(
     ref.watch(messageStoreProvider),
     // Read, not watched: this seeds the notifier, and watching it would
-    // rebuild the whole feed — pages, scroll and all — every time the toggle
+    // rebuild the whole feed — pages, scroll and all — every time the order
     // it writes came back round.
-    includeDropped: ref.read(appPrefsProvider).homeShowDropped,
-    persistIncludeDropped: (value) =>
-        ref.read(appPrefsProvider.notifier).setHomeShowDropped(value),
+    sort: ref.read(appPrefsProvider).homeSort,
+    // Read for the same reason, and followed below rather than watched: the
+    // slider is the rail's, and moving it must narrow the Needs You tile and
+    // the rows under it without throwing away the pages already walked.
+    threshold: ref.read(appPrefsProvider).attentionThreshold,
+    persistSort: (value) =>
+        ref.read(appPrefsProvider.notifier).setHomeSort(value),
     // Read inside the closure, so the search stack — the embedding client and
     // everything it holds — is built the first time somebody actually asks a
     // question rather than every time the feed loads.
@@ -810,33 +1031,41 @@ final homeFeedProvider =
             ),
     bus: ref.watch(progressBusProvider),
   );
+  // The one number the rail and this feed share. Listened to rather than
+  // watched so the slider reloads page one instead of rebuilding the notifier,
+  // and so the tile and the table are counting against the same bar.
+  ref.listen<double>(
+    appPrefsProvider.select((p) => p.attentionThreshold),
+    (_, value) => notifier.setThreshold(value),
+  );
+  return notifier;
 });
 
-/// How far back the tiles and the hot strip look. A day, because the question
-/// they answer is "what has the app been doing today".
-const Duration homeMetricsWindow = Duration(hours: 24);
-
-/// Through the store's own stamp helper, never `toIso8601String` — the cutoff
-/// is compared against `message_progress.updated_at` as a STRING, and Dart
-/// prints three fractional digits when the microseconds are zero and six
-/// otherwise. Two widths do not sort against each other; see
-/// [MessageStore.isoStamp].
-String _windowStart() =>
-    MessageStore.isoStamp(DateTime.now().subtract(homeMetricsWindow));
-
-/// The six numbers over the feed. autoDispose because they are cheap to
-/// re-read and stale the moment the pane is closed.
+/// The numbers behind the eight tiles over the feed. autoDispose because they
+/// are cheap to re-read and stale the moment the pane is closed.
 final homeMetricsProvider = FutureProvider.autoDispose<HomeMetrics>((ref) {
   // The live phase's pulse: a settled burst re-reads the tiles. Riverpod
   // carries the previous value through the rebuild, so the numbers change
   // without the tiles ever blinking blank.
   ref.watch(homeFeedProvider.select((s) => s.metricsEpoch));
+  // The same connectors the table is showing. A tile counting mail the feed is
+  // hiding would be a number nobody can find the rows for.
+  final sources = ref.watch(homeFeedProvider.select((s) => s.sources));
   return ref.watch(messageStoreProvider).homeMetrics(
+        // The seven windowed tiles' week. `needs_you` is read over the whole
+        // table inside that one statement and ignores this — it is a pile to
+        // burn down, not a readout of the last seven days.
         sinceIso: _windowStart(),
+        sources: sources,
+        // The rail's own bar, so the Needs You tile and the rail's badge are
+        // one number. Watched rather than read: moving the slider has to move
+        // the tile, and the feed is following the same pref beside it.
+        threshold:
+            ref.watch(appPrefsProvider.select((p) => p.attentionThreshold)),
         // Computed here and bound once, so every row the tile is counting is
         // measured against the same instant the rows themselves are. Through
-        // `isoStamp` for [_windowStart]'s reason: this one is compared against
-        // a stored stamp.
+        // `isoStamp` because it is compared against a stored stamp — see
+        // [MessageStore.isoStamp].
         stalledBeforeIso:
             MessageStore.isoStamp(DateTime.now().subtract(homeStalledAfter)),
       );
@@ -845,7 +1074,34 @@ final homeMetricsProvider = FutureProvider.autoDispose<HomeMetrics>((ref) {
 final hotStorylinesProvider =
     FutureProvider.autoDispose<List<HotStoryline>>((ref) {
   ref.watch(homeFeedProvider.select((s) => s.metricsEpoch));
+  final sources = ref.watch(homeFeedProvider.select((s) => s.sources));
   return ref
       .watch(messageStoreProvider)
-      .hotStorylines(sinceIso: _windowStart());
+      .hotStorylines(sinceIso: _windowStart(), sources: sources);
+});
+
+/// What the pipeline is doing right now, under the strip of tiles.
+///
+/// It narrates the work the filter above it may be hiding, which is why it is
+/// read on its own clock rather than off the rows: a reader who has narrowed
+/// the table to Needs You still has to be able to see that fifty messages are
+/// being triaged behind it.
+///
+/// No timer of its own. It re-reads behind the feed's own settled-burst epoch,
+/// behind the activity log's events, and behind whatever invalidates it from
+/// outside — a poll, a pane rebuild. Three cheap reads on a pulse somebody else
+/// is already keeping is far less than a second-hand of its own.
+final pipelinePulseProvider = FutureProvider.autoDispose<PipelinePulse>((ref) {
+  ref.watch(homeFeedProvider.select((s) => s.metricsEpoch));
+  final sources = ref.watch(homeFeedProvider.select((s) => s.sources));
+  // A sync or a sweep finishing records an event and moves nothing the bus
+  // ticks on, so the epoch alone would leave the queue's own comings and
+  // goings unreported.
+  ref.watch(activityEventsProvider);
+  return ref.watch(messageStoreProvider).pipelinePulse(
+        sinceIso: MessageStore.isoStamp(
+          DateTime.now().subtract(homePulseWindow),
+        ),
+        sources: sources,
+      );
 });

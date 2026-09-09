@@ -2,14 +2,23 @@ import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
+import '../services/profile_photos.dart';
 import '../theme/tokens.dart';
+import 'attachment_card.dart';
 import 'attachment_chip.dart';
-import 'attachment_chip_row.dart';
 import 'attachment_format.dart';
+import 'bond_avatar.dart';
 import 'chips.dart';
+import 'image_grid.dart';
 import 'inline_image_thumb.dart';
+import 'link_unfurl.dart';
 import 'preview/preview_kind.dart';
 import 'time_format.dart';
+
+// The avatar and its two pure helpers moved to `bond_avatar.dart` when the
+// same face had to be drawn in a typeahead row and a rail. Re-exported so
+// every caller that learned them here still finds them here.
+export 'bond_avatar.dart' show avatarColorFor, initialsFor;
 
 /// How long a gap can be before a message stops reading as part of the same
 /// breath and gets its own header again.
@@ -51,6 +60,14 @@ final RegExp _bodyToken = RegExp(
 /// leaves behind.
 final RegExp _blankRun = RegExp(r'\n{3,}');
 
+/// The kinds that are somewhere ELSE rather than something the message carried.
+///
+/// Wider than `preview_kind.dart`'s own link set, which is about what a preview
+/// can BUILD: a `reference` previews like the drive file it points at, but it
+/// still arrived as a link and it still has a site the reader needs told. So
+/// the row draws all three as unfurls and everything else as a card.
+const Set<String> _linkKinds = linkAttachmentKinds;
+
 /// Under this an inline image is furniture — a signature logo, a social icon,
 /// a tracking pixel — and is stripped from the body and left out of the chips
 /// entirely. Over it, somebody meant to show you something.
@@ -60,45 +77,6 @@ final RegExp _blankRun = RegExp(r'\n{3,}');
 /// A size of 0 means "the connector did not say" (every Teams attachment) and
 /// is never treated as small.
 const int inlineImageMinBytes = 20 * 1024;
-
-/// Inbound avatar fills, picked from the existing token set rather than a new
-/// one. Five is enough that adjacent senders rarely collide and few enough
-/// that the transcript still reads as one palette.
-const List<Color> _avatarPalette = [
-  BondColors.primaryDeep,
-  BondColors.attention,
-  BondColors.success,
-  BondColors.darkTileAlt,
-  BondColors.channelVideo,
-];
-
-/// Two letters from a display name, one from an address, "?" from nothing.
-/// Never throws on the half-empty senders a mailbox is full of.
-String initialsFor(String? name, String? address) {
-  final words = [
-    for (final w in (name ?? '').split(RegExp(r'\s+')))
-      if (w.isNotEmpty) w,
-  ];
-  if (words.length >= 2) {
-    return '${words.first[0]}${words.last[0]}'.toUpperCase();
-  }
-  if (words.length == 1) return words.first[0].toUpperCase();
-
-  final addr = (address ?? '').trim();
-  if (addr.isNotEmpty) return addr[0].toUpperCase();
-  return '?';
-}
-
-/// The avatar fill. Outbound is always the product's own primary — "this one
-/// is you" should not depend on which address the account signs with. Everyone
-/// else gets a stable color per address, so a sender looks the same in every
-/// thread.
-Color avatarColorFor(String? address, {required bool outbound}) {
-  if (outbound) return BondColors.primary;
-  final hash = (address ?? '').toLowerCase().hashCode;
-  final index = hash.remainder(_avatarPalette.length).abs();
-  return _avatarPalette[index];
-}
 
 /// Whether [b] collapses under [a]: same sender, same direction, and close
 /// enough in time. An unparseable timestamp on either side breaks the run —
@@ -356,6 +334,13 @@ bool _isSubThresholdInlineImage(AttachmentRef attachment) =>
 ///   open ask keeps its line, and a message carrying a [suggestion] says so in
 ///   one caption. A folded row must never be the reason an answer went unsent.
 /// - The user's own toggle outlives every rebuild. Nothing recomputes it.
+///
+/// The files a message carried sit UNDER the words that came with them, drawn
+/// as what they are: a document is a card with its own picture on it, one
+/// photograph is a picture, two or more are a grid, and a link is an unfurl
+/// that names the site before it names the file. A file the sender put INSIDE
+/// a sentence is the exception and stays a chip there — a 320px card halfway
+/// through a paragraph is not a paragraph.
 class MessageRow extends StatefulWidget {
   final Message message;
 
@@ -402,12 +387,19 @@ class MessageRow extends StatefulWidget {
   /// reads a disk.
   final ImageProvider? Function(AttachmentRef attachment)? thumbnailFor;
 
-  /// Opens this message's own history — every stage, judgement and queue row
-  /// behind it. Null renders no link, which is what a host with nowhere to
-  /// show one needs; and it appears on header rows only, because a run's
-  /// continuations are the same message's neighbours rather than rows of
-  /// their own.
-  final VoidCallback? onWhatHappened;
+  /// Where the sender's face comes from. Null draws initials and asks nothing,
+  /// which is what every test and every signed-out session gets.
+  final ProfilePhotos? photos;
+
+  /// What the card's hover strip offers: put THIS file into the reply being
+  /// written. Null hides the strip, for a host with no box to write into — the
+  /// same rule [onAskTap] follows, and the same rule the file panel's own
+  /// button follows, because they are one path.
+  final void Function(AttachmentRef attachment)? onUseInReply;
+
+  /// Hands a link's address to the operating system — the unfurl's `Open link`.
+  /// Null draws no button, and so does an address `webUriOf` refuses.
+  final void Function(String url)? onOpenLink;
 
   const MessageRow({
     super.key,
@@ -421,17 +413,18 @@ class MessageRow extends StatefulWidget {
     this.onOpenAttachment,
     this.selectedAttachment,
     this.thumbnailFor,
-    this.onWhatHappened,
+    this.photos,
+    this.onUseInReply,
+    this.onOpenLink,
   });
-
-  /// The link into this message's history. One key and not a per-message one:
-  /// a transcript renders many rows, and every test that wants this wants it
-  /// on a row it has already found.
-  static const Key whatHappenedKey = ValueKey('message-row-what-happened');
 
   /// The one line a folded row keeps about its files.
   static const Key collapsedAttachmentHintKey =
       ValueKey('message-row-attachment-hint');
+
+  /// The run of file cards under a message — what a test asks for to say "the
+  /// files this message carried are drawn here".
+  static const Key cardsKey = ValueKey('message-row-cards');
 
   @override
   State<MessageRow> createState() => _MessageRowState();
@@ -573,18 +566,6 @@ class _MessageRowState extends State<MessageRow> {
                     onTap: () => setState(() => _expanded = !_expanded),
                   ),
                 ],
-                // Pictures the body never pointed at, under the words they came
-                // with rather than in a strip of their own.
-                for (final image in layout.trailingImages) ...[
-                  const SizedBox(height: BondSpacing.s8),
-                  _thumb(image),
-                ],
-                // A document the host has a picture of shows it. No picture,
-                // NOTHING — never the dashed frame an image gets: the chip
-                // below is already the file, and a frame per attachment would
-                // put an empty box under every mail with a spreadsheet on it.
-                for (final document in layout.thumbnailable)
-                  ..._documentThumb(document),
                 if (pending) ...[
                   const SizedBox(height: BondSpacing.s4),
                   Text('Sending…', style: BondType.caption),
@@ -602,37 +583,14 @@ class _MessageRowState extends State<MessageRow> {
                 ],
                 // The files, last: under everything that was said about them,
                 // and above the ask that is probably about them too.
-                if (layout.chips.isNotEmpty) ...[
-                  const SizedBox(height: BondSpacing.s8),
-                  AttachmentChipRow(
-                    attachments: layout.chips,
-                    selected: widget.selectedAttachment,
-                    onOpen: widget.onOpenAttachment,
-                  ),
-                  // What the model made of each file, under the SAME `AI:`
-                  // label the message's own summary carries, and for the same
-                  // reason: this is the model's read of a document, never a
-                  // sentence the sender wrote, and the two must never be
-                  // mistakable for one another.
-                  //
-                  // A file still being read, skipped, or never digested adds
-                  // NOTHING here — the chip's own `reading…` hint is the whole
-                  // signal while a digest is pending, and a placeholder line
-                  // per attachment would grow the row for nothing.
-                  for (final attachment in layout.chips)
-                    if (attachment.digest?.summary.isNotEmpty == true) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        'AI: ${attachment.name ?? 'file'}: '
-                        '${attachment.digest!.summary}',
-                        key: attachmentKey('digest', attachment),
-                        style: BondType.caption
-                            .copyWith(color: BondColors.inkMuted),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                ],
+                //
+                // Pictures first, because a picture is what the message IS
+                // when somebody sent one. One stays the single thumbnail it
+                // always was; two or more become a grid, which is what every
+                // chat app a reader has used draws for them.
+                ..._trailingPictures(layout),
+                ..._links(layout),
+                ..._cards(layout),
               ],
               // The ask this message is still waiting on. The thread banner
               // carries only the newest one, so an older message keeps its own
@@ -732,25 +690,109 @@ class _MessageRowState extends State<MessageRow> {
         ),
       );
 
-  /// A document's own picture, when the host has one, at a size that keeps two
-  /// of them from filling a screen. Empty when it has none — see the call site.
-  List<Widget> _documentThumb(AttachmentRef attachment) {
-    final image = widget.thumbnailFor?.call(attachment);
-    if (image == null) return const [];
+  /// The pictures the body never pointed at.
+  ///
+  /// One stays the single thumbnail it has always been — a lone photograph is
+  /// the message, and cropping it to a square would throw away the half of it
+  /// somebody meant to show. Two or more become a grid, because a column of
+  /// full-width pictures is a scroll rather than a message.
+  List<Widget> _trailingPictures(BodyLayout layout) {
+    final images = layout.trailingImages;
+    if (images.isEmpty) return const [];
     return [
       const SizedBox(height: BondSpacing.s8),
-      Align(
-        alignment: Alignment.centerLeft,
-        child: InlineImageThumb(
-          key: InlineImageThumb.keyFor(attachment),
-          attachment: attachment,
-          image: image,
-          maxWidth: 200,
-          maxHeight: 200,
-          onTap: _openAttachment(attachment),
+      if (images.length == 1)
+        _thumb(images.first)
+      else
+        ImageGrid(
+          key: ImageGrid.gridKey,
+          images: images,
+          imageFor: (attachment) => widget.thumbnailFor?.call(attachment),
+          onTap: widget.onOpenAttachment,
         ),
+    ];
+  }
+
+  /// The links, as unfurls.
+  ///
+  /// A picture is passed only for a link this build might actually be able to
+  /// render — `layout.thumbnailable` is the list that already answers that. A
+  /// mail link to a drive PDF IS on it, because the bytes ladder fetches a
+  /// `reference` by its url like any other file; a card or a quoted message
+  /// never is, and asking the host for a picture of one would be asking for a
+  /// picture that can never arrive.
+  List<Widget> _links(BodyLayout layout) {
+    final links = [
+      for (final attachment in layout.chips)
+        if (_linkKinds.contains(attachment.kind)) attachment,
+    ];
+    if (links.isEmpty) return const [];
+    return [
+      const SizedBox(height: BondSpacing.s8),
+      Wrap(
+        spacing: BondSpacing.s8,
+        runSpacing: BondSpacing.s8,
+        children: [
+          for (final attachment in links)
+            LinkUnfurl(
+              key: LinkUnfurl.keyFor(attachment),
+              attachment: attachment,
+              image: _thumbnailIfWanted(layout, attachment),
+              onOpen: _openAttachment(attachment),
+              onOpenLink: widget.onOpenLink,
+            ),
+        ],
       ),
     ];
+  }
+
+  /// The files, as cards.
+  ///
+  /// Everything in `layout.chips` that is not a link: a document, a
+  /// spreadsheet, a forwarded message. The card carries the digest line, so
+  /// there is no second run of captions under the row any more — one line per
+  /// file, on the file.
+  List<Widget> _cards(BodyLayout layout) {
+    final files = [
+      for (final attachment in layout.chips)
+        if (!_linkKinds.contains(attachment.kind)) attachment,
+    ];
+    if (files.isEmpty) return const [];
+    final use = widget.onUseInReply;
+    return [
+      const SizedBox(height: BondSpacing.s8),
+      Wrap(
+        key: MessageRow.cardsKey,
+        spacing: BondSpacing.s8,
+        runSpacing: BondSpacing.s8,
+        children: [
+          for (final attachment in files)
+            AttachmentCard(
+              key: AttachmentCard.keyFor(attachment),
+              attachment: attachment,
+              selected:
+                  sameAttachment(widget.selectedAttachment, attachment),
+              image: _thumbnailIfWanted(layout, attachment),
+              onTap: _openAttachment(attachment),
+              onUseInReply: use == null ? null : () => use(attachment),
+            ),
+        ],
+      ),
+    ];
+  }
+
+  /// The host's picture for a file, but only for a file the layout says is
+  /// worth asking about. `thumbnailable` is that answer, and it is the same
+  /// list the row used to draw a separate thumbnail from — so a link still
+  /// asks nothing, which a test pins.
+  ImageProvider? _thumbnailIfWanted(
+    BodyLayout layout,
+    AttachmentRef attachment,
+  ) {
+    final wanted = layout.thumbnailable
+        .any((candidate) => sameAttachment(candidate, attachment));
+    if (!wanted) return null;
+    return widget.thumbnailFor?.call(attachment);
   }
 
   VoidCallback? _openAttachment(AttachmentRef attachment) {
@@ -782,25 +824,6 @@ class _MessageRowState extends State<MessageRow> {
         if (meta.isNotEmpty) ...[
           const SizedBox(width: BondSpacing.s8),
           Text(meta, style: BondType.caption),
-        ],
-        // After the meta and before the chevron, in its own transparent
-        // Material and its own InkWell: the header IS the fold's target, and a
-        // link sharing that gesture would collapse the message every time
-        // somebody asked why it was here.
-        if (widget.onWhatHappened != null) ...[
-          const SizedBox(width: BondSpacing.s8),
-          Material(
-            type: MaterialType.transparency,
-            child: InkWell(
-              key: MessageRow.whatHappenedKey,
-              onTap: widget.onWhatHappened,
-              borderRadius: BondRadii.smAll,
-              child: Text(
-                'What happened',
-                style: BondType.caption.copyWith(color: BondColors.primary),
-              ),
-            ),
-          ),
         ],
         if (folds) ...[
           const SizedBox(width: BondSpacing.s4),
@@ -869,21 +892,15 @@ class _MessageRowState extends State<MessageRow> {
   }
 
   Widget _avatar(Message message) {
-    return Container(
-      width: _avatarSize,
-      height: _avatarSize,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: avatarColorFor(message.fromAddress, outbound: message.outbound),
-      ),
-      child: Text(
-        initialsFor(message.fromName, message.fromAddress),
-        style: BondType.caption.copyWith(
-          color: BondColors.onDarkPrimary,
-          fontWeight: FontWeight.w600,
-        ),
-      ),
+    return BondAvatar(
+      name: message.fromName,
+      address: message.fromAddress,
+      outbound: message.outbound,
+      size: _avatarSize,
+      // A stored message knows an address and never a Graph id, except for
+      // Teams, where the address IS one wearing a `teams:` prefix.
+      photoKey: photoKeyFor(address: message.fromAddress),
+      photos: widget.photos,
     );
   }
 }

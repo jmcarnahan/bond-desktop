@@ -236,9 +236,10 @@ void main() {
       String body = 'body text',
       String receivedAt = '2026-08-29T10:00:00Z',
       String from = 'Sarah',
+      String source = 'email',
     }) async {
       await store.upsertMessage({
-        'source': 'email',
+        'source': source,
         'source_message_id': id,
         'conversation_key': 'conv-$id',
         'direction': 'inbound',
@@ -249,7 +250,7 @@ void main() {
         'body_text': body,
       });
       await store.writeTriage(
-        'email',
+        source,
         id,
         status: 'triaged',
         result: TriageResult(
@@ -262,9 +263,9 @@ void main() {
       );
     }
 
-    Future<void> embed(String id) async {
-      final row = (await store.getMessageRow('email', id))!;
-      final outcome = await embedMessageRow(store, server.client, 'email', row);
+    Future<void> embed(String id, {String source = 'email'}) async {
+      final row = (await store.getMessageRow(source, id))!;
+      final outcome = await embedMessageRow(store, server.client, source, row);
       expect(outcome, MessageEmbedOutcome.embedded);
     }
 
@@ -317,6 +318,32 @@ void main() {
       expect(row.fromAddress, 'sarah@x.com');
       expect(row.source, 'email');
       expect(row.receivedAt, '2026-08-29T10:00:00Z');
+    });
+
+    test('sources narrows both corpora — what the in: facet rides on', () async {
+      if (!available) return;
+      await seed(id: 'inv', subject: 'Invoice 4471 is overdue');
+      await seed(
+        id: 'chat-inv',
+        subject: 'Invoice 4471, in chat',
+        source: 'teams',
+      );
+      await embed('inv');
+      await embed('chat-inv', source: 'teams');
+
+      final both =
+          await MessageSearch(store, server.client).search('the invoice');
+      expect(idsOf(both), containsAll(['inv', 'chat-inv']));
+
+      // Narrowed in SQL rather than over the hits: the index's budget must be
+      // spent on the connector the reader asked about.
+      final chats = await MessageSearch(store, server.client)
+          .search('the invoice', sources: const ['teams']);
+      expect(idsOf(chats), ['chat-inv']);
+
+      final mail = await MessageSearch(store, server.client)
+          .search('the invoice', sources: const ['email']);
+      expect(idsOf(mail), ['inv']);
     });
 
     test('honours the limit', () async {

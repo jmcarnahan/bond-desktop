@@ -36,6 +36,7 @@ import '../services/graph_mail.dart';
 import '../services/graph_people.dart';
 import '../services/graph_teams.dart';
 import '../services/identity_guard.dart';
+import '../services/profile_photos.dart';
 import '../services/llm/embeddings_client.dart';
 import '../services/llm/llm_client.dart';
 import '../services/mcp/bond_mcp_client.dart';
@@ -259,6 +260,20 @@ final peopleBackendProvider = Provider<PeopleBackend>((ref) {
   return mode == backendModeSdk
       ? GraphPeople(ref.watch(graphAuthProvider))
       : McpPeopleBackend(ref.watch(mcpStackProvider).client);
+});
+
+/// Faces for avatars, over whichever directory backend is selected.
+///
+/// Disabled until an account is stored, and that is the load-bearing part: a
+/// signed-out app — and every widget test, which stores no account — asks the
+/// directory nothing, so an avatar is initials and no call is made to find out
+/// what everybody already knows.
+final profilePhotosProvider = Provider<ProfilePhotos>((ref) {
+  final auth = ref.watch(authSessionProvider);
+  return DirectoryProfilePhotos(
+    ref.watch(peopleBackendProvider),
+    enabled: () async => (await auth.storedAccount) != null,
+  );
 });
 
 /// Attachment words and bytes, from whichever connector the app is on.

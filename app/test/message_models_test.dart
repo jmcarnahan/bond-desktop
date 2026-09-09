@@ -407,6 +407,32 @@ void main() {
       expect(Message.fromRow(const {}).deadline, isNull);
     });
 
+    test('the needs-you verdict stays tri-state, and its reason rides along',
+        () {
+      expect(
+        Message.fromRow(const {'needs_you_verdict': 1}).needsYouVerdict,
+        isTrue,
+      );
+      expect(
+        Message.fromRow(const {'needs_you_verdict': 0}).needsYouVerdict,
+        isFalse,
+      );
+      // Load-bearing: NULL is "the pass has never reached this row", which is
+      // the worklist itself. A false here would claim it had been judged.
+      expect(
+        Message.fromRow(const {'needs_you_verdict': null}).needsYouVerdict,
+        isNull,
+      );
+      expect(Message.fromRow(const {}).needsYouVerdict, isNull);
+
+      expect(
+        Message.fromRow(const {'needs_you_reason': 'teams_direct'})
+            .needsYouReason,
+        'teams_direct',
+      );
+      expect(Message.fromRow(const {}).needsYouReason, isNull);
+    });
+
     test('only an is_read 0 reads as unread; absent and null read as read', () {
       expect(Message.fromRow(const {'is_read': 0}).isRead, isFalse);
       expect(Message.fromRow(const {'is_read': 1}).isRead, isTrue);

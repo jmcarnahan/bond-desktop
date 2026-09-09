@@ -1,33 +1,65 @@
 import 'package:flutter/material.dart';
 
 import '../models/home_models.dart';
+import '../models/home_sort.dart';
+import '../providers/activity_provider.dart' show SyncStamps;
 import '../theme/tokens.dart';
 import 'attachment_search_tile.dart';
-import 'chips.dart';
 import 'home_feed_row.dart';
 import 'home_metrics.dart';
+import 'home_pulse.dart';
 import 'home_search.dart';
 import 'hot_storylines.dart';
 import 'inline_alert.dart';
+import 'sort_menu.dart';
 
-/// The home screen: what the app has been doing, as a table you can leave open.
+/// The Inbox: what the app has been doing, as a table you can leave open.
 ///
 /// Dumb by construction, like the activity panel and the Later digest: every
 /// value and every callback is a prop, nothing is read from a provider, and the
 /// clock is injected. The one thing it owns is the scroll controller, because
 /// paging is a property of the viewport rather than of the data.
+///
+/// The class keeps its name where the stop keeps its enum — see
+/// `RailSectionLabel`. What moved is the word a reader sees.
 class HomePane extends StatefulWidget {
-  /// Newest first.
+  /// In [sort]'s order.
   final List<HomeFeedRow> rows;
 
   /// The tiles' numbers, or null while the first read is in flight. Null
-  /// renders nothing rather than zeros — six noughts is a claim, and "not read
-  /// yet" is not that claim.
+  /// renders nothing rather than zeros — eight noughts is a claim, and "not
+  /// read yet" is not that claim.
   final HomeMetrics? metrics;
 
   final List<HotStoryline> hotStorylines;
 
-  final bool includeDropped;
+  /// Which rows the table is keeping, and the way to change it. The tiles are
+  /// the control — see [HomeMetricsBar].
+  final HomeFilter filter;
+  final ValueChanged<HomeFilter> onFilter;
+
+  /// Which way the table runs, and the menu beside the search box that turns
+  /// it around.
+  final HomeSort sort;
+  final ValueChanged<HomeSort> onSort;
+
+  /// The list column's source chip, or null for both — the one source
+  /// selection the app has; the Emails / Teams tiles set it.
+  final String? sourceFilter;
+  final ValueChanged<String?> onSelectSource;
+
+  /// What the pipeline is doing, or null before the first read. The tiles above
+  /// it are a filter now, and this is what tells a reader whose table looks
+  /// empty whether the filter is hiding the work.
+  final PipelinePulse? pulse;
+
+  /// Whether a pull is out on either connector. Words on the strip, never a
+  /// spinner.
+  final bool mailSyncing;
+  final bool teamsSyncing;
+
+  /// When each pass last finished, or null before the first read.
+  final SyncStamps? stamps;
 
   /// Whether a first page has come back at all. False is what keeps the empty
   /// line off the screen during the read that is about to fill it.
@@ -55,7 +87,6 @@ class HomePane extends StatefulWidget {
   final void Function(String source, String conversationKey) onOpenThread;
   final void Function(String storylineId) onOpenStoryline;
   final VoidCallback onLoadMore;
-  final VoidCallback onToggleDropped;
 
   /// Lets the held-back rows onto the table.
   final VoidCallback? onReleasePending;
@@ -96,9 +127,17 @@ class HomePane extends StatefulWidget {
     required this.onOpenThread,
     required this.onOpenStoryline,
     required this.onLoadMore,
-    required this.onToggleDropped,
+    required this.filter,
+    required this.onFilter,
+    required this.sort,
+    required this.onSort,
+    required this.sourceFilter,
+    required this.onSelectSource,
+    this.pulse,
+    this.mailSyncing = false,
+    this.teamsSyncing = false,
+    this.stamps,
     this.hotStorylines = const [],
-    this.includeDropped = false,
     this.loaded = true,
     this.loadingMore = false,
     this.atEnd = false,
@@ -117,6 +156,24 @@ class HomePane extends StatefulWidget {
     this.onRetry,
     this.onOpenHistory,
   });
+
+  /// The sort menu, and one key per order in it.
+  static const Key sortKey = ValueKey('home-sort');
+
+  static Key sortItemKeyFor(HomeSort s) => ValueKey('home-sort-${s.name}');
+
+  /// The line that says a tile filter is on, and the way back out of it.
+  static const Key filterNoticeKey = ValueKey('home-filter-notice');
+  static const Key showEveryoneKey = ValueKey('home-show-everyone');
+
+  /// Below this much table width the row folds onto ONE line.
+  ///
+  /// 900 because of what sits beside this pane: with a thread open in the side
+  /// panel the main pane is about 600px, and seven columns — sender, subject,
+  /// a 200px bar, a verdict, an ask and a stamp — cannot line up in that. A
+  /// table whose columns have stopped lining up is no longer a table, and the
+  /// fold is what keeps the comparison this screen exists for.
+  static const double compactBelow = 900;
 
   /// How close to the bottom the viewport has to get before the next page is
   /// asked for. Roughly a screenful of rows ahead of the reader, so the page
@@ -223,7 +280,7 @@ class _HomePaneState extends State<HomePane> {
         children: [
           Row(
             children: [
-              Text('Home', style: BondType.title),
+              Text('Inbox', style: BondType.title),
               const SizedBox(width: BondSpacing.s16),
               Expanded(
                 child: Align(
@@ -237,15 +294,40 @@ class _HomePaneState extends State<HomePane> {
                 ),
               ),
               const SizedBox(width: BondSpacing.s16),
-              BondFilterPill(
-                label: 'Show dropped',
-                selected: widget.includeDropped,
-                onTap: widget.onToggleDropped,
+              // Beside the box rather than over the table, because it is a
+              // property of the whole list and not of the results in it — the
+              // shape every other list in the app wears.
+              SortMenu<HomeSort>(
+                key: HomePane.sortKey,
+                value: widget.sort,
+                options: HomeSort.values,
+                labelOf: (order) => order.label,
+                onChanged: widget.onSort,
+                itemKeyFor: HomePane.sortItemKeyFor,
               ),
             ],
           ),
           const SizedBox(height: BondSpacing.s16),
-          if (metrics != null) HomeMetricsBar(metrics: metrics),
+          if (metrics != null)
+            HomeMetricsBar(
+              metrics: metrics,
+              filter: widget.filter,
+              sourceFilter: widget.sourceFilter,
+              onFilter: widget.onFilter,
+              onSelectSource: widget.onSelectSource,
+            ),
+          if (widget.filter != HomeFilter.fromOthers) ...[
+            const SizedBox(height: BondSpacing.s8),
+            _filterNotice(),
+          ],
+          const SizedBox(height: BondSpacing.s8),
+          PipelinePulseStrip(
+            pulse: widget.pulse,
+            mailSyncing: widget.mailSyncing,
+            teamsSyncing: widget.teamsSyncing,
+            stamps: widget.stamps,
+            now: widget.now,
+          ),
           const SizedBox(height: BondSpacing.s12),
           HotStorylinesStrip(
             items: widget.hotStorylines,
@@ -276,22 +358,83 @@ class _HomePaneState extends State<HomePane> {
             Text('Searching…', style: BondType.caption),
             const SizedBox(height: BondSpacing.s8),
           ],
+          // The fold is decided on the width the TABLE actually gets, not on
+          // the window's: this pane sits beside a thread as often as not, and
+          // the two are hundreds of pixels apart.
           Expanded(
-            child: AnimatedSwitcher(
-              duration: HomePane.searchSwap,
-              child: widget.search == null
-                  ? KeyedSubtree(
-                      key: const ValueKey<String>('home-live'),
-                      child: _feed(),
-                    )
-                  : KeyedSubtree(
-                      key: const ValueKey<String>('home-search'),
-                      child: _searchBody(widget.search!),
-                    ),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                final compact =
+                    constraints.maxWidth < HomePane.compactBelow;
+                return AnimatedSwitcher(
+                  duration: HomePane.searchSwap,
+                  child: widget.search == null
+                      ? KeyedSubtree(
+                          key: const ValueKey<String>('home-live'),
+                          child: _feed(compact),
+                        )
+                      : KeyedSubtree(
+                          key: const ValueKey<String>('home-search'),
+                          child: _searchBody(widget.search!, compact),
+                        ),
+                );
+              },
             ),
           ),
         ],
       ),
+    );
+  }
+
+  /// What a tile filter is hiding, and the way out of it.
+  ///
+  /// A filter with no visible control saying so is how a reader comes to
+  /// believe their mail has gone missing — and the tile that set it may have
+  /// wrapped onto a line they are not looking at. It names the filter, and the
+  /// WINDOW too where the filter has one: a windowed filter's tile counts a
+  /// week and its table shows a week, and a list that stops at last Tuesday
+  /// with nothing saying so reads as a mailbox with a hole in it. Needs You
+  /// and the default name no window because they have none —
+  /// see `HomeFilterLabel.windowed`.
+  ///
+  /// A text link and not a button, the way `Back to live` is: this is a way
+  /// out inside a body, and a raised control here would outrank the table.
+  Widget _filterNotice() {
+    return Row(
+      key: HomePane.filterNoticeKey,
+      children: [
+        Flexible(
+          child: Text(
+            // The window is named only where it applies: a Dropped list that
+            // stops at last Tuesday has to say so, and a Needs You pile that
+            // reaches back as far as the mail does must not claim a week.
+            // Same for the default — Everyone is the whole history.
+            widget.filter.windowed
+                ? 'Showing ${widget.filter.label} · '
+                    '${homeMetricsWindowLabel(homeMetricsWindow).toLowerCase()}'
+                : 'Showing ${widget.filter.label}',
+            style: BondType.caption,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        const SizedBox(width: BondSpacing.s8),
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            key: HomePane.showEveryoneKey,
+            onTap: () => widget.onFilter(HomeFilter.fromOthers),
+            borderRadius: BondRadii.smAll,
+            child: Text(
+              'Show everyone',
+              style: BondType.small.copyWith(
+                fontWeight: FontWeight.w600,
+                color: BondColors.primary,
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -302,7 +445,7 @@ class _HomePaneState extends State<HomePane> {
   /// [PageStorageKey]: a result set's scroll position is disposable, and the
   /// live table keeps its own through the swap precisely because that key
   /// stays on the list that owns it.
-  Widget _searchBody(HomeSearch search) {
+  Widget _searchBody(HomeSearch search, bool compact) {
     // The rows on screen and nothing else — one fused list means the header
     // can simply count it. Documents are not in the number; see below.
     final count = search.hits.length;
@@ -424,8 +567,8 @@ class _HomePaneState extends State<HomePane> {
             ),
           )
         else ...[
-          const HomeFeedHeaderRow(),
-          Expanded(child: _resultList(search)),
+          HomeFeedHeaderRow(compact: compact),
+          Expanded(child: _resultList(search, compact)),
         ],
       ],
     );
@@ -437,7 +580,7 @@ class _HomePaneState extends State<HomePane> {
   /// by its meaning are answers to the same question — the fusion already
   /// weighed them against each other, and a heading splitting them apart
   /// would file the row that matched BOTH ways under one of them.
-  Widget _resultList(HomeSearch search) {
+  Widget _resultList(HomeSearch search, bool compact) {
     return ListView.builder(
       itemCount: search.hits.length,
       itemBuilder: (context, index) {
@@ -446,6 +589,7 @@ class _HomePaneState extends State<HomePane> {
           key: ValueKey<String>('search-${row.feedKey}'),
           row: row,
           now: widget.now,
+          compact: compact,
           muteBar: true,
           onOpenThread: widget.onOpenThread,
           onOpenStoryline: widget.onOpenStoryline,
@@ -456,7 +600,7 @@ class _HomePaneState extends State<HomePane> {
     );
   }
 
-  Widget _feed() {
+  Widget _feed(bool compact) {
     if (widget.rows.isEmpty && widget.loaded) {
       return Center(
         child: Text(
@@ -472,7 +616,7 @@ class _HomePaneState extends State<HomePane> {
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const HomeFeedHeaderRow(),
+            HomeFeedHeaderRow(compact: compact),
             Expanded(
               child: ListView.builder(
                 // Named, so the place a reader scrolled to survives swapping
@@ -490,6 +634,13 @@ class _HomePaneState extends State<HomePane> {
                     key: ValueKey<String>(key),
                     row: row,
                     now: widget.now,
+                    compact: compact,
+                    // Only the LIVE rows, and only under this one filter:
+                    // every row the Needs You filter returns is the newest
+                    // kept message of a thread the rail says is owed an
+                    // answer. A search result under the same filter is
+                    // whatever the query found and carries no such promise.
+                    threadNeedsYou: widget.filter == HomeFilter.needsYou,
                     animateIn: widget.entering.contains(key),
                     fading: widget.fading.contains(key),
                     collapsing: widget.collapsing.contains(key),

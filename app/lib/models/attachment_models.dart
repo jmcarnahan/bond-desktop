@@ -2,6 +2,19 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show immutable;
 
+/// The kinds that are somewhere ELSE rather than something the message carried.
+///
+/// One set for every surface that has to tell a link from a file — the
+/// transcript's unfurls, the thread's Files tab, the Files stop's Links shelf —
+/// so a fourth link kind cannot be an unfurl in one place and a card in
+/// another. `MessageStore.recentAttachments` spells the same three out in SQL;
+/// change both together.
+const Set<String> linkAttachmentKinds = {
+  'reference',
+  'message_reference',
+  'card',
+};
+
 /// One thing that came with a message, and what the app has managed to learn
 /// about it.
 ///

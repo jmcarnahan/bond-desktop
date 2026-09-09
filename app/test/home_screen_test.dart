@@ -8,11 +8,14 @@ import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/navigation_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/services/message_search.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
+import 'package:bond_inbox/widgets/side_panel.dart';
+import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
@@ -21,7 +24,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
 
-/// Home as the SCREEN assembles it: the pane the app opens on, and the two
+/// The Inbox as the SCREEN assembles it: the pane the app opens on, and the two
 /// places a row leads.
 ///
 /// This file deliberately does NOT override [initialSectionProvider]. Every
@@ -61,7 +64,11 @@ class _FakeSearch implements MessageSearch {
   }) async {
     final rows = await store.pageHomeFeed(
       limit: limit,
-      includeDropped: includeDropped,
+      // `includeDropped` and a filter are not the same question, and
+      // [HomeFilter.processed] is the one filter that answers this one: it is
+      // everything the app has finished with, dropped or not. Asking for
+      // [HomeFilter.dropped] here would hand back the pile alone.
+      filter: includeDropped ? HomeFilter.processed : HomeFilter.fromOthers,
     );
     return MessageSearchHits(
       query.trim(),
@@ -185,14 +192,14 @@ void main() {
     await tester.pump(HomeFeedNotifier.metricsDebounce);
   }
 
-  testWidgets('the app opens on Home, with the stop on the rail',
+  testWidgets('the app opens on the Inbox, with the stop on the rail',
       (tester) async {
     await seedThread('c1', 'Homepage copy');
 
     await pumpInbox(tester);
 
     expect(find.byType(HomePane), findsOneWidget);
-    expect(find.text('HOME'), findsOneWidget);
+    expect(find.text('INBOX'), findsOneWidget);
     // The feed read the stored row rather than waiting on a sync.
     expect(
       find.descendant(
@@ -204,7 +211,7 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('a feed row opens its thread', (tester) async {
+  testWidgets('a feed row opens its thread BESIDE the table', (tester) async {
     await seedThread('c1', 'Homepage copy');
 
     await pumpInbox(tester);
@@ -216,8 +223,47 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.byType(ThreadDetailPanel), findsOneWidget);
-    expect(find.byType(HomePane), findsNothing);
+    // The table is the pane, so reading one row must not cost the reader the
+    // comparison they opened it for.
+    expect(
+      find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(ThreadDetailPanel),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byType(HomePane), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('the list column\'s Teams chip narrows the feed', (tester) async {
+    await seedThread('c1', 'Homepage copy');
+    await seedThread(
+      'chat-1',
+      'Standup at ten',
+      source: 'teams',
+      from: 'Dana Whitfield',
+      receivedAt: '2026-08-28T10:00:00Z',
+    );
+
+    await pumpInbox(tester);
+    await settleQueues(tester);
+
+    final mail = const ValueKey<String>('email\nc1-m1');
+    final chat = const ValueKey<String>('teams\nchat-1-m1');
+    expect(find.byKey(mail), findsOneWidget);
+    expect(find.byKey(chat), findsOneWidget);
+
+    // The chips are the one source selection the app has, and the feed reads
+    // the store itself — so a chip that did not reach the notifier would leave
+    // a table full of mail under a rail that says Teams.
+    await tester.tap(find.byKey(SourceFilterBar.teamsKey));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(chat), findsOneWidget);
+    expect(find.byKey(mail), findsNothing);
     await settleQueues(tester);
   });
 
@@ -256,8 +302,8 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('the rail stop comes back to Home from a thread',
-      (tester) async {
+  testWidgets('the rail stop comes back to the Inbox, and drops the thread '
+      'beside it', (tester) async {
     await seedThread('c1', 'Homepage copy');
 
     await pumpInbox(tester);
@@ -267,9 +313,21 @@ void main() {
     ));
     await tester.pump();
     await tester.pump();
-    expect(find.byType(HomePane), findsNothing);
+    expect(find.byType(ThreadDetailPanel), findsOneWidget);
 
-    await tester.tap(find.text('HOME'));
+    // Away and back. The thread was open BESIDE, so it is the stop that has to
+    // clear it — the row's own tap no longer replaces the pane.
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('People'),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('Inbox'),
+    ));
     await tester.pump();
     await tester.pump();
 
@@ -334,11 +392,14 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('an OpenSectionIntent for Home lands on it', (tester) async {
+  testWidgets('an OpenSectionIntent for the Inbox lands on it', (tester) async {
     await seedThread('c1', 'Homepage copy');
 
     await pumpInbox(tester);
-    await tester.tap(find.text('CONVERSATIONS'));
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('People'),
+    ));
     await tester.pump();
     expect(find.byType(HomePane), findsNothing);
 

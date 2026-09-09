@@ -3,6 +3,7 @@ import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/services/restore_service.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/widgets/app_rail.dart'
@@ -160,7 +161,7 @@ void main() {
 
     // Narrowed: the digest is on screen and the title names the day.
     expect(find.byType(LaterDigestPanel), findsOneWidget);
-    expect(find.textContaining('Archive · '), findsOneWidget);
+    expect(find.textContaining('Later · '), findsOneWidget);
 
     await tester.tap(find.widgetWithText(BondFilterPill, 'Done'));
     await tester.pump();
@@ -170,7 +171,7 @@ void main() {
     // narrowing went with it — the title is the whole section again.
     expect(find.byType(ConversationListPane), findsOneWidget);
     expect(find.byType(LaterDigestPanel), findsNothing);
-    expect(find.textContaining('Archive · '), findsNothing);
+    expect(find.textContaining('Later · '), findsNothing);
     expect(find.text('Homepage copy'), findsOneWidget);
   });
 
@@ -204,10 +205,16 @@ void main() {
     await tester.pump();
     expect(find.text('Weekly roundup'), findsOneWidget);
 
-    await tester.tap(find.text('CONVERSATIONS'));
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('People'),
+    ));
     await tester.pump();
     await seedDropped('Quarterly digest', id: 'dropped-2');
-    await tester.tap(find.text('ARCHIVE'));
+    await tester.tap(find.descendant(
+      of: find.byType(IconRail),
+      matching: find.text('Later'),
+    ));
     await tester.pump();
     await tester.pump();
     await tester.pump();

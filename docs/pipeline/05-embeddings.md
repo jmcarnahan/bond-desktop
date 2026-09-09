@@ -195,3 +195,16 @@ and there are exactly two sentences: *Words only — …* when the embedding
 server or the vector index is down (the sentence names which), and *Meaning
 only — the keyword index could not be built.* when FTS is unavailable. They
 never coexist; that pair is the unavailable case.
+
+**Search grammar.** Home's box takes facets — `from:`, `in:`, `has:file`,
+`before:`, `after:` — parsed by `parseSearchQuery`
+(`app/lib/services/search_grammar.dart`) before anything is embedded. Only
+`in:` reaches this layer: it travels down as `sources` to all four reads —
+`semanticSearch`, `searchAttachmentChunks`, `keywordSearchMessages` and
+`keywordSearchChunks` — because the connector is a column on every row each
+read touches and narrowing there stops the index spending its whole budget on
+hits the reader excluded. Everything else filters the hits afterwards. A query
+of nothing but facets is refused before the embed call — there is no sentence,
+and embedding the empty string would rank the whole mailbox by its distance from
+nothing at all. The facet table and the client-side half are in
+[../shell.md](../shell.md#finding-things).
