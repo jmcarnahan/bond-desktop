@@ -31,7 +31,7 @@ are the authority on sequencing.
 4. **Audit** (`StorylineAuditHandler` → `audit`) — re-judges the threads the
    MODEL filed into one storyline, against the charter as it now reads and the
    owner's own examples. Queued by `removeThread` and by *Re-check members* at
-   the foot of the Messages tab. It is registered after the refresh and before
+   the head of the Messages tab. It is registered after the refresh and before
    the recruit,
    and both halves of that matter: the removal that woke it also queues a
    refresh, which is the pass that narrows the charter, so the audit judges
@@ -406,7 +406,7 @@ the storyline pane is already several conversations side by side and halving
 it again leaves neither readable. *Back* out of that viewer lands on the
 storyline, not on a split that was never there.
 
-The **Messages** tab ends with what has been taken *out* of the storyline —
+The **Messages** tab opens with what has been taken *out* of the storyline —
 two lists and a *Re-check members* button, all under *Removing a thread* below.
 
 The same two lists are readable from the other end. A message's history screen
@@ -553,17 +553,19 @@ They stay out of both example fences, and no pass clears them; a thread the
 re-check took out stays out until a person says otherwise, which is what stops
 the audit and the recruit trading the same thread back and forth across drains.
 
-**On screen**, the two lists sit at the foot of the **Messages** tab, under a
-divider below the spine — **REMOVED BY YOU** and **REMOVED BY RE-CHECK**, each
-rendering only when it has something in it. They are here and not on a
-reference tab because the reader who has just looked at six cards and doubts
-three of them is looking at the spine. One caption stands above both: *Add back
-puts a thread on the spine again. Allow again only lifts the block — the model
-may file the thread again on its own, or not.*
+**On screen**, the block leads the **Messages** tab, above the first card and
+under a rule of its own: first ***Re-check members*** as a real outlined
+button with its one-line caption beside it, then the two lists — **REMOVED BY
+YOU** and **REMOVED BY RE-CHECK**, each rendering only when it has something
+in it. It led from the foot first, and the foot of a long spine is where
+nobody looks; a reference tab is not where a reader doubting three cards would
+go either. One caption stands above both lists: *Add back puts a thread on the
+spine again. Allow again only lifts the block — the model may file the thread
+again on its own, or not.*
 
 An entry is the thread's subject — or *(thread no longer stored)*, since a
 block outlives the conversation row it was written about — over the evidence
-that was recorded, and two buttons. ***Add back*** comes FIRST
+that was recorded, and two buttons. ***Add back*** comes FIRST and is the outlined one
 (`StorylineBlocksSection.addBackKeyFor(source, key)`): it files the thread by
 hand, which clears a block of either kind on the way in, and it is what a
 reader looking at a thread the re-check took out actually wants. ***Allow
@@ -575,7 +577,7 @@ how an owner clearing a re-check ends up with fewer threads than they started
 with. Both buttons sit on both lists — a re-check's block is as reversible as
 the owner's.
 
-Under them, ***Re-check members*** queues the audit by hand and pumps the
+Above it all, ***Re-check members*** queues the audit by hand and pumps the
 worker, for a storyline whose charter has drifted without anything being
 removed. While that pass is in the worker the button reads ***Re-checking…***
 and answers nothing, and its caption says the spine updates as it goes:

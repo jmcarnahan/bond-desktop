@@ -7,6 +7,7 @@ import 'package:bond_inbox/widgets/inline_alert.dart';
 import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/pinned_documents_bar.dart';
 import 'package:bond_inbox/widgets/room_header.dart';
+import 'package:bond_inbox/widgets/storyline_blocks_section.dart';
 import 'package:bond_inbox/widgets/storyline_timeline.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1260,7 +1261,7 @@ void main() {
     });
   });
 
-  group('removed threads under the spine', () {
+  group('removed threads above the spine', () {
     final userBlock = StorylineBlock(
       storylineId: 'sl-1',
       conversationKey: 'c9',
@@ -1282,16 +1283,26 @@ void main() {
       blockedAt: '2026-09-01T10:00:00Z',
     );
 
-    testWidgets('they sit at the foot of Messages, not on About',
+    testWidgets('they lead Messages, above the first card, not on About',
         (tester) async {
-      // The reader who has just looked at the cards and doubts three of them
-      // is looking here — under the spine, not a reference tab away from it.
+      // The foot of a long spine is where nobody looks, and a reference tab
+      // is not where a reader doubting three cards would go either.
       await pumpPanel(tester, blocks: [userBlock, auditBlock]);
 
       expect(find.text('REMOVED BY YOU'), findsOneWidget);
       expect(find.text('REMOVED BY RE-CHECK'), findsOneWidget);
       expect(find.text('Office move'), findsOneWidget);
       expect(find.text('Re-check members'), findsOneWidget);
+      // Above the spine: the button's top edge is higher than the first
+      // card's, and the button is a real one rather than a text link.
+      final button = find.byKey(StorylineBlocksSection.auditButtonKey);
+      expect(tester.widget(button), isA<OutlinedButton>());
+      expect(
+        tester.getTopLeft(button).dy,
+        lessThan(
+          tester.getTopLeft(find.textContaining('· open \u203a').first).dy,
+        ),
+      );
 
       await openTab(tester, StorylineTab.about);
 
@@ -1300,7 +1311,7 @@ void main() {
       expect(find.text('Re-check members'), findsNothing);
     });
 
-    testWidgets('a running re-check says so under the spine', (tester) async {
+    testWidgets('a running re-check says so above the spine', (tester) async {
       await pumpPanel(tester, blocks: [auditBlock], auditing: true);
 
       expect(find.text('Re-checking…'), findsOneWidget);

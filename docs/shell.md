@@ -275,9 +275,9 @@ message lives on that message, never up here.
 **The tab row** is a second line of `BondFilterPill`s, drawn only when there is
 more than one tab — one pill is a label pretending to be a choice. Each pill
 carries `RoomHeader.tabKey(value)`. A storyline's tabs are **Messages | Files
-(n) | About**: the catch-up, the pinned bar, the spine, and under a divider at
-its foot the removed threads and *Re-check members*; then the whole document
-shelf; then the charter. Each episode card carries one italic line saying why
+(n) | About**: the catch-up, the pinned bar, then *Re-check members* and the
+removed threads above a rule, then the spine; then the whole document shelf;
+then the charter. Each episode card carries one italic line saying why
 the thread is here — *Filed by you*, or the model's sentence.
 
 A **thread's** tabs are **Messages | Files (n)**, and only when it carries

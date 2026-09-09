@@ -116,7 +116,7 @@ class StorylineTimelinePanel extends StatefulWidget {
   final void Function(AttachmentRef attachment)? onUnpinDocument;
 
   /// The threads somebody took out of this storyline — the owner's own and
-  /// the re-check pass's — for the two lists at the foot of Messages. Empty is
+  /// the re-check pass's — for the two lists at the head of Messages. Empty is
   /// the ordinary state and renders no headings at all.
   final List<StorylineBlock> blocks;
 
@@ -365,6 +365,20 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                   onOpen: widget.onOpenDocument,
                 ),
               ),
+            // The re-check and the removed threads lead the spine they are
+            // about, above the first card and under a rule of their own. They
+            // were at the foot first, and the foot of a long spine is where
+            // nobody looks; a reference tab is not where they would go either.
+            const SizedBox(height: BondSpacing.s12),
+            StorylineBlocksSection(
+              blocks: widget.blocks,
+              onUnblockThread: widget.onUnblockThread,
+              onAddBackThread: widget.onAddBackThread,
+              onAudit: widget.onAudit,
+              auditing: widget.auditing,
+            ),
+            const SizedBox(height: BondSpacing.s12),
+            const Divider(height: 1, color: BondColors.border),
             const SizedBox(height: BondSpacing.s12),
             for (final episode in displayed) _episodeCard(episode),
             // Last rather than instead: a storyline whose threads were all
@@ -375,19 +389,6 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
                 child: Text('No messages in this storyline.',
                     style: BondType.small),
               ),
-            // The removed threads and the re-check sit under the spine they
-            // are about. The reader who has just looked at six cards and
-            // doubts three of them is looking here, not on a reference tab.
-            const SizedBox(height: BondSpacing.s16),
-            const Divider(height: 1, color: BondColors.border),
-            const SizedBox(height: BondSpacing.s12),
-            StorylineBlocksSection(
-              blocks: widget.blocks,
-              onUnblockThread: widget.onUnblockThread,
-              onAddBackThread: widget.onAddBackThread,
-              onAudit: widget.onAudit,
-              auditing: widget.auditing,
-            ),
           ],
         ),
       ),
