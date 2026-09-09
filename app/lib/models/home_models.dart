@@ -41,6 +41,15 @@ const Duration homeStalledAfter = Duration(minutes: 15);
 /// the window beside the numbers so nobody has to guess it again.
 const Duration homeMetricsWindow = Duration(days: 7);
 
+/// How far back the pipeline pulse counts as "just now".
+///
+/// Ten minutes, where the tiles look back a week. The pulse is a reading of
+/// what the machine is doing at this moment, and a pipeline that takes
+/// seventeen seconds a message fills ten minutes with real work — long enough
+/// that a quiet stretch is visible as a quiet stretch, short enough that
+/// yesterday's drain is not still being reported as news.
+const Duration homePulseWindow = Duration(minutes: 10);
+
 /// The window, in words, for the caption beside the tiles: `Last 7 days`,
 /// `Last 24 hours`. Hours under two days, days from there — "Last 1 days" is
 /// not a sentence and "Last 168 hours" is not a number anybody reads.
@@ -116,6 +125,21 @@ class HomeFeedRow {
   final String? fromName;
   final String? fromAddress;
 
+  /// What triage said this message was about, in its own words
+  /// (`messages.summary`). Null until triage has run, and null for good on a
+  /// message the gate threw out before reading it.
+  final String? summary;
+
+  /// The ask the app wrote for this row's THREAD (`conversations.cta_text`).
+  ///
+  /// Per thread where [summary] is per message, which is exactly why they are
+  /// two fields and not one: the ask is restated every time the thread moves,
+  /// so a row can carry an ask that was written about a message NEWER than
+  /// itself. That is the honest reading — the thread is still owed the same
+  /// thing — and collapsing the two would make an old row claim a new
+  /// message's words as its own summary.
+  final String? ctaText;
+
   /// Whether the message carried anything attached, straight off
   /// `messages.has_attachments`. False on any read that did not select the
   /// column — which reads as "nothing attached" rather than as a paperclip on
@@ -183,6 +207,8 @@ class HomeFeedRow {
     this.subject,
     this.fromName,
     this.fromAddress,
+    this.summary,
+    this.ctaText,
     this.hasAttachments = false,
     this.updatedAt = '',
     this.needsYouVerdict,
@@ -216,6 +242,8 @@ class HomeFeedRow {
         subject: row['subject'] as String?,
         fromName: row['from_name'] as String?,
         fromAddress: row['from_address'] as String?,
+        summary: row['summary'] as String?,
+        ctaText: row['cta_text'] as String?,
         hasAttachments: (row['has_attachments'] as num?)?.toInt() == 1,
         updatedAt: row['updated_at'] as String? ?? '',
         // Three-valued on purpose: null stays null, and only a stored 1 is a
@@ -280,6 +308,8 @@ class HomeFeedRow {
         subject: subject,
         fromName: fromName,
         fromAddress: fromAddress,
+        summary: summary,
+        ctaText: ctaText,
         hasAttachments: hasAttachments,
         updatedAt: updatedAt,
         needsYouVerdict: needsYouVerdict,
@@ -567,4 +597,97 @@ class HotStoryline {
         messageCount: (row['message_count'] as num?)?.toInt() ?? 0,
         lastAt: row['last_at'] as String? ?? '',
       );
+}
+
+/// What the pipeline is doing right now, and what it has just finished.
+///
+/// The tiles answer "what has the app been doing lately" over a week; this
+/// answers "is anything happening" over ten minutes, which is a different
+/// question and the one a reader asks when the table under a filter looks
+/// emptier than they expected. The filter may be hiding the work — the pulse
+/// is what says so.
+///
+/// The stage words are keys rather than an enum for [HomeFeedRow]'s reason:
+/// they are read out of `work_items.task_kind` and `messages.triage_status`,
+/// and a kind a newer build introduces must be skippable rather than a crash.
+@immutable
+class PipelinePulse {
+  /// Stage word → items waiting, keyed by [stages]. A stage nothing is queued
+  /// for is ABSENT rather than zero, so a caller can tell "nothing waiting"
+  /// from "this stage was never asked about".
+  final Map<String, int> queued;
+
+  /// Stage word → items being worked, keyed the same way.
+  final Map<String, int> running;
+
+  /// Settled, dropped and judged-needs-you inside [homePulseWindow] — measured
+  /// on `message_progress.updated_at`, which is when the pipeline last wrote
+  /// about the row rather than when the message arrived.
+  final int recentSettled;
+  final int recentDropped;
+  final int recentNeedsYou;
+
+  /// Still `outcome = 'pending'`, whatever their age. Not window-bounded on
+  /// purpose: a message stuck since yesterday is exactly the one a reader
+  /// wants counted, and a ten-minute window would quietly stop mentioning it.
+  final int inFlight;
+
+  const PipelinePulse({
+    this.queued = const {},
+    this.running = const {},
+    this.recentSettled = 0,
+    this.recentDropped = 0,
+    this.recentNeedsYou = 0,
+    this.inFlight = 0,
+  });
+
+  /// Pipeline order — the order any narration walks. Triage first because it
+  /// is the gate everything else is downstream of, files last because a
+  /// document's text is read after the message it hangs off has been handled.
+  static const List<String> stages = [
+    'triage',
+    'extract',
+    'needs_you',
+    'storyline',
+    'draft',
+    'embed',
+    'files',
+  ];
+
+  /// `work_items.task_kind` → stage word.
+  ///
+  /// Several kinds collapse onto one stage on purpose: the six storyline
+  /// passes are one thing to a reader, and both attachment kinds are "files".
+  /// A kind that is not here is not pipeline work and is not counted —
+  /// `mark_read` is a chore the app runs on the user's behalf, and a pulse
+  /// that reported it as a stage would be narrating housekeeping.
+  static const Map<String, String> kindStages = {
+    'extract': 'extract',
+    'needs_you': 'needs_you',
+    'draft': 'draft',
+    'embed_message': 'embed',
+    'attachment_text': 'files',
+    'attachment_digest': 'files',
+    'storyline': 'storyline',
+    'storyline_sweep': 'storyline',
+    'storyline_recruit': 'storyline',
+    'storyline_refresh': 'storyline',
+    'storyline_audit': 'storyline',
+    'storyline_recap': 'storyline',
+  };
+
+  int get working =>
+      running.values.fold(0, (total, count) => total + count);
+
+  int get waiting => queued.values.fold(0, (total, count) => total + count);
+
+  /// Whether anything is moving at all — what decides between narrating the
+  /// stages and saying the pipeline is idle.
+  bool get busy => working + waiting > 0;
+
+  /// Everything outstanding for one stage, waiting and working together. Zero
+  /// for a stage neither map mentions, so a caller can walk [stages]
+  /// unconditionally.
+  int countFor(String stage) =>
+      (queued[stage] ?? 0) + (running[stage] ?? 0);
 }

@@ -382,7 +382,7 @@ void main() {
       onAboutMeChanged: (_) {},
     );
 
-    expect(find.byTooltip('Home'), findsNothing);
+    expect(find.byTooltip('Inbox'), findsNothing);
 
     var home = 0;
     await open(
@@ -392,8 +392,8 @@ void main() {
       onHome: () => home++,
     );
 
-    expect(find.byTooltip('Home'), findsOneWidget);
-    await tester.tap(find.byTooltip('Home'));
+    expect(find.byTooltip('Inbox'), findsOneWidget);
+    await tester.tap(find.byTooltip('Inbox'));
     await tester.pumpAndSettle();
     expect(home, 1);
   });

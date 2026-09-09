@@ -390,10 +390,10 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    // Scoped: the icon rail's Home stop carries the same word.
+    // Scoped: the icon rail's Inbox stop carries the same word.
     await tester.tap(find.descendant(
       of: find.byType(PaneSurface),
-      matching: find.text('Home'),
+      matching: find.text('Inbox'),
     ));
     await tester.pump();
     await tester.pump();

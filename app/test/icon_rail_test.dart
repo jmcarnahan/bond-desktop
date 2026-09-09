@@ -54,7 +54,7 @@ void main() {
       await pumpRail(tester);
 
       for (final label in const [
-        'Home',
+        'Inbox',
         'Needs You',
         'Storylines',
         'People',
@@ -109,14 +109,14 @@ void main() {
       }
 
       expect(fillUnder('Storylines'), BondColors.onDarkTint);
-      expect(fillUnder('Home'), BondColors.railDeep);
+      expect(fillUnder('Inbox'), BondColors.railDeep);
       // And the ink follows the fill.
       expect(
         tester.widget<Text>(find.text('Storylines')).style?.color,
         BondColors.onDarkPrimary,
       );
       expect(
-        tester.widget<Text>(find.text('Home')).style?.color,
+        tester.widget<Text>(find.text('Inbox')).style?.color,
         BondColors.onDarkMuted,
       );
     });

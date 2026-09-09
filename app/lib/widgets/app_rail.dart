@@ -22,9 +22,11 @@ import 'time_format.dart';
 /// mail. [RailSection.ai] trails because it is the only one that is about the
 /// app rather than about anything in the mailbox.
 ///
-/// [RailSection.archive] keeps its enum name and is LABELLED 'Later': the
-/// column it reads is `bucket = 'later'`, and renaming the constant would
-/// rename it everywhere the store spells it.
+/// [RailSection.archive] keeps its enum name and is LABELLED 'Later', and
+/// [RailSection.home] keeps its own and is LABELLED 'Inbox', for one reason:
+/// the column `archive` reads is `bucket = 'later'`, and `home` is spelled in
+/// providers, intents and tests from one end of the app to the other —
+/// renaming either constant would rename it everywhere.
 ///
 /// [RailSection.files] sits between People and Later because it is the last of
 /// the piles that are about the MAIL rather than about the app: everything
@@ -32,11 +34,11 @@ import 'time_format.dart';
 /// document went.
 ///
 /// [RailSection.drafts] is the one destination that is NOT a stop on the icon
-/// rail. It is a row in the Home stack — see `IconRail.stops`, which is an
+/// rail. It is a row in the Inbox stack — see `IconRail.stops`, which is an
 /// explicit list and does not contain it — because what it holds is the
 /// model's unsent work rather than a pile of mail, and a seventh icon for a
 /// list that is usually empty would cost a permanent stop for an occasional
-/// one. While its pane is up the icon rail lights Home, which is the stack the
+/// one. While its pane is up the icon rail lights Inbox, which is the stack the
 /// row lives in.
 enum RailSection {
   home,
@@ -51,7 +53,10 @@ enum RailSection {
 
 extension RailSectionLabel on RailSection {
   String get label => switch (this) {
-        RailSection.home => 'Home',
+        // 'Inbox' where the enum says `home`, exactly as `archive` is labelled
+        // 'Later': the constant is spelled through the whole codebase and the
+        // word a reader sees is the one that had to change.
+        RailSection.home => 'Inbox',
         RailSection.needsYou => 'Needs You',
         RailSection.drafts => 'Drafts & sent',
         RailSection.storylines => 'Storylines',

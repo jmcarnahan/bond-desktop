@@ -47,7 +47,7 @@ transcript's own 420 minimum, with nothing to catch it.
 
 | Stop | Icon | The list column shows | Main shows |
 |---|---|---|---|
-| Home | `bolt` | the whole stack: Needs You · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row | `HomePane` — the pipeline as a table |
+| Inbox (`RailSection.home`) | `bolt` | the whole stack: Needs You · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row | `HomePane` — the pipeline as a table |
 | Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count, in the pile's chosen order | the Needs You overview — five tabs, the order control, and rows that open beside |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
 | People | `people_outline` | one row per person | the directory of everyone, or the open room |
@@ -55,11 +55,11 @@ transcript's own 420 minimum, with nothing to catch it.
 | Later | `schedule` | one row per deferred day | `ArchivePane` — Later · Done · Dropped |
 | AI | `auto_awesome` | one line: 'Models, rules and the log' | `SettingsScreen(scope: ai)`, titled 'AI' |
 
-**Drafts & sent is a row in the Home stack, not a stop.** It sits between Needs
+**Drafts & sent is a row in the Inbox stack, not a stop.** It sits between Needs
 You and Storylines with a badge counting the suggestions waiting. What it holds
 is the model's unsent work rather than a pile of mail, and a seventh icon for a
 list that is usually empty would cost a permanent stop for an occasional one.
-While its pane is up the icon rail lights **Home** — the stack the row belongs
+While its pane is up the icon rail lights **Inbox** — the stack the row belongs
 to — and the list column keeps that whole stack with the row highlighted: the
 reader has not gone anywhere, they have opened one of the things the column was
 already offering. The row has nothing under it, because the pane IS the list and
@@ -67,10 +67,12 @@ a column repeating it would be a second copy always a beat behind.
 
 `RailSection` is the vocabulary for all of this
 (`{ home, needsYou, drafts, storylines, people, files, archive, ai }`).
-`archive` keeps its enum name and is **labelled 'Later'**: the column the store
-reads is `bucket = 'later'`, and renaming the constant would rename it
-everywhere. `IconRail.stops` is an explicit ordered list: it DOES contain
-`files`, between People and Later, and does NOT contain `drafts`.
+`archive` keeps its enum name and is **labelled 'Later'**, and `home` keeps its
+own and is **labelled 'Inbox'**: the column the store reads is `bucket =
+'later'`, `home` is spelled in providers, intents and tests from one end of the
+app to the other, and renaming either constant would rename it everywhere.
+`IconRail.stops` is an explicit ordered list: it DOES contain `files`, between
+People and Later, and does NOT contain `drafts`.
 
 **The Files column is a list of shelves, not of rows.** The four kinds are the
 whole column, with the one that is up highlighted, and there are no counts on
@@ -90,9 +92,12 @@ the way back — `Showing 💬 Teams only. Show all` (`InboxScreen.showAllSource
 under the pane's own empty sentence. The pill is a column away from where the
 reader is looking, and without the line an empty Needs You under Teams reads as
 "nothing needs you" when the truth is "nothing on Teams needs you". Each Needs
-You tab has an empty sentence of its own (`NeedsYouTab.emptyText`). Home is not
-narrowed by the pills — its feed reads both connectors — so its title never
-carries one.
+You tab has an empty sentence of its own (`NeedsYouTab.emptyText`). The Inbox
+is narrowed by the pills like everything else, and it also WRITES them: its
+Emails and Teams tiles call `_setSourceFilter`, because a connector is the one
+selection this app makes once and applies everywhere. Its feed, its tiles, its
+hot strip and its pulse all read `_activeSources`, so every number over the
+table is about the same mail as the table.
 
 **Storylines narrow too.** A pill leaves only the storylines holding a thread
 from that connector — in the rail, in the overview and in Find, off the
@@ -101,10 +106,10 @@ itself mail or chat, but the threads in it are. The OPEN storyline is never
 closed by a pill, and the storyline pickers are never narrowed: a pill changes
 what is browsed, never what is open or what a thread may be filed into.
 
-On Home the column is the whole stack and every section collapses. On any other
-stop it is that one section, expanded, with its header row and **no chevron** —
-the user picked the stop, and a chevron that emptied the column would be an
-affordance that lied.
+On the Inbox the column is the whole stack and every section collapses. On any
+other stop it is that one section, expanded, with its header row and **no
+chevron** — the user picked the stop, and a chevron that emptied the column
+would be an affordance that lied.
 
 ---
 
@@ -128,15 +133,22 @@ and the People directory are the exceptions and open in main: the archive's
 rows are a pile being cleared, not a room being worked in, and a directory row
 IS a room — the person's — so it opens the way the rail's own row does.
 
+**An Inbox row opens BESIDE**, by that same rule and for that same reason: the
+feed is a table, the table IS the pane, and a reader comparing rows must not
+lose the comparison to read one of them. A search result opens beside too. The
+storyline name still opens the storyline in main — that is a different room,
+not a row in this one — and the stage bar and the Result cell still open the
+history beside.
+
 `SidePanel` has five kinds, and the panel shows exactly one of them:
 
 | Kind | What it holds | Opened by |
 |---|---|---|
-| `ThreadPanel` | a conversation | a storyline episode card, a person room's card, a Drafts & sent row, a row on the Needs You overview |
+| `ThreadPanel` | a conversation | a storyline episode card, a person room's card, a Drafts & sent row, a row on the Needs You overview, an Inbox feed row or search result |
 | `FilePanel` | one file | any card, chip, unfurl or shelf row |
 | `WhyPanel` | why one message got its verdict | the hover **Why** on an inbound row, and the CTA banner |
 | `PersonPanel` | one person | the room header's **Profile**, and tapping the faces on a room or a thread |
-| `HistoryPanel` | what happened to one message — every stage, judgement and queue row, with the levers | the hover **What happened** on an inbound row, the Why panel's `What happened ›`, a home row's stage bar or Result cell, an Archive row |
+| `HistoryPanel` | what happened to one message — every stage, judgement and queue row, with the levers | the hover **What happened** on an inbound row, the Why panel's `What happened ›`, an Inbox row's stage bar or Result cell, an Archive row |
 
 Why, Person and History follow the file rule: opened from a thread that is
 itself beside, they REPLACE it. One panel, never two stacked — the Why panel's
@@ -155,10 +167,10 @@ screen — what it reads, what each lever writes — is in
 
 `_main()`'s ladder is the priority order, top rung first: compose → Settings →
 activity log → add-thread picker → pick-storyline picker → full file viewer →
-thread → storyline → **room** → **Drafts & sent** → Home → AI → section
+thread → storyline → **room** → **Drafts & sent** → Inbox → AI → section
 overview. A pane outranks what it was opened from because it is the newer thing
-the user asked for. Drafts & sent sits directly above Home because its row lives
-in the Home stack.
+the user asked for. Drafts & sent sits directly above the Inbox because its row
+lives in the Inbox stack.
 
 ---
 
@@ -194,13 +206,13 @@ their own work by mistyping a name. The rail filters BEFORE it truncates to
 **Enter opens the first row still drawn.** `firstFindTarget` is the one place
 that order lives — the rail draws it and the screen walks it — so the row that
 opens is the row under the reader's eyes rather than a second opinion about
-which came first. It walks the scope's own sections: Home and Drafts walk
+which came first. It walks the scope's own sections: the Inbox and Drafts walk
 threads, then storylines, then rooms; a single-section scope walks only its own;
 Files, Later and AI answer null. `find_filter_test` and `app_rail_test` pin the two
 halves of that agreement against each other.
 
 **Nothing matched is not a dead end.** With a needle still in the box, Enter
-falls through to Home's search: `_selectSection(home)` then
+falls through to the Inbox's search: `_selectSection(home)` then
 `submitSearch(text)`. That is the honest escalation — Find only ever looked at
 the rail, and search looks at the whole index. On any pick the field clears and
 gives up focus, the way Slack's switcher closes.
@@ -224,7 +236,7 @@ hiding one under a filter about mail would make the toggle mean two things. Its
 tooltip names what pressing it would do, so it flips: `Unread only` ↔ `Show
 everything`.
 
-**The search grammar** belongs to Home's own box, not to Find. See
+**The search grammar** belongs to the Inbox's own box, not to Find. See
 `parseSearchQuery` (`app/lib/services/search_grammar.dart`); the hint on
 `HomeSearchField` names it, because there is nowhere else to put a legend.
 
@@ -296,12 +308,12 @@ top-right while the mouse is over it. It is a WRAPPER around `MessageRow`, not
 a change to it: the row seeds its collapsed state once, and hover is a
 per-frame fact about the pointer. Touch never enters a `MouseRegion`, so
 nothing may live only here — all four buttons have a home the pointer is not
-needed for (the history is also reachable from the Why panel, from every home
+needed for (the history is also reachable from the Why panel, from every Inbox
 row and from the archive). The two that explain come after the two that write
 a reply, and What happened comes after Why because it is the longer answer to
 the same question: Why is the verdict, What happened is everything the
 pipeline did to reach it. The strip is drawn on INBOUND rows only, so from a
-thread the history of the owner's own message is reachable through the home
+thread the history of the owner's own message is reachable through the Inbox
 feed, not the transcript.
 
 **The CTA banner explains, it no longer opens the box.** Tapping it opens
@@ -508,10 +520,25 @@ Three lists growing three order controls is how they come to disagree about
 what a sort menu looks like, and a reader who learned one would have learned
 nothing about the next.
 
-Four preferences carry the orders, each written as its enum's own name and each
+**The Inbox's tiles ARE its filter.** There is no pill and no menu of filters
+over the feed: the eight numbers were already on screen, and a reader who wants
+to see the twelve dropped messages is already pointing at the twelve. A tile
+taps its filter on, the same tile taps it off, and one is in force at a time
+(`HomeFilter`, `app/lib/models/home_sort.dart`). A tile filter is bounded by
+the tiles' own window, so the number on the tile IS the number of rows under
+it; the default, `fromOthers`, is the whole history. Emails and Teams are the
+two tiles that write somewhere else — they move the list column's source chips,
+which is the one source selection the app has. While a filter is on, a caption
+under the tiles names it and offers **Show everyone**
+(`HomePane.filterNoticeKey`, `HomePane.showEveryoneKey`), because a narrowing
+with nothing visible saying so is how a reader comes to believe their mail has
+gone missing.
+
+Five preferences carry the orders, each written as its enum's own name and each
 falling back to the default on anything this app did not write:
-`needs_you_sort`, `people_sort`, `person_room_sort` and
-`storyline_newest_first`.
+`needs_you_sort`, `people_sort`, `person_room_sort`,
+`storyline_newest_first` and `home_sort` (the Inbox's `SortMenu<HomeSort>`,
+newest or oldest first).
 
 ---
 
@@ -599,10 +626,10 @@ the person room's header `AvatarStack`.
   `pump(Duration(milliseconds: 400))` is how a menu route is run out.
 - `initialSectionProvider` decides which stop the column is scoped to, and the
   column shows ONLY that stop — a test that taps a storyline row must select
-  the Storylines stop first, or land on Home.
+  the Storylines stop first, or land on the Inbox.
 - Scope finders: the list column and the overview beside it often name the same
   thing (`find.descendant(of: find.byType(AppRail), …)`), and the icon rail's
-  Home stop wears the same tooltip as `PaneSurface`'s Home button.
+  Inbox stop wears the same tooltip as `PaneSurface`'s Inbox button.
 - Settings, Activity log and Sign out are reached through
   `IconRail.accountMenuKey` and then `settingsItemKey` / `activityItemKey` /
   `signOutItemKey`.
@@ -674,7 +701,7 @@ the person room's header `AvatarStack`.
   history into the same slot); `why_panel_test.dart` owns the wording.
 - **The history panel**: `MessageHistoryScreen` (`chrome: false`) inside a
   `SidePanelHost` titled `What happened`. `message_history_nav_test.dart`
-  covers the shell seam from a home row (opens beside, ✕, Open thread, the
+  covers the shell seam from an Inbox row (opens beside, ✕, Open thread, the
   picker in main with the story still beside, another stop closes it); the
   hover door is `HoverActions.historyKeyFor(id)`, pinned in
   `thread_detail_panel_test.dart`. The story is a lazy `ListView` and the

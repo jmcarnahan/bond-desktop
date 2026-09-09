@@ -16,8 +16,8 @@ class PaneSurface extends StatelessWidget {
   /// Leaves the pane, back to whatever was underneath.
   final VoidCallback onBack;
 
-  /// Goes straight to Home. Null renders no home affordance at all — panes
-  /// reached from a single click do not need one.
+  /// Goes straight to the Inbox. Null renders no such affordance at all —
+  /// panes reached from a single click do not need one.
   final VoidCallback? onHome;
 
   /// Anything the pane wants at the right end of the header. Null renders
@@ -78,15 +78,17 @@ class PaneSurface extends StatelessWidget {
                 ),
                 if (home != null) ...[
                   const SizedBox(width: BondSpacing.s8),
-                  // Labelled, not an icon alone: Home is a destination rather
-                  // than a control, and the rail's bolt is not a glyph anyone
-                  // reads as "home" without the word beside it.
+                  // Labelled, not an icon alone: the Inbox is a destination
+                  // rather than a control, and the rail's bolt is not a glyph
+                  // anyone reads as a destination without the word beside it.
+                  // The bolt stays — it is the mark of the same stop on the
+                  // icon rail, and the word is what the rename moved.
                   Tooltip(
-                    message: 'Home',
+                    message: 'Inbox',
                     child: TextButton.icon(
                       onPressed: home,
                       icon: const Icon(Icons.bolt, size: 18),
-                      label: const Text('Home'),
+                      label: const Text('Inbox'),
                     ),
                   ),
                 ],

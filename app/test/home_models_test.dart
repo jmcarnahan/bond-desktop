@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// What a feed row can say about itself without a database.
@@ -118,6 +119,20 @@ void main() {
       expect(HomeFeedRow.fromRow(base({})).workOpen, false);
     });
 
+    test('the words come through as written, from their own two tables', () {
+      final row = HomeFeedRow.fromRow(base({
+        'summary': 'Confirms the launch is on the 14th',
+        'cta_text': 'Send the signed order form',
+      }));
+
+      expect(row.summary, 'Confirms the launch is on the 14th');
+      expect(row.ctaText, 'Send the signed order form');
+      // A read that selected neither column says nothing rather than empty
+      // string — "nobody has written one" is its own answer.
+      expect(HomeFeedRow.fromRow(base({})).summary, isNull);
+      expect(HomeFeedRow.fromRow(base({})).ctaText, isNull);
+    });
+
     test('the reasons come through as written', () {
       final row = HomeFeedRow.fromRow(base({
         'updated_at': '2026-09-01T11:00:00Z',
@@ -141,6 +156,114 @@ void main() {
     });
   });
 
+  group('the pulse', () {
+    test('waiting, working and busy are the two maps added up', () {
+      const pulse = PipelinePulse(
+        queued: {'extract': 2, 'files': 1},
+        running: {'triage': 3},
+      );
+
+      expect(pulse.waiting, 3);
+      expect(pulse.working, 3);
+      expect(pulse.busy, isTrue);
+      expect(pulse.countFor('extract'), 2);
+      expect(pulse.countFor('triage'), 3);
+      // A stage neither map mentions answers zero, so a caller can walk
+      // [PipelinePulse.stages] without asking whether each one is there.
+      expect(pulse.countFor('draft'), 0);
+    });
+
+    test('an empty pulse is idle rather than unknown', () {
+      const pulse = PipelinePulse();
+
+      expect(pulse.busy, isFalse);
+      expect(pulse.waiting, 0);
+      expect(pulse.working, 0);
+      expect(pulse.inFlight, 0);
+    });
+
+    test('a stage that is both waiting and working counts both', () {
+      const pulse = PipelinePulse(
+        queued: {'storyline': 4},
+        running: {'storyline': 1},
+      );
+
+      expect(pulse.countFor('storyline'), 5);
+    });
+
+    test('every storyline pass is one stage, and chores are not stages', () {
+      final storyline = [
+        for (final entry in PipelinePulse.kindStages.entries)
+          if (entry.key.startsWith('storyline')) entry.value,
+      ];
+
+      expect(storyline, hasLength(6));
+      expect(storyline, everyElement('storyline'));
+      // `mark_read` is a chore run on the user's behalf, not a stage of the
+      // pipeline — a pulse that narrated it would be reporting housekeeping.
+      expect(PipelinePulse.kindStages.containsKey('mark_read'), isFalse);
+      // Every stage a kind maps to is one the narration knows how to walk.
+      expect(
+        PipelinePulse.kindStages.values.toSet()
+            .difference(PipelinePulse.stages.toSet()),
+        isEmpty,
+      );
+    });
+
+    test('the window in force is ten minutes', () {
+      expect(homePulseWindow, const Duration(minutes: 10));
+    });
+  });
+
+  group('the filters', () {
+    test('everything but the default is bounded by the tiles window', () {
+      for (final filter in HomeFilter.values) {
+        expect(
+          filter.windowed,
+          filter != HomeFilter.fromOthers,
+          reason: 'the number on a tile is the number of rows under it',
+        );
+      }
+    });
+
+    test('only the outcome filters can show the dropped pile', () {
+      expect(
+        {
+          for (final filter in HomeFilter.values)
+            filter: filter.showsDropped,
+        },
+        {
+          HomeFilter.fromOthers: false,
+          HomeFilter.needsYou: false,
+          HomeFilter.urgent: false,
+          HomeFilter.inFlight: true,
+          HomeFilter.errors: true,
+          HomeFilter.dropped: true,
+          HomeFilter.processed: true,
+        },
+      );
+    });
+
+    test('every filter and every order says its own name', () {
+      expect(
+        [for (final filter in HomeFilter.values) filter.label],
+        [
+          'Everyone',
+          'Needs you',
+          'Urgent',
+          'In flight',
+          'Errors',
+          'Dropped',
+          'Processed',
+        ],
+      );
+      expect(
+        [for (final sort in HomeSort.values) sort.label],
+        ['Newest first', 'Oldest first'],
+      );
+    });
+  });
+
   group('restored', () {
     test('the optimistic row is working, not stalled', () {
       final restored = rowAged(600, outcome: 'dropped').restored();
@@ -151,6 +274,24 @@ void main() {
       expect(restored.isStalled(now), false);
       expect(restored.outcome, 'pending');
       expect(restored.dropped, false);
+    });
+
+    test('it keeps the words — Restore does not unsay them', () {
+      final row = HomeFeedRow.fromRow({
+        'source': 'email',
+        'source_message_id': 'm1',
+        'conversation_key': 'c1',
+        'received_at': '2026-09-01T10:00:00Z',
+        'outcome': 'dropped',
+        'dropped': 1,
+        'summary': 'A weekly roundup nobody asked for',
+        'cta_text': 'Send the signed order form',
+      });
+
+      final restored = row.restored();
+
+      expect(restored.summary, 'A weekly roundup nobody asked for');
+      expect(restored.ctaText, 'Send the signed order form');
     });
 
     test('it keeps the reasons — they are why the row was dropped', () {

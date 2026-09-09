@@ -445,6 +445,17 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// not worth a provider.
   bool _syncing = false;
 
+  /// Whether a pull is OUT on each connector, for the Inbox's pulse strip.
+  ///
+  /// Two flags rather than one, because the two pulls are independent — the
+  /// timer runs mail alone and the resume path runs Teams alone — and one flag
+  /// would report "Syncing mail and Teams…" for either of them. Local to this
+  /// screen for [_syncing]'s reason: it is what one line of narration says
+  /// while a future is in flight, and a future in flight is not a fact the
+  /// database has any opinion about.
+  bool _mailPulling = false;
+  bool _teamsPulling = false;
+
   /// The stored "Teams last synced" stamp, read once and re-read only after a
   /// pull. See [_refreshAction], whose tooltip is the only thing that shows it.
   Future<String?>? _teamsSyncedAt;
@@ -500,6 +511,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // sync's arrivals land on the next read.
     Future.microtask(() {
       if (!mounted) return;
+      // The chips first, so the first page is read under the connectors the
+      // screen is actually showing. Two reads at most, once, at startup — the
+      // notifier's sequence guard discards whichever answer is older.
+      ref.read(homeFeedProvider.notifier).setSources(_activeSources);
       ref.read(homeFeedProvider.notifier).load();
     });
     // LAST of the three, deliberately: this is a keychain read whose only
@@ -554,6 +569,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     unawaited(_refreshTeams());
   }
 
+  /// Reports a pull going out or coming back, for the pulse strip.
+  ///
+  /// A no-op when neither flag moves: this runs on every pass, and a setState
+  /// per minute for a value that did not change would rebuild the whole screen
+  /// for nothing. Off the widget tree it still writes the fields, so a pass
+  /// that finished after the screen went away leaves nothing stuck at "out".
+  void _notePulling({bool? mail, bool? teams}) {
+    final nextMail = mail ?? _mailPulling;
+    final nextTeams = teams ?? _teamsPulling;
+    if (nextMail == _mailPulling && nextTeams == _teamsPulling) return;
+    if (!mounted) {
+      _mailPulling = nextMail;
+      _teamsPulling = nextTeams;
+      return;
+    }
+    setState(() {
+      _mailPulling = nextMail;
+      _teamsPulling = nextTeams;
+    });
+  }
+
   /// The list AND whatever thread is open. Refreshing only the list is the
   /// bug that reads as "the app is broken": the row updates, the transcript
   /// beside it does not, and the two disagree on screen.
@@ -572,6 +608,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// the pull brought in.
   Future<void> _refresh() async {
     if (!mounted) return;
+    _notePulling(mail: true);
     final mail = ref.read(conversationsProvider.notifier).load();
     ref.read(storylinesProvider.notifier).load();
     // The tiles otherwise re-read only behind a pipeline tick, and a row
@@ -579,7 +616,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // that lets the In flight tile catch up with the rows under it, which
     // re-evaluate on every rebuild. A no-op when nobody is watching them.
     ref.invalidate(homeMetricsProvider);
-    await mail;
+    // Beside it for the same reason one step further on: the pulse's ten-minute
+    // window decays without a tick, so a drain that finished eight minutes ago
+    // would still be reported as news until something else moved.
+    ref.invalidate(pipelinePulseProvider);
+    // The clear is in a `finally` and not after the await: this method returns
+    // early on `!mounted` below, and a leg that threw would otherwise leave the
+    // strip saying "Syncing mail…" for the rest of the session.
+    try {
+      await mail;
+    } finally {
+      _notePulling(mail: false);
+    }
     if (!mounted) return;
     final selected = _selectedId;
     if (selected != null) {
@@ -704,7 +752,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   Future<void> _refreshTeams() async {
     if (!mounted) return;
     _lastTeamsRefresh = DateTime.now();
-    await ref.read(conversationsProvider.notifier).refreshTeams();
+    _notePulling(teams: true);
+    try {
+      await ref.read(conversationsProvider.notifier).refreshTeams();
+    } finally {
+      _notePulling(teams: false);
+    }
     if (!mounted) return;
     setState(() => _teamsSyncedAt = null);
     // The chat the user is looking at is the one they most want a pull they
@@ -1717,6 +1770,12 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     if (_section == RailSection.files) {
       ref.read(filesProvider.notifier).load(sources: _activeSources);
     }
+    // The Inbox feed reads the store itself too, for the shelf's reason — and
+    // unconditionally, because the tiles, the hot strip and the pulse all read
+    // the feed's copy of this list and none of them is necessarily on screen
+    // when it moves. The notifier no-ops on an equal list, so a chip that
+    // changed nothing costs nothing.
+    ref.read(homeFeedProvider.notifier).setSources(_activeSources);
   }
 
   /// The line under an empty pane while a source pill is down: which half of
@@ -1929,16 +1988,6 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       onOpenActivityLog: _openActivityLog,
       notifyStyle: prefs.notifyStyle,
       onNotifyStyleChanged: (style) => unawaited(notifier.setNotifyStyle(style)),
-      homeShowDropped: prefs.homeShowDropped,
-      onHomeShowDroppedChanged: (on) {
-        unawaited(notifier.setHomeShowDropped(on));
-        if (!mounted) return;
-        // The feed reads this preference ONCE, when its notifier is built, so
-        // the pref alone would not move the list until the next launch. This is
-        // the same call HomePane's own toggle makes — the preference is what
-        // the next launch reads, this is what the user sees now.
-        ref.read(homeFeedProvider.notifier).setIncludeDropped(on);
-      },
       storylineNewestFirst: prefs.storylineNewestFirst,
       onStorylineNewestFirstChanged: (on) =>
           unawaited(notifier.setStorylineNewestFirst(on)),
@@ -2444,7 +2493,24 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // before the very first one lands.
       metrics: ref.watch(homeMetricsProvider).valueOrNull,
       hotStorylines: ref.watch(hotStorylinesProvider).valueOrNull ?? const [],
-      includeDropped: feed.includeDropped,
+      // The tiles are the filter and the menu is the order; both live on the
+      // notifier, which is what makes them survive a swap to a thread and back.
+      filter: feed.filter,
+      onFilter: (value) =>
+          ref.read(homeFeedProvider.notifier).setFilter(value),
+      sort: feed.sort,
+      onSort: (value) => ref.read(homeFeedProvider.notifier).setSort(value),
+      // The Emails / Teams tiles write the list column's chips, because that
+      // is the one source selection the app has and a second copy of it on
+      // this bar would be two answers to one question.
+      sourceFilter: _sourceFilter,
+      onSelectSource: _setSourceFilter,
+      // Whatever the last read said, carried through a re-read the same way the
+      // tiles are; null only before the very first one.
+      pulse: ref.watch(pipelinePulseProvider).valueOrNull,
+      mailSyncing: _mailPulling,
+      teamsSyncing: _teamsPulling,
+      stamps: ref.watch(syncStampsProvider).valueOrNull,
       loaded: feed.loaded,
       loadingMore: feed.loadingMore,
       atEnd: feed.atEnd,
@@ -2457,20 +2523,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       searching: feed.searching,
       searchNotice: feed.searchNotice,
       now: DateTime.now(),
-      // The same door a notification's OpenThreadIntent goes through: one
-      // selector resolves the row's source, marks it read and loads the
-      // transcript, and a second path into that would eventually disagree
-      // with this one.
-      onOpenThread: (source, key) => _select(key, source: source),
+      // BESIDE, not in main: this pane is a table, and a table a reader
+      // cannot see while they read one of its rows is a table they have to
+      // navigate back to for the next one. The Needs You overview's rule,
+      // applied to the screen the app lands on. Everything [_select] does
+      // except take the main pane — the thread is loaded, its draft is
+      // loaded, and opening it still counts as reading it.
+      onOpenThread: (source, key) => _openThreadBeside(source, key),
       onOpenStoryline: _selectStoryline,
       onLoadMore: () => ref.read(homeFeedProvider.notifier).loadMore(),
       onReleasePending: () =>
           ref.read(homeFeedProvider.notifier).releasePending(),
       onAnchoredChanged: (anchored) =>
           ref.read(homeFeedProvider.notifier).setAnchored(anchored),
-      onToggleDropped: () => ref
-          .read(homeFeedProvider.notifier)
-          .setIncludeDropped(!feed.includeDropped),
       onSearch: (query) =>
           ref.read(homeFeedProvider.notifier).submitSearch(query),
       onExitSearch: () => ref.read(homeFeedProvider.notifier).exitSearch(),

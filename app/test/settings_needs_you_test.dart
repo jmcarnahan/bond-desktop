@@ -1,7 +1,6 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
-import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
@@ -26,10 +25,6 @@ import 'fixtures/test_db.dart';
 /// is stored, and that a Save from inside it lands in `app_prefs` and moves the
 /// summary above it. Those are wiring touches on the screen, and none of them
 /// is visible from the editor's own tests.
-///
-/// The Home & feed switch is pinned here too, for the same reason: its second
-/// write — the one that moves the feed now rather than at the next launch —
-/// only exists in the host.
 
 class _FakeSync implements MailSync {
   @override
@@ -45,7 +40,6 @@ class _FakeSync implements MailSync {
 void main() {
   late BondDatabase db;
   late MessageStore store;
-  late ProviderContainer container;
 
   setUp(() {
     db = testDb();
@@ -77,13 +71,6 @@ void main() {
     // periodic timer and an unbounded settle would never come back.
     await tester.pump();
     await tester.pump();
-
-    // The scope's own container, read back rather than injected: an
-    // UncontrolledProviderScope disposed in a tearDown outlives the timer
-    // check flutter_test runs first, and the pane's coordinator owns one.
-    container = ProviderScope.containerOf(
-      tester.element(find.byType(InboxScreen)),
-    );
 
     // Settings and the activity log live in the icon rail's account menu now
     // (D8), so getting there is two taps. Bounded pumps throughout —
@@ -272,21 +259,5 @@ void main() {
     await saveRules(tester, 'Anything about the budget.');
 
     expect(find.textContaining('judging 1 message'), findsOneWidget);
-  });
-
-  testWidgets('the Home & feed switch moves the feed now, not at next launch',
-      (tester) async {
-    // The feed reads this preference once, when its notifier is built, so the
-    // host has to tell the notifier as well as the store. Writing only the
-    // pref would leave Home unchanged until the app was restarted.
-    await openSettings(tester);
-    await expand(tester, 'Home & feed');
-
-    expect(container.read(homeFeedProvider).includeDropped, isFalse);
-
-    await tapVisible(tester, find.byType(SwitchListTile));
-
-    expect(container.read(homeFeedProvider).includeDropped, isTrue);
-    expect(await store.getPref(homeShowDroppedKey), 'true');
   });
 }

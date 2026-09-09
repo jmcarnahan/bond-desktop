@@ -5,10 +5,9 @@ import 'dart:async';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
-import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
-import 'package:bond_inbox/providers/prefs_provider.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:bond_inbox/services/message_search.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fixtures/test_db.dart';
@@ -28,6 +27,14 @@ class _FlakyStore extends MessageStore {
   int pageCalls = 0;
   bool failNextPage = false;
 
+  /// What the last read actually asked for. The notifier's whole job here is
+  /// turning its state into these four arguments, and a test that only looked
+  /// at the rows could not tell a window that was passed from one that was not.
+  HomeFilter? lastFilter;
+  String? lastSinceIso;
+  bool? lastAscending;
+  List<String>? lastSources;
+
   /// Held open, the read never returns — which is how a second [loadMore] can
   /// arrive while the first is still in flight.
   Completer<void>? gate;
@@ -37,11 +44,16 @@ class _FlakyStore extends MessageStore {
     String? beforeReceivedAt,
     String? beforeSourceMessageId,
     int limit = 50,
-    bool includeDropped = false,
-    bool onlyDropped = false,
+    HomeFilter filter = HomeFilter.fromOthers,
+    String? sinceIso,
+    bool ascending = false,
     List<String> sources = const ['email', 'teams'],
   }) async {
     pageCalls++;
+    lastFilter = filter;
+    lastSinceIso = sinceIso;
+    lastAscending = ascending;
+    lastSources = sources;
     final held = gate;
     if (held != null) await held.future;
     if (failNextPage) {
@@ -52,8 +64,9 @@ class _FlakyStore extends MessageStore {
       beforeReceivedAt: beforeReceivedAt,
       beforeSourceMessageId: beforeSourceMessageId,
       limit: limit,
-      includeDropped: includeDropped,
-      onlyDropped: onlyDropped,
+      filter: filter,
+      sinceIso: sinceIso,
+      ascending: ascending,
       sources: sources,
     );
   }
@@ -211,61 +224,175 @@ void main() {
     });
   });
 
-  group('setIncludeDropped', () {
-    test('reveals the dropped rows and writes the choice down', () async {
-      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
-      await seed(
-        'm2',
-        receivedAt: '2026-09-03T10:00:00Z',
-        gateReason: 'newsletter',
-      );
+  /// A stamp [days] before now, in the store's own spelling — the same helper
+  /// the window itself is built from. Relative rather than absolute because
+  /// the tiles' window is measured from the wall clock, and a fixture pinned
+  /// to a date would fall out of it as the calendar moved.
+  String daysAgo(int days) =>
+      MessageStore.isoStamp(DateTime.now().subtract(Duration(days: days)));
 
-      final container = ProviderContainer(overrides: [
-        dbProvider.overrideWithValue(db),
-        // Preloaded, like `main()` does it: without this the prefs notifier
-        // reads the database on a future nobody awaits, and that read lands
-        // after the test has closed it.
-        initialAppPrefsProvider.overrideWithValue(const AppPrefs()),
-      ]);
-      addTearDown(container.dispose);
+  group('setFilter', () {
+    test('a tile filter is read over the tiles own window', () async {
+      await seed('recent', receivedAt: daysAgo(1), gateReason: 'newsletter');
+      await seed('ancient', receivedAt: daysAgo(30), gateReason: 'newsletter');
+      await seed('kept', receivedAt: daysAgo(2));
 
-      final notifier = container.read(homeFeedProvider.notifier);
+      final notifier = HomeFeedNotifier(store);
+      addTearDown(notifier.dispose);
       await notifier.load();
-      expect(idsOf(container.read(homeFeedProvider).rows), ['m1']);
 
-      await notifier.setIncludeDropped(true);
-
-      expect(idsOf(container.read(homeFeedProvider).rows), ['m2', 'm1']);
-      expect(container.read(homeFeedProvider).includeDropped, isTrue);
+      expect(idsOf(notifier.state.rows), ['kept']);
       expect(
-        await MessageStore(db).getPref(homeShowDroppedKey),
-        'true',
-        reason: 'the toggle is a setting, not a mood',
+        store.lastSinceIso,
+        isNull,
+        reason: 'everyone else is the whole history, not the last week',
       );
-      expect(container.read(appPrefsProvider).homeShowDropped, isTrue);
+
+      await notifier.setFilter(HomeFilter.dropped);
+
+      expect(store.lastFilter, HomeFilter.dropped);
+      expect(store.lastSinceIso, isNotNull);
+      expect(
+        idsOf(notifier.state.rows),
+        ['recent'],
+        reason: 'the number on the tile is the number of rows under it',
+      );
+      expect(notifier.state.includeDropped, isTrue);
     });
 
-    test('a stored choice is what the feed opens on', () async {
-      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
-      await seed(
-        'm2',
-        receivedAt: '2026-09-03T10:00:00Z',
-        gateReason: 'newsletter',
+    test('the filter it is already on is not a second read', () async {
+      await seed('m1', receivedAt: daysAgo(1));
+
+      final notifier = HomeFeedNotifier(store);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      final before = store.pageCalls;
+
+      await notifier.setFilter(HomeFilter.fromOthers);
+
+      expect(store.pageCalls, before);
+    });
+
+    test('the standing search is re-asked, dropped following the filter',
+        () async {
+      await seed('m1', receivedAt: daysAgo(1));
+      final runner = _RecordingRunner();
+
+      final notifier = HomeFeedNotifier(store, searchRunner: runner.call);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      await notifier.submitSearch('invoice');
+      expect(runner.dropped, [false]);
+
+      await notifier.setFilter(HomeFilter.dropped);
+
+      expect(
+        runner.dropped,
+        [false, true],
+        reason: 'a search under the Dropped tile has to reach the pile',
       );
-      final store = MessageStore(db);
-      await store.setPref(homeShowDroppedKey, 'true');
 
-      final container = ProviderContainer(overrides: [
-        dbProvider.overrideWithValue(db),
-        initialAppPrefsProvider
-            .overrideWithValue(await AppPrefsNotifier.read(store)),
-      ]);
-      addTearDown(container.dispose);
+      await notifier.setFilter(HomeFilter.needsYou);
 
-      await container.read(homeFeedProvider.notifier).load();
-
-      expect(container.read(homeFeedProvider).includeDropped, isTrue);
-      expect(idsOf(container.read(homeFeedProvider).rows), ['m2', 'm1']);
+      expect(runner.dropped, [false, true, false]);
     });
   });
+
+  group('setSort', () {
+    test('oldest first walks the other way and is written down', () async {
+      await seed('m1', receivedAt: daysAgo(3));
+      await seed('m2', receivedAt: daysAgo(2));
+      await seed('m3', receivedAt: daysAgo(1));
+
+      final stored = <HomeSort>[];
+      final notifier = HomeFeedNotifier(
+        store,
+        persistSort: (value) async => stored.add(value),
+      );
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      expect(idsOf(notifier.state.rows), ['m3', 'm2', 'm1']);
+
+      await notifier.setSort(HomeSort.oldest);
+
+      expect(stored, [HomeSort.oldest], reason: 'the order is a habit');
+      expect(store.lastAscending, isTrue);
+      expect(idsOf(notifier.state.rows), ['m1', 'm2', 'm3']);
+    });
+
+    test('the order it is already on is not a second read', () async {
+      await seed('m1', receivedAt: daysAgo(1));
+
+      final notifier = HomeFeedNotifier(store);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      final before = store.pageCalls;
+
+      await notifier.setSort(HomeSort.newest);
+
+      expect(store.pageCalls, before);
+    });
+
+    test('the order the notifier was built on is the order it opens on',
+        () async {
+      await seed('m1', receivedAt: daysAgo(2));
+      await seed('m2', receivedAt: daysAgo(1));
+
+      final notifier = HomeFeedNotifier(store, sort: HomeSort.oldest);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      expect(notifier.state.sort, HomeSort.oldest);
+      expect(idsOf(notifier.state.rows), ['m1', 'm2']);
+    });
+  });
+
+  group('setSources', () {
+    test('an equal list is not a reload, however new the list object is',
+        () async {
+      await seed('m1', receivedAt: daysAgo(1));
+
+      final notifier = HomeFeedNotifier(store);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      final before = store.pageCalls;
+
+      // A fresh object with the same contents, which is what the chips hand
+      // over on every rebuild.
+      await notifier.setSources(['email', 'teams']);
+
+      expect(store.pageCalls, before);
+    });
+
+    test('a different list reloads against it', () async {
+      await seed('mail', receivedAt: daysAgo(1));
+      await seed('chat', receivedAt: daysAgo(1), source: 'teams');
+
+      final notifier = HomeFeedNotifier(store);
+      addTearDown(notifier.dispose);
+      await notifier.load();
+      expect(idsOf(notifier.state.rows), hasLength(2));
+
+      await notifier.setSources(const ['teams']);
+
+      expect(store.lastSources, ['teams']);
+      expect(idsOf(notifier.state.rows), ['chat']);
+    });
+  });
+}
+
+/// A search runner that answers with nothing and remembers what it was asked.
+/// The question under test is which FILTER the query was run against, not what
+/// came back.
+class _RecordingRunner {
+  final dropped = <bool>[];
+
+  Future<MessageSearchResult> call(
+    String query, {
+    bool includeDropped = false,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    dropped.add(includeDropped);
+    return MessageSearchHits(query, const []);
+  }
 }

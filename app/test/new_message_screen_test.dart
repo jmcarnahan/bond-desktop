@@ -236,7 +236,7 @@ void main() {
     await tester.pump();
     expect(backs, 1);
 
-    await tester.tap(find.byTooltip('Home'));
+    await tester.tap(find.byTooltip('Inbox'));
     await tester.pump();
     expect(homes, 1);
 

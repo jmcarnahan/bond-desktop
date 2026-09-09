@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
 import '../models/home_models.dart';
+import '../models/home_sort.dart';
 import '../services/message_search.dart';
 import 'app_providers.dart';
 
@@ -152,7 +153,7 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
     try {
       final rows = await _store.pageHomeFeed(
         limit: pageSize,
-        onlyDropped: true,
+        filter: HomeFilter.dropped,
       );
       if (seq != _fetchSeq || !mounted) return;
       state = state.copyWith(
@@ -185,7 +186,7 @@ class ArchiveNotifier extends StateNotifier<ArchiveState> {
         beforeReceivedAt: tail.receivedAt,
         beforeSourceMessageId: tail.sourceMessageId,
         limit: pageSize,
-        onlyDropped: true,
+        filter: HomeFilter.dropped,
       );
       if (seq != _fetchSeq || !mounted) return;
       state = state.copyWith(

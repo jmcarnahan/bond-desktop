@@ -150,8 +150,6 @@ class SettingsScreen extends StatefulWidget {
   /// editor and leaves the Needs You section as the threshold alone.
   final void Function(String value)? onNeedsYouRulesSaved;
 
-  final bool homeShowDropped;
-  final void Function(bool value)? onHomeShowDroppedChanged;
   final bool storylineNewestFirst;
   final void Function(bool value)? onStorylineNewestFirstChanged;
 
@@ -291,8 +289,6 @@ class SettingsScreen extends StatefulWidget {
     this.needsYouFixedTail = '',
     this.needsYouRulesMaxLength = 4000,
     this.onNeedsYouRulesSaved,
-    this.homeShowDropped = false,
-    this.onHomeShowDroppedChanged,
     this.storylineNewestFirst = false,
     this.onStorylineNewestFirstChanged,
     this.slotTargets = slotDefaults,
@@ -349,7 +345,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late double _threshold = widget.threshold.clamp(0.0, 1.0);
   late bool _showActivityLog = widget.showActivityLog;
   late NotifyStyle _notifyStyle = widget.notifyStyle;
-  late bool _homeShowDropped = widget.homeShowDropped;
   late bool _storylineNewestFirst = widget.storylineNewestFirst;
 
   /// Ten stops. Enough that the slider feels like it has an opinion, few enough
@@ -561,8 +556,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _section('Notifications', _notifySummary(), _notifyBody()),
       if (widget.onShowActivityLogChanged != null)
         _section('Activity log', _activityLogSummary(), _activityLogBody()),
-      if (!ai && widget.onHomeShowDroppedChanged != null)
-        _section('Home & feed', _homeSummary(), _homeBody()),
       if (widget.onStorylineNewestFirstChanged != null)
         _section('Storylines', _storylinesSummary(), _storylinesBody()),
       if (!ai && widget.onRefreshNow != null)
@@ -1232,33 +1225,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
       ],
-    );
-  }
-
-  // ── Home & feed ───────────────────────────────────────────────────────────
-
-  String _homeSummary() =>
-      _homeShowDropped ? 'Dropped messages shown' : 'Dropped messages hidden';
-
-  Widget _homeBody() {
-    final onChanged = widget.onHomeShowDroppedChanged!;
-    return SwitchListTile(
-      contentPadding: EdgeInsets.zero,
-      dense: true,
-      value: _homeShowDropped,
-      title: Text(
-        'Show dropped messages',
-        style: BondType.body.copyWith(fontWeight: FontWeight.w600),
-      ),
-      subtitle: Text(
-        'Home lists everything the pipeline decided to drop, alongside what '
-        'it kept.',
-        style: BondType.caption,
-      ),
-      onChanged: (value) {
-        setState(() => _homeShowDropped = value);
-        onChanged(value);
-      },
     );
   }
 

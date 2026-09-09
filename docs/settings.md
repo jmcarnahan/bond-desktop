@@ -17,9 +17,10 @@ stacked on top of anything.
 - **The AI stop.** `RailSection.ai` renders the same screen with
   `SettingsScope.ai`: titled **AI**, and narrowed to the sections that are
   about how the model reads this mailbox — About me, Models, Needs You,
-  Activity log and Storylines. The Microsoft connection, Notifications, Home &
-  feed, Sync & data and About are about the app or the account rather than the
-  model, and stay behind the avatar menu. Its Back goes to Home rather than to a `_showingSettings`
+  Activity log and Storylines. The Microsoft connection, Notifications,
+  Sync & data and About are about the app or the account rather than the
+  model, and stay behind the avatar menu. Its Back goes to the Inbox rather
+  than to a `_showingSettings`
   that was never set: the AI pane is a SECTION, not an overlay — nothing opened
   it, the user is standing on that stop.
 
@@ -38,9 +39,10 @@ added without deleting that test.
 `PaneSurface` (`app/lib/widgets/pane_surface.dart`) draws the header: a back
 arrow tooltipped **Back**, the title (**Settings**, or **AI** under
 `SettingsScope.ai`), and — because Settings is
-deep enough that Back alone is a poor way out — a labelled **Home** link that
-goes straight to `RailSection.home`. `onHome` is optional on `PaneSurface`; a
-host with no Home to offer passes null and no affordance renders at all.
+deep enough that Back alone is a poor way out — a labelled **Inbox** link that
+goes straight to `RailSection.home` (the enum keeps its name; the label is
+'Inbox'). `onHome` is optional on `PaneSurface`; a host with nowhere to send the
+reader passes null and no affordance renders at all.
 
 Under the header is a `SingleChildScrollView` over a `Column` of sections.
 **Never a `ListView`**: two sections hold a `TextField`, and a lazy list may
@@ -76,14 +78,13 @@ body has the same shape in `settings_models_body.dart`.
 | Needs You | always | the threshold wording, plus ` · custom rules` or ` · default rules` when `onNeedsYouRulesSaved` is wired, plus ` · judging N message(s)` while `needsYouRejudging` (the whole needs-you queue, from `needsYouPendingProvider`) is above zero — "judging", not "re-judging", because the count cannot tell a Save's rows from a sync's |
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
-| Home & feed | `onHomeShowDroppedChanged` wired | `Dropped messages shown` / `Dropped messages hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
 | Sync & data | `onRefreshNow` wired | `Not synced yet`; `Mail synced <rel> · Teams <rel>`; a side that never ran says `not synced yet` in words (`Mail synced 4m ago · Teams not synced yet`, `Mail not synced yet · Teams synced 2h ago`) |
 | About | `appVersion` or `databasePath` is known | `Bond <version>` / `Version unknown` |
 
 **A section whose wiring is absent is absent** — the same discipline every
 optional row in the old dialog followed, and what lets the permissions tests
-wire `hasScope` alone. Under `SettingsScope.ai` five of them are absent for a
+wire `hasScope` alone. Under `SettingsScope.ai` four of them are absent for a
 second reason: the AI pane keeps About me, Models, Needs You, Activity log and
 Storylines, in this same order, and drops the rest.
 
@@ -134,19 +135,19 @@ never overwritten.
 
 **The custom server URL is the exception**, because it has no Save of its own.
 It commits on Enter, on focus leaving the field, and on the three clicks that
-take the field off the screen without moving focus: Back, Home, and collapsing
+take the field off the screen without moving focus: Back, Inbox, and collapsing
 the section. Flutter fires no unfocus when a subtree is disposed — measured, not
 assumed — so `Focus.onFocusChange` alone would lose a typed URL on the way out.
 `MicrosoftConnectionSectionState.commitPendingServerUrl` runs in those three
 event handlers rather than in `dispose`, so the provider write it causes happens
 outside the frame that is unmounting the tree. The section calls it itself on
-Collapse; Back and Home are the screen's, which reaches it through a `GlobalKey`
+Collapse; Back and Inbox are the screen's, which reaches it through a `GlobalKey`
 on the section — the state is the only thing that knows whether the field is
 showing and what is in it.
 
 **The custom lookback date keeps the same contract**, through
 `LookbackFieldState.commitPending` and a `GlobalKey` per side. Enter, focus
-leaving the field, and the same three clicks — Back, Home, collapsing **Sync &
+leaving the field, and the same three clicks — Back, Inbox, collapsing **Sync &
 data** — with one difference from the URL above it: **a date that does not parse
 commits nothing.** A half-typed URL is still a server somebody could mean, but
 `2026-08` is a year and a month with nothing to sync between them, so the field
@@ -202,12 +203,6 @@ underneath and the section re-asks, so the user sees what their own click did.
 the stored rules to say whether they are custom, so a Save inside the screen
 only moves that line because the host rebuilds. Optimising the watch back to a
 read would silently stop the summary following saves.
-
-`onHomeShowDroppedChanged` writes **twice**: the preference, and
-`ref.read(homeFeedProvider.notifier).setIncludeDropped(on)`. The feed reads that
-preference once, when its notifier is built, so the pref alone would leave Home
-unchanged until the next launch. `settings_needs_you_test.dart` pins both
-halves.
 
 Every closure that touches `ref` keeps its `mounted` guard. The work behind them
 outlives the pane — a sign-in still out in the browser, a sign-out from the rail
@@ -300,7 +295,7 @@ starts on. Both halves come from the same arithmetic the sync uses — UTC
 midnight minus the count — so the day named here is the day the window reaches.
 
 A preset commits the instant it is picked. The custom date commits on Enter, on
-focus leaving the field, and on Back / Home / collapsing the section (see **What
+focus leaving the field, and on Back / Inbox / collapsing the section (see **What
 commits, and when**). A date that does not parse, one today or later, or one
 further back than a year commits nothing and shows `Use YYYY-MM-DD, a past date
 within the last year` — refused rather than clamped, because silently syncing a

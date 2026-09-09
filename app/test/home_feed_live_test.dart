@@ -3,6 +3,7 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:bond_inbox/services/progress_bus.dart';
@@ -78,8 +79,8 @@ void main() {
     progress.noteIngest(source, id, receivedAt: ingested!);
   }
 
-  HomeFeedNotifier build() {
-    final notifier = HomeFeedNotifier(store, bus: bus);
+  HomeFeedNotifier build({HomeSort sort = HomeSort.newest}) {
+    final notifier = HomeFeedNotifier(store, bus: bus, sort: sort);
     addTearDown(notifier.dispose);
     return notifier;
   }
@@ -426,6 +427,126 @@ void main() {
       // survived the reload.
       await tester.pump(homeDropLinger);
       await tester.pump(homeDropCollapse);
+      await quiet(tester);
+    });
+  });
+
+  group('an arrival under a tile filter', () {
+    /// The stamps have to sit inside the tiles' window, which is measured from
+    /// the wall clock: a filter other than the default is read over that week,
+    /// and the live path admits rows by the same rule.
+    String hoursAgo(int hours) =>
+        MessageStore.isoStamp(DateTime.now().subtract(Duration(hours: hours)));
+
+    /// Puts the message on the table and then says whether the app is owed
+    /// something for it — the pair a settle writes.
+    Future<void> settle(String id, {required bool needsYou}) =>
+        progress.noteSettled(
+          'email',
+          id,
+          needsYou: needsYou,
+          reason: needsYou ? 'asks for the dates' : 'nothing to do',
+          dropped: false,
+        );
+
+    testWidgets('one the filter does not name never lands', (tester) async {
+      await seed('m1', receivedAt: hoursAgo(3));
+      final notifier = build();
+      await notifier.load();
+      await notifier.setFilter(HomeFilter.needsYou);
+      expect(idsOf(notifier), isEmpty);
+
+      await arrive('quiet', receivedAt: hoursAgo(1));
+      await settle('quiet', needsYou: false);
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        isEmpty,
+        reason: 'a row nobody can see arriving is a row nobody can explain',
+      );
+
+      await arrive('loud', receivedAt: hoursAgo(1));
+      await settle('loud', needsYou: true);
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['loud']);
+      await tester.pump(HomeFeedNotifier.entryClear);
+      await quiet(tester);
+    });
+
+    testWidgets('one already on the table stays where it is', (tester) async {
+      await seed('m1', receivedAt: hoursAgo(3));
+      final notifier = build();
+      await notifier.load();
+      await arrive('m2', receivedAt: hoursAgo(2));
+      await settle('m2', needsYou: true);
+      await settleTicks(tester);
+      await tester.pump(HomeFeedNotifier.entryClear);
+
+      await notifier.setFilter(HomeFilter.needsYou);
+      expect(idsOf(notifier), ['m2']);
+
+      // The verdict is revised: the row no longer matches, and it stays put.
+      await settle('m2', needsYou: false);
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        ['m2'],
+        reason: 'the table never moves under a reader; the next load reads it '
+            'out',
+      );
+      expect(notifier.state.rows.single.needsYou, isFalse);
+      expect(notifier.state.fading, isEmpty);
+      await quiet(tester);
+    });
+  });
+
+  group('an arrival under oldest first', () {
+    testWidgets('is counted rather than inserted, and releasing reloads',
+        (tester) async {
+      await seedThree();
+      final notifier = build(sort: HomeSort.oldest);
+      await notifier.load();
+      expect(idsOf(notifier), ['m1', 'm2', 'm3']);
+
+      await arrive('m9', receivedAt: '2026-09-03T12:00:00Z');
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        ['m1', 'm2', 'm3'],
+        reason: 'the prepend arithmetic is newest-first',
+      );
+      expect(notifier.state.pendingNewCount, 1);
+
+      await notifier.releasePending();
+
+      expect(idsOf(notifier), ['m1', 'm2', 'm3', 'm9']);
+      expect(notifier.state.pendingNewCount, 0);
+      await quiet(tester);
+    });
+
+    testWidgets('a gate-dropped one is not performed either', (tester) async {
+      await seedThree();
+      final notifier = build(sort: HomeSort.oldest);
+      await notifier.load();
+
+      await arrive(
+        'n1',
+        receivedAt: '2026-09-03T12:00:00Z',
+        gateReason: 'newsletter',
+      );
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['m1', 'm2', 'm3']);
+      expect(notifier.state.fading, isEmpty);
+      expect(
+        notifier.state.pendingNewCount,
+        0,
+        reason: 'a count that promised a dropped row would promise nothing',
+      );
       await quiet(tester);
     });
   });

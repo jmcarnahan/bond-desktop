@@ -135,10 +135,10 @@ void main() {
     await pumpInbox(tester);
     await openSettings(tester);
 
-    // Scoped: the icon rail's Home stop wears the same tooltip.
+    // Scoped: the icon rail's Inbox stop wears the same tooltip.
     await tester.tap(find.descendant(
       of: find.byType(PaneSurface),
-      matching: find.byTooltip('Home'),
+      matching: find.byTooltip('Inbox'),
     ));
     await tester.pump();
     await tester.pump();

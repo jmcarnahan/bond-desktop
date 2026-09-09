@@ -379,7 +379,7 @@ void main() {
     await openRoom(tester, 'Dana Whitfield');
     expect(find.byType(PersonRoomPane), findsOneWidget);
 
-    await tapStop(tester, 'Home');
+    await tapStop(tester, 'Inbox');
 
     expect(find.byType(PersonRoomPane), findsNothing);
     await settleQueues(tester);
@@ -416,7 +416,7 @@ void main() {
     expect(find.text('STORYLINES'), findsNothing);
     expect(find.text('LATER'), findsNothing);
 
-    await tapStop(tester, 'Home');
+    await tapStop(tester, 'Inbox');
 
     // Home is the whole stack again.
     expect(find.text('NEEDS YOU'), findsOneWidget);

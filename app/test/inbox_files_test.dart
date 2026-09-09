@@ -307,13 +307,13 @@ void main() {
 
     await tester.tap(find.descendant(
       of: find.byType(IconRail),
-      matching: find.byTooltip('Home'),
+      matching: find.byTooltip('Inbox'),
     ));
     await tester.pump();
     await tester.pump();
     await tester.pump();
 
-    // Not a row in the Home stack, so leaving it leaves it entirely.
+    // Not a row in the Inbox stack, so leaving it leaves it entirely.
     expect(find.byType(FilesPane), findsNothing);
     expect(find.byType(HomePane), findsOneWidget);
     await settleQueues(tester);

@@ -11,6 +11,32 @@ String? formatTimestamp(String? iso) {
   return DateFormat('MMM d, h:mm a').format(parsed.toLocal());
 }
 
+/// The Inbox table's stamp: `h:mm a` for something that arrived today,
+/// `MMM d, h:mm a` for anything else. Null for anything unparseable, exactly as
+/// [formatTimestamp] is.
+///
+/// [formatTimestamp]'s neighbour rather than a flag on it, because they answer
+/// different questions. That one is the stamp on a message in a thread, where
+/// the day is always worth stating; this one is a column in a table a reader
+/// scans, and the day is dropped ONLY when it is today's — which is the one day
+/// they can infer without being told.
+///
+/// The comparison is on the LOCAL calendar day for [dayKeyOfIso]'s reason: the
+/// day a message belongs to is the day the reader was living in when it
+/// arrived, and a UTC comparison would print this evening's mail with
+/// tomorrow's date on it for anyone west of Greenwich.
+String? feedStamp(String? iso, DateTime now) {
+  if (iso == null || iso.isEmpty) return null;
+  final parsed = DateTime.tryParse(iso);
+  if (parsed == null) return null;
+  final local = parsed.toLocal();
+  final today = now.toLocal();
+  final sameDay = local.year == today.year &&
+      local.month == today.month &&
+      local.day == today.day;
+  return DateFormat(sameDay ? 'h:mm a' : 'MMM d, h:mm a').format(local);
+}
+
 /// How long ago [iso] was, in the one unit that matters at that distance —
 /// "just now", "4m ago", "3h ago", "2d ago". Null for null and for anything
 /// unparseable, which reads as "never" upstream.

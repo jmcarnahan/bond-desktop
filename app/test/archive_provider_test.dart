@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:bond_inbox/providers/archive_provider.dart';
 import 'package:bond_inbox/services/message_search.dart';
 import 'package:drift/drift.dart' show Variable;
@@ -32,8 +33,9 @@ class _FailingStore extends MessageStore {
     String? beforeReceivedAt,
     String? beforeSourceMessageId,
     int limit = 50,
-    bool includeDropped = false,
-    bool onlyDropped = false,
+    HomeFilter filter = HomeFilter.fromOthers,
+    String? sinceIso,
+    bool ascending = false,
     List<String> sources = const ['email', 'teams'],
   }) async {
     if (failNextPage) {
@@ -44,8 +46,9 @@ class _FailingStore extends MessageStore {
       beforeReceivedAt: beforeReceivedAt,
       beforeSourceMessageId: beforeSourceMessageId,
       limit: limit,
-      includeDropped: includeDropped,
-      onlyDropped: onlyDropped,
+      filter: filter,
+      sinceIso: sinceIso,
+      ascending: ascending,
       sources: sources,
     );
   }

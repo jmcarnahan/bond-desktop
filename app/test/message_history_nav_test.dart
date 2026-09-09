@@ -225,6 +225,13 @@ void main() {
         matching: find.byType(Scrollable),
       ),
     );
+    // scrollUntilVisible stops as soon as the lazy list BUILDS the target,
+    // which its cache extent does a little below the fold. One more nudge puts
+    // it where a tap can reach it.
+    await tester.ensureVisible(
+      find.byKey(MessageHistoryScreen.addToStorylineKey),
+    );
+    await tester.pump();
     await tester.tap(find.byKey(MessageHistoryScreen.addToStorylineKey));
     for (var i = 0; i < 4; i++) {
       await tester.pump();
@@ -274,6 +281,13 @@ void main() {
         matching: find.byType(Scrollable),
       ),
     );
+    // scrollUntilVisible stops as soon as the lazy list BUILDS the target,
+    // which its cache extent does a little below the fold. One more nudge puts
+    // it where a tap can reach it.
+    await tester.ensureVisible(
+      find.byKey(MessageHistoryScreen.addToStorylineKey),
+    );
+    await tester.pump();
     await tester.tap(find.byKey(MessageHistoryScreen.addToStorylineKey));
     for (var i = 0; i < 4; i++) {
       await tester.pump();

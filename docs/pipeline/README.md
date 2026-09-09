@@ -88,30 +88,65 @@ The home screen's five-segment stage bar (triage · extract · storyline ·
 draft · settle) is this pipeline rendered per row; `pipeline_progress.dart`
 records the transitions it draws.
 
-## What the home screen shows
+## What the Inbox shows
 
-Every row's Result cell is one sentence with the reason in it, and every
-reason is a column this pipeline already writes. `resultLine` in
-`app/lib/widgets/home_result.dart` picks the first sentence that matches, in
-this order:
+Every row's verdict is TWO CELLS. The **Result** cell is the label — `Needs
+you`, `Newsletter`, `Filed in <storyline>`, `Stalled` — and the **Ask ·
+Summary** cell beside it carries the words. `resultLine` in
+`app/lib/widgets/home_result.dart` picks the first label that matches, in this
+order, and writes the reason clause into `HomeResult.detail`; the whole
+sentence, both halves joined, is the tooltip.
 
-| Sentence | Columns behind it |
-|----------|-------------------|
-| `Filtered — …`, `Newsletter`, `Nothing to do — …` | `message_progress.drop_reason`, plus `messages.gate_reason` for a gated drop; for `not_worthy` the judge's `needs_you_reason` when the verdict was a no, or "the thread is in Later" / "below the attention threshold" when it was a yes |
-| `Failed at <stage>` | the first `message_progress.<stage>_state` that is `error` |
-| `Stalled — waiting on <stage>` | `message_progress.outcome = 'pending'`, no open `work_items` for the message, its thread or its documents, `messages.triage_status` neither pending nor processing, and `message_progress.updated_at` older than 15 minutes |
-| `Triaging…` / `Waiting on <stage>` | the five stage states, and whether any `work_items` row is open ("not queued yet" when none is) |
-| `Needs you — …` | `message_progress.needs_you` with `messages.needs_you_reason` |
-| `Filed in <storyline>` | the row's storyline pointer, or the thread's newest `storyline_members` row, with its `evidence` — or "filed by you" when `added_by = 'user'` |
-| `Later — …` | `conversation_ai.bucket` with `conversation_ai.bucket_reason` |
-| `Draft ready` | `message_progress.draft_state = 'done'` |
-| `Nothing to do` | nothing above matched; the tooltip carries `needs_you_reason` when the verdict was a no |
+| Result | Detail / Ask | Columns behind it |
+|--------|--------------|-------------------|
+| `Filtered`, `Newsletter`, `Nothing to do` (dropped) | the gate words, or the not-worthy reason | `message_progress.drop_reason`, plus `messages.gate_reason` for a gated drop; for `not_worthy` the judge's `needs_you_reason` when the verdict was a no, or "the thread is in Later" / "below the attention threshold" when it was a yes |
+| `Failed at <stage>` | `The <stage> stage ended in an error.` | the first `message_progress.<stage>_state` that is `error` |
+| `Stalled` | `No progress for 15 minutes and nothing is queued — waiting on <stage>.` | `message_progress.outcome = 'pending'`, no open `work_items` for the message, its thread or its documents, `messages.triage_status` neither pending nor processing, and `message_progress.updated_at` older than 15 minutes |
+| `Triaging…` / `Waiting on <stage>` | `Not queued yet` when nothing is | the five stage states, and whether any `work_items` row is open |
+| `Needs you` | the thread's `conversations.cta_text`, else `messages.needs_you_reason` | `message_progress.needs_you` |
+| `Filed in <storyline>` | the membership's `evidence`, or "filed by you" | the row's storyline pointer, or the thread's newest `storyline_members` row |
+| `Later` | the bucket reason in words | `conversation_ai.bucket` with `conversation_ai.bucket_reason` |
+| `Draft ready` | — | `message_progress.draft_state = 'done'` |
+| `Nothing to do` | `needs_you_reason` when the verdict was a no | nothing above matched |
 
-The eight tiles above the table read the same columns over the last seven
-days (`homeMetricsWindow`, `app/lib/models/home_models.dart` — a day made a
-quiet Sunday look like a broken pipeline), and the bar says the window in a
-caption beside the numbers; the hot strip uses the same window. Retry (`PipelineRepairService`) puts back exactly the stages a row still
-owes — never one that finished, and never a dropped row, which is Restore's.
+The Ask · Summary cell prefers the THREAD's ask on a needs-you row and the
+MESSAGE's `messages.summary` everywhere else — an ask is per thread and a
+summary is per message, which is why they are two columns in the store and one
+on screen — and falls back to the Detail column above when a row has neither.
+That fallback is what a gate-dropped message shows: it never reached triage, so
+it has no summary, and "sender muted" in that space is worth more than a blank.
+`askLine` is the one place that order is written down.
+
+**The eight tiles are the filter.** They read the same columns over the last
+seven days (`homeMetricsWindow`, `app/lib/models/home_models.dart` — a day made
+a quiet Sunday look like a broken pipeline), the bar says the window in a
+caption beside the numbers, and the hot strip uses the same window. Pressing a
+tile narrows the table to what that tile counted; pressing it again widens back
+to everyone else's messages, and one filter is in force at a time
+(`HomeFilter`, with `MessageStore.homeFilterSql` as the single definition of
+what each one admits). A tile filter is bounded by that same seven-day window,
+so **the number on the tile is the number of rows under it**. Emails and Teams
+are the two tiles that write elsewhere: they move the list column's source
+chips, which every pane reads.
+
+**The pulse strip** under the tiles narrates the work a filter may be hiding,
+in three segments joined by `·` (`app/lib/widgets/home_pulse.dart`):
+
+- what is moving — `triaging 2 · grouping 1`, in pipeline order, off
+  `work_items.task_kind` for every stage and off `messages.triage_status` for
+  triage, which has no queue row of its own;
+- what just finished — `Last 10 min: 5 settled · 2 dropped · 1 needs you`, from
+  `message_progress.updated_at` inside `homePulseWindow`;
+- where the mail is coming from — `Syncing mail…` while a pull is out, else
+  `Mail 2m ago · Teams 4m ago · Sweep 12m ago` from the stored stamps, with
+  `never` for a pass that has not run.
+
+It has no timer of its own: `pipelinePulseProvider` re-reads behind the feed's
+metrics epoch, the activity log's events, and the screen's own sixty-second
+invalidate. Words and one dot, never a spinner — the stage bar's rule.
+
+Retry (`PipelineRepairService`) puts back exactly the stages a row still owes —
+never one that finished, and never a dropped row, which is Restore's.
 
 ## Finding out what happened to a message
 

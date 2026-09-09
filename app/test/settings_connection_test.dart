@@ -333,7 +333,7 @@ void main() {
         'http://typed/mcp',
       );
       await tester.pump();
-      await tester.tap(find.byTooltip('Home'));
+      await tester.tap(find.byTooltip('Inbox'));
       await tester.pumpAndSettle();
 
       expect(urls, ['http://typed/mcp']);

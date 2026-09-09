@@ -57,11 +57,12 @@ void main() {
   testWidgets('there is no home affordance unless the host wires one',
       (tester) async {
     // A pane reached from a single click does not need a shortcut out of it,
-    // and a Home button on a host with no Home would go nowhere.
+    // and an Inbox button on a host with nowhere to send the reader would go
+    // nowhere.
     await pump(tester, onBack: () {});
 
-    expect(find.byTooltip('Home'), findsNothing);
-    expect(find.text('Home'), findsNothing);
+    expect(find.byTooltip('Inbox'), findsNothing);
+    expect(find.text('Inbox'), findsNothing);
   });
 
   testWidgets('the home affordance renders and fires when it is wired',
@@ -69,13 +70,13 @@ void main() {
     var homes = 0;
     await pump(tester, onBack: () {}, onHome: () => homes++);
 
-    expect(find.byTooltip('Home'), findsOneWidget);
+    expect(find.byTooltip('Inbox'), findsOneWidget);
     // Labelled rather than an icon alone: the bolt is not a glyph anyone reads
-    // as "home" without the word beside it.
-    expect(find.text('Home'), findsOneWidget);
+    // as a destination without the word beside it.
+    expect(find.text('Inbox'), findsOneWidget);
     expect(find.byIcon(Icons.bolt), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Home'));
+    await tester.tap(find.byTooltip('Inbox'));
     await tester.pump();
 
     expect(homes, 1);
@@ -108,6 +109,6 @@ void main() {
 
     expect(tester.takeException(), isNull);
     expect(find.byTooltip('Back'), findsOneWidget);
-    expect(find.byTooltip('Home'), findsOneWidget);
+    expect(find.byTooltip('Inbox'), findsOneWidget);
   });
 }

@@ -279,7 +279,14 @@ void main() {
 
     expect(find.byKey(MessageHistoryScreen.retryKey), findsOneWidget);
     expect(find.byKey(MessageHistoryScreen.restoreKey), findsNothing);
-    expect(find.text('Stalled — waiting on settle'), findsOneWidget);
+    // The label, and the reason clause under it: the Inbox splits these
+    // across two cells, and this screen is where both fit.
+    expect(find.text('Stalled'), findsOneWidget);
+    expect(
+      find.text('No progress for 15 minutes and nothing is queued — '
+          'waiting on settle.'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('Ignore is two taps, and the first one fires nothing',

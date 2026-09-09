@@ -7,6 +7,7 @@ import '../models/attachment_models.dart';
 import '../models/drafts_models.dart';
 import '../models/files_models.dart';
 import '../models/home_models.dart';
+import '../models/home_sort.dart';
 import '../models/message_models.dart';
 import '../models/person.dart';
 import '../models/storyline_models.dart';
@@ -5288,8 +5289,9 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
   p.settle_state,
   p.outcome, p.dropped, p.drop_reason, p.needs_you, p.urgency, p.updated_at,
   $_effectiveStorylineId AS storyline_id,
-  m.subject, m.from_name, m.from_address, m.has_attachments,
+  m.subject, m.from_name, m.from_address, m.has_attachments, m.summary,
   m.needs_you_verdict, m.needs_you_reason, m.gate_reason,
+  c.cta_text,
   s.title AS storyline_title,
   ai.bucket, ai.bucket_reason, ai.attention_score,
   (SELECT sm.evidence FROM storyline_members sm
@@ -5306,13 +5308,17 @@ p.source, p.source_message_id, p.conversation_key, p.received_at,
   ///
   /// `conversation_ai`'s primary key is `(source, conversation_key)`, so its
   /// LEFT JOIN cannot multiply a row — unlike the memberships above, which is
-  /// why those stayed subqueries.
+  /// why those stayed subqueries. `conversations` is keyed the same way, so
+  /// the ask joins on exactly the same argument: one thread row per message
+  /// row, whatever the thread's size.
   static const String _homeFeedJoins = '''
 JOIN messages m
   ON m.source = p.source AND m.source_message_id = p.source_message_id
 LEFT JOIN storylines s ON s.id = $_effectiveStorylineId
 LEFT JOIN conversation_ai ai
-  ON ai.source = p.source AND ai.conversation_key = p.conversation_key''';
+  ON ai.source = p.source AND ai.conversation_key = p.conversation_key
+LEFT JOIN conversations c
+  ON c.source = p.source AND c.conversation_key = p.conversation_key''';
 
   static const String _homeFeedSelect = '''
 SELECT $_homeFeedColumns
@@ -5958,10 +5964,18 @@ RETURNING source, source_message_id, received_at
   /// stamp excluded because an unparseable clock answers FALSE there. A row
   /// with no `updated_at` sorts before every cutoff, and counting it would
   /// accuse the pipeline of a fault on the strength of a column nobody wrote.
+  ///
+  /// [sources] narrows the same way the feed under the tiles does — the list
+  /// column's source chips are one selection, and a tile counting a connector
+  /// the table is hiding would be a number nobody can find the rows for. An
+  /// empty list is "no connector at all", which is zeros rather than
+  /// everything.
   Future<HomeMetrics> homeMetrics({
     required String sinceIso,
     required String stalledBeforeIso,
+    List<String> sources = const ['email', 'teams'],
   }) async {
+    if (sources.isEmpty) return const HomeMetrics();
     final row = await db
         .customSelect(
           '''
@@ -5985,15 +5999,49 @@ SELECT
     AS errored,
   COUNT(*) AS total
 FROM message_progress p
-WHERE received_at >= ?1
+WHERE received_at >= ?1 AND p.source IN (${_placeholders(sources.length)})
 ''',
-          variables: _args([sinceIso, stalledBeforeIso]),
+          variables: _args([sinceIso, stalledBeforeIso, ...sources]),
         )
         .getSingle();
     return HomeMetrics.fromRow(row.data);
   }
 
-  /// One page of the feed, newest first.
+  /// The WHERE fragment one [HomeFilter] stands for, with no leading `AND`
+  /// and never empty — every filter narrows something, so a caller can always
+  /// write `WHERE ${homeFilterSql(filter)} AND …`.
+  ///
+  /// Public and static because it is a definition rather than a query: the
+  /// notifier's live path has to admit exactly the rows this admits, and the
+  /// only way two copies of a rule stay equal is if one of them is the one
+  /// everybody reads.
+  ///
+  /// [HomeFilter.processed] deliberately includes dropped rows. The tile it
+  /// belongs to counts `total − in_flight`, and a filter that showed fewer
+  /// rows than the number written above it would be a tile nobody believes
+  /// twice — the question is "what has the app finished with", and it has
+  /// finished with the newsletters.
+  ///
+  /// [HomeFilter.errors] names exactly the three stages the errored tile
+  /// counts, in the same order, so a tap on that tile lists what it counted.
+  ///
+  /// `ix_message_progress_visible` leads with `dropped`, so the two
+  /// dropped-keyed filters stay equality seeks rather than scans over the
+  /// whole table.
+  static String homeFilterSql(HomeFilter filter) => switch (filter) {
+        HomeFilter.fromOthers => 'p.dropped = 0',
+        HomeFilter.needsYou => 'p.dropped = 0 AND p.needs_you = 1',
+        HomeFilter.urgent =>
+          "p.dropped = 0 AND p.urgency IN ('urgent', 'high')",
+        HomeFilter.inFlight => "p.outcome = 'pending'",
+        HomeFilter.errors => "(p.triage_state = 'error' "
+            "OR p.extract_state = 'error' "
+            "OR p.storyline_state = 'error')",
+        HomeFilter.dropped => 'p.dropped = 1',
+        HomeFilter.processed => "p.outcome <> 'pending'",
+      };
+
+  /// One page of the feed, newest first — or oldest first under [ascending].
   ///
   /// Keyset rather than OFFSET, and two literal statements rather than one
   /// with a `? IS NULL OR` cursor: that form defeats the index range scan, and
@@ -6001,48 +6049,50 @@ WHERE received_at >= ?1
   /// table. The cursor is the previous page's last row — pass both halves or
   /// neither.
   ///
-  /// [includeDropped] chooses which index the read walks:
-  /// `ix_message_progress_visible` leads with `dropped`, so hiding dropped
-  /// rows is an equality seek rather than a filter over everything.
+  /// [beforeReceivedAt] and [beforeSourceMessageId] are THE CURSOR, named for
+  /// the common direction: "before" under [HomeSort.newest] and "after" under
+  /// [ascending], where the compare flips to `>` along with the ORDER BY. One
+  /// pair of parameters rather than two, because a page walk asks the same
+  /// question in both directions — carry on from the row I am standing on.
   ///
-  /// [onlyDropped] is the other end of that same seek — `dropped = 1` — and is
-  /// what the Archive's Dropped tab reads. It is a list rather than a search
-  /// because a gate-dropped message never reached the embedder, so there is no
-  /// vector to ask about it; the index that hides these rows from Home is the
-  /// index that gathers them here.
+  /// [filter] is the ONE way to ask which rows are wanted; see
+  /// [homeFilterSql]. The Archive's Dropped tab passes
+  /// [HomeFilter.dropped] and reads it as a list rather than as a search,
+  /// because a gate-dropped message never reached the embedder and there is no
+  /// vector to ask about it.
   ///
-  /// The two flags name disjoint questions — "and also the dropped ones" and
-  /// "the dropped ones only" — so a caller passing both is asking two things
-  /// at once and means neither.
+  /// [sinceIso] bounds the read by `received_at`, and the Inbox passes the
+  /// tiles' own window under a tile filter and nothing under the default: the
+  /// number on a tile is only the number of rows under it if both are measured
+  /// over the same week.
   Future<List<HomeFeedRow>> pageHomeFeed({
     String? beforeReceivedAt,
     String? beforeSourceMessageId,
     int limit = 50,
-    bool includeDropped = false,
-    bool onlyDropped = false,
+    HomeFilter filter = HomeFilter.fromOthers,
+    String? sinceIso,
+    bool ascending = false,
     List<String> sources = const ['email', 'teams'],
   }) async {
-    assert(
-      !(onlyDropped && includeDropped),
-      'onlyDropped and includeDropped are different questions; pass one',
-    );
     if (sources.isEmpty) return const [];
     final places = _placeholders(sources.length);
-    final visible = onlyDropped
-        ? 'p.dropped = 1 AND '
-        : includeDropped
-            ? ''
-            : 'p.dropped = 0 AND ';
+    final where = StringBuffer(homeFilterSql(filter))
+      ..write(' AND p.source IN ($places)');
+    final args = <Object?>[...sources];
+    if (sinceIso != null) {
+      where.write(' AND p.received_at >= ?');
+      args.add(sinceIso);
+    }
+    final order = ascending
+        ? 'ORDER BY p.received_at ASC, p.source_message_id ASC'
+        : 'ORDER BY p.received_at DESC, p.source_message_id DESC';
     final first = beforeReceivedAt == null || beforeSourceMessageId == null;
 
     final result = first
         ? await db
             .customSelect(
-              '$_homeFeedSelect '
-              'WHERE ${visible}p.source IN ($places) '
-              'ORDER BY p.received_at DESC, p.source_message_id DESC '
-              'LIMIT ?',
-              variables: _args([...sources, limit]),
+              '$_homeFeedSelect WHERE $where $order LIMIT ?',
+              variables: _args([...args, limit]),
             )
             .get()
         : await db
@@ -6052,14 +6102,16 @@ WHERE received_at >= ?1
               // 3.35 for RETURNING); the portable spelling is
               //   p.received_at < ?a
               //   OR (p.received_at = ?a AND p.source_message_id < ?b)
-              // which sqlite would not turn into one index range scan.
-              '$_homeFeedSelect '
-              'WHERE ${visible}p.source IN ($places) '
-              'AND (p.received_at, p.source_message_id) < (?, ?) '
-              'ORDER BY p.received_at DESC, p.source_message_id DESC '
-              'LIMIT ?',
+              // which sqlite would not turn into one index range scan. It
+              // flips to `>` under [ascending] for the same reason the ORDER
+              // BY does: a cursor that walked the other way would re-read the
+              // page it just handed over.
+              '$_homeFeedSelect WHERE $where '
+              'AND (p.received_at, p.source_message_id) '
+              '${ascending ? '>' : '<'} (?, ?) '
+              '$order LIMIT ?',
               variables: _args([
-                ...sources,
+                ...args,
                 beforeReceivedAt,
                 beforeSourceMessageId,
                 limit,
@@ -6562,10 +6614,16 @@ $where
   /// Dropped rows are left out: they are hidden from the feed by default, and
   /// a strip that ranked a storyline on messages the user cannot see would
   /// send them looking for rows that are not there.
+  ///
+  /// [sources] narrows it for [homeMetrics]' reason: the strip sits over the
+  /// same table the chips are filtering, and ranking on a connector that is
+  /// switched off would name a storyline whose messages are nowhere on screen.
   Future<List<HotStoryline>> hotStorylines({
     required String sinceIso,
     int limit = 8,
+    List<String> sources = const ['email', 'teams'],
   }) async {
+    if (sources.isEmpty) return const [];
     final result = await db
         .customSelect(
           '''
@@ -6574,15 +6632,118 @@ SELECT p.storyline_id AS id, s.title AS title,
 FROM message_progress p
 JOIN storylines s ON s.id = p.storyline_id
 WHERE p.storyline_id IS NOT NULL AND p.dropped = 0 AND p.received_at >= ?
+  AND p.source IN (${_placeholders(sources.length)})
   AND s.status IN ('suggested', 'active')
 GROUP BY p.storyline_id, s.title
 ORDER BY message_count DESC, last_at DESC, id ASC
 LIMIT ?
 ''',
-          variables: _args([sinceIso, limit]),
+          variables: _args([sinceIso, ...sources, limit]),
         )
         .get();
     return [for (final row in result) HotStoryline.fromRow(row.data)];
+  }
+
+  /// What the pipeline is doing right now, and what it has just finished.
+  ///
+  /// THREE reads, and three because they are three tables — the queue, the
+  /// messages, and the progress rows — not because three round trips were
+  /// cheaper to write. There is no way to ask one statement for all of it
+  /// without a union whose branches share no columns.
+  ///
+  /// The queue read folds `task_kind` onto the stage words through
+  /// [PipelinePulse.kindStages]; a kind that is not in that map is not
+  /// pipeline work and is skipped rather than counted under its own name.
+  ///
+  /// Triage comes off `messages.triage_status` because triage has no work row
+  /// at all — the queue claims the column directly — so a pulse that read only
+  /// `work_items` would report an idle pipeline through the whole of a drain.
+  ///
+  /// [sinceIso] is compared against `message_progress.updated_at`: what the
+  /// pipeline last WROTE, rather than when the message arrived. An empty
+  /// [sources] is "no connector at all", which is the empty pulse rather than
+  /// every connector.
+  Future<PipelinePulse> pipelinePulse({
+    required String sinceIso,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (sources.isEmpty) return const PipelinePulse();
+    final places = _placeholders(sources.length);
+
+    final queued = <String, int>{};
+    final running = <String, int>{};
+    void fold(String? stage, String? status, int n) {
+      if (stage == null || n == 0) return;
+      final into = status == 'processing' ? running : queued;
+      into[stage] = (into[stage] ?? 0) + n;
+    }
+
+    final work = await db
+        .customSelect(
+          'SELECT task_kind, status, COUNT(*) AS n FROM work_items '
+          "WHERE status IN ('pending', 'processing') "
+          'AND source IN ($places) '
+          'GROUP BY task_kind, status',
+          variables: _args(sources),
+        )
+        .get();
+    for (final row in work) {
+      fold(
+        PipelinePulse.kindStages[row.data['task_kind'] as String? ?? ''],
+        row.data['status'] as String?,
+        (row.data['n'] as num?)?.toInt() ?? 0,
+      );
+    }
+
+    final triage = await db
+        .customSelect(
+          'SELECT triage_status, COUNT(*) AS n FROM messages '
+          "WHERE triage_status IN ('pending', 'processing') "
+          'AND source IN ($places) '
+          'GROUP BY triage_status',
+          variables: _args(sources),
+        )
+        .get();
+    for (final row in triage) {
+      fold(
+        'triage',
+        row.data['triage_status'] as String?,
+        (row.data['n'] as num?)?.toInt() ?? 0,
+      );
+    }
+
+    // The in-flight count is a scalar subquery rather than a fourth read
+    // because it is the same table asked a second question, and one statement
+    // is one snapshot: a message settling between two reads would be counted
+    // as both finished and still moving. Its parameters bind FIRST — sqlite
+    // numbers anonymous placeholders by where they appear in the text, and
+    // the SELECT list comes before the WHERE clause.
+    final row = await db
+        .customSelect(
+          '''
+SELECT
+  (SELECT COUNT(*) FROM message_progress f
+    WHERE f.outcome = 'pending' AND f.source IN ($places)) AS in_flight,
+  COALESCE(SUM(CASE WHEN p.outcome = 'done' THEN 1 ELSE 0 END), 0) AS settled,
+  COALESCE(SUM(p.dropped), 0) AS dropped,
+  COALESCE(SUM(CASE WHEN p.needs_you = 1 AND p.dropped = 0 THEN 1 ELSE 0 END),
+           0) AS needs_you
+FROM message_progress p
+WHERE p.updated_at >= ? AND p.source IN ($places)
+''',
+          variables: _args([...sources, sinceIso, ...sources]),
+        )
+        .getSingle();
+    int at(String column) => (row.data[column] as num?)?.toInt() ?? 0;
+
+    return PipelinePulse(
+      queued: queued,
+      running: running,
+      recentSettled: at('settled'),
+      recentDropped: at('dropped'),
+      recentNeedsYou: at('needs_you'),
+      inFlight: at('in_flight'),
+    );
   }
 
   // ── attachments ──────────────────────────────────────────────────────

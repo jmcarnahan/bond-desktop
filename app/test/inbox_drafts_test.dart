@@ -197,12 +197,12 @@ void main() {
         .ancestor(
           of: find.descendant(
             of: find.byType(IconRail),
-            matching: find.text('Home'),
+            matching: find.text('Inbox'),
           ),
           matching: find.byType(Material),
         )
         .first);
-    // A Home-stack row lights the stack it belongs to. Anything else would
+    // An Inbox-stack row lights the stack it belongs to. Anything else would
     // leave every icon dark, which reads as "you are nowhere".
     expect(material.color, BondColors.onDarkTint);
     await settleQueues(tester);

@@ -3,8 +3,8 @@ import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/home_result.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-/// The home feed's narrator: which sentence a row gets, and which reason rides
-/// in it.
+/// The Inbox feed's narrator: which LABEL a row gets, which reason rides in the
+/// cell beside it, and what the Ask · Summary column says.
 ///
 /// Pure, so the awkward cases are cheap — a row that is stalled AND errored
 /// AND dropped, a drop with no reason on it, a verdict nobody has written yet.
@@ -21,6 +21,8 @@ HomeFeedRow _row({
   String source = 'email',
   String id = 'm1',
   String conversationKey = 'c1',
+  String? summary,
+  String? ctaText,
   String triage = 'done',
   String extract = 'done',
   String storyline = 'done',
@@ -48,6 +50,8 @@ HomeFeedRow _row({
       sourceMessageId: id,
       conversationKey: conversationKey,
       receivedAt: '2026-09-03T09:00:00Z',
+      summary: summary,
+      ctaText: ctaText,
       triageState: triage,
       extractState: extract,
       storylineState: storyline,
@@ -95,7 +99,15 @@ void main() {
       ));
 
       expect(result.kind, HomeResultKind.stalled);
-      expect(result.text, 'Stalled — waiting on storyline');
+      expect(result.text, 'Stalled');
+      expect(
+        result.detail,
+        'No progress for 15 minutes and nothing is queued — waiting on '
+            'storyline.',
+        reason: 'every stalled row says the same word; WHICH stage it is stuck '
+            'behind is the reason rather than the verdict',
+      );
+      expect(result.tooltip, '${result.text} — ${result.detail}');
       expect(result.tone, BondTone.error);
       expect(result.retryable, isTrue);
     });
@@ -121,8 +133,8 @@ void main() {
           triage: 'done',
           extract: 'pending',
           storyline: 'pending',
-        )).text,
-        'Stalled — waiting on extract',
+        )).detail,
+        endsWith('waiting on extract.'),
       );
       // Skipped is finished, not owed: a message nobody is drafting for is
       // waiting on the settle behind it.
@@ -132,8 +144,8 @@ void main() {
           updatedAt: _minutesAgo(20),
           draft: 'skipped',
           settle: 'pending',
-        )).text,
-        'Stalled — waiting on settle',
+        )).detail,
+        endsWith('waiting on settle.'),
       );
     });
 
@@ -182,8 +194,11 @@ void main() {
 
       expect(result.kind, HomeResultKind.error);
       expect(result.text, 'Failed at triage');
-      expect(result.tooltip, 'The triage stage ended in an error. '
-          'Retry runs it again.');
+      expect(result.detail, 'The triage stage ended in an error.');
+      expect(
+        result.tooltip,
+        'Failed at triage — The triage stage ended in an error.',
+      );
       expect(result.tone, BondTone.error);
       expect(result.retryable, isTrue);
     });
@@ -204,6 +219,7 @@ void main() {
 
       expect(result.kind, HomeResultKind.dropped);
       expect(result.text, 'Newsletter');
+      expect(result.detail, isNull);
       expect(result.tooltip, 'Dropped: Newsletter');
       expect(result.tone, BondTone.neutral);
       expect(result.retryable, isFalse);
@@ -217,12 +233,16 @@ void main() {
           dropReason: 'not_worthy',
           needsYouVerdict: false,
           needsYouReason: 'a receipt, nobody is asked for anything',
-        )).text,
-        'Nothing to do — a receipt, nobody is asked for anything',
+        )).detail,
+        'a receipt, nobody is asked for anything',
       );
       expect(
         _line(_row(dropped: true, dropReason: 'not_worthy')).text,
-        'Nothing to do — no ask found',
+        'Nothing to do',
+      );
+      expect(
+        _line(_row(dropped: true, dropReason: 'not_worthy')).detail,
+        'no ask found',
       );
       expect(
         _line(_row(
@@ -230,8 +250,8 @@ void main() {
           dropReason: 'not_worthy',
           needsYouVerdict: false,
           needsYouReason: '   ',
-        )).text,
-        'Nothing to do — no ask found',
+        )).detail,
+        'no ask found',
       );
     });
 
@@ -248,8 +268,8 @@ void main() {
           needsYouReason: 'asks for the DPA by Friday',
           bucket: 'later',
           bucketReason: 'user',
-        )).text,
-        'Nothing to do — the thread is in Later',
+        )).detail,
+        'the thread is in Later',
       );
       expect(
         _line(_row(
@@ -257,8 +277,8 @@ void main() {
           dropReason: 'not_worthy',
           needsYouVerdict: true,
           needsYouReason: 'asks for the DPA by Friday',
-        )).text,
-        'Nothing to do — below the attention threshold',
+        )).detail,
+        'below the attention threshold',
       );
     });
 
@@ -268,13 +288,25 @@ void main() {
           dropped: true,
           dropReason: 'gated',
           gateReason: 'sender_muted',
-        )).text,
-        'Filtered — sender muted',
+        )).detail,
+        'sender muted',
+      );
+      expect(
+        _line(_row(
+          dropped: true,
+          dropReason: 'gated',
+          gateReason: 'sender_muted',
+        )).tooltip,
+        'Dropped: Filtered — sender muted',
       );
       // No gate reason recorded is still a filter, just a quieter one.
       expect(
         _line(_row(dropped: true, dropReason: 'gated')).text,
         'Filtered',
+      );
+      expect(
+        _line(_row(dropped: true, dropReason: 'gated')).detail,
+        isNull,
       );
     });
   });
@@ -292,7 +324,12 @@ void main() {
 
       expect(result.kind, HomeResultKind.inFlight);
       expect(result.text, 'Extracting…');
-      expect(result.tooltip, 'The extract stage is running.');
+      expect(
+        result.detail,
+        isNull,
+        reason: '"not queued yet" beside "Extracting…" would be the row '
+            'contradicting itself',
+      );
       expect(result.tone, BondTone.primary);
       expect(result.retryable, isFalse);
     });
@@ -306,7 +343,7 @@ void main() {
       ));
 
       expect(result.text, 'Waiting on storyline');
-      expect(result.tooltip, 'Queued behind other work.');
+      expect(result.detail, isNull);
     });
 
     test('nothing running and nothing queued says so', () {
@@ -316,11 +353,9 @@ void main() {
         settle: 'pending',
       ));
 
-      expect(result.text, 'Waiting on storyline — not queued yet');
-      expect(
-        result.tooltip,
-        'Nothing is queued for this yet; the next sync pass queues it.',
-      );
+      expect(result.text, 'Waiting on storyline');
+      expect(result.detail, 'Not queued yet');
+      expect(result.tooltip, 'Waiting on storyline — Not queued yet');
     });
   });
 
@@ -333,8 +368,9 @@ void main() {
       ));
 
       expect(result.kind, HomeResultKind.needsYou);
-      expect(result.text, 'Needs you — a direct Teams message');
-      expect(result.tooltip, result.text);
+      expect(result.text, 'Needs you');
+      expect(result.detail, 'a direct Teams message');
+      expect(result.tooltip, 'Needs you — a direct Teams message');
       expect(result.tone, BondTone.attention);
     });
 
@@ -343,19 +379,19 @@ void main() {
         _line(_row(
           needsYou: true,
           needsYouReason: 'asks you to confirm Thursday',
-        )).text,
-        'Needs you — asks you to confirm Thursday',
+        )).detail,
+        'asks you to confirm Thursday',
       );
     });
 
     test('no reason at all still says who decided', () {
       expect(
-        _line(_row(needsYou: true)).text,
-        'Needs you — the app thinks this wants you',
+        _line(_row(needsYou: true)).detail,
+        'the app thinks this wants you',
       );
       expect(
-        _line(_row(needsYou: true, needsYouReason: '  ')).text,
-        'Needs you — the app thinks this wants you',
+        _line(_row(needsYou: true, needsYouReason: '  ')).detail,
+        'the app thinks this wants you',
       );
     });
 
@@ -391,7 +427,12 @@ void main() {
       ));
 
       expect(result.kind, HomeResultKind.filed);
-      expect(result.text, 'Filed in Website redesign — same launch thread');
+      expect(result.text, 'Filed in Website redesign');
+      expect(result.detail, 'same launch thread');
+      expect(
+        result.tooltip,
+        'Filed in Website redesign — same launch thread',
+      );
       expect(result.tone, BondTone.success);
     });
 
@@ -402,8 +443,8 @@ void main() {
           storylineTitle: 'Website redesign',
           storylineEvidence: 'same launch thread',
           storylineAddedBy: 'user',
-        )).text,
-        'Filed in Website redesign — filed by you',
+        )).detail,
+        'filed by you',
       );
       expect(
         homeFiledEvidence(_row(storylineAddedBy: 'user')),
@@ -413,15 +454,16 @@ void main() {
 
     test('no evidence is a shorter sentence, not an empty clause', () {
       expect(
-        _line(_row(storylineId: 's1', storylineTitle: 'Website redesign')).text,
-        'Filed in Website redesign',
+        _line(_row(storylineId: 's1', storylineTitle: 'Website redesign'))
+            .detail,
+        isNull,
       );
       expect(
         _line(_row(
           storylineId: 's1',
           storylineTitle: 'Website redesign',
           storylineEvidence: '   ',
-        )).text,
+        )).tooltip,
         'Filed in Website redesign',
       );
     });
@@ -437,25 +479,29 @@ void main() {
   group('later', () {
     test('every reason the sweep writes has words', () {
       expect(
+        _line(_row(bucket: 'later', bucketReason: 'low_value')).detail,
+        'low value',
+      );
+      expect(
+        _line(_row(bucket: 'later', bucketReason: 'user')).detail,
+        'you deferred it',
+      );
+      expect(
+        _line(_row(bucket: 'later', bucketReason: 'sender_pref')).detail,
+        'sender rule',
+      );
+      expect(
         _line(_row(bucket: 'later', bucketReason: 'low_value')).text,
-        'Later — low value',
-      );
-      expect(
-        _line(_row(bucket: 'later', bucketReason: 'user')).text,
-        'Later — you deferred it',
-      );
-      expect(
-        _line(_row(bucket: 'later', bucketReason: 'sender_pref')).text,
-        'Later — sender rule',
+        'Later',
       );
     });
 
     test('a reason this build has never heard of reads as itself', () {
       expect(
-        _line(_row(bucket: 'later', bucketReason: 'quiet_hours')).text,
-        'Later — quiet_hours',
+        _line(_row(bucket: 'later', bucketReason: 'quiet_hours')).detail,
+        'quiet_hours',
       );
-      expect(_line(_row(bucket: 'later')).text, 'Later — deferred');
+      expect(_line(_row(bucket: 'later')).detail, 'deferred');
     });
 
     test('another bucket is not this sentence', () {
@@ -471,6 +517,8 @@ void main() {
 
     expect(result.kind, HomeResultKind.draftReady);
     expect(result.text, 'Draft ready');
+    expect(result.detail, isNull);
+    expect(result.tooltip, 'Draft ready');
     expect(result.tone, BondTone.success);
   });
 
@@ -480,6 +528,7 @@ void main() {
 
       expect(result.kind, HomeResultKind.nothing);
       expect(result.text, 'Nothing to do');
+      expect(result.detail, isNull);
       expect(result.tooltip, 'Nothing to do');
       expect(result.tone, BondTone.neutral);
     });
@@ -501,6 +550,82 @@ void main() {
         _line(_row(needsYouReason: 'looked like an ask once')).tooltip,
         'Nothing to do',
       );
+    });
+  });
+
+  group('the ask line', () {
+    HomeAsk ask(HomeFeedRow row) => askLine(row, _line(row));
+
+    test('a needs-you row prefers the thread\'s ask over everything', () {
+      final result = ask(_row(
+        needsYou: true,
+        needsYouReason: 'asks you to confirm Thursday',
+        ctaText: 'Confirm Thursday with Sarah',
+        summary: 'Sarah proposes moving the launch',
+      ));
+
+      expect(result.text, 'Confirm Thursday with Sarah');
+      expect(result.ask, isTrue);
+    });
+
+    test('then the judge\'s reason, then the reason clause', () {
+      expect(
+        ask(_row(
+          needsYou: true,
+          needsYouReason: 'asks you to confirm Thursday',
+          summary: 'Sarah proposes moving the launch',
+        )).text,
+        'asks you to confirm Thursday',
+        reason: 'an ask is per thread; the summary is about one message on it',
+      );
+      // No ask and no reason: the clause the Result cell put down is what is
+      // left, and it is better than a blank.
+      expect(
+        ask(_row(needsYou: true)).text,
+        'the app thinks this wants you',
+      );
+      // Whitespace is not an ask.
+      expect(
+        ask(_row(needsYou: true, ctaText: '   ', needsYouReason: '  ')).text,
+        'the app thinks this wants you',
+      );
+    });
+
+    test('a settled row shows the summary, and is not an ask', () {
+      final result = ask(_row(summary: 'A receipt for the annual licence'));
+
+      expect(result.text, 'A receipt for the annual licence');
+      expect(result.ask, isFalse);
+    });
+
+    test('a dropped row is never an ask, whatever the thread wanted', () {
+      // The app judged this one did not need the owner. Drawing its CTA as
+      // work would be the app arguing with itself.
+      final result = ask(_row(
+        dropped: true,
+        dropReason: 'newsletter',
+        needsYou: true,
+        ctaText: 'Reply to the newsletter',
+        summary: 'This week in widgets',
+      ));
+
+      expect(result.text, 'This week in widgets');
+      expect(result.ask, isFalse);
+    });
+
+    test('a row with no summary falls back to the reason clause', () {
+      // A gate-dropped message never reached triage, so there is no summary
+      // for it to fall back to.
+      expect(
+        ask(_row(
+          dropped: true,
+          dropReason: 'gated',
+          gateReason: 'sender_muted',
+        )).text,
+        'sender muted',
+      );
+      // And a row with neither is empty rather than inventing a sentence.
+      expect(ask(_row()).text, '');
     });
   });
 

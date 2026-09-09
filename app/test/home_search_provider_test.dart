@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/home_models.dart';
+import 'package:bond_inbox/models/home_sort.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/services/message_search.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
@@ -108,7 +109,7 @@ void main() {
     final notifier = HomeFeedNotifier(
       store,
       searchRunner: runner.call,
-      persistIncludeDropped: (_) async {},
+      persistSort: (_) async {},
       bus: live ? bus : null,
     );
     addTearDown(notifier.dispose);
@@ -142,7 +143,9 @@ void main() {
     // that has its own test below.
     notifier.exitSearch();
 
-    await notifier.setIncludeDropped(true);
+    // Dropped is one of the filters that shows the pile, so the runner's
+    // `includeDropped` follows it.
+    await notifier.setFilter(HomeFilter.dropped);
     final second = notifier.submitSearch('invoice');
     expect(
       runner.calls.last,
@@ -314,13 +317,13 @@ void main() {
     await second;
   });
 
-  test('the dropped toggle re-asks the question', () async {
+  test('a filter change re-asks the question', () async {
     final notifier = build();
     final first = notifier.submitSearch('invoice');
     runner.answer(0, _hits('invoice', ['a']));
     await first;
 
-    final toggled = notifier.setIncludeDropped(true);
+    final toggled = notifier.setFilter(HomeFilter.dropped);
     // The reload runs first, so the re-ask is queued behind it: the answer is
     // completed once the call has actually been made.
     await pumpEventQueue();
@@ -338,12 +341,12 @@ void main() {
     expect(notifier.state.search!.hits, hasLength(2));
   });
 
-  test('the toggle re-asks even a question still in flight', () async {
+  test('a filter change re-asks even a question still in flight', () async {
     final notifier = build();
     // Never answered: the toggle flips while the index is still thinking.
     final first = notifier.submitSearch('invoice');
 
-    final toggled = notifier.setIncludeDropped(true);
+    final toggled = notifier.setFilter(HomeFilter.dropped);
     await pumpEventQueue();
     expect(
       runner.calls.last,
