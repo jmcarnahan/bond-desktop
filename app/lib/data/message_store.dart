@@ -2833,6 +2833,18 @@ RETURNING *
   /// when a name was actually filled — [stripSenderIdentificationTips]' shape,
   /// for its reasons.
   Future<int> fillParticipantNames() async {
+    // The rows that could change, found first: on a store that never had a
+    // nameless participant this returns before either scan below runs.
+    final candidates = await db
+        .customSelect(
+          'SELECT source, conversation_key, participants_json '
+          'FROM conversations '
+          'WHERE participants_json LIKE \'%"name":null%\' '
+          '   OR participants_json LIKE \'%"name":""%\'',
+        )
+        .get();
+    if (candidates.isEmpty) return 0;
+
     // Built ONCE, over the whole store: a per-row lookup would be two queries
     // per candidate conversation, and the answer is the same every time.
     final names = <String, String>{};
@@ -2849,14 +2861,18 @@ RETURNING *
         names.putIfAbsent(address, () => name);
       }
     }
-    // Newest first, so the name somebody signs with today wins over one they
-    // used a year ago. `putIfAbsent` keeps the first row seen.
+    // One row per address, carrying the name off its NEWEST message — SQLite's
+    // bare-column rule under MAX() — so the name somebody signs with today
+    // wins over one they used a year ago, and the whole messages table is not
+    // pulled into memory to decide it. `putIfAbsent` keeps a participant's
+    // own entry over this.
     for (final row in await db
         .customSelect(
-          'SELECT from_address, from_name FROM messages '
+          'SELECT from_address, from_name, MAX(received_at) AS at '
+          'FROM messages '
           "WHERE from_name IS NOT NULL AND from_name <> '' "
           '  AND from_address IS NOT NULL '
-          'ORDER BY received_at DESC',
+          'GROUP BY lower(from_address)',
         )
         .get()) {
       final address =
@@ -2866,15 +2882,6 @@ RETURNING *
       names.putIfAbsent(address, () => name);
     }
     if (names.isEmpty) return 0;
-
-    final candidates = await db
-        .customSelect(
-          'SELECT source, conversation_key, participants_json '
-          'FROM conversations '
-          'WHERE participants_json LIKE \'%"name":null%\' '
-          '   OR participants_json LIKE \'%"name":""%\'',
-        )
-        .get();
 
     var changed = 0;
     for (final row in candidates) {

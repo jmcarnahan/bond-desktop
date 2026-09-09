@@ -311,6 +311,73 @@ void main() {
     await settleQueues(tester);
   });
 
+  testWidgets('the needle and the pill reset when another person opens',
+      (tester) async {
+    // A filter is a question about the last person; carried into the next
+    // one it opens an empty room over somebody who has plenty.
+    await seedPerson();
+    await seedMessage('c9', 'c9-m1',
+        subject: 'Office move',
+        who: 'Priya Raman',
+        address: 'priya@example.test',
+        receivedAt: '2026-08-27T09:00:00Z');
+    await seedThread('c9', 'Office move',
+        participantsJson:
+            '[{"name":"Priya Raman","email":"priya@example.test"}]',
+        receivedAt: '2026-08-27T09:00:00Z');
+    await pumpInbox(tester);
+    await openRoom(tester, 'Dana Whitfield');
+
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(PersonRoomPane),
+        matching: find.byType(TextField),
+      ),
+      'launch',
+    );
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: find.byKey(PersonRoomPane.filterPillsKey),
+      matching: find.text('Groups'),
+    ));
+    await tester.pump();
+    expect(find.byType(RootMessageCard), findsNothing);
+
+    await openRoom(tester, 'Priya Raman');
+
+    expect(find.byKey(RootMessageCard.keyFor('email', 'c9')), findsOneWidget);
+    final field = tester.widget<TextField>(find.descendant(
+      of: find.byType(PersonRoomPane),
+      matching: find.byType(TextField),
+    ));
+    expect(field.controller!.text, '');
+    await settleQueues(tester);
+  });
+
+  testWidgets('a person only ever met in a group chat gets no Message action',
+      (tester) async {
+    // The absent arm, on purpose: the only thread with Priya is a chat with
+    // Dana in it too, and a Message that opened THAT would put a private line
+    // in front of somebody else. (A group MAIL thread is different — a mail
+    // is addressed on its face — and does offer Message.)
+    await seedMessage('chat-9', 'chat-9-m1',
+        source: 'teams',
+        subject: 'Office move',
+        address: 'teams:19:abc',
+        body: 'Boxes on Monday?');
+    await seedThread('chat-9', 'Office move',
+        source: 'teams',
+        participantsJson: '[{"name":"Dana Whitfield","email":"teams:19:abc"},'
+            '{"name":"Priya Raman","email":"teams:19:def"}]');
+    await pumpInbox(tester);
+    await openRoom(tester, '💬 Priya Raman');
+
+    expect(find.byKey(RootMessageCard.keyFor('teams', 'chat-9')), findsOneWidget);
+    expect(find.byTooltip('Message'), findsNothing);
+    expect(find.byTooltip('Profile'), findsOneWidget);
+    await settleQueues(tester);
+  });
+
   testWidgets('the filter field narrows the room as it is typed',
       (tester) async {
     await seedPerson();

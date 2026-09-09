@@ -235,6 +235,27 @@ void main() {
       expect(find.text('Send this reply?'), findsNothing);
     });
 
+    testWidgets('a send that goes away takes its question with it',
+        (tester) async {
+      // The screen wires onSend from the draft's capability, which the poll's
+      // re-read can drop a rung — a keychain that would not open, say. The
+      // armed question must not stand over a callback that is no longer
+      // there, or the Send button throws on the tap.
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+      await tester.tap(find.text('Confirm Friday'));
+      await tester.pump();
+      expect(find.byKey(QuickReplyBar.confirmSendKeyFor(0)), findsOneWidget);
+
+      // Same two options, no send: the widget updates in place.
+      await pumpBar(tester, onSend: null);
+
+      expect(find.byKey(QuickReplyBar.confirmSendKeyFor(0)), findsNothing);
+      expect(find.text('Send this reply?'), findsNothing);
+      expect(tester.takeException(), isNull);
+      expect(sent, isEmpty);
+    });
+
     testWidgets('a tap asks on that card and no other', (tester) async {
       final sent = <String>[];
       await pumpBar(tester, onSend: (o) => sent.add(o.stance));

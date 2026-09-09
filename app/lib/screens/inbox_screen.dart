@@ -309,12 +309,45 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// draft read on another screen has nothing in any box.
   final Map<String, String?> _staged = {};
 
+  /// Bumped on every EXPLICIT stage and on the ✕, and part of the composer's
+  /// key — see [_composer] — so those two rebuild the field from scratch. A
+  /// quiet stage ([_stageQuietly]) leaves it alone, which is what keeps a
+  /// sentence typed while the model was thinking from being thrown away when
+  /// the model's answer lands.
+  final Map<String, int> _stageSeq = {};
+
   String _stageKey(DraftTarget t) => '${t.source}|${t.conversationKey}';
 
-  void _stage(DraftTarget t, {String? body}) =>
-      setState(() => _staged[_stageKey(t)] = body);
+  /// Puts [body] — or, null, the draft's own body — in the box, and rebuilds
+  /// the box to do it: the reader asked for these words by name (a card, the
+  /// `Use it` line), and a field holding their own half-typed sentence has to
+  /// give way to them.
+  void _stage(DraftTarget t, {String? body}) => setState(() {
+        final key = _stageKey(t);
+        _staged[key] = body;
+        _stageSeq[key] = (_stageSeq[key] ?? 0) + 1;
+      });
 
-  void _unstage(DraftTarget t) => setState(() => _staged.remove(_stageKey(t)));
+  /// Tells the box to LISTEN for the draft — the generate the reader just
+  /// asked for — without rebuilding it. The words land through the field's own
+  /// update, which never overwrites typed text: a sentence written while the
+  /// model was thinking outranks what the model wrote.
+  void _stageQuietly(DraftTarget t) =>
+      setState(() => _staged[_stageKey(t)] = null);
+
+  /// Empties the box, and rebuilds it empty.
+  void _unstage(DraftTarget t) => setState(() {
+        final key = _stageKey(t);
+        _staged.remove(key);
+        _stageSeq[key] = (_stageSeq[key] ?? 0) + 1;
+      });
+
+  /// The side thread whose box should take the cursor the moment it mounts —
+  /// set by the room header's `Message`, which opens a chat beside and means
+  /// "type here". Read by [_composer] as the field's `autofocus`; a focus
+  /// requested a frame after the open would miss, because the box appears
+  /// only once the draft's capability has been read.
+  DraftTarget? _focusSideOnMount;
 
   /// The text the box should hold for [target], or null for an empty box.
   ///
@@ -726,6 +759,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _clearOverlays() {
     _side = null;
     _sideFull = false;
+    _focusSideOnMount = null;
     _addingToStorylineId = null;
     _pickingStorylineForThread = null;
     _railOpen = false;
@@ -741,12 +775,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   void _openBeside(SidePanel panel) => setState(() {
         _side = panel;
         _sideFull = false;
+        _focusSideOnMount = null;
         _dropSideReplyTarget();
       });
 
   void _closeSide() => setState(() {
         _side = null;
         _sideFull = false;
+        _focusSideOnMount = null;
         _dropSideReplyTarget();
       });
 
@@ -2904,19 +2940,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// A direct chat wins: a sentence typed at a person's name belongs in the
   /// conversation that is only the two of them, and the chat opens BESIDE with
   /// its own box focused, the way the hover Reply hands over the cursor.
-  /// Failing that it is a new mail to their newest thread's people. A person
-  /// the reader has only ever been in group threads with gets no action at
-  /// all, rather than one that would put a private line in front of nine
-  /// people.
+  /// Failing that it is a new mail to their newest mail thread's people — a
+  /// group thread included, because a mail is addressed on its face and the
+  /// reader sees the To line before anything goes. A person met only in group
+  /// CHATS gets no action at all: a chat has no To line to check, and the only
+  /// place a sentence could land is in front of everybody in it.
   VoidCallback? _messagePersonFor(PersonRoom room) {
     final chat = directChat(room);
     if (chat != null) {
       return () {
         _openThreadBeside(chat.source, chat.id);
-        // The box is in the thread that just opened beside; put the cursor in
-        // it, the way the hover Reply does.
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _sideComposerFocus.requestFocus();
+        // The box is in the thread that just opened beside, and it takes the
+        // cursor when it MOUNTS — not a frame from now, because the box is
+        // drawn only once the draft's capability has been read, and a focus
+        // asked for before that has nothing to land on.
+        setState(() {
+          _focusSideOnMount = (source: chat.source, conversationKey: chat.id);
         });
       };
     }
@@ -3119,7 +3158,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? (_) {
               // Asked for, so it lands in the box: staged before the generate
               // starts, so the words are not written to a box nobody opened.
-              _stage(target);
+              // Quietly — anything typed while the model thinks stays.
+              _stageQuietly(target);
               unawaited(notifier.generate());
             }
           : null,
@@ -3461,8 +3501,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     });
     // The reader asked for a draft about this file, so the box is the place it
     // belongs — staged before the generate, so the words land in an open box
-    // rather than waiting on a card for a second gesture.
-    _stage(from);
+    // rather than waiting on a card for a second gesture. Quietly, so a
+    // sentence typed while the model thinks is not thrown away by its answer.
+    _stageQuietly(from);
     unawaited(ref.read(draftProvider(from).notifier).generate(
           pinnedAttachmentIds: [attachment.attachmentId],
         ));
@@ -3899,13 +3940,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // Keyed on the conversation so switching threads builds a fresh field
       // rather than carrying one thread's typed text into another's — and on
       // the send epoch, so a COMPLETED send builds a fresh empty one instead
-      // of leaving the sent text armed behind a re-enabled button. The staged
-      // flag is the third: the ✕ has to rebuild an EMPTY field and a stage a
-      // filled one, and the field's own controller would otherwise keep
-      // whatever it was last given.
-      key: ValueKey('composer-$conversationKey-${draft.sendEpoch}'
-          '-${stagedBody == null ? 'empty' : 'staged'}'),
+      // of leaving the sent text armed behind a re-enabled button. The stage
+      // sequence is the third: the ✕ has to rebuild an EMPTY field and a card
+      // a filled one, and the field's own controller would otherwise keep
+      // whatever it was last given. It is a COUNTER and not "is anything
+      // staged", deliberately: a draft the reader asked for arrives through
+      // the field's own update, which keeps a sentence they typed while
+      // waiting — a key that flipped when the draft landed would rebuild the
+      // field and lose it.
+      key: ValueKey(
+        'composer-$conversationKey-${draft.sendEpoch}'
+        '-${_stageSeq[_stageKey(target)] ?? 0}',
+      ),
       suggestedBody: stagedBody,
+      focusOnMount:
+          focusNode == _sideComposerFocus && _focusSideOnMount == target,
       provenance: _provenance,
       generating: draft.generating,
       sending: draft.sending,
@@ -3916,9 +3965,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // rules differ, and those ride in the user message — so Regenerate means
       // exactly the same thing on either kind of thread.
       // Staged FIRST, then asked for: the reader pressed a button to get words
-      // in this box, so the box has to be listening when they arrive.
+      // in this box, so the box has to be listening when they arrive. Quietly:
+      // whatever they type while the model thinks outranks what it writes.
       onGenerate: () {
-        _stage(target);
+        _stageQuietly(target);
         notifier.generate();
       },
       // The ✕ empties the BOX and nothing else. The suggestion is not thrown

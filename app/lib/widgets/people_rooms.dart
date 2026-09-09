@@ -319,7 +319,12 @@ List<PersonRoom> peopleRooms(
       i,
       PersonRoom(
         key: key,
-        title: best == null ? selfRoomTitle : _displayOf(best),
+        // By the KEY, which is what decided this is nobody's room, not by
+        // whether the ranking loop found somebody — the two agree today, and
+        // the key is the one that cannot stop agreeing.
+        title: key == noSenderRoom
+            ? selfRoomTitle
+            : (best == null ? key : _displayOf(best)),
         threads: threads,
         unread: unread,
         needsYou: needsYou,

@@ -38,6 +38,7 @@ PersonRoom _room(
   int needsYou = 0,
   List<Conversation> threads = const [],
   Set<ThreadTargetLike> direct = const {},
+  Map<String, List<String>> companions = const {},
 }) =>
     PersonRoom(
       key: key,
@@ -51,6 +52,10 @@ PersonRoom _room(
       direct: {
         for (final d in direct)
           (source: d.source, conversationKey: d.conversationKey),
+      },
+      companions: {
+        for (final entry in companions.entries)
+          (source: 'email', conversationKey: entry.key): entry.value,
       },
     );
 
@@ -271,6 +276,29 @@ void main() {
       expect(
         filterRoomThreads(room, RoomFilter.all, 'priya').map((c) => c.id),
         ['g1'],
+      );
+    });
+
+    test('and the name the card shows for a recipient stored nameless', () {
+      // The room was grouped from resolved names; a thread whose recipient
+      // the sync stored as an address alone still has to answer to the name
+      // its card is drawing.
+      final nameless = _thread(
+        'out-1',
+        subject: 'Rate sheet',
+        people: const [Participant(email: 'priya@example.test')],
+      );
+      final resolved = _room(
+        'dana',
+        threads: [nameless],
+        companions: const {
+          'out-1': ['Priya Raman'],
+        },
+      );
+      expect(
+        filterRoomThreads(resolved, RoomFilter.all, 'priya raman')
+            .map((c) => c.id),
+        ['out-1'],
       );
     });
 

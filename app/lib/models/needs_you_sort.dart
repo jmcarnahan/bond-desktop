@@ -1,4 +1,5 @@
 import 'message_models.dart';
+import 'stable_sort.dart';
 
 /// How the Needs You pile is ordered, everywhere it is drawn.
 ///
@@ -32,12 +33,11 @@ extension NeedsYouSortLabel on NeedsYouSort {
 /// own order, decided once, and re-deriving it here would be a second opinion
 /// about a ranking that already has one.
 ///
-/// [NeedsYouSort.newest] is by `lastMessageAt` descending and STABLE: rows
-/// with equal stamps keep the order they arrived in, so the ranking still
-/// shows through wherever the clock says nothing, and a row with no stamp at
-/// all sorts last rather than to the top a missing string would otherwise buy
-/// it. Dart's own sort is not stable, so the input position is carried through
-/// and used as the final tie-break rather than trusted.
+/// [NeedsYouSort.newest] is by `lastMessageAt` descending and STABLE
+/// ([stableSorted]): rows with equal stamps keep the order they arrived in, so
+/// the ranking still shows through wherever the clock says nothing, and a row
+/// with no stamp at all sorts last rather than to the top a missing string
+/// would otherwise buy it.
 ///
 /// Same rows in, same rows out. This never filters — the tabs do that, and a
 /// sort that could also drop a row would make the badge over the section a
@@ -45,21 +45,13 @@ extension NeedsYouSortLabel on NeedsYouSort {
 List<Conversation> sortNeedsYou(NeedsYouSort sort, List<Conversation> rows) {
   if (sort == NeedsYouSort.priority) return rows;
 
-  final indexed = <(int, Conversation)>[];
-  var index = 0;
-  for (final c in rows) {
-    indexed.add((index++, c));
-  }
-  indexed.sort((a, b) {
-    final left = a.$2.lastMessageAt ?? '';
-    final right = b.$2.lastMessageAt ?? '';
+  return stableSorted(rows, (a, b) {
+    final left = a.lastMessageAt ?? '';
+    final right = b.lastMessageAt ?? '';
     // An undated row goes to the bottom whichever side it is on. ISO-8601 UTC
     // strings compare lexicographically, so nothing has to be parsed to put
     // the rest in order.
     if (left.isEmpty != right.isEmpty) return left.isEmpty ? 1 : -1;
-    final byDate = right.compareTo(left);
-    if (byDate != 0) return byDate;
-    return a.$1.compareTo(b.$1);
+    return right.compareTo(left);
   });
-  return [for (final (_, c) in indexed) c];
 }

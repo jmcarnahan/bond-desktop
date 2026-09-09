@@ -118,11 +118,18 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   /// remember to copy it.
   final Set<String> _auditing = {};
 
-  /// Releases [_auditing] when nothing ever reports. A model server that is
-  /// not running parks the item with work still "remaining", and a button
-  /// left inert until the server comes back is a button that lies. Two
-  /// minutes is longer than any real pass over a room-sized storyline.
-  Timer? _auditBackstop;
+  /// Releases an id from [_auditing] when nothing ever reports on it. A model
+  /// server that is not running parks the item with work still "remaining",
+  /// and a button left inert until the server comes back is a button that
+  /// lies. Two minutes is longer than any real pass over a room-sized
+  /// storyline. One timer PER storyline: a second re-check asked for a
+  /// minute after the first must not push the first one's release out to a
+  /// fresh two minutes.
+  final Map<String, Timer> _auditBackstops = {};
+
+  /// How long the backstop waits. A constructor argument only so a test can
+  /// prove the release without a two-minute clock.
+  final Duration _auditBackstopAfter;
 
   int _fetchSeq = 0;
 
@@ -131,7 +138,9 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
     this._service, {
     AiWorker? aiWorker,
     this._onMembersChanged,
+    Duration auditBackstop = const Duration(minutes: 2),
   })  : _worker = aiWorker,
+        _auditBackstopAfter = auditBackstop,
         super(const StorylinesInitial()) {
     final worker = aiWorker;
     if (worker == null) return;
@@ -143,10 +152,17 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
           progress.remaining == 0 &&
           _auditing.isNotEmpty) {
         _auditing.clear();
-        _auditBackstop?.cancel();
+        _cancelBackstops();
       }
       _scheduleReload();
     });
+  }
+
+  void _cancelBackstops() {
+    for (final timer in _auditBackstops.values) {
+      timer.cancel();
+    }
+    _auditBackstops.clear();
   }
 
   /// Re-publishes the rows that are already loaded with whatever [_auditing]
@@ -174,7 +190,7 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   @override
   void dispose() {
     _reload?.cancel();
-    _auditBackstop?.cancel();
+    _cancelBackstops();
     _progress?.cancel();
     super.dispose();
   }
@@ -306,10 +322,11 @@ class StorylinesNotifier extends StateNotifier<StorylinesState> {
   Future<void> auditNow(String id) async {
     _auditing.add(id);
     _republish();
-    _auditBackstop?.cancel();
-    _auditBackstop = Timer(const Duration(minutes: 2), () {
+    _auditBackstops.remove(id)?.cancel();
+    _auditBackstops[id] = Timer(_auditBackstopAfter, () {
+      _auditBackstops.remove(id);
       if (!mounted) return;
-      _auditing.clear();
+      _auditing.remove(id);
       _republish();
     });
     await _store.requeueWork('storyline_audit', _source, id);

@@ -3,6 +3,7 @@
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
+import 'package:bond_inbox/providers/draft_provider.dart' show draftProvider;
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
@@ -177,6 +178,30 @@ void main() {
       body: 'Yes, Friday works for me.',
       optionsJson: _newerOptions,
     );
+  }
+
+  /// The same thread with NO draft yet — the shape a box is in while the
+  /// reader waits on a generate they asked for.
+  Future<void> seedBareThread() async {
+    await store.upsertMessage({
+      'source_message_id': 'c1-m1',
+      'conversation_key': 'c1',
+      'direction': 'inbound',
+      'subject': 'Homepage copy',
+      'from_name': 'Eric Vance',
+      'from_address': 'eric@example.com',
+      'received_at': '2026-08-28T09:00:00Z',
+      'body_text': 'The homepage copy is in.',
+    });
+    await store.upsertConversation({
+      'conversation_key': 'c1',
+      'subject': 'Homepage copy',
+      'participants_json': '[{"name":"Eric Vance","email":"eric@example.com"}]',
+      'state': 'needs_reply',
+      'last_message_at': '2026-08-28T09:00:00Z',
+      'last_inbound_at': '2026-08-28T09:00:00Z',
+    });
+    await store.recomputeConversationCounts('email', 'c1');
   }
 
   Future<void> pumpScreen(
@@ -580,6 +605,76 @@ void main() {
     // The newest message's card names nothing: the send already resolves to
     // that message, and a caption saying so would be saying nothing.
     expect(find.byKey(const Key('replying-to')), findsNothing);
+  });
+
+  testWidgets('a sentence typed while a draft is coming survives its arrival',
+      (tester) async {
+    // Draft reply stages the box QUIETLY: the words land through the field's
+    // own update, which never overwrites typed text. A key that flipped when
+    // the draft arrived rebuilt the field and lost the sentence.
+    await seedBareThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    // No model behind the test, so the generate fails — which is exactly the
+    // window in which the reader types.
+    await tester.tap(find.text('Draft reply'));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(Composer),
+        matching: find.byType(TextField),
+      ),
+      'Tuesday works for me.',
+    );
+    await tester.pump();
+
+    // The draft lands.
+    await store.upsertDraft(
+      source: 'email',
+      conversationKey: 'c1',
+      replyToMessageId: 'c1-m1',
+      body: 'Model text.',
+      optionsJson: _olderOptions,
+    );
+    final container =
+        ProviderScope.containerOf(tester.element(find.byType(InboxScreen)));
+    await container
+        .read(draftProvider((source: 'email', conversationKey: 'c1')).notifier)
+        .load();
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    expect(boxText(tester), 'Tuesday works for me.');
+  });
+
+  testWidgets('a card picked over typed words puts ITS words in the box',
+      (tester) async {
+    // The reader asked for the card by name; a box that kept their half-typed
+    // sentence and said nothing would have ignored them.
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(Composer),
+        matching: find.byType(TextField),
+      ),
+      'Half a thought',
+    );
+    await tester.pump();
+
+    await tester.tap(cardOn('c1-m1', 'Confirm receipt'));
+    await tester.pump();
+    await tester.tap(editOn('c1-m1', 0));
+    await tester.pump();
+    await tester.pump();
+
+    expect(boxText(tester), 'Got it, thanks.');
   });
 
   testWidgets('a send leaves the next box empty rather than re-staging',

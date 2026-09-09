@@ -1,6 +1,7 @@
 import '../services/conversation_state.dart' show stripReFw;
 import '../widgets/people_rooms.dart';
 import 'message_models.dart';
+import 'stable_sort.dart';
 
 /// How the People directory and one person's room are ordered and narrowed.
 ///
@@ -72,38 +73,26 @@ extension RoomFilterLabel on RoomFilter {
 /// which is the sensible thing to fall back to once the question "who is
 /// waiting" has been answered.
 ///
-/// Dart's sort is not stable, so the input position is carried through and
-/// used as the final tie-break rather than trusted.
+/// Stable through [stableSorted], so ties keep the order they came in.
 List<PersonRoom> sortRooms(PeopleSort sort, List<PersonRoom> rooms) {
   if (sort == PeopleSort.recent) return rooms;
 
-  final indexed = <(int, PersonRoom)>[];
-  var index = 0;
-  for (final room in rooms) {
-    indexed.add((index++, room));
-  }
-
-  indexed.sort((a, b) {
+  return stableSorted(rooms, (a, b) {
     switch (sort) {
       case PeopleSort.recent:
-        break;
+        return 0;
       case PeopleSort.name:
-        final left = a.$2.key == noSenderRoom;
-        final right = b.$2.key == noSenderRoom;
+        final left = a.key == noSenderRoom;
+        final right = b.key == noSenderRoom;
         if (left != right) return left ? 1 : -1;
-        final byName =
-            a.$2.title.toLowerCase().compareTo(b.$2.title.toLowerCase());
-        if (byName != 0) return byName;
+        return a.title.toLowerCase().compareTo(b.title.toLowerCase());
       case PeopleSort.needsYou:
-        final left = a.$2.needsYou;
-        final right = b.$2.needsYou;
-        if ((left > 0) != (right > 0)) return left > 0 ? -1 : 1;
-        final byCount = right.compareTo(left);
-        if (byCount != 0) return byCount;
+        if ((a.needsYou > 0) != (b.needsYou > 0)) {
+          return a.needsYou > 0 ? -1 : 1;
+        }
+        return b.needsYou.compareTo(a.needsYou);
     }
-    return a.$1.compareTo(b.$1);
   });
-  return [for (final (_, room) in indexed) room];
 }
 
 /// The directory narrowed. Order preserved — this never reorders, because the
@@ -144,26 +133,17 @@ List<PersonRoom> filterRooms(
 /// "the oldest" either, and putting it at whichever end the reader is looking
 /// at would make an unstamped row the first thing they see twice over.
 List<Conversation> sortRoomThreads(RoomSort sort, List<Conversation> threads) {
-  final indexed = <(int, Conversation)>[];
-  var index = 0;
-  for (final c in threads) {
-    indexed.add((index++, c));
-  }
-
-  indexed.sort((a, b) {
-    final left = a.$2.lastMessageAt ?? '';
-    final right = b.$2.lastMessageAt ?? '';
+  return stableSorted(threads, (a, b) {
+    final left = a.lastMessageAt ?? '';
+    final right = b.lastMessageAt ?? '';
     if (left.isEmpty != right.isEmpty) return left.isEmpty ? 1 : -1;
-    if (left.isEmpty) return a.$1.compareTo(b.$1);
+    if (left.isEmpty) return 0;
     // ISO-8601 UTC strings compare lexicographically, so nothing has to be
     // parsed to put the rest in order.
-    final byDate = sort == RoomSort.newest
+    return sort == RoomSort.newest
         ? right.compareTo(left)
         : left.compareTo(right);
-    if (byDate != 0) return byDate;
-    return a.$1.compareTo(b.$1);
   });
-  return [for (final (_, c) in indexed) c];
 }
 
 /// One room's threads narrowed. Order preserved, for [filterRooms]' reason.
@@ -173,6 +153,11 @@ List<Conversation> sortRoomThreads(RoomSort sort, List<Conversation> threads) {
 /// remembers, the last line they saw, the ask the app wrote, and whoever else
 /// was on it are all things somebody would type to find one conversation among
 /// a colleague's forty.
+///
+/// "Whoever else" is read off [PersonRoom.companions] — the RESOLVED names the
+/// card draws — as well as the thread's own stored participants: a recipient
+/// the sync stored nameless shows the colleague's name on the card, and the
+/// needle has to find what the card says.
 List<Conversation> filterRoomThreads(
   PersonRoom room,
   RoomFilter filter,
@@ -187,6 +172,11 @@ List<Conversation> filterRoomThreads(
     if ((c.ctaText ?? '').toLowerCase().contains(needle)) return true;
     for (final p in c.participants) {
       if (p.display.toLowerCase().contains(needle)) return true;
+    }
+    final companions =
+        room.companions[(source: c.source, conversationKey: c.id)] ?? const [];
+    for (final name in companions) {
+      if (name.toLowerCase().contains(needle)) return true;
     }
     return false;
   }

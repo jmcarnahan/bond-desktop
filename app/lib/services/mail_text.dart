@@ -24,8 +24,14 @@ library;
 /// Anything after "Learn why this is important" on that line goes with it,
 /// and so do the blank lines under it, so the sender's first sentence comes
 /// first.
+///
+/// Between "from" and "Learn why" Exchange puts ONE address and nothing else,
+/// so that is all the pattern allows: a single run with no whitespace in it.
+/// Anything looser matched a sender's own sentence — "You don't often get
+/// email from me, so here is the update. Learn why this is important to us"
+/// — and deleted it, in place, at ingest.
 final RegExp _senderTip = RegExp(
-  r"^\s*\[?You don['’]t often get email from [^\n]+?\.?\s*"
+  r"^\s*\[?You don['’]t often get email from \S{1,200}?\.?\s*"
   r"Learn why this is important[ \t]*(?:<[^>\n]*>|\([^)\n]*\)|https?://\S+)?"
   r"\]?[ \t.]*(?:\r?\n)*",
   caseSensitive: false,
@@ -40,8 +46,3 @@ String stripSenderIdentification(String text) {
   if (match == null) return text;
   return text.substring(match.end);
 }
-
-/// Whether [text] carries the tip somewhere — the cheap question the one-off
-/// cleanup asks of a stored row before it decides to rewrite it.
-bool hasSenderIdentification(String? text) =>
-    text != null && _senderTip.hasMatch(text);

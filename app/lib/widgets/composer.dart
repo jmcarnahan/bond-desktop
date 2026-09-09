@@ -68,6 +68,17 @@ class Composer extends StatefulWidget {
   /// and the suggestion stays on its card in the transcript.
   final VoidCallback? onDismiss;
 
+  /// Takes the cursor the moment the field MOUNTS. For the host that opened a
+  /// thread beside and wants the reader typing in it at once: the box appears
+  /// only after the draft's capability has been read, which is an async
+  /// keychain read, so a focus requested on the frame after the open lands on
+  /// a node that has nothing to attach to yet. Mount-time focus cannot miss.
+  ///
+  /// An explicit request rather than the field's own `autofocus`, which
+  /// yields to whatever already holds focus — and on this screen something
+  /// always does.
+  final bool focusOnMount;
+
   /// The user started editing. Debounced, so it fires on pauses rather than on
   /// keystrokes.
   final void Function(String body)? onEdited;
@@ -97,6 +108,7 @@ class Composer extends StatefulWidget {
     required this.onSend,
     this.onGenerate,
     this.onDismiss,
+    this.focusOnMount = false,
     this.onEdited,
     this.sending = false,
     this.hint = 'Write a reply…',
@@ -126,6 +138,18 @@ class _ComposerState extends State<Composer> {
   /// The suggestion was closed here, this frame. The host clears its own copy
   /// a beat later; without this the caption would flash back on in between.
   bool _dismissed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.focusOnMount) {
+      // After the first frame, so the node is attached to a scope by the
+      // time it is asked for.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.focusNode?.requestFocus();
+      });
+    }
+  }
 
   Timer? _editDebounce;
 

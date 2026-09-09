@@ -37,9 +37,10 @@ class QuickReplyBar extends StatefulWidget {
   /// nothing at all where there is nothing to ask.
   final List<DraftOption> options;
 
-  /// Whether this build holds a real send grant. It no longer changes what a
-  /// card does — every tap stages, either way — and is kept for the pending
-  /// row's sake and for the hosts that already know the answer.
+  /// Whether this build holds a real send grant. Nothing in this widget reads
+  /// it any more — what a tap does is decided by [onSend] alone — and it stays
+  /// on the constructor only because every host still passes it. Dropping it
+  /// is a follow-up, not a fact about this bar.
   final bool armed;
 
   /// The reader wants these words in the box. What that means is the host's
@@ -135,6 +136,10 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
       // reader was being asked about is not the card that is there now.
       _confirmingSend = null;
     }
+    // And when the send itself went away — a grant that dropped a rung under
+    // the poll's re-read — the question has no answer left. A Send button that
+    // outlived its callback would throw on the tap.
+    if (widget.onSend == null) _confirmingSend = null;
   }
 
   /// Whether two option lists say the same thing. By value, because
@@ -357,7 +362,10 @@ class _QuickReplyBarState extends State<QuickReplyBar> {
                         .withValues(alpha: Composer.suggestedOpacity),
                   ),
                 ),
-                if (_confirmingSend == index) _sendConfirmRow(index, option),
+                // Both halves, on purpose: the row is only ever drawn over a
+                // callback it can call.
+                if (_confirmingSend == index && widget.onSend != null)
+                  _sendConfirmRow(index, option),
               ],
             ),
           ),

@@ -111,8 +111,8 @@ affordance that lied.
 ## What opens where
 
 > List column click → main pane. A row in a list that LIVES IN MAIN (the Needs
-> You overview, the People overview) → side panel, and that row stays lit in the
-> list while it is open. A thread reached from INSIDE a room (a storyline
+> You overview) → side panel, and that row stays lit in the list while it is
+> open. A thread reached from INSIDE a room (a storyline
 > episode card, a person room's card) → side panel. A file → side panel.
 > ⤢ on a thread panel opens it in main; ⤢ on a file opens the full viewer.
 > Opening a file from a side thread REPLACES the side panel.
@@ -124,8 +124,9 @@ The list COLUMN is the other half of that rule. A row on the rail opens in main
 because the column is BESIDE the pane rather than in it; a row on an overview
 opens beside because the list is the pane, and swapping it out for the first
 thread the reader opened would cost them their place in the pile. `ArchivePane`
-is the exception and opens in main: its rows are a pile being cleared, not a
-room being worked in.
+and the People directory are the exceptions and open in main: the archive's
+rows are a pile being cleared, not a room being worked in, and a directory row
+IS a room — the person's — so it opens the way the rail's own row does.
 
 `SidePanel` has five kinds, and the panel shows exactly one of them:
 
@@ -312,8 +313,9 @@ it always did — and every per-message ask line still focuses the box.
 
 **The composer is docked.** Whenever a reply is possible the box is under the
 transcript from the moment the thread opens, placeholder `Reply to <who>…`.
-There is no reply window, no `Reply…` row and no ✕ to close: a thread that can
-be answered says where the answer goes, and the transcript keeps the reader's
+There is no reply window and no `Reply…` row, and the box's ✕ empties it
+rather than closing it: a thread that can be answered says where the answer
+goes, and the transcript keeps the reader's
 attention anyway because the box is quiet until typed in. Where a reply is NOT
 possible — a chat without `Chat.ReadWrite` — the same slot says `Reply in
 Microsoft Teams`. The focus node lives on the screen, one per pane, because the

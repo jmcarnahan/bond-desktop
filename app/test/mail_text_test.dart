@@ -58,9 +58,13 @@ void main() {
     expect(stripSenderIdentification(cut), cut);
   });
 
-  test('hasSenderIdentification is the cheap pre-check', () {
-    expect(hasSenderIdentification('$_tip\nHello.'), isTrue);
-    expect(hasSenderIdentification('Hello.'), isFalse);
-    expect(hasSenderIdentification(null), isFalse);
+  test('a sender\'s own sentence that happens to use both phrases survives',
+      () {
+    // Exchange puts one address and nothing else between "from" and "Learn
+    // why". A pattern that allowed a whole clause there once matched this
+    // and deleted everything up to "to us", in place, at ingest.
+    const body = "You don't often get email from me, so here is the update. "
+        'Learn why this is important to us: we ship Friday.';
+    expect(stripSenderIdentification(body), body);
   });
 }

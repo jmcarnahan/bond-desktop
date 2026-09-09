@@ -336,6 +336,48 @@ void main() {
       expect((notifier.state as StorylinesLoaded).auditing, {'sl-1'});
     });
 
+    test('a re-check nobody ever reports on is released by the backstop',
+        () async {
+      // No worker at all: the item is queued and nothing will drain it. A
+      // model server that is down parks it the same way, and the button
+      // must not stay inert until somebody restarts the server.
+      await seedStoryline('sl-1', status: 'active');
+      final notifier = StorylinesNotifier(
+        store,
+        service,
+        auditBackstop: const Duration(milliseconds: 20),
+      );
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      await notifier.auditNow('sl-1');
+      expect((notifier.state as StorylinesLoaded).auditing, {'sl-1'});
+
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+      expect((notifier.state as StorylinesLoaded).auditing, isEmpty);
+    });
+
+    test('a second re-check does not hold the first one\'s release',
+        () async {
+      await seedStoryline('sl-1', status: 'active');
+      await seedStoryline('sl-2', status: 'active');
+      final notifier = StorylinesNotifier(
+        store,
+        service,
+        auditBackstop: const Duration(milliseconds: 60),
+      );
+      addTearDown(notifier.dispose);
+      await notifier.load();
+
+      await notifier.auditNow('sl-1');
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await notifier.auditNow('sl-2');
+      await Future<void>.delayed(const Duration(milliseconds: 45));
+
+      // The first has had its sixty milliseconds; the second has not.
+      expect((notifier.state as StorylinesLoaded).auditing, {'sl-2'});
+    });
+
     test('a storyline nobody re-checked is not marked as running', () async {
       await seedStoryline('sl-1', status: 'active');
       await seedStoryline('sl-2', status: 'active');

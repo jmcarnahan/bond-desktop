@@ -4,9 +4,6 @@ import '../theme/tokens.dart';
 import 'chips.dart';
 import 'source_glyph.dart';
 
-/// Which connector the inbox is showing: All, Mail, or Teams.
-///
-
 /// How a narrowed source is named everywhere it is named — on its pill, in
 /// a pane's title, in an empty pane's notice. One spelling, glyph and all,
 /// so the title over an empty pane reads exactly like the pill that emptied
@@ -14,6 +11,8 @@ import 'source_glyph.dart';
 String sourceFilterLabel(String source) =>
     source == 'teams' ? '$teamsGlyph Teams' : '$mailGlyph Mail';
 
+/// Which connector the inbox is showing: All, Mail, or Teams.
+///
 /// Null is All and is the value the app starts on. A sealed enum would be
 /// tidier to read here and worse everywhere else — the value is compared
 /// against `Conversation.source`, which is a string from a database column,

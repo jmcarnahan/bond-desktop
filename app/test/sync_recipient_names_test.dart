@@ -256,6 +256,39 @@ void main() {
     ]);
   });
 
+  test('the backfill names a recipient the sync stored nameless', () async {
+    // Against what the sync actually WRITES, not a hand-typed blob: the
+    // store test seeds its own JSON, so a change to how the ingest encodes a
+    // participant would slip past it and be caught here.
+    queueSent([
+      sentMessage(
+        id: 'sent-1',
+        receivedDateTime: fresh(const Duration(hours: 1)),
+        to: const [(null, 'todd@example.test')],
+      ),
+    ]);
+    await sync.syncNow();
+    expect(await participants('conv-1'), [(null, 'todd@example.test')]);
+
+    // Then he writes back somewhere else, signed.
+    await store.upsertMessage({
+      'source': 'email',
+      'source_message_id': 'in-1',
+      'conversation_key': 'conv-2',
+      'direction': 'inbound',
+      'from_name': 'Todd Alder',
+      'from_address': 'todd@example.test',
+      'received_at': fresh(const Duration(minutes: 30)),
+      'subject': 'Re: The rate sheet',
+      'body_text': 'Looks right.',
+    });
+
+    expect(await store.fillParticipantNames(), 1);
+    expect(await participants('conv-1'), [('Todd Alder', 'todd@example.test')]);
+    // And nothing is left to do.
+    expect(await store.fillParticipantNames(), 0);
+  });
+
   test('the backfill runs once and records its pref', () async {
     queueSent([
       sentMessage(id: 'sent-1', receivedDateTime: fresh(const Duration(hours: 1))),

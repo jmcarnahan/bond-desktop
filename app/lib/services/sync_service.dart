@@ -7,13 +7,13 @@ import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
 import 'attachments/attachment_policy.dart';
 import 'attachments/owa_links.dart';
-import 'mail_text.dart';
 import 'attention.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
 import 'conversation_state.dart';
 import 'gates.dart';
 import 'graph_mail.dart';
+import 'mail_text.dart';
 import 'pipeline_progress.dart';
 
 /// How far back a mailbox that has never synced reaches. Two weeks is enough
