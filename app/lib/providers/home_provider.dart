@@ -28,10 +28,19 @@ import 'prefs_provider.dart';
 /// newer one that already landed. The live patch obeys the same stamp: a batch
 /// that comes back after a reload belongs to a list that no longer exists.
 ///
-/// The liveness is three more rules on top of those.
+/// The liveness is four more rules on top of those.
 ///
 /// **A burst is read once.** The bus carries keys rather than rows, so ticks
 /// pile into a window and one batch read turns the window into a patch.
+///
+/// **The store admits, this orders.** Whether a ticked row belongs under the
+/// filter that is up is answered by [MessageStore.progressPatchFor], in the
+/// same SQL the page read is written in; what this does with an admitted row —
+/// replace it, prepend it, hold it behind the count, or only count it — is the
+/// list's own arithmetic and lives here. A second spelling of the filter in
+/// Dart used to sit in this file, and two spellings of one rule drift: the
+/// table would then hold rows a reload deletes, or hide rows a reload brings
+/// back, with nothing on screen to say which read was lying.
 ///
 /// **The table never moves under a reader.** Arrivals go to the top only while
 /// the viewport is anchored there; otherwise they wait behind a count the
@@ -130,8 +139,8 @@ class HomeFeedState {
   /// The attention slider's setting, as the feed reads it.
   ///
   /// Only [HomeFilter.needsYou] uses it, and it is here rather than read from
-  /// the prefs at the call site because the live path has to admit exactly the
-  /// rows the store returned — one number, read once, seen by both.
+  /// the prefs at the call site because the page read and the live patch both
+  /// hand it to the store — one number, read once, bound by both queries.
   final double threshold;
 
   const HomeFeedState({
@@ -308,10 +317,6 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 
   /// Whether the viewport is at the top. See [setAnchored].
   bool _anchored = true;
-
-  /// The window a windowed tile filter is bounded by, recomputed once per
-  /// [_apply] so every row in one batch is measured against the same instant.
-  String _windowStartIso = '';
 
   HomeFeedNotifier(
     this._store, {
@@ -703,9 +708,15 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     _pendingTicks.clear();
 
     final seq = _fetchSeq;
-    final List<HomeFeedRow> patch;
+    final List<({HomeFeedRow row, bool admitted})> patch;
     try {
-      patch = await _store.progressRowsFor(keys);
+      patch = await _store.progressPatchFor(
+        keys,
+        filter: state.filter,
+        threshold: state.threshold,
+        sinceIso: _filterWindow(),
+        sources: state.sources,
+      );
     } catch (e) {
       // Nothing to say to the user about this: the next stage write ticks the
       // same rows and the read runs again. A table one beat behind is not
@@ -719,60 +730,8 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     _scheduleMetricsBump();
   }
 
-  /// Whether [row] belongs under the filter that is up — the Dart twin of
-  /// [MessageStore.homeFilterSql], term for term, the way [HomeFeedRow.isStalled]
-  /// is the twin of the stalled tile's SQL.
-  ///
-  /// [HomeFilter.needsYou] is `isNeedsYou` read off the row's own thread
-  /// columns, against the same [HomeFeedState.threshold] the store bound. It
-  /// is the LIVE rule and not [HomeFeedRow.needsYou]: that field is the settle
-  /// pass's snapshot of the message, and a live path admitting rows the store
-  /// would not return is how a table comes to hold rows a reload deletes.
-  ///
-  /// Admitting is not the whole answer under that filter — see [_apply], where
-  /// an admitted row that is not already on the table is only counted.
-  ///
-  /// Plus the window, which the SQL takes as a bound parameter rather than as
-  /// part of the fragment: a windowed tile filter is read over the tiles' own
-  /// week, so a live arrival older than that must not appear under a number
-  /// that never counted it. [_windowStartIso] is computed once per [_apply] so
-  /// every row of one batch is measured against the same instant.
-  bool _admits(HomeFeedRow row) {
-    if (!_matches(row)) return false;
-    return !state.filter.windowed ||
-        row.receivedAt.compareTo(_windowStartIso) >= 0;
-  }
-
-  /// The narrowing alone, without the window — the Dart twin of the SQL
-  /// fragment, kept apart from the bound parameter for the same reason the SQL
-  /// keeps them apart.
-  bool _matches(HomeFeedRow row) => switch (state.filter) {
-        HomeFilter.fromOthers => !row.dropped,
-        // "Kept" is `MessageStore.keptMessageSql` spelled in Dart — a fact
-        // about the MESSAGE the gate judged, not about the progress row that
-        // recorded the judgement. The `teams_source` tolerance rides in it:
-        // a chat stored before chats were triaged was born `skipped` under
-        // that reason and is a real message from a real person.
-        HomeFilter.needsYou => (row.triageStatus != 'skipped' ||
-                row.gateReason == 'teams_source') &&
-            (row.bucket ?? '') != 'later' &&
-            row.threadState != 'done' &&
-            (row.attentionScore ?? 0) >= state.threshold &&
-            (row.threadState == 'needs_reply' ||
-                (row.ctaText?.isNotEmpty ?? false)),
-        HomeFilter.urgent =>
-          !row.dropped && (row.urgency == 'urgent' || row.urgency == 'high'),
-        HomeFilter.inFlight => row.outcome == 'pending',
-        HomeFilter.errors => row.triageState == 'error' ||
-            row.extractState == 'error' ||
-            row.storylineState == 'error',
-        HomeFilter.dropped => row.dropped,
-        HomeFilter.processed => row.outcome != 'pending',
-      };
-
   /// Turns one batch of read-back rows into one new list and one state write.
-  void _apply(List<HomeFeedRow> patch) {
-    _windowStartIso = _windowStart();
+  void _apply(List<({HomeFeedRow row, bool admitted})> patch) {
     final rows = [...state.rows];
     var index = _indexOf(rows);
     final entered = <String>{};
@@ -782,9 +741,11 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
     // and every one is marked as arriving. Newest first, only the first would
     // be: each later row would find a newer head above it and be filed under
     // it as history.
-    final incoming = [...patch]..sort(_compare);
+    final incoming = [...patch]..sort((a, b) => _compare(a.row, b.row));
 
-    for (final row in incoming) {
+    for (final entry in incoming) {
+      final row = entry.row;
+      final admitted = entry.admitted;
       final key = row.feedKey;
 
       // Already on its way out. A patch must not resurrect a row whose removal
@@ -812,7 +773,7 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 
       final held = _buffer.indexWhere((waiting) => waiting.feedKey == key);
       if (held >= 0) {
-        if (!_admits(row)) {
+        if (!admitted) {
           // Nobody ever saw it, so there is nothing to show leaving: it just
           // stops being one of the messages the count is promising.
           _buffer.removeAt(held);
@@ -823,13 +784,21 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
         continue;
       }
 
-      if (state.filter == HomeFilter.fromOthers && row.dropped) {
+      if (state.filter == HomeFilter.fromOthers &&
+          row.dropped &&
+          state.sources.contains(row.source)) {
         // The gate's own show: a newsletter appears, grays, and is gone — the
         // one way a reader ever sees what the app is throwing away. Only for a
         // reader who is at the top and can watch it happen; anywhere else it
         // would be a row that flickered past the corner of their eye. And only
         // newest-first, because the head of an oldest-first table is the OLDEST
         // row and putting an arrival there would be a lie about its place.
+        //
+        // The source test is the show's own, because this branch sits ABOVE
+        // the admission gate on purpose — a dropped row is never admitted —
+        // and so is the one place the store's answer does not reach. It is a
+        // question of scope, not of filter: a newsletter from a connector
+        // whose chip is down is not on this table to be seen leaving it.
         if (!_anchored || state.sort == HomeSort.oldest) continue;
         if (rows.isNotEmpty && _compare(row, rows.first) <= 0) continue;
         rows.insert(0, row);
@@ -841,8 +810,10 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
 
       // Anything the filter would not have returned is not put on the table by
       // the live path either: a row nobody can see arriving is a row the reader
-      // would have to reload to explain.
-      if (!_admits(row)) continue;
+      // would have to reload to explain. Below the drop show deliberately — a
+      // dropped arrival is NOT admitted under the default filter, and the show
+      // is the one exception to this line.
+      if (!admitted) continue;
 
       if (state.sort == HomeSort.oldest ||
           state.filter == HomeFilter.needsYou) {

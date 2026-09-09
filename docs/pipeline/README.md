@@ -154,11 +154,24 @@ bound to the same attention threshold the rail reads — and under that filter
 the table shows one row per thread, its newest kept message. "Kept" is
 `MessageStore.keptMessageSql` on `messages` (`triage_status <> 'skipped' OR
 gate_reason = 'teams_source'`), a fact about the message the gate judged rather
-than about the progress row that recorded the judgement, and three readers say
-it one way: this filter, the tile's own count, and the live twin in
-`home_provider.dart`. Every other tile counts messages. Emails and Teams are
+than about the progress row that recorded the judgement, and two readers say it
+one way: this filter and the tile's own count. Every other tile counts
+messages. Emails and Teams are
 the two tiles that write elsewhere: they move the list column's source chips,
 which every pane reads.
+
+**The store admits, the notifier orders.** A stage write ticks the bus, the
+notifier collects a burst of keys, and `MessageStore.progressPatchFor` reads
+those rows back with a flag saying whether the filter that is up would have
+returned each one — the same `homeFilterSql` fragment the page read is built
+from, over the same source chips and the same window. There is no second
+spelling of the filter in Dart: `home_provider.dart` decides only where an
+admitted row goes (replaced in place, prepended, held behind the pending count,
+or merely counted under `oldest` and under Needs You, where whether a row is
+its thread's newest kept message is a fact about the thread rather than the
+row). A row comes back whatever its flag says, because a row already on the
+table is patched in place even once it stops matching — the table never moves
+under a reader, and the next load reads it out.
 
 **The pulse strip** under the tiles narrates the work a filter may be hiding,
 in three segments joined by `·` (`app/lib/widgets/home_pulse.dart`):

@@ -3305,10 +3305,15 @@ RETURNING *
   /// automatic Later for as long as it stays unanswered. The exits are a reply,
   /// Done, or the owner's own Later, and nothing else — a question does not
   /// stop being a question because a fortnight went by.
-  static const String _openAskWhere = """
+  ///
+  /// "Kept" is spelled once, here as everywhere: [keptMessageSql], not a
+  /// fourth copy of the same predicate that a later change could miss.
+  ///
+  /// `final` rather than `const` only because a const cannot call a method.
+  static final String _openAskWhere = """
   m.direction = 'inbound'
   AND m.needs_you_verdict = 1
-  AND (m.triage_status <> 'skipped' OR m.gate_reason = 'teams_source')
+  AND ${keptMessageSql('m')}
   AND m.received_at > COALESCE(c.last_outbound_at, '')""";
 
   /// Every thread holding an open ask: an inbound message the needs-you stage
@@ -6351,10 +6356,10 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// WHERE clause and sqlite numbers anonymous placeholders by where they
   /// appear in the text.
   ///
-  /// Public and static because it is a definition rather than a query: the
-  /// notifier's live path has to admit exactly the rows this admits, and the
-  /// only way two copies of a rule stay equal is if one of them is the one
-  /// everybody reads.
+  /// Public and static because it is a definition rather than a query. The
+  /// feed's page read, the tiles and the live patch ([progressPatchFor]) all
+  /// bind this one fragment — there is no Dart copy of it anywhere, which is
+  /// the only arrangement under which they cannot drift.
   ///
   /// [HomeFilter.needsYou] is the one filter that counts THREADS. The rail
   /// counts threads, the tile above the table is the same number, and so the
@@ -6366,8 +6371,8 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
   /// alias [_homeFeedJoins] already carries — and through a `qm` join of its
   /// own inside the newest-kept subquery. It is a fact about the message the
   /// gate judged, not about the progress row that recorded the judgement, and
-  /// three readers say it one way: this filter, [homeMetrics]' needs-you
-  /// count, and the live twin in `home_provider.dart`.
+  /// two readers say it one way: this filter and [homeMetrics]' needs-you
+  /// count.
   ///
   /// [HomeFilter.processed] deliberately includes dropped rows. The tile it
   /// belongs to counts `total − in_flight`, and a filter that showed fewer
@@ -6416,6 +6421,35 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
           ),
       };
 
+  /// The clause that says a progress row belongs under [filter] as the Inbox
+  /// is showing it: the filter's own fragment, the source chips, and the
+  /// window when there is one. With no chips up nothing belongs — a bare
+  /// `0`, which a WHERE reads as no rows and a CASE reads as not admitted.
+  ///
+  /// ONE builder for the page read and the live patch, so that "the live path
+  /// admits exactly what the page read returns" is a fact about the code's
+  /// shape rather than a discipline two methods have to keep. The arguments
+  /// come back in text order — the fragment's, then the sources, then the
+  /// window — which is the order sqlite binds anonymous placeholders in, and
+  /// the reason a caller must splice them before anything it appends.
+  static ({String sql, List<Object?> args}) _feedNarrowing(
+    HomeFilter filter, {
+    required double threshold,
+    required List<String> sources,
+    String? sinceIso,
+  }) {
+    if (sources.isEmpty) return (sql: '0', args: const []);
+    final narrowing = homeFilterSql(filter, threshold: threshold);
+    final sql = StringBuffer(narrowing.sql)
+      ..write(' AND p.source IN (${_placeholders(sources.length)})');
+    final args = <Object?>[...narrowing.args, ...sources];
+    if (sinceIso != null) {
+      sql.write(' AND p.received_at >= ?');
+      args.add(sinceIso);
+    }
+    return (sql: sql.toString(), args: args);
+  }
+
   /// One page of the feed, newest first — or oldest first under [ascending].
   ///
   /// Keyset rather than OFFSET, and two literal statements rather than one
@@ -6457,18 +6491,14 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
     List<String> sources = const ['email', 'teams'],
   }) async {
     if (sources.isEmpty) return const [];
-    final places = _placeholders(sources.length);
-    final narrowing = homeFilterSql(filter, threshold: threshold);
-    final where = StringBuffer(narrowing.sql)
-      ..write(' AND p.source IN ($places)');
-    // In text order, which is the only order sqlite numbers anonymous
-    // placeholders in: the filter's fragment opens the WHERE clause, so its
-    // arguments bind before the sources, the window and the cursor.
-    final args = <Object?>[...narrowing.args, ...sources];
-    if (sinceIso != null) {
-      where.write(' AND p.received_at >= ?');
-      args.add(sinceIso);
-    }
+    // The narrowing opens the WHERE clause, so its arguments bind before the
+    // cursor and the limit appended below — see [_feedNarrowing].
+    final (sql: where, args: args) = _feedNarrowing(
+      filter,
+      threshold: threshold,
+      sources: sources,
+      sinceIso: sinceIso,
+    );
     final order = ascending
         ? 'ORDER BY p.received_at ASC, p.source_message_id ASC'
         : 'ORDER BY p.received_at DESC, p.source_message_id DESC';
@@ -6535,6 +6565,81 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
       rows.addAll([for (final row in result) HomeFeedRow.fromRow(row.data)]);
     }
     return rows;
+  }
+
+  /// The feed rows for [keys], each with whether the filter that is up would
+  /// have returned it — the live patch's read.
+  ///
+  /// The row comes back whatever the flag says, because a row already on the
+  /// table is replaced IN PLACE even when it stopped matching: the table never
+  /// moves under a reader, and the live path still needs the new bar and the
+  /// new outcome to draw. The flag is the one definition of "belongs under
+  /// this filter" — the same [homeFilterSql] fragment [pageHomeFeed] reads,
+  /// over the same source narrowing and the same window — so the live path and
+  /// the page read cannot disagree about a row. A second spelling in Dart is
+  /// exactly where they used to drift.
+  ///
+  /// Under [HomeFilter.needsYou] the flag also answers "is this the thread's
+  /// newest kept message", which is the one question a single row cannot
+  /// answer about itself — the SQL can, because it can look at the thread.
+  /// That does not make an arrival placeable: whether the row it would replace
+  /// is still on the table is a question about the LIST, so the notifier keeps
+  /// counting arrivals there rather than inserting them.
+  ///
+  /// Empty [sources] flags every row `false` and still returns them all: no
+  /// chip is up, so nothing is admitted, but the rows on the table are still
+  /// patched in place.
+  ///
+  /// Same 200-key chunking as [progressRowsFor], for the same reason.
+  Future<List<({HomeFeedRow row, bool admitted})>> progressPatchFor(
+    List<({String source, String id})> keys, {
+    required HomeFilter filter,
+    double threshold = 0,
+    String? sinceIso,
+    List<String> sources = const ['email', 'teams'],
+  }) async {
+    if (keys.isEmpty) return const [];
+
+    // The SAME clause the page read puts in its WHERE, here inside a CASE so
+    // the row comes back whatever the answer is. Built once for every chunk;
+    // its arguments open the SELECT list and so bind before the key tuples in
+    // the WHERE clause — text order, the only order sqlite knows.
+    final (sql: narrowing, args: admitArgs) = _feedNarrowing(
+      filter,
+      threshold: threshold,
+      sources: sources,
+      sinceIso: sinceIso,
+    );
+    final admits = 'CASE WHEN $narrowing THEN 1 ELSE 0 END';
+
+    const chunkSize = 200;
+    final patch = <({HomeFeedRow row, bool admitted})>[];
+    for (var start = 0; start < keys.length; start += chunkSize) {
+      final end = start + chunkSize > keys.length ? keys.length : start + chunkSize;
+      final chunk = keys.sublist(start, end);
+      final tuples = List.filled(chunk.length, '(?, ?)').join(', ');
+      final result = await db
+          .customSelect(
+            'SELECT $_homeFeedColumns,\n'
+            '  $admits AS admitted\n'
+            'FROM message_progress p\n'
+            '$_homeFeedJoins\n'
+            'WHERE (p.source, p.source_message_id) IN (VALUES $tuples)',
+            variables: _args([
+              ...admitArgs,
+              for (final key in chunk) ...[key.source, key.id],
+            ]),
+          )
+          .get();
+      patch.addAll([
+        for (final row in result)
+          (
+            row: HomeFeedRow.fromRow(row.data),
+            admitted: (row.data['admitted'] as int? ?? 0) != 0,
+          ),
+      ]);
+    }
+    return patch;
   }
 
   // ── message vectors & semantic search ────────────────────────────────

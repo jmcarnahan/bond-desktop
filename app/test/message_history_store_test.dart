@@ -39,6 +39,7 @@ void main() {
     String receivedAt = '2026-09-01T08:00:00Z',
     String triageStatus = 'triaged',
     String direction = 'inbound',
+    String? gateReason,
   }) =>
       store.upsertMessage({
         'source': source,
@@ -51,6 +52,7 @@ void main() {
         'body_text': 'Could you look at the DPA before Friday?',
         'received_at': receivedAt,
         'triage_status': triageStatus,
+        'gate_reason': ?gateReason,
       });
 
   Future<void> logEvent(
@@ -368,6 +370,51 @@ void main() {
       // The default is the home table's meaning, because that is where the
       // results are drawn.
       expect([for (final hit in hits) hit.row.sourceMessageId], ['kept']);
+    });
+  });
+
+  group('the open-ask predicate', () {
+    /// The one clause the predicate shares with the rest of the app:
+    /// `MessageStore.keptMessageSql`, spliced rather than spelled again. A
+    /// chat stored before chats were triaged was born `skipped` under
+    /// `teams_source` and is a real question from a real person.
+    test('a chat born skipped under teams_source still asks', () async {
+      await seed(
+        'chat-1',
+        source: 'teams',
+        conversationKey: 'chat',
+        triageStatus: 'skipped',
+        gateReason: 'teams_source',
+      );
+      await store.writeNeedsYouVerdict(
+        'teams',
+        'chat-1',
+        verdict: true,
+        reason: 'asks for the DPA by Friday',
+      );
+
+      expect(await store.hasOpenAsk('teams', 'chat'), isTrue);
+      expect(
+        await store.openAskThreads(sources: const ['teams']),
+        contains(MessageStore.openAskKey('teams', 'chat')),
+      );
+    });
+
+    test('a message the gate really threw out asks nothing', () async {
+      await seed(
+        'news',
+        triageStatus: 'skipped',
+        gateReason: 'newsletter',
+      );
+      await store.writeNeedsYouVerdict(
+        'email',
+        'news',
+        verdict: true,
+        reason: 'asks for the DPA by Friday',
+      );
+
+      expect(await store.hasOpenAsk('email', 'c1'), isFalse);
+      expect(await store.openAskThreads(), isEmpty);
     });
   });
 

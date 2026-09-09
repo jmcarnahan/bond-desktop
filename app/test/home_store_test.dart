@@ -164,6 +164,40 @@ void main() {
   /// as stalled unless a test says so.
   const stalledCutoff = '2026-09-01T09:45:00Z';
 
+  /// One row that matches [filter] and one that does not, so a filter that
+  /// let everything through would fail as loudly as one that let nothing.
+  ///
+  /// Shared by the page read's loop and the live patch's, because the whole
+  /// point of the patch's flag is that it answers the page read's question.
+  Future<void> seedPair(HomeFilter filter) async {
+    switch (filter) {
+      case HomeFilter.fromOthers:
+        await seed('yes');
+        await seed('no', dropped: true, conversationKey: 'c2');
+      case HomeFilter.needsYou:
+        // The THREAD owes a reply, which is the rail's rule; the other
+        // thread carries the message-level snapshot and nothing else, so a
+        // filter still reading that column would fail here.
+        await seed('yes', threadState: 'needs_reply');
+        await seed('no', needsYou: true, conversationKey: 'c2');
+      case HomeFilter.urgent:
+        await seed('yes', urgency: 'high');
+        await seed('no', urgency: 'normal', conversationKey: 'c2');
+      case HomeFilter.inFlight:
+        await seed('yes', outcome: 'pending');
+        await seed('no', conversationKey: 'c2');
+      case HomeFilter.errors:
+        await seed('yes', storylineState: 'error');
+        await seed('no', conversationKey: 'c2');
+      case HomeFilter.dropped:
+        await seed('yes', dropped: true);
+        await seed('no', conversationKey: 'c2');
+      case HomeFilter.processed:
+        await seed('yes');
+        await seed('no', outcome: 'pending', conversationKey: 'c2');
+    }
+  }
+
   group('the tiles', () {
     test('every number comes off the same read', () async {
       await seed('m1', urgency: 'high', threadState: 'needs_reply');
@@ -620,6 +654,150 @@ void main() {
     });
   });
 
+  group('progressPatchFor', () {
+    /// The flag is the page read's own answer, so it is asked the page read's
+    /// own question: for every filter, the row it keeps and the row it throws
+    /// away — and BOTH rows come back either way, because a row already on the
+    /// table is patched in place whatever the filter now says about it.
+    for (final filter in HomeFilter.values) {
+      test('${filter.name} flags what it admits and returns what it refuses',
+          () async {
+        await seedPair(filter);
+
+        final patch = await store.progressPatchFor(
+          [(source: 'email', id: 'yes'), (source: 'email', id: 'no')],
+          filter: filter,
+        );
+
+        expect(patch, hasLength(2));
+        expect(
+          patch.firstWhere((e) => e.row.sourceMessageId == 'yes').admitted,
+          isTrue,
+        );
+        expect(
+          patch.firstWhere((e) => e.row.sourceMessageId == 'no').admitted,
+          isFalse,
+        );
+      });
+    }
+
+    test('a tick for the other connector is not admitted', () async {
+      // The gap this closed: the live path narrowed by nothing on sources, so
+      // a chat ticked its way onto the table while the Mail chip alone was up.
+      await seed('m1', source: 'teams', conversationKey: 'chat-1');
+
+      final patch = await store.progressPatchFor(
+        [(source: 'teams', id: 'm1')],
+        filter: HomeFilter.fromOthers,
+        sources: const ['email'],
+      );
+
+      expect(patch.single.row.source, 'teams');
+      expect(patch.single.admitted, isFalse);
+    });
+
+    test('a row from before the window is not admitted', () async {
+      await seed('recent', urgency: 'high');
+      await seed(
+        'old',
+        conversationKey: 'c2',
+        receivedAt: '2026-08-01T10:00:00Z',
+        urgency: 'high',
+      );
+
+      final patch = await store.progressPatchFor(
+        [(source: 'email', id: 'recent'), (source: 'email', id: 'old')],
+        filter: HomeFilter.urgent,
+        sinceIso: '2026-09-01T00:00:00Z',
+      );
+
+      expect(
+        patch.firstWhere((e) => e.row.sourceMessageId == 'recent').admitted,
+        isTrue,
+      );
+      expect(
+        patch.firstWhere((e) => e.row.sourceMessageId == 'old').admitted,
+        isFalse,
+      );
+    });
+
+    test('under Needs You only the thread\'s newest kept message is admitted',
+        () async {
+      // The question one row cannot answer about itself, which is exactly why
+      // it is the store's to answer.
+      await seed(
+        'live-old',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T09:00:00Z',
+        threadState: 'needs_reply',
+      );
+      await seed(
+        'live-new',
+        conversationKey: 'live',
+        receivedAt: '2026-09-01T11:00:00Z',
+        threadState: 'needs_reply',
+      );
+
+      final patch = await store.progressPatchFor(
+        [
+          (source: 'email', id: 'live-old'),
+          (source: 'email', id: 'live-new'),
+        ],
+        filter: HomeFilter.needsYou,
+      );
+
+      expect(
+        patch.firstWhere((e) => e.row.sourceMessageId == 'live-new').admitted,
+        isTrue,
+      );
+      expect(
+        patch.firstWhere((e) => e.row.sourceMessageId == 'live-old').admitted,
+        isFalse,
+      );
+    });
+
+    test('no chips up admits nothing and still hands back the rows', () async {
+      await seed('m1');
+
+      final patch = await store.progressPatchFor(
+        [(source: 'email', id: 'm1')],
+        filter: HomeFilter.fromOthers,
+        sources: const [],
+      );
+
+      // Not an empty result: the table's own rows still have to be patched in
+      // place, and a read that returned nothing would freeze them.
+      expect(patch, hasLength(1));
+      expect(patch.single.admitted, isFalse);
+    });
+
+    test('a burst larger than one chunk comes back whole', () async {
+      // The flag rides on every chunk's SQL, so the arguments have to bind the
+      // same way 250 keys in as they do 200.
+      for (var i = 0; i < 250; i++) {
+        await seed('m$i', conversationKey: 'c$i');
+      }
+
+      final patch = await store.progressPatchFor(
+        [for (var i = 0; i < 250; i++) (source: 'email', id: 'm$i')],
+        filter: HomeFilter.fromOthers,
+      );
+
+      expect(patch, hasLength(250));
+      expect(patch.every((e) => e.admitted), isTrue);
+    });
+
+    test('an empty key list costs nothing', () async {
+      expect(
+        await store.progressPatchFor(
+          const [],
+          filter: HomeFilter.fromOthers,
+        ),
+        isEmpty,
+      );
+    });
+  });
+
   group('the reasons ride on every row', () {
     /// One message carrying every explanation the pipeline can record, so the
     /// four readers can be asked the same question.
@@ -979,37 +1157,6 @@ void main() {
   });
 
   group('one filter at a time', () {
-    /// One row that matches [filter] and one that does not, so a filter that
-    /// let everything through would fail as loudly as one that let nothing.
-    Future<void> seedPair(HomeFilter filter) async {
-      switch (filter) {
-        case HomeFilter.fromOthers:
-          await seed('yes');
-          await seed('no', dropped: true, conversationKey: 'c2');
-        case HomeFilter.needsYou:
-          // The THREAD owes a reply, which is the rail's rule; the other
-          // thread carries the message-level snapshot and nothing else, so a
-          // filter still reading that column would fail here.
-          await seed('yes', threadState: 'needs_reply');
-          await seed('no', needsYou: true, conversationKey: 'c2');
-        case HomeFilter.urgent:
-          await seed('yes', urgency: 'high');
-          await seed('no', urgency: 'normal', conversationKey: 'c2');
-        case HomeFilter.inFlight:
-          await seed('yes', outcome: 'pending');
-          await seed('no', conversationKey: 'c2');
-        case HomeFilter.errors:
-          await seed('yes', storylineState: 'error');
-          await seed('no', conversationKey: 'c2');
-        case HomeFilter.dropped:
-          await seed('yes', dropped: true);
-          await seed('no', conversationKey: 'c2');
-        case HomeFilter.processed:
-          await seed('yes');
-          await seed('no', outcome: 'pending', conversationKey: 'c2');
-      }
-    }
-
     for (final filter in HomeFilter.values) {
       test('${filter.name} keeps exactly what it names', () async {
         await seedPair(filter);

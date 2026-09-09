@@ -185,9 +185,10 @@ class HomeFeedRow {
   final String? gateReason;
 
   /// `messages.triage_status` — `pending`, `triaged`, `skipped`. With
-  /// [gateReason] it is the whole of `MessageStore.keptMessageSql`, which is
-  /// what the Needs You filter narrows on: one definition of "kept", read by
-  /// the filter's SQL, the tile's count and the provider's live twin.
+  /// [gateReason] it is the whole of `MessageStore.keptMessageSql`, the one
+  /// definition of "kept" the Needs You filter narrows on. Carried on the row
+  /// so a reader explaining a row has the fact the filter judged it by; the
+  /// judging itself happens in SQL, and nothing in Dart re-derives it.
   ///
   /// Defaults to `pending` on any read that did not select it — which reads
   /// as "kept, nothing judged yet", never as a message the gate threw out.

@@ -375,6 +375,30 @@ void main() {
       await quiet(tester);
     });
 
+    testWidgets('is not performed for a connector whose chip is down',
+        (tester) async {
+      // The show sits above the admission gate on purpose — a dropped row is
+      // never admitted — so it has to ask about the chips itself. A Teams
+      // newsletter must not be seen leaving a table that is showing mail.
+      await seedThree();
+      final notifier = build();
+      await notifier.load();
+      await notifier.setSources(const ['email']);
+
+      await arrive(
+        'n1',
+        receivedAt: '2026-09-03T12:00:00Z',
+        source: 'teams',
+        gateReason: 'newsletter',
+      );
+      await settleTicks(tester);
+
+      expect(idsOf(notifier), ['m3', 'm2', 'm1']);
+      expect(notifier.state.fading, isEmpty);
+      expect(notifier.state.entering, isEmpty);
+      await quiet(tester);
+    });
+
     testWidgets('is not performed for a reader who is looking elsewhere',
         (tester) async {
       await seedThree();
@@ -504,12 +528,11 @@ void main() {
       await quiet(tester);
     });
 
-    testWidgets('the twin admits a teams_source row and refuses a gated one',
+    testWidgets('a teams_source row is admitted and a gated one refused',
         (tester) async {
-      // "Kept" is `MessageStore.keptMessageSql` on both sides now — a fact
-      // about the MESSAGE, read here off `triageStatus` and `gateReason`. A
-      // live path admitting rows the store would not return is how a table
-      // comes to hold rows a reload deletes.
+      // "Kept" is `MessageStore.keptMessageSql`, and the live path now asks
+      // the store rather than re-deciding: whatever admits a row into the page
+      // read admits it into the patch, because it is the same SQL.
       await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
       final notifier = build();
       await notifier.load();
@@ -537,6 +560,37 @@ void main() {
       expect(notifier.state.pendingNewCount, 1,
           reason: 'the newsletter is not admitted, so nothing was added');
 
+      await quiet(tester);
+    });
+
+    testWidgets('a tick for the other connector never lands under a chip',
+        (tester) async {
+      // The live path used to narrow by nothing on sources, so a chat ticked
+      // its way onto a table showing mail alone. The store's flag reads the
+      // chips the page read reads.
+      await seed('m1', receivedAt: '2026-09-03T09:00:00Z');
+      final notifier = build();
+      await notifier.load();
+      await notifier.setSources(const ['email']);
+      expect(idsOf(notifier), ['m1']);
+
+      await arrive(
+        'chat',
+        receivedAt: '2026-09-03T12:00:00Z',
+        source: 'teams',
+      );
+      await settleTicks(tester);
+
+      expect(
+        idsOf(notifier),
+        ['m1'],
+        reason: 'the Teams chip is down, so the chat is not on the table',
+      );
+      expect(
+        notifier.state.pendingNewCount,
+        0,
+        reason: 'nor behind the count, which promises rows the reader can see',
+      );
       await quiet(tester);
     });
 
