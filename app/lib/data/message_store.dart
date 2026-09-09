@@ -34,6 +34,11 @@ import '../services/llm/extract_task.dart' show ExtractionResult;
 // that here would be the coverage count and the search itself disagreeing
 // about what a term is.
 import '../services/search_fusion.dart';
+// The fourth, on the same licence: `mail_text.dart` is one regular expression
+// over a string. The one-off below has to strip a stored body exactly the way
+// the ingest strips a fresh one, and a second spelling of the pattern here is
+// how the two would come to disagree about what the tip looks like.
+import '../services/mail_text.dart';
 import 'attachment_chunk_index.dart';
 import 'conversation_vec_index.dart';
 import 'database.dart' show BondDatabase;
@@ -2765,6 +2770,49 @@ RETURNING *
           conversationKey: row.data['conversation_key'] as String? ?? '',
         ),
     ];
+  }
+
+  /// Takes Exchange's first-contact tip off every stored body and preview
+  /// that still opens with it, and returns how many rows changed.
+  ///
+  /// The ingest strips it from new mail; this is the once-over for the rows
+  /// that arrived before it did. Candidates are found with a LIKE so the
+  /// regular expression runs over the few rows that can match rather than
+  /// the whole table, and a row is rewritten only when the strip changed
+  /// something. `updated_at` moves with the text — it is the keyword index's
+  /// watermark, and a body rewritten under a stale stamp would stay indexed
+  /// with the tip in it.
+  Future<int> stripSenderIdentificationTips() async {
+    final rows = await db
+        .customSelect(
+          'SELECT source, source_message_id, body_text, body_preview '
+          'FROM messages '
+          "WHERE body_text LIKE '%often get email from%' "
+          "   OR body_preview LIKE '%often get email from%'",
+        )
+        .get();
+    var changed = 0;
+    for (final row in rows) {
+      final body = row.data['body_text'] as String?;
+      final preview = row.data['body_preview'] as String?;
+      final newBody = body == null ? null : stripSenderIdentification(body);
+      final newPreview =
+          preview == null ? null : stripSenderIdentification(preview);
+      if (newBody == body && newPreview == preview) continue;
+      await db.customUpdate(
+        'UPDATE messages SET body_text = ?, body_preview = ?, updated_at = ? '
+        'WHERE source = ? AND source_message_id = ?',
+        variables: _args([
+          newBody,
+          newPreview,
+          _nowIso(),
+          row.data['source'],
+          row.data['source_message_id'],
+        ]),
+      );
+      changed++;
+    }
+    return changed;
   }
 
   /// Stores one thread's ranking score. Same targeted insert-then-update as

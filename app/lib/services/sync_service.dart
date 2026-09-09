@@ -7,6 +7,7 @@ import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
 import 'attachments/attachment_policy.dart';
 import 'attachments/owa_links.dart';
+import 'mail_text.dart';
 import 'attention.dart';
 import 'backend/backend_types.dart';
 import 'backend/mail_backend.dart';
@@ -329,6 +330,15 @@ class SyncService implements MailSync {
         await _store.setPref('needs_you_flag_backfill', '1');
       }
 
+      // Exchange's first-contact tip, off the rows stored before the ingest
+      // learned to strip it. Once, on the same one-shot idiom as the two
+      // above. Null until it runs.
+      int? strippedSenderTips;
+      if (await _store.getPref('sender_tip_strip') == null) {
+        strippedSenderTips = await _store.stripSenderIdentificationTips();
+        await _store.setPref('sender_tip_strip', '1');
+      }
+
       // The per-message search vectors, over the same window and on the same
       // `OR IGNORE` idempotence — new mail is queued, and a backlog that
       // predates the search feature refills itself without anyone asking.
@@ -394,6 +404,7 @@ class SyncService implements MailSync {
           'backfilled_addressed_me': ?backfilled,
           'revived_needs_you': ?revivedNeedsYou,
           'backfilled_needs_you': ?backfilledNeedsYou,
+          'stripped_sender_tips': ?strippedSenderTips,
           if (inboxResync || sentResync) 'resync': true,
         },
       );
@@ -830,8 +841,12 @@ class SyncService implements MailSync {
         // Graph's preview of a link-attachment message is the file name
         // wrapped in zero-width spaces; search and cards must never carry an
         // invisible character.
-        final preview =
+        // And Exchange's first-contact tip, which the preview opens with for
+        // any sender the mailbox has not seen — see `mail_text.dart`.
+        final rawPreview =
             (message['bodyPreview'] as String?)?.replaceAll('\u200b', '');
+        final preview =
+            rawPreview == null ? null : stripSenderIdentification(rawPreview);
         final key = conversationKeyFor(
           message['conversationId'] as String?,
           id,
@@ -1051,8 +1066,12 @@ class SyncService implements MailSync {
     }
 
     final uniqueBody = detail['uniqueBody'];
-    final bodyText =
+    final rawBody =
         uniqueBody is Map<String, dynamic> ? uniqueBody['content'] as String? : null;
+    // Exchange's first-contact tip comes off HERE, where the body first
+    // exists, so nothing downstream — the transcript, the index, the prompts
+    // — ever sees a sentence the sender did not write. See `mail_text.dart`.
+    final bodyText = rawBody == null ? null : stripSenderIdentification(rawBody);
     final headers = _headers(detail['internetMessageHeaders']);
 
     final rawAttachments = detail['attachments'];

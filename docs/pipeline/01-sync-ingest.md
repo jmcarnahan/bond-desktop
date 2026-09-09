@@ -160,3 +160,15 @@ delimited run in the body — so `_fetchDetailInto` parses it out
 `reference` row numbered after the connector's own, and raises the paperclip
 even though the message said `hasAttachments: false`. See
 [12-attachments.md](12-attachments.md).
+
+It also takes off what the sender never wrote. Exchange prepends its
+first-contact safety tip — *You don't often get email from …. Learn why this
+is important<…>* — to the BODY of the first mail from any new sender, and
+the delta page's `bodyPreview` opens with the same words.
+`stripSenderIdentification` (`app/lib/services/mail_text.dart`) removes it
+from both at ingest, at the head of the text only (a person quoting the
+banner wrote those words on purpose), so the transcript, the preview, the
+search index and every prompt see the sender's own first sentence. A one-off
+behind the `sender_tip_strip` pref rewrites the rows stored before this
+build, reported as `stripped_sender_tips` on the sync's activity row; it
+moves `updated_at` with the text so the keyword index refiles them.
