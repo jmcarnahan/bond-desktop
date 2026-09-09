@@ -237,6 +237,41 @@ void main() {
       expect(conversation.attentionScore, isNull);
     });
 
+    test('all_dropped is true only once every message on the thread is '
+        'dropped', () async {
+      await seedConversation('c1', state: 'needs_reply');
+      await seedMessage('c1', 'm1');
+      await store.writeTriageProgress(
+        'email',
+        'm1',
+        state: 'skipped',
+        gateReason: 'self',
+      );
+      expect((await store.loadConversations()).single.allDropped, isTrue);
+
+      // A second, kept message makes the thread somebody's to answer again.
+      await seedMessage('c1', 'm2', receivedAt: '2026-08-28T11:00:00Z');
+      expect((await store.loadConversations()).single.allDropped, isFalse);
+    });
+
+    test('a chat born skipped under teams_source counts as kept', () async {
+      await seedConversation('c1', state: 'needs_reply');
+      await seedMessage('c1', 'm1');
+      await store.writeTriageProgress(
+        'email',
+        'm1',
+        state: 'skipped',
+        gateReason: 'teams_source',
+      );
+      expect((await store.loadConversations()).single.allDropped, isFalse);
+    });
+
+    test('a thread the progress table has never seen is not all dropped',
+        () async {
+      await seedConversation('c1', state: 'needs_reply');
+      expect((await store.loadConversations()).single.allDropped, isFalse);
+    });
+
     test('the ordering is unchanged by the join', () async {
       await seedConversation('old', lastMessageAt: '2026-08-01T10:00:00Z');
       await seedConversation('new', lastMessageAt: '2026-08-28T10:00:00Z');

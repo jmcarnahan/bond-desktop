@@ -202,6 +202,15 @@ class Conversation {
   /// has passed.
   final String? snoozedUntil;
 
+  /// True when the pipeline dropped EVERY message on this thread — nothing
+  /// kept, nothing for anyone to answer. The thread's [state] can still say
+  /// `needs_reply`, because the state machine folds that in the moment an
+  /// inbound arrives and the gate speaks later; this is the correction. False
+  /// on a thread with a kept message, on one the progress table has never
+  /// seen, and on every read that does not compute it — a fixture built by
+  /// hand is a thread somebody meant to be live.
+  final bool allDropped;
+
   const Conversation({
     required this.id,
     this.source = 'email',
@@ -225,6 +234,7 @@ class Conversation {
     this.latestDeadline,
     this.pendingDraftCount = 0,
     this.snoozedUntil,
+    this.allDropped = false,
   });
 
   /// First participant — the row's primary sender. Null when a conversation
@@ -268,6 +278,7 @@ class Conversation {
       latestDeadline: latestDeadline,
       pendingDraftCount: pendingDraftCount,
       snoozedUntil: snoozedUntil,
+      allDropped: allDropped,
     );
   }
 
@@ -370,6 +381,7 @@ class Conversation {
       // From the same LEFT JOIN the bucket comes from, and null on every read
       // that does not run it — which reads as "no date set".
       snoozedUntil: row['snoozed_until'] as String?,
+      allDropped: (row['all_dropped'] as num?)?.toInt() == 1,
     );
   }
 }

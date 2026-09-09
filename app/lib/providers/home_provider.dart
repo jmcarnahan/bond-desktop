@@ -748,7 +748,10 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
   /// keeps them apart.
   bool _matches(HomeFeedRow row) => switch (state.filter) {
         HomeFilter.fromOthers => !row.dropped,
-        HomeFilter.needsYou => !row.dropped &&
+        // "Kept" carries the store's `teams_source` tolerance: a chat stored
+        // before chats were triaged is dropped on paper and real in fact.
+        HomeFilter.needsYou => (!row.dropped ||
+                row.dropReason == 'teams_source') &&
             (row.bucket ?? '') != 'later' &&
             row.threadState != 'done' &&
             (row.attentionScore ?? 0) >= state.threshold &&

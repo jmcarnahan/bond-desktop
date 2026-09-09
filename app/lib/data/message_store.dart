@@ -874,6 +874,22 @@ WHERE source = ? AND conversation_key = ?
         .customSelect(
           'SELECT c.*, ai.bucket AS bucket, ai.attention_score AS attention_score, '
           '  ai.snoozed_until AS snoozed_until, '
+          // Whether the pipeline threw away EVERY message on the thread — the
+          // owner's own copies of a self-addressed test, an auto-reply, a
+          // backlog nobody read. The state machine folds `needs_reply` onto a
+          // thread the moment an inbound arrives, before the gate has spoken,
+          // and nothing folds it back when the gate drops that message; this
+          // column is how the Needs You rule finds out. A thread with no
+          // progress rows at all answers 0, so a row older than the progress
+          // table keeps whatever its state says.
+          '  (CASE WHEN EXISTS (SELECT 1 FROM message_progress p '
+          '                      WHERE p.source = c.source '
+          '                        AND p.conversation_key = c.conversation_key) '
+          '         AND NOT EXISTS (SELECT 1 FROM message_progress p '
+          '                      WHERE p.source = c.source '
+          '                        AND p.conversation_key = c.conversation_key '
+          '                        AND ${_keptProgress('p')}) '
+          '        THEN 1 ELSE 0 END) AS all_dropped, '
           '  (SELECT COUNT(*) FROM messages m '
           '   WHERE m.source = c.source AND m.conversation_key = c.conversation_key '
           "     AND m.direction = 'inbound' AND m.is_read = 0) AS unread_count, "
@@ -6023,7 +6039,7 @@ SELECT
        ON c.source = p2.source AND c.conversation_key = p2.conversation_key
      LEFT JOIN conversation_ai ai
        ON ai.source = p2.source AND ai.conversation_key = p2.conversation_key
-    WHERE p2.dropped = 0 AND p2.source IN ($places)
+    WHERE ${_keptProgress('p2')} AND p2.source IN ($places)
       AND $_liveNeedsYouThread) AS needs_you,
   COALESCE(SUM(CASE WHEN p.storyline_id IS NOT NULL THEN 1 ELSE 0 END), 0)
     AS storylined,
@@ -6057,6 +6073,18 @@ WHERE p.received_at >= ? AND p.source IN ($places)
         .getSingle();
     return HomeMetrics.fromRow(row.data);
   }
+
+  /// A progress row the pipeline KEPT, for one aliased table.
+  ///
+  /// `dropped = 0`, plus the `teams_source` tolerance every other reader of a
+  /// kept message carries: a chat stored before chats were triaged was born
+  /// `skipped` under that reason and is a real message from a real person.
+  /// Written once and spliced by alias, because the Needs You rule reads it
+  /// in three places — the conversation list's `all_dropped`, the tile's
+  /// count, and the filter's newest-kept-message cursor — and three spellings
+  /// of "kept" are three ways for the rail and the tile to disagree.
+  static String _keptProgress(String alias) =>
+      "($alias.dropped = 0 OR $alias.drop_reason = 'teams_source')";
 
   /// `isNeedsYou` spelled in SQL, over the `conversations c` and
   /// `conversation_ai ai` joins [_homeFeedJoins] already carries.
@@ -6122,12 +6150,12 @@ AND (c.state = 'needs_reply' OR COALESCE(c.cta_text, '') <> '')''';
       switch (filter) {
         HomeFilter.fromOthers => (sql: 'p.dropped = 0', args: const []),
         HomeFilter.needsYou => (
-            sql: 'p.dropped = 0 AND $_liveNeedsYouThread '
+            sql: '${_keptProgress('p')} AND $_liveNeedsYouThread '
                 'AND p.received_at = (SELECT MAX(q.received_at) '
                 'FROM message_progress q '
                 'WHERE q.source = p.source '
                 'AND q.conversation_key = p.conversation_key '
-                'AND q.dropped = 0)',
+                'AND ${_keptProgress('q')})',
             args: [threshold],
           ),
         HomeFilter.urgent => (
