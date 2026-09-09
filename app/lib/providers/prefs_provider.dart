@@ -2,12 +2,17 @@ import 'package:flutter/foundation.dart' show immutable;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
+import '../models/needs_you_sort.dart';
 import '../services/attention.dart';
 import '../services/llm/model_slots.dart';
 import '../services/sync_service.dart';
 import 'app_providers.dart';
 
 export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
+
+/// The setter below takes a [NeedsYouSort], so whoever reads this file for the
+/// preference has the vocabulary to change it in the same import.
+export '../models/needs_you_sort.dart' show NeedsYouSort, NeedsYouSortLabel;
 
 /// So the settings screen reaches a slot's value and its name through one
 /// import — the prefs are where both are composed.
@@ -97,6 +102,12 @@ class AppPrefs {
   /// someone who wants the latest at the top wants it everywhere.
   final bool storylineNewestFirst;
 
+  /// How the Needs You pile is ordered, everywhere it is drawn — the rail,
+  /// the overview and the row Enter opens. [NeedsYouSort.priority] by default,
+  /// because that is the ranking the app is FOR: the reader who wants the
+  /// clock instead asks for it once, and gets it in all three places.
+  final NeedsYouSort needsYouSort;
+
   /// How a settled message announces itself. [NotifyStyle.native] by default,
   /// unlike every other switch here: the app spends minutes deciding a message
   /// needs the user, and finishing that in silence unless someone goes looking
@@ -140,6 +151,7 @@ class AppPrefs {
     this.mcpServerUrl = defaultMcpServerUrl,
     this.showActivityLog = false,
     this.storylineNewestFirst = false,
+    this.needsYouSort = NeedsYouSort.priority,
     this.notifyStyle = NotifyStyle.native,
     this.homeShowDropped = false,
     this.fastLlmUrl = '',
@@ -191,6 +203,7 @@ class AppPrefs {
     String? mcpServerUrl,
     bool? showActivityLog,
     bool? storylineNewestFirst,
+    NeedsYouSort? needsYouSort,
     NotifyStyle? notifyStyle,
     bool? homeShowDropped,
     String? fastLlmUrl,
@@ -209,6 +222,7 @@ class AppPrefs {
         showActivityLog: showActivityLog ?? this.showActivityLog,
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
+        needsYouSort: needsYouSort ?? this.needsYouSort,
         notifyStyle: notifyStyle ?? this.notifyStyle,
         homeShowDropped: homeShowDropped ?? this.homeShowDropped,
         fastLlmUrl: fastLlmUrl ?? this.fastLlmUrl,
@@ -230,6 +244,7 @@ const String backendModeKey = 'backend_mode';
 const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
 const String storylineNewestFirstKey = 'storyline_newest_first';
+const String needsYouSortKey = 'needs_you_sort';
 const String notifyStyleKey = 'notify_style';
 const String homeShowDroppedKey = 'home_show_dropped';
 const String fastLlmUrlKey = 'fast_llm_url';
@@ -287,6 +302,7 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       showActivityLog: await store.getPref(showActivityLogKey) == 'true',
       storylineNewestFirst:
           await store.getPref(storylineNewestFirstKey) == 'true',
+      needsYouSort: _needsYouSort(await store.getPref(needsYouSortKey)),
       // The one setting here that DEFAULTS ON, so its read is the inverse of
       // the two above — see [_style].
       notifyStyle: _style(
@@ -314,6 +330,15 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   /// Trimmed on the way in as well as on the way out, because a URL with a
   /// trailing newline is a `SocketException` nobody can read.
   static String _slotValue(String? raw) => raw?.trim() ?? '';
+
+  /// The stored order, or the ranking. Only the one spelling this notifier
+  /// writes reads as the clock — an absent key, a hand-edited value, or a name
+  /// a later build stopped using all leave the reader on the priority order
+  /// the app decides, which is the state every install starts in.
+  static NeedsYouSort _needsYouSort(String? raw) =>
+      raw == NeedsYouSort.newest.name
+          ? NeedsYouSort.newest
+          : NeedsYouSort.priority;
 
   /// The stored style, or what the switch it replaced said, or on.
   ///
@@ -404,6 +429,13 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setStorylineNewestFirst(bool value) async {
     state = state.copyWith(storylineNewestFirst: value);
     await _store.setPref(storylineNewestFirstKey, value.toString());
+  }
+
+  /// Orders the Needs You pile, in all three places it is drawn. Written as
+  /// the enum's own name, which is what [_needsYouSort] parses back.
+  Future<void> setNeedsYouSort(NeedsYouSort value) async {
+    state = state.copyWith(needsYouSort: value);
+    await _store.setPref(needsYouSortKey, value.name);
   }
 
   Future<void> setNotifyStyle(NotifyStyle value) async {

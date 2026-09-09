@@ -300,6 +300,31 @@ On the Deadlines tab each row's second line becomes `Deadline · <the text>`
 ask. On a list the reader picked BECAUSE every row has a date on it, the date is
 worth more than another copy of an ask the row's title already carries.
 
+A row tapped on this overview opens **beside** the list rather than over it,
+highlighted here while it is open — the overview is a room the reader is
+standing in, and ⤢ on the panel is how a thread gets the whole pane. See
+`docs/shell.md`, "What opens where".
+
+### Order
+
+The pile has ONE order everywhere it is drawn — the rail's Needs You section,
+this overview, and the row Enter opens from Find — and the reader chooses it:
+`By priority` (`needsYouRows`' own ranking: needs-reply first, then attention
+score; the default) or `Newest first` (`lastMessageAt` descending, stable, an
+undated row last). The choice lives on the overview's order control
+(`Key('needs-you-sort')`, a `PopupMenuButton` beside the pills) and is kept in
+the `needs_you_sort` preference, so it survives a restart and reaches every
+place the pile is drawn.
+
+`sortNeedsYou` (pure, in `app/lib/models/needs_you_sort.dart`, re-exported by
+`needs_you_tabs.dart`) is the one implementation. It is applied to the WHOLE
+pile — before Find's matching, before the rail's `AttentionTuning.topCount`
+truncation, and before the tabs filter — which is what keeps the three views
+agreeing: `+N more` opens the list in the order the rail showed, Enter opens the
+row under the reader's eyes, and a tab filters an ordered pile rather than
+reordering it. It never adds or drops a row, so the badge over the section is
+unaffected by it.
+
 ## What the documents on a message say
 
 `NeedsYouInput.attachmentDigests` is one line per digested document on **this

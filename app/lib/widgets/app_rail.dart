@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/files_models.dart';
 import '../models/message_models.dart';
+import '../models/needs_you_sort.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import '../services/profile_photos.dart';
@@ -410,6 +411,12 @@ class AppRail extends StatefulWidget {
   /// Restore buttons inert.
   final void Function(String storylineId)? onRestoreStoryline;
 
+  /// How the Needs You rows are ordered. The screen holds the preference and
+  /// hands the same value to the overview and to [firstFindTarget], because
+  /// the three have to draw one pile in one order — the `+N more` row opens
+  /// the list the rail was showing, and Enter opens the row under the eyes.
+  final NeedsYouSort needsYouSort;
+
   const AppRail({
     super.key,
     required this.conversations,
@@ -442,6 +449,7 @@ class AppRail extends StatefulWidget {
     this.filesKind = FilesKind.all,
     this.onSelectFilesKind,
     this.onRestoreStoryline,
+    this.needsYouSort = NeedsYouSort.priority,
   });
 
   /// Fixed: the rail is a landmark, not a resizable pane.
@@ -531,9 +539,16 @@ class _AppRailState extends State<AppRail> {
   }
 
   List<Widget> _needsYouSection({bool collapsible = true}) {
-    final needsYou = needsYouRows(
-      widget.conversations,
-      threshold: widget.attentionThreshold,
+    // Ordered BEFORE the filtering, which is itself before the truncation.
+    // Both edges matter: `+N more` has to open the list in the order the rail
+    // showed, and Enter has to open the row the reader is looking at — so the
+    // order is applied to the whole pile and everything downstream narrows it.
+    final needsYou = sortNeedsYou(
+      widget.needsYouSort,
+      needsYouRows(
+        widget.conversations,
+        threshold: widget.attentionThreshold,
+      ),
     );
 
     // Filtered BEFORE the truncation, and the order matters twice over. It is

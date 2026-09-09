@@ -13,6 +13,7 @@ import 'package:bond_inbox/services/token_store.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/composer.dart' show Composer;
+import 'package:bond_inbox/widgets/quick_replies.dart' show QuickReplyBar;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -233,6 +234,17 @@ void main() {
   /// One message's row, by the key the transcript gives it.
   Finder rowFor(String id) => find.byKey(ValueKey(id));
 
+  /// The text the reply box is actually holding, controller and all — the
+  /// `suggestedBody` a `Composer` was handed says what the host offered, not
+  /// what is on screen.
+  String boxText(WidgetTester tester) => tester
+      .widget<TextField>(find.descendant(
+        of: find.byType(Composer),
+        matching: find.byType(TextField),
+      ))
+      .controller!
+      .text;
+
   testWidgets('every message that still has one carries its own cards',
       (tester) async {
     await seedThread();
@@ -355,13 +367,18 @@ void main() {
     );
   });
 
-  testWidgets('without a send grant a card does the same thing', (tester) async {
-    // Rewritten: this was the honest half of a split. There is no split left —
-    // a tap stages in either grant state — so what it pins now is that the
-    // read-only build behaves exactly like the sending one.
+  testWidgets('without a send grant a card does the same thing, and offers '
+      'no Send', (tester) async {
+    // Rewritten: this was the honest half of a split. A TAP has no split left
+    // — it stages in either grant state — so what it pins now is that the
+    // read-only build stages exactly like the sending one, and that the card's
+    // own Send is absent where the send would really be a save to Outlook.
     await seedThread();
     await pumpScreen(tester, grantedScopes: _readGrant);
     await openThread(tester);
+
+    expect(find.byKey(QuickReplyBar.sendKeyFor(0)), findsNothing);
+    expect(find.text('Send this reply?'), findsNothing);
 
     await tester.tap(find.text('Confirm receipt'));
     await tester.pump();
@@ -372,16 +389,66 @@ void main() {
     expect(find.widgetWithText(Composer, 'Got it, thanks.'), findsOneWidget);
   });
 
-  /// The text the reply box is actually holding, controller and all — the
-  /// `suggestedBody` a `Composer` was handed says what the host offered, not
-  /// what is on screen.
-  String boxText(WidgetTester tester) => tester
-      .widget<TextField>(find.descendant(
-        of: find.byType(Composer),
-        matching: find.byType(TextField),
-      ))
-      .controller!
-      .text;
+  /// One message's Send, out of the several cards the transcript is drawing.
+  Finder sendOn(String messageId, int index) => find.descendant(
+        of: rowFor(messageId),
+        matching: find.byKey(QuickReplyBar.sendKeyFor(index)),
+      );
+
+  testWidgets('a card can send its own words, after asking', (tester) async {
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    // The OLDER message's card. A send resolves to the newest inbound on its
+    // own, so this is the one that proves the card addresses its own message.
+    await tester.tap(sendOn('c1-m1', 0));
+    await tester.pump();
+
+    // Nothing has gone yet — the card owes the reader a question first.
+    expect(mail.calls, isEmpty);
+    expect(find.text('Send this reply?'), findsOneWidget);
+
+    await tester.tap(find.descendant(
+      of: rowFor('c1-m1'),
+      matching: find.byKey(QuickReplyBar.confirmSendKeyFor(0)),
+    ));
+    for (var i = 0; i < 12; i++) {
+      await tester.pump();
+    }
+
+    // One send, of the card's own words, built against the card's own message.
+    expect(mail.bodies, ['Got it, thanks.']);
+    expect(mail.calls.first, 'createReply:c1-m1');
+    expect(
+      mail.calls.where((c) => c.startsWith('send:')).length,
+      1,
+    );
+    // And nothing was staged on the way: the words the reader confirmed went
+    // straight out, so the box is still the empty line it opened as.
+    expect(boxText(tester), '');
+  });
+
+  testWidgets('Cancel keeps the card and sends nothing', (tester) async {
+    await seedThread();
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    await tester.tap(sendOn('c1-m2', 0));
+    await tester.pump();
+    await tester.tap(find.descendant(
+      of: rowFor('c1-m2'),
+      matching: find.byKey(QuickReplyBar.cancelSendKeyFor(0)),
+    ));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    expect(mail.calls, isEmpty);
+    expect(find.text('Send this reply?'), findsNothing);
+    expect(find.text('Say yes'), findsOneWidget);
+    expect(boxText(tester), '');
+  });
 
   testWidgets('the box opens EMPTY even when a suggestion is waiting',
       (tester) async {

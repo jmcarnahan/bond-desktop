@@ -11,9 +11,11 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/theme/tokens.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
+import 'package:bond_inbox/widgets/conversation_row.dart';
 import 'package:bond_inbox/widgets/needs_you_tabs.dart';
+import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/source_filter.dart';
 import 'package:bond_inbox/widgets/thread_detail_panel.dart';
 import 'package:flutter/material.dart';
@@ -24,9 +26,11 @@ import 'fixtures/test_db.dart';
 
 /// The five lenses on the Needs You overview, wired to a real store.
 ///
-/// `needs_you_tabs_test` holds the filtering; this holds the seam — the pills
-/// are there, the two data-driven tabs read the columns `loadConversations`
-/// adds, and the choice survives a trip into a thread and back.
+/// `needs_you_tabs_test` holds the filtering and the ordering; this holds the
+/// seam — the pills and the order control are there, the two data-driven tabs
+/// read the columns `loadConversations` adds, the order the control writes is
+/// the order the rail draws, and the choice survives a trip into a thread and
+/// back.
 
 class _FakeSync implements MailSync {
   @override
@@ -66,6 +70,7 @@ void main() {
     String state = 'needs_reply',
     String receivedAt = '2026-09-03T09:00:00Z',
     String? deadline,
+    String urgency = 'normal',
   }) async {
     await store.upsertMessage({
       'source': 'email',
@@ -101,6 +106,7 @@ void main() {
           '[{"name":"Dana Whitfield","email":"dana@example.com"}]',
       'state': state,
       'cta_text': cta,
+      'cta_urgency': urgency,
       'last_message_at': receivedAt,
       'last_inbound_at': receivedAt,
     });
@@ -310,8 +316,17 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('the tab survives opening a thread and coming back',
+  /// The thread panel in the side panel, if there is one — the finder every
+  /// test of something that opens beside is written against.
+  final sideThread = find.descendant(
+    of: find.byType(SidePanelHost),
+    matching: find.byType(ThreadDetailPanel),
+  );
+
+  testWidgets('the tab survives opening a thread beside and closing it',
       (tester) async {
+    // Rewritten: a row on this overview opens BESIDE now. The list is the room
+    // the reader is standing in, so it stays — and the tab with it.
     await seedAll();
     await pumpInbox(tester);
     await pickTab(tester, NeedsYouTab.deadlines);
@@ -320,16 +335,175 @@ void main() {
     await tester.pump();
     await tester.pump();
     await tester.pump();
-    expect(find.byType(ThreadDetailPanel), findsOneWidget);
 
-    await tester.tap(find.byTooltip('Back'));
+    expect(sideThread, findsOneWidget);
+    // The pills never left, and neither did the list under them.
+    expect(find.byKey(const Key('needs-you-tabs')), findsOneWidget);
+    expect(rowTitles(tester), ['Homepage copy']);
+    // And the row that opened it is lit, so the list says which thread is over
+    // there.
+    expect(
+      tester
+          .widget<ConversationRow>(find.byWidgetPredicate(
+            (w) => w is ConversationRow && w.conversation.id == 'c1',
+          ))
+          .selected,
+      isTrue,
+    );
+
+    await tester.tap(find.byKey(SidePanelHost.closeKey));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byType(SidePanelHost), findsNothing);
+    expect(find.byType(ThreadDetailPanel), findsNothing);
+    expect(rowTitles(tester), ['Homepage copy']);
+    await settleQueues(tester);
+  });
+
+  testWidgets('⤢ hands the thread the main pane', (tester) async {
+    await seedAll();
+    await pumpInbox(tester);
+    await pickTab(tester, NeedsYouTab.deadlines);
+
+    await tester.tap(find.text('Deadline · by Friday'));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    // ⤢ is a selection: the thread takes the whole pane, so the overview it
+    // came from is not on screen and it is never in both.
+    expect(find.byType(SidePanelHost), findsNothing);
+    expect(find.byType(ThreadDetailPanel), findsOneWidget);
+    expect(find.byKey(const Key('needs-you-tabs')), findsNothing);
+
+    // Scoped to the panel: the main pane's thread draws the only Back on
+    // screen, and an unscoped tooltip finder would be one more thing to break
+    // when a neighbouring pane grows one.
+    await tester.tap(find.descendant(
+      of: find.byType(ThreadDetailPanel),
+      matching: find.byTooltip('Back'),
+    ));
     await tester.pump();
     await tester.pump();
     await tester.pump();
 
     // Coming back lands on the tab the reader left, exactly as the Archive
     // pane's pills do.
+    expect(find.byKey(const Key('needs-you-tabs')), findsOneWidget);
     expect(rowTitles(tester), ['Homepage copy']);
     await settleQueues(tester);
+  });
+
+  group('the order of the pile', () {
+    /// Two threads whose ranking and whose clock disagree: the older one is
+    /// urgent and outscores the newer one however the recency decay lands, so
+    /// the fixture does not rot as the dates recede.
+    Future<void> seedRankedAgainstTheClock() async {
+      await seedThread(
+        'a',
+        'Homepage copy',
+        cta: 'Confirm the launch date',
+        receivedAt: '2026-09-01T09:00:00Z',
+        urgency: 'urgent',
+      );
+      await seedThread(
+        'b',
+        'Invoice 4471',
+        cta: 'Sign the invoice',
+        receivedAt: '2026-09-03T09:00:00Z',
+      );
+    }
+
+    /// One row's position in whichever list it is scoped to.
+    double topOf(WidgetTester tester, Finder scope, String id) =>
+        tester.getTopLeft(find.descendant(
+          of: scope,
+          matching: find.byWidgetPredicate(
+            (w) => w is ConversationRow && w.conversation.id == id,
+          ),
+        )).dy;
+
+    /// One Needs You row's position on the rail. Its title carries a `· who`
+    /// suffix, which makes the row a `Text.rich` rather than plain text.
+    double railTopOf(WidgetTester tester, String ask) =>
+        tester.getTopLeft(find.descendant(
+          of: find.byType(AppRail),
+          matching: find.textContaining(ask),
+        )).dy;
+
+    Future<void> pickOrder(WidgetTester tester, NeedsYouSort sort) async {
+      await tester.tap(find.byKey(const Key('needs-you-sort')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.byKey(Key('needs-you-sort-${sort.name}')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    testWidgets('the order control is there, and By priority is the default',
+        (tester) async {
+      await seedAll();
+      await pumpInbox(tester);
+
+      expect(find.byKey(const Key('needs-you-sort')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('needs-you-sort')),
+          matching: find.text(NeedsYouSort.priority.label),
+        ),
+        findsOneWidget,
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('Newest first puts today above a louder older thread',
+        (tester) async {
+      await seedRankedAgainstTheClock();
+      await pumpInbox(tester);
+
+      final list = find.byType(ConversationListPane);
+      // By priority, the urgent thread from the first leads.
+      expect(topOf(tester, list, 'a'), lessThan(topOf(tester, list, 'b')));
+      expect(
+        railTopOf(tester, 'Confirm the launch date'),
+        lessThan(railTopOf(tester, 'Sign the invoice')),
+      );
+
+      await pickOrder(tester, NeedsYouSort.newest);
+
+      expect(topOf(tester, list, 'b'), lessThan(topOf(tester, list, 'a')));
+      // And the rail flipped with it: one pile, one order, wherever it is
+      // drawn. A column still ranking by loudness would teach the reader that
+      // the control does not mean what it says.
+      expect(
+        railTopOf(tester, 'Sign the invoice'),
+        lessThan(railTopOf(tester, 'Confirm the launch date')),
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('and the order is remembered', (tester) async {
+      await seedRankedAgainstTheClock();
+      await pumpInbox(tester);
+
+      await pickOrder(tester, NeedsYouSort.newest);
+
+      expect(await store.getPref(needsYouSortKey), 'newest');
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('needs-you-sort')),
+          matching: find.text(NeedsYouSort.newest.label),
+        ),
+        findsOneWidget,
+      );
+      await settleQueues(tester);
+    });
   });
 }

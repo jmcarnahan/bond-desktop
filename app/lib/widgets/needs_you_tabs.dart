@@ -1,6 +1,11 @@
 import '../models/message_models.dart';
 import 'app_rail.dart' show isWaitingRow;
 
+/// The pile's ORDER travels with its lenses: everything that draws Needs You
+/// already imports this file, and the enum lives in `models/` only so the
+/// preference that stores it need not import a widget.
+export '../models/needs_you_sort.dart';
+
 /// The five ways to read the Needs You pile.
 ///
 /// [all] leads and is the default, so arriving at the stop shows exactly what

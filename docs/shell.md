@@ -48,7 +48,7 @@ transcript's own 420 minimum, with nothing to catch it.
 | Stop | Icon | The list column shows | Main shows |
 |---|---|---|---|
 | Home | `bolt` | the whole stack: Needs You · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row | `HomePane` — the pipeline as a table |
-| Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count | the Needs You overview |
+| Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count, in the pile's chosen order | the Needs You overview — five tabs, the order control, and rows that open beside |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
 | People | `people_outline` | one row per person room | the flat list of live threads nobody has claimed, or the open room |
 | Files | `folder_outlined` | the four kinds as rows — All · Documents · Images · Links | `FilesPane` — every document in the mailbox, by day |
@@ -103,19 +103,28 @@ affordance that lied.
 
 ## What opens where
 
-> List column click → main pane. A thread reached from INSIDE a room (a
-> storyline episode card, a person room's root message) → side panel. A file →
-> side panel. ⤢ on a thread panel opens it in main; ⤢ on a file opens the full
-> viewer. Opening a file from a side thread REPLACES the side panel.
+> List column click → main pane. A row in a list that LIVES IN MAIN (the Needs
+> You overview, the People overview) → side panel, and that row stays lit in the
+> list while it is open. A thread reached from INSIDE a room (a storyline
+> episode card, a person room's root message) → side panel. A file → side panel.
+> ⤢ on a thread panel opens it in main; ⤢ on a file opens the full viewer.
+> Opening a file from a side thread REPLACES the side panel.
 
 That is Slack's rule, and it is what keeps the room on screen while one
 conversation in it is being read.
+
+The list COLUMN is the other half of that rule. A row on the rail opens in main
+because the column is BESIDE the pane rather than in it; a row on an overview
+opens beside because the list is the pane, and swapping it out for the first
+thread the reader opened would cost them their place in the pile. `ArchivePane`
+is the exception and opens in main: its rows are a pile being cleared, not a
+room being worked in.
 
 `SidePanel` has five kinds, and the panel shows exactly one of them:
 
 | Kind | What it holds | Opened by |
 |---|---|---|
-| `ThreadPanel` | a conversation | a storyline episode card, a person room's card or `Open chat ›`, a Drafts & sent row |
+| `ThreadPanel` | a conversation | a storyline episode card, a person room's card or `Open chat ›`, a Drafts & sent row, a row on the Needs You or People overview |
 | `FilePanel` | one file | any card, chip, unfurl or shelf row |
 | `WhyPanel` | why one message got its verdict | the hover **Why** on an inbound row, and the CTA banner |
 | `PersonPanel` | one person | the room header's **Profile**, and tapping the faces on a room or a thread |
@@ -543,6 +552,13 @@ the person room's header `AvatarStack`.
   tooltip, because the tooltip flips with the state.
 - `Key('needs-you-tabs')` is the Needs You pill row. **Scope pill finders to
   it**: the source chips carry an `All` pill of their own.
+- `Key('needs-you-sort')` is the order control beside those pills, and
+  `Key('needs-you-sort-<name>')` its two items (`priority`, `newest`). It is a
+  `PopupMenuButton`, so the idiom is: tap it, `pump()`,
+  `pump(const Duration(milliseconds: 400))`, tap the item, then the same pair
+  again. The order it writes is the `needs_you_sort` preference, which the rail
+  and Find's Enter read too — see
+  [pipeline/11-needs-you.md](pipeline/11-needs-you.md#order).
 - `DraftsPane.draftKeyFor(source, messageId)` / `dismissKeyFor(...)` /
   `sentKeyFor(source, messageId)` reach the Drafts & sent rows. The list column
   row is `find.text('DRAFTS & SENT')`, scoped to `AppRail`.

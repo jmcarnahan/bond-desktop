@@ -1,4 +1,5 @@
 import '../models/message_models.dart';
+import '../models/needs_you_sort.dart';
 import '../models/storyline_models.dart';
 import '../services/attention.dart';
 import 'app_rail.dart';
@@ -81,6 +82,11 @@ final class FindRoom extends FindTarget {
 /// match is the row under their eyes. So the walk here is the stack's own
 /// order — Needs You, then storylines, then rooms.
 ///
+/// [needsYouSort] is the order the rail is drawing the pile in, and it is
+/// passed rather than read here for the same reason the threshold is: this
+/// file knows no preferences, and the screen that owns the setting hands the
+/// same value to both.
+///
 /// The rail's `+N more` truncation cannot come between them, and that is a
 /// consequence of WHERE it filters rather than luck: the rail narrows the
 /// Needs You list and only then cuts it to [AttentionTuning.topCount], so the
@@ -101,6 +107,7 @@ FindTarget? firstFindTarget({
   required String find,
   required bool unreadOnly,
   required double threshold,
+  NeedsYouSort needsYouSort = NeedsYouSort.priority,
 }) {
   final needle = normalizeFind(find);
 
@@ -110,7 +117,14 @@ FindTarget? firstFindTarget({
       roomMatches(r, needle) && (!unreadOnly || r.unread > 0);
 
   FindTarget? firstThread() {
-    for (final c in needsYouRows(conversations, threshold: threshold)) {
+    // The reader's chosen order, applied exactly where the rail applies it —
+    // to the whole pile, before the match. Reading the rail's order and then
+    // walking a different one is the one way this function can lie.
+    final pile = sortNeedsYou(
+      needsYouSort,
+      needsYouRows(conversations, threshold: threshold),
+    );
+    for (final c in pile) {
       if (keepThread(c)) return FindThread(c.source, c.id);
     }
     return null;

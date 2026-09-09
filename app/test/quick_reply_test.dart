@@ -28,6 +28,7 @@ void main() {
     List<DraftOption> options = const [_confirm, _propose],
     bool armed = true,
     void Function(DraftOption)? onPick,
+    void Function(DraftOption)? onSend,
     VoidCallback? onDismiss,
     PendingSend? pending,
     VoidCallback? onUndo,
@@ -42,6 +43,7 @@ void main() {
           options: options,
           armed: armed,
           onPick: onPick ?? (_) {},
+          onSend: onSend,
           onDismiss: onDismiss,
           pending: pending,
           onUndo: onUndo,
@@ -164,6 +166,114 @@ void main() {
       addTearDown(gesture.removePointer);
       await gesture.moveTo(tester.getCenter(find.text('Confirm Friday')));
       await tester.pumpAndSettle();
+    });
+  });
+
+  group('send from a card', () {
+    testWidgets('is absent where the host has no real send to offer',
+        (tester) async {
+      // A button that says Send and saves to Outlook drafts instead is a lie,
+      // so the lower rungs get no button at all.
+      await pumpBar(tester);
+
+      expect(find.byKey(QuickReplyBar.sendKeyFor(0)), findsNothing);
+      expect(find.byIcon(Icons.send_outlined), findsNothing);
+      expect(find.text('Tap a reply to put it in the box.'), findsOneWidget);
+    });
+
+    testWidgets('is on every card where there is, and says so in the caption',
+        (tester) async {
+      await pumpBar(tester, onSend: (_) {});
+
+      expect(find.byKey(QuickReplyBar.sendKeyFor(0)), findsOneWidget);
+      expect(find.byKey(QuickReplyBar.sendKeyFor(1)), findsOneWidget);
+      expect(
+        find.text('Tap a reply to put it in the box, or send it as it stands.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('and a plain tap still only stages', (tester) async {
+      // The button consumes its own tap, so the card's stage-on-tap is
+      // untouched — and tapping the words is never a send.
+      final picked = <String>[];
+      final sent = <String>[];
+      await pumpBar(
+        tester,
+        onPick: (o) => picked.add(o.stance),
+        onSend: (o) => sent.add(o.stance),
+      );
+
+      await tester.tap(find.text('Propose Tuesday'));
+      await tester.pump();
+
+      expect(picked, ['Propose Tuesday']);
+      expect(sent, isEmpty);
+    });
+
+    testWidgets('Send asks first, on that card and no other', (tester) async {
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+
+      await tester.tap(find.byKey(QuickReplyBar.sendKeyFor(0)));
+      await tester.pump();
+
+      expect(sent, isEmpty);
+      expect(find.text('Send this reply?'), findsOneWidget);
+      expect(find.byKey(QuickReplyBar.confirmSendKeyFor(0)), findsOneWidget);
+      // One question at a time: the other card is not being asked about.
+      expect(find.byKey(QuickReplyBar.confirmSendKeyFor(1)), findsNothing);
+      // And the words the question is about stay on screen while it stands.
+      expect(find.text(_confirm.body), findsOneWidget);
+    });
+
+    testWidgets('Cancel puts the card back and sends nothing', (tester) async {
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+
+      await tester.tap(find.byKey(QuickReplyBar.sendKeyFor(0)));
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBar.cancelSendKeyFor(0)));
+      await tester.pump();
+
+      expect(sent, isEmpty);
+      expect(find.text('Send this reply?'), findsNothing);
+      expect(find.byKey(QuickReplyBar.sendKeyFor(0)), findsOneWidget);
+    });
+
+    testWidgets('the confirm reports that option once, and disarms',
+        (tester) async {
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+
+      await tester.tap(find.byKey(QuickReplyBar.sendKeyFor(1)));
+      await tester.pump();
+      await tester.tap(find.byKey(QuickReplyBar.confirmSendKeyFor(1)));
+      await tester.pump();
+
+      expect(sent, ['Propose Tuesday']);
+      expect(find.text('Send this reply?'), findsNothing);
+    });
+
+    testWidgets('a fresh pair is never sent on the old one\'s behalf',
+        (tester) async {
+      // The same rule the ×'s question follows: the card the reader was being
+      // asked about is not the card in front of them now.
+      final sent = <String>[];
+      await pumpBar(tester, onSend: (o) => sent.add(o.stance));
+      await tester.tap(find.byKey(QuickReplyBar.sendKeyFor(0)));
+      await tester.pump();
+
+      await pumpBar(
+        tester,
+        options: const [
+          DraftOption(stance: 'Ask for Wednesday', body: 'Wednesday?'),
+        ],
+        onSend: (o) => sent.add(o.stance),
+      );
+
+      expect(find.text('Send this reply?'), findsNothing);
+      expect(sent, isEmpty);
     });
   });
 

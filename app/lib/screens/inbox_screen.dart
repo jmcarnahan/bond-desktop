@@ -782,6 +782,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     return side is FilePanel ? side.attachment : null;
   }
 
+  /// The thread open beside the main pane, for the lists in main that highlight
+  /// it. Same shape as [_sideAttachment] and for the same reason: a row lit in
+  /// the list and a panel showing something else is two answers to one
+  /// question.
+  ThreadPanel? get _threadBeside {
+    final side = _side;
+    return side is ThreadPanel ? side : null;
+  }
+
   void _select(String id, {String? source}) {
     // The row's own source, resolved from the loaded list the way [_selected]
     // resolves it — the rail, the list pane and the digest all pass an id and
@@ -1491,6 +1500,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       laterCount: later.length,
       laterDays: laterDayCounts(conversations),
       attentionThreshold: ref.watch(appPrefsProvider).attentionThreshold,
+      // The same value the overview's control writes and `_submitFind` reads.
+      // One pile, one order, three places it is drawn.
+      needsYouSort: ref.watch(appPrefsProvider).needsYouSort,
       processingSince: ref.watch(sessionStartProvider),
       // A thread, a storyline, a room or a Later day being open means no
       // section overview is showing, so the rail must not highlight one.
@@ -2162,6 +2174,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       find: _find,
       unreadOnly: _unreadOnly,
       threshold: ref.read(appPrefsProvider).attentionThreshold,
+      needsYouSort: ref.read(appPrefsProvider).needsYouSort,
     );
     switch (target) {
       case FindThread(:final source, :final conversationKey):
@@ -2992,7 +3005,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     /// Every guard here is about honesty rather than tidiness: a card offers to
     /// write words into the box that answer THIS message, so it goes the moment
     /// that message has been answered — by a synced reply or by a queued one.
-    /// A card never sends; the composer's own button is the only send.
+    /// A TAP never sends; the card's own Send does, and asks first.
     Widget? cardFor(Message m) {
       if (!m.inbound) return null;
       final row = draft.threadDrafts[m.id];
@@ -3026,6 +3039,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             composerFocus.requestFocus();
           }
         },
+        // Only on the top rung. The lower rungs save to Outlook or copy to
+        // the clipboard, and a button that says Send and does either is a lie.
+        //
+        // Always addressed to `m.id`: the card answers the message it hangs
+        // under, newest or not, and nothing is staged on the way — the words
+        // the reader confirmed are the words that go.
+        onSend: draft.capability == SendCapability.send
+            ? (option) => unawaited(_send(target, option.body, replyTo: m.id))
+            : null,
         onDismiss: () => unawaited(notifier.dismissOptionsFor(m.id)),
       );
     }
@@ -3958,13 +3980,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// The one place a click becomes a send. It says what happened, including
   /// when what happened was a copy.
-  Future<void> _send(DraftTarget target, String body) async {
-    // Only this pane's own override. A message named in the thread beside must
-    // not steer a send from the main pane.
-    final replyTo = _replyTo?.target == target ? _replyTo!.messageId : null;
+  ///
+  /// [replyTo] is a caller that already knows which message is being answered
+  /// — a suggestion card, which hangs under one message and means that one.
+  Future<void> _send(DraftTarget target, String body, {String? replyTo}) async {
+    // An explicit message outranks the pane's own caption: a card sends the
+    // reply to the message it was drawn under, whatever the box above it was
+    // pointed at. Failing that, only this pane's own override — a message
+    // named in the thread beside must not steer a send from the main pane.
+    final replyToId =
+        replyTo ?? (_replyTo?.target == target ? _replyTo!.messageId : null);
     final outcome = await ref
         .read(draftProvider(target).notifier)
-        .send(body, replyTo: replyTo);
+        .send(body, replyTo: replyToId);
     if (!mounted) return;
     // Anything but a failure means the named message has been answered, and a
     // caption that outlived its send would steer the NEXT one. A failure keeps
@@ -4189,13 +4217,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         const <(String, List<Conversation>)>[],
     };
 
+    // One rule for every list that lives in MAIN — this one and the Needs You
+    // overview: a row opens BESIDE and is lit here while it is open, because
+    // the list is the room the reader is standing in. The list COLUMN is the
+    // other half of that rule: a row on the rail opens in main, because there
+    // the list is beside the pane rather than in it.
     return ConversationListPane(
       sources: _sources,
       filter: InboxFilter.open,
       conversations: conversations,
-      selectedId: _selectedId,
-      selectedSource: _selectedSource,
-      onSelect: (source, id) => _select(id, source: source),
+      selectedId: _threadBeside?.conversationKey,
+      selectedSource: _threadBeside?.source,
+      onSelect: _openThreadBeside,
       sectionsOverride: sections,
       processingSince: ref.watch(sessionStartProvider),
       emptyNotice: _scopeNotice(),
@@ -4248,35 +4281,59 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     );
   }
 
-  /// Needs You, under five lenses.
+  /// Needs You, under five lenses and in the reader's own order.
   ///
-  /// [NeedsYouTab.all] is the list the rail's badge counts, in the rail's own
-  /// order and at the rail's own threshold — so the `+N more` row opens the
+  /// [NeedsYouTab.all] is the list the rail's badge counts, at the rail's own
+  /// threshold and in the rail's own order — so the `+N more` row opens the
   /// list it promised. The other four filter that same list rather than
   /// re-deriving one: the ranking was decided once, and a tab that re-read the
-  /// store would eventually rank differently from the column beside it.
+  /// store would eventually rank differently from the column beside it. The
+  /// order control sits beside the pills and changes the pile everywhere,
+  /// because the rail, this list and Enter are three views of one thing.
+  ///
+  /// A row here opens BESIDE rather than taking the main pane. This overview
+  /// is a room the reader is standing in, the way a storyline's spine is: the
+  /// list is what they are working through, and swapping it out for the first
+  /// thread they opened would cost them their place. ⤢ on the panel is how a
+  /// thread gets the whole pane when it deserves it.
   ///
   /// Its own method rather than an arm of the switch below, on the archive
   /// arm's precedent: the pills sit ABOVE the list, so this returns a column
   /// and not a `(label, rows)` pair.
   Widget _needsYouOverview(List<Conversation> conversations) {
     final tab = _needsYouTab;
+    final sort = ref.watch(appPrefsProvider).needsYouSort;
     final rows = needsYouTabRows(
       tab,
-      needsYouRows(
-        conversations,
-        threshold: ref.watch(appPrefsProvider).attentionThreshold,
+      sortNeedsYou(
+        sort,
+        needsYouRows(
+          conversations,
+          threshold: ref.watch(appPrefsProvider).attentionThreshold,
+        ),
       ),
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        BondFilterPillRow<NeedsYouTab>(
-          key: const Key('needs-you-tabs'),
-          options: NeedsYouTab.values,
-          selected: tab,
-          labelOf: (t) => t.label,
-          onSelected: (t) => setState(() => _needsYouTab = t),
+        Row(
+          // The pills wrap on a narrow pane, and the control belongs with
+          // their FIRST line rather than centred against however many there
+          // turned out to be.
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: BondFilterPillRow<NeedsYouTab>(
+                key: const Key('needs-you-tabs'),
+                options: NeedsYouTab.values,
+                selected: tab,
+                labelOf: (t) => t.label,
+                onSelected: (t) => setState(() => _needsYouTab = t),
+              ),
+            ),
+            const SizedBox(width: BondSpacing.s8),
+            _needsYouSortControl(sort),
+          ],
         ),
         const SizedBox(height: BondSpacing.s12),
         Expanded(
@@ -4284,9 +4341,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             sources: _sources,
             filter: InboxFilter.open,
             conversations: conversations,
-            selectedId: _selectedId,
-            selectedSource: _selectedSource,
-            onSelect: (source, id) => _select(id, source: source),
+            // The thread beside, not the main pane's selection: this list
+            // opens rows into the side panel, so what it lights is what is
+            // over there.
+            selectedId: _threadBeside?.conversationKey,
+            selectedSource: _threadBeside?.source,
+            // Beside, so the pile the reader is working through stays under
+            // their eyes — the same rule a storyline's episode cards follow.
+            // ⤢ on the panel hands the thread the whole pane.
+            onSelect: _openThreadBeside,
             sectionsOverride: [
               (
                 tab == NeedsYouTab.all
@@ -4307,6 +4370,57 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ),
         ),
       ],
+    );
+  }
+
+  /// How the Needs You pile is ordered, as a quiet menu rather than a sixth
+  /// pill: the pills are lenses on the pile and this is the pile's own order,
+  /// and a control that looked like a tab would read as one.
+  ///
+  /// It writes the preference rather than any local state, because the rail
+  /// and Enter read the same value — changing the order here is a statement
+  /// about Needs You, not about this pane.
+  Widget _needsYouSortControl(NeedsYouSort sort) {
+    return PopupMenuButton<NeedsYouSort>(
+      key: const Key('needs-you-sort'),
+      tooltip: 'Order',
+      initialValue: sort,
+      onSelected: (value) =>
+          unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouSort(value)),
+      itemBuilder: (_) => [
+        for (final option in NeedsYouSort.values)
+          CheckedPopupMenuItem<NeedsYouSort>(
+            key: Key('needs-you-sort-${option.name}'),
+            value: option,
+            checked: option == sort,
+            child: Text(option.label),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: BondSpacing.s8,
+          vertical: BondSpacing.s4,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(
+              Icons.sort,
+              size: 14,
+              color: BondColors.inkSecondary,
+            ),
+            const SizedBox(width: BondSpacing.s4),
+            // The current order in words. A bare icon would leave the reader
+            // to guess which of the two they are looking at.
+            Text(sort.label, style: BondType.small),
+            const Icon(
+              Icons.arrow_drop_down,
+              size: 16,
+              color: BondColors.inkSecondary,
+            ),
+          ],
+        ),
+      ),
     );
   }
 

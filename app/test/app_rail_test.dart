@@ -1,5 +1,6 @@
 import 'package:bond_inbox/models/files_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/models/needs_you_sort.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
@@ -680,6 +681,7 @@ void main() {
       WidgetTester tester, {
       required List<Conversation> conversations,
       double threshold = 0,
+      NeedsYouSort needsYouSort = NeedsYouSort.priority,
       void Function(RailSection)? onSelectSection,
       RailSection scope = RailSection.home,
       List<PersonRoom>? rooms,
@@ -696,10 +698,53 @@ void main() {
         selectedId: null,
         selectedSection: RailSection.needsYou,
         attentionThreshold: threshold,
+        needsYouSort: needsYouSort,
         onSelectConversation: (_, _) {},
         onSelectSection: onSelectSection ?? (_) {},
       )));
     }
+
+    /// Two rows whose ranking and whose clock disagree — the shape the order
+    /// control exists for. The loud one is a week older than the quiet one.
+    List<Conversation> rankedAgainstTheClock() => [
+          _conv(
+            id: 'loud',
+            who: 'Loud',
+            state: ConversationState.needsReply,
+            score: 1.4,
+            lastMessageAt: '2026-09-01T09:00:00Z',
+          ),
+          _conv(
+            id: 'today',
+            who: 'Today',
+            state: ConversationState.needsReply,
+            score: 0.6,
+            lastMessageAt: '2026-09-08T09:00:00Z',
+          ),
+        ];
+
+    double topOfRow(WidgetTester tester, String who) =>
+        tester.getTopLeft(find.text(who)).dy;
+
+    testWidgets('ranks by priority by default, whatever the clock says',
+        (tester) async {
+      await pumpRail(tester, conversations: rankedAgainstTheClock());
+
+      expect(topOfRow(tester, 'Loud'), lessThan(topOfRow(tester, 'Today')));
+    });
+
+    testWidgets('and Newest first flips the rows the rail draws',
+        (tester) async {
+      // The rail is the other half of the promise the overview's control
+      // makes: one pile, one order, wherever it is drawn.
+      await pumpRail(
+        tester,
+        conversations: rankedAgainstTheClock(),
+        needsYouSort: NeedsYouSort.newest,
+      );
+
+      expect(topOfRow(tester, 'Today'), lessThan(topOfRow(tester, 'Loud')));
+    });
 
     List<Conversation> manyNeedsReply(int n) => [
           for (var i = 0; i < n; i++)

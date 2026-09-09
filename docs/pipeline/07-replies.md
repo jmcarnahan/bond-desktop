@@ -107,15 +107,28 @@ reply is possible on, from the moment the thread opens — see
 [../shell.md](../shell.md#room-anatomy). Every ask on the pane, the banner and
 each message's own line, puts the cursor in that box rather than opening one.
 
-**The box opens empty, and a card never sends.** A tapped card puts its whole
-reply in the composer and takes the cursor there, in every grant state; the
-composer's own button is the one send. `DraftNotifier.queueSend`, `PendingSend`
+**The box opens empty, and a card TAP never sends.** A tapped card puts its
+whole reply in the composer and takes the cursor there, in every grant state.
+`DraftNotifier.queueSend`, `PendingSend`
 and `cancelQueuedSend` — the five-second undo window — remain provider API with
 their own tests, but nothing in the shell arms them any more. What gets a
 suggestion into the box is a card tap, a Suggest a reply, the box's Draft reply
 / Regenerate, a Use in reply on a file, or the `Use it` on the hint above the
 box; that staging is screen state keyed by thread and never touches the stored
 draft, and the box's ✕ only empties it.
+
+**A card's own Send does send, and asks first.** Each card carries a quiet
+`Send` (`QuickReplyBar.sendKeyFor(i)`) that arms an inline `Send this reply?`
+under the words it is about — confirm (`confirmSendKeyFor(i)`) or cancel
+(`cancelSendKeyFor(i)`), never a dialog, and the body stays visible while the
+question stands. Confirming goes through the SAME path as the composer's
+button, `_send(target, option.body, replyTo: m.id)`: addressed to the card's own
+message rather than to whatever the box above was pointed at, and staging
+nothing on the way. It is offered only on the top rung
+(`SendCapability.send`) — the lower rungs save to Outlook or copy to the
+clipboard, and a button that says Send and does either is a lie — and the
+caption above the cards says so, reading `Tap a reply to put it in the box, or
+send it as it stands.` only where the button is really there.
 
 ## Drafts & sent
 

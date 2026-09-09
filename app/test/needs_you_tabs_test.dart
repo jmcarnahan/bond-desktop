@@ -17,6 +17,7 @@ Conversation _conv({
   String? deadline,
   int pendingDrafts = 0,
   double? score,
+  String? lastMessageAt,
 }) =>
     Conversation(
       id: id,
@@ -25,6 +26,7 @@ Conversation _conv({
       attentionScore: score,
       latestDeadline: deadline,
       pendingDraftCount: pendingDrafts,
+      lastMessageAt: lastMessageAt,
     );
 
 List<String> _idsOf(List<Conversation> rows) => [for (final c in rows) c.id];
@@ -129,6 +131,89 @@ void main() {
     for (final tab in NeedsYouTab.values) {
       expect(needsYouTabRows(tab, const []), isEmpty, reason: '$tab');
     }
+  });
+
+  group('sortNeedsYou', () {
+    test('every order has a label a menu item can wear', () {
+      expect(
+        [for (final sort in NeedsYouSort.values) sort.label],
+        ['By priority', 'Newest first'],
+      );
+    });
+
+    test('priority leads, so an install that never chose gets the ranking', () {
+      expect(NeedsYouSort.values.first, NeedsYouSort.priority);
+    });
+
+    test('priority is the input itself, untouched', () {
+      final rows = [
+        _conv(id: 'a', lastMessageAt: '2026-09-01T09:00:00Z'),
+        _conv(id: 'b', lastMessageAt: '2026-09-03T09:00:00Z'),
+      ];
+
+      expect(sortNeedsYou(NeedsYouSort.priority, rows), same(rows));
+    });
+
+    test('newest puts the latest stamp on top', () {
+      final rows = [
+        _conv(id: 'older', lastMessageAt: '2026-09-01T09:00:00Z'),
+        _conv(id: 'newest', lastMessageAt: '2026-09-05T09:00:00Z'),
+        _conv(id: 'middle', lastMessageAt: '2026-09-03T09:00:00Z'),
+      ];
+
+      expect(
+        _idsOf(sortNeedsYou(NeedsYouSort.newest, rows)),
+        ['newest', 'middle', 'older'],
+      );
+    });
+
+    test('and is stable, so the ranking still shows through a tie', () {
+      // Dart's own sort is not stable. Two threads whose newest message landed
+      // in the same second must stay in the order the ranking put them, or the
+      // list would reshuffle between reads for no reason a reader could see.
+      final rows = [
+        for (var i = 0; i < 8; i++)
+          _conv(id: 'c$i', lastMessageAt: '2026-09-03T09:00:00Z'),
+      ];
+
+      expect(
+        _idsOf(sortNeedsYou(NeedsYouSort.newest, rows)),
+        _idsOf(rows),
+      );
+    });
+
+    test('a row with no stamp sorts last, not first', () {
+      final rows = [
+        _conv(id: 'undated', lastMessageAt: null),
+        _conv(id: 'blank', lastMessageAt: ''),
+        _conv(id: 'dated', lastMessageAt: '2026-09-01T09:00:00Z'),
+      ];
+
+      expect(
+        _idsOf(sortNeedsYou(NeedsYouSort.newest, rows)),
+        ['dated', 'undated', 'blank'],
+      );
+    });
+
+    test('and never drops one — the badge over the section counts these', () {
+      final rows = [
+        _conv(id: 'a', lastMessageAt: '2026-09-01T09:00:00Z'),
+        _conv(id: 'b'),
+        _conv(id: 'c', lastMessageAt: '2026-09-05T09:00:00Z'),
+      ];
+
+      for (final sort in NeedsYouSort.values) {
+        final out = sortNeedsYou(sort, rows);
+        expect(out, hasLength(rows.length), reason: '$sort');
+        expect(_idsOf(out)..sort(), ['a', 'b', 'c'], reason: '$sort');
+      }
+    });
+
+    test('an empty pile is an empty pile in either order', () {
+      for (final sort in NeedsYouSort.values) {
+        expect(sortNeedsYou(sort, const []), isEmpty, reason: '$sort');
+      }
+    });
   });
 
   test('every tab has an empty sentence of its own', () {

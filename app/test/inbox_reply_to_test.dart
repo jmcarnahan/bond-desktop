@@ -14,6 +14,7 @@ import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
 import 'package:bond_inbox/widgets/composer.dart' show Composer;
 import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/hover_actions.dart';
+import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/why_panel.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -332,11 +333,9 @@ void main() {
     await tester.pump();
     expect(find.text('Replying to Eric Vance'), findsOneWidget);
 
-    // Back to the overview first: once a thread is open it has the main pane,
-    // and the list beside it is gone.
-    await tester.tap(find.byTooltip('Back'));
-    await tester.pump();
-    await tester.pump();
+    // No way back to walk: a row on the People overview opens BESIDE now, so
+    // the list the reader came from is still under their eyes and the next
+    // thread is one tap away in it.
     await openThread(tester, 'Dana Ruiz');
 
     // A message named on one thread must never be the target of a send from
@@ -356,6 +355,15 @@ void main() {
     await seedThread();
     await pumpScreen(tester);
     await openThread(tester, 'Eric Vance');
+    // ⤢ first: a row on the People overview opens BESIDE now, and one thing at
+    // a time lives on that side of the seam — so a Why opened from a thread
+    // still in the side panel would take the thread's place, box and all. The
+    // question here is about the box, so the thread is given the main pane
+    // the way a reader who wants to work in it would.
+    await tester.tap(find.byKey(SidePanelHost.expandKey));
+    for (var i = 0; i < 3; i++) {
+      await tester.pump();
+    }
 
     expect(tester.widget<TextField>(composerField()).focusNode?.hasFocus,
         isFalse);

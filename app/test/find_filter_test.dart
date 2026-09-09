@@ -1,4 +1,5 @@
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/models/needs_you_sort.dart';
 import 'package:bond_inbox/models/storyline_models.dart';
 import 'package:bond_inbox/widgets/app_rail.dart';
 import 'package:bond_inbox/widgets/find_filter.dart';
@@ -156,6 +157,46 @@ void main() {
       );
 
       expect(target, isA<FindRoom>());
+    });
+
+    test('Enter opens the top row in the order the rail is drawing', () {
+      // The two halves of one promise: the rail applies the reader's order to
+      // the whole pile, and so does this. Walking the ranking while the column
+      // shows the clock is the one way Enter can open a row nobody is looking
+      // at.
+      final rows = [
+        _conv(
+          id: 'older',
+          who: 'Eric Vance',
+          cta: 'Confirm the launch date',
+          lastMessageAt: '2026-09-01T09:00:00Z',
+        ),
+        _conv(
+          id: 'newer',
+          who: 'Priya Raman',
+          cta: 'Confirm the launch date',
+          lastMessageAt: '2026-09-05T09:00:00Z',
+        ),
+      ];
+      FindTarget? targetFor(NeedsYouSort sort) => firstFindTarget(
+            scope: RailSection.needsYou,
+            conversations: rows,
+            storylines: const [],
+            rooms: const [],
+            find: 'launch',
+            unreadOnly: false,
+            threshold: 0,
+            needsYouSort: sort,
+          );
+
+      expect(
+        (targetFor(NeedsYouSort.priority) as FindThread).conversationKey,
+        'older',
+      );
+      expect(
+        (targetFor(NeedsYouSort.newest) as FindThread).conversationKey,
+        'newer',
+      );
     });
 
     test('Drafts scopes to the same stack its row lives in', () {
