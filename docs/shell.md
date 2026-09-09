@@ -391,9 +391,11 @@ are derived from the conversation list on every build.
   same person has a named room from their own mail and a second, address-titled
   room from the user's. Read-time and People-layer only: no ingest or store
   change.
-- Nobody left files under **`'(no sender)'`**. A no-reply address and a chat
-  whose roster failed to load are still mail; a pile that loses them silently
-  is worse than one odd row.
+- Nobody left files under the key **`'(no sender)'`**, titled **`Just you`**:
+  in practice it is mail the user sent to themselves — a note, a forward, a
+  probe — and a no-reply address or a chat whose roster failed to load lands
+  there too. It is a real room because a pile that loses them silently is
+  worse than one odd row.
 - **Every thread is in the room, done and deferred included.** The stop answers
   "what is there with this person", and a colleague whose one chat had been
   closed used to have no room at all. What excludes them is only `unread` and
@@ -438,7 +440,7 @@ through.
 
 Above the list: a `FilterField` (`Filter people…`), the pills
 `All · Needs you · Unread`, and a `SortMenu` offering
-`Most recent · By name · Needs you first`. By name puts `(no sender)` last: it
+`Most recent · By name · Needs you first`. By name puts `Just you` last: it
 is not a person, and a bracket at the top of an alphabetical list of colleagues
 is a row nobody was looking for where everybody looks first.
 

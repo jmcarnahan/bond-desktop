@@ -12,11 +12,19 @@ import 'app_rail.dart' show isNeedsYou;
 /// alone would leave the owner standing in their own chat rooms.
 typedef Owner = ({String? name, String? address});
 
-/// The room a thread with nobody but the owner on it falls into. It is a real
-/// room rather than a dropped thread: mail from a no-reply address and a chat
-/// whose roster failed to load are still mail, and a pile that quietly loses
-/// them is worse than one with an oddly named row in it.
+/// The KEY of the room a thread with nobody but the owner on it falls into.
+/// It is a real room rather than a dropped thread: mail the user sent to
+/// themselves, a no-reply address, a chat whose roster failed to load are all
+/// still mail, and a pile that quietly loses them is worse than one odd row.
+///
+/// The key is not what the row says — see [selfRoomTitle]. It stays as it is
+/// because it is what a screen stores as the selection.
 const String noSenderRoom = '(no sender)';
+
+/// What the [noSenderRoom] row is CALLED. In practice it is mail the user
+/// sent to themselves — a note, a forward, a probe — so the honest name is
+/// the reader, not a bracket saying nobody wrote it.
+const String selfRoomTitle = 'Just you';
 
 /// A thread the reader is still in: not closed, not deferred. The two counts
 /// on a room that drive bold and the badge are taken over these.
@@ -311,7 +319,7 @@ List<PersonRoom> peopleRooms(
       i,
       PersonRoom(
         key: key,
-        title: best == null ? noSenderRoom : _displayOf(best),
+        title: best == null ? selfRoomTitle : _displayOf(best),
         threads: threads,
         unread: unread,
         needsYou: needsYou,

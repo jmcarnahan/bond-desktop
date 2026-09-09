@@ -517,7 +517,7 @@ void main() {
 
     await pumpInbox(tester);
     // These fixtures carry no sender, so every live thread files into the one
-    // '(no sender)' room; opening it is how the rail reaches a thread now.
+    // 'Just you' room; opening it is how the rail reaches a thread now.
     await tester.tap(find.descendant(
       of: find.byType(IconRail),
       matching: find.text('People'),
@@ -526,7 +526,7 @@ void main() {
     await tester.pump();
     await tester.tap(find.descendant(
       of: find.byType(AppRail),
-      matching: find.text('(no sender)'),
+      matching: find.text('Just you'),
     ));
     await tester.pump();
     await tester.pump();

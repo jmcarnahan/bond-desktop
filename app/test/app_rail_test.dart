@@ -1230,7 +1230,7 @@ void main() {
       expect(find.text('Eric Nolan'), findsOneWidget);
       expect(find.text('Priya Raman'), findsOneWidget);
       expect(find.text('Tom Alder'), findsOneWidget);
-      expect(find.text(noSenderRoom), findsOneWidget);
+      expect(find.text(selfRoomTitle), findsOneWidget);
     });
 
     testWidgets('tapping a room reports its key', (tester) async {

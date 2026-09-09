@@ -446,7 +446,8 @@ void main() {
       );
 
       expect(rooms.single.key, noSenderRoom);
-      expect(rooms.single.title, noSenderRoom);
+      // Keyed as nobody, titled as the reader: it is their own mail.
+      expect(rooms.single.title, selfRoomTitle);
       expect(rooms.single.people, isEmpty);
     });
 
