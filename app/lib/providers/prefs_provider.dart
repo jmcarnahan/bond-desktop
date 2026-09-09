@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../data/message_store.dart';
 import '../models/needs_you_sort.dart';
+import '../models/people_sort.dart';
 import '../services/attention.dart';
 import '../services/llm/model_slots.dart';
 import '../services/sync_service.dart';
@@ -13,6 +14,12 @@ export '../data/message_store.dart' show aboutMeKey, needsYouRulesKey;
 /// The setter below takes a [NeedsYouSort], so whoever reads this file for the
 /// preference has the vocabulary to change it in the same import.
 export '../models/needs_you_sort.dart' show NeedsYouSort, NeedsYouSortLabel;
+
+/// The two People orders, for the same reason: the directory and a person's
+/// room read their order from here, and the menus that write it need the
+/// vocabulary in the same import.
+export '../models/people_sort.dart'
+    show PeopleSort, PeopleSortLabel, RoomSort, RoomSortLabel;
 
 /// So the settings screen reaches a slot's value and its name through one
 /// import — the prefs are where both are composed.
@@ -108,6 +115,16 @@ class AppPrefs {
   /// clock instead asks for it once, and gets it in all three places.
   final NeedsYouSort needsYouSort;
 
+  /// How the People directory is ordered. [PeopleSort.recent] by default,
+  /// which is the order [peopleRooms] already hands it in: the person who
+  /// spoke last is the person most likely to be looked for.
+  final PeopleSort peopleSort;
+
+  /// How one person's threads are ordered inside their room.
+  /// [RoomSort.newest] by default — a room opens on what just happened, the
+  /// way every other list in this app does.
+  final RoomSort roomSort;
+
   /// How a settled message announces itself. [NotifyStyle.native] by default,
   /// unlike every other switch here: the app spends minutes deciding a message
   /// needs the user, and finishing that in silence unless someone goes looking
@@ -152,6 +169,8 @@ class AppPrefs {
     this.showActivityLog = false,
     this.storylineNewestFirst = false,
     this.needsYouSort = NeedsYouSort.priority,
+    this.peopleSort = PeopleSort.recent,
+    this.roomSort = RoomSort.newest,
     this.notifyStyle = NotifyStyle.native,
     this.homeShowDropped = false,
     this.fastLlmUrl = '',
@@ -204,6 +223,8 @@ class AppPrefs {
     bool? showActivityLog,
     bool? storylineNewestFirst,
     NeedsYouSort? needsYouSort,
+    PeopleSort? peopleSort,
+    RoomSort? roomSort,
     NotifyStyle? notifyStyle,
     bool? homeShowDropped,
     String? fastLlmUrl,
@@ -223,6 +244,8 @@ class AppPrefs {
         storylineNewestFirst:
             storylineNewestFirst ?? this.storylineNewestFirst,
         needsYouSort: needsYouSort ?? this.needsYouSort,
+        peopleSort: peopleSort ?? this.peopleSort,
+        roomSort: roomSort ?? this.roomSort,
         notifyStyle: notifyStyle ?? this.notifyStyle,
         homeShowDropped: homeShowDropped ?? this.homeShowDropped,
         fastLlmUrl: fastLlmUrl ?? this.fastLlmUrl,
@@ -245,6 +268,8 @@ const String mcpServerUrlKey = 'mcp_server_url';
 const String showActivityLogKey = 'show_activity_log';
 const String storylineNewestFirstKey = 'storyline_newest_first';
 const String needsYouSortKey = 'needs_you_sort';
+const String peopleSortKey = 'people_sort';
+const String roomSortKey = 'person_room_sort';
 const String notifyStyleKey = 'notify_style';
 const String homeShowDroppedKey = 'home_show_dropped';
 const String fastLlmUrlKey = 'fast_llm_url';
@@ -303,6 +328,8 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       storylineNewestFirst:
           await store.getPref(storylineNewestFirstKey) == 'true',
       needsYouSort: _needsYouSort(await store.getPref(needsYouSortKey)),
+      peopleSort: _peopleSort(await store.getPref(peopleSortKey)),
+      roomSort: _roomSort(await store.getPref(roomSortKey)),
       // The one setting here that DEFAULTS ON, so its read is the inverse of
       // the two above — see [_style].
       notifyStyle: _style(
@@ -339,6 +366,21 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
       raw == NeedsYouSort.newest.name
           ? NeedsYouSort.newest
           : NeedsYouSort.priority;
+
+  /// The stored People order, or recency. Anything this notifier did not write
+  /// — an absent key, a hand-edited value, a name a later build stopped using
+  /// — leaves the reader on the order every install starts in, rather than
+  /// throwing on the first frame of the People stop.
+  static PeopleSort _peopleSort(String? raw) {
+    for (final option in PeopleSort.values) {
+      if (option.name == raw) return option;
+    }
+    return PeopleSort.recent;
+  }
+
+  /// The stored room order, or newest first. [_peopleSort]'s rule exactly.
+  static RoomSort _roomSort(String? raw) =>
+      raw == RoomSort.oldest.name ? RoomSort.oldest : RoomSort.newest;
 
   /// The stored style, or what the switch it replaced said, or on.
   ///
@@ -436,6 +478,20 @@ class AppPrefsNotifier extends StateNotifier<AppPrefs> {
   Future<void> setNeedsYouSort(NeedsYouSort value) async {
     state = state.copyWith(needsYouSort: value);
     await _store.setPref(needsYouSortKey, value.name);
+  }
+
+  /// Orders the People directory. Written as the enum's own name, which is
+  /// what [_peopleSort] parses back.
+  Future<void> setPeopleSort(PeopleSort value) async {
+    state = state.copyWith(peopleSort: value);
+    await _store.setPref(peopleSortKey, value.name);
+  }
+
+  /// Orders the threads inside every person's room — one habit, not a setting
+  /// per colleague.
+  Future<void> setRoomSort(RoomSort value) async {
+    state = state.copyWith(roomSort: value);
+    await _store.setPref(roomSortKey, value.name);
   }
 
   Future<void> setNotifyStyle(NotifyStyle value) async {

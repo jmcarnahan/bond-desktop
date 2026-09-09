@@ -10,6 +10,7 @@ import '../data/message_store.dart' show MessageStore;
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
+import '../models/people_sort.dart';
 import '../models/person.dart';
 import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
@@ -60,6 +61,7 @@ import '../widgets/inline_alert.dart';
 import '../widgets/message_history_host.dart';
 import '../widgets/needs_you_tabs.dart';
 import '../widgets/notification_ribbon.dart';
+import '../widgets/people_directory_pane.dart';
 import '../widgets/people_rooms.dart';
 import '../widgets/person_panel.dart';
 import '../widgets/person_room_pane.dart';
@@ -72,6 +74,7 @@ import '../widgets/quick_replies.dart';
 import '../widgets/room_header.dart';
 import '../widgets/settings_screen.dart';
 import '../widgets/side_panel.dart';
+import '../widgets/sort_menu.dart';
 import '../widgets/source_filter.dart';
 import '../widgets/storyline_pickers.dart';
 import '../widgets/storyline_timeline.dart';
@@ -214,6 +217,19 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// the reason every other pane's controller is: the pane is rebuilt on every
   /// answer, and a controller it owned would lose a half-typed query each time.
   final TextEditingController _filesSearchText = TextEditingController();
+
+  /// The People stop's two live filter boxes and the pills over them.
+  ///
+  /// Held on the screen for [_filesSearchText]'s reason: both panes are
+  /// rebuilt on every sync, and a controller either of them owned would lose a
+  /// half-typed needle each time. The needles are kept normalised, so the pane
+  /// and the pure filters behind it measure the same thing.
+  final TextEditingController _peopleSearchText = TextEditingController();
+  final TextEditingController _roomSearchText = TextEditingController();
+  String _peopleNeedle = '';
+  String _roomNeedle = '';
+  PeopleFilter _peopleFilter = PeopleFilter.all;
+  RoomFilter _roomFilter = RoomFilter.all;
 
   /// Whether the list column is showing only rows with something unread.
   /// Never touches a badge — see [AppRail.unreadOnly].
@@ -487,6 +503,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _findText.dispose();
     _findFocus.dispose();
     _filesSearchText.dispose();
+    _peopleSearchText.dispose();
+    _roomSearchText.dispose();
     super.dispose();
   }
 
@@ -599,24 +617,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           .load(fetchBodies: false);
     }
     if (!mounted) return;
-    // A room's inline chats are as open as any transcript: they are on screen,
-    // and a chat that never refreshed under a room would sit a poll behind the
-    // rail rows beside it.
-    final roomKey = _selectedRoomKey;
-    if (roomKey != null) {
-      for (final room in _rooms) {
-        if (room.key != roomKey) continue;
-        for (final chat in roomChats(room)) {
-          await ref
-              .read(threadProvider(
-                (source: chat.source, conversationKey: chat.id),
-              ).notifier)
-              .load(fetchBodies: false);
-          if (!mounted) return;
-        }
-        break;
-      }
-    }
+    // A room has no transcript of its own to refresh: it is a list of cards
+    // derived from the conversation list, which the poll has already reloaded.
     final storyline = _selectedStorylineId;
     if (storyline != null) {
       await ref.read(storylineTimelineProvider(storyline).notifier).load();
@@ -894,7 +896,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// Opens one person's room. The section moves with it, so Back out of the
   /// room lands on the People overview rather than wherever the user was
   /// before — the same rule [_selectLaterDay] follows for a day.
+  ///
+  /// It reads nothing and marks nothing. Every row in the room is a CARD — a
+  /// summary, not the mail — and the conversation itself opens beside, where
+  /// [_openThreadBeside] marks it read the way opening a thread always has.
+  /// The room's own filter and needle reset with it: they were a question
+  /// about the last person, and carrying them into the next one would open an
+  /// empty room over somebody who has plenty.
   void _selectRoom(String key) {
+    _roomSearchText.clear();
     setState(() {
       _clearOverlays();
       _section = RailSection.people;
@@ -903,27 +913,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       _selectedSource = null;
       _selectedStorylineId = null;
       _selectedLaterDay = null;
+      _roomFilter = RoomFilter.all;
+      _roomNeedle = '';
     });
-
-    for (final room in _rooms) {
-      if (room.key != key) continue;
-      // The room's chats are drawn inline, so opening the room IS opening
-      // them — the same pair [_openThreadBeside] runs, for the same reason a
-      // Slack DM is read the moment it is on screen. Mail threads stay unread
-      // until somebody opens one: a card is a summary, not the mail.
-      for (final chat in roomChats(room)) {
-        final target = (source: chat.source, conversationKey: chat.id);
-        ref.read(conversationsProvider.notifier).noteThreadOpened(chat.id);
-        ref
-            .read(conversationsProvider.notifier)
-            .markRead(chat.source, chat.id);
-        ref.read(threadProvider(target).notifier).load();
-      }
-      // The docked composer's suggestion, if this room has a box at all.
-      final target = roomComposerTarget(room);
-      if (target != null) ref.read(draftProvider(target).notifier).load();
-      return;
-    }
   }
 
   /// Opens one day's Later digest. The section moves with it, so backing out of
@@ -2821,36 +2813,21 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     _openCompose(prefill: OpenComposeIntent(to: to));
   }
 
-  /// One person's room: everything live with them, in the order it happened.
+  /// One person's room: every thread with them, as cards.
   ///
-  /// Goal one of the round, literally. Chats read as messages and mail threads
-  /// read as cards, interleaved by time, so a colleague who both mails and
-  /// chats has ONE history here rather than two piles to merge in the reader's
-  /// head. Opening any of them puts the thread BESIDE the room (D3), so the
-  /// history the reader came from stays on screen.
+  /// Goal one of the round, literally — a colleague who both mails and chats
+  /// has ONE place here rather than two piles to merge in the reader's head,
+  /// and a thread they were on with four other people is under their name too.
+  /// Done and deferred threads are HERE and marked, because the question the
+  /// stop answers is "what is there with this person", not "what is unfinished".
   ///
-  /// The composer under it targets the 1:1 chat when there is one, and
-  /// otherwise there is a `Message …` button that opens a new mail — never
-  /// both, because two ways to write to one person on one pane is two
-  /// decisions the reader did not ask to make.
+  /// Opening a card puts the thread BESIDE the room (D3), so the list the
+  /// reader came from stays on screen — and the composer, the files and the
+  /// thread menu are all over there, on the one conversation they belong to.
+  /// The room itself offers `Message`, which is about the PERSON.
   Widget _room(PersonRoom room) {
-    // Watched, not read: a chat whose transcript lands after the room opened
-    // has to turn from a card into its messages without another click.
-    final chats = <ThreadTarget, List<Message>>{};
-    for (final chat in roomChats(room)) {
-      final target = (source: chat.source, conversationKey: chat.id);
-      final state = ref.watch(threadProvider(target));
-      if (state is ThreadLoaded) chats[target] = state.messages;
-    }
-
-    final target = roomComposerTarget(room);
-    // A chat gets a box only on the top rung, exactly as a chat thread does:
-    // there is no drafts folder behind a Teams message, so without the grant
-    // the honest thing is no box at all.
-    final canReply = target != null &&
-        ref.watch(draftProvider(target)).capability == SendCapability.send;
-    final mailThread = newestMailThread(room);
     final photos = ref.read(profilePhotosProvider);
+    final message = _messagePersonFor(room);
 
     return Padding(
       padding: const EdgeInsets.all(BondSpacing.s24),
@@ -2881,6 +2858,15 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
             onBack: () => _selectSection(RailSection.people),
             onPeopleTap: () => _openPersonPanel(room.key),
             actions: [
+              // Omitted rather than disabled when there is nowhere to write:
+              // [RoomHeader] renders a null `onTap` as a greyed button, and a
+              // control that answers nothing must not look like one.
+              if (message != null)
+                RoomAction(
+                  icon: Icons.edit_outlined,
+                  label: 'Message',
+                  onTap: message,
+                ),
               RoomAction(
                 icon: Icons.person_outline,
                 label: 'Profile',
@@ -2892,37 +2878,51 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           Expanded(
             child: PersonRoomPane(
               room: room,
-              chats: chats,
+              filter: _roomFilter,
+              onFilter: (f) => setState(() => _roomFilter = f),
+              sort: ref.watch(appPrefsProvider).roomSort,
+              onSort: (s) =>
+                  unawaited(ref.read(appPrefsProvider.notifier).setRoomSort(s)),
+              searchController: _roomSearchText,
+              onSearch: (text) =>
+                  setState(() => _roomNeedle = normalizeFind(text)),
+              needle: _roomNeedle,
               now: DateTime.now(),
               photos: photos,
-              thumbnailFor: _thumbnailFor,
               onOpenThread: _openThreadBeside,
-              onOpenAttachment: (attachment, from) =>
-                  _openBeside(FilePanel(attachment: attachment, from: from)),
-              onOpenLink: (url) => unawaited(_launchExternal(url)),
-              // The button and the box are alternatives, never both.
-              onMessage: (target == null && mailThread != null)
-                  ? () => unawaited(_composeFrom(mailThread))
-                  : null,
+              emptyNotice: _scopeNotice(),
             ),
           ),
-          if (canReply) ...[
-            const SizedBox(height: BondSpacing.s12),
-            _composer(
-              target,
-              focusNode: _mainComposerFocus,
-              hint: 'Message ${room.title}…',
-            ),
-          ] else if (target != null) ...[
-            // A chat with nowhere to write from here says where to write,
-            // exactly as a chat thread does — a room that offered nothing at
-            // all would read as a room with nobody in it.
-            const SizedBox(height: BondSpacing.s12),
-            _replyElsewhere(),
-          ],
         ],
       ),
     );
+  }
+
+  /// What the room header's `Message` does, or null when there is nowhere
+  /// obvious to write.
+  ///
+  /// A direct chat wins: a sentence typed at a person's name belongs in the
+  /// conversation that is only the two of them, and the chat opens BESIDE with
+  /// its own box focused, the way the hover Reply hands over the cursor.
+  /// Failing that it is a new mail to their newest thread's people. A person
+  /// the reader has only ever been in group threads with gets no action at
+  /// all, rather than one that would put a private line in front of nine
+  /// people.
+  VoidCallback? _messagePersonFor(PersonRoom room) {
+    final chat = directChat(room);
+    if (chat != null) {
+      return () {
+        _openThreadBeside(chat.source, chat.id);
+        // The box is in the thread that just opened beside; put the cursor in
+        // it, the way the hover Reply does.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _sideComposerFocus.requestFocus();
+        });
+      };
+    }
+    final mail = newestMailThread(room);
+    if (mail != null) return () => unawaited(_composeFrom(mail));
+    return null;
   }
 
   /// The thread in the MAIN pane: the transcript, and the composer under it.
@@ -3128,8 +3128,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // beside follows: the panel shows one thing.
       onWhy: (message) => _openWhy(target, message),
       // The faces: who is on this thread, and what else is live with them.
-      onPeople: () =>
-          _openPersonPanel(roomKeyFor(selected, owner: _ownerRecord)),
+      // The SAME name resolution the rooms were built with, so a thread whose
+      // recipient the sync stored nameless opens the colleague's room rather
+      // than a key nothing on the rail is filed under.
+      onPeople: () => _openPersonPanel(roomKeyFor(
+        selected,
+        owner: _ownerRecord,
+        names: participantNames(_rows),
+      )),
       onAddToStoryline: () => setState(() {
         _clearOverlays();
         _pickingStorylineForThread = (source: selected.source, id: selected.id);
@@ -4210,30 +4216,22 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     }
 
     if (section == RailSection.needsYou) return _needsYouOverview(conversations);
+    // Its own early return, on the same precedent: the directory has a filter
+    // box, a pill row and an order control above its list, so it is a column
+    // rather than a `(label, rows)` pair the list pane could draw.
+    if (section == RailSection.people) return _peopleDirectory();
 
     final sections = switch (section) {
-      // The People OVERVIEW is the flat list of everything nobody has claimed
-      // — the same rows the rail groups into rooms, ungrouped. A room is one
-      // person; this is all of them, and it is what the stop lands on before
-      // a room is picked.
-      RailSection.people => [
-          (
-            'OPEN',
-            conversationRows(
-              conversations,
-              threshold: ref.watch(appPrefsProvider).attentionThreshold,
-            ),
-          ),
-        ],
       // Unreachable: [_main] routes Home, Drafts & sent and AI to their own
-      // panes, and the three arms above return before this switch. The cases
-      // exist so the analyzer keeps this exhaustive when a stop is added.
+      // panes, and the arms above return before this switch. The cases exist
+      // so the analyzer keeps this exhaustive when a stop is added.
       RailSection.home ||
       RailSection.drafts ||
       RailSection.files ||
       RailSection.archive ||
       RailSection.storylines ||
       RailSection.needsYou ||
+      RailSection.people ||
       RailSection.ai =>
         const <(String, List<Conversation>)>[],
     };
@@ -4255,6 +4253,29 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       emptyNotice: _scopeNotice(),
     );
   }
+
+  /// Everyone, one row each. The People stop's landing: a directory, not the
+  /// flat thread list — a person is the unit here, and a row opens their room
+  /// in MAIN (the rail's People row does the same).
+  ///
+  /// [_rooms] and not a fresh grouping: it was written by [_body] earlier in
+  /// this same build, from the same source-filtered list the rail was handed,
+  /// so the directory and the column can never disagree about who is here.
+  Widget _peopleDirectory() => PeopleDirectoryPane(
+        rooms: _rooms,
+        filter: _peopleFilter,
+        onFilter: (f) => setState(() => _peopleFilter = f),
+        sort: ref.watch(appPrefsProvider).peopleSort,
+        onSort: (s) =>
+            unawaited(ref.read(appPrefsProvider.notifier).setPeopleSort(s)),
+        searchController: _peopleSearchText,
+        onSearch: (text) => setState(() => _peopleNeedle = normalizeFind(text)),
+        needle: _peopleNeedle,
+        now: DateTime.now(),
+        photos: ref.read(profilePhotosProvider),
+        onOpen: _selectRoom,
+        emptyNotice: _scopeNotice(),
+      );
 
   /// Every document in the mailbox, on one shelf.
   ///
@@ -4400,50 +4421,18 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   ///
   /// It writes the preference rather than any local state, because the rail
   /// and Enter read the same value — changing the order here is a statement
-  /// about Needs You, not about this pane.
-  Widget _needsYouSortControl(NeedsYouSort sort) {
-    return PopupMenuButton<NeedsYouSort>(
-      key: const Key('needs-you-sort'),
-      tooltip: 'Order',
-      initialValue: sort,
-      onSelected: (value) =>
-          unawaited(ref.read(appPrefsProvider.notifier).setNeedsYouSort(value)),
-      itemBuilder: (_) => [
-        for (final option in NeedsYouSort.values)
-          CheckedPopupMenuItem<NeedsYouSort>(
-            key: Key('needs-you-sort-${option.name}'),
-            value: option,
-            checked: option == sort,
-            child: Text(option.label),
-          ),
-      ],
-      child: Padding(
-        padding: const EdgeInsets.symmetric(
-          horizontal: BondSpacing.s8,
-          vertical: BondSpacing.s4,
+  /// about Needs You, not about this pane. [SortMenu] is the shape it is
+  /// drawn in, shared with the People directory and a person's room.
+  Widget _needsYouSortControl(NeedsYouSort sort) => SortMenu<NeedsYouSort>(
+        key: const Key('needs-you-sort'),
+        value: sort,
+        options: NeedsYouSort.values,
+        labelOf: (o) => o.label,
+        itemKeyFor: (o) => Key('needs-you-sort-${o.name}'),
+        onChanged: (value) => unawaited(
+          ref.read(appPrefsProvider.notifier).setNeedsYouSort(value),
         ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(
-              Icons.sort,
-              size: 14,
-              color: BondColors.inkSecondary,
-            ),
-            const SizedBox(width: BondSpacing.s4),
-            // The current order in words. A bare icon would leave the reader
-            // to guess which of the two they are looking at.
-            Text(sort.label, style: BondType.small),
-            const Icon(
-              Icons.arrow_drop_down,
-              size: 16,
-              color: BondColors.inkSecondary,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+      );
 
   /// The Sync action beside the Storylines heading. Quiet — a text button in
   /// the pane's own idiom, the same one the cards keep/dismiss with — because

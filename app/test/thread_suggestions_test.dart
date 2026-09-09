@@ -10,8 +10,8 @@ import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
-import 'package:bond_inbox/widgets/conversation_list_pane.dart';
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/person_room_pane.dart';
 import 'package:bond_inbox/widgets/composer.dart' show Composer;
 import 'package:bond_inbox/widgets/quick_replies.dart' show QuickReplyBar;
 import 'package:flutter/material.dart';
@@ -218,13 +218,17 @@ void main() {
   }
 
   Future<void> openThread(WidgetTester tester) async {
-    // In the overview beside the column, not the room row in it: tapping the
-    // rail's People row opens the ROOM, and this test wants the thread.
+    // Through his ROOM: the People stop lands on a directory of people now,
+    // and one person's threads are the cards in the room the rail's row
+    // opens. A card opens the thread beside, which is what this test wants.
     await tester.tap(find.descendant(
-      of: find.byType(ConversationListPane),
+      of: find.byType(AppRail),
       matching: find.text('Eric Vance'),
     ));
+    await tester.pump();
+    await tester.pump();
     // The tap, the transcript read, then the capability the cards wait on.
+    await tester.tap(find.byType(RootMessageCard).first);
     await tester.pump();
     await tester.pump();
     await tester.pump();

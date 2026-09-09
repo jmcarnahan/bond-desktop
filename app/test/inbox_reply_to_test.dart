@@ -10,9 +10,9 @@ import 'package:bond_inbox/services/backend/mail_backend.dart';
 import 'package:bond_inbox/services/graph_auth.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/token_store.dart';
-import 'package:bond_inbox/widgets/app_rail.dart' show RailSection;
+import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/composer.dart' show Composer;
-import 'package:bond_inbox/widgets/conversation_list_pane.dart';
+import 'package:bond_inbox/widgets/person_room_pane.dart';
 import 'package:bond_inbox/widgets/hover_actions.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
 import 'package:bond_inbox/widgets/why_panel.dart';
@@ -213,13 +213,22 @@ void main() {
     await tester.pump();
   }
 
-  /// Opens one thread from the overview beside the column.
+  /// Opens one thread beside the person's room.
+  ///
+  /// Through the ROOM and not a flat list, because the People stop no longer
+  /// has one: its landing is a directory of people, and one person's threads
+  /// are the cards in their room. The rail's row is the way in from wherever
+  /// main happens to be, so this works from a room already open.
   Future<void> openThread(WidgetTester tester, String who) async {
     await tester.tap(find.descendant(
-      of: find.byType(ConversationListPane),
+      of: find.byType(AppRail),
       matching: find.text(who),
     ));
-    // The tap, the transcript read, then the capability the box waits on.
+    await tester.pump();
+    await tester.pump();
+    // Their one thread, as a card. The tap, the transcript read, then the
+    // capability the box waits on.
+    await tester.tap(find.byType(RootMessageCard).first);
     await tester.pump();
     await tester.pump();
     await tester.pump();

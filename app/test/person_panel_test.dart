@@ -96,7 +96,7 @@ void main() {
     await pump(tester, room: null);
 
     expect(
-      find.text('Nothing live with this person right now.'),
+      find.text('No threads with this person right now.'),
       findsOneWidget,
     );
     expect(find.text('THREADS'), findsNothing);

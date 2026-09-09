@@ -1211,25 +1211,26 @@ void main() {
       expect(fillOf('2'), BondColors.onDarkTint);
     });
 
-    testWidgets('a 1:1 room leads with a face; a group keeps the dot',
+    testWidgets('every person leads with a face; the no-sender row keeps a dot',
         (tester) async {
       await pumpRail(tester, conversations: [
         withPeople(
           'a',
           people: const [Participant(name: 'Eric Nolan', email: 'e@x.test')],
         ),
+        // A group thread is in each member's own room, so both are faces too.
         withPeople('b', people: const [
           Participant(name: 'Priya Raman'),
           Participant(name: 'Tom Alder'),
         ]),
+        withPeople('c', people: const []),
       ]);
 
-      expect(find.byType(BondAvatar), findsOneWidget);
-      expect(
-        tester.widget<BondAvatar>(find.byType(BondAvatar)).name,
-        'Eric Nolan',
-      );
-      expect(find.text('Priya Raman, Tom Alder'), findsOneWidget);
+      expect(find.byType(BondAvatar), findsNWidgets(3));
+      expect(find.text('Eric Nolan'), findsOneWidget);
+      expect(find.text('Priya Raman'), findsOneWidget);
+      expect(find.text('Tom Alder'), findsOneWidget);
+      expect(find.text(noSenderRoom), findsOneWidget);
     });
 
     testWidgets('tapping a room reports its key', (tester) async {
@@ -1268,7 +1269,7 @@ void main() {
         (tester) async {
       await pumpRail(tester, conversations: const []);
 
-      expect(find.text('Nobody is waiting on anything'), findsOneWidget);
+      expect(find.text('Nobody yet'), findsOneWidget);
     });
   });
 

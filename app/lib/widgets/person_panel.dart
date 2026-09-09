@@ -23,11 +23,13 @@ import 'time_format.dart';
 /// in: `Loading…` while the read is out, and a sentence when the answer is
 /// genuinely nothing. An empty list drawn as empty space reads as a bug.
 class PersonPanelBody extends StatelessWidget {
-  /// The room this person is, or null when they have nothing live at all.
+  /// The room this person is, or null when the list the host was handed has
+  /// nothing with them on it at all.
   ///
-  /// Rooms are derived from the live inbox by construction, so a person whose
-  /// only thread is deferred or done has no room — and the honest answer is
-  /// that there is nothing going on, not an empty panel.
+  /// Rooms are derived from the conversation list on every build, so a key
+  /// that no longer resolves means the person fell out from under the open
+  /// panel — a source pill came down, or a sync moved the list — and the
+  /// honest answer is that there is nothing here, not an empty panel.
   final PersonRoom? room;
 
   /// The storylines their threads belong to, already resolved to titles by the
@@ -85,7 +87,7 @@ class PersonPanelBody extends StatelessWidget {
       return Padding(
         padding: const EdgeInsets.all(BondSpacing.s16),
         child: Text(
-          'Nothing live with this person right now.',
+          'No threads with this person right now.',
           style: BondType.small,
         ),
       );
@@ -170,13 +172,13 @@ class PersonPanelBody extends StatelessWidget {
     ];
   }
 
-  /// Every live thread with them, newest first — the same list the room draws,
-  /// as one line each. It is here so the panel is useful beside a THREAD as
-  /// well as beside the room: from a conversation, this is the way to the rest
-  /// of what is going on with the person on it.
+  /// Every thread with them, newest first — the same list the room draws, as
+  /// one line each. It is here so the panel is useful beside a THREAD as well
+  /// as beside the room: from a conversation, this is the way to the rest of
+  /// what is going on with the person on it.
   List<Widget> _threads(PersonRoom room) {
     if (room.threads.isEmpty) {
-      return [Text('Nothing live with them.', style: BondType.small)];
+      return [Text('No threads with them.', style: BondType.small)];
     }
     return [
       for (final thread in room.threads)

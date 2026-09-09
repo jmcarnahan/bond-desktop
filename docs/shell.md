@@ -50,7 +50,7 @@ transcript's own 420 minimum, with nothing to catch it.
 | Home | `bolt` | the whole stack: Needs You · Drafts & sent · Storylines · People · Later — every section collapsible but Drafts & sent, which is one row | `HomePane` — the pipeline as a table |
 | Needs You | `notifications_outlined` | Needs You alone, expanded, with a `railBadge` count, in the pile's chosen order | the Needs You overview — five tabs, the order control, and rows that open beside |
 | Storylines | `tag` | the storylines, suggestions first | the storylines overview |
-| People | `people_outline` | one row per person room | the flat list of live threads nobody has claimed, or the open room |
+| People | `people_outline` | one row per person | the directory of everyone, or the open room |
 | Files | `folder_outlined` | the four kinds as rows — All · Documents · Images · Links | `FilesPane` — every document in the mailbox, by day |
 | Later | `schedule` | one row per deferred day | `ArchivePane` — Later · Done · Dropped |
 | AI | `auto_awesome` | one line: 'Models, rules and the log' | `SettingsScreen(scope: ai)`, titled 'AI' |
@@ -113,7 +113,7 @@ affordance that lied.
 > List column click → main pane. A row in a list that LIVES IN MAIN (the Needs
 > You overview, the People overview) → side panel, and that row stays lit in the
 > list while it is open. A thread reached from INSIDE a room (a storyline
-> episode card, a person room's root message) → side panel. A file → side panel.
+> episode card, a person room's card) → side panel. A file → side panel.
 > ⤢ on a thread panel opens it in main; ⤢ on a file opens the full viewer.
 > Opening a file from a side thread REPLACES the side panel.
 
@@ -131,7 +131,7 @@ room being worked in.
 
 | Kind | What it holds | Opened by |
 |---|---|---|
-| `ThreadPanel` | a conversation | a storyline episode card, a person room's card or `Open chat ›`, a Drafts & sent row, a row on the Needs You or People overview |
+| `ThreadPanel` | a conversation | a storyline episode card, a person room's card, a Drafts & sent row, a row on the Needs You overview |
 | `FilePanel` | one file | any card, chip, unfurl or shelf row |
 | `WhyPanel` | why one message got its verdict | the hover **Why** on an inbound row, and the CTA banner |
 | `PersonPanel` | one person | the room header's **Profile**, and tapping the faces on a room or a thread |
@@ -372,71 +372,135 @@ dot until the answer is whole (`showsProcessing`).
 `app/lib/widgets/people_rooms.dart` is pure and has no store behind it: rooms
 are derived from the conversation list on every build.
 
-- **The key** is the other parties' display names, lowercased, joined by `'\n'`
-  — an address where a name is missing. The owner is dropped **by address**
-  (exact, case-insensitive) **or by name**: a Teams roster names the account
-  with a `teams:<id>` no mailbox address will ever equal, so without the name
-  arm the user stands in every one of their own chats.
+- **A room is one PERSON**, and its key is that person's display name,
+  lowercased (their address when nobody anywhere named them). A thread with
+  three other parties on it is in THREE rooms — `personKeysFor` returns a key
+  per party, and `roomKeyFor` is the first of them, for the one caller that
+  has to pick (a thread header's faces). A colleague reached only inside a
+  five-way project thread is findable under their own name, which a room keyed
+  on the whole group could never be.
+- The owner is dropped **by address** (exact, case-insensitive) **or by name**:
+  a Teams roster names the account with a `teams:<id>` no mailbox address will
+  ever equal, so without the name arm the user stands in every one of their own
+  chats.
+- **Names resolve across the list.** `participantNames` builds
+  `address → name` from every participant in the list carrying both, first name
+  seen winning, and a nameless participant takes the name from that map. It is
+  what makes an outbound-only thread — whose recipients the mail sync stores
+  with `name: null` — file under the colleague it was sent to. Without it the
+  same person has a named room from their own mail and a second, address-titled
+  room from the user's. Read-time and People-layer only: no ingest or store
+  change.
 - Nobody left files under **`'(no sender)'`**. A no-reply address and a chat
-  whose roster failed to load are still mail; a pile that loses them silently is
-  worse than one odd row.
-- **The title** is that one person, or 2–3 names joined `', '`, or the first
-  three and `'…'` — the `TeamsSync._subjectFor` rule, so a group chat's own
-  subject and its room title agree.
-- **The rows** are `needsYouRows` + `conversationRows`: the live inbox, which
-  between them claim each thread exactly once. Later and done threads are in
-  neither and so are in no room.
+  whose roster failed to load are still mail; a pile that loses them silently
+  is worse than one odd row.
+- **Every thread is in the room, done and deferred included.** The stop answers
+  "what is there with this person", and a colleague whose one chat had been
+  closed used to have no room at all. What excludes them is only `unread` and
+  `needsYou`, which count `isLiveThread` rows alone: those two numbers drive
+  bold and the badge, and a finished thread owes nothing. `liveCount` is the
+  count they are taken over, and `direct` is the set of threads this person is
+  the only other party on.
+- **`people` is the ONE participant the room is** — across its threads, the
+  instance with both a name and a mailable address wins over a `teams:` one,
+  which wins over an address alone. It is what the face and the panel's
+  writable address come off.
 - Rooms sort newest-first by `latestAt`; threads inside a room sort the same
   way.
 
-A room row leads with a 20px face when there is one person to show, and with
-the usual dot for a group. It carries a source glyph only when every thread in
-it came from one connector — a colleague on both would otherwise be marked as
-whichever arrived last. Its badge is the room's needs-you count in
-`railBadge`, or the thread count in grey when nothing is owed, never both.
+A room row on the rail leads with a 20px face — a room is about WHO, and a name
+beside their photograph is how a reader picks a row out of a column of names.
+The no-sender row keeps the dot, because it stands for nobody. A row carries a
+source glyph only when every thread in it came from one connector; its badge is
+the room's needs-you count in `railBadge`, or the thread count in grey when
+nothing is owed, never both.
 
-Tapping a room opens `_room()`, and what it opens is **one timeline** — goal
-one of this round, literally. A `RoomHeader` titled by the person, subtitled
-`N threads · mail and Teams`, and under it a `PersonRoomPane`
-(`app/lib/widgets/person_room_pane.dart`) holding everything live with them in
-the order it happened.
+### The directory
 
-- **Chats read as messages, mail reads as cards.** The newest `roomChatCap`
-  (five) Teams threads have their transcripts drawn inline as `MessageRow`s;
-  every mail thread is a `RootMessageCard` — who, subject, last line, the CTA,
-  `N messages · last <relative>`, `open ›`. A chat has no subject and no shape
-  to summarise, so a card standing for one would say nothing; a mail thread has
-  both.
-- **A chat whose transcript has not arrived is a card until it does**, and so
-  is every chat past the cap. The room never has a hole where a conversation
-  should be.
-- **Interleaved by time, oldest at the top, newest at the bottom.** The list is
-  `reverse: true` over the reversed items, so the newest row is on screen the
-  moment the room opens, with `DayDivider`s where the calendar turns over. A
-  chat heading (`💬 <name>` plus `Open chat ›`) is drawn before every RUN of
-  chat messages, not once per chat: a mail card dated between two chat messages
-  lands between them, and a run resuming under somebody else's heading would be
-  misread.
-- **Opening the room marks its inline chats read** — `noteThreadOpened` +
-  `markRead` + a transcript load, the `_openThreadBeside` pair — because they
-  ARE on screen, the way a Slack DM is read when it is opened. Mail cards stay
-  unread until somebody opens one: a card is a summary, not the mail.
-- **One way to write, never two.** A room with exactly one person and a Teams
-  thread gets the docked composer on that chat, placeholder
-  `Message <name>…`, and only on the `Chat.ReadWrite` rung. Otherwise, if there
-  is mail, a `Message <name>` button
-  (`PersonRoomPane.messageButtonKey`) opens a new message to them. A group room
-  with no mail gets neither: a group chat is not a place a sentence typed under
-  a room heading obviously belongs.
+With no room open, the People stop's main pane is
+`PeopleDirectoryPane` — everyone the mailbox knows, one row each. It replaced a
+flat list of unclaimed threads, which on a stop whose whole claim is that a
+PERSON is the unit put the same colleague on screen twice and said nothing
+about them.
+
+A row is a face, the name (source-glyphed by the rail's rule, bold while
+anything is unread), the caption `N threads · M mail · K chats` with
+`· J need you` when something is owed, the relative time of their newest
+message, and a red needs-you badge. It opens the person's room in MAIN, the way
+the rail's own row does — a directory is a way in, not a pile being worked
+through.
+
+Above the list: a `FilterField` (`Filter people…`), the pills
+`All · Needs you · Unread`, and a `SortMenu` offering
+`Most recent · By name · Needs you first`. By name puts `(no sender)` last: it
+is not a person, and a bracket at the top of an alphabetical list of colleagues
+is a row nobody was looking for where everybody looks first.
+
+### The room
+
+Tapping a room opens `_room()`: a `RoomHeader` titled by the person, subtitled
+`N threads · mail and Teams · 1 done`, and under it a `PersonRoomPane`
+(`app/lib/widgets/person_room_pane.dart`) holding every thread with them as
+`RootMessageCard`s.
+
+- **Every thread is a card** — who, subject, last line, the CTA,
+  `N messages · last <relative>`, `open ›` — and a card opens the conversation
+  BESIDE the room (D3), where its composer, its files and its thread menu are.
+  The pane renders no transcript of its own. It used to draw the newest five
+  chats inline and summarise the rest, which made a list whose rows meant two
+  different things, and the merged timeline it needed was `reverse: true` —
+  which left a person with three threads reading as a gap with three cards
+  under it. The list is now **top-anchored**.
+- A chat's card names its ROSTER rather than a sender, and its preview stands
+  alone: a chat's messages come from everyone in it, so `who · line` would name
+  the wrong person as the one who said it.
+- A done card reads `Done · N messages…` and a deferred one `Later · …`. The
+  room holds both, and an unmarked closed thread in a list of live ones is a
+  thread the reader answers twice.
+- Above the list: a `FilterField` (`Filter threads…`), the pills
+  `All · Direct · Groups`, and a `SortMenu` offering
+  `Newest first · Oldest first`. The needle reaches the subject (reply prefix
+  off), the preview, the ask and every participant — a room is a list of
+  threads, and those are what somebody types to find one among a colleague's
+  forty. Both reset when another person is opened.
+- **Opening a room reads nothing and marks nothing.** Every row is a summary,
+  and the thread that opens beside is where reading happens.
+- **`Message` is a header action, and it is about the PERSON.** It opens their
+  newest DIRECT Teams chat beside with the side composer focused; failing that
+  it composes a new mail from their newest mail thread; failing both it is
+  absent rather than disabled. A sentence typed at one person's name must not
+  land in a nine-way chat because that was the newest thing they spoke in.
 - **Profile, and the faces**, both open `PersonPanel` beside — name and
   writable addresses (a `teams:` id is a Graph id and is hidden), the counts
   `N threads · M mail · K chats · J need you`, `Last seen`, the storylines
-  their threads are in, every live thread as a line, and the files they sent.
-  Its lists say which state they are in: `Loading…` while the read is out, and
-  a sentence when the answer is genuinely nothing.
+  their threads are in, every thread as a line, and the files they sent. Its
+  lists say which state they are in: `Loading…` while the read is out, and a
+  sentence when the answer is genuinely nothing.
 
 Back goes to the People overview — the room IS the People stop, and dropping
 the user somewhere else would make the way out depend on how they got in.
+
+---
+
+## Sorting and filtering
+
+One control each, everywhere. `SortMenu<T>`
+(`app/lib/widgets/sort_menu.dart`) is the order control every list wears: an
+icon, the current order in words, a caret, and a checked menu of the
+alternatives. `FilterField` (`app/lib/widgets/filter_field.dart`) is the
+light-pane live filter box — a magnifier, a hint, and a × that empties it,
+Escape bound in the field as in `FindField`. It narrows rows already in memory,
+so there is nothing to submit; the archive's box, which asks the store a
+question, is a different control.
+
+Three lists growing three order controls is how they come to disagree about
+what a sort menu looks like, and a reader who learned one would have learned
+nothing about the next.
+
+Four preferences carry the orders, each written as its enum's own name and each
+falling back to the default on anything this app did not write:
+`needs_you_sort`, `people_sort`, `person_room_sort` and
+`storyline_newest_first`.
 
 ---
 
@@ -565,7 +629,7 @@ the person room's header `AvatarStack`.
   it**: the source chips carry an `All` pill of their own.
 - `Key('needs-you-sort')` is the order control beside those pills, and
   `Key('needs-you-sort-<name>')` its two items (`priority`, `newest`). It is a
-  `PopupMenuButton`, so the idiom is: tap it, `pump()`,
+  `SortMenu`, so a `PopupMenuButton`, and the idiom is: tap it, `pump()`,
   `pump(const Duration(milliseconds: 400))`, tap the item, then the same pair
   again. The order it writes is the `needs_you_sort` preference, which the rail
   and Find's Enter read too — see
@@ -577,15 +641,21 @@ the person room's header `AvatarStack`.
   `attentionThresholdKey` to `'0'` before reading prefs. The scoring pass lands
   a few pumps in, and the default 0.5 slider will cut a quiet row out from under
   an assertion that was true on the first frame.
+- **The People directory**: `PeopleDirectoryPane.rowKeyFor(roomKey)` is one
+  person's row (the room key is their lowercased name), `filterPillsKey` the
+  pills, `sortKey` / `sortItemKeyFor(sort)` the order menu, and `emptyKey` both
+  empty sentences.
 - **A person's room**: `PersonRoomPane` is the pane,
-  `RootMessageCard.keyFor(source, id)` is a mail card,
-  `PersonRoomPane.openChatKeyFor(key)` is a chat's way in,
-  `messageButtonKey` the compose button and `emptyKey` the empty room. The
-  header is a `RoomHeader<ThreadTab>`, so scope Back to it rather than to
-  `PaneSurface` — the room stopped being one in Phase 6.
+  `RootMessageCard.keyFor(source, id)` is any thread's card — mail or chat —
+  `filterPillsKey` / `sortKey` / `sortItemKeyFor(sort)` its three controls,
+  `listKey` the card list and `emptyKey` the empty room. The header is a
+  `RoomHeader<ThreadTab>`, so scope Back to it rather than to `PaneSurface`.
   `inbox_room_timeline_test.dart` is the harness, and it fakes the send grant
   with an `implements AuthSession` whose `hasScope` answers from a set, which
   is far less machinery than the full SDK stack `inbox_teams_test` stands up.
+- **There is no flat thread list on the People stop any more.** A test that
+  wants one conversation from there goes rail row → room → card, or reaches the
+  card by key.
 - **The Why panel**: `WhyPanelBody` inside a `SidePanelHost`, with
   `verdictKey` / `triageKey` / `asksKey` / `attentionKey` / `extractionKey` per
   block and `whatHappenedKey` for the history door. `inbox_why_test.dart`

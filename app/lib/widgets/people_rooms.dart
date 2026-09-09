@@ -1,7 +1,8 @@
 import 'package:flutter/foundation.dart' show immutable;
 
 import '../models/message_models.dart';
-import 'app_rail.dart' show conversationRows, isNeedsYou, needsYouRows;
+import '../providers/conversations_provider.dart' show ThreadTarget;
+import 'app_rail.dart' show isNeedsYou;
 
 /// The signed-in account, as much of it as the grouping needs.
 ///
@@ -17,34 +18,42 @@ typedef Owner = ({String? name, String? address});
 /// them is worse than one with an oddly named row in it.
 const String noSenderRoom = '(no sender)';
 
-/// How many names a group room's title spells out before it trails off. The
-/// same three `TeamsSync._subjectFor` uses, so a chat titled by its roster and
-/// a room titled by its people read the same way.
-const int _maxTitleNames = 3;
+/// A thread the reader is still in: not closed, not deferred. The two counts
+/// on a room that drive bold and the badge are taken over these.
+///
+/// A done or deferred thread is still the person's — it is in their room and
+/// marked on its card — but it owes nothing, and a badge that counted it would
+/// ask the reader for work they have already put down.
+bool isLiveThread(Conversation c) =>
+    c.state != ConversationState.done && c.bucket != 'later';
 
-/// One person — or one group of them — and every live thread with them in it.
+/// One person, and every thread with them in it.
 ///
 /// The unit the People section is a list of. A room is not stored anywhere: it
 /// is derived from the conversation list on every build, which is what lets a
 /// mail thread and a Teams chat with the same colleague sit in one row without
 /// a cross-source identity table behind them.
+///
+/// A thread with three other parties on it is in THREE rooms — the room is the
+/// person, not the group, so a colleague reached only inside a project thread
+/// is still findable under their own name.
 @immutable
 class PersonRoom {
-  /// What [roomKeyFor] returned for every thread in it — the grouping key, and
-  /// what the screen stores as the selection.
+  /// One of the keys [personKeysFor] minted for every thread in it — the
+  /// grouping key, and what the screen stores as the selection.
   final String key;
 
-  /// The row's one line: the other party, or the group spelled out.
+  /// The row's one line: the person this room is.
   final String title;
 
-  /// The room's threads, newest first.
+  /// The room's threads, newest first. Done and deferred ones included.
   final List<Conversation> threads;
 
-  /// Unread messages across the room, summed from the rows.
+  /// Unread messages across the room's LIVE threads.
   final int unread;
 
-  /// How many of [threads] the user is on the hook for, at the threshold the
-  /// caller passed.
+  /// How many of the LIVE [threads] the user is on the hook for, at the
+  /// threshold the caller passed.
   final int needsYou;
 
   /// Which connectors the room's threads came from. One source earns the row a
@@ -55,8 +64,14 @@ class PersonRoom {
   /// Null when nothing in it is stamped.
   final String? latestAt;
 
-  /// The other parties, for avatars.
+  /// The one person this room is, for the avatar and the panel. Empty for
+  /// [noSenderRoom], which is nobody.
   final List<Participant> people;
+
+  /// The threads on which this person is the ONLY other party — their 1:1s,
+  /// mail and chat alike. What the `Direct` pill keeps and what the Message
+  /// action writes into.
+  final Set<ThreadTarget> direct;
 
   const PersonRoom({
     required this.key,
@@ -67,7 +82,12 @@ class PersonRoom {
     required this.sources,
     required this.latestAt,
     required this.people,
+    this.direct = const {},
   });
+
+  /// How many of the room's threads are still going. The count the room's own
+  /// numbers are taken over, offered so a caller can say so.
+  int get liveCount => threads.where(isLiveThread).length;
 }
 
 /// What a participant is called: their name when they have one, their address
@@ -97,12 +117,44 @@ bool _isOwner(Participant p, Owner owner) {
   return false;
 }
 
+/// Lowercased address → display name, from every participant in [all] that
+/// carries both. First name seen wins.
+///
+/// This is what lets an outbound-only thread — whose recipients the mail sync
+/// stores with no name at all — file under the colleague it was sent to rather
+/// than under their address. Without it the same person has a named room from
+/// the mail they sent and a second, address-titled room from the mail the user
+/// sent them, and the People list reads as a list of strangers.
+///
+/// Read-time and pure: nothing is written back to the store, because the name
+/// is a fact about the OTHER threads in this list rather than about this one.
+Map<String, String> participantNames(Iterable<Conversation> all) {
+  final names = <String, String>{};
+  for (final c in all) {
+    for (final p in c.participants) {
+      final address = p.email?.trim().toLowerCase() ?? '';
+      if (address.isEmpty) continue;
+      final name = p.name?.trim() ?? '';
+      if (name.isEmpty) continue;
+      names.putIfAbsent(address, () => name);
+    }
+  }
+  return names;
+}
+
 /// Everyone on the thread but the account, in the order the thread lists them,
-/// each person once.
-List<Participant> _others(Conversation c, Owner owner) {
+/// each person once, with [names] filling in the ones the thread left nameless.
+List<Participant> _others(
+  Conversation c,
+  Owner owner,
+  Map<String, String> names,
+) {
   final out = <Participant>[];
   final seen = <String>{};
-  for (final p in c.participants) {
+  for (final raw in c.participants) {
+    // Resolved BEFORE the owner test, so a nameless recipient that turns out
+    // to be the account is dropped by the name arm too.
+    final p = _resolve(raw, names);
     if (_isOwner(p, owner)) continue;
     final display = _displayOf(p);
     if (display.isEmpty) continue;
@@ -115,9 +167,20 @@ List<Participant> _others(Conversation c, Owner owner) {
   return out;
 }
 
-/// Lowercased other-party display names joined by `'\n'` (address when a name
-/// is missing); the owner excluded by address or by name; [noSenderRoom] when
-/// nobody is left.
+/// A participant with the list's name for their address, where they had none.
+Participant _resolve(Participant p, Map<String, String> names) {
+  final name = p.name?.trim() ?? '';
+  if (name.isNotEmpty) return p;
+  final address = p.email?.trim().toLowerCase() ?? '';
+  if (address.isEmpty) return p;
+  final known = names[address];
+  if (known == null) return p;
+  return Participant(name: known, email: p.email);
+}
+
+/// One key per other party on the thread: their resolved display name,
+/// lowercased (their address when no name is known anywhere).
+/// `[noSenderRoom]` when nobody but the owner is on it.
 ///
 /// A name and not an address, deliberately (D7): the same colleague reaches
 /// this mailbox as `dana@…` and reaches Teams as `teams:19:…`, and the display
@@ -125,23 +188,27 @@ List<Participant> _others(Conversation c, Owner owner) {
 /// meant to be — a real cross-source identity map is a later round — but it is
 /// the heuristic that makes one row out of one person.
 ///
-/// The newline is the separator because it is the one character a display name
-/// cannot contain, so no two different groups can collide on one key.
-String roomKeyFor(Conversation c, {required Owner owner}) {
-  final others = _others(c, owner);
-  if (others.isEmpty) return noSenderRoom;
-  return [for (final p in others) _displayOf(p).toLowerCase()].join('\n');
+/// A thread yields as many keys as it has other parties, because a room is a
+/// PERSON: a colleague on a five-way project thread is in that thread's list
+/// under their own name, not buried in a room titled after all five.
+List<String> personKeysFor(
+  Conversation c, {
+  required Owner owner,
+  Map<String, String> names = const {},
+}) {
+  final others = _others(c, owner, names);
+  if (others.isEmpty) return const [noSenderRoom];
+  return [for (final p in others) _displayOf(p).toLowerCase()];
 }
 
-/// The room's one line: one other party is their name, a handful are spelled
-/// out, and a crowd trails off after three — the `TeamsSync._subjectFor` rule,
-/// so a group chat's own subject and its room title agree.
-String _titleFor(List<Participant> people) {
-  if (people.isEmpty) return noSenderRoom;
-  final names = [for (final p in people) _displayOf(p)];
-  if (names.length <= _maxTitleNames) return names.join(', ');
-  return '${names.take(_maxTitleNames).join(', ')}…';
-}
+/// The FIRST of [personKeysFor] — the person a thread is "with" when one has
+/// to be picked. The thread header's faces open this person.
+String roomKeyFor(
+  Conversation c, {
+  required Owner owner,
+  Map<String, String> names = const {},
+}) =>
+    personKeysFor(c, owner: owner, names: names).first;
 
 /// Newest first, with unstamped threads last. Lexicographic over the stored
 /// ISO strings, which is chronological for the UTC stamps the store writes.
@@ -152,32 +219,35 @@ int _byLatestDesc(String? a, String? b) {
   return b.compareTo(a);
 }
 
-/// Every live thread, grouped by who is on it, busiest room first.
+/// Every thread, grouped by each person on it, most recent room first.
 ///
-/// Over [needsYouRows] and [conversationRows] together — the two halves of the
-/// live inbox, which between them claim each thread exactly once. Later and
-/// done threads are in neither, and so are in no room: a person's room is what
-/// is going on with them now, and a pile the user deferred is not that.
+/// Over ALL of [all] rather than over the live inbox: a room is everything
+/// with a person, and a reader who filtered People by Teams and found the one
+/// chat they have missing — because they had marked it done — has been told
+/// their colleague is not there. Done and deferred threads are IN the room and
+/// marked on their cards; what excludes them is only [unread] and [needsYou],
+/// the two numbers that ask for work.
 List<PersonRoom> peopleRooms(
   List<Conversation> all, {
   required Owner owner,
   double threshold = 0,
 }) {
-  final live = [
-    ...needsYouRows(all, threshold: threshold),
-    ...conversationRows(all, threshold: threshold),
-  ];
+  // Built once, over the whole list, and handed to every key and every member
+  // walk below: a name resolved differently in two of them would file one
+  // person's threads in two rooms.
+  final names = participantNames(all);
 
   final grouped = <String, List<Conversation>>{};
   final order = <String>[];
-  for (final c in live) {
-    final key = roomKeyFor(c, owner: owner);
-    final bucket = grouped[key];
-    if (bucket == null) {
-      grouped[key] = [c];
-      order.add(key);
-    } else {
-      bucket.add(c);
+  for (final c in all) {
+    for (final key in personKeysFor(c, owner: owner, names: names)) {
+      final bucket = grouped[key];
+      if (bucket == null) {
+        grouped[key] = [c];
+        order.add(key);
+      } else {
+        bucket.add(c);
+      }
     }
   }
 
@@ -189,35 +259,42 @@ List<PersonRoom> peopleRooms(
 
     // Taken across the room's threads rather than off one of them: every
     // thread here produced the same key, so the names match, but only one of
-    // them may carry a real address for the face.
-    final people = <Participant>[];
-    final seen = <String>{};
+    // them may carry a real address for the face. A mail address is preferred
+    // over a `teams:` id, which is a Graph id nothing can be written to.
+    Participant? best;
     for (final c in threads) {
-      for (final p in _others(c, owner)) {
-        if (seen.add(_displayOf(p).toLowerCase())) people.add(p);
+      for (final p in _others(c, owner, names)) {
+        if (_displayOf(p).toLowerCase() != key) continue;
+        if (_rank(p) > _rank(best)) best = p;
       }
     }
 
     var unread = 0;
     var needsYou = 0;
     final sources = <String>{};
+    final direct = <ThreadTarget>{};
     for (final c in threads) {
+      sources.add(c.source);
+      if (_others(c, owner, names).length == 1) {
+        direct.add((source: c.source, conversationKey: c.id));
+      }
+      if (!isLiveThread(c)) continue;
       unread += c.unreadCount;
       if (isNeedsYou(c, threshold: threshold)) needsYou++;
-      sources.add(c.source);
     }
 
     rooms.add((
       i,
       PersonRoom(
         key: key,
-        title: _titleFor(people),
+        title: best == null ? noSenderRoom : _displayOf(best),
         threads: threads,
         unread: unread,
         needsYou: needsYou,
         sources: sources,
         latestAt: threads.isEmpty ? null : threads.first.lastMessageAt,
-        people: people,
+        people: best == null ? const [] : [best],
+        direct: direct,
       ),
     ));
   }
@@ -230,4 +307,17 @@ List<PersonRoom> peopleRooms(
     return a.$1.compareTo(b.$1);
   });
   return [for (final (_, room) in rooms) room];
+}
+
+/// How good an instance of one person is as THE instance: a named, mailable
+/// one beats a named `teams:` one, which beats one with only an address.
+int _rank(Participant? p) {
+  if (p == null) return -1;
+  final named = (p.name?.trim() ?? '').isNotEmpty;
+  final address = p.email?.trim() ?? '';
+  final mailable = address.isNotEmpty && !address.startsWith('teams:');
+  if (named && mailable) return 3;
+  if (named && address.isNotEmpty) return 2;
+  if (named) return 1;
+  return 0;
 }

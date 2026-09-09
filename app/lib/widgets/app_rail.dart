@@ -660,7 +660,7 @@ class _AppRailState extends State<AppRail> {
               (!widget.unreadOnly || room.unread > 0))
             _roomItem(room),
       ],
-      placeholder: 'Nobody is waiting on anything',
+      placeholder: 'Nobody yet',
     );
   }
 
@@ -972,13 +972,12 @@ class _AppRailState extends State<AppRail> {
     );
   }
 
-  /// One People room: a colleague, or a group, and every live thread with
-  /// them in it.
+  /// One People room: a colleague, and every thread with them in it — their
+  /// own, and the ones they share with four other people.
   ///
-  /// A face where there is one person to show — a room is about WHO, and a
-  /// name beside their photograph is how a reader picks a row out of a column
-  /// of names. A group keeps the dot: three overlapping faces at 20px on a
-  /// 260px row is a smudge, and the names are already the title.
+  /// A face, because a room is about WHO and a name beside their photograph is
+  /// how a reader picks a row out of a column of names. The no-sender room
+  /// keeps the dot: it stands for nobody, so there is no face to draw.
   ///
   /// The badge is the room's Needs You count in the attention red where there
   /// is one, and the thread count in grey where there is not — the two

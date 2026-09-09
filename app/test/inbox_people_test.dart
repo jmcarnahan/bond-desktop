@@ -10,7 +10,9 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/widgets/conversation_list_pane.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
+import 'package:bond_inbox/widgets/people_directory_pane.dart';
 import 'package:bond_inbox/widgets/person_room_pane.dart';
 import 'package:bond_inbox/widgets/room_header.dart';
 import 'package:bond_inbox/widgets/settings_screen.dart';
@@ -23,11 +25,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'fixtures/test_db.dart';
 
 /// The shell as the screen assembles it: the icon rail, the list column it
-/// scopes, and the People room a colleague's row opens.
+/// scopes, the DIRECTORY the People stop lands on, and the room a colleague's
+/// row opens.
 ///
 /// The interesting claim is that ONE row stands for a person however many ways
 /// they reach this mailbox — a mail thread and a Teams chat with the same
-/// colleague are one room, and what they deferred is in none.
+/// colleague are one room, a thread they were on with four other people is in
+/// it too, and what they deferred or closed is in it and marked rather than
+/// dropped on the floor.
 
 class _FakeSync implements MailSync {
   @override
@@ -70,6 +75,8 @@ void main() {
     String address = 'dana@example.test',
     String receivedAt = '2026-08-28T09:00:00Z',
     String? bucket,
+    String state = 'waiting',
+    String? participantsJson,
   }) async {
     await store.upsertMessage({
       'source': source,
@@ -86,8 +93,9 @@ void main() {
       'source': source,
       'conversation_key': key,
       'subject': subject,
-      'participants_json': '[{"name":"$who","email":"$address"}]',
-      'state': 'waiting',
+      'participants_json':
+          participantsJson ?? '[{"name":"$who","email":"$address"}]',
+      'state': state,
       'last_message_at': receivedAt,
     });
     if (bucket != null) {
@@ -198,24 +206,124 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('the room holds her live threads and not what was deferred',
+  testWidgets('the room holds every thread with her, and marks the deferred one',
       (tester) async {
     await seedPerson();
     await pumpInbox(tester);
     await openRoom(tester, 'Dana Whitfield');
 
-    // Rewritten in Phase 6: the room is a merged timeline, not a list pane.
     final pane = find.byType(PersonRoomPane);
     expect(pane, findsOneWidget);
     expect(find.descendant(
       of: find.byType(RoomHeader<ThreadTab>),
       matching: find.text('Dana Whitfield'),
     ), findsOneWidget);
-    expect(find.text('2 threads · mail and Teams'), findsOneWidget);
+    expect(find.text('3 threads · mail and Teams'), findsOneWidget);
     expect(find.text('💬 Launch date'), findsOneWidget);
     expect(find.text('Homepage copy'), findsOneWidget);
-    // Deferred mail is in Later, and in no room at all.
-    expect(find.text('Old invoice'), findsNothing);
+    // Deferred mail is HERE — it is still a thread with her — and its card
+    // says which pile it is in, so it is not answered twice.
+    expect(find.text('Old invoice'), findsOneWidget);
+    expect(find.textContaining('Later · '), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a done chat is still the person\'s', (tester) async {
+    // The user's own report: the one Teams chat in the mailbox was closed, so
+    // People had no room for the colleague it was with and the Teams pill
+    // narrowed the stop to nothing.
+    await seedThread(
+      'chat-done',
+      'Launch date',
+      source: 'teams',
+      who: 'Todd Alder',
+      address: 'teams:19:todd',
+      state: 'done',
+      receivedAt: '2026-08-29T09:00:00Z',
+    );
+    await pumpInbox(tester);
+
+    // One connector, so the row wears its glyph — the rail's own rule.
+    expect(roomRow('💬 Todd Alder'), findsOneWidget);
+    expect(
+      find.byKey(PeopleDirectoryPane.rowKeyFor('todd alder')),
+      findsOneWidget,
+    );
+
+    await openRoom(tester, '💬 Todd Alder');
+    expect(find.textContaining('Done · '), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('the People stop lands on the directory', (tester) async {
+    await seedPerson();
+    await pumpInbox(tester);
+
+    // A directory of PEOPLE, not the flat list of threads nobody claimed.
+    expect(
+      find.byKey(PeopleDirectoryPane.rowKeyFor('dana whitfield')),
+      findsOneWidget,
+    );
+    expect(find.byType(ConversationListPane), findsNothing);
+
+    await tester.tap(
+      find.byKey(PeopleDirectoryPane.rowKeyFor('dana whitfield')),
+    );
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+
+    // A row opens the room in MAIN, the way the rail's own row does.
+    expect(find.byType(PersonRoomPane), findsOneWidget);
+    expect(find.descendant(
+      of: find.byType(RoomHeader<ThreadTab>),
+      matching: find.text('Dana Whitfield'),
+    ), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a nameless recipient files under the colleague\'s name',
+      (tester) async {
+    // Thread B is one the user SENT: the mail sync stores its recipients with
+    // no name, and without the name resolution it would be a second room
+    // titled by the bare address.
+    await seedThread('c1', 'Homepage copy',
+        who: 'Todd Alder', address: 'todd@example.test');
+    await seedThread(
+      'c2',
+      'The rate sheet',
+      receivedAt: '2026-08-27T09:00:00Z',
+      participantsJson: '[{"name":null,"email":"todd@example.test"}]',
+    );
+    await pumpInbox(tester);
+
+    expect(roomRow('Todd Alder'), findsOneWidget);
+    expect(roomRow('todd@example.test'), findsNothing);
+    expect(
+      find.byKey(PeopleDirectoryPane.rowKeyFor('todd@example.test')),
+      findsNothing,
+    );
+
+    await openRoom(tester, 'Todd Alder');
+    expect(find.text('Homepage copy'), findsOneWidget);
+    expect(find.text('The rate sheet'), findsOneWidget);
+    await settleQueues(tester);
+  });
+
+  testWidgets('a group thread is in every member\'s room', (tester) async {
+    await seedThread(
+      'g1',
+      'The five of us',
+      participantsJson: '[{"name":"Dana Whitfield","email":"dana@example.test"},'
+          '{"name":"Priya Raman","email":"priya@example.test"}]',
+    );
+    await pumpInbox(tester);
+
+    expect(roomRow('Dana Whitfield'), findsOneWidget);
+    expect(roomRow('Priya Raman'), findsOneWidget);
+
+    await openRoom(tester, 'Priya Raman');
+    expect(find.text('The five of us'), findsOneWidget);
     await settleQueues(tester);
   });
 

@@ -2,18 +2,19 @@
 // tables, and this file means the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/people_sort.dart';
 import 'package:bond_inbox/services/backend/backend_types.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
 import 'package:bond_inbox/providers/prefs_provider.dart';
 import 'package:bond_inbox/screens/inbox_screen.dart';
+import 'package:bond_inbox/screens/new_message_screen.dart';
 import 'package:bond_inbox/services/backend/auth_session.dart';
 import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
 import 'package:bond_inbox/widgets/composer.dart';
-import 'package:bond_inbox/widgets/message_row.dart';
 import 'package:bond_inbox/widgets/person_panel.dart';
 import 'package:bond_inbox/widgets/person_room_pane.dart';
 import 'package:bond_inbox/widgets/side_panel.dart';
@@ -26,9 +27,11 @@ import 'fixtures/test_db.dart';
 
 /// A person's room, as the screen assembles it.
 ///
-/// The claim: one colleague, one history. Her chat reads as messages, her mail
-/// reads as a card, both are in one column, and every way into a thread from
-/// here opens it BESIDE the room rather than over it.
+/// The claim: one colleague, one list. Every thread with her — mail and chat,
+/// hers alone and shared with others — is a CARD in one top-anchored column,
+/// in the order she asked for, and every way into a conversation from here
+/// opens it BESIDE the room rather than over it. The room itself offers one
+/// thing about the PERSON: `Message`.
 
 class _FakeSync implements MailSync {
   @override
@@ -51,8 +54,8 @@ class _FakeTeamsSync implements TeamsSync {
   Future<String?> get lastSyncedAt async => null;
 }
 
-/// A grant, without the whole SDK stack behind it. The room's composer only
-/// appears on the top rung, and that rung is one `hasScope` answer.
+/// A grant, without the whole SDK stack behind it. The thread that opens
+/// beside only gets a box on the `Chat.ReadWrite` rung.
 class _FakeAuth implements AuthSession {
   final Set<String> scopes;
 
@@ -111,15 +114,15 @@ void main() {
     String key,
     String? subject, {
     String source = 'email',
-    String address = 'dana@example.test',
+    String participantsJson =
+        '[{"name":"Dana Whitfield","email":"dana@example.test"}]',
     String receivedAt = '2026-08-28T09:00:00Z',
   }) async {
     await store.upsertConversation({
       'source': source,
       'conversation_key': key,
       'subject': subject,
-      'participants_json':
-          '[{"name":"Dana Whitfield","email":"$address"}]',
+      'participants_json': participantsJson,
       'state': 'waiting',
       'last_message_at': receivedAt,
     });
@@ -129,8 +132,8 @@ void main() {
   /// One colleague on both connectors: a mail thread, and a 1:1 chat with two
   /// messages in it.
   Future<void> seedPerson() async {
-    await seedMessage('c1', 'c1-m1', subject: 'Homepage copy',
-        body: 'The hero paragraph.');
+    await seedMessage('c1', 'c1-m1',
+        subject: 'Homepage copy', body: 'The hero paragraph.');
     await seedThread('c1', 'Homepage copy');
 
     await seedMessage('chat-1', 'chat-1-m1',
@@ -145,7 +148,8 @@ void main() {
         body: 'The fourteenth works.');
     await seedThread('chat-1', 'Launch date',
         source: 'teams',
-        address: 'teams:19:abc',
+        participantsJson:
+            '[{"name":"Dana Whitfield","email":"teams:19:abc"}]',
         receivedAt: '2026-08-28T11:00:00Z');
   }
 
@@ -197,21 +201,44 @@ void main() {
     }
   }
 
-  testWidgets('one column holds her chat messages and her mail card',
+  double topOf(WidgetTester tester, String source, String id) =>
+      tester.getTopLeft(find.byKey(RootMessageCard.keyFor(source, id))).dy;
+
+  testWidgets('one column holds every thread with her, as cards',
       (tester) async {
     await seedPerson();
     await pumpInbox(tester);
     await openRoom(tester, 'Dana Whitfield');
 
     expect(find.byType(PersonRoomPane), findsOneWidget);
-    // The chat is drawn as messages, under its own heading.
-    expect(find.text('Is the fourteenth still good?'), findsOneWidget);
-    expect(find.text('The fourteenth works.'), findsOneWidget);
-    expect(find.text('💬 Launch date'), findsOneWidget);
-    expect(find.byType(MessageRow), findsNWidgets(2));
-    // The mail thread is a card, not a transcript.
     expect(find.byKey(RootMessageCard.keyFor('email', 'c1')), findsOneWidget);
+    expect(
+      find.byKey(RootMessageCard.keyFor('teams', 'chat-1')),
+      findsOneWidget,
+    );
+    // Cards and not transcripts: the messages are in the thread that opens
+    // beside, which is where the box and the files are too.
+    expect(find.text('The fourteenth works.'), findsNothing);
     expect(find.text('The hero paragraph.'), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('newest first, anchored at the TOP of the pane', (tester) async {
+    await seedPerson();
+    await pumpInbox(tester);
+    await openRoom(tester, 'Dana Whitfield');
+
+    // The chat is the newer of the two.
+    expect(
+      topOf(tester, 'teams', 'chat-1'),
+      lessThan(topOf(tester, 'email', 'c1')),
+    );
+    // What used to pin the whole list to the bottom of the pane: a room with
+    // three cards in it read as a gap with three cards under it.
+    expect(
+      tester.widget<ListView>(find.byKey(PersonRoomPane.listKey)).reverse,
+      isFalse,
+    );
     await settleQueues(tester);
   });
 
@@ -237,84 +264,126 @@ void main() {
     await settleQueues(tester);
   });
 
-  testWidgets('Open chat opens the chat beside too', (tester) async {
-    await seedPerson();
-    await pumpInbox(tester);
-    await openRoom(tester, 'Dana Whitfield');
-
-    await tester.tap(find.byKey(PersonRoomPane.openChatKeyFor('chat-1')));
-    for (var i = 0; i < 4; i++) {
-      await tester.pump();
-    }
-
-    expect(find.byType(SidePanelHost), findsOneWidget);
-    expect(
-      tester
-          .widget<ThreadDetailPanel>(find.descendant(
-            of: find.byType(SidePanelHost),
-            matching: find.byType(ThreadDetailPanel),
-          ))
-          .conversation
-          .id,
-      'chat-1',
-    );
-    await settleQueues(tester);
-  });
-
-  testWidgets('a one-person room with a chat docks a composer at her name',
+  testWidgets('the room\'s order control flips it, and is remembered',
       (tester) async {
     await seedPerson();
     await pumpInbox(tester);
     await openRoom(tester, 'Dana Whitfield');
-    // The capability is a keychain read; the box waits on it.
-    for (var i = 0; i < 4; i++) {
+
+    await tester.tap(find.byKey(PersonRoomPane.sortKey));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester
+        .tap(find.byKey(PersonRoomPane.sortItemKeyFor(RoomSort.oldest)));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(
+      topOf(tester, 'email', 'c1'),
+      lessThan(topOf(tester, 'teams', 'chat-1')),
+    );
+    expect(await store.getPref(roomSortKey), 'oldest');
+    await settleQueues(tester);
+  });
+
+  testWidgets('the Direct and Groups pills narrow her threads', (tester) async {
+    await seedPerson();
+    // A thread she is on with somebody else, so Groups has something to keep.
+    await seedMessage('g1', 'g1-m1', subject: 'The five of us');
+    await seedThread(
+      'g1',
+      'The five of us',
+      participantsJson: '[{"name":"Dana Whitfield","email":"dana@example.test"},'
+          '{"name":"Priya Raman","email":"priya@example.test"}]',
+    );
+    await pumpInbox(tester);
+    await openRoom(tester, 'Dana Whitfield');
+
+    await tester.tap(find.descendant(
+      of: find.byKey(PersonRoomPane.filterPillsKey),
+      matching: find.text(RoomFilter.groups.label),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(RootMessageCard.keyFor('email', 'g1')), findsOneWidget);
+    expect(find.byKey(RootMessageCard.keyFor('email', 'c1')), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('the filter field narrows the room as it is typed',
+      (tester) async {
+    await seedPerson();
+    await pumpInbox(tester);
+    await openRoom(tester, 'Dana Whitfield');
+
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(PersonRoomPane),
+        matching: find.byType(TextField),
+      ),
+      'homepage',
+    );
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(RootMessageCard.keyFor('email', 'c1')), findsOneWidget);
+    expect(find.byKey(RootMessageCard.keyFor('teams', 'chat-1')), findsNothing);
+    await settleQueues(tester);
+  });
+
+  testWidgets('Message opens her direct chat beside, with the box focused',
+      (tester) async {
+    await seedPerson();
+    await pumpInbox(tester);
+    await openRoom(tester, 'Dana Whitfield');
+
+    await tester.tap(find.byTooltip('Message'));
+    for (var i = 0; i < 6; i++) {
       await tester.pump();
     }
 
     final composer = find.descendant(
-      of: find.byType(PersonRoomPane).hitTestable(),
+      of: find.byType(SidePanelHost),
       matching: find.byType(Composer),
     );
-    expect(find.byType(Composer), findsOneWidget);
-    expect(composer, findsNothing, reason: 'the box is docked UNDER the pane');
+    expect(composer, findsOneWidget);
     expect(
-      tester.widget<Composer>(find.byType(Composer)).hint,
-      'Message Dana Whitfield…',
+      tester.widget<Composer>(composer).focusNode?.hasFocus,
+      isTrue,
+      reason: 'the cursor lands in the box, the way the hover Reply hands over',
     );
-    // The alternative is never offered beside it.
-    expect(find.byKey(PersonRoomPane.messageButtonKey), findsNothing);
     await settleQueues(tester);
   });
 
-  testWidgets('a mail-only room offers the Message button instead',
+  testWidgets('Message on a mail-only person composes instead',
       (tester) async {
     await seedMessage('c1', 'c1-m1', subject: 'Homepage copy');
     await seedThread('c1', 'Homepage copy');
     await pumpInbox(tester);
     await openRoom(tester, 'Dana Whitfield');
 
-    expect(find.byKey(PersonRoomPane.messageButtonKey), findsOneWidget);
-    expect(find.text('Message Dana Whitfield'), findsOneWidget);
-    expect(find.byType(Composer), findsNothing);
-    await settleQueues(tester);
-  });
-
-  testWidgets('without a send grant a chat room gets no box either',
-      (tester) async {
-    await seedPerson();
-    await pumpInbox(tester, scopes: const {'mail.send'});
-    await openRoom(tester, 'Dana Whitfield');
-    for (var i = 0; i < 4; i++) {
+    await tester.tap(find.byTooltip('Message'));
+    for (var i = 0; i < 5; i++) {
       await tester.pump();
     }
 
-    // There is no drafts folder behind a Teams message, so a box that could
-    // not send would be a lie — and a room with nothing under it at all would
-    // read as a room with nobody in it, so the line says where to write.
-    expect(find.byType(Composer), findsNothing);
-    expect(find.text('Reply in Microsoft Teams'), findsOneWidget);
-    expect(find.byKey(PersonRoomPane.messageButtonKey), findsNothing);
+    expect(find.byType(NewMessageScreen), findsOneWidget);
     await settleQueues(tester);
+  });
+
+  testWidgets('opening a room marks nothing read', (tester) async {
+    await seedPerson();
+    await pumpInbox(tester);
+    await openRoom(tester, 'Dana Whitfield');
+    await settleQueues(tester);
+
+    // Every row here is a CARD — a summary, not the mail. The chat used to be
+    // drawn inline and read on open; now its messages are in the thread that
+    // opens beside, and that is where reading it happens.
+    final rows = await store.loadConversations(sources: ['email', 'teams']);
+    expect(rows.firstWhere((c) => c.id == 'chat-1').unreadCount, 2);
+    expect(rows.firstWhere((c) => c.id == 'c1').unreadCount, 1);
   });
 
   testWidgets('Profile opens the person beside the room', (tester) async {
@@ -334,26 +403,7 @@ void main() {
       ),
       findsOneWidget,
     );
-    // The room's face for her comes off her NEWEST thread, which is the chat
-    // — so the address on it is a `teams:` id, which the panel deliberately
-    // does not show. What it can say is how much is live.
     expect(find.text('2 threads · 1 mail · 1 chat'), findsOneWidget);
     await settleQueues(tester);
-  });
-
-  testWidgets('opening the room marks its chat read, and leaves mail alone',
-      (tester) async {
-    await seedPerson();
-    await pumpInbox(tester);
-    await openRoom(tester, 'Dana Whitfield');
-    await settleQueues(tester);
-
-    // The chat IS on screen, the way a Slack DM is read when it is opened. The
-    // mail is a card — a summary, not the mail.
-    final rows = await store.loadConversations(sources: ['email', 'teams']);
-    final chat = rows.firstWhere((c) => c.id == 'chat-1');
-    final mail = rows.firstWhere((c) => c.id == 'c1');
-    expect(chat.unreadCount, 0);
-    expect(mail.unreadCount, 1);
   });
 }
