@@ -205,6 +205,39 @@ void main() {
       await quiet(tester);
     });
 
+    testWidgets('a held arrival the gate then drops leaves the count',
+        (tester) async {
+      // The buffer's eviction branch, now answered by the store's flag: a row
+      // nobody has seen yet stops matching, so it stops being one of the rows
+      // the count is promising — and nothing is shown leaving, because
+      // nothing was ever shown.
+      await seedThree();
+      final notifier = build();
+      await notifier.load();
+      notifier.setAnchored(false);
+
+      await arrive('m9', receivedAt: '2026-09-03T12:00:00Z');
+      await settleTicks(tester);
+      expect(notifier.state.pendingNewCount, 1);
+
+      await progress.noteTriage(
+        'email',
+        'm9',
+        state: 'skipped',
+        gateReason: 'newsletter',
+      );
+      await settleTicks(tester);
+
+      expect(notifier.state.pendingNewCount, 0);
+      expect(idsOf(notifier), ['m3', 'm2', 'm1']);
+      expect(notifier.state.fading, isEmpty);
+
+      await notifier.releasePending();
+      expect(idsOf(notifier), ['m3', 'm2', 'm1'],
+          reason: 'releasing an empty buffer changes nothing');
+      await quiet(tester);
+    });
+
     testWidgets('past the cap the count keeps counting, and releasing reloads',
         (tester) async {
       await seedThree();
