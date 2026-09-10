@@ -6,9 +6,12 @@
 Every case is a real command shape from past sessions or a review finding.
 A rule change that flips one of these is a regression, not a refinement.
 The commit gate is exercised separately (it needs a staged tree); see its
-docstring. The one branch-dependent case (`git commit` on main) adapts to
-the branch the suite runs on.
+docstring — except its secret-file rule, whose regex is replayed here
+because one lookbehind is all that lets a template be committed. The one
+branch-dependent case (`git commit` on main) adapts to the branch the suite
+runs on.
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -304,8 +307,36 @@ AGENT_CASES = [
 ]
 
 
+# The commit gate's secret-file rule: a template is the one env-shaped file
+# that may be committed; everything a real value could live in may not.
+SECRET_FILE_CASES = [
+    (False, ".env.example"),
+    (False, "docs/settings.md"),
+    (True, ".env"),
+    (True, ".env.local"),
+    (True, "app/prod.env"),
+    (True, "local.mk"),
+    (True, "app/macos/SigningLocal.xcconfig"),
+    (True, "certs/dev.p12"),
+]
+
+
+def secret_files():
+    spec = importlib.util.spec_from_file_location("commit_gate", os.path.join(HERE, "commit-gate.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.SECRET_FILES
+
+
 def main():
     failures = 0
+    pattern = secret_files()
+    for expected, path in SECRET_FILE_CASES:
+        got = bool(pattern.search(path))
+        ok = got == expected
+        failures += not ok
+        print("%s %-7s %-7s %s" % ("ok " if ok else "FAIL", "secret" if expected else "plain",
+                                   "secret" if got else "plain", path))
     for expected, cmd, agent in BASH_CASES:
         got, detail = run("guard-bash.py", bash(cmd, agent))
         ok = got == expected
@@ -317,7 +348,7 @@ def main():
         ok = got == expected
         failures += not ok
         print("%s %-7s %-7s %s" % ("ok " if ok else "FAIL", expected, got, json.dumps(payload["tool_input"])[:70]))
-    total = len(BASH_CASES) + len(AGENT_CASES)
+    total = len(BASH_CASES) + len(AGENT_CASES) + len(SECRET_FILE_CASES)
     print("\n%d/%d hook cases pass (branch: %s)" % (total - failures, total, "main" if ON_MAIN else "feature"))
     sys.exit(1 if failures else 0)
 

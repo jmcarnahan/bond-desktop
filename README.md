@@ -42,8 +42,9 @@ workload needs it.
 ## Requirements
 
 - Apple Silicon Mac. Every layer is offloaded to Metal (`-ngl 99`).
-- 32GB RAM or more recommended. Verified on an M1 Max with 64GB.
-- ~20GB free disk for the weights.
+- 48GB RAM or more recommended for all three servers; 32GB works with a
+  smaller `CTX_SIZE` in `local.mk`. Verified on an M1 Max with 64GB.
+- ~30GB free disk: ~24GB of weights across the three servers plus the app build.
 - [Homebrew](https://brew.sh), for `llama.cpp`.
 - Dart SDK on `PATH`. If you have Flutter installed you already have it.
 

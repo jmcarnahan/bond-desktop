@@ -17,7 +17,7 @@ content anywhere at inference time:
 |---|---|---|---|
 | prose (names storylines, drafts replies) | 8080 | Qwen3.8-27B Q4_K_M | ~19 GB + 0.6 GB vision projector |
 | bulk (triage, extraction) | 8082 | Qwen3-4B-Instruct Q8_0 | ~4.3 GB |
-| embeddings (clustering) | 8081 | EmbeddingGemma-300M Q8_0 | ~0.3 GB |
+| embeddings (clustering) | 8081 | EmbeddingGemma-300M | ~0.6 GB |
 
 You need:
 
@@ -26,8 +26,9 @@ You need:
   a smaller context. 16 to 24 GB needs a smaller prose model. Step 2 shows the
   one-line overrides.
 - **Disk.** About 30 GB free: the weights above plus the app build.
-- **macOS 14 or newer** with Xcode installed. macOS 12 is the build floor, but
-  Xcode 26 on macOS 15 and 26 is what has been tested.
+- **macOS 14 or newer** with Xcode installed. That is the Mac you build on;
+  the app itself deploys back to macOS 12. Xcode 26 on macOS 15 and 26 is
+  what has been tested.
 - **A bond-mcps server URL** from the project owner. It never appears in this
   repository. It is the only secret-ish thing you need, and it is not a secret:
   you sign in to that server with your own login.
@@ -103,11 +104,14 @@ What happens:
   `~/.cache/huggingface/hub/`, waits for both to answer `/health`, hashes the
   downloaded files, and runs one real completion. **The first run downloads
   about 23 GB and takes ten minutes or more.** It prints an elapsed-time line
-  every 60 seconds so you can tell it is alive, and waits up to 30 minutes.
+  every 60 seconds so you can tell it is alive, and waits up to 30 minutes
+  for each of the two servers.
 - `make embed` starts the embeddings server on :8081. `make setup` does not
   start this one yet, and the app degrades quietly without it (no storyline
   clustering, no explanation), so do not skip it.
-- `make status` should show all three `[up]` with a pid.
+- `make status` should show `model`, `embed` and `fast` as `[up]` with a pid.
+  A fourth row, `omlx`, is a benchmarking runtime this path never starts;
+  `[down]` there is correct.
 
 Early in the first run you will see this from `make model`, and it is not a
 failure:
@@ -176,6 +180,9 @@ make status
 make model fast embed
 ```
 
+The three start one after another, and each gives up after two minutes if its
+port has not bound, so on a cold cache start them one at a time.
+
 Stop them when you need the memory back:
 
 ```sh
@@ -219,8 +226,12 @@ download. Every cheap check passes on it; only the hash catches it.
 
 ```sh
 make verify
-make stop && make clean-model && make model
+make stop fast-stop embed-stop
+make clean-model && make setup && make embed
 ```
+
+`make clean-model` refuses to run while any `llama-server` is alive, which is
+why all three are stopped first.
 
 **The model never binds, or the Mac swaps and stalls.** Not enough memory for
 the model plus its context. Lower `CTX_SIZE` or choose the smaller prose model
