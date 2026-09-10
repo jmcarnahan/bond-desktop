@@ -14,8 +14,8 @@ import FlutterMacOS
 /// The Dart side of this is `DirectoryAccess`
 /// (`lib/services/context/directory_access.dart`), which turns every failure
 /// below into null. Nothing here throws across the channel except as a
-/// `FlutterError`, and both codes are ones that seam already reads as "no
-/// bookmark": the caller falls back to the stored path and marks the
+/// `FlutterError`, and every code it sends is one that seam already reads as
+/// "no bookmark": the caller falls back to the stored path and marks the
 /// directory unavailable only if that cannot be read either.
 final class BookmarkChannel {
   /// Named for the bundle id, as every channel in this app is. Must match
@@ -90,7 +90,15 @@ final class BookmarkChannel {
   /// was re-signed — not that the resolved URL is wrong, and the resolve
   /// above has already granted access to it. The app re-creates the bookmark
   /// the next time the user adds that directory; refusing the read in the
-  /// meantime would take a working folder away over bookkeeping.
+  /// meantime would take a working folder away over bookkeeping. It is
+  /// logged, because "the bookmark wants re-making" is the fact behind a
+  /// folder that starts failing after an update.
+  ///
+  /// A resource the sandbox REFUSES is a different thing, and it answers
+  /// with an error rather than a path. Access is what this method is for: a
+  /// path handed back without it sends the caller off to walk a directory it
+  /// cannot open, one file-system error at a time, when the honest answer is
+  /// that this folder needs picking again.
   private static func resolve(_ call: FlutterMethodCall, _ result: FlutterResult) {
     guard let args = call.arguments as? [String: Any],
           let data = args["bookmark"] as? FlutterStandardTypedData
@@ -106,7 +114,18 @@ final class BookmarkChannel {
         relativeTo: nil,
         bookmarkDataIsStale: &stale
       )
-      if accessed[url.path] == nil, url.startAccessingSecurityScopedResource() {
+      if stale {
+        NSLog("bookmarks: the bookmark for %@ is stale and wants re-making", url.path)
+      }
+      if accessed[url.path] == nil {
+        guard url.startAccessingSecurityScopedResource() else {
+          result(FlutterError(
+            code: "access_denied",
+            message: "The sandbox refused access to \(url.path)",
+            details: nil
+          ))
+          return
+        }
         accessed[url.path] = url
       }
       result(url.path)

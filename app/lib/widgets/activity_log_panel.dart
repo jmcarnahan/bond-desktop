@@ -119,6 +119,10 @@ class ActivityLogPanel extends StatefulWidget {
     'fresh': 'read less than a minute ago',
     'unavailable': 'the directory could not be opened',
     'gone': 'the directory is no longer registered',
+    // Its own reason and not [gone]'s: a digest is queued per FILE, and a
+    // file the walk deleted between the queue and the pass is a nothing,
+    // where a directory that went is the whole shelf.
+    'file_gone': 'the file is no longer in the directory',
     'off': 'summaries are off for this directory',
     'already_digested': 'already summarised',
     'too_short': 'too short to summarise',

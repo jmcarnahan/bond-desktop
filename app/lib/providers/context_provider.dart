@@ -106,13 +106,20 @@ final contextLinksProvider =
 /// would be a switch that unlinked somebody else's storyline.
 ///
 /// Empty for a storyline's own panel, which inherits from nothing.
-final contextInheritedProvider = FutureProvider.autoDispose
-    .family<List<({String storyline, String dirName})>, DraftTarget>(
+///
+/// The [dirId] rides beside the name because two readers need two different
+/// things from the same row: the panel prints the name, and the file panel
+/// asks whether THIS directory is in scope for the room before it offers
+/// **Consult for the reply**. A name is not an identity — two storylines can
+/// carry directories that display the same — so the question is answered on
+/// the id.
+final contextInheritedProvider = FutureProvider.autoDispose.family<
+    List<({String storyline, String dirId, String dirName})>, DraftTarget>(
   (ref, target) async {
     ref.watch(activityEventsProvider);
     final messages = ref.watch(messageStoreProvider);
     final store = ref.watch(contextStoreProvider);
-    final inherited = <({String storyline, String dirName})>[];
+    final inherited = <({String storyline, String dirId, String dirName})>[];
     for (final storylineId
         in await messages.storylineIdsFor(target.source, target.conversationKey)) {
       final storyline = await messages.getStoryline(storylineId);
@@ -124,7 +131,11 @@ final contextInheritedProvider = FutureProvider.autoDispose
       )) {
         final dir = await store.directory(dirId);
         if (dir == null) continue;
-        inherited.add((storyline: storyline.title, dirName: dir.displayName));
+        inherited.add((
+          storyline: storyline.title,
+          dirId: dir.id,
+          dirName: dir.displayName,
+        ));
       }
     }
     return inherited;
@@ -149,9 +160,8 @@ typedef ContextFileView = ({
 
 /// One file of one registered directory, for the file panel.
 ///
-/// Null for a file nobody indexed and for one whose directory has since been
-/// de-registered — the panel says so in a sentence rather than showing an
-/// empty reader.
+/// Null for a file nobody indexed — the panel says so in a sentence rather
+/// than showing an empty reader.
 ///
 /// Re-read on every activity event for [contextLinksProvider]'s reason: a
 /// reconcile pass that lands while the panel is open changes the words on
@@ -163,6 +173,10 @@ final contextFileProvider = FutureProvider.autoDispose
     final store = ref.watch(contextStoreProvider);
     final file = await store.fileById(key.fileId);
     if (file == null) return null;
+    // Belt and braces. `removeDirectory` deletes the file rows before the
+    // directory row, so a file whose directory has gone is a file that cannot
+    // be read back at all — this branch has nothing to catch today. It stays
+    // because the alternative to it is a breadcrumb drawn against a null.
     final dir = await store.directory(file.dirId);
     if (dir == null) return null;
 

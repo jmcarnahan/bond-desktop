@@ -620,6 +620,30 @@ void main() {
       );
     });
 
+    test('a deleted file and a de-registered directory read differently', () {
+      // Two reasons and not one: a digest is queued per FILE, so the file
+      // the walk deleted between the queue and the pass is the ordinary
+      // skip, while the whole shelf going is the other thing entirely.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_digest',
+          status: 'skipped',
+          detail: const {'reason': 'file_gone'},
+        )),
+        'Directory file digest skipped — the file is no longer in the '
+            'directory',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_digest',
+          status: 'skipped',
+          detail: const {'reason': 'gone'},
+        )),
+        'Directory file digest skipped — the directory is no longer '
+            'registered',
+      );
+    });
+
     test('a brief counts the files it mapped', () {
       expect(
         ActivityLogPanel.describe(_event(

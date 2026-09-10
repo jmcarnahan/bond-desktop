@@ -129,8 +129,9 @@ String cleanDescription(Object? raw) {
 ///
 /// The description falls back to the first real line of the body when the
 /// header has none. A skill with no description at all is invisible to the
-/// cosine match that Phase 3 runs over these, and the first line of a skill
-/// is very nearly always the sentence its author would have written there.
+/// cosine match [ContextRetriever] runs over these, and the first line of a
+/// skill is very nearly always the sentence its author would have written
+/// there.
 ({String name, String description})? skillOf(String relPath, String text) {
   if (contextKindFor(relPath) != 'skill') return null;
 

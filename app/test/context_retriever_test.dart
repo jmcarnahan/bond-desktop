@@ -6,6 +6,8 @@ import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/services/context/context_chunker.dart';
+import 'package:bond_inbox/services/context/context_pack_render.dart'
+    show renderContextGuidance;
 import 'package:bond_inbox/services/context/context_retriever.dart';
 import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
@@ -430,7 +432,18 @@ void main() {
         perFile: 4,
         k: 3,
       );
-      expect(short.excerpts, hasLength(3));
+      // WHICH three, not merely how many: `k` cuts the ranked list after
+      // the per-file cap, so the three that survive are the head of the
+      // ranking in order — and a count alone would pass just as happily on
+      // a list that had lost the nearest passage and kept a far one.
+      expect(
+        [for (final e in short.excerpts) '${e.relPath} · ${e.locator}'],
+        [
+          'docs/report.md · part 0',
+          'docs/report.md · part 1',
+          'docs/report.md · part 2',
+        ],
+      );
     });
 
     test('a long passage is skipped rather than ending the list', () async {
@@ -847,6 +860,209 @@ void main() {
           ['guidance']);
     });
 
+    test('every block says which project it came from', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      // The same three files in two projects. Six identically-labelled
+      // blocks of contradictory instructions is a draft following whichever
+      // it read last, with nothing to say which project it was obeying.
+      final labels = <String>[];
+      for (final name in ['acme', 'beta']) {
+        final dir = await context.registerDirectory(
+            path: '/$name', displayName: name);
+        await seedFile(dir, 'docs/CLAUDE.md',
+            kind: 'claude_md',
+            text: '# docs\n\nIn $name, cite the table.\n');
+        await seedFile(dir, '.claude/rules/pricing.md',
+            kind: 'rule',
+            pathsJson: '["docs/**"]',
+            text: '---\npaths: docs/**\n---\nIn $name, never round up.\n');
+        final skill = await seedFile(
+          dir,
+          '.claude/skills/vendor-replies/SKILL.md',
+          kind: 'skill',
+          description: 'Quote a renewal rate.',
+          text: '---\nname: vendor-replies\n'
+              'description: Quote a renewal rate.\n---\n'
+              'In $name, name the rung.\n',
+        );
+        await context.setFileDescEmbedding(
+            skill, encodeEmbedding(axes({1: 1.0})));
+        final under = await seedFile(dir, 'docs/pricing.md');
+        await context.setFileChain(under, const ['docs/CLAUDE.md']);
+        await seedChunk(under, 'docs/pricing.md',
+            'The rung schedule is settled in $name.',
+            vector: {1: 1.0});
+        await context.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
+        labels.addAll([
+          'docs/CLAUDE.md «$name»',
+          'SKILL vendor-replies «$name»',
+          'rule pricing.md «$name»',
+        ]);
+      }
+      await context.indexPendingChunks();
+
+      final pack = await retriever().packFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+        storylineIds: const [],
+      );
+
+      expect(
+        [for (final block in pack.guidance) block.label]..sort(),
+        labels..sort(),
+      );
+      expect(
+        pack.guidance
+            .firstWhere((b) => b.label == 'rule pricing.md «beta»')
+            .text,
+        contains('In beta, never round up.'),
+      );
+    });
+
+    test('the fence is fitted to its budget, and the rules still arrive',
+        () async {
+      if (!available) return;
+      await seedMessage('m1');
+      // Two real projects' worth of standing advice. Before the fence was
+      // fitted this overran it by thousands of characters and the renderer
+      // answered by dropping whole blocks off the END — so the rules never
+      // reached the model while the pack went on naming them.
+      final line = 'Quote the rung and never the prose, and say which sheet '
+          'the figure came from before anything else. ' * 2;
+      for (final name in ['acme', 'beta']) {
+        final dir = await context.registerDirectory(
+            path: '/$name', displayName: name);
+        await context.setDirectoryBrief(
+          dir,
+          briefJson: jsonEncode({
+            'about': 'A renewal pricing model.',
+            'reply_guidance': [for (var i = 0; i < 6; i++) '$i. $line'],
+          }),
+          briefHash: 'h-$name',
+        );
+        await seedFile(dir, '.claude/rules/pricing.md',
+            kind: 'rule',
+            pathsJson: '["docs/**"]',
+            text: '---\npaths: docs/**\n---\n${'R' * 400}\n');
+        final file = await seedFile(dir, 'docs/pricing.md');
+        await seedChunk(file, 'docs/pricing.md',
+            'The rung schedule is settled in $name.',
+            vector: {1: 1.0});
+        await context.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
+      }
+      // One skill, matched by the cosine, at its full body cap.
+      final acme = (await context.directories()).first;
+      final skill = await seedFile(
+        acme.id,
+        '.claude/skills/vendor-replies/SKILL.md',
+        kind: 'skill',
+        description: 'Quote a renewal rate.',
+        text: '---\nname: vendor-replies\n'
+            'description: Quote a renewal rate.\n---\n${'S' * 600}\n',
+      );
+      await context.setFileDescEmbedding(
+          skill, encodeEmbedding(axes({1: 1.0})));
+      await context.indexPendingChunks();
+
+      final pack = await retriever().packFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+        storylineIds: const [],
+      );
+
+      final rendered =
+          renderContextGuidance(pack, ContextTuning.guidanceBudget);
+      expect(rendered.length, lessThanOrEqualTo(ContextTuning.guidanceBudget));
+      // Nothing was lost to the renderer's clamp: every block the pack
+      // carries is in the text the model reads.
+      for (final block in pack.guidance) {
+        expect(rendered, contains('[${block.label}]'), reason: block.label);
+      }
+      final labels = [for (final block in pack.guidance) block.label];
+      expect(labels, containsAll(<String>[
+        'rule pricing.md «acme»',
+        'rule pricing.md «beta»',
+        'SKILL vendor-replies «acme»',
+      ]));
+      expect(pack.skills, ['vendor-replies']);
+      // The broad blocks paid for it. Standing advice shortened still says
+      // something; a rule that never arrived says nothing at all.
+      for (final block in pack.guidance.where((b) => b.broad)) {
+        expect(block.text.length, lessThan(6 * line.length));
+        expect(block.text.length,
+            greaterThanOrEqualTo(ContextTuning.guidanceFloor));
+      }
+    });
+
+    test('a skill the fence could not hold is not named either', () async {
+      if (!available) return;
+      await seedMessage('m1');
+      // Five projects' standing advice, all of it already at the floor, and
+      // two skills behind it. Nothing can be shortened any further, so the
+      // last block goes — and `pack.skills` has to say so, because it is
+      // what the provenance row shows a person as the instructions the
+      // draft was written under.
+      final dirs = <String>[];
+      for (var i = 0; i < 5; i++) {
+        final dir = await context.registerDirectory(
+            path: '/p$i', displayName: 'p$i');
+        await context.setDirectoryBrief(
+          dir,
+          briefJson: jsonEncode({
+            'about': 'A project.',
+            'reply_guidance': ['${'G' * 400}$i'],
+          }),
+          briefHash: 'h$i',
+        );
+        await context.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
+        dirs.add(dir);
+      }
+      final file = await seedFile(dirs.first, 'docs/pricing.md');
+      await seedChunk(file, 'docs/pricing.md', 'The rung schedule is settled.',
+          vector: {1: 1.0});
+      final nearer = await seedFile(
+        dirs.first,
+        '.claude/skills/vendor-replies/SKILL.md',
+        kind: 'skill',
+        description: 'Quote a renewal rate.',
+        text: '---\nname: vendor-replies\n'
+            'description: Quote a renewal rate.\n---\n${'S' * 600}\n',
+      );
+      final farther = await seedFile(
+        dirs[1],
+        '.claude/skills/renewal-notes/SKILL.md',
+        kind: 'skill',
+        description: 'Quote a renewal rate.',
+        text: '---\nname: renewal-notes\n'
+            'description: Quote a renewal rate.\n---\n${'T' * 600}\n',
+      );
+      await context.setFileDescEmbedding(
+          nearer, encodeEmbedding(axes({1: 1.0})));
+      await context.setFileDescEmbedding(
+          farther, encodeEmbedding(axes({1: 1.0, 2: 0.2})));
+      await context.indexPendingChunks();
+
+      final pack = await retriever().packFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+        storylineIds: const [],
+      );
+
+      final labels = [for (final block in pack.guidance) block.label];
+      expect(labels, contains('SKILL vendor-replies «p0»'));
+      expect(labels, isNot(contains('SKILL renewal-notes «p1»')));
+      // The list the provenance reads names what the model actually read.
+      expect(pack.skills, ['vendor-replies']);
+      expect(
+        renderContextGuidance(pack, ContextTuning.guidanceBudget).length,
+        lessThanOrEqualTo(ContextTuning.guidanceBudget),
+      );
+    });
+
     test('a rule rides only when its own paths match a kept passage',
         () async {
       if (!available) return;
@@ -1162,6 +1378,138 @@ Standard freight is 41 credits per pallet.
       // And the other file's passage is still there, behind it.
       expect([for (final e in rest) e.relPath], contains('docs/notes.md'));
       expect(pack.selectError, isNull);
+    });
+
+    test('a clamped section keeps the passages it did not reach', () async {
+      if (!available) return;
+      // A section far longer than the ceiling: the expansion arrives cut to
+      // three thousand characters, and the parts past the cut are the only
+      // place the rest of it still exists.
+      final body = [
+        for (var i = 0; i < 60; i++)
+          'Paragraph $i of the desk\'s pricing note, which sets out how one '
+              'renewal is quoted and what the freight rung costs.',
+      ].join('\n\n');
+      final dir = await seedDirectory(sheet: '## Pricing\n\n$body\n',
+          vectors: false);
+      final file = (await context.fileByPath(dir, 'docs/pricing.md'))!;
+      final parts = await context.chunksForFile(file.id, limit: 50);
+      expect(parts.length, greaterThanOrEqualTo(5),
+          reason: 'the real chunker cuts this into parts');
+      expect(parts.first.locator, 'Pricing · part 1');
+      // The first part and the last, both ranked. One is inside the three
+      // thousand characters that arrive and one is past them.
+      for (final part in [parts.first, parts.last]) {
+        await context.setChunkEmbedding(
+          part.chunkId,
+          embedding: encodeEmbedding(axes({1: 1.0})),
+          dims: 768,
+          embedModel: tag,
+        );
+      }
+      await context.indexPendingChunks();
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'docs/pricing.md', 'locator': 'Pricing'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      final expanded = pack.excerpts.first;
+      expect(expanded.expanded, isTrue);
+      expect(expanded.text.length, ContextTuning.expandedSectionCap);
+      final rest = [for (final e in pack.excerpts.skip(1)) e.locator];
+      // The part the clamp cut off is still in the pack. Dropping it because
+      // the WHOLE section would have held it takes those paragraphs out of
+      // the prompt and puts nothing in their place.
+      expect(rest, contains(parts.last.locator));
+      // And the part the section really does carry comes out, as before.
+      expect(rest, isNot(contains('Pricing · part 1')));
+    });
+
+    test('a section that fits still drops every part of it', () async {
+      if (!available) return;
+      // The behaviour the clamp rule must not disturb: a section the ceiling
+      // never touched holds all of its parts, so quoting one beside it is
+      // two sources saying the same thing.
+      final body = [
+        for (var i = 0; i < 25; i++)
+          'Paragraph $i of the desk\'s pricing note about the freight rung.',
+      ].join('\n\n');
+      final dir = await seedDirectory(sheet: '## Pricing\n\n$body\n',
+          vectors: false);
+      final file = (await context.fileByPath(dir, 'docs/pricing.md'))!;
+      final parts = await context.chunksForFile(file.id, limit: 50);
+      expect(parts.length, greaterThanOrEqualTo(2));
+      for (final part in parts) {
+        await context.setChunkEmbedding(
+          part.chunkId,
+          embedding: encodeEmbedding(axes({1: 1.0})),
+          dims: 768,
+          embedModel: tag,
+        );
+      }
+      await context.indexPendingChunks();
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'docs/pricing.md', 'locator': 'Pricing'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      expect(pack.excerpts.single.expanded, isTrue);
+      expect(pack.excerpts.single.text.length,
+          lessThan(ContextTuning.expandedSectionCap));
+    });
+
+    test('a part of a prose file expands to the file, and says so', () async {
+      if (!available) return;
+      // The case a `.txt` makes: there is no `part 2` to cut out of a prose
+      // file, so the reader hands back the whole text. Expanding it under
+      // the locator `part 2` would leave parts 1 and 3 quoted beside the
+      // very words that already hold them.
+      final dir = await seedDirectory();
+      final notes = [
+        for (var i = 0; i < 17; i++)
+          'Paragraph $i of the analysis, at about the length one of them '
+              'runs to when somebody has written it out in full for a '
+              'reader who was not there.',
+      ].join('\n\n');
+      final file = await seedFile(dir, 'notes.txt', text: notes);
+      final chunks = await context.replaceChunks(file, [
+        for (final chunk in chunkContextText('notes.txt', notes))
+          (seq: chunk.seq, locator: chunk.locator, text: chunk.text),
+      ]);
+      expect(chunks.length, 3);
+      for (final id in chunks) {
+        await context.setChunkEmbedding(
+          id,
+          embedding: encodeEmbedding(axes({1: 1.0})),
+          dims: 768,
+          embedModel: tag,
+        );
+      }
+      await context.indexPendingChunks();
+      final fake = FakeLlm([
+        answer(read: [
+          {'path': 'notes.txt', 'locator': 'part 2'},
+        ]),
+      ]);
+
+      final pack = await packWith(fake);
+
+      final mine = [
+        for (final e in pack.excerpts)
+          if (e.relPath == 'notes.txt') e,
+      ];
+      expect(mine, hasLength(1));
+      expect(mine.single.expanded, isTrue);
+      // The render says `whole file, read in full`, and the handback names
+      // the bare path — both of which are true, and `part 2` was not.
+      expect(mine.single.locator, '');
+      expect(pack.expanded, ['notes.txt']);
     });
 
     test('the selector saw the message, the pointers and the passages',

@@ -83,7 +83,8 @@ void main() {
     WidgetTester tester, {
     List<ContextDirRow> rows = const [],
     Set<String> linked = const {},
-    List<({String storyline, String dirName})> inherited = const [],
+    List<({String storyline, String dirId, String dirName})> inherited =
+        const [],
     Set<String> expanded = const {},
     Map<String, List<ContextFile>> files = const {},
     bool withFiles = false,
@@ -174,12 +175,16 @@ void main() {
       await pumpPanel(
         tester,
         rows: [_row()],
-        inherited: const [(storyline: 'Marrowfield renewal', dirName: 'ridge')],
+        inherited: const [
+          (storyline: 'Marrowfield renewal', dirId: 'd9', dirName: 'ridge'),
+        ],
       );
 
       expect(find.text('Also from storylines'), findsOneWidget);
+      // The heading carries the "also from"; the line under it names the
+      // storyline and the directory and nothing else.
       expect(
-        find.text('Also from Marrowfield renewal: ridge'),
+        find.text('«Marrowfield renewal»: ridge'),
         findsOneWidget,
       );
       // No switch of its own: it is not this thread's link to turn off, and a

@@ -26,8 +26,10 @@ class ContextPanelBody extends StatelessWidget {
   /// it simply draws nothing.
   final Set<String> linked;
 
-  /// Thread only: the storyline each inherited directory comes through.
-  final List<({String storyline, String dirName})> inherited;
+  /// Thread only: the storyline each inherited directory comes through. The
+  /// id rides along unused here — the host needs it to decide what a room may
+  /// consult, and one record serves both readers.
+  final List<({String storyline, String dirId, String dirName})> inherited;
 
   final void Function(String dirId, bool on) onToggle;
   final VoidCallback onAddDirectory;
@@ -105,11 +107,15 @@ class ContextPanelBody extends StatelessWidget {
             style: BondType.caption.copyWith(color: BondColors.inkMuted),
           ),
           const SizedBox(height: BondSpacing.s4),
+          // The heading already said "also from", so each line under it says
+          // only which storyline and which directory — a list whose every
+          // row repeats its own heading reads as three separate sentences
+          // rather than as one list.
           for (final entry in inherited)
             Padding(
               padding: const EdgeInsets.only(bottom: BondSpacing.s4),
               child: Text(
-                'Also from ${entry.storyline}: ${entry.dirName}',
+                '«${entry.storyline}»: ${entry.dirName}',
                 style: BondType.small.copyWith(color: BondColors.inkMuted),
               ),
             ),

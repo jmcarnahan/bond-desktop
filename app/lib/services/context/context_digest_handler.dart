@@ -87,9 +87,13 @@ class ContextDigestHandler extends WorkHandler {
 
     final file = await _context.fileById(fileId);
     if (file == null || file.dirId != dirId) {
-      // Queued, then the file was deleted or the whole directory was
-      // de-registered before the worker reached it. Done, not failed.
-      _skip('gone');
+      // Queued, then the FILE was deleted — or moved to another directory —
+      // before the worker reached it. Done, not failed. Its own reason
+      // rather than the directory's `gone`: the activity panel turns these
+      // words into a sentence for a person, and "the directory is no longer
+      // registered" is a different thing to have happened than one file
+      // going away from a project that is still there.
+      _skip('file_gone');
       return;
     }
 

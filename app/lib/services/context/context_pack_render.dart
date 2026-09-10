@@ -48,13 +48,26 @@ String renderContextGuidance(ContextPack pack, int cap) => _joined(
 String renderContextExcerpts(ContextPack pack, int cap) => _joined(
       [
         for (final excerpt in pack.excerpts)
-          '[${excerpt.dirName}/${excerpt.relPath}, '
-              '${_where(excerpt)}, '
-              'modified ${excerpt.modified.isEmpty ? 'an unknown date' : excerpt.modified}]\n'
-              '${excerpt.text}',
+          '${contextExcerptHeader(excerpt)}\n${excerpt.text}',
       ],
       cap,
     );
+
+/// The bracket line written above one passage, on its own.
+///
+/// Public because the RETRIEVER budgets with it. The excerpt fence is sized
+/// for the passages plus these lines, and the retriever used to charge a
+/// flat eighty characters for each — while a real one, naming a directory
+/// and a path in a project of nested folders, runs well past a hundred. Six
+/// of them understate the fence by enough to overrun the cap the prompt was
+/// sized for, and the renderer then hard-cuts the last passage for no
+/// reason anybody could see. One function, so the number budgeted and the
+/// line written are the same line.
+String contextExcerptHeader(ContextExcerpt excerpt) =>
+    '[${excerpt.dirName}/${excerpt.relPath}, '
+    '${_where(excerpt)}, '
+    'modified '
+    '${excerpt.modified.isEmpty ? 'an unknown date' : excerpt.modified}]';
 
 /// Where in the file this passage sits, whether it is the whole of that
 /// place, and whether the file was read whole.

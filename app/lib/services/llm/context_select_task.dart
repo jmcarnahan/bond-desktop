@@ -7,8 +7,8 @@ import 'prompt_guard.dart';
 /// The rules half of the section-pick system prompt. Const, and never
 /// interpolated into: see [JsonTask.systemPrompt].
 ///
-/// One call per draft that reads a directory, and the only call in this round
-/// that is allowed to ask for MORE text. It names no channel and no tool for
+/// One call per draft that reads a directory, and the only call anywhere in
+/// the app that is allowed to ask for MORE text. It names no channel and no tool for
 /// the digest prompt's reason — the subject is the owner's own files, and how
 /// anyone reaches them about those files is not a fact about them.
 const String _contextSelectRules = '''

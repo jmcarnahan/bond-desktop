@@ -363,34 +363,35 @@ void main() {
       );
     });
 
-    test('the passages get a third of the draft budget', () {
+    test('the passages are cut to the head, from the far end', () {
+      // Four passages of four hundred characters is well over the eight
+      // hundred this call allows, so the cut is the thing under test rather
+      // than a cap the fixture never reaches. Whole blocks come off the END
+      // — the ranking put the nearest first — so the last one must be gone
+      // entirely and the first must still be whole.
       final prompt = task.buildUserMessage(inputWith(
-        directories: pack(excerpts: const [
-          ContextExcerpt(
-            dirName: 'acme',
-            relPath: 'docs/nearest.md',
-            locator: '',
-            modified: '2026-08-30',
-            text: 'NNNNNNNNNN',
-            fileId: 1,
-            dirId: 'd1',
-          ),
-          ContextExcerpt(
-            dirName: 'acme',
-            relPath: 'docs/farthest.md',
-            locator: '',
-            modified: '2026-08-30',
-            text: 'FFFFFFFFFF',
-            fileId: 2,
-            dirId: 'd1',
-          ),
+        directories: pack(excerpts: [
+          for (var i = 1; i <= 4; i++)
+            ContextExcerpt(
+              dirName: 'acme',
+              relPath: 'docs/p$i.md',
+              locator: '',
+              modified: '2026-08-30',
+              text: '$i' * 400,
+              fileId: i,
+              dirId: 'd1',
+            ),
         ]),
       ));
-      final start = prompt.indexOf('source="directory_excerpts"');
-      final end = prompt.indexOf('</untrusted_data>', start);
 
-      expect(prompt, contains('docs/nearest.md'));
-      expect(end - start, lessThan(1000));
+      const open = '<untrusted_data source="directory_excerpts">\n';
+      final start = prompt.indexOf(open) + open.length;
+      final end = prompt.indexOf('\n</untrusted_data>', start);
+      final body = prompt.substring(start, end);
+
+      expect(body.length, lessThanOrEqualTo(800));
+      expect(body, contains('docs/p1.md'));
+      expect(body, isNot(contains('4' * 400)));
     });
 
     test('the system prompt is identical with and without a pack', () {

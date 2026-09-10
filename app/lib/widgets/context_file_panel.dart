@@ -44,8 +44,18 @@ class ContextFilePanelBody extends StatefulWidget {
   final String? located;
 
   /// Non-null only when this panel was opened from a room a reply can be
-  /// drafted in.
+  /// drafted in AND that room actually reads this file's directory.
   final VoidCallback? onConsult;
+
+  /// Why there is no **Consult for the reply** here, when the room could
+  /// otherwise have had one. Drawn in caption type where the button would
+  /// have been.
+  ///
+  /// A sentence rather than a disabled button: the retriever re-checks scope
+  /// and drops a file the room does not link, so a button that pressed and
+  /// changed nothing would be the app lying about its own reach. The sentence
+  /// says what to do about it instead.
+  final String? consultNote;
 
   /// Injected rather than read from the clock, like every other timestamp in
   /// the widget layer, so a test can pin "3h ago".
@@ -60,10 +70,12 @@ class ContextFilePanelBody extends StatefulWidget {
     this.locator,
     this.located,
     this.onConsult,
+    this.consultNote,
     required this.now,
   });
 
   static const Key consultKey = Key('context-file-consult');
+  static const Key consultNoteKey = Key('context-file-consult-note');
   static const Key digestKey = Key('context-file-digest');
   static const Key locatedKey = Key('context-file-located');
   static const Key bodyKey = Key('context-file-body');
@@ -141,6 +153,7 @@ class _ContextFilePanelBodyState extends State<ContextFilePanelBody> {
   Widget build(BuildContext context) {
     final mono = monoForName(widget.file.relPath);
     final consult = widget.onConsult;
+    final note = widget.consultNote;
 
     return ListView(
       key: ContextFilePanelBody.bodyKey,
@@ -163,6 +176,13 @@ class _ContextFilePanelBodyState extends State<ContextFilePanelBody> {
           ),
           Text(
             'Regenerates the suggestion with this file read first.',
+            style: BondType.caption.copyWith(color: BondColors.inkMuted),
+          ),
+        ] else if (note != null) ...[
+          const SizedBox(height: BondSpacing.s8),
+          Text(
+            note,
+            key: ContextFilePanelBody.consultNoteKey,
             style: BondType.caption.copyWith(color: BondColors.inkMuted),
           ),
         ],

@@ -8,8 +8,8 @@ import 'prompt_guard.dart';
 /// The rules half of the brief system prompt. Const, and never interpolated
 /// into: see [JsonTask.systemPrompt].
 ///
-/// One call per directory per change, and the only call in this round that
-/// reads a whole project at once. It names no channel and no tool for the
+/// One call per directory per change, and the only call that reads a whole
+/// project at once. It names no channel and no tool for the
 /// digest prompt's reason — the subject is the owner's own project, and how
 /// anyone reaches them about it is not a fact about the project.
 const String _contextBriefRules = '''

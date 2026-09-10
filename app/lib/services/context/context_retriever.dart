@@ -18,6 +18,9 @@ import '../search_fusion.dart';
 import 'claude_conventions.dart';
 import 'context_chunker.dart'
     show contextSection, expandedSectionLines, parseLineLocator;
+// The header line is written there and CHARGED for here, and the two have to
+// be the same line — see [contextExcerptHeader].
+import 'context_pack_render.dart' show contextExcerptHeader;
 
 /// Every number the directory retrieval depends on, in one place.
 ///
@@ -52,6 +55,26 @@ class ContextTuning {
   /// has synced past in a while, and it costs the draft nothing because the
   /// pass it starts runs after this one has answered.
   static const Duration staleAfter = Duration(minutes: 10);
+
+  /// The whole guidance fence, in characters — the ceiling the prompt keeps
+  /// and the number the retriever fits its blocks to.
+  ///
+  /// One brief's reply guidance is six lines, its root notes eight hundred
+  /// characters, two skills a description and six hundred each, and every
+  /// nested note and matching rule four hundred more. The old fifteen
+  /// hundred was smaller than its own contents on any real project, and the
+  /// renderer's answer to that is to drop whole blocks off the END — so the
+  /// rules and the second skill never reached the model while the pack and
+  /// the provenance went on naming them. The fence is the ceiling; the
+  /// fitting below is what makes what the provenance names and what the
+  /// model read the same list.
+  static const int guidanceBudget = 2500;
+
+  /// How far one broad block may be shrunk to make room. Three hundred
+  /// characters is a paragraph — enough for standing notes to still say
+  /// something — and it is a floor rather than a share so that a project
+  /// with one long note and one short one does not lose the short one.
+  static const int guidanceFloor = 300;
 
   /// How much of a directory's standing notes reaches a prompt when there is
   /// no compiled brief to stand in for them.
@@ -175,7 +198,24 @@ class ContextGuidance {
   final String label;
   final String text;
 
-  const ContextGuidance({required this.label, required this.text});
+  /// Whether this block is standing advice about the project as a WHOLE —
+  /// the brief's reply guidance, the root notes, a nested `CLAUDE.md`.
+  ///
+  /// The fitting reads it, and it is a field rather than something inferred
+  /// from the label because the label is display text: it carries a
+  /// directory name when two projects are in scope, and a rule that decided
+  /// what may be shortened by matching on a prefix would be a formatting
+  /// choice quietly deciding what the model gets to read. A skill and a
+  /// rule are NOT broad: a skill is the instructions for this kind of
+  /// message and a rule is what governs this very file, and half of either
+  /// is worse than none of it.
+  final bool broad;
+
+  const ContextGuidance({
+    required this.label,
+    required this.text,
+    this.broad = false,
+  });
 }
 
 /// Everything the owner's own directories have to say about ONE message.
@@ -367,21 +407,36 @@ class ContextRetriever {
     /// The pack as it stands. Called at every exit, including the failure
     /// one: a directory whose brief was read and whose index then threw still
     /// knows what the project is.
-    ContextPack built() => ContextPack(
-          directories: List.unmodifiable(_namesOf(dirs, contributed)),
-          briefs: List.unmodifiable(briefs),
-          guidance: List.unmodifiable([
-            ...briefGuidance,
-            ...rootGuidance,
-            ...nestedGuidance,
-            ...skillGuidance,
-            ...ruleGuidance,
-          ]),
-          excerpts: List.unmodifiable(excerpts),
-          skills: List.unmodifiable(skills),
-          expanded: List.unmodifiable(expanded),
-          selectError: selectError,
-        );
+    ContextPack built() {
+      // Fitted here rather than left to the renderer, and at every exit
+      // because this is every exit. The renderer's clamp stays as the last
+      // line of defence, but it drops whole blocks off the END with no idea
+      // what they are — which is how the rules and the second skill came to
+      // be named by a provenance line that had already lost them.
+      final guidance = _fitGuidance(
+        [
+          ...briefGuidance,
+          ...rootGuidance,
+          ...nestedGuidance,
+          ...skillGuidance,
+          ...ruleGuidance,
+        ],
+        ContextTuning.guidanceBudget,
+      );
+      return ContextPack(
+        directories: List.unmodifiable(_namesOf(dirs, contributed)),
+        briefs: List.unmodifiable(briefs),
+        guidance: List.unmodifiable(guidance),
+        excerpts: List.unmodifiable(excerpts),
+        // Only the skills whose block survived the fitting. This list is
+        // read by the provenance row, which says what the draft was written
+        // under — and naming a skill whose instructions never reached the
+        // model is the one thing it must not do.
+        skills: List.unmodifiable(_survivingSkills(skills, guidance)),
+        expanded: List.unmodifiable(expanded),
+        selectError: selectError,
+      );
+    }
 
     try {
       final dirIds = await _context.dirIdsInScope(
@@ -401,10 +456,11 @@ class ContextRetriever {
         if (dir == null) continue;
         dirs.add(dir);
         if (_isStale(dir)) {
-          // Queued and not awaited. The pass this starts walks a folder and
-          // may reach for two servers; the reply being drafted right now
-          // reads what the LAST pass indexed, and waiting for a fresher
-          // answer would put a file system between a person and their draft.
+          // Awaited only as a database write; the pass it queues is not.
+          // That pass walks a folder and may reach for two servers, while
+          // the reply being drafted right now reads what the LAST pass
+          // indexed — waiting for a fresher answer would put a file system
+          // between a person and their draft.
           await _store.requeueWork('context_reconcile', 'local', dir.id);
         }
       }
@@ -422,6 +478,7 @@ class ContextRetriever {
             rootGuidance.add(ContextGuidance(
               label: _labelFor('CLAUDE.md', dir, dirs.length),
               text: notes,
+              broad: true,
             ));
           }
           continue;
@@ -445,9 +502,15 @@ class ContextRetriever {
           briefGuidance.add(ContextGuidance(
             label: _labelFor('guidance', dir, dirs.length),
             text: lines.join('\n'),
+            broad: true,
           ));
         }
       }
+
+      // The directories in scope by id, for every label below. A skill, a
+      // nested note and a rule are all reached through a FILE, and the file
+      // knows only which directory it belongs to.
+      final byId = {for (final dir in dirs) dir.id: dir};
 
       // The cheap read before the expensive one, and the order is the point.
       // A directory registered a minute ago, or one holding nothing but
@@ -520,6 +583,7 @@ class ContextRetriever {
             source: source,
             replyToId: replyToId,
             dirs: dirs,
+            byId: byId,
             dirIds: dirIds,
             pointers: pointers,
             ordered: ordered,
@@ -533,7 +597,8 @@ class ContextRetriever {
         } catch (error) {
           selectError = error.toString();
         }
-        await _addNestedNotes(excerpts, files, nestedGuidance, contributed);
+        await _addNestedNotes(
+            excerpts, files, byId, nestedGuidance, contributed);
         await _addRules(dirs, excerpts, ruleGuidance, contributed);
       }
 
@@ -596,33 +661,37 @@ class ContextRetriever {
           files[hit.fileId] = read;
           file = read;
         }
-        final text = _withoutHeader(hit.text);
-        // The 80 is the bracket line the renderer writes above each passage;
-        // budgeting the text alone would let the headers overrun the cap the
-        // prompt was sized for. `continue` and not `break`, on the attachment
-        // retriever's rule: one long passage in the middle of the ranking
-        // must not hide the three short ones behind it.
-        final cost = text.length + _headerCost;
-        if (spent + cost > budgetChars) continue;
-        spent += cost;
-        contributed.add(file.dirId);
-        excerpts.add(ContextExcerpt(
+        final excerpt = ContextExcerpt(
           dirName: hit.dirName,
           relPath: file.relPath,
           locator: hit.locator,
           modified: _day(file.mtime),
-          text: text,
+          text: _withoutHeader(hit.text),
           fileId: file.id,
           dirId: file.dirId,
           truncated: file.status == 'truncated',
-        ));
+        );
+        // The bracket line the renderer writes above each passage, measured
+        // rather than guessed at — a real one naming a directory and a
+        // nested path runs past a hundred characters, and budgeting the
+        // text alone would let six of them overrun the cap the prompt was
+        // sized for. `continue` and not `break`, on the attachment
+        // retriever's rule: one long passage in the middle of the ranking
+        // must not hide the three short ones behind it.
+        final cost =
+            excerpt.text.length + contextExcerptHeader(excerpt).length + 1;
+        if (spent + cost > budgetChars) continue;
+        spent += cost;
+        contributed.add(file.dirId);
+        excerpts.add(excerpt);
       }
 
       // Skills are matched against the question's vector and there is no
       // other way to pick one, so a pass that got here on a named file alone
       // adds none — the same degradation the early return used to make.
       if (query != null) {
-        await _addSkills(dirIds, query, skills, skillGuidance, contributed);
+        await _addSkills(
+            dirIds, byId, query, skills, skillGuidance, contributed);
       }
       await lookCloser(ranking.ordered);
       return built();
@@ -633,9 +702,6 @@ class ContextRetriever {
       return built();
     }
   }
-
-  /// The bracket line the renderer writes above each passage, in characters.
-  static const int _headerCost = 80;
 
   /// The display names of the directories in [contributed], in scope order and
   /// said once each. Two registered folders can carry the same display name —
@@ -666,6 +732,110 @@ class ContextRetriever {
   /// model two identically-labelled blocks of contradictory instructions.
   static String _labelFor(String label, ContextDir dir, int dirsInScope) =>
       dirsInScope > 1 ? '$label «${dir.displayName}»' : label;
+
+  /// The same, for a block reached through a FILE — a skill, a nested note,
+  /// a rule.
+  ///
+  /// Every one of those is as ambiguous as the root notes are: two projects
+  /// in scope can each hold a `docs/CLAUDE.md`, a `vendor-replies` skill and
+  /// a `pricing.md` rule, and six identically-labelled blocks of
+  /// contradictory instructions is a draft following whichever it read last
+  /// with nothing to say which project it was obeying.
+  static String _labelForFile(
+    String label,
+    String dirId,
+    Map<String, ContextDir> dirsInScope,
+  ) {
+    final dir = dirsInScope[dirId];
+    return dir == null ? label : _labelFor(label, dir, dirsInScope.length);
+  }
+
+  /// The guidance blocks trimmed to [budget], as the renderer will measure
+  /// them.
+  ///
+  /// Two moves, in this order. Broad blocks — standing advice about a
+  /// project as a whole — are SHORTENED, longest first, none below
+  /// [ContextTuning.guidanceFloor]: half of a project's standing notes is
+  /// still the project's standing notes, and it buys room for the block that
+  /// speaks to this very message. Only when no broad block has room left do
+  /// whole blocks come off the end, which is the renderer's own rule and is
+  /// a real loss.
+  ///
+  /// The measurement has to be the renderer's, or the fitting is fitting to
+  /// a different number than the clamp: `[label]` and a newline above each
+  /// block, and `\n---\n` between them.
+  static List<ContextGuidance> _fitGuidance(
+    List<ContextGuidance> blocks,
+    int budget,
+  ) {
+    final fitted = [...blocks];
+    var over = _renderedLength(fitted) - budget;
+    while (over > 0) {
+      var pick = -1;
+      var longest = 0;
+      for (var i = 0; i < fitted.length; i++) {
+        if (!fitted[i].broad) continue;
+        final length = fitted[i].text.length;
+        if (length <= ContextTuning.guidanceFloor) continue;
+        if (length > longest) {
+          longest = length;
+          pick = i;
+        }
+      }
+      if (pick < 0) break;
+      final room = longest - ContextTuning.guidanceFloor;
+      final cut = room < over ? room : over;
+      fitted[pick] = ContextGuidance(
+        label: fitted[pick].label,
+        text: fitted[pick].text.substring(0, longest - cut),
+        broad: true,
+      );
+      over -= cut;
+    }
+    // Nothing left to shorten. Blocks come off the END, where the rules and
+    // the second skill sit — the same order the renderer would have used,
+    // said here so that [ContextPack.skills] can be told about it.
+    while (over > 0 && fitted.length > 1) {
+      final dropped = fitted.removeLast();
+      over -= _blockLength(dropped) + _separator.length;
+    }
+    return fitted;
+  }
+
+  /// What [renderContextGuidance] will make of these blocks, in characters.
+  static int _renderedLength(List<ContextGuidance> blocks) {
+    if (blocks.isEmpty) return 0;
+    var total = (blocks.length - 1) * _separator.length;
+    for (final block in blocks) {
+      total += _blockLength(block);
+    }
+    return total;
+  }
+
+  /// `[label]` plus a newline plus the text — the block as it renders.
+  static int _blockLength(ContextGuidance block) =>
+      block.label.length + 3 + block.text.length;
+
+  /// What the renderer puts between two blocks.
+  static const String _separator = '\n---\n';
+
+  /// The skill names whose block is still in [guidance] after the fitting.
+  ///
+  /// Matched on the label rather than held alongside, because the label is
+  /// the only thing a block and a name have in common — and matched by
+  /// PREFIX, since a pack with two directories in scope labels the block
+  /// `SKILL vendor-replies «acme»`.
+  static List<String> _survivingSkills(
+    List<String> skills,
+    List<ContextGuidance> guidance,
+  ) =>
+      [
+        for (final name in skills)
+          if (guidance.any((block) =>
+              block.label == 'SKILL $name' ||
+              block.label.startsWith('SKILL $name «')))
+            name,
+      ];
 
   /// The root standing notes of a directory with no compiled brief, clamped.
   Future<String> _rootNotes(ContextDir dir) async {
@@ -827,6 +997,7 @@ class ContextRetriever {
   /// table over a dozen rows would be a table to keep in step for nothing.
   Future<void> _addSkills(
     List<String> dirIds,
+    Map<String, ContextDir> byId,
     Uint8List query,
     List<String> skills,
     List<ContextGuidance> guidance,
@@ -853,7 +1024,7 @@ class ContextRetriever {
     // second-nearest skill its place for a block nothing renders.
     for (final match in matches) {
       if (skills.length >= ContextTuning.maxSkills) break;
-      final block = await _skillBlock(match.file);
+      final block = await _skillBlock(match.file, byId);
       if (block == null) continue;
       contributed.add(match.file.dirId);
       skills.add(block.name);
@@ -876,6 +1047,7 @@ class ContextRetriever {
   /// for a block nothing renders.
   Future<({String name, ContextGuidance guidance})?> _skillBlock(
     ContextFile file,
+    Map<String, ContextDir> byId,
   ) async {
     final text = await _context.fileText(file.id) ?? '';
     // The FOLDER name, which is what a skill is invoked as — `skillOf`'s own
@@ -891,7 +1063,7 @@ class ContextRetriever {
     return (
       name: name,
       guidance: ContextGuidance(
-        label: 'SKILL $name',
+        label: _labelForFile('SKILL $name', file.dirId, byId),
         // Description first: it is the author's own sentence saying when this
         // applies, and a model reading the body without it is reading steps
         // with no statement of what they are for.
@@ -926,6 +1098,7 @@ class ContextRetriever {
     required String source,
     required String replyToId,
     required List<ContextDir> dirs,
+    required Map<String, ContextDir> byId,
     required List<String> dirIds,
     required List<({String topic, String path})> pointers,
     required List<ContextChunkHit> ordered,
@@ -1017,6 +1190,11 @@ class ContextRetriever {
 
     final sections = <ContextExcerpt>[];
     final labels = <String>[];
+    // Whether each section arrived cut by the ceiling, alongside it. The
+    // drop rule below needs it: a section that fits is everything it claims
+    // to contain, and a section that was cut is only as much of it as
+    // survived the cut.
+    final clamped = <bool>[];
     final contributedNow = <String>{};
     for (final read in answer.read) {
       final path = read.path.trim();
@@ -1060,6 +1238,7 @@ class ContextRetriever {
         if (!_contains(read.locator, sections[taken].locator)) continue;
         sections.removeAt(taken);
         labels.removeAt(taken);
+        clamped.removeAt(taken);
       }
       final text = await _context.fileText(file.id);
       if (text == null || text.isEmpty) continue;
@@ -1067,21 +1246,29 @@ class ContextRetriever {
       // A locator this file does not have. Nothing is expanded and nothing is
       // reported: the ranked passages are still there, which is what the pack
       // would have been anyway.
-      if (section == null || section.trim().isEmpty) continue;
+      if (section == null || section.text.trim().isEmpty) continue;
+      final kept = _clamp(section.text, ContextTuning.expandedSectionCap);
+      // The reader handed back the WHOLE file — a `part 2` on a prose file,
+      // a `digest`, an empty locator. The locator goes with it: the render
+      // says `whole file, read in full`, the handback names the bare path,
+      // and the drop rule below treats the file as fully in hand rather
+      // than reasoning about a piece that is not what arrived.
+      final locator = section.whole ? '' : read.locator;
       sections.add(ContextExcerpt(
         dirName: from.displayName,
         relPath: file.relPath,
-        locator: read.locator,
+        locator: locator,
         modified: _day(file.mtime),
-        text: _clamp(section, ContextTuning.expandedSectionCap),
+        text: kept,
         fileId: file.id,
         dirId: file.dirId,
         truncated: file.status == 'truncated',
         expanded: true,
       ));
-      labels.add(read.locator.isEmpty
+      clamped.add(kept.length < section.text.length);
+      labels.add(locator.isEmpty
           ? file.relPath
-          : '${file.relPath} § ${read.locator}');
+          : '${file.relPath} § $locator');
       // The expanded file joins the map the nested notes are looked up
       // through. A section pulled in from a pointer is a file the ranking
       // never surfaced, so nothing else would have put it there — and a
@@ -1098,10 +1285,7 @@ class ContextRetriever {
     // two sources saying the same thing.
     final remaining = [
       for (final excerpt in excerpts)
-        if (!sections.any((section) =>
-            section.fileId == excerpt.fileId &&
-            _contains(section.locator, excerpt.locator)))
-          excerpt,
+        if (!_alreadyIn(sections, clamped, excerpt)) excerpt,
     ];
 
     // The sections go FIRST: they are what the model asked to read, and the
@@ -1123,7 +1307,7 @@ class ContextRetriever {
         break;
       }
       if (file == null) continue;
-      final block = await _skillBlock(file);
+      final block = await _skillBlock(file, byId);
       if (block == null) continue;
       picked.add(block.name);
       pickedGuidance.add(block.guidance);
@@ -1151,6 +1335,48 @@ class ContextRetriever {
     expanded.addAll(labels);
     contributed.addAll(contributedNow);
   }
+
+  /// Whether one of the expanded [sections] already holds this ranked
+  /// [excerpt] — the question the drop rule asks, and the reason it is not
+  /// simply [_contains].
+  ///
+  /// The locator rule says which passages a section CLAIMS. The ceiling
+  /// decides how many of them actually arrived. A `## Pricing` longer than
+  /// [ContextTuning.expandedSectionCap] reaches the prompt as its first
+  /// three thousand characters, and dropping `Pricing · part 4` because the
+  /// whole section would have held it takes the paragraph carrying the
+  /// figure out of the fence and puts nothing in its place — the one failure
+  /// this whole step exists to prevent. So a section that was cut has to
+  /// show it kept the passage before the passage goes.
+  ///
+  /// Containment is whitespace-tolerant. The prose packer trims each
+  /// paragraph and joins them with a blank line, so a passage's body is
+  /// rarely a byte-for-byte substring of the file's own text even when every
+  /// word of it survived — and a comparison that missed for that reason
+  /// would quote the same paragraph twice.
+  static bool _alreadyIn(
+    List<ContextExcerpt> sections,
+    List<bool> clamped,
+    ContextExcerpt excerpt,
+  ) {
+    for (var i = 0; i < sections.length; i++) {
+      final section = sections[i];
+      if (section.fileId != excerpt.fileId) continue;
+      if (!_contains(section.locator, excerpt.locator)) continue;
+      if (!clamped[i]) return true;
+      if (_squashed(section.text).contains(_squashed(excerpt.text))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Every run of whitespace as one space, trimmed. Only ever used to
+  /// compare two pieces of the same file with each other.
+  static String _squashed(String text) =>
+      text.replaceAll(_whitespaceRun, ' ').trim();
+
+  static final RegExp _whitespaceRun = RegExp(r'\s+');
 
   /// Whether the section located by [section] already holds the passage
   /// located by [passage], in the same file.
@@ -1191,6 +1417,7 @@ class ContextRetriever {
   Future<void> _addNestedNotes(
     List<ContextExcerpt> excerpts,
     Map<int, ContextFile> files,
+    Map<String, ContextDir> byId,
     List<ContextGuidance> guidance,
     Set<String> contributed,
   ) async {
@@ -1213,7 +1440,11 @@ class ContextRetriever {
         );
         if (body.isEmpty) continue;
         contributed.add(file.dirId);
-        guidance.add(ContextGuidance(label: chainPath, text: body));
+        guidance.add(ContextGuidance(
+          label: _labelForFile(chainPath, file.dirId, byId),
+          text: body,
+          broad: true,
+        ));
       }
     }
   }
@@ -1251,7 +1482,11 @@ class ContextRetriever {
         if (body.isEmpty) continue;
         contributed.add(dir.id);
         guidance.add(ContextGuidance(
-          label: 'rule ${p.posix.basename(file.relPath)}',
+          label: _labelFor(
+            'rule ${p.posix.basename(file.relPath)}',
+            dir,
+            dirs.length,
+          ),
           text: body,
         ));
       }

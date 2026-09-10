@@ -50,9 +50,10 @@ class ContextDirectoriesSection extends StatefulWidget {
   /// Whether each changed file in this directory earns a digest.
   final void Function(String id, bool on) onDigestsChanged;
 
-  /// The stored `honor_gitignore` value, NOT the switch position. The control
-  /// is labelled **Read ignored files**, which is the opposite question, and
-  /// this widget does that inversion so nothing above it has to remember to.
+  /// Writes one directory's stored `honor_gitignore` value. What arrives is
+  /// that column and NOT the switch position: the control is labelled **Read
+  /// ignored files**, which is the opposite question, and this widget flips
+  /// it back on the way out so nothing above has to remember to.
   final void Function(String id, bool on) onHonorGitignoreChanged;
 
   /// The clock the relative times are measured against. Passed rather than

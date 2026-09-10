@@ -191,6 +191,26 @@ void main() {
       );
     });
 
+    test('the header helper is the very line the renderer writes', () {
+      for (final excerpt in [
+        excerptOf(),
+        excerptOf(locator: '', modified: ''),
+        excerptOf(locator: 'digest'),
+        excerptOf(truncated: true, expanded: true),
+        excerptOf(
+          dirName: 'southbay analysis',
+          relPath: 'analysis/2031/renewals-by-segment.md',
+        ),
+      ]) {
+        final rendered = renderContextExcerpts(packOf(excerpts: [excerpt]), 5000);
+        // The retriever budgets with the helper and the renderer writes the
+        // line; a second spelling of it would make the fence's arithmetic
+        // wrong by however far the two drifted apart.
+        expect(rendered.split('\n').first, contextExcerptHeader(excerpt),
+            reason: excerpt.relPath);
+      }
+    });
+
     test('a file the extractor cut short says so after the locator', () {
       expect(
         renderContextExcerpts(

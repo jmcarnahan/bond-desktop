@@ -406,7 +406,7 @@ is — `digest (a model's summary of this file)`.
 | Fence | Draft | Decision | What it holds |
 |---|---|---|---|
 | `directory_brief` | 700 | 300 | `«name»: about`, `Facts:`, `Terms:` |
-| `directory_guidance` | 1,500 | — | `[guidance]`, `[CLAUDE.md]`, `[docs/CLAUDE.md]`, `[SKILL vendor-replies]`, `[rule pricing.md]` |
+| `directory_guidance` | 2,500 (`ContextTuning.guidanceBudget`, and the retriever has already FITTED the blocks to it — see `13-context-directories.md`) | — | `[guidance]`, `[CLAUDE.md]`, `[docs/CLAUDE.md]`, `[SKILL vendor-replies]`, `[rule pricing.md]` |
 | `directory_excerpts` | 8,700 (2,500 ranked + two 3,000-character sections and their bracket lines) | 800 | `[acme/docs/pricing.md, Pricing > Q4 rates, modified 2026-08-30]` then the passage |
 
 The decision gets no guidance fence at all: it answers one yes-or-no question,
@@ -479,8 +479,11 @@ Regenerate after a Use in reply or a Consult therefore drops the last one's
 name, which is the point: asking again without naming a file has to mean the
 file is no longer named. That rule covers both lists.
 
-**Provenance.** The `drafts` table stores no inventory of what was read. Two
-things stand in for one: the prompt asks the model to cite the file when it
-uses one, and the activity row for the draft carries `documents` — the
-distinct file names the excerpts came from — beside `chars`. A retrieval that
-threw is recorded as `excerpts_error` and costs nothing else.
+**Provenance.** The row itself records what was read: `drafts.context_json`
+holds the documents, the directories, the files with their locators and the
+skills (see **Directories in the prompt** above), and the composer's caption
+and its chips are built from it. Two things stand beside it rather than in
+place of it: the prompt asks the model to cite the file when it uses one, and
+the activity row for the draft carries `documents` — the distinct file names
+the excerpts came from — beside `chars`. A retrieval that threw is recorded
+as `excerpts_error` and costs nothing else.

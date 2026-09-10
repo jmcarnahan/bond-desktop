@@ -538,14 +538,33 @@ void main() {
         expect(built, contains('<untrusted_data source="directory_brief">'));
         expect(built, contains('<untrusted_data source="directory_excerpts">'));
       }
-      for (final label in const [
-        'directory_brief',
-        'directory_guidance',
-        'directory_excerpts',
+      // Every label the two prompts actually WROTE, read back off the built
+      // messages. A list of literals declared here and checked against
+      // itself would be three constants agreeing with themselves, and would
+      // go on passing after a fourth fence arrived named `chat_directory`.
+      final labels = <String>{};
+      for (final built in [
+        draft.buildUserMessage(
+            draftInput(emailMessage, directories: directoryPack)),
+        draft.buildUserMessage(
+            draftInput(chatMessage, directories: directoryPack)),
+        replyDecision.buildUserMessage(
+            replyDecisionInput(emailMessage, directories: directoryPack)),
+        replyDecision.buildUserMessage(
+            replyDecisionInput(chatMessage, directories: directoryPack)),
       ]) {
-        expect(label, isNot(contains('email')));
-        expect(label, isNot(contains('mail')));
-        expect(label, isNot(contains('chat')));
+        for (final match
+            in RegExp(r'<untrusted_data source="([^"]*)">').allMatches(built)) {
+          labels.add(match.group(1)!);
+        }
+      }
+
+      expect(labels, contains('directory_brief'));
+      expect(labels, contains('directory_excerpts'));
+      for (final label in labels) {
+        expect(label, isNot(contains('email')), reason: label);
+        expect(label, isNot(contains('mail')), reason: label);
+        expect(label, isNot(contains('chat')), reason: label);
       }
     });
 

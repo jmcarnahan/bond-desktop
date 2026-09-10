@@ -304,20 +304,24 @@ Net thirty.
       // the question the caller is asking is "what does this section say",
       // and a section stops at its next SIBLING.
       expect(section, isNotNull);
-      expect(section, contains('The desk publishes one sheet.'));
-      expect(section, contains('### Q4 rates'));
-      expect(section, contains('41 credits per pallet'));
+      expect(section!.text, contains('The desk publishes one sheet.'));
+      expect(section.text, contains('### Q4 rates'));
+      expect(section.text, contains('41 credits per pallet'));
       // And stops there. `## Terms` is the next section, not part of this one.
-      expect(section, isNot(contains('Net thirty')));
+      expect(section.text, isNot(contains('Net thirty')));
+      // A piece of the file, not the file: the caller keeps the locator it
+      // asked with.
+      expect(section.whole, isFalse);
     });
 
     test('a nested section is just itself', () {
       final section =
           contextSection('docs/pricing.md', manual, 'Pricing > Q4 rates');
 
-      expect(section, contains('41 credits per pallet'));
-      expect(section, isNot(contains('The desk publishes one sheet.')));
-      expect(section, isNot(contains('Net thirty')));
+      expect(section!.text, contains('41 credits per pallet'));
+      expect(section.text, isNot(contains('The desk publishes one sheet.')));
+      expect(section.text, isNot(contains('Net thirty')));
+      expect(section.whole, isFalse);
     });
 
     test('a part suffix names the whole section it is part of', () {
@@ -343,12 +347,17 @@ Then run it.
 
       expect(contextSection('README.md', fenced, 'Install'), isNull);
       final setup = contextSection('README.md', fenced, 'Setup');
-      expect(setup, contains('brew install ripgrep'));
-      expect(setup, contains('Then run it.'));
+      expect(setup!.text, contains('brew install ripgrep'));
+      expect(setup.text, contains('Then run it.'));
     });
 
-    test('an empty locator is the whole file', () {
-      expect(contextSection('docs/pricing.md', manual, ''), manual);
+    test('an empty locator is the whole file, and says so', () {
+      final section = contextSection('docs/pricing.md', manual, '');
+
+      expect(section!.text, manual);
+      // The caller relabels on this: `whole file, read in full` is what the
+      // render says, and every other passage of the file comes out.
+      expect(section.whole, isTrue);
     });
 
     test('a breadcrumb this file does not have answers null', () {
@@ -365,8 +374,10 @@ Then run it.
       // A function rarely ends where the sixty-line window it was cut at
       // did, so the reader gets the next one too.
       expect(section, isNotNull);
-      expect(section!.split('\n').first, 'line 61');
-      expect(section.split('\n').last, 'line 180');
+      expect(section!.text.split('\n').first, 'line 61');
+      expect(section.text.split('\n').last, 'line 180');
+      // A window is a piece of the file however much of it it covers.
+      expect(section.whole, isFalse);
       // The hyphen a model types back is the same range.
       expect(contextSection('lib/rate.dart', code, 'lines 61-120'), section);
     });
@@ -376,7 +387,8 @@ Then run it.
 
       final section = contextSection('lib/rate.dart', code, 'lines 61–80');
 
-      expect(section!.split('\n').last, 'line 80');
+      expect(section!.text.split('\n').last, 'line 80');
+      expect(section.whole, isFalse);
       // Past the file entirely is nothing, not an empty string.
       expect(contextSection('lib/rate.dart', code, 'lines 900–960'), isNull);
       expect(contextSection('lib/rate.dart', code, 'lines wat'), isNull);
@@ -386,8 +398,13 @@ Then run it.
       const notes = 'Devi owns the sheet.\n\nThe rung is settled.';
 
       for (final locator in ['part 2', 'digest', '']) {
-        expect(contextSection('notes.txt', notes, locator), notes,
-            reason: locator);
+        final section = contextSection('notes.txt', notes, locator);
+        expect(section!.text, notes, reason: locator);
+        // And the caller is TOLD it is the whole file. A `part 2` that
+        // silently expanded to everything would keep its locator, claim to
+        // be one passage of a prose file, and leave parts 1 and 3 quoted
+        // beside the very text that already holds them.
+        expect(section.whole, isTrue, reason: locator);
       }
     });
 

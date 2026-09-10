@@ -197,11 +197,16 @@ final identityGuardProvider = Provider<IdentityGuard>(
                   debugPrint('attachment cache not cleared on wipe: $e'),
             ),
       );
-      // The LINKS and nothing else. They name conversation keys and storyline
-      // ids the wipe has just deleted, so they would point a new person's
-      // rooms at the previous person's directories. The directories
-      // themselves stay registered: they are the user's own folders on their
-      // own disk, and have nothing to do with whose mailbox was signed in.
+      // The LINKS and nothing else, and this one is rows rather than disk.
+      // A link names a conversation key or a storyline id that the wipe has
+      // just deleted, so leaving it would let a new identity's room — which
+      // can be handed the same conversation key by the same connector —
+      // inherit the previous account's directories and quote one person's
+      // project into another person's reply. The directories themselves stay
+      // registered: they are the user's own folders on their own disk, and
+      // have nothing to do with whose mailbox was signed in. Started and not
+      // awaited for the reason above it, and safe for the same one: the rows
+      // that could reach a link through a conversation are already gone.
       unawaited(
         ref.read(contextStoreProvider).unlinkAll().catchError(
               (Object e) => debugPrint('context links not cleared on wipe: $e'),

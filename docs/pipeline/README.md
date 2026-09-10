@@ -90,6 +90,7 @@ live in [10-model-routing.md](10-model-routing.md).
 | Attachment digest | fast / bulk | `:8082` |
 | Directory file digest | fast / bulk | `:8082` |
 | Directory brief | fast / bulk | `:8082` |
+| Directory section pick | fast / bulk | `:8082` |
 | Storyline membership confirm | fast / bulk | `:8082` |
 | Storyline naming | prose / 27B | `:8080` Qwen3.8-27B (`make model`) |
 | Storyline refresh | prose / 27B | `:8080` |

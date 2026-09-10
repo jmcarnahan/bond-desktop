@@ -4584,6 +4584,13 @@ FROM storylines s''';
   /// after it has to drop the last one's — a payload that survived would go on
   /// pinning a file the user has stopped asking about, on every draft of that
   /// message for the rest of the mailbox's life.
+  ///
+  /// A revived row starts its attempts afresh, exactly as the read-ack upsert
+  /// and [reviveUnjudgedNeedsYou] do. `attempts` is otherwise monotonic for
+  /// the life of the row, and a handler that reads it to decide whether a
+  /// failure is fatal would treat the first try of new work as the last try
+  /// of old work — a file re-queued after two bad digests would be closed as
+  /// hopeless on the attempt that was going to succeed.
   Future<void> requeueWork(
     String kind,
     String source,
@@ -4598,7 +4605,7 @@ FROM storylines s''';
       "VALUES (?, ?, ?, 'pending', 0, NULL, ?, ?, ?) "
       'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
       "status = 'pending', updated_at = excluded.updated_at, "
-      'payload_json = excluded.payload_json '
+      'payload_json = excluded.payload_json, attempts = 0, error = NULL '
       "WHERE work_items.status IN ('done', 'error')",
       variables: _args([kind, source, entityId, payloadJson, now, now]),
     );

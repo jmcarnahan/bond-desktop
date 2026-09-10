@@ -434,6 +434,40 @@ void main() {
       expect(removes, ['d1']);
     });
 
+    testWidgets('a row that goes and comes back is not still armed',
+        (tester) async {
+      // The safety net in `didUpdateWidget`. A re-read that drops the armed
+      // row — or a Remove that lands — must not leave the section holding a
+      // confirmation for an id nothing renders, because the next Remove on
+      // that id would then arrive already confirmed and delete on one tap.
+      await pumpSection(tester, rows: [_row(_dir())]);
+      await tester.tap(find.byKey(ContextDirectoriesSection.removeKeyFor('d1')));
+      await tester.pump();
+      expect(
+        find.byKey(ContextDirectoriesSection.confirmRemoveKeyFor('d1')),
+        findsOneWidget,
+      );
+
+      // Gone: the library came back without it.
+      await pumpSection(
+        tester,
+        rows: [_row(_dir(id: 'd2', displayName: 'notes'))],
+      );
+      // And back: the same directory registered again, or a read that had
+      // simply missed it.
+      await pumpSection(tester, rows: [_row(_dir())]);
+
+      expect(
+        find.byKey(ContextDirectoriesSection.removeKeyFor('d1')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(ContextDirectoriesSection.confirmRemoveKeyFor('d1')),
+        findsNothing,
+      );
+      expect(removes, isEmpty);
+    });
+
     testWidgets('arming one row leaves the other alone', (tester) async {
       await pumpSection(
         tester,

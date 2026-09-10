@@ -163,6 +163,16 @@ class ContextReconcileHandler extends WorkHandler {
     final stored = {
       for (final file in await _context.filesFor(dirId)) file.relPath: file,
     };
+    // The same rows keyed the other way, for the move check below. Built
+    // once here rather than asked of the store per new file: `sha256` has no
+    // index, and on a FIRST walk every file is new and every one of those
+    // queries is a table scan whose answer is empty — which is what made the
+    // first pass over a project quadratic in its own size.
+    final bySha = <String, List<ContextFile>>{};
+    for (final file in stored.values) {
+      if (file.sha256.isEmpty) continue;
+      (bySha[file.sha256] ??= <ContextFile>[]).add(file);
+    }
     final walkedPaths = {for (final file in walk.files) file.relPath};
     final claudeMdPaths = {
       for (final file in walk.files)
@@ -171,7 +181,6 @@ class ContextReconcileHandler extends WorkHandler {
 
     final seenAt = MessageStore.isoStamp(now);
     final touched = <int>[];
-    final changedFileIds = <int>[];
     final renamedFrom = <String>{};
     final hashes = <String, String>{};
     var changed = 0;
@@ -238,7 +247,7 @@ class ContextReconcileHandler extends WorkHandler {
       // a reorganised project costing nothing and costing the entire index.
       if (existing == null) {
         final moved = [
-          for (final candidate in await _context.filesBySha(dirId, sha))
+          for (final candidate in bySha[sha] ?? const <ContextFile>[])
             if (!walkedPaths.contains(candidate.relPath) &&
                 !renamedFrom.contains(candidate.relPath))
               candidate,
@@ -366,16 +375,22 @@ class ContextReconcileHandler extends WorkHandler {
       }
       // The digest describes text nobody has any more.
       await _context.resetFileDigest(id);
-      changedFileIds.add(id);
     }
 
     await _context.touchFilesSeen(dirId, touched, seenAt);
 
-    // Everything the walk did not account for is gone from the folder.
+    // Everything the walk did not account for is gone from the folder —
+    // EXCEPT what sits under a directory the walk could not open. An
+    // unmounted share or a permissions change three folders down makes its
+    // files invisible to the listing without making them absent from the
+    // disk, and reading that as a deletion would drop their rows, their
+    // words, their passages, their vectors and their digests over a folder
+    // that is fine again a minute later.
     final kept = touched.toSet();
     final removedIds = [
       for (final file in stored.values)
-        if (!kept.contains(file.id)) file.id,
+        if (!kept.contains(file.id) && !_underAny(file.relPath, walk.unlisted))
+          file.id,
     ];
     await _context.deleteFiles(removedIds);
 
@@ -455,6 +470,7 @@ class ContextReconcileHandler extends WorkHandler {
           if (digestsQueued > 0) 'digests_queued': digestsQueued,
           if (briefQueued) 'brief_queued': true,
           if (errors > 0) 'errors': errors,
+          if (walk.unlisted.isNotEmpty) 'unlisted': walk.unlisted.length,
           if (walk.truncated) 'truncated': true,
         };
 
@@ -468,6 +484,13 @@ class ContextReconcileHandler extends WorkHandler {
     // server, and a second copy of this block is a second place to forget
     // the stamp.
     Future<Never> park() async {
+      if (await _abandonIfGone(dirId)) {
+        // De-registered under this pass AND the embedding server is down.
+        // Everything the pass wrote is deleted above; the throw still parks
+        // the KIND, because that is a statement about the server rather
+        // than about this directory.
+        throw const LlmUnavailableException('embedding server unavailable');
+      }
       await _context.setDirectoryWalked(
         dirId,
         walkedAt: walkedAt,
@@ -528,6 +551,8 @@ class ContextReconcileHandler extends WorkHandler {
     await _context.indexPendingChunks();
     await _context.ensureKeywordIndex();
 
+    if (await _abandonIfGone(dirId)) return;
+
     await _context.setDirectoryWalked(
       dirId,
       walkedAt: walkedAt,
@@ -537,6 +562,26 @@ class ContextReconcileHandler extends WorkHandler {
     );
 
     _log.note(notes());
+  }
+
+  /// Whether the directory this pass is reading was de-registered under it —
+  /// and, when it was, undoing everything the pass wrote.
+  ///
+  /// [ContextStore.removeDirectory] deliberately leaves a `processing` work
+  /// row where it is, and that row is this very pass: taking a claim out
+  /// from under a running handler is the one way to make the drain's
+  /// bookkeeping wrong. The cost is that everything after the remove —
+  /// `upsertFile`, `setFileText`, `replaceChunks` — writes against a
+  /// `dir_id` with no directory row behind it and no foreign key to refuse
+  /// it, and the `setDirectoryWalked` at the end then updates nothing. Those
+  /// rows are unreachable: nothing lists them, no link scopes them, and they
+  /// would sit in the database until somebody registered the same folder
+  /// again. Removing a second time is what clears them.
+  Future<bool> _abandonIfGone(String dirId) async {
+    if (await _context.directory(dirId) != null) return false;
+    await _context.removeDirectory(dirId);
+    _log.note({'reason': 'gone'});
+    return true;
   }
 
   /// What a Claude Code project already says about one of its own files.
@@ -637,6 +682,21 @@ class ContextReconcileHandler extends WorkHandler {
       for (final file in files) '${file.relPath}|${hashes[file.relPath] ?? ''}',
     ]..sort();
     return sha256.convert(utf8.encode(lines.join('\n'))).toString();
+  }
+
+  /// Whether [relPath] lies inside any of [directories], which are rel paths
+  /// of their own — `sub` holds `sub/a.md` and nothing else.
+  ///
+  /// The empty string is the ROOT, and it is deliberately not treated as a
+  /// prefix of everything: a root that could not be listed produced no files
+  /// at all, and the pass that meets one has nothing to sweep in the first
+  /// place.
+  static bool _underAny(String relPath, List<String> directories) {
+    for (final directory in directories) {
+      if (directory.isEmpty) continue;
+      if (relPath.startsWith('$directory/')) return true;
+    }
+    return false;
   }
 
   static bool _sameChain(List<String> a, List<String> b) {

@@ -207,6 +207,22 @@ void main() {
         matching: find.byType(ContextPanelBody),
       );
 
+  Finder spinner() => find.descendant(
+        of: find.byType(SidePanelHost),
+        matching: find.byType(CircularProgressIndicator),
+      );
+
+  /// Records one activity row through the real recorder, which is what the
+  /// sixty-second sync poll and every work item of a drain do. Every provider
+  /// behind these two panels watches that stream, so this is the event that
+  /// puts them all back into `loading` with a value still in hand.
+  Future<void> recordActivity() =>
+      container.read(activityLogProvider).record(
+            'triage',
+            source: 'email',
+            entityId: 'c1-m1',
+          );
+
   testWidgets('the thread header opens it, and a switch writes the link',
       (tester) async {
     final id = await context.registerDirectory(
@@ -363,13 +379,48 @@ void main() {
       await tester.pump();
     }
 
-    expect(find.text('Also from Website redesign: ridge'), findsOneWidget);
+    expect(find.text('«Website redesign»: ridge'), findsOneWidget);
     // The thread's own switch is still off: it is the storyline's link, and
     // this room has not made one of its own.
     final toggle = tester.widget<Switch>(
       find.byKey(ContextPanelBody.toggleKeyFor(id)),
     );
     expect(toggle.value, isFalse);
+    await settleQueues(tester);
+  });
+
+  testWidgets('an activity row does not blink the switches away',
+      (tester) async {
+    // Every provider behind this panel watches the activity stream, so a
+    // sixty-second poll or one work item of a drain puts them back into
+    // `loading`. Answering that with a spinner would replace a switch that
+    // is under somebody's finger.
+    final id = await context.registerDirectory(
+      path: folder.path,
+      displayName: 'ridge',
+    );
+    await seedThread('c1', 'Homepage copy');
+    await pumpInbox(tester);
+    await openThread(tester, 'Send the survey back');
+    await tester.tap(find.byKey(const Key('thread-context')));
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+    }
+    expect(find.byKey(ContextPanelBody.toggleKeyFor(id)), findsOneWidget);
+
+    await recordActivity();
+    // Asserted on every frame the reload passes through rather than only on
+    // the one it settles at: a switch gone for a single frame is a switch
+    // gone from under a finger.
+    for (var i = 0; i < 4; i++) {
+      await tester.pump();
+      expect(spinner(), findsNothing, reason: 'frame $i');
+      expect(
+        find.byKey(ContextPanelBody.toggleKeyFor(id)),
+        findsOneWidget,
+        reason: 'frame $i',
+      );
+    }
     await settleQueues(tester);
   });
 
@@ -557,6 +608,14 @@ void main() {
         (tester) async {
       final seeded = await seedFile();
       await seedThread('c1', 'Homepage copy');
+      // Linked, because Consult is offered only where the retriever would
+      // actually quote the file — see the test under this one.
+      await context.link(
+        seeded.dirId,
+        ContextScopeKind.thread,
+        'email',
+        'c1',
+      );
       await pumpInbox(tester);
       await openThread(tester, 'Send the survey back');
       await tester.tap(find.byKey(const Key('thread-context')));
@@ -588,6 +647,169 @@ void main() {
         work['payload_json'],
         '{"context_file_ids":[${seeded.fileId}]}',
       );
+      await settleQueues(tester);
+    });
+
+    testWidgets('a directory this room does not read offers no Consult',
+        (tester) async {
+      // The whole library gets a `Files ›`, linked or not, so a file of a
+      // directory this room never switched on is one tap away. The retriever
+      // re-checks scope and would drop it, so the button would press and
+      // change nothing — the sentence names the switch instead.
+      final seeded = await seedFile();
+      await seedThread('c1', 'Homepage copy');
+      await pumpInbox(tester);
+      await openThread(tester, 'Send the survey back');
+      await tester.tap(find.byKey(const Key('thread-context')));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(ContextPanelBody.filesKeyFor(seeded.dirId)));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(ContextPanelBody.fileKeyFor(seeded.fileId)));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+
+      expect(filePanel(), findsOneWidget);
+      expect(find.byKey(ContextFilePanelBody.consultKey), findsNothing);
+      expect(
+        find.byKey(ContextFilePanelBody.consultNoteKey),
+        findsOneWidget,
+      );
+      expect(
+        find.text('Not linked to this room — switch «ridge» on under '
+            'Context to consult it.'),
+        findsOneWidget,
+      );
+
+      // Switch the directory on and come back: the same file, the same door,
+      // and now a button that means something. The disclosure is a
+      // preference of the panel, so it is still open.
+      await tester.tap(find.byKey(SidePanelHost.closeKey));
+      for (var i = 0; i < 3; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(const Key('thread-context')));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(ContextPanelBody.toggleKeyFor(seeded.dirId)));
+      for (var i = 0; i < 5; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(ContextPanelBody.fileKeyFor(seeded.fileId)));
+      for (var i = 0; i < 5; i++) {
+        await tester.pump();
+      }
+
+      expect(find.byKey(ContextFilePanelBody.consultKey), findsOneWidget);
+      expect(find.byKey(ContextFilePanelBody.consultNoteKey), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a storyline the thread is in is scope enough for Consult',
+        (tester) async {
+      // The room's own links are half the question; what it inherits is the
+      // other half, and the retriever reads both. A file offered here must
+      // be one the retriever would actually quote.
+      final seeded = await seedFile();
+      await seedThread('c1', 'Homepage copy');
+      await store.insertStoryline(
+        id: 'sl-1',
+        title: 'Website redesign',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('sl-1', 'email', 'c1', addedBy: 'auto');
+      await context.link(seeded.dirId, ContextScopeKind.storyline, '', 'sl-1');
+      await pumpInbox(tester);
+      await openThread(tester, 'Send the survey back');
+      await tester.tap(find.byKey(const Key('thread-context')));
+      for (var i = 0; i < 5; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(ContextPanelBody.filesKeyFor(seeded.dirId)));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(ContextPanelBody.fileKeyFor(seeded.fileId)));
+      for (var i = 0; i < 5; i++) {
+        await tester.pump();
+      }
+
+      expect(find.byKey(ContextFilePanelBody.consultKey), findsOneWidget);
+      expect(find.byKey(ContextFilePanelBody.consultNoteKey), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('an activity row leaves the reader on the passage',
+        (tester) async {
+      // The file panel's providers watch the activity stream too, and a
+      // spinner here would not only blank the words: rebuilding the body
+      // re-runs its post-frame `ensureVisible`, yanking a reader who had
+      // scrolled away back to the highlight once a minute.
+      final seeded = await seedFile();
+      await context.replaceChunks(seeded.fileId, const [
+        (
+          seq: 0,
+          locator: 'Pricing',
+          text: 'docs/pricing.md · Pricing\nQ4 rates hold at nine.',
+        ),
+      ]);
+      await seedThread('c1', 'Homepage copy');
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'c1',
+        replyToMessageId: 'c1-m1',
+        body: 'Friday works.',
+        contextJson: DraftProvenance(
+          documents: const [],
+          directories: const ['ridge'],
+          files: [
+            (
+              dir: 'ridge',
+              path: 'docs/pricing.md',
+              locator: 'Pricing',
+              fileId: seeded.fileId,
+            ),
+          ],
+          skills: const [],
+        ).encode(),
+      );
+      await pumpInbox(tester);
+      await openThread(tester, 'Send the survey back');
+      await tester.tap(find.descendant(
+        of: find.byKey(InboxScreen.useSuggestionKey),
+        matching: find.text('Use it'),
+      ));
+      for (var i = 0; i < 3; i++) {
+        await tester.pump();
+      }
+      await tester.tap(
+        find.byKey(Composer.provenanceChipKeyFor(seeded.fileId)),
+      );
+      for (var i = 0; i < 5; i++) {
+        await tester.pump();
+      }
+
+      expect(find.byKey(ContextFilePanelBody.locatedKey), findsOneWidget);
+      // The header names the file, not the placeholder it falls back to.
+      expect(find.text('pricing.md'), findsOneWidget);
+
+      await recordActivity();
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+        expect(spinner(), findsNothing, reason: 'frame $i');
+        expect(
+          find.byKey(ContextFilePanelBody.locatedKey),
+          findsOneWidget,
+          reason: 'frame $i',
+        );
+        expect(find.text('pricing.md'), findsOneWidget, reason: 'frame $i');
+      }
       await settleQueues(tester);
     });
   });

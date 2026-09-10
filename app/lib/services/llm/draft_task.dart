@@ -197,7 +197,12 @@ class DraftTask implements JsonTask<DraftResult> {
   /// never a target — the ordinary directory-fed draft is the same size it
   /// always was.
   static const int _directoryBriefCap = 700;
-  static const int _directoryGuidanceCap = 1500;
+
+  /// The guidance fence is the retriever's own ceiling, said once. The
+  /// retriever FITS its blocks to this number before the pack is built, so
+  /// what the provenance names is what the model read; a second, smaller
+  /// number here would silently drop the blocks it had already promised.
+  static const int _directoryGuidanceCap = ContextTuning.guidanceBudget;
   static const int _directoryExcerptsCap = 8700;
   static const int _evidenceCap = 300;
 

@@ -479,6 +479,32 @@ void main() {
 
       expect(identical(task.systemPrompt, before), isTrue);
     });
+
+    test('the guidance fence is the retriever\'s own budget, said once', () {
+      // The retriever FITS its blocks to this number before the pack is
+      // built, so a smaller number here would drop blocks the pack had
+      // already promised — the rules and the second skill, which are last.
+      final message = task.buildUserMessage(inputWith(
+        directories: pack(guidance: [
+          ContextGuidance(
+              label: 'guidance', text: 'A' * ContextTuning.guidanceBudget),
+          const ContextGuidance(label: 'rule pricing.md', text: 'Zed.'),
+        ]),
+      ));
+
+      final start = message.indexOf('source="directory_guidance"');
+      final end = message.indexOf('</untrusted_data>', start);
+      final fence = message.substring(start, end);
+      expect(fence, contains('A' * 100));
+      expect(fence.length, greaterThan(ContextTuning.guidanceBudget - 100));
+      // One block longer than the whole budget: the fence cuts it here and
+      // nowhere earlier, which is what pins the two numbers together.
+      expect(fence, isNot(contains('[rule pricing.md]')));
+      expect(
+        'A'.allMatches(fence).length,
+        ContextTuning.guidanceBudget - '[guidance]\n'.length,
+      );
+    });
   });
 
   group('the channel note', () {

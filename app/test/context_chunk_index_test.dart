@@ -294,7 +294,7 @@ void main() {
   });
 
   group('re-chunking', () {
-    test('the rowids a re-read orphaned are gone after a rebuild', () async {
+    test('a re-read unfiles the rowids it orphaned', () async {
       if (!available) return;
       final seed = await seedFile();
       await seedChunks(seed.fileId, const ['The rate card runs to March.'],
@@ -302,9 +302,7 @@ void main() {
       expect(await store.indexPendingChunks(), 1);
       expect(await indexedRows(), 1);
 
-      // vec0 has no cascade, so emptying a file's passages leaves its rowid
-      // filed. The store's answer to that is the hydrating join, which drops
-      // an id that matches no row.
+      // vec0 has no cascade, so emptying a file's passages has to say so.
       await store.replaceChunks(seed.fileId, const []);
 
       final hits = await store.chunkKnn(
@@ -314,8 +312,54 @@ void main() {
         k: 5,
       );
       expect(hits, isEmpty);
-      // Invisible, but still there — and every orphan is a neighbour slot
-      // spent on nothing, so a library that re-chunks daily needs the sweep.
+      // And gone from the index too, not merely invisible through the
+      // hydrating join: an orphan is a neighbour slot spent on nothing.
+      expect(await indexedRows(), 0);
+    });
+
+    test('a new passage on a reused rowid is not ranked by its predecessor',
+        () async {
+      if (!available) return;
+      final seed = await seedFile();
+      final old = await seedChunks(
+        seed.fileId,
+        const ['The rate card runs to March.'],
+        axis: 0,
+      );
+      expect(await store.indexPendingChunks(), 1);
+
+      // The file is re-read and says something else. Its old passage was the
+      // highest row in the table, so SQLite hands the new one the very same
+      // id — and a vector left filed under it would rank these words by the
+      // meaning of the words they replaced, indefinitely while the embedder
+      // is parked.
+      final fresh = await store.replaceChunks(seed.fileId, const [
+        (seq: 0, locator: 'lines 1–60', text: 'The archive is read-only.'),
+      ]);
+      expect(fresh, old);
+
+      final hits = await store.chunkKnn(
+        encodeEmbedding(axes({0: 1.0})),
+        embedModel: tag,
+        dirIds: [seed.dirId],
+        k: 5,
+      );
+      expect(hits, isEmpty);
+    });
+
+    test('the rebuild still sweeps a rowid that drifted anyway', () async {
+      if (!available) return;
+      final seed = await seedFile();
+      await seedChunks(seed.fileId, const ['The rate card runs to March.'],
+          axis: 0);
+      expect(await store.indexPendingChunks(), 1);
+
+      // The row deleted behind the store's back — what a build whose native
+      // extension arrived after the delete did leaves behind.
+      await db.customStatement(
+        'DELETE FROM context_chunks WHERE file_id = ?',
+        [seed.fileId],
+      );
       expect(await indexedRows(), 1);
 
       await store.rebuildIndexes();

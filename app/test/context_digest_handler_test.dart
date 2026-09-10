@@ -1,6 +1,7 @@
 import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/keyword_index.dart' show ContextKeywordIndex;
+import 'package:bond_inbox/data/message_store.dart' show MessageStore;
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart' show AiWorker;
@@ -271,14 +272,16 @@ void main() {
       expect(log.notes['reason'], 'malformed_entity');
     });
 
-    test('a file that is gone is skipped', () async {
+    test('a file that is gone is skipped as the FILE being gone', () async {
       final dirId = await register();
       final handler = handlerWith([digestAnswer()]);
 
       await runFor(handler, ContextDigestHandler.entityIdFor(dirId, 9999));
 
       expect(log.status, 'skipped');
-      expect(log.notes['reason'], 'gone');
+      // Not `gone`, which the panel reads as "the directory is no longer
+      // registered": this directory is registered and one file left it.
+      expect(log.notes['reason'], 'file_gone');
     });
 
     test('a file belonging to another directory is skipped', () async {
@@ -287,6 +290,23 @@ void main() {
       final handler = handlerWith([digestAnswer()]);
 
       await runFor(handler, ContextDigestHandler.entityIdFor('other', fileId));
+
+      expect(log.status, 'skipped');
+      expect(log.notes['reason'], 'file_gone');
+    });
+
+    test('a de-registered directory is still skipped as gone', () async {
+      final dirId = await register();
+      final fileId = await addFile(dirId);
+      final entity = ContextDigestHandler.entityIdFor(dirId, fileId);
+      // The whole folder, not one file: the row survives the remove only in
+      // this test's ordering, and the directory is what the panel names.
+      await db.customStatement(
+        'DELETE FROM context_dirs WHERE id = ?',
+        [dirId],
+      );
+
+      await runFor(handlerWith([digestAnswer()]), entity);
 
       expect(log.status, 'skipped');
       expect(log.notes['reason'], 'gone');
@@ -510,6 +530,40 @@ void main() {
       // `pending` against it is the loop this whole rung exists to close.
       expect((await store.fileById(fileId))!.digestStatus, 'error');
       expect(await store.filesPendingDigest(dirId), isEmpty);
+    });
+
+    test('a requeued row is asked again from its first attempt', () async {
+      final dirId = await register();
+      final fileId = await addFile(dirId);
+      final entity = ContextDigestHandler.entityIdFor(dirId, fileId);
+      final work = MessageStore(db);
+      await work.enqueueWork('context_digest', 'local', entity);
+      // Two failures, which is the worker's whole ladder — the row is
+      // `error` and the file row was closed with it.
+      await failOn(dirId, fileId, attempts: 0);
+      await failOn(dirId, fileId, attempts: AiWorker.maxAttempts - 1);
+      await work.writeWork('context_digest', 'local', entity,
+          status: 'error', error: 'bad answer', attempts: AiWorker.maxAttempts);
+
+      // The file is edited, so the reconcile pass reopens the digest and
+      // re-queues the work.
+      await store.resetFileDigest(fileId);
+      await work.requeueWork('context_digest', 'local', entity);
+
+      final row = await db.customSelect(
+        'SELECT attempts FROM work_items WHERE task_kind = ? AND entity_id = ?',
+        variables: [Variable('context_digest'), Variable(entity)],
+      ).getSingle();
+      expect(row.data['attempts'], 0);
+
+      log = _Recorder();
+      await failOn(dirId, fileId, attempts: row.data['attempts'] as int);
+
+      // Attempts that carried over would make this first try of new work
+      // read as the last try of the old, and the file would be written off
+      // on the attempt that still had a retry behind it.
+      expect((await store.fileById(fileId))!.digestStatus, 'pending');
+      expect(await store.filesPendingDigest(dirId), hasLength(1));
     });
 
     test('an edit to the file puts it back on the worklist', () async {

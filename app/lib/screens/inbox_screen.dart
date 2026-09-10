@@ -8,9 +8,9 @@ import 'package:path/path.dart' as p;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart' show MessageStore;
+import '../models/attachment_models.dart';
 import '../models/context_models.dart' show ContextScopeKind;
 import '../models/draft_provenance.dart';
-import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/people_sort.dart';
@@ -53,6 +53,8 @@ import '../widgets/archive_pane.dart';
 import '../widgets/attachment_format.dart';
 import '../widgets/chips.dart';
 import '../widgets/composer.dart';
+import '../widgets/context_file_panel.dart';
+import '../widgets/context_panel.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/drafts_pane.dart';
 import '../widgets/files_pane.dart';
@@ -77,8 +79,6 @@ import '../widgets/preview/preview_kind.dart' show openRefused;
 import '../widgets/quick_replies.dart';
 import '../widgets/room_header.dart';
 import '../widgets/settings_screen.dart';
-import '../widgets/context_file_panel.dart';
-import '../widgets/context_panel.dart';
 import '../widgets/side_panel.dart';
 import '../widgets/sort_menu.dart';
 import '../widgets/source_filter.dart';
@@ -3591,55 +3591,80 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ),
         );
 
+    // `valueOrNull` and a spinner only on the FIRST read, never `when` — the
+    // rule the library section in [_settings] already keeps. Both of these
+    // providers watch the activity stream, so every recorded row (the
+    // sixty-second sync poll, every work item of a drain) puts them back
+    // into `loading` with the previous value still in hand, and `when` draws
+    // a spinner over that. A switch replaced by a spinner is a switch that
+    // vanishes from under a finger.
+    final rows = library.valueOrNull;
+    final ids = links.valueOrNull;
+
+    // A read that failed with a previous value in hand keeps drawing the
+    // previous value: this panel is re-read once a minute whatever happens,
+    // so blanking it costs the reader their switches over something the next
+    // event fixes by itself. The failure goes to the log instead.
+    if (library.hasError && rows != null) {
+      debugPrint('Context panel: kept the last library — ${library.error}');
+    }
+    if (links.hasError && ids != null) {
+      debugPrint('Context panel: kept the last links — ${links.error}');
+    }
+
+    final Widget body;
+    if (rows == null && library.hasError) {
+      body = message('Could not read your directories.');
+    } else if (ids == null && links.hasError) {
+      body = message('Could not read what this room links.');
+    } else if (rows == null || ids == null) {
+      body = const Center(child: CircularProgressIndicator());
+    } else {
+      body = ContextPanelBody(
+        rows: rows,
+        linked: ids.toSet(),
+        // The frame before the inherited read lands shows the switches
+        // rather than a spinner: the list a person came here to use is
+        // already in hand, and the muted lines under it are context.
+        inherited: inherited?.valueOrNull ?? const [],
+        onToggle: (id, on) => unawaited(actions.setLinked(id, scope, on)),
+        onAddDirectory: () => unawaited(
+          actions.addDirectoryTo(_fileDialogs, scope),
+        ),
+        onManage: _openSettings,
+        expanded: _expandedContextDirs,
+        // Only the open ones are read: a family provider per directory
+        // means a closed disclosure costs no query at all.
+        files: {
+          for (final id in _expandedContextDirs)
+            id: ref.watch(contextFilesProvider(id)).valueOrNull ?? const [],
+        },
+        onToggleFiles: (id) => setState(() {
+          if (!_expandedContextDirs.remove(id)) {
+            _expandedContextDirs.add(id);
+          }
+        }),
+        onOpenFile: (fileId) => _openBeside(ContextFilePanel(
+          fileId: fileId,
+          // A thread's panel can write a reply; a storyline's cannot,
+          // because a storyline is not a room a draft is keyed by.
+          from: side.kind == ContextScopeKind.thread
+              ? (source: side.source, conversationKey: side.scopeKey)
+              : null,
+        )),
+        now: DateTime.now(),
+      );
+    }
+
+    // The title is a constant and the subtitle is the room's own name, so
+    // neither moves while a reload is out: a header that flickered back to
+    // its default once a minute would read as the panel reopening itself.
     return SidePanelHost(
       title: 'Context',
       subtitle: side.title.isEmpty ? null : side.title,
       leading: const Icon(Icons.folder_open_outlined, size: 18),
       onClose: _closeSide,
-      child: library.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, _) => message('Could not read your directories.'),
-        data: (rows) => links.when(
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (_, _) => message('Could not read what this room links.'),
-          data: (ids) => ContextPanelBody(
-            rows: rows,
-            linked: ids.toSet(),
-            // The frame before the inherited read lands shows the switches
-            // rather than a spinner: the list a person came here to use is
-            // already in hand, and the muted lines under it are context.
-            inherited: inherited?.valueOrNull ?? const [],
-            onToggle: (id, on) =>
-                unawaited(actions.setLinked(id, scope, on)),
-            onAddDirectory: () => unawaited(
-              actions.addDirectoryTo(_fileDialogs, scope),
-            ),
-            onManage: _openSettings,
-            expanded: _expandedContextDirs,
-            // Only the open ones are read: a family provider per directory
-            // means a closed disclosure costs no query at all.
-            files: {
-              for (final id in _expandedContextDirs)
-                id: ref.watch(contextFilesProvider(id)).valueOrNull ??
-                    const [],
-            },
-            onToggleFiles: (id) => setState(() {
-              if (!_expandedContextDirs.remove(id)) {
-                _expandedContextDirs.add(id);
-              }
-            }),
-            onOpenFile: (fileId) => _openBeside(ContextFilePanel(
-              fileId: fileId,
-              // A thread's panel can write a reply; a storyline's cannot,
-              // because a storyline is not a room a draft is keyed by.
-              from: side.kind == ContextScopeKind.thread
-                  ? (source: side.source, conversationKey: side.scopeKey)
-                  : null,
-            )),
-            now: DateTime.now(),
-          ),
-        ),
-      ),
+      child: body,
     );
   }
 
@@ -3795,7 +3820,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// did that sentence come from" — and taking the room away to show the file
   /// whole is answering a question nobody asked.
   Widget _contextFilePanel(ContextFilePanel side) {
-    final view = ref.watch(
+    final async = ref.watch(
       contextFileProvider((fileId: side.fileId, locator: side.locator)),
     );
     final from = side.from;
@@ -3804,6 +3829,28 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final canReply = from != null &&
         (from.source == 'email' ||
             ref.watch(draftProvider(from)).capability == SendCapability.send);
+
+    // Which directories the room this was opened from actually READS: its own
+    // links, plus the ones it inherits from its storylines. The retriever
+    // re-checks exactly this before it quotes anything, so a Consult button
+    // offered on a directory outside the set would be a button whose file is
+    // silently dropped — the caption would be the lie, not the retriever.
+    final scoped = <String>{};
+    if (from != null) {
+      scoped.addAll(ref
+              .watch(contextLinksProvider((
+                kind: ContextScopeKind.thread,
+                source: from.source,
+                scopeKey: from.conversationKey,
+              )))
+              .valueOrNull ??
+          const <String>[]);
+      final inherited =
+          ref.watch(contextInheritedProvider(from)).valueOrNull ?? const [];
+      for (final entry in inherited) {
+        scoped.add(entry.dirId);
+      }
+    }
 
     Widget message(String text) => Center(
           child: Padding(
@@ -3816,47 +3863,65 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ),
         );
 
-    return view.when(
-      loading: () => SidePanelHost(
-        title: 'File',
-        leading: const Icon(Icons.folder_open_outlined, size: 18),
-        onClose: _closeSide,
-        child: const Center(child: CircularProgressIndicator()),
-      ),
-      error: (_, _) => SidePanelHost(
-        title: 'File',
-        leading: const Icon(Icons.folder_open_outlined, size: 18),
-        onClose: _closeSide,
-        child: message('This file is no longer indexed.'),
-      ),
-      data: (view) {
-        if (view == null) {
-          return SidePanelHost(
-            title: 'File',
-            leading: const Icon(Icons.folder_open_outlined, size: 18),
-            onClose: _closeSide,
-            child: message('This file is no longer indexed.'),
-          );
-        }
-        return SidePanelHost(
-          title: p.basename(view.file.relPath),
-          subtitle: '${view.dir.displayName}/${view.file.relPath}',
+    // [_contextPanel]'s rule, and one more of its own: this provider watches
+    // the activity stream too, and a `when` here would not only blink the
+    // words away but re-run the body's post-frame `ensureVisible` — yanking a
+    // reader who had scrolled off the highlight straight back to it, once a
+    // minute, for as long as the panel is open.
+    final view = async.valueOrNull;
+    if (async.hasError && view != null) {
+      debugPrint('Context file panel: kept the last read — ${async.error}');
+    }
+
+    Widget host({
+      required String title,
+      String? subtitle,
+      required Widget child,
+    }) =>
+        SidePanelHost(
+          title: title,
+          subtitle: subtitle,
           leading: const Icon(Icons.folder_open_outlined, size: 18),
           onClose: _closeSide,
-          child: ContextFilePanelBody(
-            file: view.file,
-            dirName: view.dir.displayName,
-            text: view.text,
-            digest: view.digest,
-            locator: side.locator,
-            located: view.located,
-            onConsult: canReply
-                ? () => _consultContextFile(from, view.file.id)
-                : null,
-            now: DateTime.now(),
-          ),
+          child: child,
         );
-      },
+
+    if (view == null) {
+      // `hasValue` and not `isLoading`: a file that came back null once is a
+      // file that is gone, and the sentence saying so must not blink to a
+      // spinner on every reload behind it.
+      final first = !async.hasValue && !async.hasError;
+      return host(
+        title: 'File',
+        child: first
+            ? const Center(child: CircularProgressIndicator())
+            : message('This file is no longer indexed.'),
+      );
+    }
+
+    final inScope = scoped.contains(view.dir.id);
+    return host(
+      title: p.basename(view.file.relPath),
+      subtitle: '${view.dir.displayName}/${view.file.relPath}',
+      child: ContextFilePanelBody(
+        file: view.file,
+        dirName: view.dir.displayName,
+        text: view.text,
+        digest: view.digest,
+        locator: side.locator,
+        located: view.located,
+        onConsult: canReply && inScope
+            ? () => _consultContextFile(from, view.file.id)
+            : null,
+        // The room could have consulted this file but for the link, so the
+        // sentence names the switch that would fix it rather than leaving a
+        // reader to guess why the button they saw on the last file is gone.
+        consultNote: canReply && !inScope
+            ? 'Not linked to this room — switch «${view.dir.displayName}» '
+                'on under Context to consult it.'
+            : null,
+        now: DateTime.now(),
+      ),
     );
   }
 

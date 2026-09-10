@@ -96,7 +96,7 @@ to resolve a stored bookmark as soon as it renders.
 | Method | Arguments | Answers |
 |---|---|---|
 | `create` | `path` | the bookmark bytes, or `FlutterError("bookmark_failed")` |
-| `resolve` | `bookmark` | the resolved path, or `FlutterError("resolve_failed")` |
+| `resolve` | `bookmark` | the resolved path, or `FlutterError("resolve_failed")` when the bookmark will not resolve at all, or `FlutterError("access_denied")` when it resolved and the sandbox refused to open it |
 
 `create` is `bookmarkData(options: [.withSecurityScope], …)`. `resolve` is
 `URL(resolvingBookmarkData:options:[.withSecurityScope]:…)` followed by
@@ -111,7 +111,18 @@ scope once.
 A **stale** bookmark still answers with its path. Stale means the system wants
 the bookmark re-made, not that the resolved URL is wrong, and access has
 already been granted; the app re-creates the bookmark the next time the user
-adds that directory.
+adds that directory. It is `NSLog`ged, because "the bookmark wants re-making"
+is the fact behind a folder that starts failing after an update.
+
+A **refused** resource is not the same thing and does not answer with a path.
+When `startAccessingSecurityScopedResource()` returns false the method
+answers `access_denied`, Dart's `resolve` turns that into null like every
+other failure, and the reconcile pass falls back to the stored path, finds it
+unlistable and marks the directory `unavailable`. Answering the path anyway
+sent the walk off to open a folder this process has no access to, one
+file-system error per file, while the row went on saying `ready`. Re-taking
+the bookmark for a stale one is a follow-up; no Flutter test can drive the
+Swift, so this pair is covered by reading rather than by a test.
 
 All four entitlement files carry
 `com.apple.security.files.bookmarks.app-scope` beside
@@ -175,11 +186,11 @@ the only bytes it opens are the first 8 KB of a text candidate.
 |---|---|
 | `contextDenylist` | `.git`, `node_modules`, `.dart_tool`, `build`, `dist`, `.venv`, `__pycache__` — skipped wherever the directory name appears |
 | the dot rule | any directory whose name starts with `.` is skipped, EXCEPT `.claude` |
-| `contextFileDenylist` | `*.lock`, `.env*`, `*.pem`, `*.key` — matched against the file's NAME at any depth, because a `.env` three folders down is still a secret |
+| `contextFileDenylist` | `*.lock` plus the spellings a secret is kept under — `.env*`, `*.pem`, `*.key`, `secrets.*`, `secret.*`, `credentials.*`, `*-credentials.json`, `service-account*.json`, `*.tfvars`, `*.tfvars.json`, `*.p12`, `*.pfx`, `*.jks`, `.netrc`, `.npmrc`, `.pypirc`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*` — matched against the file's NAME at any depth, because a `.env` three folders down is still a secret. It is a list of spellings and not a guarantee: a token in a file called `notes.md` is indexed like any other note |
 | `.bondignore` | one glob per line at the root, `#` comments, blank lines; matched against the rel path |
 | `.gitignore` | the same subset, honoured **only** when `honor_gitignore` is on |
 | symlinks | never followed — a link to a parent is a walk that never ends, and a link out of the folder is a path the user never granted |
-| text allowlist | an extension list plus the four names with no extension (`CLAUDE.md`, `README`, `Makefile`, `Dockerfile`); everything else is LISTED with `isText = false` |
+| text allowlist | an extension list plus `contextTextNames` — `CLAUDE.md`, `README`, `Makefile`, `Dockerfile`, `env.example` — for files a project names rather than extends; everything else is LISTED with `isText = false` |
 | `maxContextFileBytes` | a text candidate over 4 MB is listed and not read (`reason: too_large`) |
 | the NUL sniff | a 0 byte in the first 8 KB demotes the file (`reason: binary`) |
 | `maxFiles` / `maxTextBytes` | 5,000 files and 50 MB of text per directory |
@@ -191,6 +202,14 @@ permissions will not open is counted and stepped over, where
 `Directory.list(recursive: true)` would put a `FileSystemException` into the
 stream and leave the whole project unindexed over one folder. `skipped`
 counts a pruned or unreadable DIRECTORY once, not once per file inside it.
+
+**A folder that could not be listed is NAMED, not merely counted.**
+`WalkResult.unlisted` carries the rel paths whose listing threw — an
+unmounted share, a permissions change three folders down, a sandbox that
+declined. Counting alone was not enough: the reconcile sweep below reads
+"not in `walk.files`" as "deleted", and an unlistable subtree holds files
+that are still on disk. The pass excludes those rows from the sweep and
+notes `unlisted` when there were any.
 
 **`.gitignore` is off by default, deliberately.** Claude Code analyses land in
 gitignored `output/` and `reports/` folders — the very files this feature
@@ -315,7 +334,10 @@ The ladder, in order:
 5. **The diff.** `(size, mtime)` unchanged → the row is touched and nothing
    is opened. Otherwise the bytes are hashed once. An unchanged hash costs the
    hash and nothing more. A hash that matches a row the walk NO LONGER SEES is
-   a **move**: `renameFile` keeps the row's id, and therefore its passages,
+   a **move** — looked up in a `sha256 → rows` map built ONCE from the rows
+   this pass already read, because the column has no index and a first walk
+   over a project is every file asking the same question for an answer that
+   is always empty: `renameFile` keeps the row's id, and therefore its passages,
    its vectors and its digest. A move that changes the file's KIND —
    `notes/thing.md` filed as `.claude/skills/<name>/SKILL.md` — re-reads the
    conventions off the bytes already in hand (`_conventionsFor`, shared with
@@ -329,7 +351,11 @@ The ladder, in order:
    word index's backfill fence never moves and its rows would keep the old
    path; deleting them moves the count, and step 9 re-files them.
 6. **Deletions.** Every stored row the walk did not account for is dropped
-   with its words and its passages.
+   with its words and its passages — except a row under a path in
+   `WalkResult.unlisted`. A subtree whose listing threw holds files that are
+   still there, and sweeping it would delete their rows, words, passages,
+   vectors and digests over a share that was offline for a minute. The note
+   carries `unlisted` when that happened.
 7. **Re-chaining.** A `CLAUDE.md` appearing or disappearing changes the
    standing notes for every file BELOW it, including files this pass never
    touched. Compared rather than rewritten, so the ordinary pass writes
@@ -339,9 +365,17 @@ The ladder, in order:
    and nothing else would notice the tail. One POST at a time under
    `EmbeddingsClient.documentPrefix`, stored with
    `EmbeddingsClient.documentModelTag`.
-9. `indexPendingChunks()` and `ensureKeywordIndex()`, then
-   `setDirectoryWalked` — `walked_at`, `root_hash` (one sha256 over the sorted
-   `relPath|sha256` lines), the counts, `status = 'ready'`, error cleared.
+9. `indexPendingChunks()` and `ensureKeywordIndex()`, then — before the
+   stamp — the directory row is READ AGAIN. `removeDirectory` deliberately
+   leaves a `processing` work row alone, which is this very pass, so a folder
+   de-registered mid-pass leaves the handler writing files, words and
+   passages against a `dir_id` with no row behind it and no foreign key to
+   refuse them. When the row is gone the pass calls `removeDirectory` a
+   second time, which deletes everything it just wrote, notes
+   `{"reason": "gone"}` and returns. Otherwise `setDirectoryWalked` —
+   `walked_at`, `root_hash` (one sha256 over the sorted `relPath|sha256`
+   lines), the counts, `status = 'ready'`, error cleared. The park at step 8
+   makes the same check for the same reason.
 
 **Two kinds of failure, kept apart.** A `FileSystemException` on one file is
 counted in `errors` and stepped over — a permissions oddity three folders down
@@ -548,9 +582,20 @@ every scope predicate naming a column the other half does not have.
 
 Both are derived and disposable: losing one costs `ContextStore.rebuildIndexes()`
 and not one model call, because every float and every word is already stored.
-That rebuild is also the only cleanup for the rowids `replaceChunks`,
-`deleteFiles` and `removeDirectory` orphan — vec0 has no cascade and FTS5 no
-foreign key, so an orphan hydrates to nothing through the join and is dropped.
+
+**The vector index is swept as the rows go.** vec0 has no cascade, so
+`replaceChunks`, `deleteFiles` and `removeDirectory` each read the chunk ids
+they are about to delete and hand them to `ContextChunkIndex.remove` once the
+transaction has committed. Leaving them filed is not merely untidy: SQLite
+hands a freed `INTEGER PRIMARY KEY` back out when the deleted rows were the
+highest in the table — which the chunks of a file the walk just re-read
+usually are — so the next passage to take that id would be ranked by its
+predecessor's vector until the embedder reached it, and indefinitely while
+the embedding server is parked. FTS5 has no foreign key either, and its
+orphans stay until a rebuild; those hydrate to nothing through the join and
+are dropped, which is why they are only a wasted slot rather than a wrong
+answer. `rebuildIndexes` remains the self-heal for an index that drifted
+anyway.
 
 `removeDirectory` DOES reach the queue, in the same transaction: the
 `context_reconcile` and `context_brief` rows for the directory and every
@@ -606,9 +651,9 @@ The steps, in this order and no other:
 2. **The directories.** One row each, skipping a link whose directory was
    removed between the two reads. Any whose `walked_at` is null or older than
    `ContextTuning.staleAfter` (10 minutes) is `requeueWork`'d for a reconcile
-   and **never awaited** — the reply being drafted reads what the last pass
-   indexed, and waiting on a file-system walk would put a folder between a
-   person and their draft.
+   — the row is written here, and **the pass it queues is not waited on**.
+   The reply being drafted reads what the last pass indexed, and waiting on
+   a file-system walk would put a folder between a person and their draft.
 3. **The briefs.** `ContextBrief.decode` per directory: `about`, `key_facts`
    and `vocabulary` become the brief line; `reply_guidance` becomes a
    `guidance` block. With more than one directory in scope every guidance
@@ -643,7 +688,7 @@ The steps, in this order and no other:
    organizations` plus the subject with its reply markers off; a message with
    neither is answered by the vector half alone. Ties break on `chunk_id`, so
    two identical drafts read the same prompt.
-7b. **A named file is READ, not merely ranked.** `consultFirst` is not a
+8. **A named file is READ, not merely ranked.** `consultFirst` is not a
    re-sort of the neighbour page. That page is a dozen passages wide and a
    file somebody pointed at is usually not on it — which is why they pointed
    — so each named file is asked for its own nearest passages with a second
@@ -656,22 +701,24 @@ The steps, in this order and no other:
    question at all still builds a pack when a file was named: finding it never
    needed the question. Skills are the one thing such a pass adds nothing of,
    since a skill is chosen by nearness to the question.
-8. **The order after the floor**: the files the caller named in
-   `consultFirst` are READ before the ranking runs (see step 7b), and their
+9. **The order after the floor**: the files the caller named in
+   `consultFirst` are READ before the ranking runs (see step 8), and their
    passages float to the front (stable, and exempt from the floor — a person
    saying "read this" outranks a score), then at most `perFile` passages per
    file,
    then the top `k`, then a character budget of 2,500. A passage that does not
    fit is SKIPPED rather than ending the list, so one long passage cannot hide
-   the three short ones behind it. The 80-character allowance per passage is
-   the bracket line the renderer writes above it.
-9. **The digest passage is NOT dropped** — the one place this differs from the
-   attachment path (D7). An attachment digest summarises a stranger's
-   document and the fence above it promises excerpts; a directory digest
-   summarises the OWNER'S own file and is very often the only passage that
-   answers a question about what an analysis found. It rides, labelled
-   `digest (a model's summary of this file)`.
-10. **Skills.** `ContextStore.skillVectors(dirIds)` returns every `kind =
+   the three short ones behind it. Each passage is charged for its bracket
+   line as well as its text, and the line is MEASURED — the renderer's own
+   `contextExcerptHeader` — because a real one naming a directory and a
+   nested path runs well past the eighty characters this used to assume.
+10. **The digest passage is NOT dropped** — the one place this differs from
+    the attachment path (D7). An attachment digest summarises a stranger's
+    document and the fence above it promises excerpts; a directory digest
+    summarises the OWNER'S own file and is very often the only passage that
+    answers a question about what an analysis found. It rides, labelled
+    `digest (a model's summary of this file)`.
+11. **Skills.** `ContextStore.skillVectors(dirIds)` returns every `kind =
     'skill'` row in scope that has a `desc_embedding`, with the blob; the
     cosine distance from the query vector decides. At most
     `ContextTuning.maxSkills` (2) within `skillMaxDistance` (0.60) — looser
@@ -683,20 +730,20 @@ The steps, in this order and no other:
     not after: a skill with neither a frontmatter name nor a folder above it
     cannot be rendered, and one that took a slot and then dropped out of it
     would cost the second-nearest skill its place for a block nobody sees.
-10b. **Look closer.** The one model call this read makes, in its own
+12. **Look closer.** The one model call this read makes, in its own
     `try`/`catch`: up to two sections read WHOLE and up to two skills, in
     front of the ranked passages. It is the next section of this page, and it
     is placed HERE, before the two steps below, on purpose — a section pulled
     in from a pointer is a file the ranking never surfaced, and the notes and
     the rules that govern it are gathered from the excerpts as they finally
     stand.
-11. **Nested `CLAUDE.md`.** For each kept passage's file — the expanded
+13. **Nested `CLAUDE.md`.** For each kept passage's file — the expanded
     sections included — its `claude_chain`
     minus the root entry, de-duplicated in first-seen order and keyed by
     directory. Clamped to `nestedClaudeMdCap` (400). Claude Code's own
     on-demand rule: notes beside a file apply to that file, and are read when
     it is.
-12. **Rules.** `ContextStore.rulesFor(dirId)` reads the rule rows of a
+14. **Rules.** `ContextStore.rulesFor(dirId)` reads the rule rows of a
     directory as rules — a project is tens of thousands of files of which a
     handful are rules, and this runs on every draft that kept a passage, so
     the predicate belongs in the query rather than in Dart. One applies when
@@ -710,6 +757,26 @@ The steps, in this order and no other:
 **Guidance order in the pack**: the brief's `reply_guidance`, the root notes
 (when there is no brief), the nested notes, the matched skills, the rules.
 Broad to narrow, which is the order a person would read them in.
+
+**And the pack is FITTED to the fence before it is handed over.** The blocks
+above are capped one at a time and their sum is not: one brief's guidance is
+six lines, its notes eight hundred characters, two skills six hundred each,
+and every nested note and matching rule four hundred more. The renderer's
+answer to an over-long fence is to drop whole blocks off the END — so on any
+real project the rules and the second skill never reached the model, while
+`pack.skills` and the provenance row went on naming them. `_fitGuidance`
+measures the blocks exactly as `renderContextGuidance` will and brings them
+under `ContextTuning.guidanceBudget` (2,500): the longest BROAD block is
+shortened first, never below `ContextTuning.guidanceFloor` (300), and only
+when no broad block has room left does a block come off the end. Broad means
+standing advice about the project as a whole — the brief's guidance, the root
+notes, a nested `CLAUDE.md` — and it is a field on `ContextGuidance` rather
+than something read off the label, because the label is display text. A
+skill and a rule are never shortened: half of the instructions for this kind
+of message is worse than none of them. `pack.skills` is then only the names
+whose block survived, so what the provenance names is what the model read.
+The prompt's own `directory_guidance` cap IS `guidanceBudget`, said once and
+pinned by a test; `renderContextGuidance` still clamps as the last line.
 
 ## Look closer: select-expand
 
@@ -777,6 +844,16 @@ the chunker cuts with, so a file chunked as markdown is read back as markdown:
   did. Malformed is `null`.
 - **anything else** (`part N`, `digest`, empty) — the whole text.
 
+It answers `({String text, bool whole})?`, and `whole` is load-bearing rather
+than informational: it is true whenever the answer is the entire file — an
+empty locator, a bare `part N`, and the fall-through above, which is the case
+a `.txt`, `.html` or `.csv` takes for any locator that is not a line range.
+A selector answering `analysis.html · part 2` gets the whole extracted text
+back, and the caller has to know: it relabels the excerpt `''` (the render
+says `whole file, read in full`, the handback names the bare path) and treats
+the file as fully in hand, so parts 1 and 3 come out instead of being quoted
+beside the very text that already holds them.
+
 Each section is clamped to `ContextTuning.expandedSectionCap` (3,000) — three
 times a ranked passage, because the point of asking to read something whole is
 that a thousand characters of it was not enough.
@@ -796,8 +873,34 @@ hands back a hundred and twenty, so an expanded `lines 61–120` really covers
 is the test — a window that only overlaps the tail still carries lines the
 section does not, so it stays. A paragraph quoted beside the section it was
 cut from reads as two sources saying the same thing, and spends the fence
-twice. The sections have their own ceiling (two × 3,000); the ranked tail
-keeps the `budgetChars` it was already trimmed to, and nothing re-budgets.
+twice.
+
+**A section that was CLAMPED only drops what it actually kept.** The locator
+rule says which passages a section claims; the 3,000-character ceiling
+decides how many of them arrived. A `## Pricing` of six thousand characters
+is chunked as `Pricing · part 1..5` plus its `### Q4 rates`, and dropping all
+of them because the whole section would have held them takes the paragraph
+carrying the figure out of the prompt and puts nothing in its place. So a
+passage goes only when the locator rule holds AND either the section was not
+clamped or the passage's body is inside the text that was kept — compared
+with runs of whitespace collapsed, because the prose packer trims paragraphs
+and rejoins them and a verbatim comparison would miss for no reason.
+
+The sections have their own ceiling (two × 3,000); the ranked tail keeps the
+`budgetChars` it was already trimmed to, and nothing re-budgets it. The one
+exception is the DECISION prompt, whose directory fence is 800 (`07-replies.md`):
+there one expanded section is all that fits, and the ranked tail behind it is
+clamped away by the renderer. That is the intended trade — the decision is a
+yes or no about whether to draft, and the section the model asked to read is
+the part of the pack most likely to decide it.
+
+**The select call runs before the reply decision, by design.** One pack
+serves both calls (§Serving), so the section pick happens while building it,
+which means a message the decision then declines to draft has already spent
+one fast-slot call. Splitting the two — decide first, expand only for the
+messages that get a draft — is a follow-up, not an oversight: it would mean
+two packs, two scope reads and a second embedding closure for the sake of
+one small call on the messages nobody replies to.
 
 **Two reads that overlap each other are one read.** An answer naming both
 `Pricing` and `Pricing > Q4 rates` has named one thing and part of it, and

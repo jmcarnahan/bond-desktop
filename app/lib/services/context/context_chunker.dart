@@ -189,11 +189,23 @@ const int expandedSectionLines = 2 * _codeWindowLines;
 ///   caller's ceiling is the thing that decides how much of it fits.
 /// * **anything else** (`part N`, `digest`, empty) — the whole text. There is
 ///   no smaller unit to hand back, and the caller clamps.
-String? contextSection(String relPath, String text, String locator) {
+///
+/// `whole` says which of those happened: true when the answer is the entire
+/// file rather than a piece of it. The caller needs to be TOLD rather than
+/// left to infer it, because what it does next depends on it — a locator
+/// that named a piece and got the file back has to be relabelled (`part 2`
+/// over the whole text is a lie about where the words came from) and has to
+/// drop every other passage of that file, which no locator rule could work
+/// out on its own.
+({String text, bool whole})? contextSection(
+  String relPath,
+  String text,
+  String locator,
+) {
   final wanted = locator.trim();
   if (_shapeOf(relPath) == _Shape.markdown) {
     final crumb = wanted.replaceFirst(_partSuffix, '').trim();
-    if (crumb.isEmpty) return text;
+    if (crumb.isEmpty) return (text: text, whole: true);
     final sections = _markdownSections(text);
     final start = sections.indexWhere((section) => section.locator == crumb);
     if (start < 0) {
@@ -204,7 +216,7 @@ String? contextSection(String relPath, String text, String locator) {
       // The preamble is the file, so the file is the answer. Checked after
       // the breadcrumb lookup, not before, so a document that really does
       // have a `# part 2` heading still gets its own section.
-      if (_barePart.hasMatch(crumb)) return text;
+      if (_barePart.hasMatch(crumb)) return (text: text, whole: true);
       return null;
     }
     final level = sections[start].level;
@@ -215,7 +227,7 @@ String? contextSection(String relPath, String text, String locator) {
       if (sections[next].level <= level) break;
       lines.addAll(sections[next].lines);
     }
-    return lines.join('\n');
+    return (text: lines.join('\n'), whole: false);
   }
   if (wanted.startsWith('lines')) {
     final range = parseLineLocator(wanted);
@@ -227,11 +239,20 @@ String? contextSection(String relPath, String text, String locator) {
     final lines = text.split('\n');
     if (first > lines.length) return null;
     final last = first - 1 + expandedSectionLines;
-    return lines
-        .sublist(first - 1, last < lines.length ? last : lines.length)
-        .join('\n');
+    return (
+      text: lines
+          .sublist(first - 1, last < lines.length ? last : lines.length)
+          .join('\n'),
+      // A window, even one that happens to cover every line this short file
+      // has: the locator named a range and the caller may keep quoting it
+      // as one.
+      whole: false,
+    );
   }
-  return text;
+  // `part N` on a prose file, `digest`, an empty locator — none of them names
+  // a piece this can cut out, so the answer is the file and the caller is
+  // told so.
+  return (text: text, whole: true);
 }
 
 /// Markdown, cut at its headings, each section packed and each passage

@@ -132,6 +132,48 @@ class ContextChunkIndex {
     }
   }
 
+  /// How many rowids one `DELETE … IN (…)` names. SQLite's default variable
+  /// ceiling is far higher, but a de-registered project can be tens of
+  /// thousands of passages and one statement per page is what every other
+  /// bulk write in this app does.
+  static const int _removeBatch = 500;
+
+  /// Unfiles [rowids] — the `context_chunks.id`s of passages that have just
+  /// been deleted from the durable table.
+  ///
+  /// vec0 has no cascade and no foreign key, so the caller that deletes the
+  /// rows is the only thing that can say so. Leaving them filed is not merely
+  /// untidy: SQLite hands a freed `INTEGER PRIMARY KEY` back out when the
+  /// deleted rows were the highest in the table — which the chunks of the
+  /// file a walk just re-read usually are — so the next passage to take that
+  /// id is ranked by its predecessor's vector until the embedder reaches it,
+  /// and indefinitely while the embedding server is parked. [rebuild] is the
+  /// sweep for an index that has already drifted; this is what keeps it from
+  /// drifting.
+  ///
+  /// A no-op when the index is unavailable, and it swallows its own failure
+  /// for [_write]'s reason: a deletion that could not be filed must not take
+  /// down the write that prompted it.
+  Future<void> remove(List<int> rowids) async {
+    if (rowids.isEmpty) return;
+    if (!await ensureReady()) return;
+    final db = _db!;
+    try {
+      for (var start = 0; start < rowids.length; start += _removeBatch) {
+        final end = start + _removeBatch;
+        final batch =
+            rowids.sublist(start, end < rowids.length ? end : rowids.length);
+        await db.customStatement(
+          'DELETE FROM vec_context_chunks WHERE rowid IN '
+          '(${List.filled(batch.length, '?').join(', ')})',
+          batch,
+        );
+      }
+    } catch (e) {
+      debugPrint('vec: unfiling ${rowids.length} context chunks failed: $e');
+    }
+  }
+
   /// The [k] nearest passages to [query], closest first.
   ///
   /// `AND k = ?` is not a typo for a LIMIT: in sqlite-vec's KNN form `k` is a
@@ -241,10 +283,10 @@ class ContextChunkIndex {
   /// Throws the index away and builds it again from `context_chunks`.
   ///
   /// The self-heal, and it costs zero model calls — every float it needs is
-  /// already stored. It is also the only cleanup for the rowids
-  /// `ContextStore.replaceChunks` and `removeDirectory` orphan: vec0 has no
-  /// cascade, so a re-chunked file and a de-registered directory both leave
-  /// their old rowids behind until this runs.
+  /// already stored. The routine cleanup is [remove], which the store calls
+  /// as it deletes passages; this is the sweep for an index that drifted
+  /// anyway — a build where the native extension arrived late, or a delete
+  /// whose unfiling failed.
   Future<void> rebuild() async {
     if (!await ensureReady()) return;
     try {

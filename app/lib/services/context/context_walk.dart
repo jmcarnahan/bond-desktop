@@ -36,14 +36,38 @@ const List<String> contextDenylist = [
 /// File shapes skipped wherever they appear.
 ///
 /// Two different reasons in one list. A lock file is machine-written noise
-/// hundreds of lines long; the other three are how secrets are spelled, and
-/// a public repo's worth of caution says an app that reads a person's folders
-/// must not be the thing that copies their private key into a database.
+/// hundreds of lines long; everything after it is a SPELLING a secret is
+/// commonly written under, and a public repo's worth of caution says an app
+/// that reads a person's folders must not be the thing that copies their
+/// private key into a database.
+///
+/// A list of spellings is what this is, and not a guarantee. A project can
+/// keep a token in a file called `notes.md` and nothing here will know; the
+/// list catches the conventions — dotfiles, key material, cloud credentials,
+/// Terraform variables, SSH identities — because those are what a person
+/// keeps without thinking about it, and a name nobody chose deliberately is
+/// exactly the one they would not think to exclude.
 const List<String> contextFileDenylist = [
   '*.lock',
   '.env*',
   '*.pem',
   '*.key',
+  'secrets.*',
+  'secret.*',
+  'credentials.*',
+  '*-credentials.json',
+  'service-account*.json',
+  '*.tfvars',
+  '*.tfvars.json',
+  '*.p12',
+  '*.pfx',
+  '*.jks',
+  '.netrc',
+  '.npmrc',
+  '.pypirc',
+  'id_rsa*',
+  'id_ed25519*',
+  'id_ecdsa*',
 ];
 
 /// The most files one directory contributes.
@@ -158,10 +182,21 @@ class WalkResult {
   /// prunes the folder rather than filtering its contents.
   final int skipped;
 
+  /// The rel paths of directories whose listing THREW — an unmounted share,
+  /// a permissions change three folders down, a sandbox that declined.
+  ///
+  /// Named rather than counted, because a caller has to be able to tell "not
+  /// in [files]" from "gone". A subtree the walk could not open holds files
+  /// that are still on disk, and a reconcile sweep reading its absence as a
+  /// deletion would drop their rows, their words, their vectors and their
+  /// digests over a share that was offline for a minute.
+  final List<String> unlisted;
+
   const WalkResult({
     required this.files,
     required this.truncated,
     required this.skipped,
+    this.unlisted = const [],
   });
 }
 
@@ -200,6 +235,7 @@ Future<WalkResult> walkDirectory(
   ];
 
   final found = <WalkedFile>[];
+  final unlisted = <String>[];
   var skipped = 0;
 
   // The recursion is explicit, and both reasons are about what a real
@@ -309,7 +345,12 @@ Future<WalkResult> walkDirectory(
       // A folder the permissions or the sandbox will not list. Counted once
       // and stepped over, for the same reason one unreadable file is: a
       // permissions oddity three folders down must never cost the project.
+      // NAMED as well as counted: what is under it is unknown rather than
+      // absent, and the caller's deletion sweep has to be able to tell those
+      // two apart. The root itself is named by the empty string, which no
+      // rel path starts with — the caller compares against `'<path>/'`.
       skipped += 1;
+      unlisted.add(relDir);
     }
   }
 
@@ -318,6 +359,7 @@ Future<WalkResult> walkDirectory(
     maxFiles: maxFiles,
     maxTextBytes: maxTextBytes,
     skipped: skipped,
+    unlisted: unlisted,
   );
   // Sorted by path on the way out: the caps needed precedence order to
   // decide what to keep, and every reader after this wants the order a
@@ -417,6 +459,7 @@ WalkResult _applyCaps(
   required int maxFiles,
   required int maxTextBytes,
   required int skipped,
+  required List<String> unlisted,
 }) {
   files.sort((a, b) {
     final rank = _precedence(a.relPath).compareTo(_precedence(b.relPath));
@@ -449,7 +492,12 @@ WalkResult _applyCaps(
     kept.add(file);
   }
 
-  return WalkResult(files: kept, truncated: truncated, skipped: skipped);
+  return WalkResult(
+    files: kept,
+    truncated: truncated,
+    skipped: skipped,
+    unlisted: unlisted,
+  );
 }
 
 int _precedence(String relPath) {

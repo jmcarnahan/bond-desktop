@@ -158,8 +158,9 @@ no bar and no Result cell: the thread beside carries both, and its Why panel's
 Why, Person, History, Context and the context file follow the file rule: opened from a thread
 that is itself beside, they REPLACE it. One panel, never two stacked — the Why panel's
 `What happened ›` swaps the history into the same slot, and its ✕ returns to
-the transcript, not to Why. Neither Why nor History carries ⤢: each is prose
-about one message, and prose does not improve by being given the whole window.
+the transcript, not to Why. None of Why, History, Context or the context file
+carries ⤢: each is prose or a short list about one thing, and neither improves
+by being given the whole window.
 The history takes the thread's minimum width (`threadMinWidth`) rather than the
 file's — it is a page of sections and levers, not a caption.
 

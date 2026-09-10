@@ -55,6 +55,7 @@ void main() {
     String? locator,
     String? located,
     VoidCallback? onConsult,
+    String? consultNote,
   }) =>
       tester.pumpWidget(
         MaterialApp(
@@ -70,6 +71,7 @@ void main() {
                 locator: locator,
                 located: located,
                 onConsult: onConsult,
+                consultNote: consultNote,
                 now: DateTime.parse(_now),
               ),
             ),
@@ -238,6 +240,47 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(consulted, 1);
+  });
+
+  testWidgets('a file the room does not read says so where the button was',
+      (tester) async {
+    // The retriever re-checks scope and drops a file the room does not link,
+    // so a Consult here would press and change nothing. The sentence names
+    // the switch that would fix it instead.
+    await pump(
+      tester,
+      consultNote: 'Not linked to this room — switch «acme» on under '
+          'Context to consult it.',
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(ContextFilePanelBody.consultKey), findsNothing);
+    expect(find.text('Consult for the reply'), findsNothing);
+    expect(
+      find.byKey(ContextFilePanelBody.consultNoteKey),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Not linked to this room — switch «acme» on under Context '
+          'to consult it.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the button wins over the note when both are handed over',
+      (tester) async {
+    // Belt and braces on a host that says both things at once: a button that
+    // works and a sentence saying it cannot would be the panel contradicting
+    // itself in two lines.
+    await pump(
+      tester,
+      onConsult: () {},
+      consultNote: 'Not linked to this room.',
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(ContextFilePanelBody.consultKey), findsOneWidget);
+    expect(find.byKey(ContextFilePanelBody.consultNoteKey), findsNothing);
   });
 
   testWidgets('a file with no words says so', (tester) async {

@@ -115,6 +115,27 @@ void main() {
       expect(await paths(), ['notes.md']);
     });
 
+    test('the other spellings a secret is kept under are skipped too',
+        () async {
+      write('secrets.yaml', 'token: nope');
+      write('config/secret.json', '{"token": "nope"}');
+      write('credentials.json', '{"token": "nope"}');
+      write('gcp/service-account-prod.json', '{"private_key": "nope"}');
+      write('aws/prod-credentials.json', '{"aws_secret_access_key": "nope"}');
+      write('infra/prod.tfvars', 'db_password = "nope"');
+      write('certs/bundle.p12', 'binary-ish');
+      write('.netrc', 'machine example.test password nope');
+      write('.npmrc', '//registry/:_authToken=nope');
+      write('keys/id_rsa', '-----BEGIN OPENSSH PRIVATE KEY-----');
+      write('keys/id_ed25519.pub', 'ssh-ed25519 AAAA nope');
+      write('notes.md', '# Notes');
+
+      // The four original shapes were the ones somebody thought of. These
+      // are the ones a person keeps without thinking about it, which is
+      // exactly why they would not think to exclude them either.
+      expect(await paths(), ['notes.md']);
+    });
+
     test('.bondignore at the root is honoured, comments and all', () async {
       write('.bondignore', '# generated, not written\n\nreports/**\n');
       write('reports/q3.md', '# Generated');

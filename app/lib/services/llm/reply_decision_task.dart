@@ -137,16 +137,19 @@ class ReplyDecisionTask implements JsonTask<ReplyDecisionResult> {
   static const int _aboutMeCap = 600;
   static const int _reasonCap = 300;
 
-  /// Documents, in characters, and a third of what the draft gets. This is a
-  /// yes/no about one message: the passages are here to say what the file
-  /// wants, and the draft that may follow is where the wording of it earns a
-  /// bigger budget.
+  /// Documents, in characters. A fraction of what the draft gets, because
+  /// this is a yes/no about one message: the passages are here to say what
+  /// the file wants, and the draft that may follow is where the wording of
+  /// it earns a bigger budget.
   static const int _excerptsCap = 800;
 
-  /// The owner's own directories, in characters. A third of the draft's room
-  /// and no guidance fence at all: this call answers one yes-or-no question,
-  /// and the instructions for how a reply should READ have nothing to say
-  /// about whether one is owed.
+  /// The owner's own directories, in characters. Enough for the HEAD of what
+  /// the retriever ranked — the brief's opening lines and, at most, one
+  /// expanded section — and no guidance fence at all. That is the whole of
+  /// what a yes-or-no needs: whether an answer is owed turns on what the
+  /// nearest passage is ABOUT, and instructions for how a reply should READ
+  /// have nothing to say about it. Whole blocks come off the far end
+  /// (`renderContextExcerpts`), so what is cut is always what ranked last.
   static const int _directoryBriefCap = 300;
   static const int _directoryExcerptsCap = 800;
 

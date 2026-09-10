@@ -7,6 +7,7 @@ import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/keyword_index.dart' show ContextKeywordIndex;
 import 'package:bond_inbox/data/message_store.dart' show MessageStore;
+import 'package:bond_inbox/models/context_models.dart' show ContextFile;
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/context/context_reconcile_handler.dart';
 import 'package:bond_inbox/services/context/directory_access.dart';
@@ -48,6 +49,42 @@ class _FailingStore extends ContextStore {
     List<({int seq, String locator, String text})> chunks,
   ) async =>
       throw StateError('the passage write failed');
+}
+
+/// A store that counts the per-file `sha256` lookups the handler asks for.
+///
+/// The one thing a caller cannot observe from the outside: a first walk over
+/// a project used to ask this question once per file, against a column with
+/// no index, for an answer that is always empty.
+class _CountingStore extends ContextStore {
+  _CountingStore(super.db);
+
+  int shaLookups = 0;
+
+  @override
+  Future<List<ContextFile>> filesBySha(String dirId, String sha) {
+    shaLookups += 1;
+    return super.filesBySha(dirId, sha);
+  }
+}
+
+/// A store that de-registers the directory the first time the pass writes a
+/// file's words — the race between Remove directory in Settings and a
+/// reconcile pass already under way.
+class _VanishingStore extends ContextStore {
+  _VanishingStore(super.db);
+
+  String? vanish;
+
+  @override
+  Future<void> setFileText(int id, String text) async {
+    final dirId = vanish;
+    if (dirId != null) {
+      vanish = null;
+      await removeDirectory(dirId);
+    }
+    await super.setFileText(id, text);
+  }
 }
 
 void main() {
@@ -323,6 +360,65 @@ void main() {
       expect((await store.chunkCounts(id)).chunks, 1);
     });
 
+    test('the first walk asks the store nothing per file', () async {
+      for (var i = 0; i < 200; i++) {
+        write('docs/note-$i.md', '# Note $i\n\nThe $i-th thing to say.\n');
+      }
+      final counting = _CountingStore(db);
+      final id = await counting.registerDirectory(
+        path: root.path,
+        displayName: 'atlas',
+      );
+
+      await ContextReconcileHandler(
+        counting,
+        server.client,
+        const PlainDirectoryAccess(),
+        activityLog: log,
+      ).run({
+        'task_kind': 'context_reconcile',
+        'source': 'local',
+        'entity_id': id,
+      });
+
+      expect(log.notes['changed'], 200);
+      // The move check reads the rows this pass already loaded. Asking the
+      // store per file is a scan of an unindexed column two hundred times
+      // over, for an answer that on a first walk is always empty — which is
+      // what made registering a real project quadratic in its own size.
+      expect(counting.shaLookups, 0);
+    });
+
+    test('a move is still found with no per-file lookup', () async {
+      write('docs/old.md', '# Pricing\n\nThe renewal is 2,600 a month.\n');
+      final counting = _CountingStore(db);
+      final id = await counting.registerDirectory(
+        path: root.path,
+        displayName: 'atlas',
+      );
+      Future<void> pass() => ContextReconcileHandler(
+            counting,
+            server.client,
+            const PlainDirectoryAccess(),
+            activityLog: log,
+          ).run({
+            'task_kind': 'context_reconcile',
+            'source': 'local',
+            'entity_id': id,
+            'payload_json': '{"force":true}',
+          });
+      await pass();
+      final before = await chunkIdsOf(id, 'docs/old.md');
+
+      File('${root.path}/docs/old.md').renameSync('${root.path}/docs/new.md');
+      log = _Recorder();
+      await pass();
+
+      expect(log.notes['renamed'], 1);
+      expect(await chunkIdsOf(id, 'docs/new.md'), before);
+      expect(counting.shaLookups, 0);
+    });
+
     test('a CLAUDE.md appearing re-chains files the pass never read',
         () async {
       write('analysis/model.py', 'def rate():\n    return 9\n');
@@ -341,6 +437,61 @@ void main() {
       expect((await store.fileByPath(id, 'analysis/model.py'))!.claudeChain,
           ['CLAUDE.md']);
       expect(log.notes['rechained'], 1);
+    });
+  });
+
+  group('the folder underneath', () {
+    test('an unreadable file keeps its row and its passages', () async {
+      write('a.md', '# A\n\nThe first note.\n');
+      write('b.md', '# B\n\nThe second note.\n');
+      final id = await register();
+      await run(id);
+      final kept = (await store.fileByPath(id, 'a.md'))!;
+      final passages = await chunkIdsOf(id, 'a.md');
+      expect(passages, isNotEmpty);
+
+      // The permissions change under a file that is still very much there.
+      final locked = File('${root.path}/a.md');
+      Process.runSync('chmod', ['000', locked.path]);
+      addTearDown(() => Process.runSync('chmod', ['644', locked.path]));
+      // A touch, so the cheap diff opens it rather than stepping over it.
+      locked.setLastModifiedSync(DateTime.now().add(const Duration(hours: 1)));
+      log = _Recorder();
+      await run(id, force: true);
+
+      // A file that could not be read is not a file that is gone: the row,
+      // its words and its passages all stand, and the pass says so.
+      expect(log.notes['errors'], 1);
+      expect(await store.fileByPath(id, 'a.md'), isNotNull);
+      expect(await store.fileText(kept.id), isNotNull);
+      expect(await chunkIdsOf(id, 'a.md'), passages);
+    });
+
+    test('an unlistable subdirectory is not swept as deleted', () async {
+      write('top.md', '# Top\n\nThe note at the root.\n');
+      write('sub/a.md', '# A\n\nThe note underneath.\n');
+      final id = await register();
+      await run(id);
+      final buried = (await store.fileByPath(id, 'sub/a.md'))!;
+      final passages = await chunkIdsOf(id, 'sub/a.md');
+      expect(passages, isNotEmpty);
+
+      // An unmounted share, or a permissions change three folders down.
+      final sub = Directory('${root.path}/sub');
+      Process.runSync('chmod', ['000', sub.path]);
+      addTearDown(() => Process.runSync('chmod', ['755', sub.path]));
+      log = _Recorder();
+      await run(id, force: true);
+
+      // Not in the walk is not the same as gone. Sweeping the subtree would
+      // drop the rows, the words, the passages and the digests of files that
+      // are still on disk, over a folder that is readable again a minute
+      // later.
+      expect(log.notes['unlisted'], 1);
+      expect(log.notes['removed'], 0);
+      expect(await store.fileByPath(id, 'sub/a.md'), isNotNull);
+      expect(await store.fileText(buried.id), isNotNull);
+      expect(await chunkIdsOf(id, 'sub/a.md'), passages);
     });
   });
 
@@ -454,6 +605,45 @@ void main() {
 
       expect(log.status, 'skipped');
       expect(log.notes['reason'], 'gone');
+    });
+
+    test('a directory removed mid-pass leaves no unreachable rows', () async {
+      write('docs/pricing.md',
+          '# Pricing\n\nThe Marrowfield renewal is 2,600 a month.\n');
+      write('notes.md', '# Notes\n\nThe second thing to say.\n');
+      final vanishing = _VanishingStore(db);
+      final id = await vanishing.registerDirectory(
+        path: root.path,
+        displayName: 'atlas',
+      );
+      // Remove directory pressed in Settings while this pass is already
+      // walking. The remove leaves the `processing` work row alone — this
+      // very pass — so the handler goes on writing rows against a `dir_id`
+      // with no directory behind it and no foreign key to refuse them.
+      vanishing.vanish = id;
+
+      await ContextReconcileHandler(
+        vanishing,
+        server.client,
+        const PlainDirectoryAccess(),
+        activityLog: log,
+      ).run({
+        'task_kind': 'context_reconcile',
+        'source': 'local',
+        'entity_id': id,
+      });
+
+      expect(log.notes['reason'], 'gone');
+      expect(await vanishing.directory(id), isNull);
+      // Nothing unreachable left behind: no directory lists these rows and
+      // no link scopes them, so they would sit in the database until
+      // somebody registered the same folder again.
+      expect(await vanishing.filesFor(id), isEmpty);
+      expect((await vanishing.chunkCounts(id)).chunks, 0);
+      final texts = await db
+          .customSelect('SELECT COUNT(*) AS n FROM context_text')
+          .getSingle();
+      expect(texts.data['n'], 0);
     });
 
     test('a path that vanished is unavailable, with a sentence', () async {

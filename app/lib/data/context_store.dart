@@ -243,12 +243,17 @@ class ContextStore {
   /// One transaction, deepest first, so a failure part-way cannot leave
   /// passages pointing at files that are gone — and the queue rows go with
   /// it, because work naming a directory nobody registered is work that
-  /// wakes a handler to say `gone`. What it does NOT reach is the
-  /// two virtual tables: vec0 has no cascade and FTS5 no foreign key, so the
-  /// rowids stay filed until [rebuildIndexes] runs. Both hydrate through a
-  /// join that drops them, exactly as `replaceChunks` relies on, so an
-  /// orphan is invisible rather than wrong.
+  /// wakes a handler to say `gone`. The vector index is unfiled by hand
+  /// afterwards — vec0 has no cascade, and a rowid left filed is a vector
+  /// waiting to be inherited by whichever passage SQLite next hands that id
+  /// to. The FTS5 rowids are not swept here: the keyword index hydrates
+  /// through a join that drops them, so an orphan there is invisible rather
+  /// than wrong, and [rebuildIndexes] is what eventually clears them.
   Future<void> removeDirectory(String id) async {
+    final chunkIds = await _chunkIdsWhere(
+      'file_id IN (SELECT id FROM context_files WHERE dir_id = ?)',
+      [id],
+    );
     await db.transaction(() async {
       await db.customUpdate(
         'DELETE FROM context_chunks WHERE file_id IN '
@@ -292,6 +297,23 @@ class ContextStore {
         variables: _args([id, id]),
       );
     });
+    // After the commit, never inside it: the rows are gone for good now, and
+    // an unfiling that fails leaves an orphan the rebuild can still clear
+    // rather than a half-written transaction.
+    await _chunkIndex.remove(chunkIds);
+  }
+
+  /// The `context_chunks.id`s matching a WHERE clause — read BEFORE the
+  /// delete that needs them, because the vector index has to be told which
+  /// rowids it is losing and the rows themselves are the only record of that.
+  Future<List<int>> _chunkIdsWhere(String where, List<Object?> args) async {
+    final rows = await db
+        .customSelect(
+          'SELECT id FROM context_chunks WHERE $where',
+          variables: _args(args),
+        )
+        .get();
+    return [for (final row in rows) row.data['id'] as int];
   }
 
   // ── links ────────────────────────────────────────────────────────────
@@ -609,10 +631,14 @@ class ContextStore {
     );
   }
 
-  /// Removes files and everything under them, in one transaction.
+  /// Removes files and everything under them, in one transaction — and
+  /// unfiles their passages from the vector index afterwards, because vec0
+  /// has no cascade and an id SQLite hands back out would carry the deleted
+  /// file's vector into whatever takes it.
   Future<void> deleteFiles(List<int> ids) async {
     if (ids.isEmpty) return;
     final holes = _placeholders(ids.length);
+    final chunkIds = await _chunkIdsWhere('file_id IN ($holes)', ids);
     await db.transaction(() async {
       await db.customUpdate(
         'DELETE FROM context_chunks WHERE file_id IN ($holes)',
@@ -627,6 +653,7 @@ class ContextStore {
         variables: _args(ids),
       );
     });
+    await _chunkIndex.remove(chunkIds);
   }
 
   /// Replaces the `claude_chain` of one file — what a walk writes when a
@@ -849,8 +876,11 @@ class ContextStore {
   /// Delete-then-insert rather than a diff, because the chunker is
   /// deterministic: the same text and the same code produce the same
   /// passages, so a retry after a park re-derives exactly what was there and
-  /// this is idempotent by construction. The vec0 rowids of the deleted rows
-  /// stay filed — see [removeDirectory] — and hydrate to nothing.
+  /// this is idempotent by construction. The old rows' vec0 rowids are
+  /// unfiled as they go: they are the highest ids in the table, so SQLite
+  /// hands the very same ids to the passages inserted a line later, and a
+  /// vector left behind would rank the new text by the old text's meaning
+  /// until the embedder catches up.
   ///
   /// Every row is written un-embedded. The embedder fills them in one POST at
   /// a time, and the index's backfill deliberately cannot see a row until it
@@ -861,6 +891,7 @@ class ContextStore {
   ) async {
     final now = _nowIso();
     final ids = <int>[];
+    final replaced = await _chunkIdsWhere('file_id = ?', [fileId]);
     await db.transaction(() async {
       await db.customUpdate(
         'DELETE FROM context_chunks WHERE file_id = ?',
@@ -887,6 +918,11 @@ class ContextStore {
         ids.add(row.data['id'] as int);
       }
     });
+    // The old rowids, not the new ones — and the two lists usually hold the
+    // same numbers, which is the whole reason this call exists. The rows
+    // just inserted carry no vector yet, so unfiling their ids removes the
+    // predecessor's and nothing of theirs.
+    await _chunkIndex.remove(replaced);
     return ids;
   }
 
@@ -1035,8 +1071,11 @@ class ContextStore {
 
   /// Throws both derived indexes away and builds them again.
   ///
-  /// The self-heal, and the only cleanup for the rowids [replaceChunks],
-  /// [deleteFiles] and [removeDirectory] orphan.
+  /// The self-heal. The vector rowids [replaceChunks], [deleteFiles] and
+  /// [removeDirectory] free are unfiled as those methods run, so this is the
+  /// sweep for an index that drifted anyway — a build where the native
+  /// extension arrived after the deletes did — and the only cleanup the FTS5
+  /// side has.
   Future<void> rebuildIndexes() async {
     await _chunkIndex.rebuild();
     await _keywordIndex.rebuild();
@@ -1283,9 +1322,10 @@ class ContextStore {
   /// attached, back in the order they were ranked.
   ///
   /// The scope is re-applied here, belt and braces: it costs one indexed
-  /// lookup and it means an orphaned vec0 or FTS5 rowid — [replaceChunks] and
-  /// [removeDirectory] both leave those behind — can never hydrate into a
-  /// passage from a directory this room may not read.
+  /// lookup and it means an orphaned rowid — the FTS5 side keeps them until
+  /// [rebuildIndexes] runs, and the vector side keeps them whenever an
+  /// unfiling failed — can never hydrate into a passage from a directory
+  /// this room may not read.
   ///
   /// Ids that hydrate to nothing are skipped rather than counted, which is
   /// exactly what an orphan looks like.
