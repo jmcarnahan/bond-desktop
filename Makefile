@@ -10,6 +10,13 @@
 # `MODEL_PORT ?= 8080   # free` yields "8080          " and every
 # http://localhost:$(MODEL_PORT)/v1/... below would expand with a space in it.
 
+# local.mk is read FIRST, before any default below is set and before any `:=`
+# snapshots one: a plain `=` in it beats every `?=` here, and MODEL_FLAGS,
+# FAST_FLAGS and MODEL_CACHE (all `:=`) see the override instead of the
+# default. With the include lower down, a CTX_SIZE set in local.mk was printed
+# in the launch line but never reached llama-server.
+-include local.mk
+
 # Free locally; sibling stacks use 8000-8002, 18000-18005, 3001.
 MODEL_PORT   ?= 8080
 MODEL_HF     ?= ggml-org/Qwen3.8-27B-GGUF:Q4_K_M
@@ -509,12 +516,11 @@ clean:
 # wherever those values already live. The same file may carry
 # BOND_MCP_SERVER_URL — the deployed bond-mcps endpoint, kept out of source
 # for the same public-repo reason as the ids.
--include local.mk
 MS_ENV ?= $(CURDIR)/.env
 
 # ── the bakeoff: where a bench points ──────────────────────────────────
-# Every one of these is `?=` and sits AFTER the include above, so a durable
-# override in local.mk wins and a one-off on the command line wins over that.
+# Every one of these is `?=`, so a durable override in local.mk (included at
+# the top) wins and a one-off on the command line wins over that.
 # The point is that a candidate runtime can be benched with one command and no
 # code edit: `make bench BENCH_URL=http://localhost:9000/v1/chat/completions
 # BENCH_LABEL=omlx/qwen3-4b-4bit BENCH_MODEL=qwen3-4b`.
