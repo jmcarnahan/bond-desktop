@@ -4758,6 +4758,11 @@ WHERE source IN (${_placeholders(sources.length)})
   /// `options_dismissed` goes back to 0 for the same reason `graph_draft_id`
   /// is nulled: a regenerate is a FRESH suggestion, and the user closing the
   /// last set of short replies must not silence a set they have never seen.
+  ///
+  /// `context_json` is overwritten the same way and with the same rule,
+  /// including with null: it is the inventory of what THIS answer read, and a
+  /// regenerate that read nothing must not leave the previous answer's
+  /// citations under the composer's provenance line.
   Future<void> upsertDraft({
     required String source,
     required String conversationKey,
@@ -4765,6 +4770,7 @@ WHERE source IN (${_placeholders(sources.length)})
     required String body,
     String? evidence,
     String? optionsJson,
+    String? contextJson,
     String status = 'suggested',
   }) async {
     final now = _nowIso();
@@ -4773,8 +4779,8 @@ WHERE source IN (${_placeholders(sources.length)})
 INSERT INTO drafts (
   source, conversation_key, reply_to_message_id, body, evidence, status,
   graph_draft_id, web_link, created_at, updated_at, options_json,
-  options_dismissed
-) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)
+  options_dismissed, context_json
+) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0, ?)
 ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   conversation_key = excluded.conversation_key,
   body = excluded.body,
@@ -4784,7 +4790,8 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   web_link = NULL,
   updated_at = excluded.updated_at,
   options_json = excluded.options_json,
-  options_dismissed = 0
+  options_dismissed = 0,
+  context_json = excluded.context_json
 ''',
       variables: _args([
         source,
@@ -4796,6 +4803,7 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
         now,
         now,
         optionsJson,
+        contextJson,
       ]),
     );
   }

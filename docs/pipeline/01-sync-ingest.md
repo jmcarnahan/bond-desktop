@@ -5,7 +5,11 @@
 and stamps cheap derived fields — notably `addressed_me`. It then enqueues all
 downstream work: `enqueueExtractBacklog` and `enqueueEmbedBacklog` write work
 rows for messages that lack extraction or vectors, and
-`requeueWork('storyline_sweep')` revives the clustering pass. Enqueueing is
+`requeueWork('storyline_sweep')` revives the clustering pass. Last, one
+`context_reconcile` item per REGISTERED context directory, under source
+`local` — the folders the owner registered are re-read on every pass, linked
+or not, so the index follows a project that keeps changing
+([13-context-directories.md](13-context-directories.md)). Enqueueing is
 idempotent — re-syncing the same window writes no duplicate work.
 
 **No model call.** Sync is the only stage that touches the network for

@@ -160,6 +160,15 @@ List<AttachmentChunk>? _slideChunks(List<String> lines) {
 /// The overlap is trimmed FORWARD to a word boundary rather than cut at
 /// exactly 150 characters, so a passage never opens on half a word — a
 /// fragment like `ract expires` embeds as noise and reads as a mistake.
+///
+/// Public because it is the ONE packing rule the app has, and the context
+/// directories' chunker packs a markdown section with it rather than
+/// growing a second one that would drift. Nothing about it is specific to an
+/// attachment; the locators it hands back (`part 2`, or empty for a single
+/// passage) are the generic ones, and a caller with its own naming — a
+/// heading breadcrumb, say — replaces them.
+List<AttachmentChunk> packProseChunks(String text) => _proseChunks(text);
+
 List<AttachmentChunk> _proseChunks(String text) {
   final paragraphs = [
     for (final p in text.split(RegExp(r'\n\s*\n')))

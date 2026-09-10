@@ -110,7 +110,9 @@ class AiWorker {
   /// Every source whose work this worker drains. Handlers are already
   /// per-item source-aware (they read `item['source']`), so widening this
   /// list is all a new connector needs.
-  static const List<String> _sources = ['email', 'teams'];
+  /// `local` is not a connector: it is the source context directories queue
+  /// under, because a folder on this machine came from no mailbox at all.
+  static const List<String> _sources = ['email', 'teams', 'local'];
 
   /// One retry, then the item is left alone. Same trade triage makes: a local
   /// model that answered unparseably often gets it right on a second pass, and

@@ -16,6 +16,7 @@ import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/archive_provider.dart';
+import '../providers/context_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/drafts_inbox_provider.dart';
@@ -798,6 +799,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // different account signing in next must find neither — mail from two
     // mailboxes interleaved in one inbox is the bug this line rules out.
     await ref.read(messageStoreProvider).wipeAll();
+    // The links and nothing else: they name conversation keys and storyline
+    // ids the wipe just deleted. The directories stay registered — they are
+    // the user's own folders, not this mailbox's data.
+    await ref.read(contextStoreProvider).unlinkAll();
     // The mail is gone from the file; the files have to go from the disk. The
     // cache is content-addressed and outside the database, so nothing above
     // would have taken it.
@@ -1979,6 +1984,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // there is no platform on the other end of the channel — the About
     // section then says 'Version unknown' rather than throwing.
     final stamps = ref.watch(syncStampsProvider).valueOrNull;
+    // Watched for the same reason the stamps are: the library re-reads on
+    // every recorded activity event, so a reconcile that finishes behind an
+    // open Settings pane moves `reading…` to `12 files · read just now`
+    // without the user touching anything.
+    final contextDirs = ref.watch(contextDirectoriesProvider);
     final appInfo = ref.watch(appInfoProvider).valueOrNull;
     final databasePath = ref.watch(databasePathProvider).valueOrNull;
     return SettingsScreen(
@@ -2152,6 +2162,44 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? null
           : '${appInfo.version} (${appInfo.build})',
       databasePath: databasePath,
+      // `valueOrNull ?? const []` rather than the AsyncValue's own empty
+      // state: the section must render — with its Loading… line — while the
+      // first read is out, and a null here would take the whole section off
+      // the screen for that frame.
+      contextDirectories: contextDirs.valueOrNull ?? const [],
+      contextDirectoriesLoading: contextDirs.isLoading,
+      contextDirectoriesError:
+          contextDirs.hasError ? 'The directories could not be read.' : null,
+      onAddContextDirectory: () async {
+        final added =
+            await ref.read(contextDirectoriesActionsProvider).addDirectory(
+                  _fileDialogs,
+                );
+        if (!mounted || added == null) return;
+        _toast('Added ${added.displayName}');
+      },
+      onRereadContextDirectory: (id) {
+        if (!mounted) return;
+        unawaited(ref.read(contextDirectoriesActionsProvider).reread(id));
+      },
+      onRemoveContextDirectory: (id) {
+        if (!mounted) return;
+        unawaited(ref.read(contextDirectoriesActionsProvider).remove(id));
+      },
+      onContextDigestsChanged: (id, on) {
+        if (!mounted) return;
+        unawaited(
+          ref.read(contextDirectoriesActionsProvider).setDigests(id, on),
+        );
+      },
+      onContextHonorGitignoreChanged: (id, on) {
+        if (!mounted) return;
+        unawaited(
+          ref
+              .read(contextDirectoriesActionsProvider)
+              .setHonorGitignore(id, on),
+        );
+      },
     );
   }
 

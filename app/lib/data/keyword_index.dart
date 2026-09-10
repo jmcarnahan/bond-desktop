@@ -1,13 +1,15 @@
 /// The word indexes — FTS5 tables over the text a person would type at, built
 /// lazily, thrown away without ceremony, and never part of the schema.
 ///
-/// Two of them, for the two corpora a search asks about: [MessageKeywordIndex]
-/// over `messages` and [ChunkKeywordIndex] over `attachment_chunks`. They are
-/// the exact counterpart of `MessageVectorIndex` — same lifecycle, same
-/// promises — because they answer the other half of the same question. The
-/// vector index knows what a message is ABOUT; these know what it SAYS, which
-/// is the only thing that can find a gate-dropped newsletter nobody ever paid
-/// an embedding for.
+/// Three of them, for the three corpora a search asks about:
+/// [MessageKeywordIndex] over `messages`, [ChunkKeywordIndex] over
+/// `attachment_chunks`, and [ContextKeywordIndex] over `context_chunks` — the
+/// passages of the owner's own registered directories. They are the exact
+/// counterpart of `MessageVectorIndex` — same lifecycle, same promises —
+/// because they answer the other half of the same question. The vector index
+/// knows what a message is ABOUT; these know what it SAYS, which is the only
+/// thing that can find a gate-dropped newsletter nobody ever paid an
+/// embedding for — or the one file in a project that names a part number.
 ///
 /// Everything here is derived. Losing an index costs one backfill
 /// over rows that are already stored and not one model call, which is why
@@ -183,19 +185,31 @@ abstract class _FtsIndex {
   /// the parser an exclusion. A malformed expression throws inside SQLite and
   /// comes back as `const []`, which is the same answer as "nothing matched"
   /// on purpose: there is nothing a reader could do differently about either.
+  ///
+  /// [rowidWhere] is a predicate over `rowid` — `rowid IN (SELECT …)` — added
+  /// INSIDE the ranked query, with [rowidArgs] bound after the expression and
+  /// before the limit. Scoping here rather than after the fact is the
+  /// difference between [limit] best rows the caller may read and [limit]
+  /// best rows of which it may read none: a corpus where another directory
+  /// holds two hundred better matches would otherwise answer nothing.
   Future<List<KeywordRow>> match(
     String matchExpression, {
     required int limit,
+    String? rowidWhere,
+    List<Object?> rowidArgs = const [],
   }) async {
     if (!await ensureReady()) return const [];
     final weightList = _weights.join(', ');
+    final scope = rowidWhere == null ? '' : ' AND $rowidWhere';
     try {
       final rows = await _db!
           .customSelect(
             'SELECT rowid AS row_id, bm25($_tableName, $weightList) AS score '
-            'FROM $_tableName WHERE $_tableName MATCH ? ORDER BY score LIMIT ?',
+            'FROM $_tableName WHERE $_tableName MATCH ?$scope '
+            'ORDER BY score LIMIT ?',
             variables: [
               Variable<String>(matchExpression),
+              for (final arg in rowidArgs) Variable(arg),
               Variable<int>(limit),
             ],
           )
@@ -564,6 +578,166 @@ ORDER BY c.id LIMIT ?
         await db.customStatement(
           'DELETE FROM $_tableName '
           'WHERE rowid NOT IN (SELECT id FROM attachment_chunks)',
+        );
+      }
+      return filed;
+    } catch (e) {
+      debugPrint('fts: $_tableName backfill stopped after $filed: $e');
+      return filed;
+    }
+  }
+}
+
+/// The word index over `context_chunks` — the passages of the owner's own
+/// registered directories, keyed by `context_chunks.id`.
+///
+/// The third corpus, and the one where words matter most. A project holds
+/// part numbers, config keys, function names and file paths — exactly the
+/// tokens an embedding flattens and a word index finds exactly. The vector
+/// half of the same retrieval is [ContextChunkIndex].
+class ContextKeywordIndex extends _FtsIndex {
+  static const String table = 'fts_context_chunks';
+
+  /// `path` rather than the sibling's `name`, and it is the same bet with a
+  /// better hand: a rel path carries the folder as well as the file, so a
+  /// query mentioning `pricing` reaches `docs/pricing.md` through its name
+  /// and `analysis/pricing/model.py` through its folder.
+  ///
+  /// `chars` rides along UNINDEXED as a SIGNATURE column rather than
+  /// something anyone searches: summed on both sides it is the third of the
+  /// three numbers [backfill] compares before it does any work, and the only
+  /// one of them that notices a passage whose text changed under an id it
+  /// kept — which is every edit to a file that re-chunked to the same count.
+  static const String ddl =
+      'CREATE VIRTUAL TABLE IF NOT EXISTS $table USING fts5('
+      'path, body, chars UNINDEXED, '
+      "tokenize='porter unicode61 remove_diacritics 2')";
+
+  ContextKeywordIndex(BondDatabase super.db);
+
+  ContextKeywordIndex.disabled() : super(null);
+
+  @override
+  String get _tableName => table;
+
+  @override
+  String get _ddl => ddl;
+
+  /// The path counts double, on [ChunkKeywordIndex]'s reasoning: someone
+  /// asking about the pricing analysis is usually also half-remembering where
+  /// it lives, and a path is a handful of tokens against a passage's
+  /// hundreds.
+  ///
+  /// Three numbers for three columns: the trailing zero is `chars`, which is
+  /// UNINDEXED and can never contribute a term but does occupy its place in a
+  /// weight list `bm25()` reads positionally.
+  @override
+  List<double> get _weights => const [2.0, 1.0, 0];
+
+  /// Files every passage whose text the index does not already hold.
+  ///
+  /// By comparing TEXT and not by presence, for the trap [ChunkKeywordIndex]
+  /// names: `replaceChunks` deletes a file's passages and inserts new ones,
+  /// and SQLite hands an `INTEGER PRIMARY KEY` the lowest free value, so a
+  /// replacement routinely lands on the id its predecessor just vacated. Here
+  /// that is not a corner case but the ordinary path — a reconcile pass
+  /// re-chunks every file that changed, on every sync.
+  ///
+  /// The comparison is a LEFT JOIN and a string inequality over every stored
+  /// passage, and it runs on every search, so it is fenced behind three cheap
+  /// numbers: how many passages there are, the highest id, and the total
+  /// character count. All three agreeing is as close to "nothing has changed"
+  /// as this table can be asked without reading it.
+  ///
+  /// The residual that fence accepts: a re-chunk that lands on exactly the
+  /// same ids with exactly the same total length and different words is not
+  /// noticed until something else about the table moves. It costs a stale
+  /// passage in one search result rather than a wrong answer anywhere
+  /// durable, and [rebuild] is the fix.
+  @override
+  Future<int> backfill() async {
+    if (!await ensureReady()) return 0;
+    final db = _db!;
+    var filed = 0;
+    try {
+      final signature = await db.customSelect('''
+SELECT (SELECT COUNT(*) FROM context_chunks) AS src_n,
+       (SELECT COALESCE(MAX(id), 0) FROM context_chunks) AS src_mx,
+       (SELECT COALESCE(SUM(chars), 0) FROM context_chunks) AS src_ch,
+       (SELECT COUNT(*) FROM $_tableName) AS ix_n,
+       (SELECT COALESCE(MAX(rowid), 0) FROM $_tableName) AS ix_mx,
+       (SELECT COALESCE(SUM(chars), 0) FROM $_tableName) AS ix_ch
+''').getSingle();
+      // Read as numbers on both sides: an FTS5 content column has no affinity,
+      // so what comes back out of the index is whatever shape went in.
+      int number(String key) => (signature.data[key] as num?)?.toInt() ?? 0;
+      if (number('src_n') == number('ix_n') &&
+          number('src_mx') == number('ix_mx') &&
+          number('src_ch') == number('ix_ch')) {
+        return 0;
+      }
+
+      var last = 0;
+      while (true) {
+        final rows = await db
+            .customSelect(
+              '''
+SELECT c.id AS chunk_id
+FROM context_chunks c
+LEFT JOIN context_files fi ON fi.id = c.file_id
+LEFT JOIN $_tableName f ON f.rowid = c.id
+WHERE c.id > ?
+  AND (f.rowid IS NULL OR f.body <> c.chunk_text
+       OR f.path <> COALESCE(fi.rel_path, ''))
+ORDER BY c.id LIMIT ?
+''',
+              variables: [
+                Variable<int>(last),
+                Variable<int>(batch),
+              ],
+            )
+            .get();
+        if (rows.isEmpty) break;
+        final ids = [for (final row in rows) row.data['chunk_id'] as int];
+        last = ids.last;
+        final holes = List.filled(ids.length, '?').join(', ');
+
+        await db.transaction(() async {
+          // FTS5 has no UPSERT, and the row may be an id-reuse collision
+          // rather than a new passage, so the delete is not optional.
+          await db.customStatement(
+            'DELETE FROM $_tableName WHERE rowid IN ($holes)',
+            ids,
+          );
+          await db.customStatement(
+            'INSERT INTO $_tableName(rowid, path, body, chars) '
+            "SELECT c.id, COALESCE(fi.rel_path, ''), c.chunk_text, c.chars "
+            'FROM context_chunks c '
+            'LEFT JOIN context_files fi ON fi.id = c.file_id '
+            'WHERE c.id IN ($holes)',
+            ids,
+          );
+        });
+        filed += ids.length;
+        // A short page is the last page.
+        if (ids.length < batch) break;
+      }
+
+      // A re-chunk and a de-registered directory both delete passages, so a
+      // row can outlive what it describes — and sweeping those is what stops
+      // a search quoting a version of a file that no longer exists. Guarded
+      // by the two counts for the message index's reason: the sweep is a
+      // scan, and the tables agree on almost every pass.
+      final counts = await db
+          .customSelect(
+            'SELECT (SELECT COUNT(*) FROM $_tableName) AS filed, '
+            '(SELECT COUNT(*) FROM context_chunks) AS stored',
+          )
+          .getSingle();
+      if (counts.data['filed'] != counts.data['stored']) {
+        await db.customStatement(
+          'DELETE FROM $_tableName '
+          'WHERE rowid NOT IN (SELECT id FROM context_chunks)',
         );
       }
       return filed;

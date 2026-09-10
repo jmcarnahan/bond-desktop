@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import '../data/context_store.dart';
 import '../data/message_store.dart';
 import '../models/message_models.dart' show localEchoPrefix;
 import 'activity_log.dart';
@@ -121,6 +122,11 @@ class SyncService implements MailSync {
   /// judges history against [AttentionTuning.defaultThreshold].
   final Future<double> Function()? _threshold;
 
+  /// The registered local directories, or null for every caller that does not
+  /// have any — every test that predates them, and any build wired without
+  /// the feature. Null means the tail below enqueues nothing.
+  final ContextStore? _context;
+
   SyncService(
     this._mail,
     this._store, {
@@ -128,8 +134,10 @@ class SyncService implements MailSync {
     PipelineProgress? progress,
     Future<String?> Function()? userAddress,
     Future<double> Function()? attentionThreshold,
+    ContextStore? contextStore,
     this._lookbackDays,
   })  : _log = activityLog ?? ActivityLog.disabled(),
+        _context = contextStore,
         _progress = progress ?? const PipelineProgress.disabled(),
         _userAddressReader = userAddress,
         _threshold = attentionThreshold;
@@ -377,6 +385,29 @@ class SyncService implements MailSync {
       // after this one instead of staying `done` forever.
       await _store.requeueWork('storyline_sweep', _source, 'sweep');
 
+      // One reconcile per REGISTERED directory, linked or not, on every sync.
+      // That is what makes a directory a living context rather than a
+      // snapshot: the folder keeps changing after it is linked, and the index
+      // has to follow it without anyone asking. Not linked-only, because the
+      // link is a decision the user makes in a second, and a directory that
+      // had to be re-read before it could answer would be useless for the
+      // first minute of every conversation. A requeue rather than an enqueue,
+      // for the sweep's reason one line above: `enqueueWork` is `OR IGNORE`
+      // and a finished row keeps `done` forever, so the folder would be read
+      // once on the first sync of a launch and never again. `requeueWork`
+      // revives a `done` or `error` row and leaves a pending one alone, so a
+      // row still waiting from the last sync stays one item. It nulls
+      // `payload_json` with it, which is right here — a sync pass is never a
+      // forced one. The handler's own freshness rung is what stops a hurried
+      // minute walking the same folder three times.
+      var contextDirs = 0;
+      if (_context != null) {
+        for (final dir in await _context.directories()) {
+          await _store.requeueWork('context_reconcile', 'local', dir.id);
+          contextDirs += 1;
+        }
+      }
+
       // Only when it found something. A reconcile that found nothing is the
       // normal state and every ten minutes of it would bury the panel — and it
       // cannot be made quiet the ordinary way, because [ActivityLog] never
@@ -430,6 +461,7 @@ class SyncService implements MailSync {
           'stripped_sender_tips': ?strippedSenderTips,
           'named_participants': ?namedParticipants,
           'refolded_threads': ?refoldedThreads,
+          if (contextDirs > 0) 'context_dirs': contextDirs,
           if (inboxResync || sentResync) 'resync': true,
         },
       );

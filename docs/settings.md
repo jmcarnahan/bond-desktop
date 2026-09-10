@@ -15,9 +15,9 @@ stacked on top of anything.
   account, Settings, Activity log and Sign out — see `docs/shell.md`. This is
   `_openSettings`, the whole screen, `SettingsScope.all`.
 - **The AI stop.** `RailSection.ai` renders the same screen with
-  `SettingsScope.ai`: titled **AI**, and narrowed to the sections that are
+  `SettingsScope.ai`: titled **AI**, and narrowed to the six sections that are
   about how the model reads this mailbox — About me, Models, Needs You,
-  Activity log and Storylines. The Microsoft connection, Notifications,
+  Activity log, Storylines and Context directories. The Microsoft connection, Notifications,
   Sync & data and About are about the app or the account rather than the
   model, and stay behind the avatar menu. Its Back goes to the Inbox rather
   than to a `_showingSettings`
@@ -79,14 +79,15 @@ body has the same shape in `settings_models_body.dart`.
 | Notifications | `onNotifyStyleChanged` wired | `Off` / `In-app ribbon` / `System notifications when in background` |
 | Activity log | `onShowActivityLogChanged` wired | `Shown in the sidebar` / `Hidden` |
 | Storylines | `onStorylineNewestFirstChanged` wired | `Newest first` / `Oldest first` |
+| Context directories | always (both scopes) | `No directories yet` / `N directories · M files` |
 | Sync & data | `onRefreshNow` wired | `Not synced yet`; `Mail synced <rel> · Teams <rel>`; a side that never ran says `not synced yet` in words (`Mail synced 4m ago · Teams not synced yet`, `Mail not synced yet · Teams synced 2h ago`) |
 | About | `appVersion` or `databasePath` is known | `Bond <version>` / `Version unknown` |
 
 **A section whose wiring is absent is absent** — the same discipline every
 optional row in the old dialog followed, and what lets the permissions tests
 wire `hasScope` alone. Under `SettingsScope.ai` four of them are absent for a
-second reason: the AI pane keeps About me, Models, Needs You, Activity log and
-Storylines, in this same order, and drops the rest.
+second reason: the AI pane keeps About me, Models, Needs You, Activity log,
+Storylines and Context directories, in this same order, and drops the rest.
 
 **These strings are pinned by tests** (`settings_screen_test.dart`,
 `settings_connection_test.dart`, `settings_models_test.dart`,
@@ -370,6 +371,68 @@ digests and the pins all survive, because none of them is a copy of the file.
 The same tree is emptied by **Sign out and clear local data** and by an identity
 wipe (`IdentityGuard`), which starts the delete rather than waiting on it: the
 rows pointing at those files are already gone, so nothing can reach one.
+
+## Context directories
+
+The library of local folders the model may read when it drafts. The section is
+its own widget — `app/lib/widgets/settings_context_section.dart` — in the
+`MicrosoftConnectionSection` shape: it owns which row is asking a second time
+about Remove and whether the open panel is out, and it builds its own
+`SettingsSection`. It appears in **both scopes**, because what the model is
+allowed to read is a question about the model.
+
+The body opens with one sentence saying what a directory is for and that it is
+re-read on every sync. Then one block per registered directory:
+
+- The **display name** (the folder's own name), the **path** in muted type.
+- A **status line**: `12 files · 30 passages · read 3m ago` once it has been
+  read; `not read yet` before the first pass, `reading…` during one, and the
+  stored sentence in the error colour for a folder that is `unavailable` or
+  that failed — the counts are dropped there, because they describe a walk
+  from before the folder went away. When vectors are still arriving the line
+  gains ` · embedding 8 of 30`. Singulars are singular: `1 file`,
+  `1 passage`, and the collapsed summary says `1 directory · 12 files`.
+- A **link count**: `Links: 3`, or `Not linked to any thread yet`. Registering
+  is not linking (see
+  [pipeline/13-context-directories.md](pipeline/13-context-directories.md)) —
+  a directory is read whether or not any room points at it.
+- **Re-read now**, which requeues the reconcile with `{"force":true}` and
+  pumps the worker. Forced, because the person is standing in front of it: the
+  handler's sixty-second freshness rung would otherwise answer `fresh` at a
+  row that has not changed on screen.
+- **Summaries** — the `digests` column. On by default: each changed text file
+  earns one fast-slot digest, which is what makes a question about *findings*
+  reach an analysis whose code shares none of its vocabulary.
+- **Read ignored files** — `honor_gitignore`, **inverted**. The stored column
+  asks "is `.gitignore` honoured"; the switch asks the question a person
+  actually has. On by default, because Claude Code analyses land in ignored
+  `output/` and `reports/` folders. The inversion lives in the section and
+  nowhere else. A hard denylist (`.git`, `node_modules`, build output, keys)
+  applies either way.
+- **Remove**, an inline two-step for the reason every destructive control on
+  this screen is: the first tap *replaces* the button with a red **Remove
+  directory** beside a **Keep**, so the second click lands on a different
+  button that did not exist a moment ago. A caption under the pair names what
+  goes: `Removes its index and 3 links; the folder itself is untouched.` The
+  index and the links are deleted; the folder on disk is not, and never has
+  been written to.
+
+At the foot of the body is **Add directory…**: the open panel
+(`FileDialogs.chooseDirectory`), then a security-scoped bookmark taken
+immediately — the sandbox's grant is on that pick, and a bookmark asked for a
+moment later is an error rather than a bookmark — then `registerDirectory`, a
+forced `context_reconcile`, and a pump. The button reads **Adding…** and goes
+inert until all of that is back, the same contract **Refresh now** keeps. A
+cancelled panel registers nothing and says nothing.
+
+Nothing here reaches for a provider: the section takes rows and six closures,
+and the host wires them through `ContextDirectoriesActions` in
+`app/lib/providers/context_provider.dart`. The list itself is
+`contextDirectoriesProvider`, which the screen **watches** and which re-reads
+on every recorded activity event — so a reconcile landing behind an open
+Settings pane moves `reading…` to `12 files · read just now` with no timer of
+its own.
+
 
 ## About
 

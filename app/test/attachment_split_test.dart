@@ -115,6 +115,10 @@ class _FakeDialogs implements FileDialogs {
     suggested = suggestedName;
     return answer;
   }
+
+  /// Nothing in this test picks a folder; the seam only has to exist.
+  @override
+  Future<String?> chooseDirectory() async => null;
 }
 
 void main() {

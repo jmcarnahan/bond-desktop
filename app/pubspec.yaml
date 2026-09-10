@@ -87,6 +87,13 @@ dependencies:
   # preview needs with these two, and is the only file allowed to import them.
   archive: 4.2.0
   xml: 7.0.1
+  # Both were already resolved transitively; promoted to direct because the
+  # context-directories walk and the Claude-conventions parser import them by
+  # name. `glob` matches `.bondignore` / `.gitignore` patterns against a rel
+  # path, `yaml` reads the frontmatter of a skill or a rule. Carets rather
+  # than pins: neither is near the toolchain, and both are stable.
+  glob: ^2.1.2
+  yaml: ^3.1.2
 dev_dependencies:
   flutter_test:
     sdk: flutter

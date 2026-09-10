@@ -896,6 +896,75 @@ void main() {
     expect(vecTables, isEmpty);
   });
 
+  test('v14 to v15 keeps the draft and takes a directory', () async {
+    // The pair the context-directories round adds. A drafts row is seeded at
+    // v14 so the step's ALTER is exercised against real data rather than an
+    // empty table, and the new column has to arrive NULL — a draft written
+    // before the feature existed read nothing.
+    final schema = await verifier.schemaAt(14);
+    schema.rawDatabase.execute("""
+      INSERT INTO drafts (source, conversation_key, reply_to_message_id,
+        body, status, created_at, updated_at)
+      VALUES ('email', 'conv-ridge', 'm-ridge', 'Happy to help.',
+        'suggested', 't', 't');
+    """);
+
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 15);
+    addTearDown(db.close);
+
+    final draft = await db
+        .customSelect('SELECT * FROM drafts WHERE reply_to_message_id = ?',
+            variables: [Variable('m-ridge')])
+        .getSingle();
+    expect(draft.data['body'], 'Happy to help.');
+    expect(draft.data['context_json'], null);
+
+    // Nothing is invented: a v14 install had no directories and the step
+    // creates none.
+    for (final table in const [
+      'context_dirs',
+      'context_links',
+      'context_files',
+      'context_text',
+      'context_chunks',
+    ]) {
+      final rows = await db.customSelect('SELECT * FROM $table').get();
+      expect(rows, isEmpty, reason: table);
+    }
+
+    // And the tables take a write, which a STRICT one would reject if the
+    // step had declared a column as the wrong type.
+    await db.customStatement(
+      "INSERT INTO context_dirs (id, path, display_name, created_at, "
+      "updated_at) VALUES ('abc123', '/Users/ridge/atlas', 'atlas', 't', 't')",
+    );
+    final stored =
+        await db.customSelect('SELECT * FROM context_dirs').getSingle();
+    expect(stored.data['status'], 'pending');
+    expect(stored.data['digests'], 1);
+    expect(stored.data['honor_gitignore'], 0);
+    expect(stored.data['files_count'], 0);
+    expect(stored.data['bookmark'], null);
+  });
+
+  test('v15 migration creates neither derived index', () async {
+    // The same guard v8 and v13 give, for the third and fourth virtual
+    // tables: `vec_context_chunks` and `fts_context_chunks` are built lazily
+    // at first use, and one created inside a step would fail every pair in
+    // the group above rather than this one test.
+    final schema = await verifier.schemaAt(14);
+    final db = BondDatabase(schema.newConnection());
+    await verifier.migrateAndValidate(db, 15);
+    addTearDown(db.close);
+
+    final derived = await db
+        .customSelect("SELECT name FROM sqlite_master "
+            "WHERE name LIKE 'vec_context%' OR name LIKE 'fts_context%'")
+        .get();
+    expect(derived, isEmpty);
+  });
+
   test('v8 migration leaves no vec tables behind', () async {
     // The sqlite-vec index over `message_vectors` is built lazily, at first
     // search, and never by a migration — because `migrateAndValidate` diffs

@@ -522,6 +522,23 @@ void main() {
       );
     });
 
+    test('one changed file reads as one file', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_reconcile',
+          detail: const {'changed': 1, 'removed': 1},
+        )),
+        'Read directory — 1 file changed · 1 removed',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_reconcile',
+          detail: const {'changed': 3},
+        )),
+        'Read directory — 3 files changed',
+      );
+    });
+
     test('a retry names the stages it put back', () {
       // Which work was requeued is the whole question a person has after
       // pressing Retry; a count of stages does not answer it.

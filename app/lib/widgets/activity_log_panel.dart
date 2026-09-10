@@ -93,6 +93,7 @@ class ActivityLogPanel extends StatefulWidget {
     'ignore': 'Ignore',
     'attachment_text': 'Read attachment',
     'attachment_digest': 'Attachment digest',
+    'context_reconcile': 'Read directory',
     'needs_you': 'Needs You',
     'needs_you_rejudge': 'Needs You re-judge',
     'retry': 'Retry',
@@ -113,6 +114,9 @@ class ActivityLogPanel extends StatefulWidget {
     'gated': 'nothing worth extracting',
     'already_drafted': 'already drafted',
     'no_reply_target': 'nothing to reply to',
+    'fresh': 'read less than a minute ago',
+    'unavailable': 'the directory could not be opened',
+    'gone': 'the directory is no longer registered',
   };
 
   static String _label(String kind) => _kindLabels[kind] ?? kind;
@@ -260,6 +264,20 @@ class ActivityLogPanel extends StatefulWidget {
       case 'attachment_digest':
         final kind = detail['kind'];
         return kind is String && kind.isNotEmpty ? '$label — $kind' : label;
+      // Counts CHANGES and not files, because the number a person wants
+      // after a sync is what moved: a project of two thousand files that is
+      // unchanged reads as `0 files changed`, which is the whole point of
+      // the pass being cheap.
+      case 'context_reconcile':
+        final changed = detail['changed'];
+        if (changed is! num) return label;
+        final removed = detail['removed'];
+        final count = changed.toInt();
+        final sentence =
+            '$label — $count ${count == 1 ? 'file' : 'files'} changed';
+        return removed is num && removed > 0
+            ? '$sentence · ${removed.toInt()} removed'
+            : sentence;
       case 'storyline_audit':
         final checked = detail['checked'];
         final removed = detail['removed'];

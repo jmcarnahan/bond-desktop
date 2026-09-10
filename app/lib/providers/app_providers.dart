@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
 // Storyline, …) whose names collide with the app's models.
+import '../data/context_store.dart';
 import '../data/database.dart' show BondDatabase;
 import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
@@ -26,6 +27,8 @@ import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
+import '../services/context/context_reconcile_handler.dart';
+import '../services/context/directory_access.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
@@ -155,6 +158,19 @@ final dbProvider = Provider<BondDatabase>(
 final messageStoreProvider =
     Provider<MessageStore>((ref) => MessageStore(ref.watch(dbProvider)));
 
+/// The owner's own local directories — a SECOND store over the same database,
+/// for the reason [ContextStore] gives: nothing it holds is mailbox data, and
+/// none of it is wiped when an identity changes.
+final contextStoreProvider =
+    Provider<ContextStore>((ref) => ContextStore(ref.watch(dbProvider)));
+
+/// How a picked folder stays readable after a relaunch. The real one is a
+/// method channel onto the Runner's Swift; a test overrides it with
+/// [PlainDirectoryAccess], which keeps no bookmark and resolves none, and
+/// every caller falls back to the stored path.
+final directoryAccessProvider =
+    Provider<DirectoryAccess>((_) => const ChannelDirectoryAccess());
+
 /// Enforces the one-identity-per-database rule at every completed sign-in.
 /// See [IdentityGuard] for why it is a guard rather than a convention.
 ///
@@ -176,6 +192,16 @@ final identityGuardProvider = Provider<IdentityGuard>(
         ref.read(attachmentCacheProvider).clear().catchError(
               (Object e) =>
                   debugPrint('attachment cache not cleared on wipe: $e'),
+            ),
+      );
+      // The LINKS and nothing else. They name conversation keys and storyline
+      // ids the wipe has just deleted, so they would point a new person's
+      // rooms at the previous person's directories. The directories
+      // themselves stay registered: they are the user's own folders on their
+      // own disk, and have nothing to do with whose mailbox was signed in.
+      unawaited(
+        ref.read(contextStoreProvider).unlinkAll().catchError(
+              (Object e) => debugPrint('context links not cleared on wipe: $e'),
             ),
       );
     },
@@ -390,6 +416,10 @@ final syncServiceProvider = Provider<MailSync>(
     // this provider — and abort the drain running on it — the moment someone
     // moved the setting, the same hazard [llmClientProvider] documents below.
     lookbackDays: () => ref.read(appPrefsProvider).mailLookbackDays,
+    // What puts one `context_reconcile` per registered directory at the tail
+    // of every pass — the whole mechanism by which a directory stays level
+    // with the disk without a file-system watcher.
+    contextStore: ref.watch(contextStoreProvider),
   ),
 );
 
@@ -702,6 +732,18 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // sets a flag and hands back that drain's future, which is why it is
         // not awaited: see [AttachmentDigestHandler].
         onRequeue: () => unawaited(ref.read(aiWorkerProvider).pump()),
+      ),
+      // The owner's own directories, read here and nowhere else in the drain.
+      // It talks to no chat model — the embedding server is its only server —
+      // so a park here parks only its own kind, and a missing `make embed`
+      // never sits in front of the storylines. Ahead of them and of the
+      // drafts on purpose: a reply written later in this same drain reads the
+      // index this pass has just brought level with the disk.
+      ContextReconcileHandler(
+        ref.watch(contextStoreProvider),
+        ref.watch(embeddingsClientProvider),
+        ref.watch(directoryAccessProvider),
+        activityLog: ref.watch(activityLogProvider),
       ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
