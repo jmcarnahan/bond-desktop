@@ -6,6 +6,7 @@ import 'package:drift/drift.dart' show Variable;
 import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/keyword_index.dart' show ContextKeywordIndex;
+import 'package:bond_inbox/data/message_store.dart' show MessageStore;
 import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/context/context_reconcile_handler.dart';
 import 'package:bond_inbox/services/context/directory_access.dart';
@@ -83,12 +84,14 @@ void main() {
   ContextReconcileHandler handlerWith({
     FakeEmbedServer? embeddings,
     DirectoryAccess access = const PlainDirectoryAccess(),
+    MessageStore? workQueue,
   }) =>
       ContextReconcileHandler(
         store,
         (embeddings ?? server).client,
         access,
         activityLog: log,
+        workQueue: workQueue,
       );
 
   Future<String> register({String? path}) => store.registerDirectory(
@@ -367,6 +370,13 @@ void main() {
       expect(counts.chunks, 1);
       expect(counts.embedded, 0);
       expect((await store.directory(id))!.walkedAt, isNotNull);
+
+      // A park is not a different pass. It read the same folder and moved
+      // the same rows, and its line is the one somebody actually goes
+      // looking for — so it reports what the tail reports.
+      expect(log.notes['chunks'], 1);
+      expect(log.notes['removed'], 0);
+      expect(log.notes['renamed'], 0);
     });
 
     test('the next pass pays only the embedding tail', () async {
@@ -488,6 +498,375 @@ void main() {
       // The stored path is stale — the sandbox's whole reason for bookmarks.
       expect((await store.directory(id))!.status, 'ready');
       expect(await store.fileByPath(id, 'moved.md'), isNotNull);
+    });
+  });
+
+  group('the conventions', () {
+    test("a skill's description lands on the row and earns a vector",
+        () async {
+      write(
+        '.claude/skills/rate-quote/SKILL.md',
+        '---\nname: something-else\ndescription: Quote a renewal rate '
+            'from the current table.\n---\n\nThe body of the skill.\n',
+      );
+      final id = await register();
+
+      await run(id);
+
+      final skill =
+          (await store.fileByPath(id, '.claude/skills/rate-quote/SKILL.md'))!;
+      expect(skill.kind, 'skill');
+      expect(
+        skill.description,
+        'Quote a renewal rate from the current table.',
+      );
+      // The description is matched by COSINE against what a thread is
+      // about, so it needs a vector the passages of SKILL.md cannot give it.
+      expect(skill.hasDescEmbedding, isTrue);
+      expect(log.notes['skills_embedded'], 1);
+    });
+
+    test("a rule's paths are stored as JSON beside its description",
+        () async {
+      write(
+        '.claude/rules/style.md',
+        '---\npaths:\n  - "src/**/*.dart"\n  - "test/**"\n'
+            'description: House style\n---\n\nKeep the comments in prose.\n',
+      );
+      final id = await register();
+
+      await run(id);
+
+      final rule = (await store.fileByPath(id, '.claude/rules/style.md'))!;
+      expect(rule.kind, 'rule');
+      expect(rule.description, 'House style');
+      expect(rule.pathsJson, '["src/**/*.dart","test/**"]');
+      // Only skills are embedded: a rule is matched by its globs, not by
+      // what it sounds like.
+      expect(rule.hasDescEmbedding, isFalse);
+    });
+
+    test('an edited skill loses its old vector and gets a new one', () async {
+      write(
+        '.claude/skills/rate-quote/SKILL.md',
+        '---\ndescription: Quote a renewal rate.\n---\n\nBody.\n',
+      );
+      final id = await register();
+      await run(id);
+
+      write(
+        '.claude/skills/rate-quote/SKILL.md',
+        '---\ndescription: Quote an escalator instead.\n---\n\nBody.\n',
+      );
+      log = _Recorder();
+      await run(id, force: true);
+
+      // A vector of the OLD description would match a request the skill no
+      // longer describes.
+      final skill =
+          (await store.fileByPath(id, '.claude/skills/rate-quote/SKILL.md'))!;
+      expect(skill.description, 'Quote an escalator instead.');
+      expect(skill.hasDescEmbedding, isTrue);
+      expect(log.notes['skills_embedded'], 1);
+    });
+
+    test('a file renamed INTO a skill path gets its conventions read',
+        () async {
+      const body = '---\ndescription: Quote a renewal rate from the current '
+          'table.\n---\n\nThe body of the skill.\n';
+      write('notes/thing.md', body);
+      final id = await register();
+      await run(id);
+      final before = await chunkIdsOf(id, 'notes/thing.md');
+      expect(before, isNotEmpty);
+      final callsBefore = server.calls;
+
+      Directory('${root.path}/.claude/skills/rate-quote')
+          .createSync(recursive: true);
+      File('${root.path}/notes/thing.md').renameSync(
+        '${root.path}/.claude/skills/rate-quote/SKILL.md',
+      );
+      log = _Recorder();
+      await run(id, force: true);
+
+      // The same bytes at a new path are a different KIND, and a project
+      // that writes a note first and files it as a skill afterwards is the
+      // ordinary way one gets written. Read from the bytes already in hand:
+      // no extra disk, no model.
+      final skill =
+          (await store.fileByPath(id, '.claude/skills/rate-quote/SKILL.md'))!;
+      expect(skill.kind, 'skill');
+      expect(
+        skill.description,
+        'Quote a renewal rate from the current table.',
+      );
+      expect(skill.hasDescEmbedding, isTrue);
+      expect(log.notes['skills_embedded'], 1);
+
+      // A rename still costs no re-chunk: the passages keep their ids and
+      // the only new POST is the description's own vector.
+      expect(log.notes['renamed'], 1);
+      expect(log.notes['chunks'], 0);
+      expect(
+        await chunkIdsOf(id, '.claude/skills/rate-quote/SKILL.md'),
+        before,
+      );
+      expect(server.calls, callsBefore + 1);
+    });
+
+    test('a skill renamed OUT of the skills tree loses its description',
+        () async {
+      write(
+        '.claude/skills/rate-quote/SKILL.md',
+        '---\ndescription: Quote a renewal rate.\n---\n\nBody text.\n',
+      );
+      final id = await register();
+      await run(id);
+      final was =
+          (await store.fileByPath(id, '.claude/skills/rate-quote/SKILL.md'))!;
+      expect(was.hasDescEmbedding, isTrue);
+
+      Directory('${root.path}/notes').createSync(recursive: true);
+      File('${root.path}/.claude/skills/rate-quote/SKILL.md')
+          .renameSync('${root.path}/notes/thing.md');
+      log = _Recorder();
+      await run(id, force: true);
+
+      // A vector of a description this file no longer carries would go on
+      // matching threads by a skill that is not there any more.
+      final moved = (await store.fileByPath(id, 'notes/thing.md'))!;
+      expect(moved.kind, 'doc');
+      expect(moved.description, isNull);
+      expect(moved.hasDescEmbedding, isFalse);
+      expect(log.notes['skills_embedded'], isNull);
+    });
+
+    test('a dead embedding server in the skills leaves the row ready',
+        () async {
+      write(
+        '.claude/skills/rate-quote/SKILL.md',
+        '---\ndescription: Quote a renewal rate.\n---\n\nBody.\n',
+      );
+      final id = await register();
+      await run(id);
+      final skill =
+          (await store.fileByPath(id, '.claude/skills/rate-quote/SKILL.md'))!;
+      // Every passage is embedded, so the pass below reaches the SKILLS
+      // loop with the chunk worklist already empty.
+      await store.setFileDescEmbedding(skill.id, null);
+
+      log = _Recorder();
+      await expectLater(
+        handlerWith(embeddings: FakeEmbedServer(status: null)).run({
+          'source': 'local',
+          'entity_id': id,
+          'payload_json': '{"force":true}',
+        }),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+
+      // The same stamp-then-throw the chunk loop uses: everything read is
+      // stored, so the next pass pays only for the tail.
+      final dir = (await store.directory(id))!;
+      expect(dir.status, 'ready');
+      expect(dir.walkedAt, isNotNull);
+    });
+  });
+
+  group('the queue', () {
+    late MessageStore work;
+
+    setUp(() => work = MessageStore(db));
+
+    Future<void> runQueued(String dirId, {bool force = false}) =>
+        handlerWith(workQueue: work).run({
+          'task_kind': 'context_reconcile',
+          'source': 'local',
+          'entity_id': dirId,
+          if (force) 'payload_json': '{"force":true}',
+        });
+
+    Future<List<Map<String, Object?>>> rowsOf(String taskKind) async {
+      final rows = await db
+          .customSelect(
+            'SELECT task_kind, entity_id, status FROM work_items '
+            'WHERE task_kind = ? ORDER BY entity_id',
+            variables: [Variable(taskKind)],
+          )
+          .get();
+      return [for (final row in rows) row.data];
+    }
+
+    test('one digest per eligible file, and exactly one brief', () async {
+      write('CLAUDE.md', 'House rules. ' * 40);
+      write('docs/pricing.md', 'The Marrowfield renewal is 2,600. ' * 20);
+      write('src/model.py', 'def rate():\n    return 2600\n' * 20);
+      final id = await register();
+
+      await runQueued(id);
+
+      final digests = await rowsOf('context_digest');
+      expect(digests, hasLength(3));
+      expect(
+        digests.map((row) => row['entity_id']).toSet(),
+        {
+          for (final file in await store.filesFor(id)) '$id|${file.id}',
+        },
+      );
+      expect(await rowsOf('context_brief'), hasLength(1));
+      expect(log.notes['digests_queued'], 3);
+      expect(log.notes['brief_queued'], isTrue);
+    });
+
+    test('a file too short to summarise is not queued', () async {
+      write('docs/pricing.md', 'The Marrowfield renewal is 2,600. ' * 20);
+      write('notes.md', 'Short.');
+      final id = await register();
+
+      await runQueued(id);
+
+      final digests = await rowsOf('context_digest');
+      expect(digests, hasLength(1));
+      final long = (await store.fileByPath(id, 'docs/pricing.md'))!;
+      expect(digests.single['entity_id'], '$id|${long.id}');
+    });
+
+    test('summaries switched off queue no digests, and still a brief',
+        () async {
+      write('docs/pricing.md', 'The Marrowfield renewal is 2,600. ' * 20);
+      final id = await register();
+      await store.setDirectoryOptions(id, digests: false);
+
+      await runQueued(id);
+
+      expect(await rowsOf('context_digest'), isEmpty);
+      expect(await rowsOf('context_brief'), hasLength(1));
+      expect(log.notes['digests_queued'], isNull);
+    });
+
+    test('the cap holds, and the rest lands on the next pass', () async {
+      const cap = ContextReconcileHandler.maxDigestsPerPass;
+      for (var i = 0; i <= cap; i++) {
+        write('docs/note-$i.md', 'The Marrowfield renewal is 2,600. ' * 8);
+      }
+      final id = await register();
+
+      await runQueued(id);
+      final first = await rowsOf('context_digest');
+      expect(first, hasLength(cap));
+      expect(log.notes['digests_queued'], cap);
+
+      // Stand in for the digest handler working the first batch off. Until
+      // it does, the same capped rows are the freshest pending files and
+      // the one past them waits behind — which is exactly the pacing the
+      // cap is for.
+      for (final row in first) {
+        final entity = row['entity_id']! as String;
+        await store.setFileDigest(
+          int.parse(entity.split('|').last),
+          status: 'done',
+          digestJson: '{}',
+        );
+      }
+
+      log = _Recorder();
+      await runQueued(id, force: true);
+
+      // Nothing on disk moved; the backlog is what the second pass is for,
+      // and the brief follows it because the brief is compiled from the
+      // digests.
+      expect(log.notes['changed'], 0);
+      expect(await rowsOf('context_digest'), hasLength(cap + 1));
+      expect(log.notes['digests_queued'], 1);
+      expect(log.notes['brief_queued'], isTrue);
+      expect(await rowsOf('context_brief'), hasLength(1));
+    });
+
+    test('a pass with nothing left to do queues nothing at all', () async {
+      write('docs/pricing.md', 'The Marrowfield renewal is 2,600. ' * 20);
+      final id = await register();
+      await runQueued(id);
+
+      // Stand in for the digest handler having run, and clear the queue so
+      // what the next pass writes is all that is there.
+      for (final file in await store.filesFor(id)) {
+        await store.setFileDigest(file.id, status: 'done', digestJson: '{}');
+      }
+      await db.customUpdate('DELETE FROM work_items');
+
+      log = _Recorder();
+      await runQueued(id, force: true);
+
+      expect(await rowsOf('context_digest'), isEmpty);
+      expect(await rowsOf('context_brief'), isEmpty);
+      expect(log.notes['digests_queued'], isNull);
+      expect(log.notes['brief_queued'], isNull);
+    });
+
+    test('an edited file revives the digest row it already finished',
+        () async {
+      write('docs/pricing.md', 'The Marrowfield renewal is 2,600. ' * 20);
+      final id = await register();
+      await runQueued(id);
+      final file = (await store.fileByPath(id, 'docs/pricing.md'))!;
+      final entity = '$id|${file.id}';
+      await store.setFileDigest(file.id, status: 'done', digestJson: '{}');
+      await db.customUpdate(
+        "UPDATE work_items SET status = 'done' WHERE entity_id = ?",
+        variables: [Variable(entity)],
+      );
+
+      write('docs/pricing.md', 'The escalator is 3,100 instead. ' * 20);
+      log = _Recorder();
+      await runQueued(id, force: true);
+
+      // One `requeueWork`, which is an upsert on the work row's primary
+      // key: it revives a finished row, and an `INSERT OR IGNORE` in its
+      // place would leave the edited file digested by yesterday's bytes.
+      final digests = await rowsOf('context_digest');
+      expect(digests, hasLength(1));
+      expect(digests.single['entity_id'], entity);
+      expect(digests.single['status'], 'pending');
+      expect((await store.fileById(file.id))!.digestStatus, 'pending');
+    });
+
+    test('a park reports the work it queued before it threw', () async {
+      write('docs/pricing.md', 'The Marrowfield renewal is 2,600. ' * 20);
+      final id = await register();
+
+      await expectLater(
+        ContextReconcileHandler(
+          store,
+          FakeEmbedServer(status: null).client,
+          const PlainDirectoryAccess(),
+          activityLog: log,
+          workQueue: work,
+        ).run({'source': 'local', 'entity_id': id}),
+        throwsA(isA<LlmUnavailableException>()),
+      );
+
+      // The digests and the brief are queued BEFORE the embedding tail, so
+      // they are the part of the pass a park is most likely to be hiding.
+      expect(await rowsOf('context_digest'), hasLength(1));
+      expect(log.notes['digests_queued'], 1);
+      expect(log.notes['brief_queued'], isTrue);
+      expect(log.notes['changed'], 1);
+    });
+
+    test('a pass with no queue behind it still walks and writes nothing',
+        () async {
+      // Every Phase 1 test runs this way, and this is what says so on
+      // purpose rather than by omission.
+      write('docs/pricing.md', 'The Marrowfield renewal is 2,600. ' * 20);
+      final id = await register();
+
+      await run(id);
+
+      final rows =
+          await db.customSelect('SELECT COUNT(*) AS n FROM work_items')
+              .getSingle();
+      expect(rows.data['n'], 0);
+      expect((await store.directory(id))!.status, 'ready');
     });
   });
 

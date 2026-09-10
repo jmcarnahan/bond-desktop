@@ -125,6 +125,20 @@ const List<PipelineStageInfo> pipelineStages = [
     slot: ModelSlot.fast,
   ),
   PipelineStageInfo(
+    id: 'context_file_digest',
+    label: 'Directory file digest',
+    description: 'What one file in a registered directory is for, and what '
+        'it found',
+    slot: ModelSlot.fast,
+  ),
+  PipelineStageInfo(
+    id: 'context_brief',
+    label: 'Directory brief',
+    description: 'The standing notes and file map of a directory, compiled '
+        'for replies',
+    slot: ModelSlot.fast,
+  ),
+  PipelineStageInfo(
     id: 'storyline_membership',
     label: 'Storyline membership',
     description: 'Whether a thread belongs to a storyline',

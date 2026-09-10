@@ -26,7 +26,7 @@ is always the authority when they disagree.
 | 8 | Bucket filing — low-value mail to Later, unless the thread holds an open ask | no | [04-extraction.md](04-extraction.md) |
 | 9 | Embeddings — clustering + per-message search vectors | no* | [05-embeddings.md](05-embeddings.md) |
 | 10 | Attachments — text extraction and chunk embeddings, then one digest per document | **yes**‡ | [12-attachments.md](12-attachments.md) |
-| 10b | Context directories — a registered folder re-read on every sync, chunked and embedded | no* | [13-context-directories.md](13-context-directories.md) |
+| 10b | Context directories — a registered folder re-read on every sync, chunked and embedded, then one digest per file and one brief per directory | **yes**‡‡ | [13-context-directories.md](13-context-directories.md) |
 | 11 | **Storylines** — assign, sweep, refresh, audit, recruit, recap | **yes** | [06-storylines.md](06-storylines.md) |
 | 12 | **Reply decision** — does this message need an answer | **yes** | [07-replies.md](07-replies.md) |
 | 13 | **Draft generation** — the suggested reply itself | **yes** | [07-replies.md](07-replies.md) |
@@ -38,10 +38,12 @@ is always the authority when they disagree.
 The attachment row sits here because this is where the two handlers register:
 `AttachmentTextHandler` and `AttachmentDigestHandler` go on the drain between
 Embed and StorylineAssign (`app_providers.dart`), so a document is read before
-the storylines and the drafts that quote it are. `ContextReconcileHandler`
-registers immediately after them and for the same reason — a folder the owner
-registered is read before the drafts that cite it — and it is 10b rather than
-11 because it is not a stage a MESSAGE passes through at all: its work is
+the storylines and the drafts that quote it are. `ContextReconcileHandler`,
+`ContextDigestHandler` and `ContextBriefHandler` register immediately after
+them, in that order, and for the same reason — a folder the owner registered
+is read, digested and briefed before the drafts that cite it. Digests before
+the brief, because the brief is compiled from the digest map. It is 10b rather
+than 11 because it is not a stage a MESSAGE passes through at all: its work is
 enqueued per registered directory at the sync tail, under source `local`,
 whether or not anything arrived in the mailbox.
 
@@ -62,6 +64,14 @@ documents too: the passages nearest the message being answered, scoped to its
 own thread and its storyline's pinned files. See
 [12-attachments.md](12-attachments.md) and [07-replies.md](07-replies.md).
 
+‡‡ The walk, the extractors, the chunker and the two derived indexes dial no
+chat model at all — the embedding server is their only server. The two
+COMPILED kinds do: `context_digest` is one fast-slot call per changed file of
+200 characters or more, capped at 40 per pass, and `context_brief` is one
+fast-slot call per directory whose notes or digest map have moved. Both are
+off the fast slot, and both are skipped before they spend anything when
+nothing they read has changed.
+
 † a deterministic floor (an inbound Teams @mention or 1:1) answers without any
 model call; everything below the floor gets the fast-slot judgment. See
 [11-needs-you.md](11-needs-you.md).
@@ -78,6 +88,8 @@ live in [10-model-routing.md](10-model-routing.md).
 | Needs-you verdict | fast / bulk | `:8082` |
 | Extraction | fast / bulk | `:8082` |
 | Attachment digest | fast / bulk | `:8082` |
+| Directory file digest | fast / bulk | `:8082` |
+| Directory brief | fast / bulk | `:8082` |
 | Storyline membership confirm | fast / bulk | `:8082` |
 | Storyline naming | prose / 27B | `:8080` Qwen3.8-27B (`make model`) |
 | Storyline refresh | prose / 27B | `:8080` |

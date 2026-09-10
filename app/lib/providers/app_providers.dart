@@ -27,6 +27,8 @@ import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
+import '../services/context/context_brief_handler.dart';
+import '../services/context/context_digest_handler.dart';
 import '../services/context/context_reconcile_handler.dart';
 import '../services/context/directory_access.dart';
 import '../services/draft_handler.dart';
@@ -743,6 +745,27 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(contextStoreProvider),
         ref.watch(embeddingsClientProvider),
         ref.watch(directoryAccessProvider),
+        activityLog: ref.watch(activityLogProvider),
+        // Where the pass queues the two kinds below. Both are enqueued from
+        // inside the walk, so a directory that changed is digested and
+        // re-briefed in the drain that noticed.
+        workQueue: ref.watch(messageStoreProvider),
+      ),
+      // Digests before the brief, and both immediately after the walk that
+      // queues them: the brief is compiled FROM the digest map, so a drain
+      // that ran it first would compile yesterday's map. Both ahead of the
+      // storylines and the drafts, so a reply written later in this same
+      // drain reads a brief that already knows what changed this morning.
+      ContextDigestHandler(
+        ref.watch(contextStoreProvider),
+        // Bulk work: the fast server. See [fastLlmClientProvider].
+        ref.watch(fastLlmClientProvider),
+        ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
+      ),
+      ContextBriefHandler(
+        ref.watch(contextStoreProvider),
+        ref.watch(fastLlmClientProvider),
         activityLog: ref.watch(activityLogProvider),
       ),
       // Assignment before the sweep: a thread that joins an existing storyline

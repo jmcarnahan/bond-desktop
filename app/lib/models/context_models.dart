@@ -343,3 +343,205 @@ class ContextChunkHit {
         coverage: coverage,
       );
 }
+
+/// What the fast model made of ONE file in a registered directory.
+///
+/// Written by the digest handler, read by the brief's file map, by the
+/// Settings row's progress clause and — as a passage of the file like any
+/// other — by retrieval. Every field is model output about the owner's own
+/// work, which is why nothing here is presented as though the file said it:
+/// the passage it becomes is labelled `digest`.
+///
+/// The keys are the schema's keys, snake_case and all of them, so
+/// [toJson] round-trips through the `digest_json` column without a mapping
+/// layer in between.
+@immutable
+class ContextFileDigest {
+  /// ONE sentence: what this file is FOR, from the owner's point of view.
+  final String purpose;
+
+  /// The specific conclusions, numbers, dates and names the file states,
+  /// copied exactly. Empty for code that concludes nothing, which is most
+  /// code.
+  final List<String> findings;
+
+  /// Short questions a person could answer by opening this file — the half
+  /// of the digest a question about findings actually matches on.
+  final List<String> questionsAnswered;
+
+  /// The files, sources and datasets this file reads or depends on, as
+  /// written.
+  final List<String> inputs;
+
+  /// `analysis|code|notes|data|config|other` — what the file IS, not what
+  /// its extension says.
+  final String kindHint;
+
+  const ContextFileDigest({
+    this.purpose = '',
+    this.findings = const [],
+    this.questionsAnswered = const [],
+    this.inputs = const [],
+    this.kindHint = 'other',
+  });
+
+  /// Never throws and never rejects, on `AttachmentDigest.fromJson`'s
+  /// reasoning: a digest is a convenience over a file the app already stored,
+  /// and a malformed one must cost a line of a brief rather than the render
+  /// around it.
+  factory ContextFileDigest.fromJson(Map<String, Object?> json) =>
+      ContextFileDigest(
+        purpose: _string(json['purpose']),
+        findings: _strings(json['findings']),
+        questionsAnswered: _strings(json['questions_answered']),
+        inputs: _strings(json['inputs']),
+        kindHint: _string(json['kind_hint'], fallback: 'other'),
+      );
+
+  /// ALL FIVE keys, always, including the empty ones — the same promise
+  /// `AttachmentDigest.toJson` makes, and for the same reason: a reader that
+  /// has to ask whether a key is there is a reader that will one day forget.
+  Map<String, Object?> toJson() => {
+        'purpose': purpose,
+        'findings': findings,
+        'questions_answered': questionsAnswered,
+        'inputs': inputs,
+        'kind_hint': kindHint,
+      };
+
+  /// A `digest_json` column as a [ContextFileDigest], or null.
+  ///
+  /// Null for absent, empty, unparseable and anything that does not decode to
+  /// a map. Every one of those means the same thing to every caller — "no
+  /// digest yet" — and a throw here would take out the brief's whole file
+  /// map over one bad row.
+  static ContextFileDigest? decode(String? json) {
+    if (json == null || json.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(json);
+      if (decoded is! Map) return null;
+      return ContextFileDigest.fromJson(Map<String, Object?>.from(decoded));
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// A cast would throw on the number a hand-edited row can hold, and this
+  /// class promises it never does.
+  static String _string(Object? raw, {String fallback = ''}) =>
+      raw is String ? raw : fallback;
+
+  static List<String> _strings(Object? raw) {
+    if (raw is! List) return const [];
+    return [
+      for (final entry in raw)
+        if (entry is String) entry,
+    ];
+  }
+}
+
+/// The compiled standing knowledge of ONE registered directory.
+///
+/// One per directory, built from the root `CLAUDE.md` (imports resolved) and
+/// the map of every file digest. It is what a reply reads FIRST — before any
+/// retrieved passage — so it answers the questions a passage cannot: what
+/// this project is, how the owner writes about it, and which file to reach
+/// for.
+@immutable
+class ContextBrief {
+  /// Two or three sentences: what this project IS and what the owner is doing
+  /// in it.
+  final String about;
+
+  /// Imperative lines a reply should follow, drawn from the standing notes —
+  /// tone, conventions, what to cite, what never to promise.
+  final List<String> replyGuidance;
+
+  /// Facts stated in the notes or the file map, copied exactly.
+  final List<String> keyFacts;
+
+  /// Which file answers which kind of question. Only paths that appear in
+  /// the map or the notes.
+  final List<({String topic, String path})> pointers;
+
+  /// Project terms, names and acronyms as the owner writes them.
+  final List<String> vocabulary;
+
+  const ContextBrief({
+    this.about = '',
+    this.replyGuidance = const [],
+    this.keyFacts = const [],
+    this.pointers = const [],
+    this.vocabulary = const [],
+  });
+
+  factory ContextBrief.fromJson(Map<String, Object?> json) => ContextBrief(
+        about: json['about'] is String ? json['about']! as String : '',
+        replyGuidance: _strings(json['reply_guidance']),
+        keyFacts: _strings(json['key_facts']),
+        pointers: _pointers(json['pointers']),
+        vocabulary: _strings(json['vocabulary']),
+      );
+
+  Map<String, Object?> toJson() => {
+        'about': about,
+        'reply_guidance': replyGuidance,
+        'key_facts': keyFacts,
+        'pointers': [
+          for (final pointer in pointers)
+            {'topic': pointer.topic, 'path': pointer.path},
+        ],
+        'vocabulary': vocabulary,
+      };
+
+  /// A `brief_json` column as a [ContextBrief], or null. [ContextFileDigest.
+  /// decode]'s tolerance, for its reasons.
+  static ContextBrief? decode(String? json) {
+    if (json == null || json.isEmpty) return null;
+    try {
+      final decoded = jsonDecode(json);
+      if (decoded is! Map) return null;
+      return ContextBrief.fromJson(Map<String, Object?>.from(decoded));
+    } on FormatException {
+      return null;
+    }
+  }
+
+  static List<String> _strings(Object? raw) {
+    if (raw is! List) return const [];
+    return [
+      for (final entry in raw)
+        if (entry is String) entry,
+    ];
+  }
+
+  /// The most pointers a decoded brief will carry.
+  ///
+  /// The same ten `ContextBriefTask.validate` applies on the way in, restated
+  /// here rather than imported: a model is not the place to reach into a
+  /// prompt task, and the reason the number has to hold in BOTH places is
+  /// that a column is not only ever written by this build's validator — a
+  /// row from an earlier one, or a hand-edited one, arrives through `decode`
+  /// having met no ceiling at all.
+  static const int maxPointers = 10;
+
+  /// A pointer needs BOTH halves to be worth anything — a topic with no path
+  /// cites nothing and a path with no topic answers nothing — so a pair
+  /// missing either is dropped rather than rendered half-blank. Trimmed and
+  /// capped for the same reason the validator trims and caps: what comes
+  /// back out of the column is rendered into a prompt.
+  static List<({String topic, String path})> _pointers(Object? raw) {
+    if (raw is! List) return const [];
+    final pointers = <({String topic, String path})>[];
+    for (final entry in raw) {
+      if (entry is! Map) continue;
+      final topic = entry['topic'];
+      final path = entry['path'];
+      if (topic is! String || path is! String) continue;
+      if (topic.trim().isEmpty || path.trim().isEmpty) continue;
+      pointers.add((topic: topic.trim(), path: path.trim()));
+      if (pointers.length == maxPointers) break;
+    }
+    return pointers;
+  }
+}

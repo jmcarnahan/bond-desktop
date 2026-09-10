@@ -539,6 +539,36 @@ void main() {
       );
     });
 
+    test('a file digest names what the model decided the file is', () {
+      // The kind hint is the judgement a person would want to see before
+      // they trust the rest of the record.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_digest',
+          detail: const {'kind_hint': 'analysis', 'findings': 3},
+        )),
+        'Directory file digest — analysis',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'context_digest')),
+        'Directory file digest',
+      );
+    });
+
+    test('a brief counts the files it mapped', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_brief',
+          detail: const {'files_mapped': 12, 'pointers': 4},
+        )),
+        'Directory brief — 12 files mapped',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'context_brief')),
+        'Directory brief',
+      );
+    });
+
     test('a retry names the stages it put back', () {
       // Which work was requeued is the whole question a person has after
       // pressing Retry; a count of stages does not answer it.

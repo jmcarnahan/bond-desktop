@@ -2,6 +2,8 @@ import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
+import 'package:bond_inbox/services/llm/context_brief_task.dart';
+import 'package:bond_inbox/services/llm/context_digest_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
@@ -33,6 +35,8 @@ void main() {
   const replyDecision = ReplyDecisionTask();
   const needsYou = NeedsYouTask();
   const attachmentDigest = AttachmentDigestTask();
+  const contextDigest = ContextDigestTask();
+  const contextBrief = ContextBriefTask();
 
   final emailMessage = Message(
     id: 'm1',
@@ -57,6 +61,20 @@ void main() {
   );
 
   final now = DateTime(2026, 8, 29);
+
+  final contextDigestInput = ContextDigestInput(
+    relPath: 'analysis/pricing.md',
+    kind: 'doc',
+    text: 'The renewal is 2,600 a month.',
+    now: now,
+  );
+
+  final contextBriefInput = ContextBriefInput(
+    displayName: 'atlas',
+    claudeMd: '# Atlas\n\nReplies here stay short.\n',
+    fileMap: 'analysis/pricing.md · What the renewal costs · How much?',
+    now: now,
+  );
 
   const excerpt = AttachmentExcerpt(
     name: 'Lease Addendum.pdf',
@@ -191,6 +209,20 @@ void main() {
       expect(identical(needsYou.systemPrompt, before), isTrue);
     });
 
+    test('the directory tasks hand back the identical string every time', () {
+      // Neither of these has a channel to fork ON — they read the owner's own
+      // files — so what this guards is the OTHER half of the rule: one KV
+      // prefix serves every file in every registered directory, and a prompt
+      // rebuilt per call would pay to re-read it on each one.
+      final digestBefore = contextDigest.systemPrompt;
+      contextDigest.buildUserMessage(contextDigestInput);
+      expect(identical(contextDigest.systemPrompt, digestBefore), isTrue);
+
+      final briefBefore = contextBrief.systemPrompt;
+      contextBrief.buildUserMessage(contextBriefInput);
+      expect(identical(contextBrief.systemPrompt, briefBefore), isTrue);
+    });
+
     test('the attachment digest hands back the identical string across both',
         () {
       // The task with the least reason to know its channel and the most to
@@ -289,6 +321,26 @@ void main() {
       expect(prompt, isNot(contains('chat')));
     });
 
+    test('the directory-digest prompt does not name a channel at all', () {
+      // The STRICT form. It reads a FILE off the owner's own disk; how
+      // anyone reaches the owner about that file is not a fact about it, and
+      // a prompt that knew would be a prompt reasoning about tooling.
+      final prompt = contextDigest.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
+    test('the directory-brief prompt does not name a channel at all', () {
+      // The STRICT form too, and the one with the most temptation: the brief
+      // is compiled FOR a reply. It still may not know what the reply will
+      // be sent through.
+      final prompt = contextBrief.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
     test('no prompt names a connector', () {
       // "teams" is not on this list on purpose: the extraction prompt asks for
       // "companies, schools, teams, or vendors", which is a kind of
@@ -300,6 +352,8 @@ void main() {
         replyDecision.systemPrompt,
         needsYou.systemPrompt,
         attachmentDigest.systemPrompt,
+        contextDigest.systemPrompt,
+        contextBrief.systemPrompt,
       ]) {
         expect(prompt.toLowerCase(), isNot(contains('microsoft')));
         expect(prompt.toLowerCase(), isNot(contains('outlook')));

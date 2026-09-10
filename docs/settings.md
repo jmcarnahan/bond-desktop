@@ -385,13 +385,25 @@ The body opens with one sentence saying what a directory is for and that it is
 re-read on every sync. Then one block per registered directory:
 
 - The **display name** (the folder's own name), the **path** in muted type.
+- The brief's **`about`** under the path, when one has been compiled — two or
+  three sentences saying what the project is, in the model's own words,
+  clamped to three lines. It is the only place in Settings that says what the
+  app made of a folder, which is how a person tells a directory that was READ
+  from one that was merely walked. Absent until the brief lands.
 - A **status line**: `12 files · 30 passages · read 3m ago` once it has been
   read; `not read yet` before the first pass, `reading…` during one, and the
   stored sentence in the error colour for a folder that is `unavailable` or
   that failed — the counts are dropped there, because they describe a walk
   from before the folder went away. When vectors are still arriving the line
-  gains ` · embedding 8 of 30`. Singulars are singular: `1 file`,
-  `1 passage`, and the collapsed summary says `1 directory · 12 files`.
+  gains ` · embedding 8 of 30`, and while the per-file summaries are behind it
+  gains ` · summaries 3 of 12` — shown only when **Summaries** is on, because
+  a count towards a total nothing is working on would never move. The total
+  counts files of 200 characters or more that are still owed a summary or
+  already hold one, so `K of M` counts towards a number it can reach: a file
+  too short to be worth a call, and a file the model gave up on after both
+  attempts, are in neither half because nothing will ever work them off. Singulars
+  are singular: `1 file`, `1 passage`, and the collapsed summary says
+  `1 directory · 12 files`.
 - A **link count**: `Links: 3`, or `Not linked to any thread yet`. Registering
   is not linking (see
   [pipeline/13-context-directories.md](pipeline/13-context-directories.md)) —
@@ -414,8 +426,8 @@ re-read on every sync. Then one block per registered directory:
   directory** beside a **Keep**, so the second click lands on a different
   button that did not exist a moment ago. A caption under the pair names what
   goes: `Removes its index and 3 links; the folder itself is untouched.` The
-  index and the links are deleted; the folder on disk is not, and never has
-  been written to.
+  index, the links and the directory's queued work are deleted; the folder on
+  disk is not, and never has been written to.
 
 At the foot of the body is **Add directory…**: the open panel
 (`FileDialogs.chooseDirectory`), then a security-scoped bookmark taken

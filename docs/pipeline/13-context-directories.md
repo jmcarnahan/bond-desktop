@@ -14,9 +14,9 @@ no MCP tool and no chat model in this stage — it is `dart:io`, a walk, a
 chunker and the embedding server on `:8081`.
 
 > **Live as of schema v15.** Registration, the reconcile pass, the two derived
-> indexes and the sync-tail enqueue all run. The per-file digests, the
-> per-directory brief, the linking UI and the retrieval into drafts are later
-> phases of the same round and are documented as they land.
+> indexes, the sync-tail enqueue, the Claude conventions, the per-file digests
+> and the per-directory brief all run. The linking UI and the retrieval into
+> drafts are later phases of the same round and are documented as they land.
 
 Everything below calls a per-file summary a **digest**, which is what the
 column, the work kind and the code call it. The Settings switch for this is
@@ -133,15 +133,24 @@ scopes**, because what the model may read is a question about the model.
    build that keeps none, which is legal.
 3. `ContextStore.registerDirectory` — `INSERT OR IGNORE` keyed on the path
    hash, so re-adding the same folder is the same row.
-4. `enqueueWork('context_reconcile', 'local', id, payloadJson:
+4. `requeueWork('context_reconcile', 'local', id, payloadJson:
    '{"force":true}')` and a `pump()`. Forced, because the person is standing
    in front of it and the sixty-second freshness rung would otherwise answer
    `fresh`.
 
-**Re-read now** is steps 3–4 again, as `requeueWork` then `enqueueWork` — the
-first moves a `done` or `error` row back to pending and rewrites its payload,
-the second covers there being no row at all. Both are idempotent, and either
-alone would silently do nothing in one of those two states.
+**Re-read now** is steps 3–4 again, as ONE `requeueWork`. It is an upsert on
+the work row's primary key `(task_kind, source, entity_id)`: it inserts a row
+where there is none, moves a `done` or `error` one back to pending with this
+payload, and leaves a `pending` or `processing` one exactly where it is. That
+is every state a work row can be in, so nothing follows it — an `enqueueWork`
+after a `requeueWork` is dead code.
+
+**Summaries switched ON** queues the same forced pass. The digests are queued
+by the reconcile pass and by nothing else, and the pass answers `fresh` for a
+minute, so without it the switch looks like it does nothing. Switching it off
+queues nothing: the digest handler declines a directory whose switch is off,
+and the rows it leaves `pending` are what makes turning it back on pick up
+where it stopped.
 
 Every one of those writes lives in
 `app/lib/providers/context_provider.dart` (`ContextDirectoriesActions`); the
@@ -306,8 +315,12 @@ The ladder, in order:
    is opened. Otherwise the bytes are hashed once. An unchanged hash costs the
    hash and nothing more. A hash that matches a row the walk NO LONGER SEES is
    a **move**: `renameFile` keeps the row's id, and therefore its passages,
-   its vectors and its digest. Everything else is new or edited, and only that
-   branch reads words: extract → `upsertFile` → `setFileText` →
+   its vectors and its digest. A move that changes the file's KIND —
+   `notes/thing.md` filed as `.claude/skills/<name>/SKILL.md` — re-reads the
+   conventions off the bytes already in hand (`_conventionsFor`, shared with
+   the edited branch) and clears the description vector on either side of the
+   change, so step 8's tail embeds the new one and never keeps the old.
+   Everything else is new or edited, and only that branch reads words: extract → `upsertFile` → `setFileText` →
    `chunkContextText` → `replaceChunks` → `resetFileDigest`. The row's
    `status` carries the extractor's verdict — `ok`, or `truncated` when a cap
    bit — so nothing downstream presents part of a file as the whole of one.
@@ -338,7 +351,181 @@ survives and the next pass finds nothing changed) and then
 `LlmUnavailableException` is thrown, which parks this kind alone with no
 attempt spent. `EmbedOutcome.rejected` keeps a NULL embedding and carries on.
 
-Phase 2 hangs the digest and brief enqueues off a marked seam after step 6.
+After step 6 the pass queues what the compiled layer owes: one
+`context_digest` per file still pending (capped at
+`maxDigestsPerPass` = 40), and one `context_brief` for the directory. Each is
+ONE `requeueWork` — the upsert on the work row's primary key, which inserts a
+missing row, revives a `done` or `error` one and leaves a `pending` one where
+it is. See **Digests** and **The brief**.
+
+Between step 8 and step 9 the pass also embeds every skill description that
+has no vector yet (`skillsNeedingDescEmbedding`), through the same
+stamp-then-throw park the passage loop uses.
+
+## The conventions
+
+`app/lib/services/context/claude_conventions.dart` is pure — no `dart:io`, no
+store, no clock — and it reads what a Claude Code project has already written
+down about itself. **No model call touches any of this.** A project that
+maintains skills and rules for Claude Code has described them once already;
+asking a model to guess at the same thing would be paying for an answer that
+is sitting in the frontmatter.
+
+| Function | Reads | Answers |
+|---|---|---|
+| `parseFrontmatter(text)` | a leading `---`, YAML, a closing `---` | `(yaml, body)`; unknown keys KEPT, and a missing fence, a non-map document or YAML that will not parse all answer `(const {}, text)` |
+| `cleanDescription(raw)` | a frontmatter value | angle-bracket runs removed, whitespace collapsed, clamped at 500; anything that is not a string is `''` |
+| `skillOf(relPath, text)` | a `skill` file | `(name, description)`, or null |
+| `ruleOf(relPath, text)` | a `rule` file | `(paths, description)`; a non-rule is empty on both halves |
+| `resolveImports(text, read, {hops: 2, baseDir})` | `@path` lines | the notes with the imports pulled in |
+
+**The folder name always wins for a skill.** `.claude/skills/<name>/SKILL.md`
+is invoked as `<name>`, whatever the frontmatter `name` says, so a header that
+has drifted from its folder would have the app matching on a word nobody can
+type. A skill with no `description` falls back to the first non-blank,
+non-heading line of its body, clamped at 300 — a skill with no description at
+all is invisible to the cosine match a later phase runs over these.
+
+**A rule's `paths` is read in all three shapes found in the wild**: a YAML
+list, one string, or one string with commas in it. Entries are trimmed, empties
+dropped, and a leading `./` stripped, because a rel path never carries one.
+
+**`@path` imports, and the four things that are not one.** A line whose
+trimmed form starts with `@` followed by a path is replaced by that file's
+contents, fenced as `<!-- imported: <path> -->` … `<!-- end <path> -->`;
+whatever the author wrote after the path stays as text. Not imports: a line
+inside a ``` fence (a `CLAUDE.md` documenting this syntax must not import
+itself into its own example), an `@` that is not at the start of the line or
+is followed by whitespace, `@~/…` and `@/…` (outside the directory, and
+therefore outside the index), and a relative path that normalises out of the
+root. Recursion is two hops by default; a cycle, and a `read` that answers
+null, both leave the line exactly as written. The result is clamped at 20,000
+characters.
+
+The reader is a CALLBACK rather than the disk, and that is load-bearing: the
+brief handler runs long after the walk, on a queue of its own, against a
+folder the sandbox may no longer be inside. It resolves imports through
+`context_text`, so what the brief is compiled from is what the last pass
+stored.
+
+**Where the results land.** The reconcile pass computes them in the one branch
+that has the words in hand — new or genuinely edited — and writes them through
+`upsertFile`:
+
+| Kind | `description` | `paths_json` | `desc_embedding` |
+|---|---|---|---|
+| `skill` | `skillOf(...).description` | untouched | cleared on every byte change, re-embedded at the tail of the same pass |
+| `rule` | `ruleOf(...).description` | `jsonEncode(paths)` | never — a rule is matched by its globs |
+| anything else | carried forward | carried forward | untouched |
+
+Every other branch of the diff carries the stored values forward: a stat that
+moved is not a frontmatter that changed.
+
+## Digests
+
+**On by default** (`context_dirs.digests` = 1; the Settings switch is
+**Summaries**). `ContextDigestHandler`
+(`app/lib/services/context/context_digest_handler.dart`), kind
+`context_digest`, source `local`, concurrency 1, fast slot, 512 tokens,
+temperature 0.
+
+The entity id is `'<dirId>|<fileId>'` (`entityIdFor` / `splitEntityId`). The
+directory is half of the key because the directory is what decides whether the
+call happens at all — a queued item that could not say whose file it was would
+have to read the row to find out it should not have been queued.
+
+The ladder, each rung a `skipped` with a reason:
+
+| Rung | Reason | Row after |
+|---|---|---|
+| the entity id is not two halves | `malformed_entity` | — |
+| the file is gone, or belongs to another directory | `gone` | — |
+| the directory is gone | `gone` | — |
+| `digests` is off | `off` | **left `pending`** — the switch can go back on |
+| the digest is already `done` | `already_digested` | unchanged |
+| `text_chars` < 200 (`ContextStore.digestMinChars`) | `too_short` | `skipped` |
+| the row claims words the table does not have | `no_text` | `skipped` |
+
+Then one call, and two writes. `digest_json` / `digest_status = 'done'` on the
+file row, and the digest APPENDED as a passage of the file: locator `digest`,
+text `<relPath> · digest` + purpose + findings + questions, carrying the
+chunker's own header convention so the renderer strips the first line and
+cites `rel_path` off the file row. The vector is of that STORED text, header
+line and all, because the reconcile pass's tail embeds `chunk_text` verbatim
+when it picks this passage up un-embedded — two paths writing one row's
+vector have to send the same string.
+
+**The digest passage is NOT filtered out of excerpts.** It is a model's
+summary of the owner's own work, labelled `digest` where it is cited, and it
+is the one passage a question about FINDINGS can land on — a question about a
+conclusion very rarely shares vocabulary with the code that produced it.
+
+**An embedding server that is down does not throw here**, unlike in the
+reconcile pass: the model call is already paid for, and parking the kind would
+put it at risk of being spent twice. The passage keeps a NULL embedding, which
+is invisible to the index and to every KNN until something re-reads the file.
+A fast slot that is down DOES park, leaving `digest_status = 'pending'`.
+
+**The cap paces a new project.** `maxDigestsPerPass` = 40 per reconcile pass,
+worklist `digest_status = 'pending' AND text_chars >= 200` ordered by
+`updated_at DESC, id` — the freshest edits first, because what the owner wants
+read first is what they were last working on. The drain runs every handler to
+EXHAUSTION in registration order and the three context kinds sit ahead of the
+storylines and the drafts, so the cap is not a rate: it is how many fast-slot
+calls one pass may spend before the drafts run, about a minute of fast-slot
+time at the sync cadence. A backlog past the cap lands on the following
+passes, and that is why the brief is queued whenever THIS PASS queued anything
+rather than only when the disk moved.
+
+**A digest the model cannot answer closes its own file row.** The reconcile
+pass revives a `done` or `error` WORK row on every pass, so the work row
+cannot be the memory that the model gave up. When the failure is FATAL the
+handler writes `digest_status = 'error'` before it rethrows, and
+`filesPendingDigest` reads `pending` only — so the file leaves the worklist
+until its bytes change and `resetFileDigest` puts it back. Fatal is
+`AiWorker.isFatal`, the worker's own rule and not a restatement of it: a 400
+from a `json_schema` request is fatal on the FIRST attempt, everything else
+once `maxAttempts` is spent. Two copies of that rule would be a file row
+left `pending` against a work row already written `error`.
+
+## The brief
+
+**One per directory.** `ContextBriefHandler`
+(`app/lib/services/context/context_brief_handler.dart`), kind `context_brief`,
+entity the directory id, fast slot, 768 tokens, temperature 0.
+
+Two inputs, and only two:
+
+1. the root `CLAUDE.md` with its `@` imports resolved, read through the index;
+2. the digest map — up to 200 rows carrying `digest_json`, newest first, one
+   line each as `path · purpose · questions`, clamped at 8,000 characters. A
+   row whose JSON will not decode is dropped rather than rendered as a bare
+   path.
+
+Nested `CLAUDE.md` files are deliberately NOT briefed. Each file row carries
+its own `claude_chain`, and the nested notes ride along with a retrieved
+passage instead — Claude Code's own on-demand rule, and zero extra calls per
+subtree.
+
+**Neither input** → `setDirectoryBrief(null, null)` and `skipped`, reason
+`nothing_to_brief`. Cleared rather than left alone: a project that lost its
+notes must not keep handing replies the guidance it used to give.
+
+**The hash is what keeps this to one call.** `sha256(claudeMd + ' ' +
+fileMap)`; equal to `brief_hash` → `skipped`, reason `unchanged`. It is
+written only WITH the brief it describes, so a call that failed leaves the
+previous hash and the previous brief exactly where they were. That hash is
+what makes the reconcile pass free to queue this kind on every pass that
+queued anything.
+
+The stored `brief_json` is `ContextBrief`: `about` (≤400), `reply_guidance`
+(≤6 × 200), `key_facts` (≤8 × 200), `pointers` (≤10 `{topic, path}` pairs),
+`vocabulary` (≤12 × 60). `pointers` is the one array of OBJECTS in any schema
+this app sends, so it carries no `minItems`/`maxItems` — the grammar converter
+handles those on arrays of scalars only — and its ceiling holds in `validate`.
+
+Settings shows `about` under the path, and `summaries K of M` in the status
+line whenever the switch is on and the count is behind.
 
 ## The two derived indexes
 
@@ -363,6 +550,14 @@ and not one model call, because every float and every word is already stored.
 That rebuild is also the only cleanup for the rowids `replaceChunks`,
 `deleteFiles` and `removeDirectory` orphan — vec0 has no cascade and FTS5 no
 foreign key, so an orphan hydrates to nothing through the join and is dropped.
+
+`removeDirectory` DOES reach the queue, in the same transaction: the
+`context_reconcile` and `context_brief` rows for the directory and every
+`context_digest` row whose entity id starts `<dirId>|`, since work naming a
+directory nobody registered only wakes a handler to say `gone`. A row a
+worker is holding (`processing`) is left alone — taking it out from under a
+running handler is the one way to make the drain's bookkeeping wrong, and
+that handler's own `gone` rung is already the right answer for it.
 
 The keyword index's backfill is fenced behind three cheap numbers (count, max
 id, `SUM(chars)`), which is what makes it affordable on every read. The
@@ -398,6 +593,15 @@ it is not zero. The Teams sync is user-triggered and gets no enqueue.
 work that is enqueued on every sync and never runs — silently, because the row
 stays `pending` and nothing reports a queue that is never claimed.
 
+**Three handlers, in one order that matters**
+(`app/lib/providers/app_providers.dart`, after `AttachmentDigestHandler` and
+before `StorylineAssignHandler`): `ContextReconcileHandler`, then
+`ContextDigestHandler`, then `ContextBriefHandler`. The digests come before
+the brief because the brief is compiled FROM the digest map — a drain that ran
+them the other way round would compile yesterday's map. All three come before
+the storylines and the drafts, so a reply written later in the same drain
+reads an index and a brief that already know what changed this morning.
+
 ## Activity
 
 `ActivityLogPanel` labels the kind **Read directory** and reads these keys:
@@ -409,11 +613,25 @@ stays `pending` and nothing reports a queue that is never claimed.
 | `removed`, `renamed`, `rechained` | the other three movements, absent when zero |
 | `chunks`, `embedded` | passages written, and how many got a vector |
 | `errors`, `truncated` | one unreadable file, and a cap that bit |
+| `skills_embedded` | skill descriptions given a vector this pass, absent when zero |
+| `digests_queued` | how many `context_digest` items this pass queued, absent when zero |
+| `brief_queued` | `true` when this pass queued the brief, absent otherwise |
 | `reason` | on a `skipped` row: `gone`, `fresh` or `unavailable` |
+
+A pass that PARKS on a dead embedding server writes the same map through the
+same closure. It read the same folder and queued the same work, and its line
+is the one somebody goes looking for.
 
 A row counts CHANGES and not files, because a project of two thousand
 unchanged files reads as `0 files changed` — which is the whole point of the
 pass being cheap.
+
+The two compiled kinds have rows of their own:
+
+| Kind | Label | Keys |
+|---|---|---|
+| `context_digest` | **Directory file digest** — `<kind_hint>` | `kind_hint`, `findings`, `questions`; `reason` on a skip: `malformed_entity`, `gone`, `off`, `already_digested`, `too_short`, `no_text` |
+| `context_brief` | **Directory brief** — `N files mapped` | `files_mapped`, `has_claude_md`, `pointers`; `reason` on a skip: `gone`, `nothing_to_brief`, `unchanged` |
 
 ## Sign-out
 
@@ -432,13 +650,25 @@ that call.
   `app/lib/data/keyword_index.dart` (`ContextKeywordIndex`) — the two derived
   indexes.
 - `app/lib/models/context_models.dart` — `ContextDir`, `ContextFile`,
-  `ContextLink`, `ContextScopeKind`, `ContextChunkHit`.
+  `ContextLink`, `ContextScopeKind`, `ContextChunkHit`, `ContextFileDigest`,
+  `ContextBrief`.
 - `app/lib/services/context/directory_access.dart` — the bookmark seam.
 - `app/lib/services/context/context_walk.dart` — the walk, the kinds, the
   chains.
 - `app/lib/services/context/context_extract.dart` — the extractors.
 - `app/lib/services/context/context_chunker.dart` — the passages.
-- `app/lib/services/context/context_reconcile_handler.dart` — the pass.
+- `app/lib/services/context/context_reconcile_handler.dart` — the pass, the
+  two enqueues and the skill-description vectors.
+- `app/lib/services/context/claude_conventions.dart` — frontmatter, skills,
+  rules, `@` imports.
+- `app/lib/services/context/context_digest_handler.dart` — one digest per
+  file.
+- `app/lib/services/context/context_brief_handler.dart` — one brief per
+  directory.
+- `app/lib/services/llm/context_digest_task.dart`,
+  `app/lib/services/llm/context_brief_task.dart` — the two prompts and their
+  schemas.
+- `app/lib/services/llm/model_slots.dart` — the two fast-slot stage rows.
 - `app/lib/services/sync_service.dart` — the tail enqueue.
 - `app/lib/services/ai_worker.dart` — `local` in `_sources`.
 - `app/lib/services/attachments/file_dialogs.dart` — `chooseDirectory()`.

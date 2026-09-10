@@ -39,6 +39,18 @@ class ContextStore {
   /// The word half. Same lifecycle, same promises.
   late final ContextKeywordIndex _keywordIndex = ContextKeywordIndex(db);
 
+  /// How many characters a file needs before it is worth a digest call.
+  ///
+  /// One number, in one place: the reads below use it and
+  /// `ContextDigestHandler.minChars` points at it, so the queue and the
+  /// handler can never disagree about which files are eligible — which would
+  /// show as a directory whose progress line never reaches its own total.
+  ///
+  /// Two hundred characters is about four lines. Below that a file is an
+  /// `__init__.py`, a one-line config or a stub, and a fast-slot call on it
+  /// buys a sentence saying it is short.
+  static const int digestMinChars = 200;
+
   static String _nowIso() => MessageStore.isoStamp(DateTime.now());
 
   static List<Variable> _args(List<Object?> values) => [
@@ -216,7 +228,9 @@ class ContextStore {
   /// De-registers a directory and everything derived from it.
   ///
   /// One transaction, deepest first, so a failure part-way cannot leave
-  /// passages pointing at files that are gone. What it does NOT reach is the
+  /// passages pointing at files that are gone — and the queue rows go with
+  /// it, because work naming a directory nobody registered is work that
+  /// wakes a handler to say `gone`. What it does NOT reach is the
   /// two virtual tables: vec0 has no cascade and FTS5 no foreign key, so the
   /// rowids stay filed until [rebuildIndexes] runs. Both hydrate through a
   /// join that drops them, exactly as `replaceChunks` relies on, so an
@@ -244,6 +258,25 @@ class ContextStore {
       await db.customUpdate(
         'DELETE FROM context_dirs WHERE id = ?',
         variables: _args([id]),
+      );
+      // The queue too, in the same transaction. Every one of these three
+      // kinds names this directory and nothing else, and a row left behind
+      // is a claim the worker pays for — it wakes a handler, reads a
+      // directory that is gone and skips as `gone`, once per kind and once
+      // per file that had a digest owing.
+      //
+      // A row a worker is HOLDING is left exactly where it is: taking it out
+      // from under a running handler is the one way to make the drain's
+      // bookkeeping wrong, and that handler's own `gone` rung is already the
+      // correct answer for it.
+      await db.customUpdate(
+        "DELETE FROM work_items WHERE source = 'local' "
+        "  AND status != 'processing' AND ("
+        "    (task_kind IN ('context_reconcile', 'context_brief') "
+        '      AND entity_id = ?) '
+        "    OR (task_kind = 'context_digest' "
+        "      AND entity_id LIKE ? || '|%'))",
+        variables: _args([id, id]),
       );
     });
   }
@@ -584,6 +617,110 @@ class ContextStore {
       "UPDATE context_files SET digest_status = 'pending', "
       '  digest_json = NULL, updated_at = ? WHERE id = ?',
       variables: _args([_nowIso(), id]),
+    );
+  }
+
+  /// The files in this directory still owed a digest, freshest edit first.
+  ///
+  /// The order is the whole point of the cap: a project of three thousand
+  /// files that has just been registered will not be digested in one pass,
+  /// and what the owner wants read FIRST is what they were last working on.
+  /// `updated_at` moves on every write to the row, so the file edited a
+  /// minute ago leads the list; `id` breaks the tie so two files written in
+  /// the same millisecond have a stable order between passes.
+  Future<List<ContextFile>> filesPendingDigest(
+    String dirId, {
+    int limit = 150,
+  }) async {
+    final rows = await db
+        .customSelect(
+          "SELECT * FROM context_files WHERE dir_id = ? "
+          "  AND digest_status = 'pending' AND text_chars >= ? "
+          'ORDER BY updated_at DESC, id LIMIT ?',
+          variables: _args([dirId, digestMinChars, limit]),
+        )
+        .get();
+    return [for (final row in rows) ContextFile.fromRow(row.data)];
+  }
+
+  /// The digested files of one directory, freshest first — the brief's file
+  /// map, in the order it wants to be truncated from the bottom.
+  ///
+  /// Keyed on `digest_json IS NOT NULL` rather than on the status, because a
+  /// row whose bytes changed goes back to `pending` while its previous
+  /// digest is cleared in the same statement: the two always agree, and the
+  /// column the map actually reads is the honest one to filter on.
+  Future<List<ContextFile>> filesWithDigests(
+    String dirId, {
+    int limit = 200,
+  }) async {
+    final rows = await db
+        .customSelect(
+          'SELECT * FROM context_files WHERE dir_id = ? '
+          '  AND digest_json IS NOT NULL '
+          'ORDER BY updated_at DESC, rel_path LIMIT ?',
+          variables: _args([dirId, limit]),
+        )
+        .get();
+    return [for (final row in rows) ContextFile.fromRow(row.data)];
+  }
+
+  /// Every skill in this directory whose description has no vector yet.
+  ///
+  /// The reconcile pass's own worklist, and it deliberately looks at the
+  /// WHOLE directory rather than at what this pass changed: a previous pass
+  /// may have parked on a dead embedding server part-way through the skills,
+  /// and nothing else would ever notice the tail.
+  ///
+  /// The description comes back with the id because that is all the caller
+  /// needs — hydrating a full row per skill to read one column would be a
+  /// list of file objects thrown away a line later.
+  Future<List<({int id, String description})>> skillsNeedingDescEmbedding(
+    String dirId,
+  ) async {
+    final rows = await db
+        .customSelect(
+          'SELECT id, description FROM context_files '
+          "WHERE dir_id = ? AND kind = 'skill' AND description IS NOT NULL "
+          "  AND description != '' AND desc_embedding IS NULL "
+          'ORDER BY rel_path',
+          variables: _args([dirId]),
+        )
+        .get();
+    return [
+      for (final row in rows)
+        (
+          id: row.data['id'] as int,
+          description: row.data['description'] as String,
+        ),
+    ];
+  }
+
+  /// How far the digests have got: how many files are eligible for one, and
+  /// how many have one.
+  ///
+  /// Eligible is the total the Settings row's `summaries K of M` counts
+  /// towards, so it has to be a total `done` can actually REACH: files still
+  /// owed a digest plus the files already holding one. A file with too few
+  /// words to be worth a call, and a file the model gave up on, are in
+  /// neither half — nothing is going to work either of them off, and a
+  /// denominator that includes them is a progress line that stops one short
+  /// for the life of the directory.
+  Future<({int eligible, int done})> digestCounts(String dirId) async {
+    final row = await db
+        .customSelect(
+          'SELECT '
+          '  SUM(CASE WHEN text_chars >= ? '
+          "    AND digest_status IN ('pending', 'done') "
+          '    THEN 1 ELSE 0 END) AS eligible, '
+          "  SUM(CASE WHEN digest_status = 'done' THEN 1 ELSE 0 END) AS done "
+          'FROM context_files WHERE dir_id = ?',
+          variables: _args([digestMinChars, dirId]),
+        )
+        .getSingle();
+    return (
+      eligible: (row.data['eligible'] as num?)?.toInt() ?? 0,
+      done: (row.data['done'] as num?)?.toInt() ?? 0,
     );
   }
 

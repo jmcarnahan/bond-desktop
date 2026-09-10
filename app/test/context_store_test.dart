@@ -4,9 +4,11 @@ import 'dart:typed_data';
 // the app's own models.
 import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
+import 'package:bond_inbox/data/message_store.dart' show MessageStore;
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/search_fusion.dart';
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
@@ -352,6 +354,45 @@ void main() {
       expect(await store.fileById(keptFile), isNotNull);
       expect(await store.directory(ridge), isNotNull);
     });
+
+    test('the queue rows go with it, except one a worker is holding',
+        () async {
+      final atlas = await store.registerDirectory(path: '/a',
+          displayName: 'atlas');
+      final ridge = await store.registerDirectory(path: '/r',
+          displayName: 'ridge');
+      final work = MessageStore(db);
+      await work.requeueWork('context_reconcile', 'local', atlas);
+      await work.requeueWork('context_brief', 'local', atlas);
+      await work.requeueWork('context_digest', 'local', '$atlas|7');
+      await work.requeueWork('context_digest', 'local', '$atlas|8');
+      await work.requeueWork('context_reconcile', 'local', ridge);
+      // The one a drain has already claimed.
+      await db.customUpdate(
+        "UPDATE work_items SET status = 'processing' WHERE entity_id = ?",
+        variables: [Variable('$atlas|8')],
+      );
+
+      await store.removeDirectory(atlas);
+
+      // Work naming a directory nobody registered wakes a handler to say
+      // `gone`, once per kind and once per file that had a digest owing.
+      final rows = await db
+          .customSelect('SELECT task_kind, entity_id, status FROM work_items')
+          .get();
+      // Taking a row out from under a running handler is the one way to
+      // make the drain's bookkeeping wrong, and its own `gone` rung is
+      // already the right answer for it. The neighbour is untouched.
+      expect(
+        [for (final row in rows) row.data['entity_id']],
+        unorderedEquals(<String>['$atlas|8', ridge]),
+      );
+      final held = rows.firstWhere(
+        (row) => row.data['entity_id'] == '$atlas|8',
+      );
+      expect(held.data['task_kind'], 'context_digest');
+      expect(held.data['status'], 'processing');
+    });
   });
 
   group('files', () {
@@ -484,6 +525,128 @@ void main() {
       // holding the empty string that a reader would have to special-case.
       await store.clearFileText(id);
       expect(await store.fileText(id), isNull);
+    });
+  });
+
+  group('the digest worklists', () {
+    late String atlas;
+
+    setUp(() async {
+      atlas = await store.registerDirectory(path: '/a', displayName: 'atlas');
+    });
+
+    test('only files long enough to be worth a call are pending', () async {
+      final long = await seedFile(atlas, 'docs/pricing.md',
+          sha: 'sha-a', size: 400);
+      await seedFile(atlas, 'docs/stub.md', sha: 'sha-b', size: 20);
+
+      final pending = await store.filesPendingDigest(atlas);
+
+      expect([for (final file in pending) file.id], [long]);
+    });
+
+    test('a digest that is done or skipped is off the worklist', () async {
+      final done = await seedFile(atlas, 'a.md', sha: 'sha-a', size: 400);
+      final skipped = await seedFile(atlas, 'b.md', sha: 'sha-b', size: 400);
+      final open = await seedFile(atlas, 'c.md', sha: 'sha-c', size: 400);
+      await store.setFileDigest(done, status: 'done', digestJson: '{}');
+      await store.setFileDigest(skipped, status: 'skipped');
+
+      expect(
+        [for (final file in await store.filesPendingDigest(atlas)) file.id],
+        [open],
+      );
+    });
+
+    test('the limit is honoured, freshest edit first', () async {
+      for (var i = 0; i < 5; i++) {
+        await seedFile(atlas, 'note-$i.md', sha: 'sha-$i', size: 400);
+      }
+      // The last row written is the most recently updated, so it leads.
+      final newest = (await store.fileByPath(atlas, 'note-4.md'))!.id;
+
+      final pending = await store.filesPendingDigest(atlas, limit: 2);
+
+      expect(pending, hasLength(2));
+      expect(pending.first.id, newest);
+    });
+
+    test('the map reads the rows that actually carry JSON', () async {
+      final mapped = await seedFile(atlas, 'a.md', sha: 'sha-a', size: 400);
+      await seedFile(atlas, 'b.md', sha: 'sha-b', size: 400);
+      await store.setFileDigest(mapped, status: 'done',
+          digestJson: '{"purpose":"rates"}');
+
+      expect(
+        [for (final file in await store.filesWithDigests(atlas)) file.id],
+        [mapped],
+      );
+    });
+
+    test('the counts pair what is eligible with what is done', () async {
+      final done = await seedFile(atlas, 'a.md', sha: 'sha-a', size: 400);
+      await seedFile(atlas, 'b.md', sha: 'sha-b', size: 400);
+      await seedFile(atlas, 'stub.md', sha: 'sha-c', size: 20);
+      await store.setFileDigest(done, status: 'done', digestJson: '{}');
+
+      // The short file is in neither half, so `K of M` counts towards a
+      // total it can reach.
+      expect(await store.digestCounts(atlas), (eligible: 2, done: 1));
+    });
+
+    test('a file nothing will ever digest is in neither half', () async {
+      final done = await seedFile(atlas, 'a.md', sha: 'sha-a', size: 400);
+      await seedFile(atlas, 'b.md', sha: 'sha-b', size: 400);
+      final noWords = await seedFile(atlas, 'empty.md', sha: 'sha-c',
+          size: 400);
+      final gaveUp = await seedFile(atlas, 'odd.md', sha: 'sha-d', size: 400);
+      await store.setFileDigest(done, status: 'done', digestJson: '{}');
+      // The handler's two closing verdicts: a row that claimed words the
+      // table did not have, and a file the model failed on twice.
+      await store.setFileDigest(noWords, status: 'skipped');
+      await store.setFileDigest(gaveUp, status: 'error');
+
+      // Nothing is going to work either of them off, and a denominator that
+      // counts them is a progress line that stops two short for good.
+      expect(await store.digestCounts(atlas), (eligible: 2, done: 1));
+    });
+
+    test('a skill with a description and no vector is the embed worklist',
+        () async {
+      final withDesc = await store.upsertFile(
+        dirId: atlas,
+        relPath: '.claude/skills/rate-quote/SKILL.md',
+        size: 400,
+        mtime: '2026-09-09T09:00:00.000Z',
+        sha256: 'sha-a',
+        kind: 'skill',
+        claudeChain: const [],
+        description: 'Quote a renewal rate.',
+        textChars: 400,
+      );
+      await store.upsertFile(
+        dirId: atlas,
+        relPath: '.claude/skills/blank/SKILL.md',
+        size: 400,
+        mtime: '2026-09-09T09:00:00.000Z',
+        sha256: 'sha-b',
+        kind: 'skill',
+        claudeChain: const [],
+        description: '',
+        textChars: 400,
+      );
+      await seedFile(atlas, 'docs/pricing.md', sha: 'sha-c', size: 400);
+
+      expect(
+        await store.skillsNeedingDescEmbedding(atlas),
+        [(id: withDesc, description: 'Quote a renewal rate.')],
+      );
+
+      await store.setFileDescEmbedding(
+        withDesc,
+        Uint8List.fromList([1, 2, 3, 4]),
+      );
+      expect(await store.skillsNeedingDescEmbedding(atlas), isEmpty);
     });
   });
 

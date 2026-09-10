@@ -111,8 +111,9 @@ void main() {
       expect(find.text(stage.label), findsOneWidget,
           reason: '${stage.id} is missing from the table');
     }
-    // The authored mapping: five bulk stages, five prose ones, one embedding.
-    expect(chipsSaying(tester, 'Fast'), 5);
+    // The authored mapping: seven bulk stages, five prose ones, one
+    // embedding.
+    expect(chipsSaying(tester, 'Fast'), 7);
     expect(chipsSaying(tester, 'Prose'), 5);
     expect(chipsSaying(tester, 'Embeddings'), 1);
   });

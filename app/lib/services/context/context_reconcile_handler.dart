@@ -10,7 +10,9 @@ import '../activity_log.dart';
 import '../ai_worker.dart';
 import '../llm/embeddings_client.dart';
 import '../llm/llm_client.dart';
+import 'claude_conventions.dart';
 import 'context_chunker.dart';
+import 'context_digest_handler.dart';
 import 'context_extract.dart';
 import 'context_walk.dart';
 import 'directory_access.dart';
@@ -47,12 +49,23 @@ class ContextReconcileHandler extends WorkHandler {
   final DirectoryAccess _access;
   final ActivityLog _log;
 
+  /// Where the two compiled kinds are queued, or null for a pass that queues
+  /// nothing.
+  ///
+  /// Optional because this handler's own job — bringing the index level with
+  /// the disk — is complete without a single model call, and every test that
+  /// is about the walk should be able to run one without a work queue behind
+  /// it. The app always passes one.
+  final MessageStore? _work;
+
   ContextReconcileHandler(
     this._context,
     this._embeddings,
     this._access, {
     ActivityLog? activityLog,
-  }) : _log = activityLog ?? ActivityLog.disabled();
+    MessageStore? workQueue,
+  })  : _log = activityLog ?? ActivityLog.disabled(),
+        _work = workQueue;
 
   @override
   String get kind => 'context_reconcile';
@@ -67,6 +80,19 @@ class ContextReconcileHandler extends WorkHandler {
   /// hurried minute would walk the same folder three times. A pass that the
   /// user asked for says `{"force": true}` and skips this rung.
   static const Duration freshFor = Duration(seconds: 60);
+
+  /// How many digests one pass may queue.
+  ///
+  /// A newly registered project of three thousand text files would otherwise
+  /// put three thousand fast-slot calls in front of every other kind in the
+  /// drain. The drain runs every handler to EXHAUSTION in registration
+  /// order, and the three context kinds sit ahead of the storylines and the
+  /// drafts — so this number is not a rate, it is how many fast-slot calls
+  /// one drain may spend on a project before the first reply gets its turn.
+  /// Forty is about a minute of fast-slot time, which is the sync cadence.
+  /// The backlog is worked off over the following passes, freshest edits
+  /// first, which is the order [ContextStore.filesPendingDigest] returns.
+  static const int maxDigestsPerPass = 40;
 
   @override
   Future<void> run(Map<String, Object?> item) async {
@@ -221,6 +247,24 @@ class ContextReconcileHandler extends WorkHandler {
           final from = moved.first;
           renamedFrom.add(from.relPath);
           await _context.renameFile(from.id, file.relPath);
+          // A rename can change what a file IS. The same bytes moved into
+          // `.claude/skills/<name>/SKILL.md` are a skill now, and a project
+          // that writes a note first and files it as a skill afterwards is
+          // the ordinary way one gets written. The conventions are read from
+          // the bytes already in hand — no extra disk, no model — and only
+          // when the kind actually moved, so an ordinary rename still costs
+          // nothing but the hash.
+          final newKind = contextKindFor(file.relPath);
+          var description = from.description;
+          var pathsJson = from.pathsJson;
+          if (newKind != from.kind) {
+            final text = file.isText
+                ? extractContextText(file.relPath, bytes)?.text ?? ''
+                : '';
+            final conventions = _conventionsFor(newKind, file.relPath, text);
+            description = conventions.description;
+            pathsJson = conventions.pathsJson;
+          }
           // The passages are kept — a rename must cost no embedding — but
           // the word index files them under the OLD path, and its backfill
           // fence (count, highest id, summed characters) does not move when
@@ -237,13 +281,20 @@ class ContextReconcileHandler extends WorkHandler {
             size: file.size,
             mtime: file.mtime,
             sha256: sha,
-            kind: contextKindFor(file.relPath),
+            kind: newKind,
             claudeChain: claudeChainFor(file.relPath, claudeMdPaths),
-            description: from.description,
-            pathsJson: from.pathsJson,
+            description: description,
+            pathsJson: pathsJson,
             textChars: from.textChars,
             status: from.status,
           );
+          // A file that became a skill needs a vector of its new
+          // description, and one that stopped being a skill must not keep
+          // matching threads by a description it no longer has. Cleared
+          // here; the tail of this same pass embeds whatever is left owing.
+          if (newKind == 'skill' || from.kind == 'skill') {
+            await _context.setFileDescEmbedding(from.id, null);
+          }
           touched.add(from.id);
           renamed += 1;
           continue;
@@ -254,16 +305,32 @@ class ContextReconcileHandler extends WorkHandler {
       final extracted =
           file.isText ? extractContextText(file.relPath, bytes) : null;
       final text = extracted?.text ?? '';
+      final kind = contextKindFor(file.relPath);
+
+      // The conventions, read here because this is the branch that has the
+      // words in hand — and read with no model, because a Claude Code
+      // project has already written down what its skills and rules are for.
+      // The stat-only branch carries the stored values forward, because a
+      // stat that moved is not a frontmatter that changed; the rename branch
+      // re-reads them only when the new path made the file a different kind.
+      final conventions = _conventionsFor(
+        kind,
+        file.relPath,
+        text,
+        fallbackDescription: existing?.description,
+        fallbackPaths: existing?.pathsJson,
+      );
+
       final id = await _context.upsertFile(
         dirId: dirId,
         relPath: file.relPath,
         size: file.size,
         mtime: file.mtime,
         sha256: sha,
-        kind: contextKindFor(file.relPath),
+        kind: kind,
         claudeChain: claudeChainFor(file.relPath, claudeMdPaths),
-        description: existing?.description,
-        pathsJson: existing?.pathsJson,
+        description: conventions.description,
+        pathsJson: conventions.pathsJson,
         textChars: text.length,
         // A cap bit: the megabyte ceiling or the forty-row table cut. The
         // row has to say so, because everything downstream — a digest, a
@@ -273,6 +340,12 @@ class ContextReconcileHandler extends WorkHandler {
       );
       touched.add(id);
       changed += 1;
+
+      // The description these bytes carried may not be the description they
+      // carry now, and a vector of the old one would match a request the
+      // skill no longer describes. Cleared here and re-embedded at the tail
+      // of this same pass.
+      if (kind == 'skill') await _context.setFileDescEmbedding(id, null);
 
       if (text.trim().isEmpty) {
         // A file with no words keeps its row — it is still in the folder and
@@ -306,9 +379,30 @@ class ContextReconcileHandler extends WorkHandler {
     ];
     await _context.deleteFiles(removedIds);
 
-    // Phase 2: enqueue context_digest / context_brief here — one digest per
-    // changed text file when `dir.digests`, capped per pass, and one brief
-    // for the directory when anything changed at all.
+    // One digest per file still owed one, freshest edit first and capped.
+    // The worklist is `digest_status = 'pending'` across the WHOLE
+    // directory rather than the files this pass touched: a backlog past the
+    // cap has to land on a later pass, and a park on the fast slot has to be
+    // picked up again by somebody.
+    //
+    // One call, not two. `requeueWork` is an upsert on the work row's
+    // primary key `(task_kind, source, entity_id)`: it inserts a missing
+    // row, revives a `done` or `error` one, and leaves a `pending` or
+    // `processing` one exactly where it is. That covers every state a work
+    // row can be in, and an `enqueueWork` after it is dead code.
+    var digestsQueued = 0;
+    if (dir.digests && _work != null) {
+      for (final file
+          in await _context.filesPendingDigest(dirId,
+              limit: maxDigestsPerPass)) {
+        await _work.requeueWork(
+          'context_digest',
+          'local',
+          ContextDigestHandler.entityIdFor(dirId, file.id),
+        );
+        digestsQueued += 1;
+      }
+    }
 
     // A `CLAUDE.md` appearing or disappearing changes the standing notes for
     // every file BELOW it, including files this pass never touched. Compared
@@ -321,6 +415,20 @@ class ContextReconcileHandler extends WorkHandler {
       rechained += 1;
     }
 
+    // The brief is queued when THIS PASS queued anything, not only when the
+    // disk moved. A digest backlog past the cap lands on later passes over a
+    // folder nothing has touched, and the brief has to follow the digests it
+    // is compiled from — so "nothing changed on disk" is the wrong question.
+    // An extra enqueue is free: the brief handler hashes its own inputs and
+    // skips `unchanged` before it spends anything.
+    var briefQueued = false;
+    if (_work != null &&
+        changed + removedIds.length + renamed + rechained + digestsQueued >
+            0) {
+      await _work.requeueWork('context_brief', 'local', dirId);
+      briefQueued = true;
+    }
+
     // Everything un-embedded in the directory, not only what this pass
     // changed: a previous pass may have parked on a dead embedding server
     // part-way through, and nothing else would ever notice the tail.
@@ -328,6 +436,51 @@ class ContextReconcileHandler extends WorkHandler {
     final walkedAt = MessageStore.isoStamp(DateTime.now());
     final rootHash = _rootHash(walk.files, hashes);
     var embedded = 0;
+    var skillsEmbedded = 0;
+
+    // What this pass did, in ONE place. A park is not a different pass — it
+    // read the same folder, moved the same rows and queued the same work,
+    // and it is the pass whose line somebody actually goes looking for. Two
+    // copies of this map is how the park came to report three of its twelve
+    // facts.
+    Map<String, Object?> notes() => {
+          'files_seen': walk.files.length,
+          'changed': changed,
+          'removed': removedIds.length,
+          'renamed': renamed,
+          'chunks': chunkCount,
+          'embedded': embedded,
+          if (rechained > 0) 'rechained': rechained,
+          if (skillsEmbedded > 0) 'skills_embedded': skillsEmbedded,
+          if (digestsQueued > 0) 'digests_queued': digestsQueued,
+          if (briefQueued) 'brief_queued': true,
+          if (errors > 0) 'errors': errors,
+          if (walk.truncated) 'truncated': true,
+        };
+
+    // The walk is stamped BEFORE the throw. Everything read this pass — the
+    // rows, the words, the passages — is already stored, and stamping says
+    // so: the next pass finds nothing changed, skips every read, and pays
+    // only for the embedding tail. Throwing parks this kind alone with no
+    // attempt spent.
+    //
+    // A closure because BOTH embedding loops below can meet the same dead
+    // server, and a second copy of this block is a second place to forget
+    // the stamp.
+    Future<Never> park() async {
+      await _context.setDirectoryWalked(
+        dirId,
+        walkedAt: walkedAt,
+        rootHash: rootHash,
+        filesCount: walk.files.length,
+        textBytes: textBytes,
+      );
+      await _context.indexPendingChunks();
+      await _context.ensureKeywordIndex();
+      _log.note(notes());
+      throw const LlmUnavailableException('embedding server unavailable');
+    }
+
     for (final chunk in pending) {
       final result = await _embeddings.embedResult(
         chunk.text,
@@ -335,28 +488,7 @@ class ContextReconcileHandler extends WorkHandler {
       );
       final vector = result.vector;
       if (vector == null) {
-        if (result.outcome == EmbedOutcome.unavailable) {
-          // The walk is stamped BEFORE the throw. Everything read this pass
-          // — the rows, the words, the passages — is already stored, and
-          // stamping says so: the next pass finds nothing changed, skips
-          // every read, and pays only for the embedding tail. Throwing parks
-          // this kind alone with no attempt spent.
-          await _context.setDirectoryWalked(
-            dirId,
-            walkedAt: walkedAt,
-            rootHash: rootHash,
-            filesCount: walk.files.length,
-            textBytes: textBytes,
-          );
-          await _context.indexPendingChunks();
-          await _context.ensureKeywordIndex();
-          _log.note({
-            'files_seen': walk.files.length,
-            'changed': changed,
-            'embedded': embedded,
-          });
-          throw const LlmUnavailableException('embedding server unavailable');
-        }
+        if (result.outcome == EmbedOutcome.unavailable) await park();
         // Rejected: the server read the request and said no, so the next
         // attempt reads the same no. The row keeps a NULL embedding, which
         // is invisible to both the index's backfill and every KNN.
@@ -374,6 +506,25 @@ class ContextReconcileHandler extends WorkHandler {
       embedded += 1;
     }
 
+    // A skill's description is matched by COSINE against what a thread is
+    // about, so it needs a vector of its own — the passages of `SKILL.md`
+    // are the instructions, and a request never looks like them. Every
+    // un-embedded skill in the directory, not only the ones this pass
+    // rewrote, for the reason the chunk worklist above is directory-wide.
+    for (final skill in await _context.skillsNeedingDescEmbedding(dirId)) {
+      final result = await _embeddings.embedResult(
+        skill.description,
+        prefix: EmbeddingsClient.documentPrefix,
+      );
+      final vector = result.vector;
+      if (vector == null) {
+        if (result.outcome == EmbedOutcome.unavailable) await park();
+        continue;
+      }
+      await _context.setFileDescEmbedding(skill.id, encodeEmbedding(vector));
+      skillsEmbedded += 1;
+    }
+
     await _context.indexPendingChunks();
     await _context.ensureKeywordIndex();
 
@@ -385,17 +536,42 @@ class ContextReconcileHandler extends WorkHandler {
       textBytes: textBytes,
     );
 
-    _log.note({
-      'files_seen': walk.files.length,
-      'changed': changed,
-      'removed': removedIds.length,
-      'renamed': renamed,
-      'chunks': chunkCount,
-      'embedded': embedded,
-      if (rechained > 0) 'rechained': rechained,
-      if (errors > 0) 'errors': errors,
-      if (walk.truncated) 'truncated': true,
-    });
+    _log.note(notes());
+  }
+
+  /// What a Claude Code project already says about one of its own files.
+  ///
+  /// The two branches that write a file row — the one that read new words
+  /// and the one that renamed a file into a different kind — need the same
+  /// rule, and a second copy of it is how a skill filed by rename ends up
+  /// with no description. [fallbackDescription] and [fallbackPaths] are what
+  /// a file that declares nothing keeps: the stored values for an edit, and
+  /// nothing at all for a rename out of one kind into another.
+  static ({String? description, String? pathsJson}) _conventionsFor(
+    String kind,
+    String relPath,
+    String text, {
+    String? fallbackDescription,
+    String? fallbackPaths,
+  }) {
+    if (text.isEmpty) {
+      return (description: fallbackDescription, pathsJson: fallbackPaths);
+    }
+    switch (kind) {
+      case 'skill':
+        return (
+          description: skillOf(relPath, text)?.description,
+          pathsJson: fallbackPaths,
+        );
+      case 'rule':
+        final rule = ruleOf(relPath, text);
+        return (
+          description: rule.description,
+          pathsJson: jsonEncode(rule.paths),
+        );
+      default:
+        return (description: fallbackDescription, pathsJson: fallbackPaths);
+    }
   }
 
   /// Where to read the directory from, or null when it cannot be read.

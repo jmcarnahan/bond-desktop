@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
@@ -114,6 +116,48 @@ void main() {
     expect(rows.single.links, 2);
     expect(rows.single.chunks, 2);
     expect(rows.single.embedded, 1);
+    // Nothing has been digested and nothing carries a brief yet.
+    expect(rows.single.about, isNull);
+    expect(rows.single.digestsDone, 0);
+    expect(rows.single.digestsEligible, 1);
+  });
+
+  test('a row carries the brief opener and how far the summaries have got',
+      () async {
+    final id = await context.registerDirectory(
+      path: '/Users/pat/projects/acme',
+      displayName: 'acme',
+    );
+    await context.setDirectoryBrief(
+      id,
+      briefJson: jsonEncode(
+        const ContextBrief(about: 'Acme is the renewal analysis.').toJson(),
+      ),
+      briefHash: 'h1',
+    );
+    Future<int> addFile(String relPath, {required int chars}) =>
+        context.upsertFile(
+          dirId: id,
+          relPath: relPath,
+          size: chars,
+          mtime: '2026-09-09T10:00:00Z',
+          sha256: 'sha-$relPath',
+          kind: 'doc',
+          claudeChain: const [],
+          textChars: chars,
+        );
+    final done = await addFile('docs/pricing.md', chars: 400);
+    await addFile('docs/terms.md', chars: 400);
+    // Below the floor: in neither half of the progress, which is what
+    // makes `K of M` a count that can actually reach its total.
+    await addFile('docs/stub.md', chars: 20);
+    await context.setFileDigest(done, status: 'done', digestJson: '{}');
+
+    final rows = await readRows();
+
+    expect(rows.single.about, 'Acme is the renewal analysis.');
+    expect(rows.single.digestsDone, 1);
+    expect(rows.single.digestsEligible, 2);
   });
 
   group('Add directory…', () {
@@ -162,8 +206,8 @@ void main() {
   test('Re-read now brings a finished item back to pending', () async {
     final dialogs = _FakeDialogs('/Users/pat/projects/acme');
     final added = await actions().addDirectory(dialogs);
-    // The pass ran and the row is done: this is exactly the state a plain
-    // `enqueueWork` would ignore.
+    // The pass ran and the row is done: this is exactly the state an
+    // `INSERT OR IGNORE` would leave alone, and the upsert revives.
     await db.customUpdate(
       "UPDATE work_items SET status = 'done', payload_json = NULL "
       "WHERE task_kind = 'context_reconcile'",
@@ -192,10 +236,64 @@ void main() {
 
     await actions().reread(id);
 
+    // The other half of the same upsert: one call inserts where there is no
+    // row and revives where there is a finished one, so nothing follows it.
     expect(
       await store.workCounts('context_reconcile', sources: const ['local']),
       {'pending': 1},
     );
+  });
+
+  group('the Summaries switch', () {
+    Future<String> registered() async {
+      final id = await context.registerDirectory(
+        path: '/Users/pat/projects/acme',
+        displayName: 'acme',
+      );
+      // The pass has run and the work row is finished — the state a person
+      // is actually in when they reach for this switch.
+      await store.requeueWork('context_reconcile', 'local', id);
+      await db.customUpdate(
+        "UPDATE work_items SET status = 'done', payload_json = NULL "
+        "WHERE task_kind = 'context_reconcile'",
+      );
+      return id;
+    }
+
+    test('turning it on queues a forced pass now', () async {
+      final id = await registered();
+
+      await actions().setDigests(id, true);
+
+      // The digests are queued by the reconcile pass and by nothing else,
+      // and the pass answers `fresh` for a minute — so without this the
+      // switch looks like it does nothing.
+      expect(
+        await store.workCounts('context_reconcile', sources: const ['local']),
+        {'pending': 1},
+      );
+      final work = await db
+          .customSelect(
+            'SELECT payload_json FROM work_items '
+            "WHERE task_kind = 'context_reconcile'",
+          )
+          .getSingle();
+      expect(work.data['payload_json'], '{"force":true}');
+    });
+
+    test('turning it off queues nothing', () async {
+      final id = await registered();
+
+      await actions().setDigests(id, false);
+
+      // The handler already declines a directory whose switch is off, and
+      // the rows it leaves pending are what makes turning it back on pick
+      // up where it stopped.
+      expect(
+        await store.workCounts('context_reconcile', sources: const ['local']),
+        {'done': 1},
+      );
+    });
   });
 
   test('Remove drops the directory and its links', () async {

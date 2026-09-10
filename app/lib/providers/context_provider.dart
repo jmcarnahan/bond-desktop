@@ -8,15 +8,29 @@ import '../services/attachments/file_dialogs.dart';
 import 'activity_provider.dart' show activityEventsProvider;
 import 'app_providers.dart';
 
-/// One registered directory and the three counts the library row reports:
-/// how many rooms point at it, how many passages it holds, and how many of
-/// those have a vector.
+/// One registered directory, the sentence its brief opens with, and the four
+/// counts the library row reports: how many rooms point at it, how many
+/// passages it holds, how many of those have a vector, and how far the
+/// per-file summaries have got.
 ///
 /// A record rather than a class on [ContextDir], and the counts deliberately
 /// NOT columns: `links` moves when a room is linked and `chunks` moves when a
 /// file is re-read, so storing either on the directory row would be a second
 /// copy of a number two other tables already answer.
-typedef ContextDirRow = ({ContextDir dir, int links, int chunks, int embedded});
+///
+/// [about] is the one part of the compiled brief this row shows. It is the
+/// only place in Settings that says what the app made of a folder, which is
+/// how a person tells a directory that was read from one that was merely
+/// walked.
+typedef ContextDirRow = ({
+  ContextDir dir,
+  int links,
+  int chunks,
+  int embedded,
+  String? about,
+  int digestsDone,
+  int digestsEligible,
+});
 
 /// The Settings library, re-read after every recorded activity event.
 ///
@@ -27,10 +41,10 @@ typedef ContextDirRow = ({ContextDir dir, int links, int chunks, int embedded});
 /// carries the previous value through the reload, so the rows do not blink
 /// between an event and its re-read.
 ///
-/// Two extra reads per directory rather than one joined query, because the
+/// Three extra reads per directory rather than one joined query, because the
 /// library is a handful of rows a person registered by hand — a join written
-/// to save four statements would be a harder query to change when Phase 2
-/// adds the digest progress to the same row.
+/// to save six statements would be the harder thing to change the next time
+/// a pass adds a number to this row.
 final contextDirectoriesProvider =
     FutureProvider.autoDispose<List<ContextDirRow>>((ref) async {
   ref.watch(activityEventsProvider);
@@ -38,11 +52,15 @@ final contextDirectoriesProvider =
   final rows = <ContextDirRow>[];
   for (final dir in await store.directories()) {
     final counts = await store.chunkCounts(dir.id);
+    final digests = await store.digestCounts(dir.id);
     rows.add((
       dir: dir,
       links: await store.linkCount(dir.id),
       chunks: counts.chunks,
       embedded: counts.embedded,
+      about: ContextBrief.decode(dir.briefJson)?.about,
+      digestsDone: digests.done,
+      digestsEligible: digests.eligible,
     ));
   }
   return rows;
@@ -89,8 +107,11 @@ class ContextDirectoriesActions {
     );
     // Forced, because the person is standing in front of it. Re-adding a
     // directory registered a moment ago must read it rather than answer
-    // `fresh` at a row that has not changed on screen.
-    await _ref.read(messageStoreProvider).enqueueWork(
+    // `fresh` at a row that has not changed on screen — and re-adding one
+    // that was removed months ago must read it rather than meet the `done`
+    // work row it left behind, which is why this is the same upsert
+    // [reread] uses rather than an `INSERT OR IGNORE`.
+    await _ref.read(messageStoreProvider).requeueWork(
           'context_reconcile',
           'local',
           id,
@@ -103,26 +124,18 @@ class ContextDirectoriesActions {
 
   /// Re-reads one directory now, whatever the freshness rung would have said.
   ///
-  /// Both calls, in this order, and both are idempotent. [requeueWork] moves
-  /// a `done` or `error` row back to pending and overwrites its payload, and
-  /// leaves a still-pending row alone; [enqueueWork] is `INSERT OR IGNORE`
-  /// and covers the case of no row at all. Either alone would miss one of
-  /// those two states, which is a Re-read now that silently does nothing.
+  /// One call. [requeueWork] is an upsert on the work row's primary key
+  /// `(task_kind, source, entity_id)`: it inserts a row where there is none,
+  /// moves a `done` or `error` one back to pending with this payload, and
+  /// leaves a row already waiting exactly where it is. That is every state a
+  /// work row can be in, so nothing follows it.
   Future<void> reread(String id) async {
-    final store = _ref.read(messageStoreProvider);
-    const payload = '{"force":true}';
-    await store.requeueWork(
-      'context_reconcile',
-      'local',
-      id,
-      payloadJson: payload,
-    );
-    await store.enqueueWork(
-      'context_reconcile',
-      'local',
-      id,
-      payloadJson: payload,
-    );
+    await _ref.read(messageStoreProvider).requeueWork(
+          'context_reconcile',
+          'local',
+          id,
+          payloadJson: '{"force":true}',
+        );
     unawaited(_ref.read(aiWorkerProvider).pump());
     _ref.invalidate(contextDirectoriesProvider);
   }
@@ -135,8 +148,26 @@ class ContextDirectoriesActions {
   }
 
   /// Whether each changed file in this directory earns a one-call digest.
+  ///
+  /// Turning it ON queues a forced pass, exactly as Re-read now does. The
+  /// digests are queued by the reconcile pass and by nothing else, and the
+  /// pass is skipped as `fresh` for a minute — so without this, a person who
+  /// switches summaries on watches `summaries 0 of 12` sit still and
+  /// concludes the switch does nothing. Turning it OFF queues nothing:
+  /// the digest handler already declines a directory whose switch is off,
+  /// and the rows it leaves `pending` are what makes turning it back on
+  /// pick up where it stopped.
   Future<void> setDigests(String id, bool on) async {
     await _ref.read(contextStoreProvider).setDirectoryOptions(id, digests: on);
+    if (on) {
+      await _ref.read(messageStoreProvider).requeueWork(
+            'context_reconcile',
+            'local',
+            id,
+            payloadJson: '{"force":true}',
+          );
+      unawaited(_ref.read(aiWorkerProvider).pump());
+    }
     _ref.invalidate(contextDirectoriesProvider);
   }
 

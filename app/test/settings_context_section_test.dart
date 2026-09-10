@@ -28,6 +28,7 @@ ContextDir _dir({
   int filesCount = 12,
   bool digests = true,
   bool honorGitignore = false,
+  String? briefJson,
 }) =>
     ContextDir(
       id: id,
@@ -38,6 +39,7 @@ ContextDir _dir({
       walkedAt: walkedAt,
       filesCount: filesCount,
       textBytes: 4096,
+      briefJson: briefJson,
       digests: digests,
       honorGitignore: honorGitignore,
       createdAt: _now,
@@ -49,8 +51,19 @@ ContextDirRow _row(
   int links = 0,
   int chunks = 30,
   int embedded = 30,
+  String? about,
+  int digestsDone = 0,
+  int digestsEligible = 0,
 }) =>
-    (dir: dir, links: links, chunks: chunks, embedded: embedded);
+    (
+      dir: dir,
+      links: links,
+      chunks: chunks,
+      embedded: embedded,
+      about: about,
+      digestsDone: digestsDone,
+      digestsEligible: digestsEligible,
+    );
 
 void main() {
   late List<String> rereads;
@@ -171,6 +184,39 @@ void main() {
       );
     });
 
+    testWidgets('a summary tail is named while it is still behind',
+        (tester) async {
+      await pumpSection(
+        tester,
+        rows: [_row(_dir(), digestsDone: 3, digestsEligible: 12)],
+      );
+      expect(
+        find.text('12 files · 30 passages · read 3m ago · summaries 3 of 12'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a directory level with its summaries says nothing about them',
+        (tester) async {
+      await pumpSection(
+        tester,
+        rows: [_row(_dir(), digestsDone: 12, digestsEligible: 12)],
+      );
+      expect(find.textContaining('summaries'), findsNothing);
+    });
+
+    testWidgets('summaries switched off hide the progress entirely',
+        (tester) async {
+      // A count towards a total nothing is working on would never move.
+      await pumpSection(
+        tester,
+        rows: [
+          _row(_dir(digests: false), digestsDone: 0, digestsEligible: 12),
+        ],
+      );
+      expect(find.textContaining('summaries'), findsNothing);
+    });
+
     testWidgets('an unavailable folder shows its own sentence', (tester) async {
       await pumpSection(
         tester,
@@ -228,6 +274,40 @@ void main() {
       );
       expect(find.text('Not linked to any thread yet'), findsOneWidget);
       expect(find.text('Links: 3'), findsOneWidget);
+    });
+  });
+
+  group('the brief', () {
+    testWidgets('its opening sentence sits under the path', (tester) async {
+      await pumpSection(
+        tester,
+        rows: [_row(_dir(), about: 'Atlas is the renewal analysis.')],
+      );
+
+      expect(
+        find.byKey(ContextDirectoriesSection.aboutKeyFor('d1')),
+        findsOneWidget,
+      );
+      expect(find.text('Atlas is the renewal analysis.'), findsOneWidget);
+    });
+
+    testWidgets('a directory with no brief yet shows no line at all',
+        (tester) async {
+      await pumpSection(tester, rows: [_row(_dir())]);
+
+      expect(
+        find.byKey(ContextDirectoriesSection.aboutKeyFor('d1')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('an empty about is the same as none', (tester) async {
+      await pumpSection(tester, rows: [_row(_dir(), about: '')]);
+
+      expect(
+        find.byKey(ContextDirectoriesSection.aboutKeyFor('d1')),
+        findsNothing,
+      );
     });
   });
 

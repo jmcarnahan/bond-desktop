@@ -85,6 +85,9 @@ class ContextDirectoriesSection extends StatefulWidget {
 
   static ValueKey<String> rowKeyFor(String id) => ValueKey('context-dir-$id');
 
+  static ValueKey<String> aboutKeyFor(String id) =>
+      ValueKey('context-dir-about-$id');
+
   static ValueKey<String> rereadKeyFor(String id) =>
       ValueKey('context-dir-reread-$id');
 
@@ -209,6 +212,7 @@ class _ContextDirectoriesSectionState extends State<ContextDirectoriesSection> {
 
   Widget _row(ContextDirRow row, DateTime now) {
     final dir = row.dir;
+    final about = row.about;
     final failed = dir.status == 'error' || dir.status == 'unavailable';
     return Padding(
       key: ContextDirectoriesSection.rowKeyFor(dir.id),
@@ -228,6 +232,18 @@ class _ContextDirectoriesSectionState extends State<ContextDirectoriesSection> {
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
           ),
+          // What the app made of the folder, in the model's own words. Three
+          // lines at most: this is the row of a settings list, not the brief
+          // itself, and a project whose `about` runs long must not push the
+          // controls of the directory below it off the pane.
+          if (about != null && about.isNotEmpty)
+            Text(
+              about,
+              key: ContextDirectoriesSection.aboutKeyFor(dir.id),
+              style: BondType.caption.copyWith(color: BondColors.inkSecondary),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
           const SizedBox(height: BondSpacing.s4),
           Text(
             _statusLine(row, now),
@@ -279,6 +295,14 @@ class _ContextDirectoriesSectionState extends State<ContextDirectoriesSection> {
     // `ready` and the vectors are still arriving.
     if (row.embedded < row.chunks) {
       parts.add('embedding ${row.embedded} of ${row.chunks}');
+    }
+    // The summary tail, on the same terms and for the same reason: a fast
+    // server that is off is exactly the case where the directory reads
+    // `ready` and the per-file summaries are still arriving. Hidden when the
+    // switch is off, because a progress line towards a total nothing is
+    // working on would never move.
+    if (dir.digests && row.digestsDone < row.digestsEligible) {
+      parts.add('summaries ${row.digestsDone} of ${row.digestsEligible}');
     }
     return parts.join(' · ');
   }
