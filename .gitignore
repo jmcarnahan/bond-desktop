@@ -10,7 +10,10 @@ app/build/
 *.env
 local.mk
 
-# Claude Code session/config files
-.claude/
-CLAUDE.md
+# Claude Code: the hooks and shared settings are versioned (nothing secret in
+# them); per-machine state, worktrees, plans and local notes stay out.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+__pycache__/
 CLAUDE.local.md
