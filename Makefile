@@ -92,12 +92,17 @@ RESET  := \033[0m
 
 .DEFAULT_GOAL := help
 .NOTPARALLEL:
+# dist, dist-notarize and dist-appcast are listed even though they arrive in
+# Phases 5 and 6: a `dist/` DIRECTORY exists, so without .PHONY make would
+# see the target as already satisfied and say "up to date".
 .PHONY: help install model stop status logs smoke smoke-tools chat clean \
         setup verify clean-model _wait-model _wait-embed _wait-fast \
         embed embed-stop fast fast-stop omlx omlx-stop _wait-omlx \
         app-install app-run app-test app-gen app-migrations app-analyze \
         app-build vec-vendor bench bench-verify bench-verify-prose bench-prose \
-        ab ab-membership drain bench-compare
+        ab ab-membership drain bench-compare \
+        dist-llama dist-app dist-sign dist-dmg dist-check dist-clean \
+        dist dist-notarize dist-appcast
 
 help:
 	@printf "bond-desktop — local model + agent\n\n"
@@ -139,7 +144,16 @@ help:
 	@printf "BENCH_VERIFY=0 skips the contract check; BENCH_K=1,3,6 picks the drain\n"
 	@printf "rounds (start the server with FAST_SLOTS >= max(K)).\n\n"
 	@printf "First run downloads ~19GB of weights before the port binds —\n"
-	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n"
+	@printf "'make model' will time out; watch 'make logs' and wait for [up].\n\n"
+	@printf "Ship it (macOS installer, see docs/distribution.md):\n"
+	@printf "  make dist-llama   → build the bundled llama-server sidecar (SHA-pinned source)\n"
+	@printf "  make dist-app     → build \"Bond Desktop.app\" and lay the sidecar into it\n"
+	@printf "  make dist-sign    → sign the bundle inside out\n"
+	@printf "  make dist-dmg     → dist/out/Bond-Desktop-$(VERSION).dmg\n"
+	@printf "  make dist-check   → what this machine still needs to ship a release\n"
+	@printf "  make dist-clean   → rm dist/stage dist/out\n"
+	@printf "  make dist-dmg AD_HOC=1 → unsigned DMG for testers (no certificate needed)\n"
+	@printf "  make dist (Phase 5)    → signed + notarized; dist-appcast (Phase 6) publishes updates\n"
 
 install:
 	@brew list llama.cpp >/dev/null 2>&1 || brew install llama.cpp
@@ -891,7 +905,57 @@ vec-vendor:
 
 app-build:
 	@cd $(APP_DIR) && $(FLUTTER) build macos --release $(APP_SECRET_DEFINE) $(APP_LLM_DEFINES)
-	@printf "  $(GREEN)✓$(RESET) $(APP_DIR)/build/macos/Build/Products/Release/bond_inbox.app\n"
+	@printf "  $(GREEN)✓$(RESET) \"$(APP_DIR)/build/macos/Build/Products/Release/Bond Desktop.app\"\n"
+
+# ── distribution ───────────────────────────────────────────────────────
+# The installer pipeline: build the llama-server sidecar, build and stuff the
+# bundle, sign it, wrap it in a DMG. Every step is a script under dist/ so
+# that the same commands run from a shell, and every step is idempotent.
+#
+# AD_HOC=1 is the no-certificate rehearsal: everything runs, the bundle is
+# ad-hoc signed WITHOUT the hardened runtime (library validation would refuse
+# ad-hoc dylibs), and the DMG is neither signed nor notarized. Testers open it
+# through System Settings → Privacy & Security → Open Anyway.
+#
+# `make dist` (signed + notarized end to end) and `dist-notarize` arrive in
+# Phase 5 with the Developer ID certificate; `dist-appcast` in Phase 6.
+
+# One source of truth for both numbers: pubspec's `version: 1.0.0+1` line,
+# which is also what --build-name/--build-number carry into Info.plist.
+VERSION ?= $(shell sed -n 's/^version:[[:space:]]*\([^+]*\)+.*/\1/p' $(APP_DIR)/pubspec.yaml)
+BUILD   ?= $(shell sed -n 's/^version:[[:space:]]*[^+]*+\(.*\)/\1/p' $(APP_DIR)/pubspec.yaml)
+
+# Non-empty selects the ad-hoc rehearsal described above.
+AD_HOC ?=
+
+# Machine-local signing and notarization settings, never committed. See
+# dist/local.env.example and dist/README.md.
+DIST_ENV ?= $(CURDIR)/dist/local/dist.env
+
+# Non-empty lets dist-app build without a BOND_MCP_SERVER_URL. Off by default
+# because a build with no MCP URL cannot sign in at all, which is a broken
+# tester build that only announces itself after someone has installed it.
+BOND_DIST_ALLOW_NO_MCP ?=
+
+dist-llama:
+	@dist/build-llama.sh
+
+dist-app: dist-llama
+	@MS_ENV=$(MS_ENV) VERSION=$(VERSION) BUILD=$(BUILD) FLUTTER=$(FLUTTER) \
+	 BOND_DIST_ALLOW_NO_MCP=$(BOND_DIST_ALLOW_NO_MCP) dist/bundle.sh
+
+dist-sign: dist-app
+	@AD_HOC=$(AD_HOC) DIST_ENV=$(DIST_ENV) dist/sign.sh
+
+dist-dmg: dist-sign
+	@VERSION=$(VERSION) AD_HOC=$(AD_HOC) dist/dmg.sh
+
+dist-check:
+	@MS_ENV=$(MS_ENV) DIST_ENV=$(DIST_ENV) dist/check.sh
+
+dist-clean:
+	@rm -rf dist/stage dist/out
+	@printf "  $(GREEN)✓$(RESET) removed dist/stage and dist/out\n"
 
 # This exists because a corrupt download does NOT announce itself. A
 # concurrent writer once clobbered the 19GB blob mid-pull and every cheap

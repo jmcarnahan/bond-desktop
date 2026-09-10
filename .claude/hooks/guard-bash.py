@@ -164,6 +164,24 @@ ASK = [
      r"|\bopen\s+-a\b|\bopen\s+\S*\.app\b|(?:^|[;&|(]\s*)\S*\.app/Contents/MacOS/\S+"
      r"|\bxcodebuild\b(?![^|;&]*(-showBuildSettings|-list|-version|-showsdks|-showdestinations))",
      "The user drives the live app and the model servers; gates are serverless."),
+    # The distribution targets split in two. dist-llama/dist-app/dist-dmg/
+    # dist-check/dist-clean are unattended: they compile, copy and package,
+    # and AD_HOC=1 needs no certificate. `make dist`, `dist-sign`,
+    # `dist-notarize` and `dist-appcast` reach a real identity, Apple's
+    # notary service or the Sparkle key, so `(?![-\w])` after each target
+    # keeps the first group out of this rule — and keeps `make distclean`
+    # out of it too.
+    #
+    # The repeated group spans everything make allows BEFORE a goal: flags,
+    # `-C dir`, variable assignments and earlier goals. Without the last two,
+    # `make VERSION=2 dist` and `make dist-llama dist` both slipped through
+    # unattended. It stays greedy on purpose, so `make dist-dmg AD_HOC=1`
+    # ends with nothing left to match and is still allowed.
+    (r"\bmake\b(?![^|;&]*(\s-n\b|--dry-run|--just-print))(?:\s+(?:-C\s+\S+|-\S+|\S+=\S+|[\w./-]+))*\s+(dist-notarize|dist-appcast|dist-sign|dist)(?![-\w])"
+     r"|\bxcrun\s+notarytool\s+(submit|store-credentials)\b"
+     r"|\bsecurity\s+(import|create-keychain|set-key-partition-list)\b"
+     r"|\bgh\s+release\s+(create|upload|delete|edit)\b",
+     "Signing with a real identity, uploading to Apple or GitHub, and touching keychains are the user's call."),
 ]
 
 # ------------------------------------------------------- protected paths

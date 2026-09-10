@@ -271,7 +271,8 @@ the `Makefile`, and a git-ignored `local.mk` can pin `MS_ENV` somewhere else
 permanently. A build made without them runs fine and is unaffected in MCP
 mode; it is the **This device** sign-in that refuses, with a message naming
 exactly these defines. A build made **with** the secret carries it in the
-binary — do not distribute one.
+binary — do not distribute one. `make dist` refuses to build while the env
+file has a non-empty `MICROSOFT_CLIENT_SECRET`.
 
 ### Microsoft Teams
 

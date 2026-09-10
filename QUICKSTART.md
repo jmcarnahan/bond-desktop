@@ -254,14 +254,19 @@ work that needs it until it comes back. Start the missing one.
   llama.cpp's `-hf`; `make clean-model` deletes only the prose model's directory)
 - Server logs: `tmp/logs/model-<port>.log`
 - App data (database, attachments, settings):
-  `~/Library/Containers/com.bondinbox.app/Data/Library/Application Support/`
+  `~/Library/Application Support/com.bondinbox.app/`. A build made before the
+  app dropped the sandbox kept the same files under
+  `~/Library/Containers/com.bondinbox.app/`; the app migrates it on first
+  launch, copying rather than moving, so the old copy stays until you delete
+  it. Keychain items do not migrate — sign in again once.
 
 **Uninstall**
 
 ```sh
 make stop fast-stop embed-stop
 make clean-model
-rm -rf ~/Library/Containers/com.bondinbox.app
+rm -rf ~/Library/Application\ Support/com.bondinbox.app
+rm -rf ~/Library/Containers/com.bondinbox.app   # only if an older build ran here
 ```
 
 Delete the other two model directories under `~/.cache/huggingface/hub/` by

@@ -66,7 +66,7 @@
 		331C80D7294CF71000263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
 		333000ED22D3DE5D00554162 /* Warnings.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Warnings.xcconfig; sourceTree = "<group>"; };
 		335BBD1A22A9A15E00E9071D /* GeneratedPluginRegistrant.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = GeneratedPluginRegistrant.swift; sourceTree = "<group>"; };
-		33CC10ED2044A3C60003C045 /* bond_inbox.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = bond_inbox.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		33CC10ED2044A3C60003C045 /* Bond Desktop.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Bond Desktop.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		33CC10F02044A3C60003C045 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		A1C7D3E100010B0DE0C0A7E0 /* BookmarkChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarkChannel.swift; sourceTree = "<group>"; };
 		33CC10F22044A3C60003C045 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Assets.xcassets; path = Runner/Assets.xcassets; sourceTree = "<group>"; };
@@ -135,7 +135,7 @@
 		33CC10EE2044A3C60003C045 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				33CC10ED2044A3C60003C045 /* bond_inbox.app */,
+				33CC10ED2044A3C60003C045 /* Bond Desktop.app */,
 				331C80D5294CF71000263BE5 /* RunnerTests.xctest */,
 			);
 			name = Products;
@@ -219,7 +219,7 @@
 				78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */,
 			);
 			productName = Runner;
-			productReference = 33CC10ED2044A3C60003C045 /* bond_inbox.app */;
+			productReference = 33CC10ED2044A3C60003C045 /* Bond Desktop.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -243,7 +243,7 @@
 						ProvisioningStyle = Automatic;
 						SystemCapabilities = {
 							com.apple.Sandbox = {
-								enabled = 1;
+								enabled = 0;
 							};
 						};
 					};
@@ -394,7 +394,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.bondinbox.app.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/bond_inbox.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/bond_inbox";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Bond Desktop.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Bond Desktop";
 			};
 			name = Debug;
 		};
@@ -408,7 +408,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.bondinbox.app.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/bond_inbox.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/bond_inbox";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Bond Desktop.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Bond Desktop";
 			};
 			name = Release;
 		};
@@ -422,7 +422,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.bondinbox.app.RunnerTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/bond_inbox.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/bond_inbox";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Bond Desktop.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Bond Desktop";
 			};
 			name = Profile;
 		};
@@ -481,7 +481,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = "Runner/DebugProfile$(BOND_ENTITLEMENTS_SUFFIX).entitlements";
+				CODE_SIGN_ENTITLEMENTS = Runner/DebugProfile.entitlements;
 				CODE_SIGN_IDENTITY = "$(BOND_CODE_SIGN_IDENTITY)";
 				CODE_SIGN_STYLE = "$(BOND_CODE_SIGN_STYLE)";
 				COMBINE_HIDPI_IMAGES = YES;
@@ -615,7 +615,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = "Runner/DebugProfile$(BOND_ENTITLEMENTS_SUFFIX).entitlements";
+				CODE_SIGN_ENTITLEMENTS = Runner/DebugProfile.entitlements;
 				CODE_SIGN_IDENTITY = "$(BOND_CODE_SIGN_IDENTITY)";
 				CODE_SIGN_STYLE = "$(BOND_CODE_SIGN_STYLE)";
 				COMBINE_HIDPI_IMAGES = YES;
@@ -637,7 +637,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
-				CODE_SIGN_ENTITLEMENTS = "Runner/Release$(BOND_ENTITLEMENTS_SUFFIX).entitlements";
+				CODE_SIGN_ENTITLEMENTS = Runner/Release.entitlements;
 				CODE_SIGN_IDENTITY = "$(BOND_CODE_SIGN_IDENTITY)";
 				CODE_SIGN_STYLE = "$(BOND_CODE_SIGN_STYLE)";
 				COMBINE_HIDPI_IMAGES = YES;

@@ -1,18 +1,31 @@
 // Signing defaults: ad-hoc, so a clean checkout builds with no setup.
-// To sign with a real Apple Development certificate, create
-// SigningLocal.xcconfig next to this file (gitignored) overriding these:
+//
+// To sign with a real Apple Development certificate DURING DEVELOPMENT,
+// create SigningLocal.xcconfig next to this file (gitignored) overriding
+// these three:
 //
 //   BOND_CODE_SIGN_IDENTITY = Apple Development
 //   BOND_CODE_SIGN_STYLE = Automatic
 //   BOND_DEVELOPMENT_TEAM = <your team id from `security find-identity`>
-//   BOND_ENTITLEMENTS_SUFFIX = Signed
 //
-// BOND_ENTITLEMENTS_SUFFIX slots between the entitlements basename and the
-// extension, so the empty default selects Runner/DebugProfile.entitlements
-// and "Signed" selects Runner/DebugProfileSigned.entitlements — the variant
-// carrying keychain-access-groups, which only builds under real signing.
+// DISTRIBUTION signing is NOT done here. `flutter build macos` produces an
+// ad-hoc bundle, and dist/sign.sh then re-signs it inside out with the
+// Developer ID identity — the .so backends and .dylib files first, then the
+// llama-server helper, then the app. Xcode cannot do that ordering for a
+// sidecar copied in after the build, which is why the pipeline owns it.
 BOND_CODE_SIGN_IDENTITY = -
 BOND_CODE_SIGN_STYLE = Manual
 BOND_DEVELOPMENT_TEAM =
-BOND_ENTITLEMENTS_SUFFIX =
+
+// No ENABLE_HARDENED_RUNTIME here: the hardened runtime is applied by
+// dist/sign.sh in its Developer ID branch (--options runtime) and never by
+// Xcode, because an ad-hoc build carrying it cannot load its own ad-hoc
+// dylibs (`make app-build` produced flags=(adhoc,runtime)).
+
+// The bundled llama-server sidecar is built arm64-only (Metal, and a
+// universal ggml build doubles a large binary for a slice nothing ships).
+// Intel Macs are out of scope for this app, and a universal shell around an
+// arm64-only helper would launch under Rosetta and then fail to exec it.
+ARCHS = arm64
+
 #include? "SigningLocal.xcconfig"

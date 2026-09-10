@@ -18,3 +18,13 @@ local.mk
 !.claude/hooks/
 __pycache__/
 CLAUDE.local.md
+
+# distribution — the built pipeline's outputs and its machine-local secrets.
+# dist/local/ holds the notarization key and the Sparkle signing key; the
+# other three are build products measured in gigabytes.
+dist/local/
+dist/stage/
+dist/out/
+*.dmg
+*.p12
+*.p8
