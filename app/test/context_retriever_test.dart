@@ -496,6 +496,104 @@ void main() {
       // First, and present at all: a floor calibrated on "is this about the
       // same thing" has no standing against a person saying "read this".
       expect(with_.excerpts.first.relPath, 'docs/named.md');
+      // And it floats rather than replaces: what the question itself found is
+      // still in the prompt behind it.
+      expect(
+        [for (final e in with_.excerpts) e.relPath],
+        contains('docs/near.md'),
+      );
+    });
+
+    test('a named file off the neighbour page is READ, not merely ranked',
+        () async {
+      if (!available) return;
+      await seedMessage('m1');
+      final dir = await context.registerDirectory(path: '/a',
+          displayName: 'acme');
+      // More nearer passages than the neighbour page holds. A file somebody
+      // pointed at is usually not on that page — which is why they pointed.
+      for (var i = 0; i < 14; i++) {
+        final near = await seedFile(dir, 'docs/near-$i.md');
+        await seedChunk(near, 'docs/near-$i.md', 'The rung schedule holds.',
+            vector: {1: 1.0 - i * 0.001});
+      }
+      final named = await seedFile(dir, 'docs/named.md');
+      await seedChunk(named, 'docs/named.md', 'Unrelated kitchen inventory.',
+          vector: {7: 1.0});
+      await context.indexPendingChunks();
+      await context.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
+
+      final pack = await retriever().packFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+        storylineIds: const [],
+        consultFirst: [named],
+        k: 6,
+      );
+
+      expect(pack.excerpts.first.relPath, 'docs/named.md');
+    });
+
+    test('a named file outside every linked directory stays outside',
+        () async {
+      if (!available) return;
+      await seedMessage('m1');
+      final linked = await context.registerDirectory(path: '/a',
+          displayName: 'acme');
+      final other = await context.registerDirectory(path: '/b',
+          displayName: 'ridge');
+      final here = await seedFile(linked, 'docs/near.md');
+      await seedChunk(here, 'docs/near.md', 'The rung schedule is settled.',
+          vector: {1: 1.0});
+      final elsewhere = await seedFile(other, 'docs/secret.md');
+      await seedChunk(elsewhere, 'docs/secret.md', 'Another client entirely.',
+          vector: {7: 1.0});
+      await context.indexPendingChunks();
+      await context.link(linked, ContextScopeKind.thread, 'email', 'conv-1');
+
+      final pack = await retriever().packFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+        storylineIds: const [],
+        consultFirst: [elsewhere],
+      );
+
+      // Naming a file is not a way past the scope. One client's paragraph in
+      // another client's reply is the failure this path must be incapable of.
+      expect(
+        [for (final e in pack.excerpts) e.relPath],
+        isNot(contains('docs/secret.md')),
+      );
+    });
+
+    test('a named file is read from the top when nothing can rank it',
+        () async {
+      await seedMessage('m1');
+      final dir = await context.registerDirectory(path: '/a',
+          displayName: 'acme');
+      final named = await seedFile(dir, 'docs/named.md');
+      await seedChunk(named, 'docs/named.md', 'The opening paragraph.',
+          seq: 0);
+      await seedChunk(named, 'docs/named.md', 'The second paragraph.', seq: 1);
+      await context.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
+
+      // The embedding server is down, so there is no question to measure
+      // nearness against — and "read this file first" still has an answer.
+      final pack = await retriever().packFor(
+        source: 'email',
+        conversationKey: 'conv-1',
+        replyToId: 'm1',
+        storylineIds: const [],
+        consultFirst: [named],
+        queryVector: () async => null,
+      );
+
+      expect(
+        [for (final e in pack.excerpts) e.text],
+        ['The opening paragraph.', 'The second paragraph.'],
+      );
     });
   });
 
@@ -916,7 +1014,9 @@ class _ThrowingContextStore extends ContextStore {
     Uint8List query, {
     required String embedModel,
     required List<String> dirIds,
+    List<int>? fileIds,
     int k = 12,
+    bool excludeDigests = false,
   }) =>
       throw StateError('the index is on fire');
 }

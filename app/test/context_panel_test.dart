@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/providers/context_provider.dart' show ContextDirRow;
 import 'package:bond_inbox/widgets/context_panel.dart';
@@ -46,18 +48,45 @@ void main() {
   late List<({String id, bool on})> toggles;
   late int added;
   late int managed;
+  late List<String> filesToggled;
+  late List<int> filesOpened;
 
   setUp(() {
     toggles = [];
     added = 0;
     managed = 0;
+    filesToggled = [];
+    filesOpened = [];
   });
+
+  ContextFile file(int id, String relPath, {String? purpose}) => ContextFile(
+        id: id,
+        dirId: 'd1',
+        relPath: relPath,
+        size: 400,
+        mtime: _now,
+        sha256: 'sha-$id',
+        kind: 'doc',
+        claudeChain: const [],
+        digestJson: purpose == null
+            ? null
+            : jsonEncode(ContextFileDigest(purpose: purpose).toJson()),
+        digestStatus: purpose == null ? 'pending' : 'done',
+        hasDescEmbedding: false,
+        textChars: 400,
+        status: 'ok',
+        seenAt: _now,
+        updatedAt: _now,
+      );
 
   Future<void> pumpPanel(
     WidgetTester tester, {
     List<ContextDirRow> rows = const [],
     Set<String> linked = const {},
     List<({String storyline, String dirName})> inherited = const [],
+    Set<String> expanded = const {},
+    Map<String, List<ContextFile>> files = const {},
+    bool withFiles = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(500, 800));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -70,6 +99,10 @@ void main() {
           onToggle: (id, on) => toggles.add((id: id, on: on)),
           onAddDirectory: () => added++,
           onManage: () => managed++,
+          expanded: expanded,
+          files: files,
+          onToggleFiles: withFiles ? filesToggled.add : null,
+          onOpenFile: withFiles ? filesOpened.add : null,
           now: DateTime.parse(_now),
         ),
       ),
@@ -185,6 +218,85 @@ void main() {
       expect(added, 1);
       expect(managed, 1);
       expect(find.text('Manage directories in Settings ›'), findsOneWidget);
+    });
+  });
+
+  group('Files ›', () {
+    test('the keys name what they open', () {
+      expect(
+        ContextPanelBody.filesKeyFor('d1'),
+        const Key('context-files-d1'),
+      );
+      expect(ContextPanelBody.fileKeyFor(7), const Key('context-file-7'));
+    });
+
+    testWidgets('a host that cannot fetch the files draws no button',
+        (tester) async {
+      await pumpPanel(tester, rows: [_row()]);
+
+      expect(find.byKey(ContextPanelBody.filesKeyFor('d1')), findsNothing);
+    });
+
+    testWidgets('the button asks the host to open it', (tester) async {
+      await pumpPanel(tester, rows: [_row()], withFiles: true);
+
+      expect(find.text('Files ›'), findsOneWidget);
+      await tester.tap(find.byKey(ContextPanelBody.filesKeyFor('d1')));
+      await tester.pump();
+
+      expect(filesToggled, ['d1']);
+    });
+
+    testWidgets('an open disclosure lists the files and what they are for',
+        (tester) async {
+      await pumpPanel(
+        tester,
+        rows: [_row()],
+        withFiles: true,
+        expanded: const {'d1'},
+        files: {
+          'd1': [
+            file(7, 'docs/pricing.md', purpose: 'The renewal pricing model.'),
+            file(8, 'notes.md'),
+          ],
+        },
+      );
+
+      expect(find.text('Files ⌄'), findsOneWidget);
+      expect(find.text('docs/pricing.md'), findsOneWidget);
+      expect(find.text('doc · The renewal pricing model.'), findsOneWidget);
+      // No digest yet: the kind alone, rather than a trailing separator.
+      expect(find.text('doc'), findsOneWidget);
+
+      await tester.tap(find.byKey(ContextPanelBody.fileKeyFor(7)));
+      await tester.pump();
+
+      expect(filesOpened, [7]);
+    });
+
+    testWidgets('past the cap it stops listing and says where to look',
+        (tester) async {
+      await pumpPanel(
+        tester,
+        rows: [_row()],
+        withFiles: true,
+        expanded: const {'d1'},
+        files: {
+          'd1': [
+            for (var i = 0; i < ContextPanelBody.maxFilesShown + 1; i++)
+              file(i + 1, 'docs/f$i.md'),
+          ],
+        },
+      );
+
+      // A panel is not a file browser. Search is.
+      expect(find.text('+1 more — search finds them'), findsOneWidget);
+      expect(
+        find.byKey(ContextPanelBody.fileKeyFor(
+          ContextPanelBody.maxFilesShown + 1,
+        )),
+        findsNothing,
+      );
     });
   });
 }

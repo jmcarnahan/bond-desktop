@@ -118,10 +118,16 @@ void main() {
     return id;
   }
 
-  Future<void> runFor(_FakeLlm llm, String dirId) => ContextBriefHandler(
+  Future<void> runFor(
+    _FakeLlm llm,
+    String dirId, {
+    Future<int> Function(String dirId)? onBriefChanged,
+  }) =>
+      ContextBriefHandler(
         store,
         llm,
         activityLog: log,
+        onBriefChanged: onBriefChanged,
       ).run({
         'task_kind': 'context_brief',
         'source': 'local',
@@ -389,6 +395,103 @@ void main() {
         ContextBrief.decode((await store.directory(dirId))!.briefJson)!;
     expect(brief.pointers, hasLength(10));
     expect(log.notes['pointers'], 10);
+  });
+
+  group('telling the rest of the app the project said something new', () {
+    test('the callback fires once, with the directory it is about', () async {
+      final dirId = await register();
+      await addFile(
+        dirId,
+        relPath: 'CLAUDE.md',
+        text: '# Atlas\n\nReplies here stay short.\n',
+      );
+      final told = <String>[];
+
+      await runFor(_FakeLlm([briefAnswer()]), dirId,
+          onBriefChanged: (id) async {
+        told.add(id);
+        return 2;
+      });
+
+      expect(told, [dirId]);
+      expect(log.notes['charters_offered'], 2);
+    });
+
+    test('an unchanged brief tells nobody anything', () async {
+      final dirId = await register();
+      await addFile(
+        dirId,
+        relPath: 'CLAUDE.md',
+        text: '# Atlas\n\nReplies here stay short.\n',
+      );
+      final llm = _FakeLlm([briefAnswer()]);
+      final told = <String>[];
+      Future<int> record(String id) async {
+        told.add(id);
+        return 1;
+      }
+
+      await runFor(llm, dirId, onBriefChanged: record);
+      log = _Recorder();
+      await runFor(llm, dirId, onBriefChanged: record);
+
+      // An unchanged brief has nothing new to say about the project, so
+      // there is nothing to offer anyone.
+      expect(log.notes['reason'], 'unchanged');
+      expect(told, hasLength(1));
+    });
+
+    test('nothing to brief tells nobody anything', () async {
+      final dirId = await register();
+      final told = <String>[];
+
+      await runFor(_FakeLlm([briefAnswer()]), dirId,
+          onBriefChanged: (id) async {
+        told.add(id);
+        return 1;
+      });
+
+      expect(log.notes['reason'], 'nothing_to_brief');
+      expect(told, isEmpty);
+    });
+
+    test('an offer that throws costs the offer and never the brief', () async {
+      final dirId = await register();
+      await addFile(
+        dirId,
+        relPath: 'CLAUDE.md',
+        text: '# Atlas\n\nReplies here stay short.\n',
+      );
+
+      await runFor(
+        _FakeLlm([briefAnswer()]),
+        dirId,
+        onBriefChanged: (_) async => throw StateError('the storylines are out'),
+      );
+
+      // The brief was paid for with a model call and is already stored; the
+      // charter offer is a courtesy built on top of it.
+      final dir = (await store.directory(dirId))!;
+      expect(dir.briefHash, isNotNull);
+      expect(ContextBrief.decode(dir.briefJson)!.about,
+          'Atlas is where the renewal analysis lives.');
+      expect(log.notes['charter_error'], contains('the storylines are out'));
+      expect(log.notes['charters_offered'], isNull);
+    });
+
+    test('nothing offered is nothing noted', () async {
+      final dirId = await register();
+      await addFile(
+        dirId,
+        relPath: 'CLAUDE.md',
+        text: '# Atlas\n\nReplies here stay short.\n',
+      );
+
+      await runFor(_FakeLlm([briefAnswer()]), dirId,
+          onBriefChanged: (_) async => 0);
+
+      expect(log.notes['charters_offered'], isNull);
+    });
   });
 
   test('a failed call leaves the previous brief and its hash alone',

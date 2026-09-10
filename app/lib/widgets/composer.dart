@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../models/draft_provenance.dart' show DraftProvenance, ProvenanceFile;
 import '../theme/tokens.dart';
 
 /// What this build is actually allowed to do with a reply, which depends
@@ -47,6 +48,23 @@ class Composer extends StatefulWidget {
   /// One line above the field saying where the suggestion came from. Shown
   /// only while [suggestedBody] is untouched.
   final String? provenance;
+
+  /// The directory files that draft read, as doors.
+  ///
+  /// The caption above says WHAT was read; a chip is the way INTO it. Chips
+  /// rather than tappable spans inside the caption, because a [TextButton] has
+  /// a hit target and a focus ring and a `TapGestureRecognizer` inside a two
+  /// line caption has neither — and the caption is already ellipsised, so half
+  /// the spans would be unreachable at a narrow width.
+  ///
+  /// Drawn under the same gate as the caption: once the reader types, the
+  /// words are theirs and nothing about where a suggestion came from belongs
+  /// over them.
+  final List<ProvenanceFile> provenanceFiles;
+
+  /// Opens one of [provenanceFiles]. Null draws them as nothing — a host with
+  /// no side panel has nowhere to open one.
+  final void Function(ProvenanceFile file)? onOpenProvenanceFile;
 
   /// True while a draft is being written. The generate button becomes a
   /// spinner; the composer stays usable.
@@ -103,6 +121,8 @@ class Composer extends StatefulWidget {
     super.key,
     this.suggestedBody,
     this.provenance,
+    this.provenanceFiles = const [],
+    this.onOpenProvenanceFile,
     this.generating = false,
     this.capability = SendCapability.copyOnly,
     required this.onSend,
@@ -121,6 +141,10 @@ class Composer extends StatefulWidget {
 
   /// How present the text looks before anyone has touched it.
   static const double suggestedOpacity = 0.7;
+
+  /// The key of the chip that opens one file, by its `context_files.id`.
+  static ValueKey<String> provenanceChipKeyFor(int fileId) =>
+      ValueKey('provenance-chip-$fileId');
 
   @override
   State<Composer> createState() => _ComposerState();
@@ -220,6 +244,12 @@ class _ComposerState extends State<Composer> {
             _provenanceRow(widget.provenance!),
             const SizedBox(height: BondSpacing.s8),
           ],
+          if (_showingSuggestion &&
+              widget.provenanceFiles.isNotEmpty &&
+              widget.onOpenProvenanceFile != null) ...[
+            _provenanceChips(),
+            const SizedBox(height: BondSpacing.s8),
+          ],
           _field(),
           const SizedBox(height: BondSpacing.s8),
           _buttons(),
@@ -248,6 +278,40 @@ class _ComposerState extends State<Composer> {
           constraints: const BoxConstraints(),
           visualDensity: VisualDensity.compact,
         ),
+      ],
+    );
+  }
+
+  /// One small button per file the draft read, labelled the way the caption
+  /// labels it — same path, same breadcrumb — so a chip is recognisably the
+  /// thing the sentence above it just named.
+  Widget _provenanceChips() {
+    final open = widget.onOpenProvenanceFile!;
+    return Wrap(
+      spacing: BondSpacing.s4,
+      children: [
+        for (final file in widget.provenanceFiles)
+          TextButton(
+            key: Composer.provenanceChipKeyFor(file.fileId),
+            onPressed: () => open(file),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(
+                horizontal: BondSpacing.s8,
+                vertical: BondSpacing.s4,
+              ),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
+              textStyle: BondType.caption,
+            ),
+            child: Text(
+              file.locator.isEmpty
+                  ? file.path
+                  : '${file.path} § '
+                      '${DraftProvenance.locatorLabel(file.locator)}',
+              style: BondType.caption,
+            ),
+          ),
       ],
     );
   }

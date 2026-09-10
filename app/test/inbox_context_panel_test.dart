@@ -15,6 +15,9 @@ import 'package:bond_inbox/services/notification_coordinator.dart';
 import 'package:bond_inbox/services/sync_service.dart';
 import 'package:bond_inbox/services/teams_sync.dart';
 import 'package:bond_inbox/widgets/app_rail.dart' show AppRail, RailSection;
+import 'package:bond_inbox/models/draft_provenance.dart';
+import 'package:bond_inbox/widgets/composer.dart';
+import 'package:bond_inbox/widgets/context_file_panel.dart';
 import 'package:bond_inbox/widgets/context_panel.dart';
 import 'package:bond_inbox/widgets/icon_rail.dart';
 import 'package:bond_inbox/widgets/settings_context_section.dart';
@@ -390,5 +393,202 @@ void main() {
     expect(panel(), findsNothing);
     expect(find.byType(SidePanelHost), findsNothing);
     await settleQueues(tester);
+  });
+
+  group('the doors into one file', () {
+    /// A registered directory holding one file with words in it.
+    Future<({String dirId, int fileId})> seedFile() async {
+      final dirId = await context.registerDirectory(
+        path: folder.path,
+        displayName: 'ridge',
+      );
+      final fileId = await context.upsertFile(
+        dirId: dirId,
+        relPath: 'docs/pricing.md',
+        size: 400,
+        mtime: '2026-09-09T09:00:00Z',
+        sha256: 'sha-1',
+        kind: 'doc',
+        claudeChain: const [],
+        textChars: 400,
+      );
+      await context.setFileText(fileId, 'Q4 rates hold at nine.');
+      return (dirId: dirId, fileId: fileId);
+    }
+
+    Finder filePanel() => find.descendant(
+          of: find.byType(SidePanelHost),
+          matching: find.byType(ContextFilePanelBody),
+        );
+
+    testWidgets('a provenance chip opens the file the draft read',
+        (tester) async {
+      final seeded = await seedFile();
+      await seedThread('c1', 'Homepage copy');
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'c1',
+        replyToMessageId: 'c1-m1',
+        body: 'Friday works.',
+        contextJson: DraftProvenance(
+          documents: const [],
+          directories: const ['ridge'],
+          files: [
+            (
+              dir: 'ridge',
+              path: 'docs/pricing.md',
+              locator: 'Pricing',
+              fileId: seeded.fileId,
+            ),
+          ],
+          skills: const [],
+        ).encode(),
+      );
+      await pumpInbox(tester);
+      await openThread(tester, 'Send the survey back');
+
+      // The caption names what was read; the chip is the door to it.
+      await tester.tap(find.descendant(
+        of: find.byKey(InboxScreen.useSuggestionKey),
+        matching: find.text('Use it'),
+      ));
+      for (var i = 0; i < 3; i++) {
+        await tester.pump();
+      }
+
+      await tester.tap(
+        find.byKey(Composer.provenanceChipKeyFor(seeded.fileId)),
+      );
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+
+      expect(filePanel(), findsOneWidget);
+      // Named by the file, with the project and the path under it.
+      expect(find.text('pricing.md'), findsOneWidget);
+      expect(find.text('ridge/docs/pricing.md'), findsWidgets);
+      await settleQueues(tester);
+    });
+
+    testWidgets('a fourth file the caption never named gets no chip',
+        (tester) async {
+      final seeded = await seedFile();
+      final ids = <int>[seeded.fileId];
+      for (final name in ['docs/terms.md', 'docs/scope.md', 'docs/notes.md']) {
+        ids.add(await context.upsertFile(
+          dirId: seeded.dirId,
+          relPath: name,
+          size: 100,
+          mtime: '2026-09-09T09:00:00Z',
+          sha256: 'sha-$name',
+          kind: 'doc',
+          claudeChain: const [],
+          textChars: 100,
+        ));
+      }
+      await seedThread('c1', 'Homepage copy');
+      await store.upsertDraft(
+        source: 'email',
+        conversationKey: 'c1',
+        replyToMessageId: 'c1-m1',
+        body: 'Friday works.',
+        contextJson: DraftProvenance(
+          documents: const [],
+          directories: const ['ridge'],
+          files: [
+            for (final id in ids)
+              (dir: 'ridge', path: 'docs/f$id.md', locator: '', fileId: id),
+          ],
+          skills: const [],
+        ).encode(),
+      );
+      await pumpInbox(tester);
+      await openThread(tester, 'Send the survey back');
+      await tester.tap(find.descendant(
+        of: find.byKey(InboxScreen.useSuggestionKey),
+        matching: find.text('Use it'),
+      ));
+      for (var i = 0; i < 3; i++) {
+        await tester.pump();
+      }
+
+      // The chips are the caption's names made tappable, and the caption stops
+      // at three — a fourth chip would be a door to a file the sentence above
+      // it never named.
+      for (final id in ids.take(DraftProvenance.maxFiles)) {
+        expect(find.byKey(Composer.provenanceChipKeyFor(id)), findsOneWidget);
+      }
+      expect(
+        find.byKey(Composer.provenanceChipKeyFor(ids.last)),
+        findsNothing,
+      );
+      await settleQueues(tester);
+    });
+
+    testWidgets('Files › on the Context panel opens the same file beside',
+        (tester) async {
+      final seeded = await seedFile();
+      await seedThread('c1', 'Homepage copy');
+      await pumpInbox(tester);
+      await openThread(tester, 'Send the survey back');
+      await tester.tap(find.byKey(const Key('thread-context')));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+
+      await tester.tap(find.byKey(ContextPanelBody.filesKeyFor(seeded.dirId)));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+      expect(find.text('docs/pricing.md'), findsOneWidget);
+
+      await tester.tap(find.byKey(ContextPanelBody.fileKeyFor(seeded.fileId)));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+
+      // The side shows one thing: the file REPLACES the panel that named it.
+      expect(filePanel(), findsOneWidget);
+      expect(panel(), findsNothing);
+      await settleQueues(tester);
+    });
+
+    testWidgets('Consult asks for a draft that reads this file first',
+        (tester) async {
+      final seeded = await seedFile();
+      await seedThread('c1', 'Homepage copy');
+      await pumpInbox(tester);
+      await openThread(tester, 'Send the survey back');
+      await tester.tap(find.byKey(const Key('thread-context')));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(ContextPanelBody.filesKeyFor(seeded.dirId)));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+      await tester.tap(find.byKey(ContextPanelBody.fileKeyFor(seeded.fileId)));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+
+      await tester.tap(find.byKey(ContextFilePanelBody.consultKey));
+      for (var i = 0; i < 4; i++) {
+        await tester.pump();
+      }
+
+      final work = (await db
+              .customSelect("SELECT task_kind, entity_id, payload_json "
+                  "FROM work_items WHERE task_kind = 'draft'")
+              .get())
+          .single
+          .data;
+      expect(work['entity_id'], 'c1-m1');
+      expect(
+        work['payload_json'],
+        '{"context_file_ids":[${seeded.fileId}]}',
+      );
+      await settleQueues(tester);
+    });
   });
 }

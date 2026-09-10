@@ -565,7 +565,7 @@ void main() {
         documents: [],
         directories: ['acme'],
         files: [
-          (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates'),
+          (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates', fileId: null),
         ],
         skills: ['vendor-replies'],
       ).encode(),

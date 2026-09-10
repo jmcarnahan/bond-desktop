@@ -2,11 +2,13 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/conversation_vec_index.dart';
 // `show`: drift generates an `ActivityEvent` row class from the
 // `activity_events` table, and this file means the log's own.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/activity_log.dart';
 // `show`: the one thing this file wants from the extraction pass is the hash
@@ -3518,6 +3520,35 @@ void main() {
       expect(storyline.refreshedMemberCount, 2);
     });
 
+    test('the refresh clears a parked offer it has just superseded', () async {
+      await seedStoryline(store);
+      await markDescribed('sl-1', ['member']);
+      await seed(store, 'c2', vector: vectorAt(0.9));
+      // A directory brief can park an offer against an unlocked charter, and
+      // this pass writes the sentence that offer was proposing to fill in.
+      await store.updateStoryline(
+        'sl-1',
+        charterSuggestion: 'What the folder says the project is.',
+      );
+      final llm = FakeLlm({
+        'storyline_refresh': [
+          refineAnswer(
+            title: 'Website redesign and launch',
+            summary: 'The launch party venue is the open question.',
+            charter: widened,
+          )
+        ],
+      });
+      final service = StorylineService(store, llm);
+
+      await service.addThread('sl-1', 'email', 'c2');
+      expect(await drainRefresh(service), 'sl-1');
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      expect(storyline.charter, widened);
+      expect(storyline.charterSuggestion, isNull);
+    });
+
     test('runs at temperature zero — the same members must read the same twice',
         () async {
       await seedStoryline(store);
@@ -4116,6 +4147,80 @@ void main() {
       expect(llm.userMessages.single, isNot(contains('⟨pinned')));
     });
 
+    /// A registered directory carrying a brief, linked to [scopeKey].
+    Future<ContextStore> seedDirectory({
+      String path = '/w/acme',
+      String displayName = 'acme',
+      String about = 'A rebrand of the Marrowfield stores, run out of one '
+          'repository of notes and analyses.',
+      String? linkedTo = 'sl-1',
+    }) async {
+      final context = ContextStore(db);
+      final dirId = await context.registerDirectory(
+        path: path,
+        displayName: displayName,
+      );
+      if (about.isNotEmpty) {
+        await context.setDirectoryBrief(
+          dirId,
+          briefJson: jsonEncode(ContextBrief(about: about).toJson()),
+          briefHash: 'hash-1',
+        );
+      }
+      if (linkedTo != null) {
+        await context.link(dirId, ContextScopeKind.storyline, '', linkedTo);
+      }
+      return context;
+    }
+
+    test('a linked directory says what the project is, after the pins',
+        () async {
+      await seedTwoThreads();
+      await seed(store, 'c9');
+      await seedMessage(store, 'c9', 'old-1',
+          receivedAt: '2026-07-01T09:00:00Z');
+      await seedDigested('old-1', 'a9',
+          name: 'Survey.pdf',
+          summary: 'The site survey for the Riverside lot.',
+          pinnedTo: 'sl-1');
+      final context = await seedDirectory();
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm, contextStore: context).recap('sl-1');
+
+      final user = llm.userMessages.single;
+      expect(
+        user,
+        contains('⟨directory acme: A rebrand of the Marrowfield stores'),
+      );
+      // Last of the footers, because it is the broadest thing in the prompt:
+      // the project the whole chronology sits inside.
+      expect(user.indexOf('⟨pinned Survey.pdf'),
+          lessThan(user.indexOf('⟨directory acme')));
+    });
+
+    test('a linked directory nothing has read yet adds nothing', () async {
+      await seedTwoThreads();
+      final context = await seedDirectory(about: '');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm, contextStore: context).recap('sl-1');
+
+      // No brief means nothing has read the folder, and a bare name is a word
+      // the model would have to guess at.
+      expect(llm.userMessages.single, isNot(contains('⟨directory')));
+    });
+
+    test('a directory linked to another room adds nothing', () async {
+      await seedTwoThreads();
+      final context = await seedDirectory(linkedTo: 'sl-other');
+      final llm = FakeLlm({'storyline_recap': [recapAnswer()]});
+
+      await StorylineService(store, llm, contextStore: context).recap('sl-1');
+
+      expect(llm.userMessages.single, isNot(contains('⟨directory')));
+    });
+
     test('a pinned document nobody has read is still named', () async {
       await seedTwoThreads();
       await seed(store, 'c9');
@@ -4557,6 +4662,159 @@ void main() {
       await StorylineService(store, llm).recap('sl-nope');
 
       expect(llm.schemas, isEmpty);
+    });
+  });
+
+  group('offerDirectoryCharters', () {
+    const about = 'A rebrand of the Marrowfield stores, run out of one '
+        'repository of notes and analyses.';
+
+    late ContextStore context;
+    late String dirId;
+
+    setUp(() async {
+      context = ContextStore(db);
+      dirId = await context.registerDirectory(
+        path: '/w/acme',
+        displayName: 'acme',
+      );
+    });
+
+    Future<void> brief(String text) => context.setDirectoryBrief(
+          dirId,
+          briefJson: jsonEncode(ContextBrief(about: text).toJson()),
+          briefHash: 'hash-1',
+        );
+
+    Future<int> offer() => StorylineService(
+          store,
+          FakeLlm(const {}),
+          contextStore: context,
+        ).offerDirectoryCharters(dirId);
+
+    Future<void> link([String scopeKey = 'sl-1']) =>
+        context.link(dirId, ContextScopeKind.storyline, '', scopeKey);
+
+    test('an empty charter is offered one, and never written one', () async {
+      await seedStoryline(store, charter: null);
+      await brief(about);
+      await link();
+
+      expect(await offer(), 1);
+
+      final storyline = (await store.getStoryline('sl-1'))!;
+      // A charter is the membership criteria the recruit hunts on. A sentence
+      // the person has never read must not start recruiting threads.
+      expect(storyline.charter, isNull);
+      expect(storyline.charterSuggestion, about);
+    });
+
+    test('a locked charter with nothing parked is offered one', () async {
+      await seedStoryline(store, charter: 'Only the launch evening.');
+      await store.updateStoryline('sl-1', charterLocked: true);
+      await brief(about);
+      await link();
+
+      expect(await offer(), 1);
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, about);
+    });
+
+    test('a suggestion already parked is left where it is', () async {
+      await seedStoryline(store, charter: 'Only the launch evening.');
+      await store.updateStoryline(
+        'sl-1',
+        charterLocked: true,
+        charterSuggestion: 'An older idea nobody has answered.',
+      );
+      await brief(about);
+      await link();
+
+      expect(await offer(), 0);
+      expect(
+        (await store.getStoryline('sl-1'))!.charterSuggestion,
+        'An older idea nobody has answered.',
+      );
+    });
+
+    test('an unlocked charter somebody wrote is the refresh pass\'s business',
+        () async {
+      await seedStoryline(store);
+      await brief(about);
+      await link();
+
+      expect(await offer(), 0);
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, isNull);
+    });
+
+    test('a brief that says what the charter already says offers nothing',
+        () async {
+      await seedStoryline(store, charter: null);
+      await store.updateStoryline('sl-1', charter: '  A REBRAND of the\n'
+          'Marrowfield stores, run out of one repository of notes and '
+          'analyses. ');
+      await store.updateStoryline('sl-1', charterLocked: true);
+      await brief(about);
+      await link();
+
+      // Whitespace and case are not a change, on the refresh pass's own rule.
+      expect(await offer(), 0);
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, isNull);
+    });
+
+    test('a dismissed storyline is offered nothing', () async {
+      await seedStoryline(store, status: 'dismissed', charter: null);
+      await brief(about);
+      await link();
+
+      expect(await offer(), 0);
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, isNull);
+    });
+
+    test('a thread link is not a storyline link', () async {
+      await seedStoryline(store, charter: null);
+      await brief(about);
+      await context.link(dirId, ContextScopeKind.thread, 'email', 'member');
+
+      expect(await offer(), 0);
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, isNull);
+    });
+
+    test('a directory with no brief offers nothing', () async {
+      await seedStoryline(store, charter: null);
+      await link();
+
+      expect(await offer(), 0);
+    });
+
+    test('a service with no library offers nothing', () async {
+      await seedStoryline(store, charter: null);
+      await brief(about);
+      await link();
+
+      expect(
+        await StorylineService(store, FakeLlm(const {}))
+            .offerDirectoryCharters(dirId),
+        0,
+      );
+      expect((await store.getStoryline('sl-1'))!.charterSuggestion, isNull);
+    });
+
+    test('every linked storyline is counted', () async {
+      await seedStoryline(store, charter: null);
+      await store.insertStoryline(
+        id: 'sl-2',
+        title: 'Second',
+        summary: null,
+        charter: null,
+        status: 'suggested',
+        createdBy: 'auto',
+      );
+      await brief(about);
+      await link();
+      await link('sl-2');
+
+      expect(await offer(), 2);
+      expect((await store.getStoryline('sl-2'))!.charterSuggestion, about);
     });
   });
 

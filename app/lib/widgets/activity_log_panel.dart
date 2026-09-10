@@ -310,7 +310,16 @@ class ActivityLogPanel extends StatefulWidget {
       case 'context_brief':
         final mapped = detail['files_mapped'];
         if (mapped is! num) return label;
-        return '$label — ${mapped.toInt()} files mapped';
+        // The charters are a second sentence on the same line rather than a
+        // row of their own: nothing was queued for them, so a reader looking
+        // for what this pass did would find a storyline write with no work
+        // item behind it.
+        final charters = detail['charters_offered'];
+        final offered = charters is num
+            ? ' · ${charters.toInt()} '
+                '${charters == 1 ? 'charter' : 'charters'} offered'
+            : '';
+        return '$label — ${mapped.toInt()} files mapped$offered';
       case 'storyline_audit':
         final checked = detail['checked'];
         final removed = detail['removed'];

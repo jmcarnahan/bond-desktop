@@ -508,12 +508,21 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// ignore it forever. The existing draft is deleted first for the same
   /// reason — the handler returns early when one is already stored.
   ///
-  /// [pinnedAttachmentIds] is "Use in reply": the documents the user named,
-  /// carried to the handler on the work row's payload so the retriever floats
-  /// them to the front of what it quotes. A plain Regenerate passes none, and
-  /// the requeue OVERWRITES the payload with null — asking again without
-  /// naming a file has to mean the last file is no longer named.
-  Future<void> generate({List<String> pinnedAttachmentIds = const []}) async {
+  /// [pinnedAttachmentIds] is "Use in reply" and [contextFileIds] is "Consult
+  /// for the reply": the documents and the directory files the user named,
+  /// carried to the handler on the work row's payload so each retriever floats
+  /// what it was told about to the front of what it quotes. A plain Regenerate
+  /// passes neither, and the requeue OVERWRITES the payload — asking again
+  /// without naming a file has to mean the last file is no longer named, and
+  /// that rule now covers both lists.
+  ///
+  /// The payload carries only the keys that have something in them, so a
+  /// consulted file and a pinned document never have to be asked for together
+  /// to be asked for at all.
+  Future<void> generate({
+    List<String> pinnedAttachmentIds = const [],
+    List<int> contextFileIds = const [],
+  }) async {
     if (state.generating) return;
     state = state.copyWith(generating: true, error: null);
     try {
@@ -535,9 +544,15 @@ class DraftNotifier extends StateNotifier<DraftState> {
         'draft',
         _source,
         messageId,
-        payloadJson: pinnedAttachmentIds.isEmpty
-            ? null
-            : jsonEncode({'pinned_attachment_ids': pinnedAttachmentIds}),
+        payloadJson:
+            (pinnedAttachmentIds.isEmpty && contextFileIds.isEmpty)
+                ? null
+                : jsonEncode({
+                    if (pinnedAttachmentIds.isNotEmpty)
+                      'pinned_attachment_ids': pinnedAttachmentIds,
+                    if (contextFileIds.isNotEmpty)
+                      'context_file_ids': contextFileIds,
+                  }),
       );
     } catch (e) {
       state = state.copyWith(

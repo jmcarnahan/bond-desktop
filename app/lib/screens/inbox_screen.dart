@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart' show MessageStore;
@@ -76,6 +77,7 @@ import '../widgets/preview/preview_kind.dart' show openRefused;
 import '../widgets/quick_replies.dart';
 import '../widgets/room_header.dart';
 import '../widgets/settings_screen.dart';
+import '../widgets/context_file_panel.dart';
 import '../widgets/context_panel.dart';
 import '../widgets/side_panel.dart';
 import '../widgets/sort_menu.dart';
@@ -319,6 +321,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// sentence typed while the model was thinking from being thrown away when
   /// the model's answer lands.
   final Map<String, int> _stageSeq = {};
+
+  /// Which directories have their `Files ›` disclosure open on the Context
+  /// panel.
+  ///
+  /// [_clearOverlays] deliberately does NOT touch it: this is a preference of
+  /// the panel and not a panel, so a person who opened a project's file list,
+  /// looked at a file and came back is owed the list still open.
+  final Set<String> _expandedContextDirs = {};
 
   String _stageKey(DraftTarget t) => '${t.source}|${t.conversationKey}';
 
@@ -2574,6 +2584,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The Emails / Teams tiles write the list column's chips, because that
       // is the one source selection the app has and a second copy of it on
       // this bar would be two answers to one question.
+      onOpenContextFile: (fileId, locator) => _openBeside(
+        ContextFilePanel(fileId: fileId, locator: locator),
+      ),
       sourceFilter: _sourceFilter,
       onSelectSource: _setSourceFilter,
       // Whatever the last read said, carried through a re-read the same way the
@@ -3442,6 +3455,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         WhyPanel() => _whyPanel(side),
         HistoryPanel() => _historyPanel(side),
         ContextPanel() => _contextPanel(side),
+        ContextFilePanel() => _contextFilePanel(side),
       };
 
   /// Why one message got the verdict it did.
@@ -3598,6 +3612,27 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
               actions.addDirectoryTo(_fileDialogs, scope),
             ),
             onManage: _openSettings,
+            expanded: _expandedContextDirs,
+            // Only the open ones are read: a family provider per directory
+            // means a closed disclosure costs no query at all.
+            files: {
+              for (final id in _expandedContextDirs)
+                id: ref.watch(contextFilesProvider(id)).valueOrNull ??
+                    const [],
+            },
+            onToggleFiles: (id) => setState(() {
+              if (!_expandedContextDirs.remove(id)) {
+                _expandedContextDirs.add(id);
+              }
+            }),
+            onOpenFile: (fileId) => _openBeside(ContextFilePanel(
+              fileId: fileId,
+              // A thread's panel can write a reply; a storyline's cannot,
+              // because a storyline is not a room a draft is keyed by.
+              from: side.kind == ContextScopeKind.thread
+                  ? (source: side.source, conversationKey: side.scopeKey)
+                  : null,
+            )),
             now: DateTime.now(),
           ),
         ),
@@ -3747,6 +3782,105 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onOpenLink: (url) => unawaited(_launchExternal(url)),
       ),
     );
+  }
+
+  /// One file of one of the owner's own directories, read beside the room
+  /// that named it.
+  ///
+  /// No ⤢, for [_whyPanel]'s reason and one of its own: this is the owner's
+  /// own file opened to answer a question about the room next to it — "where
+  /// did that sentence come from" — and taking the room away to show the file
+  /// whole is answering a question nobody asked.
+  Widget _contextFilePanel(ContextFilePanel side) {
+    final view = ref.watch(
+      contextFileProvider((fileId: side.fileId, locator: side.locator)),
+    );
+    final from = side.from;
+    // [_filePanel]'s own rung ladder: mail always has a box because it bottoms
+    // out at the clipboard, a chat only with the send grant.
+    final canReply = from != null &&
+        (from.source == 'email' ||
+            ref.watch(draftProvider(from)).capability == SendCapability.send);
+
+    Widget message(String text) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(BondSpacing.s24),
+            child: Text(
+              text,
+              style: BondType.small,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        );
+
+    return view.when(
+      loading: () => SidePanelHost(
+        title: 'File',
+        leading: const Icon(Icons.folder_open_outlined, size: 18),
+        onClose: _closeSide,
+        child: const Center(child: CircularProgressIndicator()),
+      ),
+      error: (_, _) => SidePanelHost(
+        title: 'File',
+        leading: const Icon(Icons.folder_open_outlined, size: 18),
+        onClose: _closeSide,
+        child: message('This file is no longer indexed.'),
+      ),
+      data: (view) {
+        if (view == null) {
+          return SidePanelHost(
+            title: 'File',
+            leading: const Icon(Icons.folder_open_outlined, size: 18),
+            onClose: _closeSide,
+            child: message('This file is no longer indexed.'),
+          );
+        }
+        return SidePanelHost(
+          title: p.basename(view.file.relPath),
+          subtitle: '${view.dir.displayName}/${view.file.relPath}',
+          leading: const Icon(Icons.folder_open_outlined, size: 18),
+          onClose: _closeSide,
+          child: ContextFilePanelBody(
+            file: view.file,
+            dirName: view.dir.displayName,
+            text: view.text,
+            digest: view.digest,
+            locator: side.locator,
+            located: view.located,
+            onConsult: canReply
+                ? () => _consultContextFile(from, view.file.id)
+                : null,
+            now: DateTime.now(),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Puts one of the owner's own files into the reply being written for
+  /// [from].
+  ///
+  /// [_useAttachmentInReply]'s body over the other corpus — the same restore
+  /// of a thread that was replaced, the same quiet stage, the same focus —
+  /// and its four comments explain every line of it. What differs is the
+  /// list: a directory file is named by its row id and floats to the front of
+  /// what the DIRECTORY retriever quotes.
+  void _consultContextFile(DraftTarget from, int fileId) {
+    setState(() {
+      if (!_isMainThread(from)) {
+        _side = ThreadPanel(
+          source: from.source,
+          conversationKey: from.conversationKey,
+        );
+        _sideFull = false;
+      }
+    });
+    _stageQuietly(from);
+    unawaited(
+      ref.read(draftProvider(from).notifier).generate(contextFileIds: [fileId]),
+    );
+    (_isMainThread(from) ? _mainComposerFocus : _sideComposerFocus)
+        .requestFocus();
   }
 
   /// Puts one file into the reply being written for [from].
@@ -4208,6 +4342,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final draft = ref.watch(draftProvider(target));
     final notifier = ref.read(draftProvider(target).notifier);
     final stagedBody = _stagedBodyFor(target, draft);
+    // Decoded ONCE: the caption and the chips are two readings of the same
+    // column, and decoding it twice per build would be two chances to disagree
+    // about what the draft read.
+    final provenance = DraftProvenance.decode(draft.contextJson);
 
     final composer = Composer(
       // Keyed on the conversation so switching threads builds a fresh field
@@ -4231,8 +4369,32 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // What the model actually read, when the handler wrote it down. The
       // decode is tolerant and the `??` covers every way it can say nothing,
       // so a malformed column costs the specific line and not the caption.
-      provenance:
-          DraftProvenance.decode(draft.contextJson)?.caption() ?? _provenance,
+      provenance: provenance?.caption() ?? _provenance,
+      // Only the files with an id behind them. A draft written before the id
+      // was stored names its files in the caption and opens none of them,
+      // which is the right answer rather than a chip that goes nowhere.
+      //
+      // Capped where the caption caps. The chips are that sentence's names
+      // made tappable, so a fourth chip would be a door to a file the sentence
+      // above it never named. The take runs BEFORE the id filter for the same
+      // reason: it is the first three files the caption named, not the first
+      // three that happen to be openable.
+      provenanceFiles: [
+        for (final file
+            in (provenance?.files ?? const []).take(DraftProvenance.maxFiles))
+          if (file.fileId != null)
+            (
+              fileId: file.fileId!,
+              dir: file.dir,
+              path: file.path,
+              locator: file.locator,
+            ),
+      ],
+      onOpenProvenanceFile: (file) => _openBeside(ContextFilePanel(
+        fileId: file.fileId,
+        locator: file.locator,
+        from: target,
+      )),
       generating: draft.generating,
       sending: draft.sending,
       capability: draft.capability,

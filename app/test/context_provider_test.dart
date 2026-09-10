@@ -160,6 +160,115 @@ void main() {
     expect(rows.single.digestsEligible, 2);
   });
 
+  group('one file, for the panel', () {
+    late String dirId;
+    late int fileId;
+
+    setUp(() async {
+      dirId = await context.registerDirectory(
+        path: '/Users/pat/projects/acme',
+        displayName: 'acme',
+      );
+      fileId = await context.upsertFile(
+        dirId: dirId,
+        relPath: 'docs/pricing.md',
+        size: 400,
+        mtime: '2026-09-09T10:00:00Z',
+        sha256: 'abc',
+        kind: 'doc',
+        claudeChain: const [],
+        textChars: 400,
+      );
+      await context.setFileText(
+        fileId,
+        'Intro paragraph.\n\nQ4 rates hold at nine.\n',
+      );
+      await context.replaceChunks(fileId, const [
+        (
+          seq: 0,
+          locator: 'Pricing',
+          text: 'docs/pricing.md · Pricing\nQ4 rates hold at nine.',
+        ),
+      ]);
+      await context.setFileDigest(
+        fileId,
+        status: 'done',
+        digestJson: jsonEncode(const ContextFileDigest(
+          purpose: 'The renewal pricing model.',
+          findings: ['Rates hold at nine.'],
+          kindHint: 'analysis',
+        ).toJson()),
+      );
+    });
+
+    Future<ContextFileView?> read({String? locator}) => container
+        .read(contextFileProvider((fileId: fileId, locator: locator)).future);
+
+    test('the file, its directory, its words and its digest', () async {
+      final view = (await read())!;
+
+      expect(view.file.relPath, 'docs/pricing.md');
+      expect(view.dir.displayName, 'acme');
+      expect(view.text, contains('Q4 rates hold at nine.'));
+      expect(view.digest!.purpose, 'The renewal pricing model.');
+      // Nothing named a section, so nothing is marked.
+      expect(view.located, isNull);
+    });
+
+    test('a locator answers the passage with its header line off', () async {
+      final view = (await read(locator: 'Pricing'))!;
+
+      // The chunker's `<rel path> · <locator>` header is stored WITH the
+      // passage so the embedding carries it, and it is not in the file's own
+      // words — a highlight hunting for it would never find one.
+      expect(view.located, 'Q4 rates hold at nine.');
+    });
+
+    test('a digest locator marks nothing in the words', () async {
+      final view = (await read(locator: 'digest'))!;
+
+      // The digest has a block of its own above the words and is not IN them.
+      expect(view.located, isNull);
+    });
+
+    test('a locator nothing was cut under marks nothing', () async {
+      expect((await read(locator: 'Nowhere'))!.located, isNull);
+    });
+
+    test('a file nobody indexed is null', () async {
+      expect(
+        await container
+            .read(contextFileProvider((fileId: 9999, locator: null)).future),
+        isNull,
+      );
+    });
+
+    test('contextFilesProvider lists a directory in path order', () async {
+      await context.upsertFile(
+        dirId: dirId,
+        relPath: 'CLAUDE.md',
+        size: 20,
+        mtime: '2026-09-09T10:00:00Z',
+        sha256: 'def',
+        kind: 'claude_md',
+        claudeChain: const [],
+        textChars: 20,
+      );
+
+      final files =
+          await container.read(contextFilesProvider(dirId).future);
+
+      expect(
+        [for (final file in files) file.relPath],
+        ['CLAUDE.md', 'docs/pricing.md'],
+      );
+      expect(
+        await container.read(contextFilesProvider('no-such-dir').future),
+        isEmpty,
+      );
+    });
+  });
+
   group('Add directory…', () {
     test('registers the folder and queues a forced read', () async {
       final dialogs = _FakeDialogs('/Users/pat/projects/acme');

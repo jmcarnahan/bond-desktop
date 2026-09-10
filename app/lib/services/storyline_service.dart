@@ -4,9 +4,11 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import '../data/context_store.dart';
 import '../data/conversation_vec_index.dart';
 import '../data/message_store.dart';
 import '../models/attachment_models.dart';
+import '../models/context_models.dart';
 import '../models/message_models.dart';
 import '../models/storyline_models.dart';
 import 'activity_log.dart';
@@ -175,6 +177,13 @@ class StorylineService {
   /// that build this service without a home screen in sight cost nothing.
   final PipelineProgress _progress;
 
+  /// The library of registered directories, or null on a build with none.
+  ///
+  /// Optional for [_embeddings]'s reason: a service given none behaves exactly
+  /// as it did before there were directories — no recap footer, no charter
+  /// offered — which is what every caller that predates them is entitled to.
+  final ContextStore? _context;
+
   StorylineService(
     this._store,
     LlmClient client, {
@@ -182,8 +191,10 @@ class StorylineService {
     ActivityLog? activityLog,
     this._embeddings,
     this._progress = const PipelineProgress.disabled(),
+    ContextStore? contextStore,
   })  : _client = client,
         _confirmClient = confirmClient ?? client,
+        _context = contextStore,
         _log = activityLog ?? ActivityLog.disabled();
 
   // ── automatic: one thread ──────────────────────────────────────────────
@@ -608,6 +619,8 @@ class StorylineService {
     // A document somebody pinned is a document they said matters past the
     // moment it arrived, and the window ages out in a fortnight.
     final pinnedLines = await _pinnedRecapLines(storylineId, rows);
+    // What the projects linked to this storyline ARE, as a second footer.
+    final directoryLines = await _directoryRecapLines(storylineId);
 
     final result = await runTask(
       _client,
@@ -626,6 +639,7 @@ class StorylineService {
               digests[_windowKey(row)] ?? const [],
             ),
           ...pinnedLines,
+          ...directoryLines,
         ],
       ),
       // Zero, like every other storyline call: the same window recapped twice
@@ -729,6 +743,42 @@ class StorylineService {
       );
     }
     return buffer.toString();
+  }
+
+  /// What each project linked to this storyline IS, one line each.
+  ///
+  /// A footer for the pins' reason and not an interleaved line: the window is
+  /// a chronology, and a registered folder did not happen on a date. It sits
+  /// after the pins because it is the broadest thing in the prompt — the
+  /// project the whole story is inside.
+  ///
+  /// The brief's `about` and not its facts or its guidance. `about` is the
+  /// sentence that says what the project IS, which is the only thing a recap
+  /// needs from it; the facts are for a reply that has to be correct about a
+  /// number, and standing reply guidance has nothing to say to a summary
+  /// nobody sends.
+  ///
+  /// A linked directory with no brief contributes NOTHING, rather than its
+  /// name alone. A brief is written the first time anything reads the folder,
+  /// so no brief means nothing has been read yet, and a bare name in a prompt
+  /// is a word the model would have to guess the meaning of.
+  Future<List<String>> _directoryRecapLines(String storylineId) async {
+    final context = _context;
+    if (context == null) return const [];
+    final lines = <String>[];
+    for (final dirId in await context.dirIdsLinkedTo(
+      ContextScopeKind.storyline,
+      // A storyline's ids are already global, so the connector half of a link
+      // is empty for every one of them.
+      '',
+      storylineId,
+    )) {
+      final dir = await context.directory(dirId);
+      final about = ContextBrief.decode(dir?.briefJson)?.about.trim() ?? '';
+      if (dir == null || about.isEmpty) continue;
+      lines.add('⟨${_clampInner('directory ${dir.displayName}: $about')}⟩');
+    }
+    return lines;
   }
 
   /// The documents pinned to this storyline whose messages the window does not
@@ -904,7 +954,16 @@ class StorylineService {
 
     if (!fresh.charterLocked) {
       if (result.charter.isEmpty) return null;
-      await _store.updateStoryline(storylineId, charter: result.charter);
+      // The suggestion is cleared with the same write. A directory's brief can
+      // park an offer against a blank unlocked charter, and this pass has just
+      // written the sentence that offer was proposing to fill in — leaving it
+      // would ask the person to accept a suggestion for a charter that now
+      // exists and that they never asked to replace.
+      await _store.updateStoryline(
+        storylineId,
+        charter: result.charter,
+        charterSuggestion: null,
+      );
       return result.charter;
     }
 
@@ -944,6 +1003,67 @@ class StorylineService {
     final grown = memberCount - describedCount;
     if (grown <= 0) return 0;
     return grown > available ? available : grown;
+  }
+
+  /// Offers a directory's brief as the charter of every storyline linked to
+  /// it. Returns how many were written.
+  ///
+  /// The SECOND source of a charter suggestion, beside the refresh pass, and
+  /// it answers a question the refresh cannot: the refresh reads the member
+  /// threads and says what they have in common, where a project's `about` says
+  /// what the owner set out to do. A storyline linked to a folder the person
+  /// registered is a storyline whose subject already has a written definition.
+  ///
+  /// Three rules decide who gets one, and every other state is left alone:
+  ///
+  /// 1. **No charter and not locked** — the suggestion is offered.
+  /// 2. **Locked with no suggestion parked** — offered. A lock says the
+  ///    stored sentence is the person's own; it does not say they never want
+  ///    to hear another idea.
+  /// 3. **Locked with a suggestion already parked** — untouched. They have
+  ///    not answered the first offer, and replacing it would lose an idea they
+  ///    were still looking at.
+  ///
+  /// An unlocked storyline that HAS a charter is the refresh pass's business
+  /// and not this one's — that sentence moves with the member set, and a
+  /// directory link is not a change to who is in the group.
+  ///
+  /// The write is a SUGGESTION even onto an empty charter, and that is the
+  /// rule this method exists to keep. A charter is the membership criteria:
+  /// [recruitForCharter] hunts the mailbox on it, and threads get filed under
+  /// it. A sentence a model lifted out of a `CLAUDE.md` that the person has
+  /// never read must not start recruiting threads on their behalf — Use this
+  /// is one tap, and it is the tap that makes it theirs.
+  Future<int> offerDirectoryCharters(String dirId) async {
+    final context = _context;
+    if (context == null) return 0;
+    final dir = await context.directory(dirId);
+    final about = ContextBrief.decode(dir?.briefJson)?.about.trim() ?? '';
+    if (about.isEmpty) return 0;
+
+    var offered = 0;
+    for (final link in await context.linksFor(dirId)) {
+      if (link.scopeKind != ContextScopeKind.storyline) continue;
+      final storyline = await _store.getStoryline(link.scopeKey);
+      // Dismissed or gone between the link and the brief. Neither renders a
+      // charter, so neither can be offered one.
+      if (storyline == null) continue;
+      if (storyline.status != 'active' && storyline.status != 'suggested') {
+        continue;
+      }
+      // Normalized, on the refresh's rule: the same sentence with different
+      // spacing is the sentence they already have.
+      if (_normalized(about) == _normalized(storyline.charter ?? '')) continue;
+
+      final blank = (storyline.charter ?? '').trim().isEmpty;
+      final offerable = (blank && !storyline.charterLocked) ||
+          (storyline.charterLocked && storyline.charterSuggestion == null);
+      if (!offerable) continue;
+
+      await _store.updateStoryline(link.scopeKey, charterSuggestion: about);
+      offered++;
+    }
+    return offered;
   }
 
   // ── automatic: one storyline, on the user's charter ────────────────────

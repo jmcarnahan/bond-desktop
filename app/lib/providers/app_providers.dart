@@ -589,6 +589,7 @@ final messageSearchProvider = Provider<MessageSearch>(
   (ref) => MessageSearch(
     ref.watch(messageStoreProvider),
     ref.watch(embeddingsClientProvider),
+    context: ref.watch(contextStoreProvider),
   ),
 );
 
@@ -784,6 +785,12 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(contextStoreProvider),
         ref.watch(fastLlmClientProvider),
         activityLog: ref.watch(activityLogProvider),
+        // A new brief is a new answer to "what is this project", which is the
+        // other thing a charter can be. Riverpod resolves a provider when it
+        // is read rather than where it is declared, so reaching forward to
+        // [storylineServiceProvider] — declared further down this file — is
+        // ordinary rather than a cycle.
+        onBriefChanged: ref.watch(storylineServiceProvider).offerDirectoryCharters,
       ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
@@ -873,6 +880,8 @@ final storylineServiceProvider = Provider<StorylineService>(
     // switch, so taking it here costs this provider nothing it did not
     // already depend on.
     progress: ref.watch(pipelineProgressProvider),
+    // The library, for the recap's directory footer and the charter offer.
+    contextStore: ref.watch(contextStoreProvider),
   ),
 );
 

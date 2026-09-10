@@ -115,6 +115,9 @@ class FakeContextRetriever extends ContextRetriever {
   /// "one pack, two prompts" assertion.
   final List<List<String>> storylinesSeen = [];
 
+  /// Every `consultFirst` it was handed — the files the person named.
+  final List<List<int>> consultSeen = [];
+
   FakeContextRetriever(
     MessageStore store,
     ContextStore context, {
@@ -137,6 +140,7 @@ class FakeContextRetriever extends ContextRetriever {
     int k = 6,
   }) async {
     storylinesSeen.add(storylineIds);
+    consultSeen.add(consultFirst);
     final failure = throws;
     if (failure != null) throw failure;
     return answer;
@@ -802,8 +806,15 @@ void main() {
       expect(provenance.documents, ['Lease Addendum.pdf']);
       expect(provenance.directories, ['acme']);
       expect(provenance.files, [
-        (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates'),
-        (dir: 'acme', path: 'analysis.html', locator: 'digest'),
+        (
+          dir: 'acme',
+          path: 'docs/pricing.md',
+          locator: 'Pricing > Q4 rates',
+          // The row id, which is what makes each of these a door rather than
+          // only a name.
+          fileId: 1,
+        ),
+        (dir: 'acme', path: 'analysis.html', locator: 'digest', fileId: 2),
       ]);
       expect(provenance.skills, ['vendor-replies']);
     });
@@ -870,6 +881,71 @@ void main() {
       expect(log.notes['directory_files'],
           ['docs/pricing.md', 'analysis.html']);
       expect(log.notes['skills'], ['vendor-replies']);
+    });
+
+    test('Consult for the reply hands the file to the retriever first',
+        () async {
+      await seedInbound();
+      final directories = FakeContextRetriever(store, ContextStore(db),
+          answer: directoryPack());
+      final log = _Recorder();
+
+      await DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        activityLog: log,
+        contextDirs: directories,
+      ).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        'payload_json': '{"context_file_ids":[7]}',
+      });
+
+      expect(directories.consultSeen.single, [7]);
+      expect(log.notes['consulted'], 1);
+    });
+
+    test('a payload nobody can read costs the consultation, never the draft',
+        () async {
+      await seedInbound();
+      final directories = FakeContextRetriever(store, ContextStore(db),
+          answer: directoryPack());
+      final log = _Recorder();
+
+      await DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        activityLog: log,
+        contextDirs: directories,
+      ).run({
+        'task_kind': 'draft',
+        'source': 'email',
+        'entity_id': 'm2',
+        // A `context_files.id` is a positive integer. Neither of these is.
+        'payload_json': '{"context_file_ids":["x",-1]}',
+      });
+
+      expect(directories.consultSeen.single, isEmpty);
+      expect(log.notes['consulted'], isNull);
+      expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
+    });
+
+    test('a draft nobody named a file for consults nothing', () async {
+      await seedInbound();
+      final directories = FakeContextRetriever(store, ContextStore(db),
+          answer: directoryPack());
+      final log = _Recorder();
+
+      await runOne(DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        activityLog: log,
+        contextDirs: directories,
+      ));
+
+      expect(directories.consultSeen.single, isEmpty);
+      expect(log.notes['consulted'], isNull);
     });
 
     test('a retriever that throws costs the citations, not the reply',

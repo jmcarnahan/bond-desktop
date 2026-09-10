@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 
+import '../data/context_store.dart';
 import '../data/message_store.dart';
 import '../models/attachment_models.dart';
+import '../models/context_models.dart';
 import '../models/home_models.dart';
 import 'llm/embeddings_client.dart';
 import 'search_fusion.dart';
@@ -48,6 +50,18 @@ class MessageSearchHits extends MessageSearchResult {
   /// further from the query than the floor allows.
   final List<AttachmentChunkHit> documents;
 
+  /// The passages of the owner's own registered directories that answer the
+  /// same query, one per file.
+  ///
+  /// A third list for [documents]'s reason and one more: a directory file is
+  /// not a message and not an attachment. It belongs to no thread, it is the
+  /// person's OWN work rather than something a stranger sent, and it is shown
+  /// above both because a question about a project is usually answered better
+  /// by the project than by a message mentioning it. Empty is the ordinary
+  /// answer for a mailbox with no directory registered, which costs one
+  /// `SELECT id FROM context_dirs` and nothing else.
+  final List<ContextChunkHit> directories;
+
   /// Non-null when only ONE of the two passes contributed — the sentence to
   /// show over a set of results that is narrower than it looks.
   ///
@@ -62,6 +76,7 @@ class MessageSearchHits extends MessageSearchResult {
     this.query,
     this.hits, {
     this.documents = const [],
+    this.directories = const [],
     this.notice,
   });
 }
@@ -105,12 +120,14 @@ class ArchiveSearchResult {
 class _SemanticPass {
   final List<SemanticHit>? hits;
   final List<AttachmentChunkHit>? documents;
+  final List<ContextChunkHit>? directories;
   final String? notice;
   final String? reason;
 
   const _SemanticPass(
     this.hits, {
     this.documents,
+    this.directories,
     this.notice,
     this.reason,
   });
@@ -124,12 +141,14 @@ class _SemanticPass {
 class _KeywordPass {
   final List<KeywordHit>? hits;
   final List<AttachmentChunkHit>? documents;
+  final List<ContextChunkHit>? directories;
   final String? notice;
   final String? reason;
 
   const _KeywordPass(
     this.hits, {
     this.documents,
+    this.directories,
     this.notice,
     this.reason,
   });
@@ -153,7 +172,14 @@ class MessageSearch {
   final MessageStore _store;
   final EmbeddingsClient _embeddings;
 
-  MessageSearch(this._store, this._embeddings);
+  /// The library of registered directories, or null on a build that has none
+  /// wired up. Optional rather than required because every test and every
+  /// caller that predates the third corpus asks the same two questions of the
+  /// mailbox and must keep getting the same two answers.
+  final ContextStore? _contextStore;
+
+  MessageSearch(this._store, this._embeddings, {ContextStore? context})
+      : _contextStore = context;
 
   /// The home screen's search: meaning and words, scored together.
   ///
@@ -203,6 +229,10 @@ class MessageSearch {
       documents: fuseDocuments(
         semantic: semantic.documents,
         keywords: keywords.documents,
+      ),
+      directories: fuseDirectories(
+        semantic: semantic.directories,
+        keywords: keywords.directories,
       ),
       // At most one of the two is set here — the both-failed case returned
       // above — so whichever is non-null is the sentence.
@@ -357,7 +387,76 @@ class MessageSearch {
       includeDropped: includeDropped,
       sources: sources,
     );
-    return _SemanticPass(hits, documents: chunks);
+    return _SemanticPass(
+      hits,
+      documents: chunks,
+      directories: await _directoryNeighbours(vector),
+    );
+  }
+
+  /// The third corpus's nearest passages, or null when it could not be read.
+  ///
+  /// Its OWN try/catch, and that is the whole reason it is a method. A
+  /// directory index that will not open — a vec0 table this build never got,
+  /// a project half-way through a rebuild — must never make a search of the
+  /// MAILBOX report itself unavailable or narrowed. The mailbox already has
+  /// its answer by the time this runs, and the worst a failure here can cost
+  /// is the third list.
+  ///
+  /// Every registered directory, named INSIDE the query rather than matched
+  /// corpus-wide and filtered after — [ContextStore.chunkKnn]'s rule, kept
+  /// even by the one caller entitled to ask for all of them.
+  ///
+  /// Four times the page, on the documents' reasoning: the fusion collapses
+  /// passages to one per file, and a single long analysis can fill a page of
+  /// neighbours on its own and still be one answer.
+  Future<List<ContextChunkHit>?> _directoryNeighbours(
+    List<double> vector,
+  ) async {
+    final context = _contextStore;
+    if (context == null) return null;
+    try {
+      final ids = await context.allDirIds();
+      if (ids.isEmpty) return const [];
+      // Null means the vector index is off, which here is the same answer as
+      // "nothing near": the words half still ran.
+      return await context.chunkKnn(
+            encodeEmbedding(vector),
+            embedModel: EmbeddingsClient.documentModelTag,
+            dirIds: ids,
+            k: SearchTuning.documentLimit * 4,
+            excludeDigests: true,
+          ) ??
+          const [];
+    } catch (e) {
+      debugPrint('search: directory semantic pass failed: $e');
+      return null;
+    }
+  }
+
+  /// The words half of the third corpus, with [_directoryNeighbours]'s
+  /// isolation and for its reasons.
+  ///
+  /// Digests are excluded at READ time, the rule the attachment search keeps:
+  /// a digest is a model's summary, and someone searching for the words they
+  /// typed is owed the file that contains them.
+  Future<List<ContextChunkHit>?> _directoryWords(String text) async {
+    final context = _contextStore;
+    if (context == null) return null;
+    try {
+      final query = buildFtsQuery(text);
+      if (query == null) return const [];
+      final ids = await context.allDirIds();
+      if (ids.isEmpty) return const [];
+      return await context.keywordChunks(
+        query,
+        dirIds: ids,
+        excludeDigests: true,
+      );
+    } catch (e) {
+      debugPrint('search: directory keyword pass failed: $e');
+      return null;
+    }
   }
 
   /// The word pass over both corpora, with a missing index and a throw
@@ -394,7 +493,11 @@ class MessageSearch {
         includeDropped: includeDropped,
         sources: sources,
       );
-      return _KeywordPass(hits, documents: documents);
+      return _KeywordPass(
+        hits,
+        documents: documents,
+        directories: await _directoryWords(text),
+      );
     } catch (e) {
       debugPrint('search: keyword pass failed: $e');
       return const _KeywordPass(

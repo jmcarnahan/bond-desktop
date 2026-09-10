@@ -198,6 +198,22 @@ void main() {
     test('a directory nobody registered reads as null', () async {
       expect(await store.directory('no-such-id'), isNull);
     });
+
+    test('allDirIds names every registered directory, in id order', () async {
+      expect(await store.allDirIds(), isEmpty);
+
+      final atlas =
+          await store.registerDirectory(path: '/a', displayName: 'atlas');
+      final ridge =
+          await store.registerDirectory(path: '/r', displayName: 'ridge');
+
+      // Search's "every directory" is a SCOPE it hands the query, not a
+      // corpus-wide match filtered afterwards, so it asks for the list first.
+      final ids = await store.allDirIds();
+      expect(ids, hasLength(2));
+      expect(ids, containsAll([atlas, ridge]));
+      expect(ids, orderedEquals([...ids]..sort()));
+    });
   });
 
   group('links', () {
@@ -833,6 +849,32 @@ void main() {
       expect(await store.hasChunksInScope([atlas]), isTrue);
       expect(await store.hasChunksInScope(['no-such-dir']), isFalse);
     });
+
+    test('chunkTextFor answers the first passage of a locator', () async {
+      await store.replaceChunks(fileId, const [
+        (seq: 0, locator: 'Pricing > Q4 rates', text: 'part one of the rates'),
+        (seq: 1, locator: 'Pricing > Q4 rates', text: 'part two of the rates'),
+        (seq: 2, locator: 'Terms', text: 'the terms'),
+      ]);
+
+      // The first part, because that is the passage a citation named.
+      expect(
+        await store.chunkTextFor(fileId, 'Pricing > Q4 rates'),
+        'part one of the rates',
+      );
+      expect(await store.chunkTextFor(fileId, 'Terms'), 'the terms');
+    });
+
+    test('chunkTextFor answers null for a locator that was never cut',
+        () async {
+      await store.replaceChunks(
+        fileId,
+        const [(seq: 0, locator: 'Pricing', text: 'one')],
+      );
+
+      expect(await store.chunkTextFor(fileId, 'Nothing here'), isNull);
+      expect(await store.chunkTextFor(999999, 'Pricing'), isNull);
+    });
   });
 
   group('the scoped reads', () {
@@ -983,6 +1025,134 @@ void main() {
       );
 
       expect(hits.single.relPath, 'analysis/marrowfield/model.py');
+    });
+
+    test('excludeDigests drops the digest passage from the neighbours',
+        () async {
+      // The vec0 index needs the native extension; without it there is no
+      // neighbour search to make a claim about.
+      if (!available) return;
+
+      await chunk(atlas, 'docs/pricing.md', 'Q4 rates hold at nine.',
+          vector: {1: 1.0}, locator: 'Pricing');
+      await chunk(atlas, 'analysis/model.py', 'a summary of the model',
+          vector: {1: 1.0}, locator: 'digest');
+      await store.indexPendingChunks();
+
+      Future<List<String>> locators({required bool exclude}) async {
+        final hits = await store.chunkKnn(
+          encodeEmbedding(axes({1: 1.0})),
+          embedModel: tag,
+          dirIds: [atlas],
+          excludeDigests: exclude,
+        );
+        return [for (final hit in hits!) hit.locator];
+      }
+
+      // Off by default, because the reply retriever quotes the digest: it is
+      // the one passage a question about a FINDING can land on.
+      expect(await locators(exclude: false), containsAll(['Pricing', 'digest']));
+      expect(await locators(exclude: true), ['Pricing']);
+    });
+
+    test('excludeDigests drops the digest passage from the words', () async {
+      await chunk(atlas, 'docs/pricing.md',
+          'The renewal quote for Marrowfield is 2,600 a month.',
+          vector: {1: 1.0}, locator: 'Pricing');
+      await chunk(atlas, 'analysis/model.py',
+          'The renewal quote for Marrowfield is the headline finding.',
+          vector: {2: 1.0}, locator: 'digest');
+
+      Future<List<String>> locators({required bool exclude}) async {
+        final hits = await store.keywordChunks(
+          buildFtsQuery('renewal quote Marrowfield')!,
+          dirIds: [atlas],
+          excludeDigests: exclude,
+        );
+        return [for (final hit in hits) hit.locator];
+      }
+
+      expect(await locators(exclude: false), containsAll(['Pricing', 'digest']));
+      expect(await locators(exclude: true), ['Pricing']);
+    });
+
+    test('fileIds narrows the neighbours to the files that were named',
+        () async {
+      // The vec0 index needs the native extension; without it there is no
+      // neighbour search to make a claim about.
+      if (!available) return;
+
+      await chunk(atlas, 'docs/pricing.md', 'Q4 rates hold at nine.',
+          vector: {1: 1.0}, locator: 'Pricing');
+      await chunk(atlas, 'docs/terms.md', 'Payment is due on the fourth.',
+          vector: {1: 0.99}, locator: 'Terms');
+      await store.indexPendingChunks();
+
+      final named = (await store.filesFor(atlas))
+          .firstWhere((file) => file.relPath == 'docs/terms.md');
+      final hits = await store.chunkKnn(
+        encodeEmbedding(axes({1: 1.0})),
+        embedModel: tag,
+        dirIds: [atlas],
+        fileIds: [named.id],
+      );
+
+      expect([for (final hit in hits!) hit.relPath], ['docs/terms.md']);
+    });
+
+    test('a named file outside the scope answers nothing', () async {
+      // The vec0 index needs the native extension; without it there is no
+      // neighbour search to make a claim about.
+      if (!available) return;
+
+      await chunk(ridge, 'docs/pricing.md', 'Q4 rates hold at nine.',
+          vector: {1: 1.0}, locator: 'Pricing');
+      await store.indexPendingChunks();
+
+      final outside = (await store.filesFor(ridge)).single;
+      // Both scopes apply. Naming a file is not a way past the directory
+      // scope that keeps one project's words out of another's reply.
+      final hits = await store.chunkKnn(
+        encodeEmbedding(axes({1: 1.0})),
+        embedModel: tag,
+        dirIds: [atlas],
+        fileIds: [outside.id],
+      );
+
+      expect(hits, isEmpty);
+    });
+
+    test('chunksForFile reads one file from the top, in the chunker\'s order',
+        () async {
+      final fileId = await seedFile(atlas, 'docs/pricing.md');
+      await store.replaceChunks(fileId, [
+        (seq: 0, locator: 'Pricing', text: 'Q4 rates hold at nine.'),
+        (seq: 1, locator: 'Terms', text: 'Payment is due on the fourth.'),
+        (seq: 2, locator: 'digest', text: 'A summary of the whole file.'),
+      ]);
+      final other = await seedFile(atlas, 'docs/terms.md', sha: 'sha-2');
+      await store.replaceChunks(
+        other,
+        [(seq: 0, locator: '', text: 'Another file entirely.')],
+      );
+
+      final hits = await store.chunksForFile(fileId);
+      expect([for (final hit in hits) hit.locator],
+          ['Pricing', 'Terms', 'digest']);
+      expect(hits.first.relPath, 'docs/pricing.md');
+      expect(hits.first.dirName, 'atlas');
+      // No signals: nothing ranked these.
+      expect(hits.first.distance, isNull);
+      expect(hits.first.bm25, isNull);
+
+      // The limit cuts from the BOTTOM, because the top of a file is what
+      // reading it from the top means.
+      expect(
+        [for (final hit in await store.chunksForFile(fileId, limit: 2))
+          hit.locator],
+        ['Pricing', 'Terms'],
+      );
+      expect(await store.chunksForFile(-1), isEmpty);
     });
   });
 }

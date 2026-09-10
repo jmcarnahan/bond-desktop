@@ -221,9 +221,13 @@ class ContextRetriever {
 
   /// Everything worth putting in front of the model about this message.
   ///
-  /// [consultFirst] is the "look at this file" path: file ids the user named,
-  /// whose passages bypass the score floor and float to the front of the
-  /// ranking. Empty is the ordinary case.
+  /// [consultFirst] is the "look at this file" path: file ids the person
+  /// named. Those files are READ, not merely ranked — the neighbour page is a
+  /// dozen passages wide and a file somebody pointed at is usually not on it,
+  /// which is precisely why they pointed. Each named file is asked for its own
+  /// nearest passages, and a file the vector index cannot answer for is read
+  /// from the top instead. What comes back bypasses the score floor and sits
+  /// in front of the ranking. Empty is the ordinary case.
   ///
   /// [queryVector] is [AttachmentRetriever.excerptsFor]'s parameter and its
   /// contract: a caller searching both corpora with the same question passes
@@ -355,23 +359,72 @@ class ContextRetriever {
       final query = await (queryVector == null
           ? replyToQueryVector(_store, _embeddings, source, replyToId)
           : queryVector());
+
+      // The named files, read before anything is ranked. A consulted file
+      // that never reaches this list contributes nothing at all, and a person
+      // who pointed at a file and got a draft that ignored it has been told
+      // something untrue by the button they pressed.
+      final consulted = <ContextChunkHit>[];
+      if (consultFirst.isNotEmpty) {
+        final nearest = query == null
+            ? null
+            : await _context.chunkKnn(
+                query,
+                embedModel: EmbeddingsClient.documentModelTag,
+                dirIds: dirIds,
+                fileIds: consultFirst,
+                // A page per named file, which is what the per-file cap below
+                // will keep of them anyway.
+                k: perFile * consultFirst.length,
+              );
+        if (nearest != null) consulted.addAll(nearest);
+
+        // Files the vector index could not answer for — no vector written
+        // yet, the native index missing from this build, the embedder down —
+        // are read from the top, in order. That is what "read this file
+        // first" means when nothing knows which part of it is nearest.
+        final answered = {for (final hit in consulted) hit.fileId};
+        for (final id in consultFirst) {
+          if (answered.contains(id)) continue;
+          final file = await _context.fileById(id);
+          // The scope again, on this path too: a named file outside every
+          // directory linked to this room is a file this room may not read.
+          if (file == null || !dirIds.contains(file.dirId)) continue;
+          consulted.addAll(await _context.chunksForFile(id, limit: perFile));
+        }
+      }
+
       // The embedding server is down, or refused the card. Degraded, never
       // thrown — and the skills go with the passages, because they are
-      // matched against this very vector.
-      if (query == null) return built();
+      // matched against this very vector. A file the person NAMED still
+      // reaches the pack, because finding it never needed the question.
+      if (query == null && consulted.isEmpty) return built();
 
-      final vectorHits = await _context.chunkKnn(
-            query,
-            embedModel: EmbeddingsClient.documentModelTag,
-            dirIds: dirIds,
-            // Over-fetch: the floor, the per-file cap and the budget all
-            // throw hits away below this, and a `k` here would leave the
-            // list short.
-            k: k * 2,
-          ) ??
-          // The native index is not in this build. The words alone are a
-          // worse answer than both halves and a better one than nothing.
-          const <ContextChunkHit>[];
+      var vectorHits = query == null
+          ? const <ContextChunkHit>[]
+          : await _context.chunkKnn(
+                query,
+                embedModel: EmbeddingsClient.documentModelTag,
+                dirIds: dirIds,
+                // Over-fetch: the floor, the per-file cap and the budget all
+                // throw hits away below this, and a `k` here would leave the
+                // list short.
+                k: k * 2,
+              ) ??
+              // The native index is not in this build. The words alone are a
+              // worse answer than both halves and a better one than nothing.
+              const <ContextChunkHit>[];
+
+      if (consulted.isNotEmpty) {
+        // Merged rather than appended: a consulted passage the neighbour page
+        // already holds keeps its distance, and so keeps its score.
+        final seen = {for (final hit in vectorHits) hit.chunkId};
+        vectorHits = [
+          ...vectorHits,
+          for (final hit in consulted)
+            if (seen.add(hit.chunkId)) hit,
+        ];
+      }
 
       final keywordHits = await _keywordHits(source, replyToId, dirIds);
       final ranked = _rank(
@@ -417,7 +470,12 @@ class ContextRetriever {
         ));
       }
 
-      await _addSkills(dirIds, query, skills, skillGuidance, contributed);
+      // Skills are matched against the question's vector and there is no
+      // other way to pick one, so a pass that got here on a named file alone
+      // adds none — the same degradation the early return used to make.
+      if (query != null) {
+        await _addSkills(dirIds, query, skills, skillGuidance, contributed);
+      }
       await _addNestedNotes(excerpts, files, nestedGuidance, contributed);
       await _addRules(dirs, excerpts, ruleGuidance, contributed);
       return built();

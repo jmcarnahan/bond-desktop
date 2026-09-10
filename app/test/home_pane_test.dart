@@ -1,9 +1,11 @@
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/home_sort.dart';
 import 'package:bond_inbox/providers/activity_provider.dart' show SyncStamps;
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/attachment_search_tile.dart';
+import 'package:bond_inbox/widgets/context_search_tile.dart';
 import 'package:bond_inbox/widgets/home_feed_row.dart';
 import 'package:bond_inbox/widgets/home_metrics.dart';
 import 'package:bond_inbox/widgets/home_pane.dart';
@@ -64,6 +66,24 @@ SearchHit _wordHit(int index) => _hit(
       distance: null,
       bm25: 3.2,
       matchedBy: MatchedBy.words,
+    );
+
+ContextChunkHit _dirHit({
+  int chunkId = 3,
+  int fileId = 7,
+  String relPath = 'docs/pricing.md',
+  String locator = 'Pricing',
+}) =>
+    ContextChunkHit(
+      fileId: fileId,
+      dirId: 'd1',
+      dirName: 'acme',
+      relPath: relPath,
+      chunkId: chunkId,
+      seq: 0,
+      locator: locator,
+      text: '$relPath · $locator\nQ4 rates hold at nine.',
+      distance: 0.3,
     );
 
 AttachmentChunkHit _doc({
@@ -130,6 +150,7 @@ Future<void> _pump(
   VoidCallback? onExitSearch,
   void Function(String, String)? onRetry,
   void Function(String, String)? onOpenHistory,
+  void Function(int, String)? onOpenContextFile,
 }) async {
   await tester.binding.setSurfaceSize(const Size(1400, 900));
   addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -168,6 +189,7 @@ Future<void> _pump(
         onExitSearch: onExitSearch,
         onRetry: onRetry,
         onOpenHistory: onOpenHistory,
+        onOpenContextFile: onOpenContextFile,
       );
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
@@ -993,6 +1015,80 @@ void main() {
       final documents = tester.getTopLeft(find.byType(AttachmentSearchTile));
       final messages = tester.getTopLeft(find.text('Subject 7'));
       expect(documents.dy, lessThan(messages.dy));
+    });
+
+    testWidgets('your own directories come first, above the documents',
+        (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch(
+          'renewal',
+          [_hit(7)],
+          documents: [_doc()],
+          directories: [_dirHit()],
+        ),
+        onOpenContextFile: (_, _) {},
+      );
+      await swap(tester);
+
+      expect(find.text('In your directories'), findsOneWidget);
+      expect(find.byType(ContextSearchTile), findsOneWidget);
+
+      // A question about a project is answered better by the project than by
+      // a document that arrived about it, and better by either than by a
+      // message that merely mentions it.
+      final directories = tester.getTopLeft(find.byType(ContextSearchTile));
+      final documents = tester.getTopLeft(find.byType(AttachmentSearchTile));
+      final messages = tester.getTopLeft(find.text('Subject 7'));
+      expect(directories.dy, lessThan(documents.dy));
+      expect(documents.dy, lessThan(messages.dy));
+    });
+
+    testWidgets('a directory tile opens the file at its passage',
+        (tester) async {
+      final opened = <(int, String)>[];
+      await _pump(
+        tester,
+        search: HomeSearch(
+          'renewal',
+          const [],
+          directories: [_dirHit()],
+        ),
+        onOpenContextFile: (fileId, locator) =>
+            opened.add((fileId, locator)),
+      );
+      await swap(tester);
+
+      await tester.tap(find.byType(ContextSearchTile));
+      expect(opened, [(7, 'Pricing')]);
+    });
+
+    testWidgets('no directories means no directories heading', (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch('invoice', [_hit(7)]),
+        onOpenContextFile: (_, _) {},
+      );
+      await swap(tester);
+
+      expect(find.text('In your directories'), findsNothing);
+      expect(find.byType(ContextSearchTile), findsNothing);
+    });
+
+    testWidgets(
+        'a directory answering where no message did narrows the empty answer '
+        'to the messages', (tester) async {
+      await _pump(
+        tester,
+        search: HomeSearch('renewal', const [], directories: [_dirHit()]),
+        onOpenContextFile: (_, _) {},
+      );
+      await swap(tester);
+
+      // The screen must not claim nothing matches while it is naming the file
+      // that does.
+      expect(find.text('No messages match that.'), findsOneWidget);
+      expect(find.text('Nothing matches that.'), findsNothing);
     });
 
     testWidgets('a document opens the thread it came with', (tester) async {

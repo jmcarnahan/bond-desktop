@@ -44,10 +44,24 @@ class ContextBriefHandler extends WorkHandler {
   final LlmClient _client;
   final ActivityLog _log;
 
+  /// Told that this directory now says something new about itself, and
+  /// answers how many storylines were offered it as a charter.
+  ///
+  /// Called ONLY after a new brief was written — never on `unchanged`, never
+  /// on the clear. An unchanged brief has nothing new to offer anyone, and a
+  /// cleared one has nothing to offer at all.
+  ///
+  /// A callback rather than the service itself, because `services/` reaches
+  /// down and never sideways: a handler that imported the storyline service
+  /// would tie the directory queue to the mailbox's clustering for one
+  /// sentence of prose.
+  final Future<int> Function(String dirId)? onBriefChanged;
+
   ContextBriefHandler(
     this._context,
     this._client, {
     ActivityLog? activityLog,
+    this.onBriefChanged,
   }) : _log = activityLog ?? ActivityLog.disabled();
 
   @override
@@ -114,10 +128,25 @@ class ContextBriefHandler extends WorkHandler {
       briefHash: hash,
     );
 
+    // The brief is STORED before the offer is made, and the offer is wrapped.
+    // What this handler owes the app is the brief; the charter offer is a
+    // courtesy built on top of it, so an offer that throws costs the offer and
+    // never the brief that was already paid for with a model call.
+    var charters = 0;
+    final offer = onBriefChanged;
+    if (offer != null) {
+      try {
+        charters = await offer(dirId);
+      } catch (e) {
+        _log.note({'charter_error': '$e'});
+      }
+    }
+
     _log.note({
       'files_mapped': mapped.length,
       'has_claude_md': claudeMd.isNotEmpty,
       'pointers': brief.pointers.length,
+      if (charters > 0) 'charters_offered': charters,
     });
   }
 

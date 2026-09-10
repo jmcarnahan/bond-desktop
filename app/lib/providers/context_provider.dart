@@ -131,6 +131,77 @@ final contextInheritedProvider = FutureProvider.autoDispose
   },
 );
 
+/// One indexed file as the panel reads it: the row, the directory it belongs
+/// to, its extracted words, its digest, and the passage a citation named.
+///
+/// [located] is the stored passage under the requested locator with its header
+/// line already off — the panel highlights it inside [text] and scrolls to it.
+/// Null when no locator was asked for, when the locator was `digest` (the
+/// digest has its own block above the words and is not IN them), or when the
+/// file no longer has a passage there.
+typedef ContextFileView = ({
+  ContextFile file,
+  ContextDir dir,
+  String text,
+  ContextFileDigest? digest,
+  String? located,
+});
+
+/// One file of one registered directory, for the file panel.
+///
+/// Null for a file nobody indexed and for one whose directory has since been
+/// de-registered — the panel says so in a sentence rather than showing an
+/// empty reader.
+///
+/// Re-read on every activity event for [contextLinksProvider]'s reason: a
+/// reconcile pass that lands while the panel is open changes the words on
+/// screen, and a file the walk deleted stops being a file.
+final contextFileProvider = FutureProvider.autoDispose
+    .family<ContextFileView?, ({int fileId, String? locator})>(
+  (ref, key) async {
+    ref.watch(activityEventsProvider);
+    final store = ref.watch(contextStoreProvider);
+    final file = await store.fileById(key.fileId);
+    if (file == null) return null;
+    final dir = await store.directory(file.dirId);
+    if (dir == null) return null;
+
+    final locator = key.locator;
+    String? located;
+    if (locator != null && locator.isNotEmpty && locator != 'digest') {
+      final chunk = await store.chunkTextFor(file.id, locator);
+      if (chunk != null) {
+        // The chunker's own header — `<rel path> · <locator>` — is stored WITH
+        // the passage so the embedding carries it. It is not in the file's
+        // words, so a highlight hunting for it would never find one.
+        final newline = chunk.indexOf('\n');
+        located = newline < 0 ? '' : chunk.substring(newline + 1);
+      }
+    }
+
+    return (
+      file: file,
+      dir: dir,
+      text: await store.fileText(file.id) ?? '',
+      digest: ContextFileDigest.decode(file.digestJson),
+      located: (located != null && located.isEmpty) ? null : located,
+    );
+  },
+);
+
+/// Every file of one directory, in path order — what a `Files ›` disclosure
+/// lists.
+///
+/// Watches the activity events for [contextFileProvider]'s reason: a pass that
+/// adds or drops a file changes this list under an open panel.
+final contextFilesProvider =
+    FutureProvider.autoDispose.family<List<ContextFile>, String>(
+  (ref, dirId) async {
+    ref.watch(activityEventsProvider);
+    return ref.watch(contextStoreProvider).filesFor(dirId);
+  },
+);
+
 /// Every write the Settings library makes, in one place.
 ///
 /// The section and the screen above it stay prop-only: they call these and

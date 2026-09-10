@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/context_models.dart' show ContextFile, ContextFileDigest;
 import '../providers/context_provider.dart' show ContextDirRow;
 import '../theme/tokens.dart';
 import 'time_format.dart' show relativeTime;
@@ -32,6 +33,24 @@ class ContextPanelBody extends StatelessWidget {
   final VoidCallback onAddDirectory;
   final VoidCallback onManage;
 
+  /// The directory ids whose `Files ›` disclosure is open. A preference of
+  /// the panel rather than a panel of its own, which is why the host keeps it
+  /// in plain state and does not clear it when the side panel closes.
+  final Set<String> expanded;
+
+  /// The files of each expanded directory, already in path order — the store
+  /// reads them that way, and re-sorting here would be a second opinion about
+  /// an order the query already has.
+  final Map<String, List<ContextFile>> files;
+
+  /// Opens or closes one disclosure. Null draws no button at all: a host that
+  /// cannot fetch the files has nothing to disclose.
+  final void Function(String dirId)? onToggleFiles;
+
+  /// Opens one file beside. Null makes each row a statement rather than a
+  /// control, the way a chip with nowhere to go is.
+  final void Function(int fileId)? onOpenFile;
+
   /// Passed rather than read from the clock, so `read 4m ago` is pinnable in
   /// a test — [relativeTime]'s rule wherever it is used.
   final DateTime now;
@@ -44,12 +63,25 @@ class ContextPanelBody extends StatelessWidget {
     required this.onToggle,
     required this.onAddDirectory,
     required this.onManage,
+    this.expanded = const {},
+    this.files = const {},
+    this.onToggleFiles,
+    this.onOpenFile,
     required this.now,
   });
 
   static Key toggleKeyFor(String dirId) => Key('context-toggle-$dirId');
+  static Key filesKeyFor(String dirId) => Key('context-files-$dirId');
+  static Key fileKeyFor(int fileId) => Key('context-file-$fileId');
   static const Key addKey = Key('context-panel-add');
   static const Key manageKey = Key('context-panel-manage');
+
+  /// How many file rows a disclosure draws before it starts counting them.
+  ///
+  /// A panel is not a file browser: a registered project runs to thousands of
+  /// files, and a list of them is neither readable nor the way anybody finds
+  /// anything. Search is — which is what the line under the cap says.
+  static const int maxFilesShown = 200;
 
   static const String caption = 'Use these directories when replying here';
   static const String emptyLine =
@@ -150,6 +182,7 @@ class ContextPanelBody extends StatelessWidget {
                   counts,
                   style: BondType.caption.copyWith(color: BondColors.inkMuted),
                 ),
+                if (onToggleFiles != null) _filesDisclosure(dir.id),
               ],
             ),
           ),
@@ -160,6 +193,85 @@ class ContextPanelBody extends StatelessWidget {
             onChanged: (on) => onToggle(dir.id, on),
           ),
         ],
+      ),
+    );
+  }
+
+  /// `Files ›`, and the list under it when it is open.
+  Widget _filesDisclosure(String dirId) {
+    final open = expanded.contains(dirId);
+    final rows = files[dirId] ?? const <ContextFile>[];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton(
+            key: filesKeyFor(dirId),
+            onPressed: () => onToggleFiles!(dirId),
+            style: TextButton.styleFrom(
+              padding: const EdgeInsets.symmetric(vertical: BondSpacing.s4),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              visualDensity: VisualDensity.compact,
+            ),
+            child: Text(open ? 'Files ⌄' : 'Files ›', style: BondType.caption),
+          ),
+        ),
+        if (open)
+          for (final file in rows.take(maxFilesShown)) _fileRow(file),
+        if (open && rows.length > maxFilesShown)
+          Padding(
+            padding: const EdgeInsets.only(top: BondSpacing.s4),
+            child: Text(
+              '+${rows.length - maxFilesShown} more — search finds them',
+              style: BondType.caption.copyWith(color: BondColors.inkMuted),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// One file: what it is called, what kind of thing it is, and what a model
+  /// made of it.
+  Widget _fileRow(ContextFile file) {
+    final purpose = ContextFileDigest.decode(file.digestJson)?.purpose ?? '';
+    final caption =
+        purpose.isEmpty ? file.kind : '${file.kind} · $purpose';
+
+    final body = Padding(
+      padding: const EdgeInsets.symmetric(vertical: BondSpacing.s4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            file.relPath,
+            style: BondType.small.copyWith(fontWeight: FontWeight.w600),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          Text(
+            caption,
+            style: BondType.caption.copyWith(color: BondColors.inkMuted),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+
+    // Nowhere to go, no control — [AttachmentSearchTile]'s rule.
+    if (onOpenFile == null) return body;
+    return Material(
+      type: MaterialType.transparency,
+      child: InkWell(
+        key: fileKeyFor(file.id),
+        onTap: () => onOpenFile!(file.id),
+        borderRadius: BondRadii.smAll,
+        child: body,
       ),
     );
   }

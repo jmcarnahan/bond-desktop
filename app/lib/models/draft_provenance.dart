@@ -30,7 +30,12 @@ class DraftProvenance {
 
   /// The distinct `(directory, path, locator)` of the passages that reached
   /// the prompt, in the order they were ranked.
-  final List<({String dir, String path, String locator})> files;
+  ///
+  /// [ProvenanceFile]'s `fileId` is what turns each of these from a name into
+  /// a DOOR — the composer draws a chip per file and the chip opens it. Null
+  /// on a draft written before the id was stored, which is why every reader
+  /// treats a missing one as "no chip" rather than as a broken row.
+  final List<({String dir, String path, String locator, int? fileId})> files;
 
   /// The skills that matched — the owner's own instructions this reply was
   /// written under.
@@ -74,7 +79,15 @@ class DraftProvenance {
         'directories': directories,
         'files': [
           for (final file in files)
-            {'dir': file.dir, 'path': file.path, 'locator': file.locator},
+            {
+              'dir': file.dir,
+              'path': file.path,
+              'locator': file.locator,
+              // Only when there is one: a row without it is a draft from
+              // before the chips, and writing `null` would say the file was
+              // looked up and had no id.
+              if (file.fileId != null) 'file_id': file.fileId,
+            },
         ],
         'skills': skills,
       });
@@ -123,11 +136,11 @@ class DraftProvenance {
     if (sources.length == 1) return null;
 
     final detail = <String>[
-      for (final file in files.take(_maxFiles))
+      for (final file in files.take(maxFiles))
         file.locator.isEmpty
             ? file.path
-            : '${file.path} § ${_locator(file.locator)}',
-      if (files.length > _maxFiles) '+${files.length - _maxFiles} more',
+            : '${file.path} § ${locatorLabel(file.locator)}',
+      if (files.length > maxFiles) '+${files.length - maxFiles} more',
       for (final skill in skills) 'SKILL $skill',
     ];
 
@@ -136,7 +149,11 @@ class DraftProvenance {
   }
 
   /// How many files a caption names before it starts counting them.
-  static const int _maxFiles = 3;
+  ///
+  /// Public because the chips under the caption honour the same cap: a chip is
+  /// the caption's name made tappable, and a fourth would be a door to a file
+  /// the sentence above it never named.
+  static const int maxFiles = 3;
 
   /// `digest` is what the column, the work kind and the code call a per-file
   /// summary. `summary` is what a person reading a caption above their reply
@@ -144,10 +161,14 @@ class DraftProvenance {
   ///
   /// The chunker writes a heading path as `Pricing > Q4 rates`, which is a
   /// comparison operator sitting in the middle of a sentence a person is
-  /// reading. The caption draws it as a breadcrumb instead. Only the caption:
-  /// the stored JSON keeps the chunker's own spelling, so the locator in the
-  /// row still matches the locator in the index.
-  static String _locator(String locator) => locator == 'digest'
+  /// reading. The caption draws it as a breadcrumb instead. Only what is
+  /// SHOWN: the stored JSON keeps the chunker's own spelling, so the locator
+  /// in the row still matches the locator in the index.
+  ///
+  /// Public because the caption is no longer the only thing that draws one —
+  /// the chips under it label themselves the same way, and two spellings of a
+  /// breadcrumb is a chip that does not look like the caption above it.
+  static String locatorLabel(String locator) => locator == 'digest'
       ? 'summary'
       : locator.replaceAll(' > ', ' › ');
 
@@ -170,19 +191,35 @@ class DraftProvenance {
   /// A file needs a path to be worth naming; a directory and a locator are
   /// both allowed to be missing, because a passage from a whole one-page file
   /// has no section to cite.
-  static List<({String dir, String path, String locator})> _files(Object? raw) {
+  static List<({String dir, String path, String locator, int? fileId})> _files(
+    Object? raw,
+  ) {
     if (raw is! List) return const [];
-    final files = <({String dir, String path, String locator})>[];
+    final files = <({String dir, String path, String locator, int? fileId})>[];
     for (final entry in raw) {
       if (entry is! Map) continue;
       final path = entry['path'];
       if (path is! String || path.isEmpty) continue;
+      final fileId = entry['file_id'];
       files.add((
         dir: entry['dir'] is String ? entry['dir']! as String : '',
         path: path,
         locator: entry['locator'] is String ? entry['locator']! as String : '',
+        // An `int` or nothing. A row that stored the id as text is a row
+        // written by something this app did not write, and a chip built on
+        // it would open a file nobody named.
+        fileId: fileId is int ? fileId : null,
       ));
     }
     return files;
   }
 }
+
+/// One file a draft read, as the composer's chips take it.
+///
+/// A record rather than the whole [DraftProvenance] entry, and narrower than
+/// it: a chip is only drawn for a file that HAS an id, so the nullable field
+/// the stored inventory carries has already been answered by the time one of
+/// these exists. The composer is prop-only and this is the shape it is
+/// handed.
+typedef ProvenanceFile = ({int fileId, String dir, String path, String locator});

@@ -376,6 +376,16 @@ a room with an empty index still cost nothing; a retriever called without one
 — every test that predates this, and any caller with no embedder — builds its
 own vector exactly as it did before.
 
+**Naming what was read.** `drafts.context_json` stores the `(directory, path,
+locator)` of every passage that reached the prompt, plus its `file_id` when
+there is one. The composer's caption names them; a row of small chips under it
+OPENS them, one per file, in the file panel at the section that was quoted. A
+row with no `file_id` is a draft written before the id was stored, and it is
+named without being opened rather than given a chip that goes nowhere. The
+chips are drawn under the caption's own gate: from the first keystroke the
+words are the user's, and where a suggestion came from has nothing to say over
+them.
+
 **Ranking.** Fused per PASSAGE rather than per file — a search names
 documents, and this quotes paragraphs — with the app's own weights and floor
 (`SearchTuning`): half the vector's relevance plus half the words', keep at or
@@ -442,10 +452,32 @@ defensively (any malformed payload reads as none) and passes it as
 `pinnedFirst`, which both widens the scope to that document and floats it to
 the front of the ranking.
 
+**Consult for the reply** is the same idea over the other corpus. The file
+panel of one of the owner's own directory files
+(`13-context-directories.md` §Consumers) carries the button whenever it was
+opened from a room a reply can be written in; it calls
+`generate(contextFileIds: [id])`, which writes
+`{"context_file_ids": [...]}` onto the same work row.
+`DraftHandler._contextFileIdsFrom` decodes it with the same paranoia plus one
+rule of its own — a `context_files.id` is a positive integer, so anything else
+reads as none named — and passes it as `packFor(consultFirst: …)`. There it
+does more than `pinnedFirst` does for a document: a named file is READ and not
+merely ranked. The retriever asks that file for its own nearest passages
+rather than hoping they were on the dozen-wide neighbour page, falls back to
+reading it from the top when nothing can rank it, and then floats what came
+back to the front exempt from the relevance floor, because a person saying
+"read this" outranks a score. Both scopes still apply, so a named file outside
+every directory linked to the room contributes nothing. The activity note
+gains `consulted: N`.
+
+The payload carries only the keys that have something in them, so a consulted
+file and a pinned document never have to be asked for together to be asked for
+at all.
+
 `requeueWork` **overwrites** the payload, including with null. A plain
-Regenerate after a Use in reply therefore drops the last one's name, which is
-the point: asking again without naming a file has to mean the file is no
-longer named.
+Regenerate after a Use in reply or a Consult therefore drops the last one's
+name, which is the point: asking again without naming a file has to mean the
+file is no longer named. That rule covers both lists.
 
 **Provenance.** The `drafts` table stores no inventory of what was read. Two
 things stand in for one: the prompt asks the model to cite the file when it

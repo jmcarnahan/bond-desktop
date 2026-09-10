@@ -15,9 +15,9 @@ chunker and the embedding server on `:8081`.
 
 > **Live as of schema v15.** Registration, the reconcile pass, the two derived
 > indexes, the sync-tail enqueue, the Claude conventions, the per-file digests,
-> the per-directory brief, the linking panel and the retrieval into drafts all
-> run. What is still owed to the round: the other consumers — storylines,
-> recaps, search and naming a file for the next draft.
+> the per-directory brief, the linking panel, the retrieval into drafts and
+> every consumer below — the charter offer, the recap footer, the home
+> search's third list, the file panel and the three doors into it — all run.
 
 Everything below calls a per-file summary a **digest**, which is what the
 column, the work kind and the code call it. The Settings switch for this is
@@ -643,9 +643,24 @@ The steps, in this order and no other:
    organizations` plus the subject with its reply markers off; a message with
    neither is answered by the vector half alone. Ties break on `chunk_id`, so
    two identical drafts read the same prompt.
-8. **The order after the floor**: files the caller named in `consultFirst`
-   float to the front (stable, and exempt from the floor — a person saying
-   "read this" outranks a score), then at most `perFile` passages per file,
+7b. **A named file is READ, not merely ranked.** `consultFirst` is not a
+   re-sort of the neighbour page. That page is a dozen passages wide and a
+   file somebody pointed at is usually not on it — which is why they pointed
+   — so each named file is asked for its own nearest passages with a second
+   `chunkKnn(fileIds: …)`, scoped by BOTH the directory ids and the file ids,
+   so naming a file is never a way past the directory scope. A named file the
+   vector index cannot answer for — no vector written yet, the native index
+   missing, the embedder down — is read from the top by `chunksForFile`,
+   because reading from the top is what "read this file first" means when
+   nothing knows which part is nearest. This is also why a pass with no
+   question at all still builds a pack when a file was named: finding it never
+   needed the question. Skills are the one thing such a pass adds nothing of,
+   since a skill is chosen by nearness to the question.
+8. **The order after the floor**: the files the caller named in
+   `consultFirst` are READ before the ranking runs (see step 7b), and their
+   passages float to the front (stable, and exempt from the floor — a person
+   saying "read this" outranks a score), then at most `perFile` passages per
+   file,
    then the top `k`, then a character budget of 2,500. A passage that does not
    fit is SKIPPED rather than ending the list, so one long passage cannot hide
    the three short ones behind it. The 80-character allowance per passage is
@@ -717,6 +732,153 @@ renamed or removed.
 Two providers back the panel, both re-read on every activity event like the
 library is: `contextLinksProvider(scope)` for the switches, and
 `contextInheritedProvider(target)` for the muted lines.
+
+## Consumers
+
+Everything above builds the index and serves one reply out of it. These are
+the other five places the app spends it.
+
+### The charter offer
+
+A directory's brief answers "what is this project", which is the other thing a
+storyline's **charter** can be — and unlike the refresh pass, which reads the
+member threads and says what they have in common, this reads what the owner
+wrote down before any of those threads existed.
+
+`ContextBriefHandler` takes an `onBriefChanged` callback and calls it with the
+directory id **only after a new brief was written** — never on `unchanged`,
+never on the clear. A callback and not the service itself, because `services/`
+reaches down and never sideways: a handler importing the storyline service
+would tie the directory queue to the mailbox's clustering for one sentence of
+prose. `app_providers.dart` wires it to
+`StorylineService.offerDirectoryCharters`; Riverpod resolves a provider when
+it is READ, so reaching forward to a provider declared further down the file
+is ordinary rather than a cycle.
+
+`offerDirectoryCharters(dirId)` walks `linksFor(dirId)`, keeps the
+`storyline` links, and for each live storyline (`active` or `suggested`)
+applies three rules:
+
+| State | What happens |
+|---|---|
+| no charter, not locked | the `about` is offered as `charter_suggestion` |
+| locked, nothing parked | offered — a lock says the stored sentence is theirs, not that they never want another idea |
+| locked, a suggestion already parked | untouched — they have not answered the first one |
+
+An UNLOCKED storyline that already has a charter is the refresh pass's
+business: that sentence moves with the member set, and a directory link is not
+a change to who is in the group. A brief whose `about` equals the charter
+modulo whitespace and case offers nothing, on the refresh's own `_normalized`
+rule.
+
+**The write is a SUGGESTION even onto an empty charter.** A charter is the
+membership criteria — `recruitForCharter` hunts the mailbox on it and threads
+get filed under it — so a sentence a model lifted out of a `CLAUDE.md` that
+the person has never read must not start recruiting threads on their behalf.
+Use this is one tap, and it is the tap that makes it theirs.
+
+The offer is made AFTER the brief is stored and inside its own `try`: what the
+handler owes the app is the brief, which a model call was already spent on, so
+an offer that throws costs the offer, notes `charter_error`, and leaves the
+brief standing. A pass that offered at least one charter notes
+`charters_offered` with the count, and `ActivityLogPanel` appends
+`· N charters offered` to the brief's line — a second sentence on the same
+row rather than a row of its own, since nothing was queued for it.
+
+### The recap line
+
+`StorylineService.recap` appends one `⟨directory <name>: <about>⟩` line per
+linked directory that has a brief, AFTER the pinned-document footer. A footer
+for the pins' reason: the window is a chronology and a registered folder did
+not happen on a date; last of them because it is the broadest thing in the
+prompt, the project the whole story sits inside.
+
+`about` and not the facts or the guidance — `about` says what the project IS,
+which is all a summary needs; the facts are for a reply that has to be correct
+about a number. A linked directory with **no brief contributes nothing**
+rather than its name alone: no brief means nothing has read the folder yet,
+and a bare name is a word the model would have to guess the meaning of.
+
+### Search: `In your directories`
+
+The third corpus on the home search (`05-embeddings.md` §Search counts them),
+listed above `In documents` and above the message rows. `MessageSearch` takes an optional `ContextStore`; both passes ask
+`allDirIds()` first and hand the whole list to `chunkKnn` / `keywordChunks` as
+a SCOPE, because "every directory" still goes INSIDE the query — a corpus-wide
+match narrowed afterwards is the mistake the scoped reads exist to prevent.
+
+**Digests are excluded in SQL**, `excludeDigests: true`, on the attachment
+search's rule (`05-embeddings.md` §Search): a search result promises the
+file's own words, and a digest is a model's summary of them. The reply
+retriever does NOT exclude them (D7), which is why the flag defaults to false.
+
+Both directory reads sit in their own `try`/`catch` that yields null: a
+directory index that cannot be read must never make a search of the MAILBOX
+report itself unavailable or narrowed. `fuseDirectories` is `fuseDocuments`'s
+arithmetic per FILE — a twin rather than a generic, because the identity
+differs: a document is a blob and needs a hash, a directory file is a row and
+`context_files.id` is already on the hit.
+
+### The file panel
+
+`ContextFilePanel` is the **seventh** `SidePanel` kind, opened by a provenance
+chip, a `Files ›` row and a search tile. `contextFileProvider` resolves the
+row, its directory, its words, its digest and — when a locator was named — the
+stored passage under it with the chunker's header line stripped.
+
+`ContextFilePanelBody` draws, in this order: a caption
+(`<dir>/<path> · modified <age>`, plus `· truncated`), **Consult for the
+reply** when the panel was opened from a room a reply can be written in, the
+digest under the `AI` label, then the words. The digest sits ABOVE the words
+because a person asking what is in this file is answered in one paragraph
+rather than ten pages, and under `AI` because that label is the app's standing
+promise about whose sentence a reader is looking at.
+
+The located passage is a highlighted `Container` between two more
+`SelectableText`s rather than a coloured span inside one: three selectable
+blocks keep the copy-a-number use working, and only a widget of its own has a
+`BuildContext` for `Scrollable.ensureVisible` to scroll to. Finding the
+passage runs on two rungs: the whole passage verbatim, which is what the
+chunker's slice usually still is, and failing that the first 60 characters
+split into words and hunted with any run of whitespace allowed between them,
+for the file whose extractor re-flowed the breaks between the walk that
+chunked it and the walk that stored its words. No match is no highlight and
+the whole file renders. The caption names the cited section as
+`· § Pricing › Q4 rates` either way, because the two can disagree and a reader
+who arrived by a chip is owed the name.
+
+**Consult** calls `generate(contextFileIds: [id])`, which writes
+`{"context_file_ids":[…]}` onto the draft work row's `payload_json`.
+`DraftHandler._contextFileIdsFrom` reads it with `_pinnedIdsFrom`'s paranoia
+plus one rule of its own — a `context_files.id` is a positive integer, so
+anything else is "none named" — and passes it as `packFor(consultFirst: …)`,
+where the named files are read for their own passages, bypass the relevance
+floor and float to the front (see §Serving steps 7b and 8). The note gains
+`consulted: N`.
+
+### The chips and `Files ›`
+
+`drafts.context_json` now stores `file_id` per file, written only when there
+is one: a row without the key is a draft from before the chips, not a file
+that was looked up and had no id. The composer draws one small `TextButton`
+per file under the provenance caption, under the same gate as the caption —
+once the reader types, the words are theirs. The screen caps the list at
+`DraftProvenance.maxFiles`, the same three the caption names before it starts
+counting, because a chip is one of those names made tappable and a fourth
+would be a door to a file the sentence above it never named. The cap is taken
+before the ids are filtered, so it is the first three files NAMED and not the
+first three that happen to be openable. Chips and not tappable spans,
+because a `TextButton` has a hit target and a focus ring and a
+`TapGestureRecognizer` inside an ellipsised two-line caption has neither. The
+label uses `DraftProvenance.locatorLabel`, the caption's own breadcrumb rule,
+so a chip looks like the sentence above it.
+
+`ContextPanelBody` gains a `Files ›` disclosure per row, capped at
+`maxFilesShown` = 200 with a `+N more — search finds them` line under it: a
+panel is not a file browser, and search is how anybody finds anything in a
+project of thousands of files. The host keeps the open set in plain state and
+`_clearOverlays` deliberately does not touch it — it is a preference of the
+panel, not a panel.
 
 ## Where it sits in the drain
 
@@ -828,7 +990,19 @@ that call.
   `app/lib/services/llm/reply_decision_task.dart` — the three fences and the
   widened invention rule.
 - `app/lib/widgets/context_panel.dart`, `app/lib/widgets/side_panel.dart` —
-  the link panel and the sixth panel kind.
+  the link panel with its `Files ›` disclosure, and the sixth and seventh
+  panel kinds.
+- `app/lib/widgets/context_file_panel.dart` — one indexed file: the located
+  passage, the `AI` digest and **Consult for the reply**.
+- `app/lib/widgets/context_search_tile.dart`,
+  `app/lib/widgets/home_pane.dart` — the `In your directories` list.
+- `app/lib/services/search_fusion.dart` — `fuseDirectories`.
+- `app/lib/services/message_search.dart` — the third corpus on the home
+  search.
+- `app/lib/services/storyline_service.dart` — the recap's directory footer
+  and `offerDirectoryCharters`.
+- `app/lib/providers/draft_provider.dart` — `generate(contextFileIds: …)`.
+- `app/lib/widgets/composer.dart` — the provenance chips.
 - `app/lib/widgets/thread_detail_panel.dart`,
   `app/lib/widgets/storyline_timeline.dart` — the **Context** room action.
 - `app/lib/services/llm/model_slots.dart` — the two fast-slot stage rows.

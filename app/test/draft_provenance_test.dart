@@ -11,7 +11,7 @@ void main() {
     documents: ['Lease Addendum.pdf'],
     directories: ['acme'],
     files: [
-      (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates'),
+      (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates', fileId: null),
     ],
     skills: ['vendor-replies'],
   );
@@ -81,10 +81,45 @@ void main() {
       // A file needs a path to be worth naming; a directory and a locator are
       // both allowed to be missing.
       expect(decoded.files, [
-        (dir: '', path: 'docs/p.md', locator: ''),
-        (dir: 'acme', path: 'docs/q.md', locator: 'digest'),
+        (dir: '', path: 'docs/p.md', locator: '', fileId: null),
+        (dir: 'acme', path: 'docs/q.md', locator: 'digest', fileId: null),
       ]);
       expect(decoded.skills, ['vendor-replies']);
+    });
+
+    test('a file id round-trips, and only when there is one', () {
+      const withId = DraftProvenance(
+        documents: [],
+        directories: ['acme'],
+        files: [
+          (
+            dir: 'acme',
+            path: 'docs/pricing.md',
+            locator: 'Pricing',
+            fileId: 7,
+          ),
+          (dir: 'acme', path: 'notes.md', locator: '', fileId: null),
+        ],
+        skills: [],
+      );
+
+      final encoded = withId.encode();
+      // Written only when there is one: a row without the key is a draft from
+      // before the chips, not a file that was looked up and had no id.
+      expect(encoded, contains('"file_id":7'));
+      expect(encoded, isNot(contains('"file_id":null')));
+      expect(DraftProvenance.decode(encoded)!.files, withId.files);
+    });
+
+    test('a file id of the wrong type is no id at all', () {
+      final decoded = DraftProvenance.decode(
+        '{"files":[{"path":"a.md","file_id":"7"},'
+        '{"path":"b.md","file_id":true},'
+        '{"path":"c.md"}]}',
+      )!;
+
+      // A chip built on a string would open a file nobody named.
+      expect([for (final file in decoded.files) file.fileId], [null, null, null]);
     });
   });
 
@@ -109,7 +144,7 @@ void main() {
         documents: [],
         directories: ['acme'],
         files: [
-          (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates'),
+          (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates', fileId: null),
         ],
         skills: ['vendor-replies'],
       );
@@ -149,7 +184,7 @@ void main() {
       const provenance = DraftProvenance(
         documents: [],
         directories: ['acme'],
-        files: [(dir: 'acme', path: 'notes.md', locator: '')],
+        files: [(dir: 'acme', path: 'notes.md', locator: '', fileId: null)],
         skills: [],
       );
 
@@ -160,7 +195,7 @@ void main() {
       const provenance = DraftProvenance(
         documents: [],
         directories: ['acme'],
-        files: [(dir: 'acme', path: 'analysis.html', locator: 'digest')],
+        files: [(dir: 'acme', path: 'analysis.html', locator: 'digest', fileId: null)],
         skills: [],
       );
 
@@ -172,11 +207,11 @@ void main() {
         documents: [],
         directories: ['acme'],
         files: [
-          (dir: 'acme', path: 'a.md', locator: ''),
-          (dir: 'acme', path: 'b.md', locator: ''),
-          (dir: 'acme', path: 'c.md', locator: ''),
-          (dir: 'acme', path: 'd.md', locator: ''),
-          (dir: 'acme', path: 'e.md', locator: ''),
+          (dir: 'acme', path: 'a.md', locator: '', fileId: null),
+          (dir: 'acme', path: 'b.md', locator: '', fileId: null),
+          (dir: 'acme', path: 'c.md', locator: '', fileId: null),
+          (dir: 'acme', path: 'd.md', locator: '', fileId: null),
+          (dir: 'acme', path: 'e.md', locator: '', fileId: null),
         ],
         skills: [],
       );

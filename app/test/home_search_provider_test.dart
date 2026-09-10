@@ -4,6 +4,7 @@ import 'dart:async';
 // the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/home_sort.dart';
 import 'package:bond_inbox/providers/home_provider.dart';
@@ -186,6 +187,39 @@ void main() {
     expect(notifier.state.search!.query, 'invoice');
     expect(notifier.state.search!.hits, hasLength(2));
     expect(notifier.state.searching, isFalse);
+  });
+
+  test('the directory passages ride along to the state, unfiltered', () async {
+    final notifier = build();
+    final search = notifier.submitSearch('rates from:dana');
+    runner.answer(
+      0,
+      MessageSearchHits(
+        'rates',
+        const [],
+        directories: const [
+          ContextChunkHit(
+            fileId: 7,
+            dirId: 'dir-1',
+            dirName: 'atlas',
+            relPath: 'docs/rates.md',
+            chunkId: 1,
+            seq: 0,
+            locator: 'Pricing',
+            text: 'docs/rates.md · Pricing\nQ4 rates hold at nine.',
+            distance: 0.2,
+          ),
+        ],
+      ),
+    );
+    await search;
+
+    // A facet narrows MESSAGES. A registered folder belongs to no sender and
+    // arrived on no date, so `from:` has nothing to say about it.
+    final directories = notifier.state.search!.directories;
+    expect(directories, hasLength(1));
+    expect(directories.single.dirName, 'atlas');
+    expect(directories.single.relPath, 'docs/rates.md');
   });
 
   test('the notice rides along to the state', () async {

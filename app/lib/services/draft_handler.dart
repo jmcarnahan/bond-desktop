@@ -215,7 +215,15 @@ class DraftHandler extends WorkHandler {
     // ONE pack, for the same reason there is one retrieval: both calls below
     // ask about the same message on the same thread, and the directories have
     // not changed between the two.
-    final pack = await _packFor(source, key, id, queryVector: vector);
+    final consultFirst = _contextFileIdsFrom(item['payload_json']);
+    final consulted = consultFirst.length;
+    final pack = await _packFor(
+      source,
+      key,
+      id,
+      queryVector: vector,
+      consultFirst: consultFirst,
+    );
 
     final decision = await runTask(
       _client,
@@ -289,13 +297,16 @@ class DraftHandler extends WorkHandler {
       final name = excerpt.name.isEmpty ? 'a file' : excerpt.name;
       if (!documents.contains(name)) documents.add(name);
     }
-    final files = <({String dir, String path, String locator})>[];
+    final files = <({String dir, String path, String locator, int? fileId})>[];
     final directoryFiles = <String>[];
     for (final excerpt in pack.excerpts) {
       final entry = (
         dir: excerpt.dirName,
         path: excerpt.relPath,
         locator: excerpt.locator,
+        // The row id, so the composer's chip can open the file rather than
+        // only name it.
+        fileId: excerpt.fileId,
       );
       if (!files.contains(entry)) files.add(entry);
       if (!directoryFiles.contains(excerpt.relPath)) {
@@ -343,6 +354,7 @@ class DraftHandler extends WorkHandler {
       // stored provenance: a person reading the log is asking what the app
       // DID, and the row has to answer after the draft it belongs to has been
       // sent, edited or thrown away.
+      if (consulted > 0) 'consulted': consulted,
       if (provenance.documents.isNotEmpty) 'documents': provenance.documents,
       if (provenance.directories.isNotEmpty)
         'directories': provenance.directories,
@@ -397,6 +409,7 @@ class DraftHandler extends WorkHandler {
     String key,
     String id, {
     Future<Uint8List?> Function()? queryVector,
+    List<int> consultFirst = const [],
   }) async {
     final retriever = _contextDirs;
     if (retriever == null) return ContextPack.empty;
@@ -407,6 +420,7 @@ class DraftHandler extends WorkHandler {
         replyToId: id,
         storylineIds: await _store.storylineIdsFor(source, key),
         queryVector: queryVector,
+        consultFirst: consultFirst,
       );
     } catch (e) {
       _log.note({'context_error': '$e'});
@@ -448,6 +462,29 @@ class DraftHandler extends WorkHandler {
       return [
         for (final id in ids)
           if (id is String && id.isNotEmpty) id,
+      ];
+    } on FormatException {
+      return const [];
+    }
+  }
+
+  /// The directory files the user named with "Consult for the reply", off the
+  /// work item.
+  ///
+  /// [_pinnedIdsFrom]'s paranoia over the other list, and one rule of its own:
+  /// a `context_files.id` is a positive integer, so anything else — a string,
+  /// a zero, a negative — is not an id and reads as "none named". A malformed
+  /// payload must cost the consultation, never the draft.
+  static List<int> _contextFileIdsFrom(Object? payloadJson) {
+    if (payloadJson is! String || payloadJson.isEmpty) return const [];
+    try {
+      final decoded = jsonDecode(payloadJson);
+      if (decoded is! Map) return const [];
+      final ids = decoded['context_file_ids'];
+      if (ids is! List) return const [];
+      return [
+        for (final id in ids)
+          if (id is int && id > 0) id,
       ];
     } on FormatException {
       return const [];

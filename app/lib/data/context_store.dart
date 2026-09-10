@@ -125,6 +125,19 @@ class ContextStore {
     return [for (final row in rows) ContextDir.fromRow(row.data)];
   }
 
+  /// Every registered directory's id, in id order.
+  ///
+  /// What a search over the whole library asks for FIRST, so that "every
+  /// directory" reaches the KNN and the ranked FTS query as a scope rather
+  /// than as a filter over the answer. A corpus-wide match narrowed
+  /// afterwards is the mistake [chunkKnn] exists to prevent; this is the one
+  /// caller entitled to name them all, and it still names them.
+  Future<List<String>> allDirIds() async {
+    final rows =
+        await db.customSelect('SELECT id FROM context_dirs ORDER BY id').get();
+    return [for (final row in rows) row.data['id'] as String];
+  }
+
   Future<ContextDir?> directory(String id) async {
     final rows = await db
         .customSelect(
@@ -1008,6 +1021,26 @@ class ContextStore {
     await _keywordIndex.backfill();
   }
 
+  /// The stored words of one file's passage under [locator], or null when
+  /// that file never had a passage there.
+  ///
+  /// The first passage of the locator rather than all of them: a section long
+  /// enough to be packed into `· part 2` was cited by its first part, and a
+  /// panel scrolling to the second half of a heading it was never sent to is
+  /// worse than scrolling to the heading. The stored text opens with the
+  /// chunker's own header line — `<rel path> · <locator>` — so every caller
+  /// showing it to a person strips that line first.
+  Future<String?> chunkTextFor(int fileId, String locator) async {
+    final rows = await db
+        .customSelect(
+          'SELECT chunk_text FROM context_chunks '
+          'WHERE file_id = ? AND locator = ? ORDER BY seq LIMIT 1',
+          variables: _args([fileId, locator]),
+        )
+        .get();
+    return rows.isEmpty ? null : rows.single.data['chunk_text'] as String?;
+  }
+
   /// How many passages one directory has, and how many of them are embedded
   /// — the two numbers the library row draws its progress from.
   Future<({int chunks, int embedded})> chunkCounts(String dirId) async {
@@ -1056,26 +1089,51 @@ class ContextStore {
   /// the nearest passage in every project the user owns — a paragraph of one
   /// client's notes pasted into another's reply is the one failure this path
   /// has to be incapable of.
+  /// [excludeDigests] drops the per-file digest passages from the answer, in
+  /// SQL rather than afterwards — a page of k neighbours half of which are
+  /// then thrown away is half a page. Search takes it and the reply retriever
+  /// does not, which is why it is off by default: a digest is a model's
+  /// summary of the owner's own file, so it is the wrong thing to show
+  /// someone hunting for the words they typed and the right thing to quote to
+  /// a model that asked what an analysis found.
+  ///
+  /// [fileIds] narrows the answer further, to the passages of named files —
+  /// what a caller asks for when a person pointed at a file and said read
+  /// this. It narrows and never widens: BOTH scopes apply, so a named file
+  /// that is no longer inside a linked directory answers nothing, exactly as
+  /// it would if it had never been named.
   Future<List<ContextChunkHit>?> chunkKnn(
     Uint8List query, {
     required String embedModel,
     required List<String> dirIds,
+    List<int>? fileIds,
     int k = 12,
+    bool excludeDigests = false,
   }) async {
     if (dirIds.isEmpty) return const [];
+    if (fileIds != null && fileIds.isEmpty) return const [];
     if (!await _chunkIndex.ensureReady()) return null;
 
     // Heal before asking: a passage whose index write never landed would
     // otherwise stay unfindable until some unrelated file happened to change.
     await _chunkIndex.backfill();
 
+    // The predicate is applied over `context_chunks` columns by the index, so
+    // both halves of it name that table.
+    final files = fileIds == null || fileIds.isEmpty
+        ? ''
+        : ' AND file_id IN (${_placeholders(fileIds.length)})';
     final scope = 'file_id IN (SELECT id FROM context_files '
-        'WHERE dir_id IN (${_placeholders(dirIds.length)}))';
+        'WHERE dir_id IN (${_placeholders(dirIds.length)}))'
+        "${excludeDigests ? " AND locator != 'digest'" : ''}"
+        '$files';
     final hits = await _chunkIndex.knn(
       query,
       k: k,
       rowidWhere: scope,
-      rowidArgs: dirIds,
+      // The directory ids first, because they are the first placeholders in
+      // the fragment above.
+      rowidArgs: [...dirIds, ...?fileIds],
     );
     if (hits.isEmpty) return const [];
 
@@ -1090,6 +1148,45 @@ class ContextStore {
     );
   }
 
+  /// One file's first passages, in the order the chunker cut them.
+  ///
+  /// The answer to "read this file" when nothing knows which part of it is
+  /// nearest a question — no vector yet, the index off, the embedder down.
+  /// Reading from the top is what a person does with a file they were handed
+  /// and told to read, so it is what this does.
+  ///
+  /// Digests are KEPT. They are a model's words and so are never shown as a
+  /// search result, but this answer goes to a model, and the digest is very
+  /// often the one passage that says what the whole file is for.
+  Future<List<ContextChunkHit>> chunksForFile(int fileId, {int limit = 3}) async {
+    final file = await fileById(fileId);
+    if (file == null) return const [];
+    final rows = await db
+        .customSelect(
+          'SELECT id FROM context_chunks WHERE file_id = ? '
+          'ORDER BY seq LIMIT ?',
+          variables: _args([fileId, limit]),
+        )
+        .get();
+    if (rows.isEmpty) return const [];
+    return _hydrate(
+      [
+        for (final row in rows)
+          (
+            id: row.data['id'] as int,
+            distance: null,
+            bm25: null,
+            coverage: null,
+          ),
+      ],
+      // No signals and no model tag: nothing ranked these, and a passage that
+      // was never embedded is exactly the case this read exists for.
+      embedModel: null,
+      dirIds: [file.dirId],
+      limit: rows.length,
+    );
+  }
+
   /// The passages within [dirIds] whose WORDS [query] matches, best first.
   ///
   /// The other half of the retrieval, and the half that finds a part number,
@@ -1097,10 +1194,13 @@ class ContextStore {
   /// Coverage is asked once per term over the page already in hand, which is
   /// what lets the fusion above say "this passage matched two of your three
   /// words".
+  ///
+  /// [excludeDigests] is [chunkKnn]'s flag and carries its reasoning.
   Future<List<ContextChunkHit>> keywordChunks(
     FtsQuery query, {
     required List<String> dirIds,
     int limit = SearchTuning.keywordFetch,
+    bool excludeDigests = false,
   }) async {
     if (dirIds.isEmpty) return const [];
     if (!await _keywordIndex.ensureReady()) return const [];
@@ -1113,7 +1213,8 @@ class ContextStore {
     // page this room may not read a single row of — and answer nothing.
     final scope = 'rowid IN (SELECT c.id FROM context_chunks c '
         'JOIN context_files f ON f.id = c.file_id '
-        'WHERE f.dir_id IN (${_placeholders(dirIds.length)}))';
+        'WHERE f.dir_id IN (${_placeholders(dirIds.length)})'
+        "${excludeDigests ? " AND c.locator != 'digest'" : ''})";
     final matches = await _keywordIndex.match(
       query.match,
       limit: limit,

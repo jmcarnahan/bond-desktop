@@ -634,6 +634,25 @@ void main() {
       );
     });
 
+    test('a brief that offered a charter says so on the same line', () {
+      // No work row stands behind a charter offer, so a reader hunting for
+      // what this pass did would find a storyline write with nothing above it.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_brief',
+          detail: const {'files_mapped': 12, 'charters_offered': 2},
+        )),
+        'Directory brief — 12 files mapped · 2 charters offered',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_brief',
+          detail: const {'files_mapped': 12, 'charters_offered': 1},
+        )),
+        'Directory brief — 12 files mapped · 1 charter offered',
+      );
+    });
+
     test('a retry names the stages it put back', () {
       // Which work was requeued is the whole question a person has after
       // pressing Retry; a count of stages does not answer it.

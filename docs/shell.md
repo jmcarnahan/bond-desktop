@@ -143,7 +143,7 @@ one line — From · Subject · Ask · When, an ask keeping its tone as a dot �
 no bar and no Result cell: the thread beside carries both, and its Why panel's
 `What happened ›` is the door to the history.
 
-`SidePanel` has six kinds, and the panel shows exactly one of them:
+`SidePanel` has seven kinds, and the panel shows exactly one of them:
 
 | Kind | What it holds | Opened by |
 |---|---|---|
@@ -153,8 +153,9 @@ no bar and no Result cell: the thread beside carries both, and its Why panel's
 | `PersonPanel` | one person | the room header's **Profile**, and tapping the faces on a room or a thread |
 | `HistoryPanel` | what happened to one message — every stage, judgement and queue row, with the levers | the hover **What happened** on an inbound row, the Why panel's `What happened ›`, an Inbox row's stage bar or Result cell, an Archive row |
 | `ContextPanel` | which directories a room reads when a reply is drafted | the room header's **Context** on a thread and on a storyline |
+| `ContextFilePanel` | one file out of one of those directories — its words, the passage a citation named, its `AI` summary, and **Consult for the reply** | a provenance chip under the composer's caption, a `Files ›` row on the Context panel, a tile in the search's **In your directories** list |
 
-Why, Person, History and Context follow the file rule: opened from a thread
+Why, Person, History, Context and the context file follow the file rule: opened from a thread
 that is itself beside, they REPLACE it. One panel, never two stacked — the Why panel's
 `What happened ›` swaps the history into the same slot, and its ✕ returns to
 the transcript, not to Why. Neither Why nor History carries ⤢: each is prose
@@ -239,6 +240,18 @@ rooms and leaves storylines alone — a storyline is not read or unread, and
 hiding one under a filter about mail would make the toggle mean two things. Its
 tooltip names what pressing it would do, so it flips: `Unread only` ↔ `Show
 everything`.
+
+**Search answers in three lists, in one order.** Above the message rows sit
+**In your directories** — passages of the owner's own registered folders
+(`pipeline/13-context-directories.md`) — and then **In documents**. The order
+is an order of answers: a question about a project is answered better by the
+project than by a document that arrived about it, and better by either than by
+a message that merely mentions it. The count over the rows stays a count of
+MESSAGES, because it labels the list under it. A directory tile opens the
+`ContextFilePanel` at the passage that matched; a document tile opens the
+thread the file came with. `Nothing matches that.` is said only when all three
+are empty — with a named file on screen the sentence narrows to `No messages
+match that.`
 
 **The search grammar** belongs to the Inbox's own box, not to Find. See
 `parseSearchQuery` (`app/lib/services/search_grammar.dart`); the hint on
@@ -702,6 +715,15 @@ the person room's header `AvatarStack`.
   `ContextPanelBody.manageKey` is **Manage directories in Settings ›**. A host
   test that presses Add must override `directoryAccessProvider` with
   `PlainDirectoryAccess` and `aiWorkerProvider` with a handler-less `AiWorker`.
+- **The context file panel**: `ContextPanelBody.filesKeyFor(dirId)` is the
+  `Files ›` disclosure and `ContextPanelBody.fileKeyFor(fileId)` is one file
+  row under it; `Composer.provenanceChipKeyFor(fileId)` is the chip under the
+  provenance caption; `ContextSearchTile.keyFor(hit)` is a directory hit on the
+  search screen. Inside the panel, `ContextFilePanelBody.consultKey` is
+  **Consult for the reply**, `ContextFilePanelBody.digestKey` the `AI` block,
+  `ContextFilePanelBody.locatedKey` the highlighted passage and
+  `ContextFilePanelBody.bodyKey` the scroller. The body is prop-only, so
+  `pumpAndSettle` is safe on it and nowhere near `InboxScreen`.
 - `Key('unread-toggle')` is the Unread only button; find it by that, not by
   tooltip, because the tooltip flips with the state.
 - `Key('needs-you-tabs')` is the Needs You pill row. **Scope pill finders to

@@ -14,10 +14,10 @@ import 'icon_rail.dart' show IconRail;
 /// second nullable field per kind is how the file preview and the full viewer
 /// drifted apart — one could be set while the other said something else.
 ///
-/// Six kinds: a thread, a file, a person, the reasoning behind one message's
-/// verdict, the whole story of what the pipeline did to one message, and
-/// which of the owner's own directories a room reads when a reply is drafted
-/// in it.
+/// Seven kinds: a thread, a file, a person, the reasoning behind one
+/// message's verdict, the whole story of what the pipeline did to one
+/// message, which of the owner's own directories a room reads when a reply is
+/// drafted in it, and one indexed file out of one of those directories.
 sealed class SidePanel {
   const SidePanel();
 }
@@ -115,6 +115,30 @@ final class ContextPanel extends SidePanel {
     required this.scopeKey,
     required this.title,
   });
+}
+
+/// One file out of a registered directory, read beside whatever named it.
+///
+/// The owner's own file rather than something a sender attached, which is
+/// what makes this a different kind from [FilePanel]: there is no blob to
+/// fetch, no sender to attribute it to and no download — the words are in the
+/// index already, and the panel is a reader over them.
+///
+/// [locator] is the section a passage was quoted FROM — a provenance chip, a
+/// search tile. The panel scrolls to it and marks it, so a person who asked
+/// "where did that come from" lands on the paragraph rather than at the top
+/// of ten pages. Null when the file was opened as a whole, from a `Files ›`
+/// row.
+///
+/// [from] is [FilePanel.from] and carries its reasoning: Consult writes into
+/// the room the panel was opened from, and a panel that only knew about the
+/// file would have nowhere to send a draft.
+final class ContextFilePanel extends SidePanel {
+  final int fileId;
+  final String? locator;
+  final DraftTarget? from;
+
+  const ContextFilePanel({required this.fileId, this.locator, this.from});
 }
 
 /// The chrome around whatever is open beside the main pane: a title, the way
