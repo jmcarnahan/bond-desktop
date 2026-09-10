@@ -49,6 +49,8 @@ workload needs it.
 
 ## Quickstart
 
+Setting up the desktop app? Start with [QUICKSTART.md](QUICKSTART.md).
+
 ```sh
 make setup
 make chat
