@@ -72,12 +72,15 @@ comments in `embed_handler.dart` document the queue's contract.
 
 ## Search
 
-**Two corpora, and each of them is indexed twice.** The document corpus
-(messages) and the passage corpus (attachment chunks) each have a `vec0` index
-for meaning and an FTS5 index for words: `vec_messages` beside `fts_messages`,
-`vec_attachment_chunks` beside `fts_attachment_chunks`. A search runs both
-halves over both corpora and fuses the four rankings into two lists — messages
-and documents.
+**Three corpora, and each of them is indexed twice.** The document corpus
+(messages), the passage corpus (attachment chunks) and the directory corpus
+(the passages of the owner's own registered folders,
+`13-context-directories.md`) each have a `vec0` index for meaning and an FTS5
+index for words: `vec_messages` beside `fts_messages`,
+`vec_attachment_chunks` beside `fts_attachment_chunks`,
+`vec_context_chunks` beside `fts_context_chunks`. A search runs both halves
+over all three and fuses the six rankings into three lists — messages,
+documents and directories.
 
 **The keyword indexes are FTS5 with the porter tokenizer**
 (`app/lib/data/keyword_index.dart`), never LIKE: substring matching has no
@@ -163,6 +166,32 @@ under a floor a message in the identical position clears. Kept at `≥ 0.25`, an
 capped at 6. Every constant lives in `SearchTuning`; RRF was tried and
 rejected, because a mediocre row in both lists beat the rows only words could
 find.
+
+**The third corpus is the owner's own work, and it is searched over EVERY
+registered directory.** `MessageSearch` takes an optional `ContextStore`; both
+passes ask `allDirIds()` and hand the whole list to `chunkKnn` /
+`keywordChunks` as a scope, because a scope belongs INSIDE the query — a
+corpus-wide match narrowed afterwards is what the two scoped reads exist to
+prevent, and the caller entitled to name every directory still names them.
+Digests are excluded at read time (`excludeDigests: true`), the attachment
+index's own rule: a search result promises the file's own words, and a digest
+is a model's summary of them. The reply retriever does the opposite — a digest
+is very often the only passage that answers a question about a FINDING — which
+is why the flag defaults to off.
+
+`fuseDirectories` is `fuseDocuments`'s arithmetic, grouped per FILE before
+anything is scored and for exactly its reasons. It is a twin rather than one
+generic function over both, because the two corpora disagree about IDENTITY: a
+document is a blob and needs `blobSha256` with a name-and-size fallback, where
+a directory file is a row and `context_files.id` is already on the hit. Kept
+at `≥ 0.25` and capped at 6, like the documents.
+
+Both directory reads sit in their own `try`/`catch` that yields null rather
+than a notice: a directory index that cannot be read must never make a search
+of the MAILBOX report itself unavailable or narrowed. The list is shown as
+**In your directories**, above `In documents` and above the message rows —
+that order is an order of answers, since a question about a project is
+answered better by the project than by a document that arrived about it.
 
 **What the floor can and cannot suppress.** Only the VECTOR half. `kr` is
 normalised against the best bm25 in this query, so the top keyword row always

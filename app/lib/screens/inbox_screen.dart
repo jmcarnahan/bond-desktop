@@ -4,10 +4,13 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:path/path.dart' as p;
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart' show MessageStore;
 import '../models/attachment_models.dart';
+import '../models/context_models.dart' show ContextScopeKind;
+import '../models/draft_provenance.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
 import '../models/people_sort.dart';
@@ -16,6 +19,7 @@ import '../models/storyline_models.dart';
 import '../providers/activity_provider.dart';
 import '../providers/app_providers.dart';
 import '../providers/archive_provider.dart';
+import '../providers/context_provider.dart';
 import '../providers/conversations_provider.dart';
 import '../providers/draft_provider.dart';
 import '../providers/drafts_inbox_provider.dart';
@@ -49,6 +53,8 @@ import '../widgets/archive_pane.dart';
 import '../widgets/attachment_format.dart';
 import '../widgets/chips.dart';
 import '../widgets/composer.dart';
+import '../widgets/context_file_panel.dart';
+import '../widgets/context_panel.dart';
 import '../widgets/conversation_list_pane.dart';
 import '../widgets/drafts_pane.dart';
 import '../widgets/files_pane.dart';
@@ -315,6 +321,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
   /// sentence typed while the model was thinking from being thrown away when
   /// the model's answer lands.
   final Map<String, int> _stageSeq = {};
+
+  /// Which directories have their `Files ›` disclosure open on the Context
+  /// panel.
+  ///
+  /// [_clearOverlays] deliberately does NOT touch it: this is a preference of
+  /// the panel and not a panel, so a person who opened a project's file list,
+  /// looked at a file and came back is owed the list still open.
+  final Set<String> _expandedContextDirs = {};
 
   String _stageKey(DraftTarget t) => '${t.source}|${t.conversationKey}';
 
@@ -798,6 +812,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // different account signing in next must find neither — mail from two
     // mailboxes interleaved in one inbox is the bug this line rules out.
     await ref.read(messageStoreProvider).wipeAll();
+    // The links and nothing else: they name conversation keys and storyline
+    // ids the wipe just deleted. The directories stay registered — they are
+    // the user's own folders, not this mailbox's data.
+    await ref.read(contextStoreProvider).unlinkAll();
     // The mail is gone from the file; the files have to go from the disk. The
     // cache is content-addressed and outside the database, so nothing above
     // would have taken it.
@@ -1979,6 +1997,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     // there is no platform on the other end of the channel — the About
     // section then says 'Version unknown' rather than throwing.
     final stamps = ref.watch(syncStampsProvider).valueOrNull;
+    // Watched for the same reason the stamps are: the library re-reads on
+    // every recorded activity event, so a reconcile that finishes behind an
+    // open Settings pane moves `reading…` to `12 files · read just now`
+    // without the user touching anything.
+    final contextDirs = ref.watch(contextDirectoriesProvider);
     final appInfo = ref.watch(appInfoProvider).valueOrNull;
     final databasePath = ref.watch(databasePathProvider).valueOrNull;
     return SettingsScreen(
@@ -2005,6 +2028,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       showActivityLog: prefs.showActivityLog,
       onShowActivityLogChanged: (on) =>
           unawaited(notifier.setShowActivityLog(on)),
+      contextSelectExpand: prefs.contextSelectExpand,
+      onContextSelectExpandChanged: (on) =>
+          unawaited(notifier.setContextSelectExpand(on)),
       onOpenActivityLog: _openActivityLog,
       notifyStyle: prefs.notifyStyle,
       onNotifyStyleChanged: (style) => unawaited(notifier.setNotifyStyle(style)),
@@ -2152,6 +2178,44 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
           ? null
           : '${appInfo.version} (${appInfo.build})',
       databasePath: databasePath,
+      // `valueOrNull ?? const []` rather than the AsyncValue's own empty
+      // state: the section must render — with its Loading… line — while the
+      // first read is out, and a null here would take the whole section off
+      // the screen for that frame.
+      contextDirectories: contextDirs.valueOrNull ?? const [],
+      contextDirectoriesLoading: contextDirs.isLoading,
+      contextDirectoriesError:
+          contextDirs.hasError ? 'The directories could not be read.' : null,
+      onAddContextDirectory: () async {
+        final added =
+            await ref.read(contextDirectoriesActionsProvider).addDirectory(
+                  _fileDialogs,
+                );
+        if (!mounted || added == null) return;
+        _toast('Added ${added.displayName}');
+      },
+      onRereadContextDirectory: (id) {
+        if (!mounted) return;
+        unawaited(ref.read(contextDirectoriesActionsProvider).reread(id));
+      },
+      onRemoveContextDirectory: (id) {
+        if (!mounted) return;
+        unawaited(ref.read(contextDirectoriesActionsProvider).remove(id));
+      },
+      onContextDigestsChanged: (id, on) {
+        if (!mounted) return;
+        unawaited(
+          ref.read(contextDirectoriesActionsProvider).setDigests(id, on),
+        );
+      },
+      onContextHonorGitignoreChanged: (id, on) {
+        if (!mounted) return;
+        unawaited(
+          ref
+              .read(contextDirectoriesActionsProvider)
+              .setHonorGitignore(id, on),
+        );
+      },
     );
   }
 
@@ -2523,6 +2587,9 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // The Emails / Teams tiles write the list column's chips, because that
       // is the one source selection the app has and a second copy of it on
       // this bar would be two answers to one question.
+      onOpenContextFile: (fileId, locator) => _openBeside(
+        ContextFilePanel(fileId: fileId, locator: locator),
+      ),
       sourceFilter: _sourceFilter,
       onSelectSource: _setSourceFilter,
       // Whatever the last read said, carried through a re-read the same way the
@@ -2787,6 +2854,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _clearOverlays();
         _selectedStorylineId = null;
       }),
+      onContext: () => _openContextFor(
+        ContextScopeKind.storyline,
+        // A storyline id is already global, and the link row stores no
+        // connector for one.
+        '',
+        storyline.id,
+        storyline.title,
+      ),
+      contextLinked: ref
+              .watch(contextLinksProvider((
+                kind: ContextScopeKind.storyline,
+                source: '',
+                scopeKey: storyline.id,
+              )))
+              .valueOrNull
+              ?.length ??
+          0,
       onRename: (title) => notifier.rename(storyline.id, title),
       onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
       onAcceptSuggestion: (charter) =>
@@ -3301,6 +3385,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // time, and the row's hover strip is where the question is asked — the
       // fourth button, after Why.
       onWhatHappened: (message) => _openHistory(message.source, message.id),
+      // Offered from a side thread too: the panel REPLACES that thread, the
+      // rule Why already follows. The room's name is the thread panel's own
+      // naming rule — a chat carries no subject and is named by who is on it.
+      onContext: () => _openContextFor(
+        ContextScopeKind.thread,
+        target.source,
+        target.conversationKey,
+        _roomNameFor(selected),
+      ),
+      // Zero for the frame before the read lands, which reads as `Context`
+      // and becomes `Context · 1` when it arrives.
+      contextLinked: ref
+              .watch(contextLinksProvider((
+                kind: ContextScopeKind.thread,
+                source: target.source,
+                scopeKey: target.conversationKey,
+              )))
+              .valueOrNull
+              ?.length ??
+          0,
     );
 
     // The composer sits OUTSIDE the panel, in this column: the panel renders a
@@ -3353,6 +3457,8 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         PersonPanel() => _personPanel(side),
         WhyPanel() => _whyPanel(side),
         HistoryPanel() => _historyPanel(side),
+        ContextPanel() => _contextPanel(side),
+        ContextFilePanel() => _contextFilePanel(side),
       };
 
   /// Why one message got the verdict it did.
@@ -3417,6 +3523,150 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         conversationKey: target.conversationKey,
         messageId: message.id,
       ));
+
+  /// What a thread is CALLED in a panel header's subtitle.
+  ///
+  /// The thread panel's own naming rule, in one place: a chat carries no
+  /// subject, so it is named by who is on it. [_whyPanel] resolves the same
+  /// thing from a conversation it looked up; this one has the conversation
+  /// already.
+  static String _roomNameFor(Conversation selected) {
+    final subject = selected.subject ?? '';
+    if (subject.isNotEmpty) return subject;
+    return [
+      for (final participant in selected.participants)
+        if (participant.display.isNotEmpty) participant.display,
+    ].join(', ');
+  }
+
+  /// Which of the owner's directories a room reads, beside that room.
+  ///
+  /// From a SIDE thread it replaces that thread, the rule every other panel
+  /// opened from beside follows: the panel shows one thing.
+  void _openContextFor(
+    ContextScopeKind kind,
+    String source,
+    String scopeKey,
+    String title,
+  ) =>
+      _openBeside(ContextPanel(
+        kind: kind,
+        source: source,
+        scopeKey: scopeKey,
+        title: title,
+      ));
+
+  /// The link panel: the whole library with a switch each, and — on a thread
+  /// — what it inherits from its storylines.
+  ///
+  /// No ⤢, for [_whyPanel]'s reason: this is a short list about one room, and
+  /// a list does not improve by being given the whole window.
+  Widget _contextPanel(ContextPanel side) {
+    final scope = (
+      kind: side.kind,
+      source: side.source,
+      scopeKey: side.scopeKey,
+    );
+    final library = ref.watch(contextDirectoriesProvider);
+    final links = ref.watch(contextLinksProvider(scope));
+    // A storyline inherits from nothing, so it is not asked. A thread's
+    // inherited list is keyed on the thread, which is exactly the scope's own
+    // two halves for a thread.
+    final inherited = side.kind == ContextScopeKind.thread
+        ? ref.watch(contextInheritedProvider((
+            source: side.source,
+            conversationKey: side.scopeKey,
+          )))
+        : null;
+    final actions = ref.read(contextDirectoriesActionsProvider);
+
+    Widget message(String text) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(BondSpacing.s24),
+            child: Text(
+              text,
+              style: BondType.small,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        );
+
+    // `valueOrNull` and a spinner only on the FIRST read, never `when` — the
+    // rule the library section in [_settings] already keeps. Both of these
+    // providers watch the activity stream, so every recorded row (the
+    // sixty-second sync poll, every work item of a drain) puts them back
+    // into `loading` with the previous value still in hand, and `when` draws
+    // a spinner over that. A switch replaced by a spinner is a switch that
+    // vanishes from under a finger.
+    final rows = library.valueOrNull;
+    final ids = links.valueOrNull;
+
+    // A read that failed with a previous value in hand keeps drawing the
+    // previous value: this panel is re-read once a minute whatever happens,
+    // so blanking it costs the reader their switches over something the next
+    // event fixes by itself. The failure goes to the log instead.
+    if (library.hasError && rows != null) {
+      debugPrint('Context panel: kept the last library — ${library.error}');
+    }
+    if (links.hasError && ids != null) {
+      debugPrint('Context panel: kept the last links — ${links.error}');
+    }
+
+    final Widget body;
+    if (rows == null && library.hasError) {
+      body = message('Could not read your directories.');
+    } else if (ids == null && links.hasError) {
+      body = message('Could not read what this room links.');
+    } else if (rows == null || ids == null) {
+      body = const Center(child: CircularProgressIndicator());
+    } else {
+      body = ContextPanelBody(
+        rows: rows,
+        linked: ids.toSet(),
+        // The frame before the inherited read lands shows the switches
+        // rather than a spinner: the list a person came here to use is
+        // already in hand, and the muted lines under it are context.
+        inherited: inherited?.valueOrNull ?? const [],
+        onToggle: (id, on) => unawaited(actions.setLinked(id, scope, on)),
+        onAddDirectory: () => unawaited(
+          actions.addDirectoryTo(_fileDialogs, scope),
+        ),
+        onManage: _openSettings,
+        expanded: _expandedContextDirs,
+        // Only the open ones are read: a family provider per directory
+        // means a closed disclosure costs no query at all.
+        files: {
+          for (final id in _expandedContextDirs)
+            id: ref.watch(contextFilesProvider(id)).valueOrNull ?? const [],
+        },
+        onToggleFiles: (id) => setState(() {
+          if (!_expandedContextDirs.remove(id)) {
+            _expandedContextDirs.add(id);
+          }
+        }),
+        onOpenFile: (fileId) => _openBeside(ContextFilePanel(
+          fileId: fileId,
+          // A thread's panel can write a reply; a storyline's cannot,
+          // because a storyline is not a room a draft is keyed by.
+          from: side.kind == ContextScopeKind.thread
+              ? (source: side.source, conversationKey: side.scopeKey)
+              : null,
+        )),
+        now: DateTime.now(),
+      );
+    }
+
+    // The title is a constant and the subtitle is the room's own name, so
+    // neither moves while a reload is out: a header that flickered back to
+    // its default once a minute would read as the panel reopening itself.
+    return SidePanelHost(
+      title: 'Context',
+      subtitle: side.title.isEmpty ? null : side.title,
+      leading: const Icon(Icons.folder_open_outlined, size: 18),
+      onClose: _closeSide,
+      child: body,
+    );
+  }
 
   /// Opens one person beside whatever the reader is looking at, and asks for
   /// the facts the room itself does not carry.
@@ -3560,6 +3810,145 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         onOpenLink: (url) => unawaited(_launchExternal(url)),
       ),
     );
+  }
+
+  /// One file of one of the owner's own directories, read beside the room
+  /// that named it.
+  ///
+  /// No ⤢, for [_whyPanel]'s reason and one of its own: this is the owner's
+  /// own file opened to answer a question about the room next to it — "where
+  /// did that sentence come from" — and taking the room away to show the file
+  /// whole is answering a question nobody asked.
+  Widget _contextFilePanel(ContextFilePanel side) {
+    final async = ref.watch(
+      contextFileProvider((fileId: side.fileId, locator: side.locator)),
+    );
+    final from = side.from;
+    // [_filePanel]'s own rung ladder: mail always has a box because it bottoms
+    // out at the clipboard, a chat only with the send grant.
+    final canReply = from != null &&
+        (from.source == 'email' ||
+            ref.watch(draftProvider(from)).capability == SendCapability.send);
+
+    // Which directories the room this was opened from actually READS: its own
+    // links, plus the ones it inherits from its storylines. The retriever
+    // re-checks exactly this before it quotes anything, so a Consult button
+    // offered on a directory outside the set would be a button whose file is
+    // silently dropped — the caption would be the lie, not the retriever.
+    final scoped = <String>{};
+    if (from != null) {
+      scoped.addAll(ref
+              .watch(contextLinksProvider((
+                kind: ContextScopeKind.thread,
+                source: from.source,
+                scopeKey: from.conversationKey,
+              )))
+              .valueOrNull ??
+          const <String>[]);
+      final inherited =
+          ref.watch(contextInheritedProvider(from)).valueOrNull ?? const [];
+      for (final entry in inherited) {
+        scoped.add(entry.dirId);
+      }
+    }
+
+    Widget message(String text) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(BondSpacing.s24),
+            child: Text(
+              text,
+              style: BondType.small,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        );
+
+    // [_contextPanel]'s rule, and one more of its own: this provider watches
+    // the activity stream too, and a `when` here would not only blink the
+    // words away but re-run the body's post-frame `ensureVisible` — yanking a
+    // reader who had scrolled off the highlight straight back to it, once a
+    // minute, for as long as the panel is open.
+    final view = async.valueOrNull;
+    if (async.hasError && view != null) {
+      debugPrint('Context file panel: kept the last read — ${async.error}');
+    }
+
+    Widget host({
+      required String title,
+      String? subtitle,
+      required Widget child,
+    }) =>
+        SidePanelHost(
+          title: title,
+          subtitle: subtitle,
+          leading: const Icon(Icons.folder_open_outlined, size: 18),
+          onClose: _closeSide,
+          child: child,
+        );
+
+    if (view == null) {
+      // `hasValue` and not `isLoading`: a file that came back null once is a
+      // file that is gone, and the sentence saying so must not blink to a
+      // spinner on every reload behind it.
+      final first = !async.hasValue && !async.hasError;
+      return host(
+        title: 'File',
+        child: first
+            ? const Center(child: CircularProgressIndicator())
+            : message('This file is no longer indexed.'),
+      );
+    }
+
+    final inScope = scoped.contains(view.dir.id);
+    return host(
+      title: p.basename(view.file.relPath),
+      subtitle: '${view.dir.displayName}/${view.file.relPath}',
+      child: ContextFilePanelBody(
+        file: view.file,
+        dirName: view.dir.displayName,
+        text: view.text,
+        digest: view.digest,
+        locator: side.locator,
+        located: view.located,
+        onConsult: canReply && inScope
+            ? () => _consultContextFile(from, view.file.id)
+            : null,
+        // The room could have consulted this file but for the link, so the
+        // sentence names the switch that would fix it rather than leaving a
+        // reader to guess why the button they saw on the last file is gone.
+        consultNote: canReply && !inScope
+            ? 'Not linked to this room — switch «${view.dir.displayName}» '
+                'on under Context to consult it.'
+            : null,
+        now: DateTime.now(),
+      ),
+    );
+  }
+
+  /// Puts one of the owner's own files into the reply being written for
+  /// [from].
+  ///
+  /// [_useAttachmentInReply]'s body over the other corpus — the same restore
+  /// of a thread that was replaced, the same quiet stage, the same focus —
+  /// and its four comments explain every line of it. What differs is the
+  /// list: a directory file is named by its row id and floats to the front of
+  /// what the DIRECTORY retriever quotes.
+  void _consultContextFile(DraftTarget from, int fileId) {
+    setState(() {
+      if (!_isMainThread(from)) {
+        _side = ThreadPanel(
+          source: from.source,
+          conversationKey: from.conversationKey,
+        );
+        _sideFull = false;
+      }
+    });
+    _stageQuietly(from);
+    unawaited(
+      ref.read(draftProvider(from).notifier).generate(contextFileIds: [fileId]),
+    );
+    (_isMainThread(from) ? _mainComposerFocus : _sideComposerFocus)
+        .requestFocus();
   }
 
   /// Puts one file into the reply being written for [from].
@@ -3999,13 +4388,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// What the provenance caption says above an untouched suggestion.
   ///
-  /// A CONSTANT, and knowingly less specific than it could be. The `drafts`
-  /// table stores the model's evidence sentence but no inventory of what went
-  /// into the prompt, so a line naming "2 past emails with Eric" would be
-  /// assembled at render time out of guesses. The evidence sentence — which IS
-  /// what the model said it was doing — rides along as the tooltip instead.
-  static const String _provenance =
-      '✨ Suggested reply — drafted from this thread and your past mail';
+  /// The FALLBACK, for a draft that recorded no inventory of what went into
+  /// its prompt — one written before the `context_json` column existed, or
+  /// one written from nothing but the thread. A draft that did record one
+  /// replaces this with the caption naming what was read.
+  ///
+  /// It lives on [DraftProvenance] so that the sentence the caption extends
+  /// and the sentence it falls back to cannot drift apart.
+  static const String _provenance = DraftProvenance.base;
 
   /// One conversation's reply box.
   ///
@@ -4020,6 +4410,10 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
     final draft = ref.watch(draftProvider(target));
     final notifier = ref.read(draftProvider(target).notifier);
     final stagedBody = _stagedBodyFor(target, draft);
+    // Decoded ONCE: the caption and the chips are two readings of the same
+    // column, and decoding it twice per build would be two chances to disagree
+    // about what the draft read.
+    final provenance = DraftProvenance.decode(draft.contextJson);
 
     final composer = Composer(
       // Keyed on the conversation so switching threads builds a fresh field
@@ -4040,7 +4434,35 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       suggestedBody: stagedBody,
       focusOnMount:
           focusNode == _sideComposerFocus && _focusSideOnMount == target,
-      provenance: _provenance,
+      // What the model actually read, when the handler wrote it down. The
+      // decode is tolerant and the `??` covers every way it can say nothing,
+      // so a malformed column costs the specific line and not the caption.
+      provenance: provenance?.caption() ?? _provenance,
+      // Only the files with an id behind them. A draft written before the id
+      // was stored names its files in the caption and opens none of them,
+      // which is the right answer rather than a chip that goes nowhere.
+      //
+      // Capped where the caption caps. The chips are that sentence's names
+      // made tappable, so a fourth chip would be a door to a file the sentence
+      // above it never named. The take runs BEFORE the id filter for the same
+      // reason: it is the first three files the caption named, not the first
+      // three that happen to be openable.
+      provenanceFiles: [
+        for (final file
+            in (provenance?.files ?? const []).take(DraftProvenance.maxFiles))
+          if (file.fileId != null)
+            (
+              fileId: file.fileId!,
+              dir: file.dir,
+              path: file.path,
+              locator: file.locator,
+            ),
+      ],
+      onOpenProvenanceFile: (file) => _openBeside(ContextFilePanel(
+        fileId: file.fileId,
+        locator: file.locator,
+        from: target,
+      )),
       generating: draft.generating,
       sending: draft.sending,
       capability: draft.capability,

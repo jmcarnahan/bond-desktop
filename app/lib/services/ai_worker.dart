@@ -110,12 +110,38 @@ class AiWorker {
   /// Every source whose work this worker drains. Handlers are already
   /// per-item source-aware (they read `item['source']`), so widening this
   /// list is all a new connector needs.
-  static const List<String> _sources = ['email', 'teams'];
+  /// `local` is not a connector: it is the source context directories queue
+  /// under, because a folder on this machine came from no mailbox at all.
+  static const List<String> _sources = ['email', 'teams', 'local'];
 
   /// One retry, then the item is left alone. Same trade triage makes: a local
   /// model that answered unparseably often gets it right on a second pass, and
   /// an item that fails twice will fail every time.
-  static const int _maxAttempts = 2;
+  ///
+  /// Public because a handler sometimes has to know it is on its LAST attempt
+  /// — a digest that keeps failing has to close its own file row, or the
+  /// reconcile pass revives the work row on the next sync and the file costs
+  /// two fast-slot calls a minute forever.
+  static const int maxAttempts = 2;
+
+  /// Whether [error] on attempt [attempts] is the END of an item.
+  ///
+  /// [attempts] is the count INCLUDING this run, the way [_recordFailure]
+  /// computes it: `item['attempts'] + 1`.
+  ///
+  /// A 400 from a `json_schema` request is this app's schema being wrong,
+  /// not the model's answer. It is identical on every retry, so retrying it
+  /// burns model time to reproduce a bug — and it is therefore fatal on the
+  /// FIRST attempt, before the count is anywhere near the ceiling.
+  ///
+  /// Public and shared because a handler that has to close its OWN row when
+  /// the worker gives up has to give up on exactly the same rung. Two copies
+  /// of this rule is a handler that leaves a row `pending` against a work
+  /// row already written `error`, which the reconcile pass then revives
+  /// every sync.
+  static bool isFatal(Object error, int attempts) =>
+      (error is LlmException && error.statusCode == 400) ||
+      attempts >= maxAttempts;
 
   final MessageStore _store;
   final List<WorkHandler> _handlers;
@@ -447,10 +473,7 @@ class AiWorker {
     final source = item['source'] as String? ?? 'email';
     final id = item['entity_id'] as String? ?? '';
     final attempts = ((item['attempts'] as num?)?.toInt() ?? 0) + 1;
-    // A 400 from a json_schema request is this app's schema being wrong, not
-    // the model's answer. It is identical on every retry, so retrying it
-    // burns model time to reproduce a bug.
-    final fatal = statusCode == 400 || attempts >= _maxAttempts;
+    final fatal = isFatal(error, attempts);
     await _writeWork(
       kind,
       source,

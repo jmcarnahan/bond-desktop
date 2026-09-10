@@ -1,3 +1,4 @@
+import 'package:bond_inbox/models/draft_provenance.dart' show ProvenanceFile;
 import 'package:bond_inbox/theme/tokens.dart';
 import 'package:bond_inbox/widgets/composer.dart';
 import 'package:flutter/material.dart';
@@ -23,6 +24,8 @@ void main() {
     void Function(String)? onEdited,
     String? hint,
     FocusNode? focusNode,
+    List<ProvenanceFile> provenanceFiles = const [],
+    void Function(ProvenanceFile file)? onOpenProvenanceFile,
   }) async {
     await tester.binding.setSurfaceSize(const Size(900, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -31,6 +34,8 @@ void main() {
         body: Composer(
           suggestedBody: suggestedBody,
           provenance: provenance,
+          provenanceFiles: provenanceFiles,
+          onOpenProvenanceFile: onOpenProvenanceFile,
           generating: generating,
           sending: sending,
           capability: capability,
@@ -362,6 +367,81 @@ void main() {
       await tester.pump();
 
       expect(node.hasFocus, isTrue);
+    });
+  });
+
+  group('the provenance chips', () {
+    const pricing = (
+      fileId: 7,
+      dir: 'acme',
+      path: 'docs/pricing.md',
+      locator: 'Pricing > Q4 rates',
+    );
+    const notes = (fileId: 8, dir: 'acme', path: 'notes.md', locator: '');
+
+    testWidgets('one chip per file, labelled the way the caption is',
+        (tester) async {
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        provenance: '✨ Suggested reply — drafted from this thread',
+        provenanceFiles: const [pricing, notes],
+        onOpenProvenanceFile: (_) {},
+        onSend: (_) {},
+      );
+
+      // The heading path is drawn as a breadcrumb here exactly as the caption
+      // draws it: a chip that spelled it differently would not look like the
+      // thing the sentence above it just named.
+      expect(find.text('docs/pricing.md § Pricing › Q4 rates'), findsOneWidget);
+      expect(find.text('notes.md'), findsOneWidget);
+      // The suggestion itself is untouched by them.
+      expect(find.text('Friday works.'), findsOneWidget);
+    });
+
+    testWidgets('a tap hands the host the file it named', (tester) async {
+      ProvenanceFile? opened;
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        provenanceFiles: const [pricing],
+        onOpenProvenanceFile: (file) => opened = file,
+        onSend: (_) {},
+      );
+
+      await tester.tap(find.byKey(Composer.provenanceChipKeyFor(7)));
+      await tester.pump();
+
+      expect(opened, pricing);
+    });
+
+    testWidgets('typing takes them away with the caption', (tester) async {
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        provenanceFiles: const [pricing],
+        onOpenProvenanceFile: (_) {},
+        onSend: (_) {},
+      );
+      expect(find.byKey(Composer.provenanceChipKeyFor(7)), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), 'My own words.');
+      await tester.pump();
+
+      // From the first keystroke the words are the user's, and where a
+      // suggestion came from has nothing to say over them.
+      expect(find.byKey(Composer.provenanceChipKeyFor(7)), findsNothing);
+    });
+
+    testWidgets('a host with nowhere to open one draws none', (tester) async {
+      await pumpComposer(
+        tester,
+        suggestedBody: 'Friday works.',
+        provenanceFiles: const [pricing],
+        onSend: (_) {},
+      );
+
+      expect(find.byKey(Composer.provenanceChipKeyFor(7)), findsNothing);
     });
   });
 }

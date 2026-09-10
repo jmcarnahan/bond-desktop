@@ -341,6 +341,14 @@ CREATE TABLE drafts (
   -- would let the auto-enqueue write the identical options straight back.
   options_json TEXT,
   options_dismissed INTEGER NOT NULL DEFAULT 0,
+  -- `context_json` is the inventory of what this draft READ:
+  -- `{"documents": […], "directories": […], "files": [{dir, path, locator}],
+  -- "skills": […]}`. Stored rather than recomputed because the composer's
+  -- provenance line has to name the file a fact came from, and by the time it
+  -- renders the retrieval that found it is long over — `payload_json` cannot
+  -- carry it (a requeue nulls it) and a second table would say what this row
+  -- already says.
+  context_json TEXT,
   PRIMARY KEY (source, reply_to_message_id)
 ) STRICT;
 
@@ -568,3 +576,133 @@ CREATE TABLE attachment_chunks (
 CREATE UNIQUE INDEX ix_attachment_chunks_seq
   ON attachment_chunks(source, source_message_id, attachment_id, seq);
 CREATE INDEX ix_attachment_chunks_unindexed ON attachment_chunks(indexed_at);
+
+-- One local directory the owner registered — typically a Claude Code project.
+-- The app re-reads it on every sync, so this row is the registration and the
+-- ledger of the last read, not a copy of anything: `path` is where it lives,
+-- `bookmark` is the security-scoped bookmark that keeps it readable after a
+-- relaunch (NULL on an unsandboxed build, where the path alone works), and
+-- `walked_at`/`root_hash`/`files_count`/`text_bytes` are what the last walk
+-- found.
+--
+-- `id` is the first 16 hex of sha256(path) rather than a surrogate, so
+-- registering the same folder twice is the same row without a lookup.
+--
+-- `digests` and `honor_gitignore` are the two per-directory switches. Digests
+-- are ON because the measuring use case is "ask me about my analysis";
+-- `.gitignore` is NOT honoured because Claude Code analyses land in ignored
+-- `output/` and `reports/` folders — a hard denylist and `.bondignore` apply
+-- either way.
+CREATE TABLE context_dirs (
+  id TEXT NOT NULL PRIMARY KEY,
+  path TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  bookmark BLOB,
+  -- pending|reading|ready|error|unavailable
+  status TEXT NOT NULL DEFAULT 'pending',
+  error TEXT,
+  walked_at TEXT,
+  root_hash TEXT,
+  files_count INTEGER NOT NULL DEFAULT 0,
+  text_bytes INTEGER NOT NULL DEFAULT 0,
+  brief_json TEXT,
+  brief_hash TEXT,
+  digests INTEGER NOT NULL DEFAULT 1,
+  honor_gitignore INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+-- What ties a directory to a room, and the ONLY such table: register once,
+-- link many. Unlinking is a row delete and costs no re-index, which is the
+-- whole reason the index tables hang off `dir_id` and not off a thread.
+--
+-- `scope_kind` is an open set — 'thread' and 'storyline' today, 'sender' and
+-- 'all' are future values rather than future migrations. `source` is the
+-- connector for a thread and '' for a storyline, whose ids are already global.
+CREATE TABLE context_links (
+  dir_id TEXT NOT NULL,
+  scope_kind TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT '',
+  scope_key TEXT NOT NULL,
+  added_at TEXT NOT NULL,
+  PRIMARY KEY (dir_id, scope_kind, source, scope_key)
+) STRICT;
+
+CREATE INDEX ix_context_links_scope
+  ON context_links(scope_kind, source, scope_key);
+
+-- One file inside a registered directory, as the last walk saw it.
+--
+-- `size`/`mtime` are the cheap diff and `sha256` the honest one: a file whose
+-- stat is unchanged is not re-read, and a file whose hash matches a row the
+-- walk no longer sees is a move rather than a delete-and-add — which is what
+-- keeps its passages and their vectors instead of paying for them again.
+--
+-- `claude_chain` is the JSON list of CLAUDE.md rel paths above this file, root
+-- first: Claude Code's own on-demand rule, stored per row so a retrieved
+-- passage can carry the notes that govern its subtree without briefing every
+-- nested CLAUDE.md. `description`/`paths_json` are the parsed skill/rule
+-- frontmatter, `digest_json` the model's summary of the file, and
+-- `desc_embedding` the skill description's vector — the three the reconcile
+-- pass must NEVER clobber when it only re-reads bytes.
+CREATE TABLE context_files (
+  id INTEGER PRIMARY KEY,
+  dir_id TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  mtime TEXT NOT NULL DEFAULT '',
+  sha256 TEXT NOT NULL DEFAULT '',
+  -- claude_md|skill|rule|doc|code|data|other
+  kind TEXT NOT NULL DEFAULT 'other',
+  claude_chain TEXT NOT NULL DEFAULT '[]',
+  description TEXT,
+  paths_json TEXT,
+  digest_json TEXT,
+  digest_status TEXT NOT NULL DEFAULT 'pending',
+  desc_embedding BLOB,
+  text_chars INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ok',
+  seen_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX ix_context_files_path
+  ON context_files(dir_id, rel_path);
+
+-- The extracted words, kept apart from the metadata for `attachment_text`'s
+-- reason: two orders of magnitude larger, and nothing but the chunker and the
+-- section reader touch them.
+CREATE TABLE context_text (
+  file_id INTEGER NOT NULL PRIMARY KEY,
+  extracted_text TEXT NOT NULL,
+  chars INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+-- One passage of one file, and the SOURCE OF TRUTH for its vector — the
+-- sqlite-vec index over these rows is derived and rebuildable without a model
+-- call, exactly as `attachment_chunks` is.
+--
+-- `locator` is what the passage is called out loud: a heading breadcrumb
+-- ('Pricing > Q4 rates'), 'lines 61-120', 'part 2', or 'digest'. `indexed_at`
+-- NULL is the backfill worklist, and `embedding` is nullable because a chunk
+-- row is written the moment the file is split and its vector arrives one POST
+-- later.
+CREATE TABLE context_chunks (
+  id INTEGER PRIMARY KEY,
+  file_id INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  locator TEXT NOT NULL DEFAULT '',
+  chunk_text TEXT NOT NULL,
+  chars INTEGER NOT NULL DEFAULT 0,
+  embedding BLOB,
+  dims INTEGER NOT NULL DEFAULT 0,
+  embed_model TEXT,
+  embedded_at TEXT,
+  indexed_at TEXT,
+  created_at TEXT NOT NULL
+) STRICT;
+
+CREATE UNIQUE INDEX ix_context_chunks_seq ON context_chunks(file_id, seq);
+CREATE INDEX ix_context_chunks_unindexed ON context_chunks(indexed_at);
+CREATE INDEX ix_context_chunks_file ON context_chunks(file_id);

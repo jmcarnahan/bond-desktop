@@ -4,6 +4,8 @@ import 'package:intl/intl.dart';
 import '../../models/message_models.dart';
 import '../attachments/attachment_markers.dart';
 import '../attachments/attachment_retriever.dart';
+import '../context/context_pack_render.dart';
+import '../context/context_retriever.dart';
 import 'json_task.dart';
 import 'message_block.dart';
 import 'prompt_guard.dart';
@@ -68,6 +70,20 @@ class ReplyDecisionInput {
   /// document asks for is the only thing that says whether an answer is owed.
   final List<AttachmentExcerpt> attachmentExcerpts;
 
+  /// What the owner's own registered directories know about this message. The
+  /// same pack the draft below this decision reads, retrieved ONCE by the
+  /// handler.
+  ///
+  /// Named `directories` rather than `context`, which on this class is
+  /// already taken by the prior messages — and the older meaning wins,
+  /// because it is what the prompt calls them out loud.
+  ///
+  /// It matters here for the case the documents matter for: a message that
+  /// leans on a project the owner keeps is a message whose answer may already
+  /// be written down, and whether an answer is OWED is easier to see when
+  /// what the project says is on the page.
+  final ContextPack? directories;
+
   /// Injected for the same reason `TriageInput.now` is: so a test can pin the
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
@@ -77,6 +93,7 @@ class ReplyDecisionInput {
     required this.message,
     this.aboutMe,
     this.attachmentExcerpts = const [],
+    this.directories,
     required this.now,
   });
 }
@@ -120,11 +137,21 @@ class ReplyDecisionTask implements JsonTask<ReplyDecisionResult> {
   static const int _aboutMeCap = 600;
   static const int _reasonCap = 300;
 
-  /// Documents, in characters, and a third of what the draft gets. This is a
-  /// yes/no about one message: the passages are here to say what the file
-  /// wants, and the draft that may follow is where the wording of it earns a
-  /// bigger budget.
+  /// Documents, in characters. A fraction of what the draft gets, because
+  /// this is a yes/no about one message: the passages are here to say what
+  /// the file wants, and the draft that may follow is where the wording of
+  /// it earns a bigger budget.
   static const int _excerptsCap = 800;
+
+  /// The owner's own directories, in characters. Enough for the HEAD of what
+  /// the retriever ranked — the brief's opening lines and, at most, one
+  /// expanded section — and no guidance fence at all. That is the whole of
+  /// what a yes-or-no needs: whether an answer is owed turns on what the
+  /// nearest passage is ABOUT, and instructions for how a reply should READ
+  /// have nothing to say about it. Whole blocks come off the far end
+  /// (`renderContextExcerpts`), so what is cut is always what ranked last.
+  static const int _directoryBriefCap = 300;
+  static const int _directoryExcerptsCap = 800;
 
   static final DateFormat _date = DateFormat('yyyy-MM-dd');
   static final DateFormat _weekday = DateFormat('EEEE');
@@ -204,6 +231,27 @@ class ReplyDecisionTask implements JsonTask<ReplyDecisionResult> {
           'attachment_excerpts',
           renderAttachmentExcerpts(input.attachmentExcerpts, _excerptsCap),
         ));
+    }
+
+    // Beside the documents and still before the judged message, which stays
+    // LAST for the reason it always has: the last thing the model reads is
+    // the thing it is being asked about.
+    final pack = input.directories;
+    if (pack != null && !pack.isEmpty) {
+      final brief = renderContextBrief(pack, _directoryBriefCap);
+      if (brief.isNotEmpty) {
+        buffer
+          ..writeln("Standing notes from the owner's own reference directory, "
+              'for context:')
+          ..writeln(wrapUntrusted('directory_brief', brief));
+      }
+      final passages = renderContextExcerpts(pack, _directoryExcerptsCap);
+      if (passages.isNotEmpty) {
+        buffer
+          ..writeln("Passages from the owner's reference directory, nearest "
+              'first:')
+          ..writeln(wrapUntrusted('directory_excerpts', passages));
+      }
     }
 
     return (buffer

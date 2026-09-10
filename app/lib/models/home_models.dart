@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show immutable;
 
 import 'attachment_models.dart';
+import 'context_models.dart';
 
 /// Row models for the home screen — the live table of messages moving through
 /// the AI pipeline, and the counts above it.
@@ -498,6 +499,10 @@ class HomeSearch {
   /// null, for [hits]' reason: an empty list is a real answer.
   final List<AttachmentChunkHit> documents;
 
+  /// The passages of the owner's own registered directories that answer the
+  /// same query. Never null, for [hits]' reason.
+  final List<ContextChunkHit> directories;
+
   /// Non-null when only one half of the search ran — the meaning pass or the
   /// word pass could not — and this set of results is narrower than it looks.
   ///
@@ -509,6 +514,7 @@ class HomeSearch {
     this.query,
     this.hits, {
     this.documents = const [],
+    this.directories = const [],
     this.notice,
   });
 }

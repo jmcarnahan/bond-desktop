@@ -156,6 +156,24 @@ saw; stamping what is true *now* would leave the gate reading "unchanged" and
 that thread would never be described. Stamping stale re-fires the pass, which
 is the correct outcome.
 
+**A second source of a suggestion.** A `charter_suggestion` can also come from
+a **context directory** linked to the storyline. When
+`ContextBriefHandler` writes a NEW brief it calls back into
+`StorylineService.offerDirectoryCharters(dirId)`, which offers that brief's
+`about` to every live storyline the directory is linked to. Three rules, and
+every other state is left alone: an empty charter that is not locked is
+offered one; a LOCKED charter with nothing parked is offered one, because a
+lock says the stored sentence is theirs and not that they never want another
+idea; a locked charter with a suggestion already parked is untouched, since
+they have not answered the first. An *unlocked* charter somebody wrote is the
+refresh pass's business — that sentence moves with the member set, and a
+directory link is not a change to who is in the group. An `about` equal to the
+charter modulo whitespace and case offers nothing, on this section's own
+normalized compare. The write is a **suggestion** even onto an empty charter,
+for the reason the whole charter mechanism exists: a charter is the membership
+criteria the recruit hunts on, and a sentence lifted out of a `CLAUDE.md` that
+the person has never read must not start recruiting threads on their behalf.
+
 **Re-arm**: a refresh queues `storyline_recruit` only when it actually wrote a
 new charter to the `charter` column and the text changed under a normalized
 compare. A parked suggestion never re-arms — it changes no criteria until the
@@ -228,8 +246,21 @@ pinned document is being named for what it *is*. A pin whose message is in the
 window is skipped — its own line already carries it, and saying it twice is how
 a recap starts reading as though two things happened.
 
-Both are clamped to 160 characters, and the clamp bites the text *inside* the
-angle brackets so the closing `⟩` survives. `_recapLineCap = 400` still applies
+**The directory footer.** After the pins, one `⟨directory <name>: <about>⟩` per
+context directory linked to this storyline that has a brief
+(`13-context-directories.md`). A footer for the pins' reason — a registered
+folder did not happen on a date — and *last* of them, because it is the
+broadest thing in the prompt: the project the whole story sits inside. The
+brief's `about` and not its facts or its reply guidance, because `about` is
+the sentence that says what the project **is**, which is all a summary needs.
+A linked directory with **no brief contributes nothing** rather than its name
+alone: no brief means nothing has read the folder yet, and a bare name is a
+word the model would have to guess the meaning of. A service built with no
+`ContextStore` — every test and every caller that predates directories — adds
+no line at all.
+
+All three are clamped to 160 characters, and the clamp bites the text *inside*
+the angle brackets so the closing `⟩` survives. `_recapLineCap = 400` still applies
 to the message text before its aside, and `StorylineRecapTask._messagesCap =
 6000` is the final clamp on the whole window — there is no third one.
 

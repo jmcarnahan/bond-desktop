@@ -18,6 +18,13 @@ import 'package:flutter/foundation.dart' show debugPrint;
 abstract interface class FileDialogs {
   /// Where the user wants [suggestedName] written, or null if they cancelled.
   Future<String?> chooseSaveLocation({required String suggestedName});
+
+  /// The folder the user picked, or null if they cancelled.
+  ///
+  /// The open panel is also the SANDBOX's grant: the app may read the folder
+  /// the person chose here, for this launch, and a security-scoped bookmark
+  /// taken straight afterwards is what keeps that grant across a relaunch.
+  Future<String?> chooseDirectory();
 }
 
 class SystemFileDialogs implements FileDialogs {
@@ -36,6 +43,18 @@ class SystemFileDialogs implements FileDialogs {
       return location?.path;
     } on Object catch (e) {
       debugPrint('save panel did not open: $e');
+      return null;
+    }
+  }
+
+  /// Cancelling and failing are the same answer here too, for the reason
+  /// above: the caller registers nothing either way.
+  @override
+  Future<String?> chooseDirectory() async {
+    try {
+      return await getDirectoryPath();
+    } on Object catch (e) {
+      debugPrint('open panel did not open: $e');
       return null;
     }
   }

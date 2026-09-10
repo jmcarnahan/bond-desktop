@@ -8478,6 +8478,17 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
     $customConstraints: 'NOT NULL DEFAULT 0',
     defaultValue: const CustomExpression('0'),
   );
+  static const VerificationMeta _contextJsonMeta = const VerificationMeta(
+    'contextJson',
+  );
+  late final GeneratedColumn<String> contextJson = GeneratedColumn<String>(
+    'context_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
   @override
   List<GeneratedColumn> get $columns => [
     source,
@@ -8492,6 +8503,7 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
     updatedAt,
     optionsJson,
     optionsDismissed,
+    contextJson,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -8602,6 +8614,15 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
         ),
       );
     }
+    if (data.containsKey('context_json')) {
+      context.handle(
+        _contextJsonMeta,
+        contextJson.isAcceptableOrUnknown(
+          data['context_json']!,
+          _contextJsonMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -8659,6 +8680,10 @@ class Drafts extends Table with TableInfo<Drafts, Draft> {
         DriftSqlType.int,
         data['${effectivePrefix}options_dismissed'],
       )!,
+      contextJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}context_json'],
+      ),
     );
   }
 
@@ -8704,6 +8729,15 @@ class Draft extends DataClass implements Insertable<Draft> {
   /// would let the auto-enqueue write the identical options straight back.
   final String? optionsJson;
   final int optionsDismissed;
+
+  /// `context_json` is the inventory of what this draft READ:
+  /// `{"documents": […], "directories": […], "files": [{dir, path, locator}],
+  /// "skills": […]}`. Stored rather than recomputed because the composer's
+  /// provenance line has to name the file a fact came from, and by the time it
+  /// renders the retrieval that found it is long over — `payload_json` cannot
+  /// carry it (a requeue nulls it) and a second table would say what this row
+  /// already says.
+  final String? contextJson;
   const Draft({
     required this.source,
     required this.conversationKey,
@@ -8717,6 +8751,7 @@ class Draft extends DataClass implements Insertable<Draft> {
     required this.updatedAt,
     this.optionsJson,
     required this.optionsDismissed,
+    this.contextJson,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -8741,6 +8776,9 @@ class Draft extends DataClass implements Insertable<Draft> {
       map['options_json'] = Variable<String>(optionsJson);
     }
     map['options_dismissed'] = Variable<int>(optionsDismissed);
+    if (!nullToAbsent || contextJson != null) {
+      map['context_json'] = Variable<String>(contextJson);
+    }
     return map;
   }
 
@@ -8766,6 +8804,9 @@ class Draft extends DataClass implements Insertable<Draft> {
           ? const Value.absent()
           : Value(optionsJson),
       optionsDismissed: Value(optionsDismissed),
+      contextJson: contextJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(contextJson),
     );
   }
 
@@ -8789,6 +8830,7 @@ class Draft extends DataClass implements Insertable<Draft> {
       updatedAt: serializer.fromJson<String>(json['updated_at']),
       optionsJson: serializer.fromJson<String?>(json['options_json']),
       optionsDismissed: serializer.fromJson<int>(json['options_dismissed']),
+      contextJson: serializer.fromJson<String?>(json['context_json']),
     );
   }
   @override
@@ -8807,6 +8849,7 @@ class Draft extends DataClass implements Insertable<Draft> {
       'updated_at': serializer.toJson<String>(updatedAt),
       'options_json': serializer.toJson<String?>(optionsJson),
       'options_dismissed': serializer.toJson<int>(optionsDismissed),
+      'context_json': serializer.toJson<String?>(contextJson),
     };
   }
 
@@ -8823,6 +8866,7 @@ class Draft extends DataClass implements Insertable<Draft> {
     String? updatedAt,
     Value<String?> optionsJson = const Value.absent(),
     int? optionsDismissed,
+    Value<String?> contextJson = const Value.absent(),
   }) => Draft(
     source: source ?? this.source,
     conversationKey: conversationKey ?? this.conversationKey,
@@ -8836,6 +8880,7 @@ class Draft extends DataClass implements Insertable<Draft> {
     updatedAt: updatedAt ?? this.updatedAt,
     optionsJson: optionsJson.present ? optionsJson.value : this.optionsJson,
     optionsDismissed: optionsDismissed ?? this.optionsDismissed,
+    contextJson: contextJson.present ? contextJson.value : this.contextJson,
   );
   Draft copyWithCompanion(DraftsCompanion data) {
     return Draft(
@@ -8861,6 +8906,9 @@ class Draft extends DataClass implements Insertable<Draft> {
       optionsDismissed: data.optionsDismissed.present
           ? data.optionsDismissed.value
           : this.optionsDismissed,
+      contextJson: data.contextJson.present
+          ? data.contextJson.value
+          : this.contextJson,
     );
   }
 
@@ -8878,7 +8926,8 @@ class Draft extends DataClass implements Insertable<Draft> {
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('optionsJson: $optionsJson, ')
-          ..write('optionsDismissed: $optionsDismissed')
+          ..write('optionsDismissed: $optionsDismissed, ')
+          ..write('contextJson: $contextJson')
           ..write(')'))
         .toString();
   }
@@ -8897,6 +8946,7 @@ class Draft extends DataClass implements Insertable<Draft> {
     updatedAt,
     optionsJson,
     optionsDismissed,
+    contextJson,
   );
   @override
   bool operator ==(Object other) =>
@@ -8913,7 +8963,8 @@ class Draft extends DataClass implements Insertable<Draft> {
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt &&
           other.optionsJson == this.optionsJson &&
-          other.optionsDismissed == this.optionsDismissed);
+          other.optionsDismissed == this.optionsDismissed &&
+          other.contextJson == this.contextJson);
 }
 
 class DraftsCompanion extends UpdateCompanion<Draft> {
@@ -8929,6 +8980,7 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
   final Value<String> updatedAt;
   final Value<String?> optionsJson;
   final Value<int> optionsDismissed;
+  final Value<String?> contextJson;
   final Value<int> rowid;
   const DraftsCompanion({
     this.source = const Value.absent(),
@@ -8943,6 +8995,7 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     this.updatedAt = const Value.absent(),
     this.optionsJson = const Value.absent(),
     this.optionsDismissed = const Value.absent(),
+    this.contextJson = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   DraftsCompanion.insert({
@@ -8958,6 +9011,7 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     required String updatedAt,
     this.optionsJson = const Value.absent(),
     this.optionsDismissed = const Value.absent(),
+    this.contextJson = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : conversationKey = Value(conversationKey),
        replyToMessageId = Value(replyToMessageId),
@@ -8977,6 +9031,7 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     Expression<String>? updatedAt,
     Expression<String>? optionsJson,
     Expression<int>? optionsDismissed,
+    Expression<String>? contextJson,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -8992,6 +9047,7 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
       if (updatedAt != null) 'updated_at': updatedAt,
       if (optionsJson != null) 'options_json': optionsJson,
       if (optionsDismissed != null) 'options_dismissed': optionsDismissed,
+      if (contextJson != null) 'context_json': contextJson,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -9009,6 +9065,7 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     Value<String>? updatedAt,
     Value<String?>? optionsJson,
     Value<int>? optionsDismissed,
+    Value<String?>? contextJson,
     Value<int>? rowid,
   }) {
     return DraftsCompanion(
@@ -9024,6 +9081,7 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
       updatedAt: updatedAt ?? this.updatedAt,
       optionsJson: optionsJson ?? this.optionsJson,
       optionsDismissed: optionsDismissed ?? this.optionsDismissed,
+      contextJson: contextJson ?? this.contextJson,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -9067,6 +9125,9 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
     if (optionsDismissed.present) {
       map['options_dismissed'] = Variable<int>(optionsDismissed.value);
     }
+    if (contextJson.present) {
+      map['context_json'] = Variable<String>(contextJson.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -9088,6 +9149,7 @@ class DraftsCompanion extends UpdateCompanion<Draft> {
           ..write('updatedAt: $updatedAt, ')
           ..write('optionsJson: $optionsJson, ')
           ..write('optionsDismissed: $optionsDismissed, ')
+          ..write('contextJson: $contextJson, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -14420,6 +14482,3157 @@ class AttachmentChunksCompanion extends UpdateCompanion<AttachmentChunk> {
   }
 }
 
+class ContextDirs extends Table with TableInfo<ContextDirs, ContextDir> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  ContextDirs(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL PRIMARY KEY',
+  );
+  static const VerificationMeta _pathMeta = const VerificationMeta('path');
+  late final GeneratedColumn<String> path = GeneratedColumn<String>(
+    'path',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _displayNameMeta = const VerificationMeta(
+    'displayName',
+  );
+  late final GeneratedColumn<String> displayName = GeneratedColumn<String>(
+    'display_name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _bookmarkMeta = const VerificationMeta(
+    'bookmark',
+  );
+  late final GeneratedColumn<Uint8List> bookmark = GeneratedColumn<Uint8List>(
+    'bookmark',
+    aliasedName,
+    true,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _errorMeta = const VerificationMeta('error');
+  late final GeneratedColumn<String> error = GeneratedColumn<String>(
+    'error',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _walkedAtMeta = const VerificationMeta(
+    'walkedAt',
+  );
+  late final GeneratedColumn<String> walkedAt = GeneratedColumn<String>(
+    'walked_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _rootHashMeta = const VerificationMeta(
+    'rootHash',
+  );
+  late final GeneratedColumn<String> rootHash = GeneratedColumn<String>(
+    'root_hash',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _filesCountMeta = const VerificationMeta(
+    'filesCount',
+  );
+  late final GeneratedColumn<int> filesCount = GeneratedColumn<int>(
+    'files_count',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _textBytesMeta = const VerificationMeta(
+    'textBytes',
+  );
+  late final GeneratedColumn<int> textBytes = GeneratedColumn<int>(
+    'text_bytes',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _briefJsonMeta = const VerificationMeta(
+    'briefJson',
+  );
+  late final GeneratedColumn<String> briefJson = GeneratedColumn<String>(
+    'brief_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _briefHashMeta = const VerificationMeta(
+    'briefHash',
+  );
+  late final GeneratedColumn<String> briefHash = GeneratedColumn<String>(
+    'brief_hash',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _digestsMeta = const VerificationMeta(
+    'digests',
+  );
+  late final GeneratedColumn<int> digests = GeneratedColumn<int>(
+    'digests',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 1',
+    defaultValue: const CustomExpression('1'),
+  );
+  static const VerificationMeta _honorGitignoreMeta = const VerificationMeta(
+    'honorGitignore',
+  );
+  late final GeneratedColumn<int> honorGitignore = GeneratedColumn<int>(
+    'honor_gitignore',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    path,
+    displayName,
+    bookmark,
+    status,
+    error,
+    walkedAt,
+    rootHash,
+    filesCount,
+    textBytes,
+    briefJson,
+    briefHash,
+    digests,
+    honorGitignore,
+    createdAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'context_dirs';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ContextDir> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('path')) {
+      context.handle(
+        _pathMeta,
+        path.isAcceptableOrUnknown(data['path']!, _pathMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_pathMeta);
+    }
+    if (data.containsKey('display_name')) {
+      context.handle(
+        _displayNameMeta,
+        displayName.isAcceptableOrUnknown(
+          data['display_name']!,
+          _displayNameMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_displayNameMeta);
+    }
+    if (data.containsKey('bookmark')) {
+      context.handle(
+        _bookmarkMeta,
+        bookmark.isAcceptableOrUnknown(data['bookmark']!, _bookmarkMeta),
+      );
+    }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    }
+    if (data.containsKey('error')) {
+      context.handle(
+        _errorMeta,
+        error.isAcceptableOrUnknown(data['error']!, _errorMeta),
+      );
+    }
+    if (data.containsKey('walked_at')) {
+      context.handle(
+        _walkedAtMeta,
+        walkedAt.isAcceptableOrUnknown(data['walked_at']!, _walkedAtMeta),
+      );
+    }
+    if (data.containsKey('root_hash')) {
+      context.handle(
+        _rootHashMeta,
+        rootHash.isAcceptableOrUnknown(data['root_hash']!, _rootHashMeta),
+      );
+    }
+    if (data.containsKey('files_count')) {
+      context.handle(
+        _filesCountMeta,
+        filesCount.isAcceptableOrUnknown(data['files_count']!, _filesCountMeta),
+      );
+    }
+    if (data.containsKey('text_bytes')) {
+      context.handle(
+        _textBytesMeta,
+        textBytes.isAcceptableOrUnknown(data['text_bytes']!, _textBytesMeta),
+      );
+    }
+    if (data.containsKey('brief_json')) {
+      context.handle(
+        _briefJsonMeta,
+        briefJson.isAcceptableOrUnknown(data['brief_json']!, _briefJsonMeta),
+      );
+    }
+    if (data.containsKey('brief_hash')) {
+      context.handle(
+        _briefHashMeta,
+        briefHash.isAcceptableOrUnknown(data['brief_hash']!, _briefHashMeta),
+      );
+    }
+    if (data.containsKey('digests')) {
+      context.handle(
+        _digestsMeta,
+        digests.isAcceptableOrUnknown(data['digests']!, _digestsMeta),
+      );
+    }
+    if (data.containsKey('honor_gitignore')) {
+      context.handle(
+        _honorGitignoreMeta,
+        honorGitignore.isAcceptableOrUnknown(
+          data['honor_gitignore']!,
+          _honorGitignoreMeta,
+        ),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  ContextDir map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ContextDir(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      path: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}path'],
+      )!,
+      displayName: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}display_name'],
+      )!,
+      bookmark: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}bookmark'],
+      ),
+      status: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}status'],
+      )!,
+      error: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}error'],
+      ),
+      walkedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}walked_at'],
+      ),
+      rootHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}root_hash'],
+      ),
+      filesCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}files_count'],
+      )!,
+      textBytes: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}text_bytes'],
+      )!,
+      briefJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}brief_json'],
+      ),
+      briefHash: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}brief_hash'],
+      ),
+      digests: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}digests'],
+      )!,
+      honorGitignore: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}honor_gitignore'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  ContextDirs createAlias(String alias) {
+    return ContextDirs(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class ContextDir extends DataClass implements Insertable<ContextDir> {
+  final String id;
+  final String path;
+  final String displayName;
+  final Uint8List? bookmark;
+
+  /// pending|reading|ready|error|unavailable
+  final String status;
+  final String? error;
+  final String? walkedAt;
+  final String? rootHash;
+  final int filesCount;
+  final int textBytes;
+  final String? briefJson;
+  final String? briefHash;
+  final int digests;
+  final int honorGitignore;
+  final String createdAt;
+  final String updatedAt;
+  const ContextDir({
+    required this.id,
+    required this.path,
+    required this.displayName,
+    this.bookmark,
+    required this.status,
+    this.error,
+    this.walkedAt,
+    this.rootHash,
+    required this.filesCount,
+    required this.textBytes,
+    this.briefJson,
+    this.briefHash,
+    required this.digests,
+    required this.honorGitignore,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['path'] = Variable<String>(path);
+    map['display_name'] = Variable<String>(displayName);
+    if (!nullToAbsent || bookmark != null) {
+      map['bookmark'] = Variable<Uint8List>(bookmark);
+    }
+    map['status'] = Variable<String>(status);
+    if (!nullToAbsent || error != null) {
+      map['error'] = Variable<String>(error);
+    }
+    if (!nullToAbsent || walkedAt != null) {
+      map['walked_at'] = Variable<String>(walkedAt);
+    }
+    if (!nullToAbsent || rootHash != null) {
+      map['root_hash'] = Variable<String>(rootHash);
+    }
+    map['files_count'] = Variable<int>(filesCount);
+    map['text_bytes'] = Variable<int>(textBytes);
+    if (!nullToAbsent || briefJson != null) {
+      map['brief_json'] = Variable<String>(briefJson);
+    }
+    if (!nullToAbsent || briefHash != null) {
+      map['brief_hash'] = Variable<String>(briefHash);
+    }
+    map['digests'] = Variable<int>(digests);
+    map['honor_gitignore'] = Variable<int>(honorGitignore);
+    map['created_at'] = Variable<String>(createdAt);
+    map['updated_at'] = Variable<String>(updatedAt);
+    return map;
+  }
+
+  ContextDirsCompanion toCompanion(bool nullToAbsent) {
+    return ContextDirsCompanion(
+      id: Value(id),
+      path: Value(path),
+      displayName: Value(displayName),
+      bookmark: bookmark == null && nullToAbsent
+          ? const Value.absent()
+          : Value(bookmark),
+      status: Value(status),
+      error: error == null && nullToAbsent
+          ? const Value.absent()
+          : Value(error),
+      walkedAt: walkedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(walkedAt),
+      rootHash: rootHash == null && nullToAbsent
+          ? const Value.absent()
+          : Value(rootHash),
+      filesCount: Value(filesCount),
+      textBytes: Value(textBytes),
+      briefJson: briefJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(briefJson),
+      briefHash: briefHash == null && nullToAbsent
+          ? const Value.absent()
+          : Value(briefHash),
+      digests: Value(digests),
+      honorGitignore: Value(honorGitignore),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory ContextDir.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ContextDir(
+      id: serializer.fromJson<String>(json['id']),
+      path: serializer.fromJson<String>(json['path']),
+      displayName: serializer.fromJson<String>(json['display_name']),
+      bookmark: serializer.fromJson<Uint8List?>(json['bookmark']),
+      status: serializer.fromJson<String>(json['status']),
+      error: serializer.fromJson<String?>(json['error']),
+      walkedAt: serializer.fromJson<String?>(json['walked_at']),
+      rootHash: serializer.fromJson<String?>(json['root_hash']),
+      filesCount: serializer.fromJson<int>(json['files_count']),
+      textBytes: serializer.fromJson<int>(json['text_bytes']),
+      briefJson: serializer.fromJson<String?>(json['brief_json']),
+      briefHash: serializer.fromJson<String?>(json['brief_hash']),
+      digests: serializer.fromJson<int>(json['digests']),
+      honorGitignore: serializer.fromJson<int>(json['honor_gitignore']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'path': serializer.toJson<String>(path),
+      'display_name': serializer.toJson<String>(displayName),
+      'bookmark': serializer.toJson<Uint8List?>(bookmark),
+      'status': serializer.toJson<String>(status),
+      'error': serializer.toJson<String?>(error),
+      'walked_at': serializer.toJson<String?>(walkedAt),
+      'root_hash': serializer.toJson<String?>(rootHash),
+      'files_count': serializer.toJson<int>(filesCount),
+      'text_bytes': serializer.toJson<int>(textBytes),
+      'brief_json': serializer.toJson<String?>(briefJson),
+      'brief_hash': serializer.toJson<String?>(briefHash),
+      'digests': serializer.toJson<int>(digests),
+      'honor_gitignore': serializer.toJson<int>(honorGitignore),
+      'created_at': serializer.toJson<String>(createdAt),
+      'updated_at': serializer.toJson<String>(updatedAt),
+    };
+  }
+
+  ContextDir copyWith({
+    String? id,
+    String? path,
+    String? displayName,
+    Value<Uint8List?> bookmark = const Value.absent(),
+    String? status,
+    Value<String?> error = const Value.absent(),
+    Value<String?> walkedAt = const Value.absent(),
+    Value<String?> rootHash = const Value.absent(),
+    int? filesCount,
+    int? textBytes,
+    Value<String?> briefJson = const Value.absent(),
+    Value<String?> briefHash = const Value.absent(),
+    int? digests,
+    int? honorGitignore,
+    String? createdAt,
+    String? updatedAt,
+  }) => ContextDir(
+    id: id ?? this.id,
+    path: path ?? this.path,
+    displayName: displayName ?? this.displayName,
+    bookmark: bookmark.present ? bookmark.value : this.bookmark,
+    status: status ?? this.status,
+    error: error.present ? error.value : this.error,
+    walkedAt: walkedAt.present ? walkedAt.value : this.walkedAt,
+    rootHash: rootHash.present ? rootHash.value : this.rootHash,
+    filesCount: filesCount ?? this.filesCount,
+    textBytes: textBytes ?? this.textBytes,
+    briefJson: briefJson.present ? briefJson.value : this.briefJson,
+    briefHash: briefHash.present ? briefHash.value : this.briefHash,
+    digests: digests ?? this.digests,
+    honorGitignore: honorGitignore ?? this.honorGitignore,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  ContextDir copyWithCompanion(ContextDirsCompanion data) {
+    return ContextDir(
+      id: data.id.present ? data.id.value : this.id,
+      path: data.path.present ? data.path.value : this.path,
+      displayName: data.displayName.present
+          ? data.displayName.value
+          : this.displayName,
+      bookmark: data.bookmark.present ? data.bookmark.value : this.bookmark,
+      status: data.status.present ? data.status.value : this.status,
+      error: data.error.present ? data.error.value : this.error,
+      walkedAt: data.walkedAt.present ? data.walkedAt.value : this.walkedAt,
+      rootHash: data.rootHash.present ? data.rootHash.value : this.rootHash,
+      filesCount: data.filesCount.present
+          ? data.filesCount.value
+          : this.filesCount,
+      textBytes: data.textBytes.present ? data.textBytes.value : this.textBytes,
+      briefJson: data.briefJson.present ? data.briefJson.value : this.briefJson,
+      briefHash: data.briefHash.present ? data.briefHash.value : this.briefHash,
+      digests: data.digests.present ? data.digests.value : this.digests,
+      honorGitignore: data.honorGitignore.present
+          ? data.honorGitignore.value
+          : this.honorGitignore,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextDir(')
+          ..write('id: $id, ')
+          ..write('path: $path, ')
+          ..write('displayName: $displayName, ')
+          ..write('bookmark: $bookmark, ')
+          ..write('status: $status, ')
+          ..write('error: $error, ')
+          ..write('walkedAt: $walkedAt, ')
+          ..write('rootHash: $rootHash, ')
+          ..write('filesCount: $filesCount, ')
+          ..write('textBytes: $textBytes, ')
+          ..write('briefJson: $briefJson, ')
+          ..write('briefHash: $briefHash, ')
+          ..write('digests: $digests, ')
+          ..write('honorGitignore: $honorGitignore, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    path,
+    displayName,
+    $driftBlobEquality.hash(bookmark),
+    status,
+    error,
+    walkedAt,
+    rootHash,
+    filesCount,
+    textBytes,
+    briefJson,
+    briefHash,
+    digests,
+    honorGitignore,
+    createdAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ContextDir &&
+          other.id == this.id &&
+          other.path == this.path &&
+          other.displayName == this.displayName &&
+          $driftBlobEquality.equals(other.bookmark, this.bookmark) &&
+          other.status == this.status &&
+          other.error == this.error &&
+          other.walkedAt == this.walkedAt &&
+          other.rootHash == this.rootHash &&
+          other.filesCount == this.filesCount &&
+          other.textBytes == this.textBytes &&
+          other.briefJson == this.briefJson &&
+          other.briefHash == this.briefHash &&
+          other.digests == this.digests &&
+          other.honorGitignore == this.honorGitignore &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class ContextDirsCompanion extends UpdateCompanion<ContextDir> {
+  final Value<String> id;
+  final Value<String> path;
+  final Value<String> displayName;
+  final Value<Uint8List?> bookmark;
+  final Value<String> status;
+  final Value<String?> error;
+  final Value<String?> walkedAt;
+  final Value<String?> rootHash;
+  final Value<int> filesCount;
+  final Value<int> textBytes;
+  final Value<String?> briefJson;
+  final Value<String?> briefHash;
+  final Value<int> digests;
+  final Value<int> honorGitignore;
+  final Value<String> createdAt;
+  final Value<String> updatedAt;
+  final Value<int> rowid;
+  const ContextDirsCompanion({
+    this.id = const Value.absent(),
+    this.path = const Value.absent(),
+    this.displayName = const Value.absent(),
+    this.bookmark = const Value.absent(),
+    this.status = const Value.absent(),
+    this.error = const Value.absent(),
+    this.walkedAt = const Value.absent(),
+    this.rootHash = const Value.absent(),
+    this.filesCount = const Value.absent(),
+    this.textBytes = const Value.absent(),
+    this.briefJson = const Value.absent(),
+    this.briefHash = const Value.absent(),
+    this.digests = const Value.absent(),
+    this.honorGitignore = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  ContextDirsCompanion.insert({
+    required String id,
+    required String path,
+    required String displayName,
+    this.bookmark = const Value.absent(),
+    this.status = const Value.absent(),
+    this.error = const Value.absent(),
+    this.walkedAt = const Value.absent(),
+    this.rootHash = const Value.absent(),
+    this.filesCount = const Value.absent(),
+    this.textBytes = const Value.absent(),
+    this.briefJson = const Value.absent(),
+    this.briefHash = const Value.absent(),
+    this.digests = const Value.absent(),
+    this.honorGitignore = const Value.absent(),
+    required String createdAt,
+    required String updatedAt,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       path = Value(path),
+       displayName = Value(displayName),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<ContextDir> custom({
+    Expression<String>? id,
+    Expression<String>? path,
+    Expression<String>? displayName,
+    Expression<Uint8List>? bookmark,
+    Expression<String>? status,
+    Expression<String>? error,
+    Expression<String>? walkedAt,
+    Expression<String>? rootHash,
+    Expression<int>? filesCount,
+    Expression<int>? textBytes,
+    Expression<String>? briefJson,
+    Expression<String>? briefHash,
+    Expression<int>? digests,
+    Expression<int>? honorGitignore,
+    Expression<String>? createdAt,
+    Expression<String>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (path != null) 'path': path,
+      if (displayName != null) 'display_name': displayName,
+      if (bookmark != null) 'bookmark': bookmark,
+      if (status != null) 'status': status,
+      if (error != null) 'error': error,
+      if (walkedAt != null) 'walked_at': walkedAt,
+      if (rootHash != null) 'root_hash': rootHash,
+      if (filesCount != null) 'files_count': filesCount,
+      if (textBytes != null) 'text_bytes': textBytes,
+      if (briefJson != null) 'brief_json': briefJson,
+      if (briefHash != null) 'brief_hash': briefHash,
+      if (digests != null) 'digests': digests,
+      if (honorGitignore != null) 'honor_gitignore': honorGitignore,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  ContextDirsCompanion copyWith({
+    Value<String>? id,
+    Value<String>? path,
+    Value<String>? displayName,
+    Value<Uint8List?>? bookmark,
+    Value<String>? status,
+    Value<String?>? error,
+    Value<String?>? walkedAt,
+    Value<String?>? rootHash,
+    Value<int>? filesCount,
+    Value<int>? textBytes,
+    Value<String?>? briefJson,
+    Value<String?>? briefHash,
+    Value<int>? digests,
+    Value<int>? honorGitignore,
+    Value<String>? createdAt,
+    Value<String>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return ContextDirsCompanion(
+      id: id ?? this.id,
+      path: path ?? this.path,
+      displayName: displayName ?? this.displayName,
+      bookmark: bookmark ?? this.bookmark,
+      status: status ?? this.status,
+      error: error ?? this.error,
+      walkedAt: walkedAt ?? this.walkedAt,
+      rootHash: rootHash ?? this.rootHash,
+      filesCount: filesCount ?? this.filesCount,
+      textBytes: textBytes ?? this.textBytes,
+      briefJson: briefJson ?? this.briefJson,
+      briefHash: briefHash ?? this.briefHash,
+      digests: digests ?? this.digests,
+      honorGitignore: honorGitignore ?? this.honorGitignore,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (path.present) {
+      map['path'] = Variable<String>(path.value);
+    }
+    if (displayName.present) {
+      map['display_name'] = Variable<String>(displayName.value);
+    }
+    if (bookmark.present) {
+      map['bookmark'] = Variable<Uint8List>(bookmark.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (error.present) {
+      map['error'] = Variable<String>(error.value);
+    }
+    if (walkedAt.present) {
+      map['walked_at'] = Variable<String>(walkedAt.value);
+    }
+    if (rootHash.present) {
+      map['root_hash'] = Variable<String>(rootHash.value);
+    }
+    if (filesCount.present) {
+      map['files_count'] = Variable<int>(filesCount.value);
+    }
+    if (textBytes.present) {
+      map['text_bytes'] = Variable<int>(textBytes.value);
+    }
+    if (briefJson.present) {
+      map['brief_json'] = Variable<String>(briefJson.value);
+    }
+    if (briefHash.present) {
+      map['brief_hash'] = Variable<String>(briefHash.value);
+    }
+    if (digests.present) {
+      map['digests'] = Variable<int>(digests.value);
+    }
+    if (honorGitignore.present) {
+      map['honor_gitignore'] = Variable<int>(honorGitignore.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextDirsCompanion(')
+          ..write('id: $id, ')
+          ..write('path: $path, ')
+          ..write('displayName: $displayName, ')
+          ..write('bookmark: $bookmark, ')
+          ..write('status: $status, ')
+          ..write('error: $error, ')
+          ..write('walkedAt: $walkedAt, ')
+          ..write('rootHash: $rootHash, ')
+          ..write('filesCount: $filesCount, ')
+          ..write('textBytes: $textBytes, ')
+          ..write('briefJson: $briefJson, ')
+          ..write('briefHash: $briefHash, ')
+          ..write('digests: $digests, ')
+          ..write('honorGitignore: $honorGitignore, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class ContextLinks extends Table with TableInfo<ContextLinks, ContextLink> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  ContextLinks(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _dirIdMeta = const VerificationMeta('dirId');
+  late final GeneratedColumn<String> dirId = GeneratedColumn<String>(
+    'dir_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _scopeKindMeta = const VerificationMeta(
+    'scopeKind',
+  );
+  late final GeneratedColumn<String> scopeKind = GeneratedColumn<String>(
+    'scope_kind',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _scopeKeyMeta = const VerificationMeta(
+    'scopeKey',
+  );
+  late final GeneratedColumn<String> scopeKey = GeneratedColumn<String>(
+    'scope_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _addedAtMeta = const VerificationMeta(
+    'addedAt',
+  );
+  late final GeneratedColumn<String> addedAt = GeneratedColumn<String>(
+    'added_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    dirId,
+    scopeKind,
+    source,
+    scopeKey,
+    addedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'context_links';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ContextLink> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('dir_id')) {
+      context.handle(
+        _dirIdMeta,
+        dirId.isAcceptableOrUnknown(data['dir_id']!, _dirIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dirIdMeta);
+    }
+    if (data.containsKey('scope_kind')) {
+      context.handle(
+        _scopeKindMeta,
+        scopeKind.isAcceptableOrUnknown(data['scope_kind']!, _scopeKindMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_scopeKindMeta);
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    }
+    if (data.containsKey('scope_key')) {
+      context.handle(
+        _scopeKeyMeta,
+        scopeKey.isAcceptableOrUnknown(data['scope_key']!, _scopeKeyMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_scopeKeyMeta);
+    }
+    if (data.containsKey('added_at')) {
+      context.handle(
+        _addedAtMeta,
+        addedAt.isAcceptableOrUnknown(data['added_at']!, _addedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_addedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {dirId, scopeKind, source, scopeKey};
+  @override
+  ContextLink map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ContextLink(
+      dirId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}dir_id'],
+      )!,
+      scopeKind: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}scope_kind'],
+      )!,
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      scopeKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}scope_key'],
+      )!,
+      addedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}added_at'],
+      )!,
+    );
+  }
+
+  @override
+  ContextLinks createAlias(String alias) {
+    return ContextLinks(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  List<String> get customConstraints => const [
+    'PRIMARY KEY(dir_id, scope_kind, source, scope_key)',
+  ];
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class ContextLink extends DataClass implements Insertable<ContextLink> {
+  final String dirId;
+  final String scopeKind;
+  final String source;
+  final String scopeKey;
+  final String addedAt;
+  const ContextLink({
+    required this.dirId,
+    required this.scopeKind,
+    required this.source,
+    required this.scopeKey,
+    required this.addedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['dir_id'] = Variable<String>(dirId);
+    map['scope_kind'] = Variable<String>(scopeKind);
+    map['source'] = Variable<String>(source);
+    map['scope_key'] = Variable<String>(scopeKey);
+    map['added_at'] = Variable<String>(addedAt);
+    return map;
+  }
+
+  ContextLinksCompanion toCompanion(bool nullToAbsent) {
+    return ContextLinksCompanion(
+      dirId: Value(dirId),
+      scopeKind: Value(scopeKind),
+      source: Value(source),
+      scopeKey: Value(scopeKey),
+      addedAt: Value(addedAt),
+    );
+  }
+
+  factory ContextLink.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ContextLink(
+      dirId: serializer.fromJson<String>(json['dir_id']),
+      scopeKind: serializer.fromJson<String>(json['scope_kind']),
+      source: serializer.fromJson<String>(json['source']),
+      scopeKey: serializer.fromJson<String>(json['scope_key']),
+      addedAt: serializer.fromJson<String>(json['added_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'dir_id': serializer.toJson<String>(dirId),
+      'scope_kind': serializer.toJson<String>(scopeKind),
+      'source': serializer.toJson<String>(source),
+      'scope_key': serializer.toJson<String>(scopeKey),
+      'added_at': serializer.toJson<String>(addedAt),
+    };
+  }
+
+  ContextLink copyWith({
+    String? dirId,
+    String? scopeKind,
+    String? source,
+    String? scopeKey,
+    String? addedAt,
+  }) => ContextLink(
+    dirId: dirId ?? this.dirId,
+    scopeKind: scopeKind ?? this.scopeKind,
+    source: source ?? this.source,
+    scopeKey: scopeKey ?? this.scopeKey,
+    addedAt: addedAt ?? this.addedAt,
+  );
+  ContextLink copyWithCompanion(ContextLinksCompanion data) {
+    return ContextLink(
+      dirId: data.dirId.present ? data.dirId.value : this.dirId,
+      scopeKind: data.scopeKind.present ? data.scopeKind.value : this.scopeKind,
+      source: data.source.present ? data.source.value : this.source,
+      scopeKey: data.scopeKey.present ? data.scopeKey.value : this.scopeKey,
+      addedAt: data.addedAt.present ? data.addedAt.value : this.addedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextLink(')
+          ..write('dirId: $dirId, ')
+          ..write('scopeKind: $scopeKind, ')
+          ..write('source: $source, ')
+          ..write('scopeKey: $scopeKey, ')
+          ..write('addedAt: $addedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(dirId, scopeKind, source, scopeKey, addedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ContextLink &&
+          other.dirId == this.dirId &&
+          other.scopeKind == this.scopeKind &&
+          other.source == this.source &&
+          other.scopeKey == this.scopeKey &&
+          other.addedAt == this.addedAt);
+}
+
+class ContextLinksCompanion extends UpdateCompanion<ContextLink> {
+  final Value<String> dirId;
+  final Value<String> scopeKind;
+  final Value<String> source;
+  final Value<String> scopeKey;
+  final Value<String> addedAt;
+  final Value<int> rowid;
+  const ContextLinksCompanion({
+    this.dirId = const Value.absent(),
+    this.scopeKind = const Value.absent(),
+    this.source = const Value.absent(),
+    this.scopeKey = const Value.absent(),
+    this.addedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  ContextLinksCompanion.insert({
+    required String dirId,
+    required String scopeKind,
+    this.source = const Value.absent(),
+    required String scopeKey,
+    required String addedAt,
+    this.rowid = const Value.absent(),
+  }) : dirId = Value(dirId),
+       scopeKind = Value(scopeKind),
+       scopeKey = Value(scopeKey),
+       addedAt = Value(addedAt);
+  static Insertable<ContextLink> custom({
+    Expression<String>? dirId,
+    Expression<String>? scopeKind,
+    Expression<String>? source,
+    Expression<String>? scopeKey,
+    Expression<String>? addedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (dirId != null) 'dir_id': dirId,
+      if (scopeKind != null) 'scope_kind': scopeKind,
+      if (source != null) 'source': source,
+      if (scopeKey != null) 'scope_key': scopeKey,
+      if (addedAt != null) 'added_at': addedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  ContextLinksCompanion copyWith({
+    Value<String>? dirId,
+    Value<String>? scopeKind,
+    Value<String>? source,
+    Value<String>? scopeKey,
+    Value<String>? addedAt,
+    Value<int>? rowid,
+  }) {
+    return ContextLinksCompanion(
+      dirId: dirId ?? this.dirId,
+      scopeKind: scopeKind ?? this.scopeKind,
+      source: source ?? this.source,
+      scopeKey: scopeKey ?? this.scopeKey,
+      addedAt: addedAt ?? this.addedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (dirId.present) {
+      map['dir_id'] = Variable<String>(dirId.value);
+    }
+    if (scopeKind.present) {
+      map['scope_kind'] = Variable<String>(scopeKind.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (scopeKey.present) {
+      map['scope_key'] = Variable<String>(scopeKey.value);
+    }
+    if (addedAt.present) {
+      map['added_at'] = Variable<String>(addedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextLinksCompanion(')
+          ..write('dirId: $dirId, ')
+          ..write('scopeKind: $scopeKind, ')
+          ..write('source: $source, ')
+          ..write('scopeKey: $scopeKey, ')
+          ..write('addedAt: $addedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class ContextFiles extends Table with TableInfo<ContextFiles, ContextFile> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  ContextFiles(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'PRIMARY KEY',
+  );
+  static const VerificationMeta _dirIdMeta = const VerificationMeta('dirId');
+  late final GeneratedColumn<String> dirId = GeneratedColumn<String>(
+    'dir_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _relPathMeta = const VerificationMeta(
+    'relPath',
+  );
+  late final GeneratedColumn<String> relPath = GeneratedColumn<String>(
+    'rel_path',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _sizeMeta = const VerificationMeta('size');
+  late final GeneratedColumn<int> size = GeneratedColumn<int>(
+    'size',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _mtimeMeta = const VerificationMeta('mtime');
+  late final GeneratedColumn<String> mtime = GeneratedColumn<String>(
+    'mtime',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _sha256Meta = const VerificationMeta('sha256');
+  late final GeneratedColumn<String> sha256 = GeneratedColumn<String>(
+    'sha256',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _kindMeta = const VerificationMeta('kind');
+  late final GeneratedColumn<String> kind = GeneratedColumn<String>(
+    'kind',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'other\'',
+    defaultValue: const CustomExpression('\'other\''),
+  );
+  static const VerificationMeta _claudeChainMeta = const VerificationMeta(
+    'claudeChain',
+  );
+  late final GeneratedColumn<String> claudeChain = GeneratedColumn<String>(
+    'claude_chain',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'[]\'',
+    defaultValue: const CustomExpression('\'[]\''),
+  );
+  static const VerificationMeta _descriptionMeta = const VerificationMeta(
+    'description',
+  );
+  late final GeneratedColumn<String> description = GeneratedColumn<String>(
+    'description',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _pathsJsonMeta = const VerificationMeta(
+    'pathsJson',
+  );
+  late final GeneratedColumn<String> pathsJson = GeneratedColumn<String>(
+    'paths_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _digestJsonMeta = const VerificationMeta(
+    'digestJson',
+  );
+  late final GeneratedColumn<String> digestJson = GeneratedColumn<String>(
+    'digest_json',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _digestStatusMeta = const VerificationMeta(
+    'digestStatus',
+  );
+  late final GeneratedColumn<String> digestStatus = GeneratedColumn<String>(
+    'digest_status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'pending\'',
+    defaultValue: const CustomExpression('\'pending\''),
+  );
+  static const VerificationMeta _descEmbeddingMeta = const VerificationMeta(
+    'descEmbedding',
+  );
+  late final GeneratedColumn<Uint8List> descEmbedding =
+      GeneratedColumn<Uint8List>(
+        'desc_embedding',
+        aliasedName,
+        true,
+        type: DriftSqlType.blob,
+        requiredDuringInsert: false,
+        $customConstraints: '',
+      );
+  static const VerificationMeta _textCharsMeta = const VerificationMeta(
+    'textChars',
+  );
+  late final GeneratedColumn<int> textChars = GeneratedColumn<int>(
+    'text_chars',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _statusMeta = const VerificationMeta('status');
+  late final GeneratedColumn<String> status = GeneratedColumn<String>(
+    'status',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'ok\'',
+    defaultValue: const CustomExpression('\'ok\''),
+  );
+  static const VerificationMeta _seenAtMeta = const VerificationMeta('seenAt');
+  late final GeneratedColumn<String> seenAt = GeneratedColumn<String>(
+    'seen_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  late final GeneratedColumn<String> updatedAt = GeneratedColumn<String>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    dirId,
+    relPath,
+    size,
+    mtime,
+    sha256,
+    kind,
+    claudeChain,
+    description,
+    pathsJson,
+    digestJson,
+    digestStatus,
+    descEmbedding,
+    textChars,
+    status,
+    seenAt,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'context_files';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ContextFile> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('dir_id')) {
+      context.handle(
+        _dirIdMeta,
+        dirId.isAcceptableOrUnknown(data['dir_id']!, _dirIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_dirIdMeta);
+    }
+    if (data.containsKey('rel_path')) {
+      context.handle(
+        _relPathMeta,
+        relPath.isAcceptableOrUnknown(data['rel_path']!, _relPathMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_relPathMeta);
+    }
+    if (data.containsKey('size')) {
+      context.handle(
+        _sizeMeta,
+        size.isAcceptableOrUnknown(data['size']!, _sizeMeta),
+      );
+    }
+    if (data.containsKey('mtime')) {
+      context.handle(
+        _mtimeMeta,
+        mtime.isAcceptableOrUnknown(data['mtime']!, _mtimeMeta),
+      );
+    }
+    if (data.containsKey('sha256')) {
+      context.handle(
+        _sha256Meta,
+        sha256.isAcceptableOrUnknown(data['sha256']!, _sha256Meta),
+      );
+    }
+    if (data.containsKey('kind')) {
+      context.handle(
+        _kindMeta,
+        kind.isAcceptableOrUnknown(data['kind']!, _kindMeta),
+      );
+    }
+    if (data.containsKey('claude_chain')) {
+      context.handle(
+        _claudeChainMeta,
+        claudeChain.isAcceptableOrUnknown(
+          data['claude_chain']!,
+          _claudeChainMeta,
+        ),
+      );
+    }
+    if (data.containsKey('description')) {
+      context.handle(
+        _descriptionMeta,
+        description.isAcceptableOrUnknown(
+          data['description']!,
+          _descriptionMeta,
+        ),
+      );
+    }
+    if (data.containsKey('paths_json')) {
+      context.handle(
+        _pathsJsonMeta,
+        pathsJson.isAcceptableOrUnknown(data['paths_json']!, _pathsJsonMeta),
+      );
+    }
+    if (data.containsKey('digest_json')) {
+      context.handle(
+        _digestJsonMeta,
+        digestJson.isAcceptableOrUnknown(data['digest_json']!, _digestJsonMeta),
+      );
+    }
+    if (data.containsKey('digest_status')) {
+      context.handle(
+        _digestStatusMeta,
+        digestStatus.isAcceptableOrUnknown(
+          data['digest_status']!,
+          _digestStatusMeta,
+        ),
+      );
+    }
+    if (data.containsKey('desc_embedding')) {
+      context.handle(
+        _descEmbeddingMeta,
+        descEmbedding.isAcceptableOrUnknown(
+          data['desc_embedding']!,
+          _descEmbeddingMeta,
+        ),
+      );
+    }
+    if (data.containsKey('text_chars')) {
+      context.handle(
+        _textCharsMeta,
+        textChars.isAcceptableOrUnknown(data['text_chars']!, _textCharsMeta),
+      );
+    }
+    if (data.containsKey('status')) {
+      context.handle(
+        _statusMeta,
+        status.isAcceptableOrUnknown(data['status']!, _statusMeta),
+      );
+    }
+    if (data.containsKey('seen_at')) {
+      context.handle(
+        _seenAtMeta,
+        seenAt.isAcceptableOrUnknown(data['seen_at']!, _seenAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_seenAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  ContextFile map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ContextFile(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      dirId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}dir_id'],
+      )!,
+      relPath: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}rel_path'],
+      )!,
+      size: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}size'],
+      )!,
+      mtime: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}mtime'],
+      )!,
+      sha256: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}sha256'],
+      )!,
+      kind: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}kind'],
+      )!,
+      claudeChain: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}claude_chain'],
+      )!,
+      description: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}description'],
+      ),
+      pathsJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}paths_json'],
+      ),
+      digestJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}digest_json'],
+      ),
+      digestStatus: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}digest_status'],
+      )!,
+      descEmbedding: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}desc_embedding'],
+      ),
+      textChars: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}text_chars'],
+      )!,
+      status: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}status'],
+      )!,
+      seenAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}seen_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  ContextFiles createAlias(String alias) {
+    return ContextFiles(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class ContextFile extends DataClass implements Insertable<ContextFile> {
+  final int id;
+  final String dirId;
+  final String relPath;
+  final int size;
+  final String mtime;
+  final String sha256;
+
+  /// claude_md|skill|rule|doc|code|data|other
+  final String kind;
+  final String claudeChain;
+  final String? description;
+  final String? pathsJson;
+  final String? digestJson;
+  final String digestStatus;
+  final Uint8List? descEmbedding;
+  final int textChars;
+  final String status;
+  final String seenAt;
+  final String updatedAt;
+  const ContextFile({
+    required this.id,
+    required this.dirId,
+    required this.relPath,
+    required this.size,
+    required this.mtime,
+    required this.sha256,
+    required this.kind,
+    required this.claudeChain,
+    this.description,
+    this.pathsJson,
+    this.digestJson,
+    required this.digestStatus,
+    this.descEmbedding,
+    required this.textChars,
+    required this.status,
+    required this.seenAt,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['dir_id'] = Variable<String>(dirId);
+    map['rel_path'] = Variable<String>(relPath);
+    map['size'] = Variable<int>(size);
+    map['mtime'] = Variable<String>(mtime);
+    map['sha256'] = Variable<String>(sha256);
+    map['kind'] = Variable<String>(kind);
+    map['claude_chain'] = Variable<String>(claudeChain);
+    if (!nullToAbsent || description != null) {
+      map['description'] = Variable<String>(description);
+    }
+    if (!nullToAbsent || pathsJson != null) {
+      map['paths_json'] = Variable<String>(pathsJson);
+    }
+    if (!nullToAbsent || digestJson != null) {
+      map['digest_json'] = Variable<String>(digestJson);
+    }
+    map['digest_status'] = Variable<String>(digestStatus);
+    if (!nullToAbsent || descEmbedding != null) {
+      map['desc_embedding'] = Variable<Uint8List>(descEmbedding);
+    }
+    map['text_chars'] = Variable<int>(textChars);
+    map['status'] = Variable<String>(status);
+    map['seen_at'] = Variable<String>(seenAt);
+    map['updated_at'] = Variable<String>(updatedAt);
+    return map;
+  }
+
+  ContextFilesCompanion toCompanion(bool nullToAbsent) {
+    return ContextFilesCompanion(
+      id: Value(id),
+      dirId: Value(dirId),
+      relPath: Value(relPath),
+      size: Value(size),
+      mtime: Value(mtime),
+      sha256: Value(sha256),
+      kind: Value(kind),
+      claudeChain: Value(claudeChain),
+      description: description == null && nullToAbsent
+          ? const Value.absent()
+          : Value(description),
+      pathsJson: pathsJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(pathsJson),
+      digestJson: digestJson == null && nullToAbsent
+          ? const Value.absent()
+          : Value(digestJson),
+      digestStatus: Value(digestStatus),
+      descEmbedding: descEmbedding == null && nullToAbsent
+          ? const Value.absent()
+          : Value(descEmbedding),
+      textChars: Value(textChars),
+      status: Value(status),
+      seenAt: Value(seenAt),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory ContextFile.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ContextFile(
+      id: serializer.fromJson<int>(json['id']),
+      dirId: serializer.fromJson<String>(json['dir_id']),
+      relPath: serializer.fromJson<String>(json['rel_path']),
+      size: serializer.fromJson<int>(json['size']),
+      mtime: serializer.fromJson<String>(json['mtime']),
+      sha256: serializer.fromJson<String>(json['sha256']),
+      kind: serializer.fromJson<String>(json['kind']),
+      claudeChain: serializer.fromJson<String>(json['claude_chain']),
+      description: serializer.fromJson<String?>(json['description']),
+      pathsJson: serializer.fromJson<String?>(json['paths_json']),
+      digestJson: serializer.fromJson<String?>(json['digest_json']),
+      digestStatus: serializer.fromJson<String>(json['digest_status']),
+      descEmbedding: serializer.fromJson<Uint8List?>(json['desc_embedding']),
+      textChars: serializer.fromJson<int>(json['text_chars']),
+      status: serializer.fromJson<String>(json['status']),
+      seenAt: serializer.fromJson<String>(json['seen_at']),
+      updatedAt: serializer.fromJson<String>(json['updated_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'dir_id': serializer.toJson<String>(dirId),
+      'rel_path': serializer.toJson<String>(relPath),
+      'size': serializer.toJson<int>(size),
+      'mtime': serializer.toJson<String>(mtime),
+      'sha256': serializer.toJson<String>(sha256),
+      'kind': serializer.toJson<String>(kind),
+      'claude_chain': serializer.toJson<String>(claudeChain),
+      'description': serializer.toJson<String?>(description),
+      'paths_json': serializer.toJson<String?>(pathsJson),
+      'digest_json': serializer.toJson<String?>(digestJson),
+      'digest_status': serializer.toJson<String>(digestStatus),
+      'desc_embedding': serializer.toJson<Uint8List?>(descEmbedding),
+      'text_chars': serializer.toJson<int>(textChars),
+      'status': serializer.toJson<String>(status),
+      'seen_at': serializer.toJson<String>(seenAt),
+      'updated_at': serializer.toJson<String>(updatedAt),
+    };
+  }
+
+  ContextFile copyWith({
+    int? id,
+    String? dirId,
+    String? relPath,
+    int? size,
+    String? mtime,
+    String? sha256,
+    String? kind,
+    String? claudeChain,
+    Value<String?> description = const Value.absent(),
+    Value<String?> pathsJson = const Value.absent(),
+    Value<String?> digestJson = const Value.absent(),
+    String? digestStatus,
+    Value<Uint8List?> descEmbedding = const Value.absent(),
+    int? textChars,
+    String? status,
+    String? seenAt,
+    String? updatedAt,
+  }) => ContextFile(
+    id: id ?? this.id,
+    dirId: dirId ?? this.dirId,
+    relPath: relPath ?? this.relPath,
+    size: size ?? this.size,
+    mtime: mtime ?? this.mtime,
+    sha256: sha256 ?? this.sha256,
+    kind: kind ?? this.kind,
+    claudeChain: claudeChain ?? this.claudeChain,
+    description: description.present ? description.value : this.description,
+    pathsJson: pathsJson.present ? pathsJson.value : this.pathsJson,
+    digestJson: digestJson.present ? digestJson.value : this.digestJson,
+    digestStatus: digestStatus ?? this.digestStatus,
+    descEmbedding: descEmbedding.present
+        ? descEmbedding.value
+        : this.descEmbedding,
+    textChars: textChars ?? this.textChars,
+    status: status ?? this.status,
+    seenAt: seenAt ?? this.seenAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  ContextFile copyWithCompanion(ContextFilesCompanion data) {
+    return ContextFile(
+      id: data.id.present ? data.id.value : this.id,
+      dirId: data.dirId.present ? data.dirId.value : this.dirId,
+      relPath: data.relPath.present ? data.relPath.value : this.relPath,
+      size: data.size.present ? data.size.value : this.size,
+      mtime: data.mtime.present ? data.mtime.value : this.mtime,
+      sha256: data.sha256.present ? data.sha256.value : this.sha256,
+      kind: data.kind.present ? data.kind.value : this.kind,
+      claudeChain: data.claudeChain.present
+          ? data.claudeChain.value
+          : this.claudeChain,
+      description: data.description.present
+          ? data.description.value
+          : this.description,
+      pathsJson: data.pathsJson.present ? data.pathsJson.value : this.pathsJson,
+      digestJson: data.digestJson.present
+          ? data.digestJson.value
+          : this.digestJson,
+      digestStatus: data.digestStatus.present
+          ? data.digestStatus.value
+          : this.digestStatus,
+      descEmbedding: data.descEmbedding.present
+          ? data.descEmbedding.value
+          : this.descEmbedding,
+      textChars: data.textChars.present ? data.textChars.value : this.textChars,
+      status: data.status.present ? data.status.value : this.status,
+      seenAt: data.seenAt.present ? data.seenAt.value : this.seenAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextFile(')
+          ..write('id: $id, ')
+          ..write('dirId: $dirId, ')
+          ..write('relPath: $relPath, ')
+          ..write('size: $size, ')
+          ..write('mtime: $mtime, ')
+          ..write('sha256: $sha256, ')
+          ..write('kind: $kind, ')
+          ..write('claudeChain: $claudeChain, ')
+          ..write('description: $description, ')
+          ..write('pathsJson: $pathsJson, ')
+          ..write('digestJson: $digestJson, ')
+          ..write('digestStatus: $digestStatus, ')
+          ..write('descEmbedding: $descEmbedding, ')
+          ..write('textChars: $textChars, ')
+          ..write('status: $status, ')
+          ..write('seenAt: $seenAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    dirId,
+    relPath,
+    size,
+    mtime,
+    sha256,
+    kind,
+    claudeChain,
+    description,
+    pathsJson,
+    digestJson,
+    digestStatus,
+    $driftBlobEquality.hash(descEmbedding),
+    textChars,
+    status,
+    seenAt,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ContextFile &&
+          other.id == this.id &&
+          other.dirId == this.dirId &&
+          other.relPath == this.relPath &&
+          other.size == this.size &&
+          other.mtime == this.mtime &&
+          other.sha256 == this.sha256 &&
+          other.kind == this.kind &&
+          other.claudeChain == this.claudeChain &&
+          other.description == this.description &&
+          other.pathsJson == this.pathsJson &&
+          other.digestJson == this.digestJson &&
+          other.digestStatus == this.digestStatus &&
+          $driftBlobEquality.equals(other.descEmbedding, this.descEmbedding) &&
+          other.textChars == this.textChars &&
+          other.status == this.status &&
+          other.seenAt == this.seenAt &&
+          other.updatedAt == this.updatedAt);
+}
+
+class ContextFilesCompanion extends UpdateCompanion<ContextFile> {
+  final Value<int> id;
+  final Value<String> dirId;
+  final Value<String> relPath;
+  final Value<int> size;
+  final Value<String> mtime;
+  final Value<String> sha256;
+  final Value<String> kind;
+  final Value<String> claudeChain;
+  final Value<String?> description;
+  final Value<String?> pathsJson;
+  final Value<String?> digestJson;
+  final Value<String> digestStatus;
+  final Value<Uint8List?> descEmbedding;
+  final Value<int> textChars;
+  final Value<String> status;
+  final Value<String> seenAt;
+  final Value<String> updatedAt;
+  const ContextFilesCompanion({
+    this.id = const Value.absent(),
+    this.dirId = const Value.absent(),
+    this.relPath = const Value.absent(),
+    this.size = const Value.absent(),
+    this.mtime = const Value.absent(),
+    this.sha256 = const Value.absent(),
+    this.kind = const Value.absent(),
+    this.claudeChain = const Value.absent(),
+    this.description = const Value.absent(),
+    this.pathsJson = const Value.absent(),
+    this.digestJson = const Value.absent(),
+    this.digestStatus = const Value.absent(),
+    this.descEmbedding = const Value.absent(),
+    this.textChars = const Value.absent(),
+    this.status = const Value.absent(),
+    this.seenAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+  });
+  ContextFilesCompanion.insert({
+    this.id = const Value.absent(),
+    required String dirId,
+    required String relPath,
+    this.size = const Value.absent(),
+    this.mtime = const Value.absent(),
+    this.sha256 = const Value.absent(),
+    this.kind = const Value.absent(),
+    this.claudeChain = const Value.absent(),
+    this.description = const Value.absent(),
+    this.pathsJson = const Value.absent(),
+    this.digestJson = const Value.absent(),
+    this.digestStatus = const Value.absent(),
+    this.descEmbedding = const Value.absent(),
+    this.textChars = const Value.absent(),
+    this.status = const Value.absent(),
+    required String seenAt,
+    required String updatedAt,
+  }) : dirId = Value(dirId),
+       relPath = Value(relPath),
+       seenAt = Value(seenAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<ContextFile> custom({
+    Expression<int>? id,
+    Expression<String>? dirId,
+    Expression<String>? relPath,
+    Expression<int>? size,
+    Expression<String>? mtime,
+    Expression<String>? sha256,
+    Expression<String>? kind,
+    Expression<String>? claudeChain,
+    Expression<String>? description,
+    Expression<String>? pathsJson,
+    Expression<String>? digestJson,
+    Expression<String>? digestStatus,
+    Expression<Uint8List>? descEmbedding,
+    Expression<int>? textChars,
+    Expression<String>? status,
+    Expression<String>? seenAt,
+    Expression<String>? updatedAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (dirId != null) 'dir_id': dirId,
+      if (relPath != null) 'rel_path': relPath,
+      if (size != null) 'size': size,
+      if (mtime != null) 'mtime': mtime,
+      if (sha256 != null) 'sha256': sha256,
+      if (kind != null) 'kind': kind,
+      if (claudeChain != null) 'claude_chain': claudeChain,
+      if (description != null) 'description': description,
+      if (pathsJson != null) 'paths_json': pathsJson,
+      if (digestJson != null) 'digest_json': digestJson,
+      if (digestStatus != null) 'digest_status': digestStatus,
+      if (descEmbedding != null) 'desc_embedding': descEmbedding,
+      if (textChars != null) 'text_chars': textChars,
+      if (status != null) 'status': status,
+      if (seenAt != null) 'seen_at': seenAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+    });
+  }
+
+  ContextFilesCompanion copyWith({
+    Value<int>? id,
+    Value<String>? dirId,
+    Value<String>? relPath,
+    Value<int>? size,
+    Value<String>? mtime,
+    Value<String>? sha256,
+    Value<String>? kind,
+    Value<String>? claudeChain,
+    Value<String?>? description,
+    Value<String?>? pathsJson,
+    Value<String?>? digestJson,
+    Value<String>? digestStatus,
+    Value<Uint8List?>? descEmbedding,
+    Value<int>? textChars,
+    Value<String>? status,
+    Value<String>? seenAt,
+    Value<String>? updatedAt,
+  }) {
+    return ContextFilesCompanion(
+      id: id ?? this.id,
+      dirId: dirId ?? this.dirId,
+      relPath: relPath ?? this.relPath,
+      size: size ?? this.size,
+      mtime: mtime ?? this.mtime,
+      sha256: sha256 ?? this.sha256,
+      kind: kind ?? this.kind,
+      claudeChain: claudeChain ?? this.claudeChain,
+      description: description ?? this.description,
+      pathsJson: pathsJson ?? this.pathsJson,
+      digestJson: digestJson ?? this.digestJson,
+      digestStatus: digestStatus ?? this.digestStatus,
+      descEmbedding: descEmbedding ?? this.descEmbedding,
+      textChars: textChars ?? this.textChars,
+      status: status ?? this.status,
+      seenAt: seenAt ?? this.seenAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (dirId.present) {
+      map['dir_id'] = Variable<String>(dirId.value);
+    }
+    if (relPath.present) {
+      map['rel_path'] = Variable<String>(relPath.value);
+    }
+    if (size.present) {
+      map['size'] = Variable<int>(size.value);
+    }
+    if (mtime.present) {
+      map['mtime'] = Variable<String>(mtime.value);
+    }
+    if (sha256.present) {
+      map['sha256'] = Variable<String>(sha256.value);
+    }
+    if (kind.present) {
+      map['kind'] = Variable<String>(kind.value);
+    }
+    if (claudeChain.present) {
+      map['claude_chain'] = Variable<String>(claudeChain.value);
+    }
+    if (description.present) {
+      map['description'] = Variable<String>(description.value);
+    }
+    if (pathsJson.present) {
+      map['paths_json'] = Variable<String>(pathsJson.value);
+    }
+    if (digestJson.present) {
+      map['digest_json'] = Variable<String>(digestJson.value);
+    }
+    if (digestStatus.present) {
+      map['digest_status'] = Variable<String>(digestStatus.value);
+    }
+    if (descEmbedding.present) {
+      map['desc_embedding'] = Variable<Uint8List>(descEmbedding.value);
+    }
+    if (textChars.present) {
+      map['text_chars'] = Variable<int>(textChars.value);
+    }
+    if (status.present) {
+      map['status'] = Variable<String>(status.value);
+    }
+    if (seenAt.present) {
+      map['seen_at'] = Variable<String>(seenAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<String>(updatedAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextFilesCompanion(')
+          ..write('id: $id, ')
+          ..write('dirId: $dirId, ')
+          ..write('relPath: $relPath, ')
+          ..write('size: $size, ')
+          ..write('mtime: $mtime, ')
+          ..write('sha256: $sha256, ')
+          ..write('kind: $kind, ')
+          ..write('claudeChain: $claudeChain, ')
+          ..write('description: $description, ')
+          ..write('pathsJson: $pathsJson, ')
+          ..write('digestJson: $digestJson, ')
+          ..write('digestStatus: $digestStatus, ')
+          ..write('descEmbedding: $descEmbedding, ')
+          ..write('textChars: $textChars, ')
+          ..write('status: $status, ')
+          ..write('seenAt: $seenAt, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class ContextText extends Table with TableInfo<ContextText, ContextTextData> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  ContextText(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _fileIdMeta = const VerificationMeta('fileId');
+  late final GeneratedColumn<int> fileId = GeneratedColumn<int>(
+    'file_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL PRIMARY KEY',
+  );
+  static const VerificationMeta _extractedTextMeta = const VerificationMeta(
+    'extractedText',
+  );
+  late final GeneratedColumn<String> extractedText = GeneratedColumn<String>(
+    'extracted_text',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _charsMeta = const VerificationMeta('chars');
+  late final GeneratedColumn<int> chars = GeneratedColumn<int>(
+    'chars',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [fileId, extractedText, chars];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'context_text';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ContextTextData> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('file_id')) {
+      context.handle(
+        _fileIdMeta,
+        fileId.isAcceptableOrUnknown(data['file_id']!, _fileIdMeta),
+      );
+    }
+    if (data.containsKey('extracted_text')) {
+      context.handle(
+        _extractedTextMeta,
+        extractedText.isAcceptableOrUnknown(
+          data['extracted_text']!,
+          _extractedTextMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_extractedTextMeta);
+    }
+    if (data.containsKey('chars')) {
+      context.handle(
+        _charsMeta,
+        chars.isAcceptableOrUnknown(data['chars']!, _charsMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {fileId};
+  @override
+  ContextTextData map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ContextTextData(
+      fileId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}file_id'],
+      )!,
+      extractedText: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}extracted_text'],
+      )!,
+      chars: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}chars'],
+      )!,
+    );
+  }
+
+  @override
+  ContextText createAlias(String alias) {
+    return ContextText(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class ContextTextData extends DataClass implements Insertable<ContextTextData> {
+  final int fileId;
+  final String extractedText;
+  final int chars;
+  const ContextTextData({
+    required this.fileId,
+    required this.extractedText,
+    required this.chars,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['file_id'] = Variable<int>(fileId);
+    map['extracted_text'] = Variable<String>(extractedText);
+    map['chars'] = Variable<int>(chars);
+    return map;
+  }
+
+  ContextTextCompanion toCompanion(bool nullToAbsent) {
+    return ContextTextCompanion(
+      fileId: Value(fileId),
+      extractedText: Value(extractedText),
+      chars: Value(chars),
+    );
+  }
+
+  factory ContextTextData.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ContextTextData(
+      fileId: serializer.fromJson<int>(json['file_id']),
+      extractedText: serializer.fromJson<String>(json['extracted_text']),
+      chars: serializer.fromJson<int>(json['chars']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'file_id': serializer.toJson<int>(fileId),
+      'extracted_text': serializer.toJson<String>(extractedText),
+      'chars': serializer.toJson<int>(chars),
+    };
+  }
+
+  ContextTextData copyWith({int? fileId, String? extractedText, int? chars}) =>
+      ContextTextData(
+        fileId: fileId ?? this.fileId,
+        extractedText: extractedText ?? this.extractedText,
+        chars: chars ?? this.chars,
+      );
+  ContextTextData copyWithCompanion(ContextTextCompanion data) {
+    return ContextTextData(
+      fileId: data.fileId.present ? data.fileId.value : this.fileId,
+      extractedText: data.extractedText.present
+          ? data.extractedText.value
+          : this.extractedText,
+      chars: data.chars.present ? data.chars.value : this.chars,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextTextData(')
+          ..write('fileId: $fileId, ')
+          ..write('extractedText: $extractedText, ')
+          ..write('chars: $chars')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(fileId, extractedText, chars);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ContextTextData &&
+          other.fileId == this.fileId &&
+          other.extractedText == this.extractedText &&
+          other.chars == this.chars);
+}
+
+class ContextTextCompanion extends UpdateCompanion<ContextTextData> {
+  final Value<int> fileId;
+  final Value<String> extractedText;
+  final Value<int> chars;
+  const ContextTextCompanion({
+    this.fileId = const Value.absent(),
+    this.extractedText = const Value.absent(),
+    this.chars = const Value.absent(),
+  });
+  ContextTextCompanion.insert({
+    this.fileId = const Value.absent(),
+    required String extractedText,
+    this.chars = const Value.absent(),
+  }) : extractedText = Value(extractedText);
+  static Insertable<ContextTextData> custom({
+    Expression<int>? fileId,
+    Expression<String>? extractedText,
+    Expression<int>? chars,
+  }) {
+    return RawValuesInsertable({
+      if (fileId != null) 'file_id': fileId,
+      if (extractedText != null) 'extracted_text': extractedText,
+      if (chars != null) 'chars': chars,
+    });
+  }
+
+  ContextTextCompanion copyWith({
+    Value<int>? fileId,
+    Value<String>? extractedText,
+    Value<int>? chars,
+  }) {
+    return ContextTextCompanion(
+      fileId: fileId ?? this.fileId,
+      extractedText: extractedText ?? this.extractedText,
+      chars: chars ?? this.chars,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (fileId.present) {
+      map['file_id'] = Variable<int>(fileId.value);
+    }
+    if (extractedText.present) {
+      map['extracted_text'] = Variable<String>(extractedText.value);
+    }
+    if (chars.present) {
+      map['chars'] = Variable<int>(chars.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextTextCompanion(')
+          ..write('fileId: $fileId, ')
+          ..write('extractedText: $extractedText, ')
+          ..write('chars: $chars')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class ContextChunks extends Table with TableInfo<ContextChunks, ContextChunk> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  ContextChunks(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  late final GeneratedColumn<int> id = GeneratedColumn<int>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'PRIMARY KEY',
+  );
+  static const VerificationMeta _fileIdMeta = const VerificationMeta('fileId');
+  late final GeneratedColumn<int> fileId = GeneratedColumn<int>(
+    'file_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _seqMeta = const VerificationMeta('seq');
+  late final GeneratedColumn<int> seq = GeneratedColumn<int>(
+    'seq',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _locatorMeta = const VerificationMeta(
+    'locator',
+  );
+  late final GeneratedColumn<String> locator = GeneratedColumn<String>(
+    'locator',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT \'\'',
+    defaultValue: const CustomExpression('\'\''),
+  );
+  static const VerificationMeta _chunkTextMeta = const VerificationMeta(
+    'chunkText',
+  );
+  late final GeneratedColumn<String> chunkText = GeneratedColumn<String>(
+    'chunk_text',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  static const VerificationMeta _charsMeta = const VerificationMeta('chars');
+  late final GeneratedColumn<int> chars = GeneratedColumn<int>(
+    'chars',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _embeddingMeta = const VerificationMeta(
+    'embedding',
+  );
+  late final GeneratedColumn<Uint8List> embedding = GeneratedColumn<Uint8List>(
+    'embedding',
+    aliasedName,
+    true,
+    type: DriftSqlType.blob,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _dimsMeta = const VerificationMeta('dims');
+  late final GeneratedColumn<int> dims = GeneratedColumn<int>(
+    'dims',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    $customConstraints: 'NOT NULL DEFAULT 0',
+    defaultValue: const CustomExpression('0'),
+  );
+  static const VerificationMeta _embedModelMeta = const VerificationMeta(
+    'embedModel',
+  );
+  late final GeneratedColumn<String> embedModel = GeneratedColumn<String>(
+    'embed_model',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _embeddedAtMeta = const VerificationMeta(
+    'embeddedAt',
+  );
+  late final GeneratedColumn<String> embeddedAt = GeneratedColumn<String>(
+    'embedded_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _indexedAtMeta = const VerificationMeta(
+    'indexedAt',
+  );
+  late final GeneratedColumn<String> indexedAt = GeneratedColumn<String>(
+    'indexed_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    $customConstraints: '',
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  late final GeneratedColumn<String> createdAt = GeneratedColumn<String>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    $customConstraints: 'NOT NULL',
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    fileId,
+    seq,
+    locator,
+    chunkText,
+    chars,
+    embedding,
+    dims,
+    embedModel,
+    embeddedAt,
+    indexedAt,
+    createdAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'context_chunks';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<ContextChunk> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    }
+    if (data.containsKey('file_id')) {
+      context.handle(
+        _fileIdMeta,
+        fileId.isAcceptableOrUnknown(data['file_id']!, _fileIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_fileIdMeta);
+    }
+    if (data.containsKey('seq')) {
+      context.handle(
+        _seqMeta,
+        seq.isAcceptableOrUnknown(data['seq']!, _seqMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_seqMeta);
+    }
+    if (data.containsKey('locator')) {
+      context.handle(
+        _locatorMeta,
+        locator.isAcceptableOrUnknown(data['locator']!, _locatorMeta),
+      );
+    }
+    if (data.containsKey('chunk_text')) {
+      context.handle(
+        _chunkTextMeta,
+        chunkText.isAcceptableOrUnknown(data['chunk_text']!, _chunkTextMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_chunkTextMeta);
+    }
+    if (data.containsKey('chars')) {
+      context.handle(
+        _charsMeta,
+        chars.isAcceptableOrUnknown(data['chars']!, _charsMeta),
+      );
+    }
+    if (data.containsKey('embedding')) {
+      context.handle(
+        _embeddingMeta,
+        embedding.isAcceptableOrUnknown(data['embedding']!, _embeddingMeta),
+      );
+    }
+    if (data.containsKey('dims')) {
+      context.handle(
+        _dimsMeta,
+        dims.isAcceptableOrUnknown(data['dims']!, _dimsMeta),
+      );
+    }
+    if (data.containsKey('embed_model')) {
+      context.handle(
+        _embedModelMeta,
+        embedModel.isAcceptableOrUnknown(data['embed_model']!, _embedModelMeta),
+      );
+    }
+    if (data.containsKey('embedded_at')) {
+      context.handle(
+        _embeddedAtMeta,
+        embeddedAt.isAcceptableOrUnknown(data['embedded_at']!, _embeddedAtMeta),
+      );
+    }
+    if (data.containsKey('indexed_at')) {
+      context.handle(
+        _indexedAtMeta,
+        indexedAt.isAcceptableOrUnknown(data['indexed_at']!, _indexedAtMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  ContextChunk map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return ContextChunk(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}id'],
+      )!,
+      fileId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}file_id'],
+      )!,
+      seq: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}seq'],
+      )!,
+      locator: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}locator'],
+      )!,
+      chunkText: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}chunk_text'],
+      )!,
+      chars: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}chars'],
+      )!,
+      embedding: attachedDatabase.typeMapping.read(
+        DriftSqlType.blob,
+        data['${effectivePrefix}embedding'],
+      ),
+      dims: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}dims'],
+      )!,
+      embedModel: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}embed_model'],
+      ),
+      embeddedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}embedded_at'],
+      ),
+      indexedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}indexed_at'],
+      ),
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}created_at'],
+      )!,
+    );
+  }
+
+  @override
+  ContextChunks createAlias(String alias) {
+    return ContextChunks(attachedDatabase, alias);
+  }
+
+  @override
+  bool get isStrict => true;
+  @override
+  bool get dontWriteConstraints => true;
+}
+
+class ContextChunk extends DataClass implements Insertable<ContextChunk> {
+  final int id;
+  final int fileId;
+  final int seq;
+  final String locator;
+  final String chunkText;
+  final int chars;
+  final Uint8List? embedding;
+  final int dims;
+  final String? embedModel;
+  final String? embeddedAt;
+  final String? indexedAt;
+  final String createdAt;
+  const ContextChunk({
+    required this.id,
+    required this.fileId,
+    required this.seq,
+    required this.locator,
+    required this.chunkText,
+    required this.chars,
+    this.embedding,
+    required this.dims,
+    this.embedModel,
+    this.embeddedAt,
+    this.indexedAt,
+    required this.createdAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<int>(id);
+    map['file_id'] = Variable<int>(fileId);
+    map['seq'] = Variable<int>(seq);
+    map['locator'] = Variable<String>(locator);
+    map['chunk_text'] = Variable<String>(chunkText);
+    map['chars'] = Variable<int>(chars);
+    if (!nullToAbsent || embedding != null) {
+      map['embedding'] = Variable<Uint8List>(embedding);
+    }
+    map['dims'] = Variable<int>(dims);
+    if (!nullToAbsent || embedModel != null) {
+      map['embed_model'] = Variable<String>(embedModel);
+    }
+    if (!nullToAbsent || embeddedAt != null) {
+      map['embedded_at'] = Variable<String>(embeddedAt);
+    }
+    if (!nullToAbsent || indexedAt != null) {
+      map['indexed_at'] = Variable<String>(indexedAt);
+    }
+    map['created_at'] = Variable<String>(createdAt);
+    return map;
+  }
+
+  ContextChunksCompanion toCompanion(bool nullToAbsent) {
+    return ContextChunksCompanion(
+      id: Value(id),
+      fileId: Value(fileId),
+      seq: Value(seq),
+      locator: Value(locator),
+      chunkText: Value(chunkText),
+      chars: Value(chars),
+      embedding: embedding == null && nullToAbsent
+          ? const Value.absent()
+          : Value(embedding),
+      dims: Value(dims),
+      embedModel: embedModel == null && nullToAbsent
+          ? const Value.absent()
+          : Value(embedModel),
+      embeddedAt: embeddedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(embeddedAt),
+      indexedAt: indexedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(indexedAt),
+      createdAt: Value(createdAt),
+    );
+  }
+
+  factory ContextChunk.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return ContextChunk(
+      id: serializer.fromJson<int>(json['id']),
+      fileId: serializer.fromJson<int>(json['file_id']),
+      seq: serializer.fromJson<int>(json['seq']),
+      locator: serializer.fromJson<String>(json['locator']),
+      chunkText: serializer.fromJson<String>(json['chunk_text']),
+      chars: serializer.fromJson<int>(json['chars']),
+      embedding: serializer.fromJson<Uint8List?>(json['embedding']),
+      dims: serializer.fromJson<int>(json['dims']),
+      embedModel: serializer.fromJson<String?>(json['embed_model']),
+      embeddedAt: serializer.fromJson<String?>(json['embedded_at']),
+      indexedAt: serializer.fromJson<String?>(json['indexed_at']),
+      createdAt: serializer.fromJson<String>(json['created_at']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<int>(id),
+      'file_id': serializer.toJson<int>(fileId),
+      'seq': serializer.toJson<int>(seq),
+      'locator': serializer.toJson<String>(locator),
+      'chunk_text': serializer.toJson<String>(chunkText),
+      'chars': serializer.toJson<int>(chars),
+      'embedding': serializer.toJson<Uint8List?>(embedding),
+      'dims': serializer.toJson<int>(dims),
+      'embed_model': serializer.toJson<String?>(embedModel),
+      'embedded_at': serializer.toJson<String?>(embeddedAt),
+      'indexed_at': serializer.toJson<String?>(indexedAt),
+      'created_at': serializer.toJson<String>(createdAt),
+    };
+  }
+
+  ContextChunk copyWith({
+    int? id,
+    int? fileId,
+    int? seq,
+    String? locator,
+    String? chunkText,
+    int? chars,
+    Value<Uint8List?> embedding = const Value.absent(),
+    int? dims,
+    Value<String?> embedModel = const Value.absent(),
+    Value<String?> embeddedAt = const Value.absent(),
+    Value<String?> indexedAt = const Value.absent(),
+    String? createdAt,
+  }) => ContextChunk(
+    id: id ?? this.id,
+    fileId: fileId ?? this.fileId,
+    seq: seq ?? this.seq,
+    locator: locator ?? this.locator,
+    chunkText: chunkText ?? this.chunkText,
+    chars: chars ?? this.chars,
+    embedding: embedding.present ? embedding.value : this.embedding,
+    dims: dims ?? this.dims,
+    embedModel: embedModel.present ? embedModel.value : this.embedModel,
+    embeddedAt: embeddedAt.present ? embeddedAt.value : this.embeddedAt,
+    indexedAt: indexedAt.present ? indexedAt.value : this.indexedAt,
+    createdAt: createdAt ?? this.createdAt,
+  );
+  ContextChunk copyWithCompanion(ContextChunksCompanion data) {
+    return ContextChunk(
+      id: data.id.present ? data.id.value : this.id,
+      fileId: data.fileId.present ? data.fileId.value : this.fileId,
+      seq: data.seq.present ? data.seq.value : this.seq,
+      locator: data.locator.present ? data.locator.value : this.locator,
+      chunkText: data.chunkText.present ? data.chunkText.value : this.chunkText,
+      chars: data.chars.present ? data.chars.value : this.chars,
+      embedding: data.embedding.present ? data.embedding.value : this.embedding,
+      dims: data.dims.present ? data.dims.value : this.dims,
+      embedModel: data.embedModel.present
+          ? data.embedModel.value
+          : this.embedModel,
+      embeddedAt: data.embeddedAt.present
+          ? data.embeddedAt.value
+          : this.embeddedAt,
+      indexedAt: data.indexedAt.present ? data.indexedAt.value : this.indexedAt,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextChunk(')
+          ..write('id: $id, ')
+          ..write('fileId: $fileId, ')
+          ..write('seq: $seq, ')
+          ..write('locator: $locator, ')
+          ..write('chunkText: $chunkText, ')
+          ..write('chars: $chars, ')
+          ..write('embedding: $embedding, ')
+          ..write('dims: $dims, ')
+          ..write('embedModel: $embedModel, ')
+          ..write('embeddedAt: $embeddedAt, ')
+          ..write('indexedAt: $indexedAt, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    fileId,
+    seq,
+    locator,
+    chunkText,
+    chars,
+    $driftBlobEquality.hash(embedding),
+    dims,
+    embedModel,
+    embeddedAt,
+    indexedAt,
+    createdAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is ContextChunk &&
+          other.id == this.id &&
+          other.fileId == this.fileId &&
+          other.seq == this.seq &&
+          other.locator == this.locator &&
+          other.chunkText == this.chunkText &&
+          other.chars == this.chars &&
+          $driftBlobEquality.equals(other.embedding, this.embedding) &&
+          other.dims == this.dims &&
+          other.embedModel == this.embedModel &&
+          other.embeddedAt == this.embeddedAt &&
+          other.indexedAt == this.indexedAt &&
+          other.createdAt == this.createdAt);
+}
+
+class ContextChunksCompanion extends UpdateCompanion<ContextChunk> {
+  final Value<int> id;
+  final Value<int> fileId;
+  final Value<int> seq;
+  final Value<String> locator;
+  final Value<String> chunkText;
+  final Value<int> chars;
+  final Value<Uint8List?> embedding;
+  final Value<int> dims;
+  final Value<String?> embedModel;
+  final Value<String?> embeddedAt;
+  final Value<String?> indexedAt;
+  final Value<String> createdAt;
+  const ContextChunksCompanion({
+    this.id = const Value.absent(),
+    this.fileId = const Value.absent(),
+    this.seq = const Value.absent(),
+    this.locator = const Value.absent(),
+    this.chunkText = const Value.absent(),
+    this.chars = const Value.absent(),
+    this.embedding = const Value.absent(),
+    this.dims = const Value.absent(),
+    this.embedModel = const Value.absent(),
+    this.embeddedAt = const Value.absent(),
+    this.indexedAt = const Value.absent(),
+    this.createdAt = const Value.absent(),
+  });
+  ContextChunksCompanion.insert({
+    this.id = const Value.absent(),
+    required int fileId,
+    required int seq,
+    this.locator = const Value.absent(),
+    required String chunkText,
+    this.chars = const Value.absent(),
+    this.embedding = const Value.absent(),
+    this.dims = const Value.absent(),
+    this.embedModel = const Value.absent(),
+    this.embeddedAt = const Value.absent(),
+    this.indexedAt = const Value.absent(),
+    required String createdAt,
+  }) : fileId = Value(fileId),
+       seq = Value(seq),
+       chunkText = Value(chunkText),
+       createdAt = Value(createdAt);
+  static Insertable<ContextChunk> custom({
+    Expression<int>? id,
+    Expression<int>? fileId,
+    Expression<int>? seq,
+    Expression<String>? locator,
+    Expression<String>? chunkText,
+    Expression<int>? chars,
+    Expression<Uint8List>? embedding,
+    Expression<int>? dims,
+    Expression<String>? embedModel,
+    Expression<String>? embeddedAt,
+    Expression<String>? indexedAt,
+    Expression<String>? createdAt,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (fileId != null) 'file_id': fileId,
+      if (seq != null) 'seq': seq,
+      if (locator != null) 'locator': locator,
+      if (chunkText != null) 'chunk_text': chunkText,
+      if (chars != null) 'chars': chars,
+      if (embedding != null) 'embedding': embedding,
+      if (dims != null) 'dims': dims,
+      if (embedModel != null) 'embed_model': embedModel,
+      if (embeddedAt != null) 'embedded_at': embeddedAt,
+      if (indexedAt != null) 'indexed_at': indexedAt,
+      if (createdAt != null) 'created_at': createdAt,
+    });
+  }
+
+  ContextChunksCompanion copyWith({
+    Value<int>? id,
+    Value<int>? fileId,
+    Value<int>? seq,
+    Value<String>? locator,
+    Value<String>? chunkText,
+    Value<int>? chars,
+    Value<Uint8List?>? embedding,
+    Value<int>? dims,
+    Value<String?>? embedModel,
+    Value<String?>? embeddedAt,
+    Value<String?>? indexedAt,
+    Value<String>? createdAt,
+  }) {
+    return ContextChunksCompanion(
+      id: id ?? this.id,
+      fileId: fileId ?? this.fileId,
+      seq: seq ?? this.seq,
+      locator: locator ?? this.locator,
+      chunkText: chunkText ?? this.chunkText,
+      chars: chars ?? this.chars,
+      embedding: embedding ?? this.embedding,
+      dims: dims ?? this.dims,
+      embedModel: embedModel ?? this.embedModel,
+      embeddedAt: embeddedAt ?? this.embeddedAt,
+      indexedAt: indexedAt ?? this.indexedAt,
+      createdAt: createdAt ?? this.createdAt,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<int>(id.value);
+    }
+    if (fileId.present) {
+      map['file_id'] = Variable<int>(fileId.value);
+    }
+    if (seq.present) {
+      map['seq'] = Variable<int>(seq.value);
+    }
+    if (locator.present) {
+      map['locator'] = Variable<String>(locator.value);
+    }
+    if (chunkText.present) {
+      map['chunk_text'] = Variable<String>(chunkText.value);
+    }
+    if (chars.present) {
+      map['chars'] = Variable<int>(chars.value);
+    }
+    if (embedding.present) {
+      map['embedding'] = Variable<Uint8List>(embedding.value);
+    }
+    if (dims.present) {
+      map['dims'] = Variable<int>(dims.value);
+    }
+    if (embedModel.present) {
+      map['embed_model'] = Variable<String>(embedModel.value);
+    }
+    if (embeddedAt.present) {
+      map['embedded_at'] = Variable<String>(embeddedAt.value);
+    }
+    if (indexedAt.present) {
+      map['indexed_at'] = Variable<String>(indexedAt.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<String>(createdAt.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('ContextChunksCompanion(')
+          ..write('id: $id, ')
+          ..write('fileId: $fileId, ')
+          ..write('seq: $seq, ')
+          ..write('locator: $locator, ')
+          ..write('chunkText: $chunkText, ')
+          ..write('chars: $chars, ')
+          ..write('embedding: $embedding, ')
+          ..write('dims: $dims, ')
+          ..write('embedModel: $embedModel, ')
+          ..write('embeddedAt: $embeddedAt, ')
+          ..write('indexedAt: $indexedAt, ')
+          ..write('createdAt: $createdAt')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$BondDatabase extends GeneratedDatabase {
   _$BondDatabase(QueryExecutor e) : super(e);
   $BondDatabaseManager get managers => $BondDatabaseManager(this);
@@ -14528,6 +17741,31 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     'ix_attachment_chunks_unindexed',
     'CREATE INDEX ix_attachment_chunks_unindexed ON attachment_chunks (indexed_at)',
   );
+  late final ContextDirs contextDirs = ContextDirs(this);
+  late final ContextLinks contextLinks = ContextLinks(this);
+  late final Index ixContextLinksScope = Index(
+    'ix_context_links_scope',
+    'CREATE INDEX ix_context_links_scope ON context_links (scope_kind, source, scope_key)',
+  );
+  late final ContextFiles contextFiles = ContextFiles(this);
+  late final Index ixContextFilesPath = Index(
+    'ix_context_files_path',
+    'CREATE UNIQUE INDEX ix_context_files_path ON context_files (dir_id, rel_path)',
+  );
+  late final ContextText contextText = ContextText(this);
+  late final ContextChunks contextChunks = ContextChunks(this);
+  late final Index ixContextChunksSeq = Index(
+    'ix_context_chunks_seq',
+    'CREATE UNIQUE INDEX ix_context_chunks_seq ON context_chunks (file_id, seq)',
+  );
+  late final Index ixContextChunksUnindexed = Index(
+    'ix_context_chunks_unindexed',
+    'CREATE INDEX ix_context_chunks_unindexed ON context_chunks (indexed_at)',
+  );
+  late final Index ixContextChunksFile = Index(
+    'ix_context_chunks_file',
+    'CREATE INDEX ix_context_chunks_file ON context_chunks (file_id)',
+  );
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -14574,6 +17812,16 @@ abstract class _$BondDatabase extends GeneratedDatabase {
     attachmentChunks,
     ixAttachmentChunksSeq,
     ixAttachmentChunksUnindexed,
+    contextDirs,
+    contextLinks,
+    ixContextLinksScope,
+    contextFiles,
+    ixContextFilesPath,
+    contextText,
+    contextChunks,
+    ixContextChunksSeq,
+    ixContextChunksUnindexed,
+    ixContextChunksFile,
   ];
 }
 
@@ -18482,6 +21730,7 @@ typedef $DraftsCreateCompanionBuilder =
       required String updatedAt,
       Value<String?> optionsJson,
       Value<int> optionsDismissed,
+      Value<String?> contextJson,
       Value<int> rowid,
     });
 typedef $DraftsUpdateCompanionBuilder =
@@ -18498,6 +21747,7 @@ typedef $DraftsUpdateCompanionBuilder =
       Value<String> updatedAt,
       Value<String?> optionsJson,
       Value<int> optionsDismissed,
+      Value<String?> contextJson,
       Value<int> rowid,
     });
 
@@ -18566,6 +21816,11 @@ class $DraftsFilterComposer extends Composer<_$BondDatabase, Drafts> {
 
   ColumnFilters<int> get optionsDismissed => $composableBuilder(
     column: $table.optionsDismissed,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get contextJson => $composableBuilder(
+    column: $table.contextJson,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -18637,6 +21892,11 @@ class $DraftsOrderingComposer extends Composer<_$BondDatabase, Drafts> {
     column: $table.optionsDismissed,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get contextJson => $composableBuilder(
+    column: $table.contextJson,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $DraftsAnnotationComposer extends Composer<_$BondDatabase, Drafts> {
@@ -18692,6 +21952,11 @@ class $DraftsAnnotationComposer extends Composer<_$BondDatabase, Drafts> {
     column: $table.optionsDismissed,
     builder: (column) => column,
   );
+
+  GeneratedColumn<String> get contextJson => $composableBuilder(
+    column: $table.contextJson,
+    builder: (column) => column,
+  );
 }
 
 class $DraftsTableManager
@@ -18734,6 +21999,7 @@ class $DraftsTableManager
                 Value<String> updatedAt = const Value.absent(),
                 Value<String?> optionsJson = const Value.absent(),
                 Value<int> optionsDismissed = const Value.absent(),
+                Value<String?> contextJson = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => DraftsCompanion(
                 source: source,
@@ -18748,6 +22014,7 @@ class $DraftsTableManager
                 updatedAt: updatedAt,
                 optionsJson: optionsJson,
                 optionsDismissed: optionsDismissed,
+                contextJson: contextJson,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -18764,6 +22031,7 @@ class $DraftsTableManager
                 required String updatedAt,
                 Value<String?> optionsJson = const Value.absent(),
                 Value<int> optionsDismissed = const Value.absent(),
+                Value<String?> contextJson = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => DraftsCompanion.insert(
                 source: source,
@@ -18778,6 +22046,7 @@ class $DraftsTableManager
                 updatedAt: updatedAt,
                 optionsJson: optionsJson,
                 optionsDismissed: optionsDismissed,
+                contextJson: contextJson,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -21228,6 +24497,1528 @@ typedef $AttachmentChunksProcessedTableManager =
       AttachmentChunk,
       PrefetchHooks Function()
     >;
+typedef $ContextDirsCreateCompanionBuilder =
+    ContextDirsCompanion Function({
+      required String id,
+      required String path,
+      required String displayName,
+      Value<Uint8List?> bookmark,
+      Value<String> status,
+      Value<String?> error,
+      Value<String?> walkedAt,
+      Value<String?> rootHash,
+      Value<int> filesCount,
+      Value<int> textBytes,
+      Value<String?> briefJson,
+      Value<String?> briefHash,
+      Value<int> digests,
+      Value<int> honorGitignore,
+      required String createdAt,
+      required String updatedAt,
+      Value<int> rowid,
+    });
+typedef $ContextDirsUpdateCompanionBuilder =
+    ContextDirsCompanion Function({
+      Value<String> id,
+      Value<String> path,
+      Value<String> displayName,
+      Value<Uint8List?> bookmark,
+      Value<String> status,
+      Value<String?> error,
+      Value<String?> walkedAt,
+      Value<String?> rootHash,
+      Value<int> filesCount,
+      Value<int> textBytes,
+      Value<String?> briefJson,
+      Value<String?> briefHash,
+      Value<int> digests,
+      Value<int> honorGitignore,
+      Value<String> createdAt,
+      Value<String> updatedAt,
+      Value<int> rowid,
+    });
+
+class $ContextDirsFilterComposer extends Composer<_$BondDatabase, ContextDirs> {
+  $ContextDirsFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get path => $composableBuilder(
+    column: $table.path,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get displayName => $composableBuilder(
+    column: $table.displayName,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get bookmark => $composableBuilder(
+    column: $table.bookmark,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get error => $composableBuilder(
+    column: $table.error,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get walkedAt => $composableBuilder(
+    column: $table.walkedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get rootHash => $composableBuilder(
+    column: $table.rootHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get filesCount => $composableBuilder(
+    column: $table.filesCount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get textBytes => $composableBuilder(
+    column: $table.textBytes,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get briefJson => $composableBuilder(
+    column: $table.briefJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get briefHash => $composableBuilder(
+    column: $table.briefHash,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get digests => $composableBuilder(
+    column: $table.digests,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get honorGitignore => $composableBuilder(
+    column: $table.honorGitignore,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $ContextDirsOrderingComposer
+    extends Composer<_$BondDatabase, ContextDirs> {
+  $ContextDirsOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get path => $composableBuilder(
+    column: $table.path,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get displayName => $composableBuilder(
+    column: $table.displayName,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get bookmark => $composableBuilder(
+    column: $table.bookmark,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get error => $composableBuilder(
+    column: $table.error,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get walkedAt => $composableBuilder(
+    column: $table.walkedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get rootHash => $composableBuilder(
+    column: $table.rootHash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get filesCount => $composableBuilder(
+    column: $table.filesCount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get textBytes => $composableBuilder(
+    column: $table.textBytes,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get briefJson => $composableBuilder(
+    column: $table.briefJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get briefHash => $composableBuilder(
+    column: $table.briefHash,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get digests => $composableBuilder(
+    column: $table.digests,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get honorGitignore => $composableBuilder(
+    column: $table.honorGitignore,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $ContextDirsAnnotationComposer
+    extends Composer<_$BondDatabase, ContextDirs> {
+  $ContextDirsAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get path =>
+      $composableBuilder(column: $table.path, builder: (column) => column);
+
+  GeneratedColumn<String> get displayName => $composableBuilder(
+    column: $table.displayName,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<Uint8List> get bookmark =>
+      $composableBuilder(column: $table.bookmark, builder: (column) => column);
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<String> get error =>
+      $composableBuilder(column: $table.error, builder: (column) => column);
+
+  GeneratedColumn<String> get walkedAt =>
+      $composableBuilder(column: $table.walkedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get rootHash =>
+      $composableBuilder(column: $table.rootHash, builder: (column) => column);
+
+  GeneratedColumn<int> get filesCount => $composableBuilder(
+    column: $table.filesCount,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get textBytes =>
+      $composableBuilder(column: $table.textBytes, builder: (column) => column);
+
+  GeneratedColumn<String> get briefJson =>
+      $composableBuilder(column: $table.briefJson, builder: (column) => column);
+
+  GeneratedColumn<String> get briefHash =>
+      $composableBuilder(column: $table.briefHash, builder: (column) => column);
+
+  GeneratedColumn<int> get digests =>
+      $composableBuilder(column: $table.digests, builder: (column) => column);
+
+  GeneratedColumn<int> get honorGitignore => $composableBuilder(
+    column: $table.honorGitignore,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $ContextDirsTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          ContextDirs,
+          ContextDir,
+          $ContextDirsFilterComposer,
+          $ContextDirsOrderingComposer,
+          $ContextDirsAnnotationComposer,
+          $ContextDirsCreateCompanionBuilder,
+          $ContextDirsUpdateCompanionBuilder,
+          (ContextDir, BaseReferences<_$BondDatabase, ContextDirs, ContextDir>),
+          ContextDir,
+          PrefetchHooks Function()
+        > {
+  $ContextDirsTableManager(_$BondDatabase db, ContextDirs table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $ContextDirsFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $ContextDirsOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $ContextDirsAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> path = const Value.absent(),
+                Value<String> displayName = const Value.absent(),
+                Value<Uint8List?> bookmark = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String?> error = const Value.absent(),
+                Value<String?> walkedAt = const Value.absent(),
+                Value<String?> rootHash = const Value.absent(),
+                Value<int> filesCount = const Value.absent(),
+                Value<int> textBytes = const Value.absent(),
+                Value<String?> briefJson = const Value.absent(),
+                Value<String?> briefHash = const Value.absent(),
+                Value<int> digests = const Value.absent(),
+                Value<int> honorGitignore = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => ContextDirsCompanion(
+                id: id,
+                path: path,
+                displayName: displayName,
+                bookmark: bookmark,
+                status: status,
+                error: error,
+                walkedAt: walkedAt,
+                rootHash: rootHash,
+                filesCount: filesCount,
+                textBytes: textBytes,
+                briefJson: briefJson,
+                briefHash: briefHash,
+                digests: digests,
+                honorGitignore: honorGitignore,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String path,
+                required String displayName,
+                Value<Uint8List?> bookmark = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String?> error = const Value.absent(),
+                Value<String?> walkedAt = const Value.absent(),
+                Value<String?> rootHash = const Value.absent(),
+                Value<int> filesCount = const Value.absent(),
+                Value<int> textBytes = const Value.absent(),
+                Value<String?> briefJson = const Value.absent(),
+                Value<String?> briefHash = const Value.absent(),
+                Value<int> digests = const Value.absent(),
+                Value<int> honorGitignore = const Value.absent(),
+                required String createdAt,
+                required String updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => ContextDirsCompanion.insert(
+                id: id,
+                path: path,
+                displayName: displayName,
+                bookmark: bookmark,
+                status: status,
+                error: error,
+                walkedAt: walkedAt,
+                rootHash: rootHash,
+                filesCount: filesCount,
+                textBytes: textBytes,
+                briefJson: briefJson,
+                briefHash: briefHash,
+                digests: digests,
+                honorGitignore: honorGitignore,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $ContextDirsProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      ContextDirs,
+      ContextDir,
+      $ContextDirsFilterComposer,
+      $ContextDirsOrderingComposer,
+      $ContextDirsAnnotationComposer,
+      $ContextDirsCreateCompanionBuilder,
+      $ContextDirsUpdateCompanionBuilder,
+      (ContextDir, BaseReferences<_$BondDatabase, ContextDirs, ContextDir>),
+      ContextDir,
+      PrefetchHooks Function()
+    >;
+typedef $ContextLinksCreateCompanionBuilder =
+    ContextLinksCompanion Function({
+      required String dirId,
+      required String scopeKind,
+      Value<String> source,
+      required String scopeKey,
+      required String addedAt,
+      Value<int> rowid,
+    });
+typedef $ContextLinksUpdateCompanionBuilder =
+    ContextLinksCompanion Function({
+      Value<String> dirId,
+      Value<String> scopeKind,
+      Value<String> source,
+      Value<String> scopeKey,
+      Value<String> addedAt,
+      Value<int> rowid,
+    });
+
+class $ContextLinksFilterComposer
+    extends Composer<_$BondDatabase, ContextLinks> {
+  $ContextLinksFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get dirId => $composableBuilder(
+    column: $table.dirId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get scopeKind => $composableBuilder(
+    column: $table.scopeKind,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get scopeKey => $composableBuilder(
+    column: $table.scopeKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get addedAt => $composableBuilder(
+    column: $table.addedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $ContextLinksOrderingComposer
+    extends Composer<_$BondDatabase, ContextLinks> {
+  $ContextLinksOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get dirId => $composableBuilder(
+    column: $table.dirId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get scopeKind => $composableBuilder(
+    column: $table.scopeKind,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get scopeKey => $composableBuilder(
+    column: $table.scopeKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get addedAt => $composableBuilder(
+    column: $table.addedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $ContextLinksAnnotationComposer
+    extends Composer<_$BondDatabase, ContextLinks> {
+  $ContextLinksAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get dirId =>
+      $composableBuilder(column: $table.dirId, builder: (column) => column);
+
+  GeneratedColumn<String> get scopeKind =>
+      $composableBuilder(column: $table.scopeKind, builder: (column) => column);
+
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<String> get scopeKey =>
+      $composableBuilder(column: $table.scopeKey, builder: (column) => column);
+
+  GeneratedColumn<String> get addedAt =>
+      $composableBuilder(column: $table.addedAt, builder: (column) => column);
+}
+
+class $ContextLinksTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          ContextLinks,
+          ContextLink,
+          $ContextLinksFilterComposer,
+          $ContextLinksOrderingComposer,
+          $ContextLinksAnnotationComposer,
+          $ContextLinksCreateCompanionBuilder,
+          $ContextLinksUpdateCompanionBuilder,
+          (
+            ContextLink,
+            BaseReferences<_$BondDatabase, ContextLinks, ContextLink>,
+          ),
+          ContextLink,
+          PrefetchHooks Function()
+        > {
+  $ContextLinksTableManager(_$BondDatabase db, ContextLinks table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $ContextLinksFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $ContextLinksOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $ContextLinksAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> dirId = const Value.absent(),
+                Value<String> scopeKind = const Value.absent(),
+                Value<String> source = const Value.absent(),
+                Value<String> scopeKey = const Value.absent(),
+                Value<String> addedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => ContextLinksCompanion(
+                dirId: dirId,
+                scopeKind: scopeKind,
+                source: source,
+                scopeKey: scopeKey,
+                addedAt: addedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String dirId,
+                required String scopeKind,
+                Value<String> source = const Value.absent(),
+                required String scopeKey,
+                required String addedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => ContextLinksCompanion.insert(
+                dirId: dirId,
+                scopeKind: scopeKind,
+                source: source,
+                scopeKey: scopeKey,
+                addedAt: addedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $ContextLinksProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      ContextLinks,
+      ContextLink,
+      $ContextLinksFilterComposer,
+      $ContextLinksOrderingComposer,
+      $ContextLinksAnnotationComposer,
+      $ContextLinksCreateCompanionBuilder,
+      $ContextLinksUpdateCompanionBuilder,
+      (ContextLink, BaseReferences<_$BondDatabase, ContextLinks, ContextLink>),
+      ContextLink,
+      PrefetchHooks Function()
+    >;
+typedef $ContextFilesCreateCompanionBuilder =
+    ContextFilesCompanion Function({
+      Value<int> id,
+      required String dirId,
+      required String relPath,
+      Value<int> size,
+      Value<String> mtime,
+      Value<String> sha256,
+      Value<String> kind,
+      Value<String> claudeChain,
+      Value<String?> description,
+      Value<String?> pathsJson,
+      Value<String?> digestJson,
+      Value<String> digestStatus,
+      Value<Uint8List?> descEmbedding,
+      Value<int> textChars,
+      Value<String> status,
+      required String seenAt,
+      required String updatedAt,
+    });
+typedef $ContextFilesUpdateCompanionBuilder =
+    ContextFilesCompanion Function({
+      Value<int> id,
+      Value<String> dirId,
+      Value<String> relPath,
+      Value<int> size,
+      Value<String> mtime,
+      Value<String> sha256,
+      Value<String> kind,
+      Value<String> claudeChain,
+      Value<String?> description,
+      Value<String?> pathsJson,
+      Value<String?> digestJson,
+      Value<String> digestStatus,
+      Value<Uint8List?> descEmbedding,
+      Value<int> textChars,
+      Value<String> status,
+      Value<String> seenAt,
+      Value<String> updatedAt,
+    });
+
+class $ContextFilesFilterComposer
+    extends Composer<_$BondDatabase, ContextFiles> {
+  $ContextFilesFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get dirId => $composableBuilder(
+    column: $table.dirId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get relPath => $composableBuilder(
+    column: $table.relPath,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get size => $composableBuilder(
+    column: $table.size,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get mtime => $composableBuilder(
+    column: $table.mtime,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get sha256 => $composableBuilder(
+    column: $table.sha256,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get kind => $composableBuilder(
+    column: $table.kind,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get claudeChain => $composableBuilder(
+    column: $table.claudeChain,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get pathsJson => $composableBuilder(
+    column: $table.pathsJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get digestJson => $composableBuilder(
+    column: $table.digestJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get digestStatus => $composableBuilder(
+    column: $table.digestStatus,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get descEmbedding => $composableBuilder(
+    column: $table.descEmbedding,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get textChars => $composableBuilder(
+    column: $table.textChars,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get seenAt => $composableBuilder(
+    column: $table.seenAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $ContextFilesOrderingComposer
+    extends Composer<_$BondDatabase, ContextFiles> {
+  $ContextFilesOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get dirId => $composableBuilder(
+    column: $table.dirId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get relPath => $composableBuilder(
+    column: $table.relPath,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get size => $composableBuilder(
+    column: $table.size,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get mtime => $composableBuilder(
+    column: $table.mtime,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get sha256 => $composableBuilder(
+    column: $table.sha256,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get kind => $composableBuilder(
+    column: $table.kind,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get claudeChain => $composableBuilder(
+    column: $table.claudeChain,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get pathsJson => $composableBuilder(
+    column: $table.pathsJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get digestJson => $composableBuilder(
+    column: $table.digestJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get digestStatus => $composableBuilder(
+    column: $table.digestStatus,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get descEmbedding => $composableBuilder(
+    column: $table.descEmbedding,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get textChars => $composableBuilder(
+    column: $table.textChars,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get status => $composableBuilder(
+    column: $table.status,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get seenAt => $composableBuilder(
+    column: $table.seenAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $ContextFilesAnnotationComposer
+    extends Composer<_$BondDatabase, ContextFiles> {
+  $ContextFilesAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get dirId =>
+      $composableBuilder(column: $table.dirId, builder: (column) => column);
+
+  GeneratedColumn<String> get relPath =>
+      $composableBuilder(column: $table.relPath, builder: (column) => column);
+
+  GeneratedColumn<int> get size =>
+      $composableBuilder(column: $table.size, builder: (column) => column);
+
+  GeneratedColumn<String> get mtime =>
+      $composableBuilder(column: $table.mtime, builder: (column) => column);
+
+  GeneratedColumn<String> get sha256 =>
+      $composableBuilder(column: $table.sha256, builder: (column) => column);
+
+  GeneratedColumn<String> get kind =>
+      $composableBuilder(column: $table.kind, builder: (column) => column);
+
+  GeneratedColumn<String> get claudeChain => $composableBuilder(
+    column: $table.claudeChain,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get description => $composableBuilder(
+    column: $table.description,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get pathsJson =>
+      $composableBuilder(column: $table.pathsJson, builder: (column) => column);
+
+  GeneratedColumn<String> get digestJson => $composableBuilder(
+    column: $table.digestJson,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get digestStatus => $composableBuilder(
+    column: $table.digestStatus,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<Uint8List> get descEmbedding => $composableBuilder(
+    column: $table.descEmbedding,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get textChars =>
+      $composableBuilder(column: $table.textChars, builder: (column) => column);
+
+  GeneratedColumn<String> get status =>
+      $composableBuilder(column: $table.status, builder: (column) => column);
+
+  GeneratedColumn<String> get seenAt =>
+      $composableBuilder(column: $table.seenAt, builder: (column) => column);
+
+  GeneratedColumn<String> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $ContextFilesTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          ContextFiles,
+          ContextFile,
+          $ContextFilesFilterComposer,
+          $ContextFilesOrderingComposer,
+          $ContextFilesAnnotationComposer,
+          $ContextFilesCreateCompanionBuilder,
+          $ContextFilesUpdateCompanionBuilder,
+          (
+            ContextFile,
+            BaseReferences<_$BondDatabase, ContextFiles, ContextFile>,
+          ),
+          ContextFile,
+          PrefetchHooks Function()
+        > {
+  $ContextFilesTableManager(_$BondDatabase db, ContextFiles table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $ContextFilesFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $ContextFilesOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $ContextFilesAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<String> dirId = const Value.absent(),
+                Value<String> relPath = const Value.absent(),
+                Value<int> size = const Value.absent(),
+                Value<String> mtime = const Value.absent(),
+                Value<String> sha256 = const Value.absent(),
+                Value<String> kind = const Value.absent(),
+                Value<String> claudeChain = const Value.absent(),
+                Value<String?> description = const Value.absent(),
+                Value<String?> pathsJson = const Value.absent(),
+                Value<String?> digestJson = const Value.absent(),
+                Value<String> digestStatus = const Value.absent(),
+                Value<Uint8List?> descEmbedding = const Value.absent(),
+                Value<int> textChars = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                Value<String> seenAt = const Value.absent(),
+                Value<String> updatedAt = const Value.absent(),
+              }) => ContextFilesCompanion(
+                id: id,
+                dirId: dirId,
+                relPath: relPath,
+                size: size,
+                mtime: mtime,
+                sha256: sha256,
+                kind: kind,
+                claudeChain: claudeChain,
+                description: description,
+                pathsJson: pathsJson,
+                digestJson: digestJson,
+                digestStatus: digestStatus,
+                descEmbedding: descEmbedding,
+                textChars: textChars,
+                status: status,
+                seenAt: seenAt,
+                updatedAt: updatedAt,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required String dirId,
+                required String relPath,
+                Value<int> size = const Value.absent(),
+                Value<String> mtime = const Value.absent(),
+                Value<String> sha256 = const Value.absent(),
+                Value<String> kind = const Value.absent(),
+                Value<String> claudeChain = const Value.absent(),
+                Value<String?> description = const Value.absent(),
+                Value<String?> pathsJson = const Value.absent(),
+                Value<String?> digestJson = const Value.absent(),
+                Value<String> digestStatus = const Value.absent(),
+                Value<Uint8List?> descEmbedding = const Value.absent(),
+                Value<int> textChars = const Value.absent(),
+                Value<String> status = const Value.absent(),
+                required String seenAt,
+                required String updatedAt,
+              }) => ContextFilesCompanion.insert(
+                id: id,
+                dirId: dirId,
+                relPath: relPath,
+                size: size,
+                mtime: mtime,
+                sha256: sha256,
+                kind: kind,
+                claudeChain: claudeChain,
+                description: description,
+                pathsJson: pathsJson,
+                digestJson: digestJson,
+                digestStatus: digestStatus,
+                descEmbedding: descEmbedding,
+                textChars: textChars,
+                status: status,
+                seenAt: seenAt,
+                updatedAt: updatedAt,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $ContextFilesProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      ContextFiles,
+      ContextFile,
+      $ContextFilesFilterComposer,
+      $ContextFilesOrderingComposer,
+      $ContextFilesAnnotationComposer,
+      $ContextFilesCreateCompanionBuilder,
+      $ContextFilesUpdateCompanionBuilder,
+      (ContextFile, BaseReferences<_$BondDatabase, ContextFiles, ContextFile>),
+      ContextFile,
+      PrefetchHooks Function()
+    >;
+typedef $ContextTextCreateCompanionBuilder =
+    ContextTextCompanion Function({
+      Value<int> fileId,
+      required String extractedText,
+      Value<int> chars,
+    });
+typedef $ContextTextUpdateCompanionBuilder =
+    ContextTextCompanion Function({
+      Value<int> fileId,
+      Value<String> extractedText,
+      Value<int> chars,
+    });
+
+class $ContextTextFilterComposer extends Composer<_$BondDatabase, ContextText> {
+  $ContextTextFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get fileId => $composableBuilder(
+    column: $table.fileId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get extractedText => $composableBuilder(
+    column: $table.extractedText,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get chars => $composableBuilder(
+    column: $table.chars,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $ContextTextOrderingComposer
+    extends Composer<_$BondDatabase, ContextText> {
+  $ContextTextOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get fileId => $composableBuilder(
+    column: $table.fileId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get extractedText => $composableBuilder(
+    column: $table.extractedText,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get chars => $composableBuilder(
+    column: $table.chars,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $ContextTextAnnotationComposer
+    extends Composer<_$BondDatabase, ContextText> {
+  $ContextTextAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get fileId =>
+      $composableBuilder(column: $table.fileId, builder: (column) => column);
+
+  GeneratedColumn<String> get extractedText => $composableBuilder(
+    column: $table.extractedText,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get chars =>
+      $composableBuilder(column: $table.chars, builder: (column) => column);
+}
+
+class $ContextTextTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          ContextText,
+          ContextTextData,
+          $ContextTextFilterComposer,
+          $ContextTextOrderingComposer,
+          $ContextTextAnnotationComposer,
+          $ContextTextCreateCompanionBuilder,
+          $ContextTextUpdateCompanionBuilder,
+          (
+            ContextTextData,
+            BaseReferences<_$BondDatabase, ContextText, ContextTextData>,
+          ),
+          ContextTextData,
+          PrefetchHooks Function()
+        > {
+  $ContextTextTableManager(_$BondDatabase db, ContextText table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $ContextTextFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $ContextTextOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $ContextTextAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> fileId = const Value.absent(),
+                Value<String> extractedText = const Value.absent(),
+                Value<int> chars = const Value.absent(),
+              }) => ContextTextCompanion(
+                fileId: fileId,
+                extractedText: extractedText,
+                chars: chars,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> fileId = const Value.absent(),
+                required String extractedText,
+                Value<int> chars = const Value.absent(),
+              }) => ContextTextCompanion.insert(
+                fileId: fileId,
+                extractedText: extractedText,
+                chars: chars,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $ContextTextProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      ContextText,
+      ContextTextData,
+      $ContextTextFilterComposer,
+      $ContextTextOrderingComposer,
+      $ContextTextAnnotationComposer,
+      $ContextTextCreateCompanionBuilder,
+      $ContextTextUpdateCompanionBuilder,
+      (
+        ContextTextData,
+        BaseReferences<_$BondDatabase, ContextText, ContextTextData>,
+      ),
+      ContextTextData,
+      PrefetchHooks Function()
+    >;
+typedef $ContextChunksCreateCompanionBuilder =
+    ContextChunksCompanion Function({
+      Value<int> id,
+      required int fileId,
+      required int seq,
+      Value<String> locator,
+      required String chunkText,
+      Value<int> chars,
+      Value<Uint8List?> embedding,
+      Value<int> dims,
+      Value<String?> embedModel,
+      Value<String?> embeddedAt,
+      Value<String?> indexedAt,
+      required String createdAt,
+    });
+typedef $ContextChunksUpdateCompanionBuilder =
+    ContextChunksCompanion Function({
+      Value<int> id,
+      Value<int> fileId,
+      Value<int> seq,
+      Value<String> locator,
+      Value<String> chunkText,
+      Value<int> chars,
+      Value<Uint8List?> embedding,
+      Value<int> dims,
+      Value<String?> embedModel,
+      Value<String?> embeddedAt,
+      Value<String?> indexedAt,
+      Value<String> createdAt,
+    });
+
+class $ContextChunksFilterComposer
+    extends Composer<_$BondDatabase, ContextChunks> {
+  $ContextChunksFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get fileId => $composableBuilder(
+    column: $table.fileId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get seq => $composableBuilder(
+    column: $table.seq,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get locator => $composableBuilder(
+    column: $table.locator,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get chunkText => $composableBuilder(
+    column: $table.chunkText,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get chars => $composableBuilder(
+    column: $table.chars,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<Uint8List> get embedding => $composableBuilder(
+    column: $table.embedding,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get dims => $composableBuilder(
+    column: $table.dims,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get indexedAt => $composableBuilder(
+    column: $table.indexedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $ContextChunksOrderingComposer
+    extends Composer<_$BondDatabase, ContextChunks> {
+  $ContextChunksOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<int> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get fileId => $composableBuilder(
+    column: $table.fileId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get seq => $composableBuilder(
+    column: $table.seq,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get locator => $composableBuilder(
+    column: $table.locator,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get chunkText => $composableBuilder(
+    column: $table.chunkText,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get chars => $composableBuilder(
+    column: $table.chars,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<Uint8List> get embedding => $composableBuilder(
+    column: $table.embedding,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get dims => $composableBuilder(
+    column: $table.dims,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get indexedAt => $composableBuilder(
+    column: $table.indexedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $ContextChunksAnnotationComposer
+    extends Composer<_$BondDatabase, ContextChunks> {
+  $ContextChunksAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<int> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<int> get fileId =>
+      $composableBuilder(column: $table.fileId, builder: (column) => column);
+
+  GeneratedColumn<int> get seq =>
+      $composableBuilder(column: $table.seq, builder: (column) => column);
+
+  GeneratedColumn<String> get locator =>
+      $composableBuilder(column: $table.locator, builder: (column) => column);
+
+  GeneratedColumn<String> get chunkText =>
+      $composableBuilder(column: $table.chunkText, builder: (column) => column);
+
+  GeneratedColumn<int> get chars =>
+      $composableBuilder(column: $table.chars, builder: (column) => column);
+
+  GeneratedColumn<Uint8List> get embedding =>
+      $composableBuilder(column: $table.embedding, builder: (column) => column);
+
+  GeneratedColumn<int> get dims =>
+      $composableBuilder(column: $table.dims, builder: (column) => column);
+
+  GeneratedColumn<String> get embedModel => $composableBuilder(
+    column: $table.embedModel,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get embeddedAt => $composableBuilder(
+    column: $table.embeddedAt,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get indexedAt =>
+      $composableBuilder(column: $table.indexedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+}
+
+class $ContextChunksTableManager
+    extends
+        RootTableManager<
+          _$BondDatabase,
+          ContextChunks,
+          ContextChunk,
+          $ContextChunksFilterComposer,
+          $ContextChunksOrderingComposer,
+          $ContextChunksAnnotationComposer,
+          $ContextChunksCreateCompanionBuilder,
+          $ContextChunksUpdateCompanionBuilder,
+          (
+            ContextChunk,
+            BaseReferences<_$BondDatabase, ContextChunks, ContextChunk>,
+          ),
+          ContextChunk,
+          PrefetchHooks Function()
+        > {
+  $ContextChunksTableManager(_$BondDatabase db, ContextChunks table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $ContextChunksFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $ContextChunksOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $ContextChunksAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                Value<int> fileId = const Value.absent(),
+                Value<int> seq = const Value.absent(),
+                Value<String> locator = const Value.absent(),
+                Value<String> chunkText = const Value.absent(),
+                Value<int> chars = const Value.absent(),
+                Value<Uint8List?> embedding = const Value.absent(),
+                Value<int> dims = const Value.absent(),
+                Value<String?> embedModel = const Value.absent(),
+                Value<String?> embeddedAt = const Value.absent(),
+                Value<String?> indexedAt = const Value.absent(),
+                Value<String> createdAt = const Value.absent(),
+              }) => ContextChunksCompanion(
+                id: id,
+                fileId: fileId,
+                seq: seq,
+                locator: locator,
+                chunkText: chunkText,
+                chars: chars,
+                embedding: embedding,
+                dims: dims,
+                embedModel: embedModel,
+                embeddedAt: embeddedAt,
+                indexedAt: indexedAt,
+                createdAt: createdAt,
+              ),
+          createCompanionCallback:
+              ({
+                Value<int> id = const Value.absent(),
+                required int fileId,
+                required int seq,
+                Value<String> locator = const Value.absent(),
+                required String chunkText,
+                Value<int> chars = const Value.absent(),
+                Value<Uint8List?> embedding = const Value.absent(),
+                Value<int> dims = const Value.absent(),
+                Value<String?> embedModel = const Value.absent(),
+                Value<String?> embeddedAt = const Value.absent(),
+                Value<String?> indexedAt = const Value.absent(),
+                required String createdAt,
+              }) => ContextChunksCompanion.insert(
+                id: id,
+                fileId: fileId,
+                seq: seq,
+                locator: locator,
+                chunkText: chunkText,
+                chars: chars,
+                embedding: embedding,
+                dims: dims,
+                embedModel: embedModel,
+                embeddedAt: embeddedAt,
+                indexedAt: indexedAt,
+                createdAt: createdAt,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $ContextChunksProcessedTableManager =
+    ProcessedTableManager<
+      _$BondDatabase,
+      ContextChunks,
+      ContextChunk,
+      $ContextChunksFilterComposer,
+      $ContextChunksOrderingComposer,
+      $ContextChunksAnnotationComposer,
+      $ContextChunksCreateCompanionBuilder,
+      $ContextChunksUpdateCompanionBuilder,
+      (
+        ContextChunk,
+        BaseReferences<_$BondDatabase, ContextChunks, ContextChunk>,
+      ),
+      ContextChunk,
+      PrefetchHooks Function()
+    >;
 
 class $BondDatabaseManager {
   final _$BondDatabase _db;
@@ -21271,4 +26062,14 @@ class $BondDatabaseManager {
       $AttachmentTextTableManager(_db, _db.attachmentText);
   $AttachmentChunksTableManager get attachmentChunks =>
       $AttachmentChunksTableManager(_db, _db.attachmentChunks);
+  $ContextDirsTableManager get contextDirs =>
+      $ContextDirsTableManager(_db, _db.contextDirs);
+  $ContextLinksTableManager get contextLinks =>
+      $ContextLinksTableManager(_db, _db.contextLinks);
+  $ContextFilesTableManager get contextFiles =>
+      $ContextFilesTableManager(_db, _db.contextFiles);
+  $ContextTextTableManager get contextText =>
+      $ContextTextTableManager(_db, _db.contextText);
+  $ContextChunksTableManager get contextChunks =>
+      $ContextChunksTableManager(_db, _db.contextChunks);
 }

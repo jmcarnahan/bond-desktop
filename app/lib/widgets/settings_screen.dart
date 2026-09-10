@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../providers/context_provider.dart' show ContextDirRow;
 import '../providers/prefs_provider.dart'
     show NotifyStyle, backendModeMcp, defaultMcpServerUrl, mcpDeployedUrl;
 import '../services/llm/model_probe.dart' show ModelProbeResult;
@@ -12,6 +13,7 @@ import 'inline_alert.dart';
 import 'needs_you_rules_editor.dart';
 import 'pane_surface.dart';
 import 'settings_connection_section.dart';
+import 'settings_context_section.dart';
 import 'settings_lookback_field.dart';
 import 'settings_models_body.dart';
 import 'settings_section.dart';
@@ -253,6 +255,46 @@ class SettingsScreen extends StatefulWidget {
 
   final String? databasePath;
 
+  /// The registered context directories, with their link and passage counts.
+  /// **Null hides the whole section** — the same "absent wiring, absent
+  /// section" discipline every optional row here follows. An empty list is
+  /// not null: it renders the section saying there are none yet, which is
+  /// what a host with the wiring but no directories wants.
+  final List<ContextDirRow>? contextDirectories;
+
+  /// Whether the first read of that list is still out. The rows keep
+  /// rendering while it is.
+  final bool contextDirectoriesLoading;
+
+  /// A sentence about a library that could not be read at all.
+  final String? contextDirectoriesError;
+
+  /// Opens the folder panel and registers what comes back. A future, because
+  /// the button holds `Adding…` until the panel is closed and the row is
+  /// written. Null leaves the section otherwise whole and offers no Add.
+  final Future<void> Function()? onAddContextDirectory;
+
+  /// Forces a read of one directory now.
+  final void Function(String id)? onRereadContextDirectory;
+
+  /// Forgets one directory: its index and its links, never the folder.
+  final void Function(String id)? onRemoveContextDirectory;
+
+  /// Whether each changed file in that directory earns a digest.
+  final void Function(String id, bool on)? onContextDigestsChanged;
+
+  /// The stored `honor_gitignore` value — the section has already inverted
+  /// the switch a person reads as **Read ignored files**.
+  final void Function(String id, bool on)? onContextHonorGitignoreChanged;
+
+  /// Whether a directory-fed draft may pick two sections to read in full
+  /// first. One switch for the library, not one per directory: it is a
+  /// question about how the app spends model calls, not about a folder.
+  final bool contextSelectExpand;
+
+  /// Null hides that switch, on the discipline every callback here follows.
+  final void Function(bool on)? onContextSelectExpandChanged;
+
   /// Which half of the screen to render — see [SettingsScope].
   final SettingsScope scope;
 
@@ -317,6 +359,16 @@ class SettingsScreen extends StatefulWidget {
     this.onSignOutAndClear,
     this.appVersion,
     this.databasePath,
+    this.contextDirectories,
+    this.contextDirectoriesLoading = false,
+    this.contextDirectoriesError,
+    this.onAddContextDirectory,
+    this.onRereadContextDirectory,
+    this.onRemoveContextDirectory,
+    this.onContextDigestsChanged,
+    this.onContextHonorGitignoreChanged,
+    this.contextSelectExpand = true,
+    this.onContextSelectExpandChanged,
   });
 
   /// Keyed because their labels are ordinary words a test would otherwise have
@@ -558,12 +610,40 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _section('Activity log', _activityLogSummary(), _activityLogBody()),
       if (widget.onStorylineNewestFirstChanged != null)
         _section('Storylines', _storylinesSummary(), _storylinesBody()),
+      // After Storylines and before Sync & data, in BOTH scopes: what the
+      // model is allowed to read is a question about the model, so it belongs
+      // on the AI stop as much as on the avatar menu's Settings.
+      if (widget.contextDirectories != null)
+        ContextDirectoriesSection(
+          expanded: _open.contains(ContextDirectoriesSection.title),
+          onToggle: () => _toggle(ContextDirectoriesSection.title),
+          rows: widget.contextDirectories!,
+          loading: widget.contextDirectoriesLoading,
+          error: widget.contextDirectoriesError,
+          onAdd: widget.onAddContextDirectory,
+          onReread: widget.onRereadContextDirectory ?? _ignoreId,
+          onRemove: widget.onRemoveContextDirectory ?? _ignoreId,
+          onDigestsChanged: widget.onContextDigestsChanged ?? _ignoreIdFlag,
+          onHonorGitignoreChanged:
+              widget.onContextHonorGitignoreChanged ?? _ignoreIdFlag,
+          selectExpand: widget.contextSelectExpand,
+          onSelectExpandChanged: widget.onContextSelectExpandChanged,
+          now: widget.now,
+        ),
       if (!ai && widget.onRefreshNow != null)
         _section('Sync & data', _syncSummary(now), _syncBody(now)),
       if (!ai && (widget.appVersion != null || widget.databasePath != null))
         _section('About', _aboutSummary(), _aboutBody()),
     ];
   }
+
+  /// The four per-row callbacks are required on the section — every row
+  /// renders all four controls — so a host that wired only some of them gets
+  /// a control that does nothing rather than a section that is missing. The
+  /// section's own premise is [contextDirectories]; these are not it.
+  static void _ignoreId(String id) {}
+
+  static void _ignoreIdFlag(String id, bool on) {}
 
   Widget _section(String title, String summary, Widget body) => SettingsSection(
     title: title,

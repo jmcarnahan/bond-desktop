@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/services/search_fusion.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -56,6 +57,28 @@ AttachmentChunkHit chunk(
       locator: 'part 1',
       text: 'passage $id',
       outbound: false,
+      distance: distance,
+      bm25: bm25,
+      coverage: coverage,
+    );
+
+ContextChunkHit dirChunk(
+  int id, {
+  int fileId = 1,
+  String relPath = 'docs/pricing.md',
+  double? distance,
+  double? bm25,
+  double? coverage,
+}) =>
+    ContextChunkHit(
+      fileId: fileId,
+      dirId: 'dir-1',
+      dirName: 'atlas',
+      relPath: relPath,
+      chunkId: id,
+      seq: 0,
+      locator: 'Pricing',
+      text: 'passage $id',
       distance: distance,
       bm25: bm25,
       coverage: coverage,
@@ -390,6 +413,80 @@ void main() {
       );
 
       expect(documents, hasLength(SearchTuning.documentLimit));
+    });
+  });
+
+  group('fuseDirectories', () {
+    test('one file is one answer, at its best passage', () {
+      // A directory file is a ROW, so the identity is the file id — where a
+      // document has to fall back on a hash. Two passages of one file are one
+      // answer either way.
+      final files = fuseDirectories(
+        semantic: [
+          dirChunk(1, fileId: 7, distance: 0.60),
+          dirChunk(2, fileId: 7, distance: 0.45),
+        ],
+        keywords: null,
+      );
+
+      expect(files, hasLength(1));
+      expect(files.single.chunkId, 2);
+    });
+
+    test('a file both halves found outranks one found a single way', () {
+      final files = fuseDirectories(
+        semantic: [dirChunk(1, fileId: 7, distance: 0.60)],
+        keywords: [
+          dirChunk(2, fileId: 7, bm25: 5.0, coverage: 1),
+          dirChunk(3, fileId: 8, bm25: 5.0, coverage: 1),
+        ],
+      );
+
+      expect(
+        [for (final hit in files) hit.fileId],
+        [7, 8],
+        reason: 'both signals beat one, which is the whole of the fusion',
+      );
+      expect(files.first.distance, 0.60);
+      expect(files.first.bm25, 5.0,
+          reason: "the FILE's numbers, not the shown passage's own");
+    });
+
+    test('a words-only passage under the floor is dropped', () {
+      final files = fuseDirectories(
+        semantic: null,
+        keywords: [
+          dirChunk(1, fileId: 7, bm25: 9.0, coverage: 1),
+          dirChunk(2, fileId: 8, bm25: 0.4, coverage: 0.25),
+        ],
+      );
+
+      expect([for (final hit in files) hit.fileId], [7]);
+    });
+
+    test('never more than the cap', () {
+      final files = fuseDirectories(
+        semantic: [
+          for (var i = 0; i < 12; i++)
+            dirChunk(i, fileId: i, relPath: 'docs/$i.md', distance: 0.45),
+        ],
+        keywords: null,
+      );
+
+      expect(files, hasLength(SearchTuning.documentLimit));
+    });
+
+    test('an exact tie breaks on the chunk id', () {
+      final files = fuseDirectories(
+        semantic: [
+          dirChunk(9, fileId: 9, distance: 0.45),
+          dirChunk(4, fileId: 4, distance: 0.45),
+        ],
+        keywords: null,
+      );
+
+      // Two identical drafts of the same query read the same page.
+      expect([for (final hit in files) hit.chunkId], [4, 9]);
     });
   });
 

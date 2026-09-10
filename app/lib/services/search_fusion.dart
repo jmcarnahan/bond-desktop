@@ -16,6 +16,7 @@ library;
 import 'dart:math' as math;
 
 import '../models/attachment_models.dart';
+import '../models/context_models.dart';
 import '../models/home_models.dart';
 
 /// Every number the ranking depends on, in one place.
@@ -453,3 +454,94 @@ class _FileSignals {
 /// this one" have to agree about it byte for byte.
 String documentIdentity(AttachmentChunkHit hit) =>
     hit.ref.blobSha256 ?? '${hit.ref.name}|${hit.ref.size}';
+
+/// [fuseDocuments]'s arithmetic over the passages of the owner's own
+/// directories, grouped per FILE before any of it runs.
+///
+/// A twin of [fuseDocuments] rather than one generic function over both, and
+/// the reason is IDENTITY. A document is a blob: the same PDF on two messages
+/// is two rows and one file, so [documentIdentity] has to reach for a hash and
+/// fall back to name-and-size. A directory file is a row — `context_files.id`
+/// is the file — so the grouping key is already sitting on the hit. A shared
+/// generic would have to be parameterised on the one thing the two corpora do
+/// not agree about, and the arithmetic underneath is nine lines. Read
+/// [fuseDocuments] for why the grouping happens FIRST; every word of it
+/// applies here.
+List<ContextChunkHit> fuseDirectories({
+  required List<ContextChunkHit>? semantic,
+  required List<ContextChunkHit>? keywords,
+}) {
+  var best = 0.0;
+  for (final hit in keywords ?? const <ContextChunkHit>[]) {
+    final bm25 = hit.bm25;
+    if (bm25 != null && bm25 > best) best = bm25;
+  }
+
+  final byFile = <int, _DirFileSignals>{};
+  for (final hit in <ContextChunkHit>[...?semantic, ...?keywords]) {
+    final signals = byFile.putIfAbsent(hit.fileId, _DirFileSignals.new);
+    final distance = hit.distance;
+    if (distance != null &&
+        (signals.distance == null || distance < signals.distance!)) {
+      signals.distance = distance;
+      signals.nearest = hit;
+    }
+    final bm25 = hit.bm25;
+    if (bm25 != null && (signals.bm25 == null || bm25 > signals.bm25!)) {
+      signals.bm25 = bm25;
+      signals.coverage = hit.coverage;
+      signals.strongest = hit;
+    }
+  }
+
+  final scored = <({ContextChunkHit hit, double score})>[];
+  for (final signals in byFile.values) {
+    final distance = signals.distance;
+    final bm25 = signals.bm25;
+    final vr = distance == null ? 0.0 : vectorRelevance(distance);
+    final kr = bm25 == null
+        ? 0.0
+        : keywordRelevance(
+            bm25: bm25,
+            best: best,
+            coverage: signals.coverage ?? 0,
+          );
+    final score =
+        SearchTuning.vectorWeight * vr + SearchTuning.keywordWeight * kr;
+    if (score < SearchTuning.minScore) continue;
+    // Ties go to the vector passage, on [fuseDocuments]'s reasoning.
+    final representative = (kr > vr ? signals.strongest : signals.nearest) ??
+        signals.strongest ??
+        signals.nearest;
+    if (representative == null) continue;
+    scored.add((
+      // The FILE's numbers, not the passage's own — the tile shows what the
+      // score was built from.
+      hit: representative.withSignals(
+        distance: distance,
+        bm25: bm25,
+        coverage: signals.coverage,
+      ),
+      score: score,
+    ));
+  }
+  scored.sort((a, b) {
+    final byScore = b.score.compareTo(a.score);
+    if (byScore != 0) return byScore;
+    return a.hit.chunkId.compareTo(b.hit.chunkId);
+  });
+
+  return [
+    for (final entry in scored.take(SearchTuning.documentLimit)) entry.hit,
+  ];
+}
+
+/// The best each half of the search did on ONE directory file, and the passage
+/// behind each. [_FileSignals]'s twin, for [fuseDirectories]'s reasons.
+class _DirFileSignals {
+  double? distance;
+  ContextChunkHit? nearest;
+  double? bm25;
+  double? coverage;
+  ContextChunkHit? strongest;
+}

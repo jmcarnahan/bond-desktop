@@ -5,6 +5,7 @@ import '../models/home_sort.dart';
 import '../providers/activity_provider.dart' show SyncStamps;
 import '../theme/tokens.dart';
 import 'attachment_search_tile.dart';
+import 'context_search_tile.dart';
 import 'home_feed_row.dart';
 import 'home_metrics.dart';
 import 'home_pulse.dart';
@@ -119,6 +120,10 @@ class HomePane extends StatefulWidget {
   /// [onRetry] null leaves the Retry link undrawn.
   final void Function(String source, String sourceMessageId)? onOpenHistory;
 
+  /// Opens one of the owner's own directory files at the passage that matched.
+  /// Null leaves the directory tiles as statements — [onRetry]'s rule.
+  final void Function(int fileId, String locator)? onOpenContextFile;
+
   const HomePane({
     super.key,
     required this.rows,
@@ -148,6 +153,7 @@ class HomePane extends StatefulWidget {
     this.collapsing = const {},
     this.onReleasePending,
     this.onAnchoredChanged,
+    this.onOpenContextFile,
     this.search,
     this.searching = false,
     this.searchNotice,
@@ -501,10 +507,12 @@ class _HomePaneState extends State<HomePane> {
           ),
           const SizedBox(height: BondSpacing.s8),
         ],
-        // Documents first, above the messages. A passage that ANSWERS the
-        // query is a better answer than a message that merely mentions it, and
-        // the reader who typed a phrase from inside a spreadsheet is looking
-        // for the spreadsheet.
+        // The owner's own projects first, then the documents, then the
+        // messages. The order is an order of ANSWERS: a question about a
+        // project is answered better by the project than by a document that
+        // arrived about it, and better by either than by a message that
+        // merely mentions it. The reader who typed a phrase from inside their
+        // own analysis is looking for the analysis.
         //
         // The header count above stays a count of MESSAGES: it labels the
         // list under it, and a number that silently included documents would
@@ -513,6 +521,37 @@ class _HomePaneState extends State<HomePane> {
         // A plain [Column], not a list: the store caps `documents` at six, so
         // this is bounded by construction, and a scroller here would fight the
         // one below it for the same gesture.
+        if (search.directories.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(
+              left: BondSpacing.s4,
+              right: BondSpacing.s4,
+              top: BondSpacing.s4,
+              bottom: BondSpacing.s8,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'In your directories',
+                  style:
+                      BondType.caption.copyWith(color: BondColors.inkMuted),
+                ),
+                const SizedBox(height: BondSpacing.s4),
+                for (final hit in search.directories)
+                  ContextSearchTile(
+                    key: ContextSearchTile.keyFor(hit),
+                    hit: hit,
+                    onOpen: widget.onOpenContextFile == null
+                        ? null
+                        : () => widget.onOpenContextFile!(
+                              hit.fileId,
+                              hit.locator,
+                            ),
+                  ),
+              ],
+            ),
+          ),
         if (search.documents.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(
@@ -542,11 +581,13 @@ class _HomePaneState extends State<HomePane> {
           ),
         // Two ways to have no message rows, and they are not the same
         // sentence. With nothing above it either, the search found nothing at
-        // all. With documents above it, the mailbox HAS an answer and it is
-        // sitting on screen — the relevance floor makes that combination
-        // ordinary rather than rare, and "Nothing matches that." over a named
-        // file is the screen contradicting itself.
-        if (search.hits.isEmpty && search.documents.isEmpty)
+        // all. With a directory file or a document above it, the app HAS an
+        // answer and it is sitting on screen — the relevance floor makes that
+        // combination ordinary rather than rare, and "Nothing matches that."
+        // over a named file is the screen contradicting itself.
+        if (search.hits.isEmpty &&
+            search.documents.isEmpty &&
+            search.directories.isEmpty)
           Expanded(
             child: Center(
               child: Text(

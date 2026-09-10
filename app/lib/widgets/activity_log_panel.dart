@@ -93,6 +93,9 @@ class ActivityLogPanel extends StatefulWidget {
     'ignore': 'Ignore',
     'attachment_text': 'Read attachment',
     'attachment_digest': 'Attachment digest',
+    'context_reconcile': 'Read directory',
+    'context_digest': 'Directory file digest',
+    'context_brief': 'Directory brief',
     'needs_you': 'Needs You',
     'needs_you_rejudge': 'Needs You re-judge',
     'retry': 'Retry',
@@ -113,6 +116,20 @@ class ActivityLogPanel extends StatefulWidget {
     'gated': 'nothing worth extracting',
     'already_drafted': 'already drafted',
     'no_reply_target': 'nothing to reply to',
+    'fresh': 'read less than a minute ago',
+    'unavailable': 'the directory could not be opened',
+    'gone': 'the directory is no longer registered',
+    // Its own reason and not [gone]'s: a digest is queued per FILE, and a
+    // file the walk deleted between the queue and the pass is a nothing,
+    // where a directory that went is the whole shelf.
+    'file_gone': 'the file is no longer in the directory',
+    'off': 'summaries are off for this directory',
+    'already_digested': 'already summarised',
+    'too_short': 'too short to summarise',
+    'no_text': 'no words to read',
+    'malformed_entity': 'the queued row named nothing',
+    'nothing_to_brief': 'no notes and no summaries yet',
+    'unchanged': 'nothing the brief reads has changed',
   };
 
   static String _label(String kind) => _kindLabels[kind] ?? kind;
@@ -197,9 +214,23 @@ class ActivityLogPanel extends StatefulWidget {
         return parts.isEmpty ? label : '$label — $parts';
       case 'draft':
         final chars = detail['chars'];
-        return chars is num
+        final written = chars is num
             ? 'Draft written — ${chars.toInt()} chars'
             : 'Draft written';
+        // The owner's own files, by BASENAME: the row is a line in a log and
+        // a rel path spends its whole width on the folders above the file.
+        // Three and then a count, for the same reason.
+        final read = detail['directory_files'];
+        if (read is! List || read.isEmpty) return written;
+        final names = [
+          for (final entry in read)
+            if (entry is String && entry.isNotEmpty)
+              entry.split('/').last,
+        ];
+        if (names.isEmpty) return written;
+        final shown = names.take(3).toList();
+        if (names.length > 3) shown.add('+${names.length - 3} more');
+        return '$written · read ${shown.join(', ')}';
       case 'mark_read':
         final count = e.count ?? 0;
         return count == 1
@@ -260,6 +291,39 @@ class ActivityLogPanel extends StatefulWidget {
       case 'attachment_digest':
         final kind = detail['kind'];
         return kind is String && kind.isNotEmpty ? '$label — $kind' : label;
+      // Counts CHANGES and not files, because the number a person wants
+      // after a sync is what moved: a project of two thousand files that is
+      // unchanged reads as `0 files changed`, which is the whole point of
+      // the pass being cheap.
+      case 'context_reconcile':
+        final changed = detail['changed'];
+        if (changed is! num) return label;
+        final removed = detail['removed'];
+        final count = changed.toInt();
+        final sentence =
+            '$label — $count ${count == 1 ? 'file' : 'files'} changed';
+        return removed is num && removed > 0
+            ? '$sentence · ${removed.toInt()} removed'
+            : sentence;
+      // The kind hint is the one fact worth the sentence: it says what the
+      // model decided the file IS, which is the judgement a person would
+      // want to see before they trust the rest of the record.
+      case 'context_digest':
+        final hint = detail['kind_hint'];
+        return hint is String && hint.isNotEmpty ? '$label — $hint' : label;
+      case 'context_brief':
+        final mapped = detail['files_mapped'];
+        if (mapped is! num) return label;
+        // The charters are a second sentence on the same line rather than a
+        // row of their own: nothing was queued for them, so a reader looking
+        // for what this pass did would find a storyline write with no work
+        // item behind it.
+        final charters = detail['charters_offered'];
+        final offered = charters is num
+            ? ' · ${charters.toInt()} '
+                '${charters == 1 ? 'charter' : 'charters'} offered'
+            : '';
+        return '$label — ${mapped.toInt()} files mapped$offered';
       case 'storyline_audit':
         final checked = detail['checked'];
         final removed = detail['removed'];

@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 
 // `show BondDatabase`: drift generates row classes (Message, Conversation,
 // Storyline, …) whose names collide with the app's models.
+import '../data/context_store.dart';
 import '../data/database.dart' show BondDatabase;
 import '../data/db.dart' show appDatabasePath;
 import '../data/message_store.dart';
@@ -26,6 +27,11 @@ import '../services/backend/auth_session.dart';
 import '../services/backend/mail_backend.dart';
 import '../services/backend/people_backend.dart';
 import '../services/backend/teams_backend.dart';
+import '../services/context/context_brief_handler.dart';
+import '../services/context/context_digest_handler.dart';
+import '../services/context/context_reconcile_handler.dart';
+import '../services/context/context_retriever.dart';
+import '../services/context/directory_access.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
 import '../services/embed_handler.dart';
@@ -155,6 +161,19 @@ final dbProvider = Provider<BondDatabase>(
 final messageStoreProvider =
     Provider<MessageStore>((ref) => MessageStore(ref.watch(dbProvider)));
 
+/// The owner's own local directories — a SECOND store over the same database,
+/// for the reason [ContextStore] gives: nothing it holds is mailbox data, and
+/// none of it is wiped when an identity changes.
+final contextStoreProvider =
+    Provider<ContextStore>((ref) => ContextStore(ref.watch(dbProvider)));
+
+/// How a picked folder stays readable after a relaunch. The real one is a
+/// method channel onto the Runner's Swift; a test overrides it with
+/// [PlainDirectoryAccess], which keeps no bookmark and resolves none, and
+/// every caller falls back to the stored path.
+final directoryAccessProvider =
+    Provider<DirectoryAccess>((_) => const ChannelDirectoryAccess());
+
 /// Enforces the one-identity-per-database rule at every completed sign-in.
 /// See [IdentityGuard] for why it is a guard rather than a convention.
 ///
@@ -176,6 +195,21 @@ final identityGuardProvider = Provider<IdentityGuard>(
         ref.read(attachmentCacheProvider).clear().catchError(
               (Object e) =>
                   debugPrint('attachment cache not cleared on wipe: $e'),
+            ),
+      );
+      // The LINKS and nothing else, and this one is rows rather than disk.
+      // A link names a conversation key or a storyline id that the wipe has
+      // just deleted, so leaving it would let a new identity's room — which
+      // can be handed the same conversation key by the same connector —
+      // inherit the previous account's directories and quote one person's
+      // project into another person's reply. The directories themselves stay
+      // registered: they are the user's own folders on their own disk, and
+      // have nothing to do with whose mailbox was signed in. Started and not
+      // awaited for the reason above it, and safe for the same one: the rows
+      // that could reach a link through a conversation are already gone.
+      unawaited(
+        ref.read(contextStoreProvider).unlinkAll().catchError(
+              (Object e) => debugPrint('context links not cleared on wipe: $e'),
             ),
       );
     },
@@ -390,6 +424,10 @@ final syncServiceProvider = Provider<MailSync>(
     // this provider — and abort the drain running on it — the moment someone
     // moved the setting, the same hazard [llmClientProvider] documents below.
     lookbackDays: () => ref.read(appPrefsProvider).mailLookbackDays,
+    // What puts one `context_reconcile` per registered directory at the tail
+    // of every pass — the whole mechanism by which a directory stays level
+    // with the disk without a file-system watcher.
+    contextStore: ref.watch(contextStoreProvider),
   ),
 );
 
@@ -556,6 +594,7 @@ final messageSearchProvider = Provider<MessageSearch>(
   (ref) => MessageSearch(
     ref.watch(messageStoreProvider),
     ref.watch(embeddingsClientProvider),
+    context: ref.watch(contextStoreProvider),
   ),
 );
 
@@ -569,6 +608,32 @@ final attachmentRetrieverProvider = Provider<AttachmentRetriever>(
   (ref) => AttachmentRetriever(
     ref.watch(messageStoreProvider),
     ref.watch(embeddingsClientProvider),
+  ),
+);
+
+/// What the owner's own registered directories know about the message being
+/// answered.
+///
+/// A plain `Provider` for [messageSearchProvider]'s reason: it holds nothing
+/// and is the pairing of three things that each hold their own state. The
+/// mailbox store is here because the query vector is the reply-to MESSAGE's,
+/// which is the one fact this retrieval needs from the other side of the
+/// store split.
+final contextRetrieverProvider = Provider<ContextRetriever>(
+  (ref) => ContextRetriever(
+    ref.watch(messageStoreProvider),
+    ref.watch(contextStoreProvider),
+    ref.watch(embeddingsClientProvider),
+    // Bulk work on the fast server: one small structured call per
+    // directory-fed draft, which is the slot every other per-item call in
+    // this app already lands on — [fastLlmClientProvider].
+    fastClient: ref.watch(fastLlmClientProvider),
+    // `ref.read` inside the closure, never `watch`, in the `lookbackDays`
+    // shape above and for its reason: watching would rebuild this provider —
+    // and the worker holding it, mid-drain — the moment somebody moved the
+    // switch. The closure is called while a pack is being built, which is
+    // exactly when the current answer is wanted.
+    selectExpand: () => ref.read(appPrefsProvider).contextSelectExpand,
   ),
 );
 
@@ -703,6 +768,45 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         // not awaited: see [AttachmentDigestHandler].
         onRequeue: () => unawaited(ref.read(aiWorkerProvider).pump()),
       ),
+      // The owner's own directories, read here and nowhere else in the drain.
+      // It talks to no chat model — the embedding server is its only server —
+      // so a park here parks only its own kind, and a missing `make embed`
+      // never sits in front of the storylines. Ahead of them and of the
+      // drafts on purpose: a reply written later in this same drain reads the
+      // index this pass has just brought level with the disk.
+      ContextReconcileHandler(
+        ref.watch(contextStoreProvider),
+        ref.watch(embeddingsClientProvider),
+        ref.watch(directoryAccessProvider),
+        activityLog: ref.watch(activityLogProvider),
+        // Where the pass queues the two kinds below. Both are enqueued from
+        // inside the walk, so a directory that changed is digested and
+        // re-briefed in the drain that noticed.
+        workQueue: ref.watch(messageStoreProvider),
+      ),
+      // Digests before the brief, and both immediately after the walk that
+      // queues them: the brief is compiled FROM the digest map, so a drain
+      // that ran it first would compile yesterday's map. Both ahead of the
+      // storylines and the drafts, so a reply written later in this same
+      // drain reads a brief that already knows what changed this morning.
+      ContextDigestHandler(
+        ref.watch(contextStoreProvider),
+        // Bulk work: the fast server. See [fastLlmClientProvider].
+        ref.watch(fastLlmClientProvider),
+        ref.watch(embeddingsClientProvider),
+        activityLog: ref.watch(activityLogProvider),
+      ),
+      ContextBriefHandler(
+        ref.watch(contextStoreProvider),
+        ref.watch(fastLlmClientProvider),
+        activityLog: ref.watch(activityLogProvider),
+        // A new brief is a new answer to "what is this project", which is the
+        // other thing a charter can be. Riverpod resolves a provider when it
+        // is read rather than where it is declared, so reaching forward to
+        // [storylineServiceProvider] — declared further down this file — is
+        // ordinary rather than a cycle.
+        onBriefChanged: ref.watch(storylineServiceProvider).offerDirectoryCharters,
+      ),
       // Assignment before the sweep: a thread that joins an existing storyline
       // is one fewer unassigned thread for the sweep to propose a new group
       // around.
@@ -752,6 +856,10 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(llmClientProvider),
         activityLog: ref.watch(activityLogProvider),
         attachments: ref.watch(attachmentRetrieverProvider),
+        contextDirs: ref.watch(contextRetrieverProvider),
+        // The same client both retrievers above hold, handed to the handler
+        // so the message being answered is embedded once for the two of them.
+        embeddings: ref.watch(embeddingsClientProvider),
         progress: ref.watch(pipelineProgressProvider),
       ),
     ],
@@ -787,6 +895,8 @@ final storylineServiceProvider = Provider<StorylineService>(
     // switch, so taking it here costs this provider nothing it did not
     // already depend on.
     progress: ref.watch(pipelineProgressProvider),
+    // The library, for the recap's directory footer and the charter offer.
+    contextStore: ref.watch(contextStoreProvider),
   ),
 );
 

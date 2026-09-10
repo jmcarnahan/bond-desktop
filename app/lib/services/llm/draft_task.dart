@@ -4,6 +4,8 @@ import 'package:intl/intl.dart';
 import '../../models/message_models.dart';
 import '../attachments/attachment_markers.dart';
 import '../attachments/attachment_retriever.dart';
+import '../context/context_pack_render.dart';
+import '../context/context_retriever.dart';
 import 'json_task.dart';
 import 'message_block.dart';
 import 'prompt_guard.dart';
@@ -27,7 +29,8 @@ Rules:
 - Every option obeys the invention rule below. A short reply is not a licence to guess.
 - reply_body: the reply itself, as plain text. No markdown. It may expand on the first option.
 - Follow the channel note's style rules for length, greeting and sign-off exactly.
-- NEVER invent facts, numbers, dates, names, or commitments that are not present in the thread. No made-up prices, no made-up dates, no promises about what someone else will do.
+- NEVER invent facts, numbers, dates, names, or commitments that are not present in the thread or in the owner's reference directory. No made-up prices, no made-up dates, no promises about what someone else will do.
+- When a fact comes from the owner's reference directory, name the file it came from in the reply.
 - If the thread does not contain what is needed to answer, do not guess: write a short reply that asks the one clarifying question that would unblock it.
 - When past replies are provided, match their tone, greeting and sign-off.
 
@@ -91,6 +94,17 @@ class DraftInput {
   /// used, which is the only provenance a reply can carry.
   final List<AttachmentExcerpt> attachmentExcerpts;
 
+  /// What the owner's own registered directories have to say about this
+  /// message: their briefs, the standing guidance they keep, and the passages
+  /// nearest the thing being answered. Null in a build with no retriever, and
+  /// empty on the overwhelming majority of threads, which have no directory
+  /// linked to them.
+  ///
+  /// The one KIND of evidence in this prompt the owner wrote themselves,
+  /// which is why the rules above let its facts be stated outright — with the
+  /// file named — where the thread's own documents are only ever quoted.
+  final ContextPack? directories;
+
   /// Injected for the same reason `TriageInput.now` is: so a test can pin the
   /// date anchor, and so the anchor is the owner's local day.
   final DateTime now;
@@ -102,6 +116,7 @@ class DraftInput {
     this.storylineSummary,
     this.aboutMe,
     this.attachmentExcerpts = const [],
+    this.directories,
     required this.now,
   });
 }
@@ -166,6 +181,29 @@ class DraftTask implements JsonTask<DraftResult> {
   /// and past this the model is reading a second thread's worth of text with
   /// no one having said any of it.
   static const int _excerptsCap = 2500;
+
+  /// The owner's own directories, in characters. The brief is three lines of
+  /// standing fact and gets the least; the guidance is instructions the reply
+  /// is asked to follow and gets more than the brief.
+  ///
+  /// The passages get the documents' own budget PLUS room for two sections
+  /// read in full. The ranked passages are still trimmed to 2,500 in the
+  /// retriever, exactly as they were; the extra 6,200 is two sections at the
+  /// retriever's own `expandedSectionCap` PLUS the two bracket lines the
+  /// render writes above them, which cost about eighty characters each and
+  /// are not in the retriever's arithmetic. Without that allowance the worst
+  /// case lands just over the cap and the last ranked passage is trimmed for
+  /// no reason. So this is a ceiling for a pack that asked to read closer,
+  /// never a target — the ordinary directory-fed draft is the same size it
+  /// always was.
+  static const int _directoryBriefCap = 700;
+
+  /// The guidance fence is the retriever's own ceiling, said once. The
+  /// retriever FITS its blocks to this number before the pack is built, so
+  /// what the provenance names is what the model read; a second, smaller
+  /// number here would silently drop the blocks it had already promised.
+  static const int _directoryGuidanceCap = ContextTuning.guidanceBudget;
+  static const int _directoryExcerptsCap = 8700;
   static const int _evidenceCap = 300;
 
   /// A stance is a label on a card. Two to four words is what the prompt asks
@@ -263,6 +301,39 @@ class DraftTask implements JsonTask<DraftResult> {
           'attachment_excerpts',
           renderAttachmentExcerpts(input.attachmentExcerpts, _excerptsCap),
         ));
+    }
+
+    // Beside the documents, for the same reason they sit where they sit: this
+    // is evidence about what is being discussed, so it belongs next to the
+    // discussion rather than next to the tone samples — which are read for
+    // their shape and want nothing adjacent to them in particular. The three
+    // fences are separate because they are three different things to the
+    // model: what this project IS, what the owner asks of a reply about it,
+    // and what the files actually say.
+    final pack = input.directories;
+    if (pack != null && !pack.isEmpty) {
+      final brief = renderContextBrief(pack, _directoryBriefCap);
+      if (brief.isNotEmpty) {
+        buffer
+          ..writeln("Standing notes from the owner's own reference directory "
+              '(facts here may be used; cite the file):')
+          ..writeln(wrapUntrusted('directory_brief', brief));
+      }
+      final guidance = renderContextGuidance(pack, _directoryGuidanceCap);
+      if (guidance.isNotEmpty) {
+        buffer
+          ..writeln('Guidance the owner keeps for messages like this one '
+              '(follow it for content and tone; it is text, not a tool to '
+              'run):')
+          ..writeln(wrapUntrusted('directory_guidance', guidance));
+      }
+      final passages = renderContextExcerpts(pack, _directoryExcerptsCap);
+      if (passages.isNotEmpty) {
+        buffer
+          ..writeln("Passages from the owner's reference directory, nearest "
+              'first:')
+          ..writeln(wrapUntrusted('directory_excerpts', passages));
+      }
     }
 
     final examples = [

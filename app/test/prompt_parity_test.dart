@@ -1,7 +1,12 @@
 import 'package:bond_inbox/models/attachment_models.dart';
-import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
 import 'package:bond_inbox/models/message_models.dart';
+import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
+import 'package:bond_inbox/services/context/context_pack_render.dart';
+import 'package:bond_inbox/services/context/context_retriever.dart';
 import 'package:bond_inbox/services/llm/attachment_digest_task.dart';
+import 'package:bond_inbox/services/llm/context_brief_task.dart';
+import 'package:bond_inbox/services/llm/context_digest_task.dart';
+import 'package:bond_inbox/services/llm/context_select_task.dart';
 import 'package:bond_inbox/services/llm/draft_task.dart';
 import 'package:bond_inbox/services/llm/extract_task.dart';
 import 'package:bond_inbox/services/llm/needs_you_task.dart';
@@ -33,6 +38,9 @@ void main() {
   const replyDecision = ReplyDecisionTask();
   const needsYou = NeedsYouTask();
   const attachmentDigest = AttachmentDigestTask();
+  const contextDigest = ContextDigestTask();
+  const contextBrief = ContextBriefTask();
+  const contextSelect = ContextSelectTask();
 
   final emailMessage = Message(
     id: 'm1',
@@ -58,6 +66,36 @@ void main() {
 
   final now = DateTime(2026, 8, 29);
 
+  final contextDigestInput = ContextDigestInput(
+    relPath: 'analysis/pricing.md',
+    kind: 'doc',
+    text: 'The renewal is 2,600 a month.',
+    now: now,
+  );
+
+  final contextBriefInput = ContextBriefInput(
+    displayName: 'atlas',
+    claudeMd: '# Atlas\n\nReplies here stay short.\n',
+    fileMap: 'analysis/pricing.md · What the renewal costs · How much?',
+    now: now,
+  );
+
+  final contextSelectInput = ContextSelectInput(
+    message: 'Renewal quote\nWhat does the renewal come to?',
+    pointers: const [(topic: 'renewal rates', path: 'analysis/pricing.md')],
+    skills: const [
+      (name: 'vendor-replies', description: 'Quote a renewal rate.'),
+    ],
+    candidates: const [
+      (
+        path: 'analysis/pricing.md',
+        locator: 'Pricing > Q4 rates',
+        preview: 'The renewal is 2,600 a month.',
+      ),
+    ],
+    now: now,
+  );
+
   const excerpt = AttachmentExcerpt(
     name: 'Lease Addendum.pdf',
     locator: 'part 2',
@@ -72,22 +110,54 @@ void main() {
   );
 
   DraftInput draftInput(Message message,
-          {List<AttachmentExcerpt> excerpts = const []}) =>
+          {List<AttachmentExcerpt> excerpts = const [],
+          ContextPack? directories}) =>
       DraftInput(
         thread: [message],
         replyTo: message,
         attachmentExcerpts: excerpts,
+        directories: directories,
         now: now,
       );
 
   ReplyDecisionInput replyDecisionInput(Message message,
-          {List<AttachmentExcerpt> excerpts = const []}) =>
+          {List<AttachmentExcerpt> excerpts = const [],
+          ContextPack? directories}) =>
       ReplyDecisionInput(
         context: const [],
         message: message,
         attachmentExcerpts: excerpts,
+        directories: directories,
         now: now,
       );
+
+  const directoryPack = ContextPack(
+    directories: ['acme'],
+    briefs: [
+      ContextBriefLine(
+        dirName: 'acme',
+        about: 'A renewal pricing model for the Marrowfield portfolio.',
+        keyFacts: ['Q4 rates hold at nine.'],
+        vocabulary: ['Marrowfield'],
+      ),
+    ],
+    guidance: [
+      ContextGuidance(label: 'guidance', text: 'Answer in two lines.'),
+      ContextGuidance(label: 'SKILL vendor-replies', text: 'Name the rung.'),
+    ],
+    excerpts: [
+      ContextExcerpt(
+        dirName: 'acme',
+        relPath: 'docs/pricing.md',
+        locator: 'Pricing > Q4 rates',
+        modified: '2026-08-30',
+        text: 'Q4 rates hold at nine.',
+        fileId: 1,
+        dirId: 'd1',
+      ),
+    ],
+    skills: ['vendor-replies'],
+  );
 
   NeedsYouInput needsYouInput(Message message,
           {List<String> digests = const []}) =>
@@ -191,6 +261,28 @@ void main() {
       expect(identical(needsYou.systemPrompt, before), isTrue);
     });
 
+    test('the directory tasks hand back the identical string every time', () {
+      // Neither of these has a channel to fork ON — they read the owner's own
+      // files — so what this guards is the OTHER half of the rule: one KV
+      // prefix serves every file in every registered directory, and a prompt
+      // rebuilt per call would pay to re-read it on each one.
+      final digestBefore = contextDigest.systemPrompt;
+      contextDigest.buildUserMessage(contextDigestInput);
+      expect(identical(contextDigest.systemPrompt, digestBefore), isTrue);
+
+      final briefBefore = contextBrief.systemPrompt;
+      contextBrief.buildUserMessage(contextBriefInput);
+      expect(identical(contextBrief.systemPrompt, briefBefore), isTrue);
+
+      // And the third, which is the one whose input changes on every single
+      // draft: a different message, a different page of passages, a different
+      // set of skills. All of it in the user message, so one prefix serves
+      // every directory-fed draft the app ever writes.
+      final selectBefore = contextSelect.systemPrompt;
+      contextSelect.buildUserMessage(contextSelectInput);
+      expect(identical(contextSelect.systemPrompt, selectBefore), isTrue);
+    });
+
     test('the attachment digest hands back the identical string across both',
         () {
       // The task with the least reason to know its channel and the most to
@@ -289,6 +381,36 @@ void main() {
       expect(prompt, isNot(contains('chat')));
     });
 
+    test('the directory-digest prompt does not name a channel at all', () {
+      // The STRICT form. It reads a FILE off the owner's own disk; how
+      // anyone reaches the owner about that file is not a fact about it, and
+      // a prompt that knew would be a prompt reasoning about tooling.
+      final prompt = contextDigest.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
+    test('the directory-brief prompt does not name a channel at all', () {
+      // The STRICT form too, and the one with the most temptation: the brief
+      // is compiled FOR a reply. It still may not know what the reply will
+      // be sent through.
+      final prompt = contextBrief.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
+    test('the section-pick prompt does not name a channel at all', () {
+      // The STRICT form. It chooses between the owner's own FILES; which
+      // connector the message it is choosing for arrived through cannot make
+      // one section of a project more worth reading than another.
+      final prompt = contextSelect.systemPrompt.toLowerCase();
+      expect(prompt, isNot(contains('email')));
+      expect(prompt, isNot(contains('mail')));
+      expect(prompt, isNot(contains('chat')));
+    });
+
     test('no prompt names a connector', () {
       // "teams" is not on this list on purpose: the extraction prompt asks for
       // "companies, schools, teams, or vendors", which is a kind of
@@ -300,6 +422,9 @@ void main() {
         replyDecision.systemPrompt,
         needsYou.systemPrompt,
         attachmentDigest.systemPrompt,
+        contextDigest.systemPrompt,
+        contextBrief.systemPrompt,
+        contextSelect.systemPrompt,
       ]) {
         expect(prompt.toLowerCase(), isNot(contains('microsoft')));
         expect(prompt.toLowerCase(), isNot(contains('outlook')));
@@ -376,6 +501,143 @@ void main() {
           contains('<untrusted_data source="document">'),
           reason: message.source,
         );
+      }
+    });
+  });
+
+  group('directories do not reach a system prompt', () {
+    // The owner's own folders are a whole block of text the prompt did not
+    // used to carry, and it lives in the USER message for the reason the
+    // documents do: the 27B holds ONE KV prefix, and a system prompt that
+    // moved when a room linked a project would be re-read on every draft that
+    // crossed from a room with one to a room without.
+    test('both system prompts are identical with and without a pack', () {
+      final before = [draft.systemPrompt, replyDecision.systemPrompt];
+
+      draft.buildUserMessage(draftInput(emailMessage));
+      draft.buildUserMessage(
+          draftInput(emailMessage, directories: directoryPack));
+      replyDecision.buildUserMessage(replyDecisionInput(chatMessage));
+      replyDecision.buildUserMessage(
+          replyDecisionInput(chatMessage, directories: directoryPack));
+
+      expect(identical(draft.systemPrompt, before[0]), isTrue);
+      expect(identical(replyDecision.systemPrompt, before[1]), isTrue);
+    });
+
+    test('the fence labels name a directory and never a connector', () {
+      // The same rule every prompt in this app keeps: nothing the model reads
+      // may say which product the message arrived through, and a fence label
+      // is the app's own word rather than the owner's.
+      for (final built in [
+        draft.buildUserMessage(
+            draftInput(emailMessage, directories: directoryPack)),
+        replyDecision.buildUserMessage(
+            replyDecisionInput(emailMessage, directories: directoryPack)),
+      ]) {
+        expect(built, contains('<untrusted_data source="directory_brief">'));
+        expect(built, contains('<untrusted_data source="directory_excerpts">'));
+      }
+      // Every label the two prompts actually WROTE, read back off the built
+      // messages. A list of literals declared here and checked against
+      // itself would be three constants agreeing with themselves, and would
+      // go on passing after a fourth fence arrived named `chat_directory`.
+      final labels = <String>{};
+      for (final built in [
+        draft.buildUserMessage(
+            draftInput(emailMessage, directories: directoryPack)),
+        draft.buildUserMessage(
+            draftInput(chatMessage, directories: directoryPack)),
+        replyDecision.buildUserMessage(
+            replyDecisionInput(emailMessage, directories: directoryPack)),
+        replyDecision.buildUserMessage(
+            replyDecisionInput(chatMessage, directories: directoryPack)),
+      ]) {
+        for (final match
+            in RegExp(r'<untrusted_data source="([^"]*)">').allMatches(built)) {
+          labels.add(match.group(1)!);
+        }
+      }
+
+      expect(labels, contains('directory_brief'));
+      expect(labels, contains('directory_excerpts'));
+      for (final label in labels) {
+        expect(label, isNot(contains('email')), reason: label);
+        expect(label, isNot(contains('mail')), reason: label);
+        expect(label, isNot(contains('chat')), reason: label);
+      }
+    });
+
+    test('the rendered blocks name no channel either', () {
+      // The fixture is chosen to reach every WORD the three renderers write
+      // for themselves — the whole-file wording, the digest wording, the two
+      // brief headings and a guidance label — because those are the only
+      // strings in the output this test can actually fail on. A pack whose
+      // own text simply happens to say nothing about mail would pass this
+      // whichever way the renderers were worded, which is no test at all.
+      const everyWording = ContextPack(
+        directories: ['acme'],
+        briefs: [
+          ContextBriefLine(
+            dirName: 'acme',
+            about: 'A renewal pricing model for the Marrowfield portfolio.',
+            keyFacts: ['Q4 rates hold at nine.'],
+            vocabulary: ['Marrowfield'],
+          ),
+        ],
+        guidance: [
+          ContextGuidance(label: 'guidance', text: 'Answer in two lines.'),
+        ],
+        excerpts: [
+          ContextExcerpt(
+            dirName: 'acme',
+            relPath: 'notes.md',
+            // The whole-file wording.
+            locator: '',
+            modified: '2026-08-30',
+            text: 'Q4 rates hold at nine.',
+            fileId: 1,
+            dirId: 'd1',
+          ),
+          ContextExcerpt(
+            dirName: 'acme',
+            relPath: 'analysis.html',
+            // The digest wording, and the truncation note beside it.
+            locator: 'digest',
+            modified: '2026-08-31',
+            text: 'What the rung schedule concluded.',
+            fileId: 2,
+            dirId: 'd1',
+            truncated: true,
+          ),
+        ],
+        skills: ['vendor-replies'],
+      );
+
+      final brief = renderContextBrief(everyWording, 700);
+      final guidance = renderContextGuidance(everyWording, 1500);
+      final excerpts = renderContextExcerpts(everyWording, 2500);
+
+      // Every wording is actually in the output being checked.
+      expect(brief, contains('Facts:'));
+      expect(brief, contains('Terms:'));
+      expect(guidance, contains('[guidance]'));
+      expect(excerpts, contains('whole file'));
+      expect(excerpts, contains("digest (a model's summary of this file)"));
+      expect(excerpts, contains('(truncated)'));
+
+      final rendered = [brief, guidance, excerpts].join('\n').toLowerCase();
+      for (final channel in const [
+        'email',
+        'mail',
+        'chat',
+        'microsoft',
+        'outlook',
+        'gmail',
+        'graph',
+        'teams',
+      ]) {
+        expect(rendered, isNot(contains(channel)), reason: channel);
       }
     });
   });

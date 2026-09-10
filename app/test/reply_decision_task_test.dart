@@ -1,6 +1,7 @@
 import 'package:bond_inbox/models/attachment_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
+import 'package:bond_inbox/services/context/context_retriever.dart';
 import 'package:bond_inbox/services/llm/reply_decision_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -62,13 +63,41 @@ ReplyDecisionInput inputWith({
   Message? message,
   String? aboutMe,
   List<AttachmentExcerpt> attachmentExcerpts = const [],
+  ContextPack? directories,
 }) =>
     ReplyDecisionInput(
       context: context,
       message: message ?? inbound(),
       aboutMe: aboutMe,
       attachmentExcerpts: attachmentExcerpts,
+      directories: directories,
       now: DateTime(2026, 8, 29),
+    );
+
+/// What the owner's own directories hand over, as the retriever ranked them.
+ContextPack pack({
+  List<ContextExcerpt> excerpts = const [
+    ContextExcerpt(
+      dirName: 'acme',
+      relPath: 'docs/pricing.md',
+      locator: 'Pricing > Q4 rates',
+      modified: '2026-08-30',
+      text: 'Q4 rates hold at nine.',
+      fileId: 1,
+      dirId: 'd1',
+    ),
+  ],
+}) =>
+    ContextPack(
+      directories: const ['acme'],
+      briefs: const [
+        ContextBriefLine(dirName: 'acme', about: 'A renewal pricing model.'),
+      ],
+      guidance: const [
+        ContextGuidance(label: 'guidance', text: 'Answer in two lines.'),
+      ],
+      excerpts: excerpts,
+      skills: const [],
     );
 
 void main() {
@@ -289,6 +318,86 @@ void main() {
       final before = task.systemPrompt;
       task.buildUserMessage(inputWith());
       task.buildUserMessage(inputWith(attachmentExcerpts: [excerpt()]));
+
+      expect(identical(task.systemPrompt, before), isTrue);
+    });
+  });
+
+  group("the owner's own directories", () {
+    test('two fences, after the documents, and the message still last', () {
+      final prompt = task.buildUserMessage(inputWith(
+        context: [inbound(id: 'earlier', body: 'Sending the addendum over.')],
+        attachmentExcerpts: [excerpt()],
+        directories: pack(),
+      ));
+
+      final documents = prompt.indexOf('source="attachment_excerpts"');
+      final brief = prompt.indexOf('source="directory_brief"');
+      final passages = prompt.indexOf('source="directory_excerpts"');
+      final judged = prompt.indexOf('Decide about ONLY this message:');
+
+      expect(documents, lessThan(brief));
+      expect(brief, lessThan(passages));
+      expect(passages, lessThan(judged));
+      expect(prompt.trimRight(), endsWith('</untrusted_data>'));
+    });
+
+    test('there is no guidance fence here at all', () {
+      // This call answers one yes-or-no question, and instructions about how a
+      // reply should READ have nothing to say about whether one is owed.
+      final prompt = task.buildUserMessage(inputWith(directories: pack()));
+
+      expect(prompt, contains('source="directory_brief"'));
+      expect(prompt, contains('source="directory_excerpts"'));
+      expect(prompt, isNot(contains('directory_guidance')));
+    });
+
+    test('a pack with nothing in it writes no fence', () {
+      expect(
+        task.buildUserMessage(inputWith(directories: ContextPack.empty)),
+        isNot(contains('directory_')),
+      );
+      expect(
+        task.buildUserMessage(inputWith()),
+        isNot(contains('directory_')),
+      );
+    });
+
+    test('the passages are cut to the head, from the far end', () {
+      // Four passages of four hundred characters is well over the eight
+      // hundred this call allows, so the cut is the thing under test rather
+      // than a cap the fixture never reaches. Whole blocks come off the END
+      // — the ranking put the nearest first — so the last one must be gone
+      // entirely and the first must still be whole.
+      final prompt = task.buildUserMessage(inputWith(
+        directories: pack(excerpts: [
+          for (var i = 1; i <= 4; i++)
+            ContextExcerpt(
+              dirName: 'acme',
+              relPath: 'docs/p$i.md',
+              locator: '',
+              modified: '2026-08-30',
+              text: '$i' * 400,
+              fileId: i,
+              dirId: 'd1',
+            ),
+        ]),
+      ));
+
+      const open = '<untrusted_data source="directory_excerpts">\n';
+      final start = prompt.indexOf(open) + open.length;
+      final end = prompt.indexOf('\n</untrusted_data>', start);
+      final body = prompt.substring(start, end);
+
+      expect(body.length, lessThanOrEqualTo(800));
+      expect(body, contains('docs/p1.md'));
+      expect(body, isNot(contains('4' * 400)));
+    });
+
+    test('the system prompt is identical with and without a pack', () {
+      final before = task.systemPrompt;
+      task.buildUserMessage(inputWith());
+      task.buildUserMessage(inputWith(directories: pack()));
 
       expect(identical(task.systemPrompt, before), isTrue);
     });

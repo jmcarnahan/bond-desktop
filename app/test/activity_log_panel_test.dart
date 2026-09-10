@@ -228,6 +228,71 @@ void main() {
       expect(find.text('Draft written — 312 chars'), findsOneWidget);
     });
 
+    testWidgets('a draft names the owner\'s own files it read', (tester) async {
+      // The log is where a person goes back and asks what the app DID, after
+      // the draft it belongs to has been sent, edited or thrown away. Basenames
+      // rather than rel paths: a log line spends its width on the file, not on
+      // the folders above it.
+      await pump(
+        tester,
+        now: DateTime(2026, 3, 12, 9),
+        events: [
+          _event(
+            kind: 'draft',
+            detail: const {
+              'chars': 120,
+              'directory_files': ['docs/pricing.md', 'reports/analysis.html'],
+            },
+            createdAt: DateTime(2026, 3, 12, 8, 30).toIso8601String(),
+          ),
+        ],
+      );
+
+      expect(
+        find.text('Draft written — 120 chars · read pricing.md, analysis.html'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('and counts them past the third', (tester) async {
+      await pump(
+        tester,
+        now: DateTime(2026, 3, 12, 9),
+        events: [
+          _event(
+            kind: 'draft',
+            detail: const {
+              'chars': 120,
+              'directory_files': ['a.md', 'b.md', 'c.md', 'd.md'],
+            },
+            createdAt: DateTime(2026, 3, 12, 8, 30).toIso8601String(),
+          ),
+        ],
+      );
+
+      expect(
+        find.text('Draft written — 120 chars · read a.md, b.md, c.md, +1 more'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a draft that read none says only how long it is',
+        (tester) async {
+      await pump(
+        tester,
+        now: DateTime(2026, 3, 12, 9),
+        events: [
+          _event(
+            kind: 'draft',
+            detail: const {'chars': 120, 'directory_files': <String>[]},
+            createdAt: DateTime(2026, 3, 12, 8, 30).toIso8601String(),
+          ),
+        ],
+      );
+
+      expect(find.text('Draft written — 120 chars'), findsOneWidget);
+    });
+
     testWidgets('a row names its connector, when, and how long it took',
         (tester) async {
       final now = DateTime(2026, 3, 12, 9);
@@ -519,6 +584,96 @@ void main() {
       expect(
         ActivityLogPanel.describe(_event(kind: 'sync_reconcile', count: 3)),
         'Mail reconcile — 3 messages the delta feed skipped',
+      );
+    });
+
+    test('one changed file reads as one file', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_reconcile',
+          detail: const {'changed': 1, 'removed': 1},
+        )),
+        'Read directory — 1 file changed · 1 removed',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_reconcile',
+          detail: const {'changed': 3},
+        )),
+        'Read directory — 3 files changed',
+      );
+    });
+
+    test('a file digest names what the model decided the file is', () {
+      // The kind hint is the judgement a person would want to see before
+      // they trust the rest of the record.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_digest',
+          detail: const {'kind_hint': 'analysis', 'findings': 3},
+        )),
+        'Directory file digest — analysis',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'context_digest')),
+        'Directory file digest',
+      );
+    });
+
+    test('a deleted file and a de-registered directory read differently', () {
+      // Two reasons and not one: a digest is queued per FILE, so the file
+      // the walk deleted between the queue and the pass is the ordinary
+      // skip, while the whole shelf going is the other thing entirely.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_digest',
+          status: 'skipped',
+          detail: const {'reason': 'file_gone'},
+        )),
+        'Directory file digest skipped — the file is no longer in the '
+            'directory',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_digest',
+          status: 'skipped',
+          detail: const {'reason': 'gone'},
+        )),
+        'Directory file digest skipped — the directory is no longer '
+            'registered',
+      );
+    });
+
+    test('a brief counts the files it mapped', () {
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_brief',
+          detail: const {'files_mapped': 12, 'pointers': 4},
+        )),
+        'Directory brief — 12 files mapped',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(kind: 'context_brief')),
+        'Directory brief',
+      );
+    });
+
+    test('a brief that offered a charter says so on the same line', () {
+      // No work row stands behind a charter offer, so a reader hunting for
+      // what this pass did would find a storyline write with nothing above it.
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_brief',
+          detail: const {'files_mapped': 12, 'charters_offered': 2},
+        )),
+        'Directory brief — 12 files mapped · 2 charters offered',
+      );
+      expect(
+        ActivityLogPanel.describe(_event(
+          kind: 'context_brief',
+          detail: const {'files_mapped': 12, 'charters_offered': 1},
+        )),
+        'Directory brief — 12 files mapped · 1 charter offered',
       );
     });
 

@@ -818,6 +818,51 @@ void main() {
       expect(work['payload_json'], '{"pinned_attachment_ids":["att-survey"]}');
     });
 
+    test('Consult for the reply names the directory file on the work row',
+        () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.generate(contextFileIds: const [7]);
+
+      final work = (await db
+              .customSelect(
+                "SELECT payload_json FROM work_items "
+                "WHERE task_kind = 'draft'",
+              )
+              .get())
+          .single
+          .data;
+      // Only the key that has something in it: a consulted file and a pinned
+      // document never have to be asked for together to be asked for at all.
+      expect(work['payload_json'], '{"context_file_ids":[7]}');
+    });
+
+    test('a document and a directory file ride together', () async {
+      await seedDraft();
+      final notifier = notifierFor();
+      await notifier.load();
+
+      await notifier.generate(
+        pinnedAttachmentIds: const ['att-survey'],
+        contextFileIds: const [7],
+      );
+
+      final work = (await db
+              .customSelect(
+                "SELECT payload_json FROM work_items "
+                "WHERE task_kind = 'draft'",
+              )
+              .get())
+          .single
+          .data;
+      expect(
+        work['payload_json'],
+        '{"pinned_attachment_ids":["att-survey"],"context_file_ids":[7]}',
+      );
+    });
+
     test('and a plain Regenerate after it drops the name again', () async {
       await seedDraft();
       final notifier = notifierFor();

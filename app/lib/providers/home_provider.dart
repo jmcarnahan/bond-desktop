@@ -589,6 +589,10 @@ class HomeFeedNotifier extends StateNotifier<HomeFeedState> {
             // passage out of an attachment IS a file. Sender and date live on
             // the message a chunk came from, which this list does not carry.
             documents: result.documents,
+            // And neither are the directory passages, for the same reason a
+            // second time over: a registered folder belongs to no sender and
+            // arrived on no date.
+            directories: result.directories,
             notice: result.notice,
           ),
           searching: false,

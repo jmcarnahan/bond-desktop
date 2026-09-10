@@ -37,7 +37,7 @@ class BondDatabase extends _$BondDatabase {
   BondDatabase(super.e);
 
   @override
-  int get schemaVersion => 14;
+  int get schemaVersion => 15;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -535,6 +535,62 @@ UPDATE storylines
                     schema.storylineMemberBlocks.evidence,
                   );
                 }
+              },
+              // v15 — the context-directories round. Five tables: the
+              // registered folder, what it is linked to, the files inside it,
+              // their extracted words and their embedded passages; plus
+              // `drafts.context_json`, the inventory of what a draft read.
+              //
+              // No backfill and nothing to backfill: a directory only exists
+              // once the owner picks one, and the first reconcile pass reads
+              // it from disk.
+              //
+              // The indexes are hand-written with IF NOT EXISTS for the v6
+              // reason (the generated `Index` entities carry a bare CREATE
+              // INDEX, which throws on a replay over a torn state); names and
+              // columns match the generated entities exactly, which is what
+              // the fresh-vs-migrated parity test compares. Neither
+              // `vec_context_chunks` nor `fts_context_chunks` is created here
+              // — both are virtual, derived, and built lazily at first use.
+              from14To15: (m, schema) async {
+                if (!await _tableExists('context_dirs')) {
+                  await m.createTable(schema.contextDirs);
+                }
+                if (!await _tableExists('context_links')) {
+                  await m.createTable(schema.contextLinks);
+                }
+                if (!await _tableExists('context_files')) {
+                  await m.createTable(schema.contextFiles);
+                }
+                if (!await _tableExists('context_text')) {
+                  await m.createTable(schema.contextText);
+                }
+                if (!await _tableExists('context_chunks')) {
+                  await m.createTable(schema.contextChunks);
+                }
+                if (!await _columnExists('drafts', 'context_json')) {
+                  await m.addColumn(schema.drafts, schema.drafts.contextJson);
+                }
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_context_links_scope '
+                  'ON context_links(scope_kind, source, scope_key)',
+                );
+                await customStatement(
+                  'CREATE UNIQUE INDEX IF NOT EXISTS ix_context_files_path '
+                  'ON context_files(dir_id, rel_path)',
+                );
+                await customStatement(
+                  'CREATE UNIQUE INDEX IF NOT EXISTS ix_context_chunks_seq '
+                  'ON context_chunks(file_id, seq)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_context_chunks_unindexed '
+                  'ON context_chunks(indexed_at)',
+                );
+                await customStatement(
+                  'CREATE INDEX IF NOT EXISTS ix_context_chunks_file '
+                  'ON context_chunks(file_id)',
+                );
               },
             ),
           ),

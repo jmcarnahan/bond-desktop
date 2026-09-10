@@ -224,6 +224,14 @@ class DraftState {
     return text.isEmpty ? null : text;
   }
 
+  /// The stored inventory of what this draft was written from — the D11 JSON
+  /// the handler wrote. Null on a draft written before there was one, which
+  /// is what leaves the composer on its constant caption.
+  String? get contextJson {
+    final value = draft?['context_json'] as String? ?? '';
+    return value.isEmpty ? null : value;
+  }
+
   /// The model's one-sentence account of what this reply answers, for the
   /// provenance tooltip.
   String? get evidence {
@@ -500,12 +508,21 @@ class DraftNotifier extends StateNotifier<DraftState> {
   /// ignore it forever. The existing draft is deleted first for the same
   /// reason — the handler returns early when one is already stored.
   ///
-  /// [pinnedAttachmentIds] is "Use in reply": the documents the user named,
-  /// carried to the handler on the work row's payload so the retriever floats
-  /// them to the front of what it quotes. A plain Regenerate passes none, and
-  /// the requeue OVERWRITES the payload with null — asking again without
-  /// naming a file has to mean the last file is no longer named.
-  Future<void> generate({List<String> pinnedAttachmentIds = const []}) async {
+  /// [pinnedAttachmentIds] is "Use in reply" and [contextFileIds] is "Consult
+  /// for the reply": the documents and the directory files the user named,
+  /// carried to the handler on the work row's payload so each retriever floats
+  /// what it was told about to the front of what it quotes. A plain Regenerate
+  /// passes neither, and the requeue OVERWRITES the payload — asking again
+  /// without naming a file has to mean the last file is no longer named, and
+  /// that rule now covers both lists.
+  ///
+  /// The payload carries only the keys that have something in them, so a
+  /// consulted file and a pinned document never have to be asked for together
+  /// to be asked for at all.
+  Future<void> generate({
+    List<String> pinnedAttachmentIds = const [],
+    List<int> contextFileIds = const [],
+  }) async {
     if (state.generating) return;
     state = state.copyWith(generating: true, error: null);
     try {
@@ -527,9 +544,15 @@ class DraftNotifier extends StateNotifier<DraftState> {
         'draft',
         _source,
         messageId,
-        payloadJson: pinnedAttachmentIds.isEmpty
-            ? null
-            : jsonEncode({'pinned_attachment_ids': pinnedAttachmentIds}),
+        payloadJson:
+            (pinnedAttachmentIds.isEmpty && contextFileIds.isEmpty)
+                ? null
+                : jsonEncode({
+                    if (pinnedAttachmentIds.isNotEmpty)
+                      'pinned_attachment_ids': pinnedAttachmentIds,
+                    if (contextFileIds.isNotEmpty)
+                      'context_file_ids': contextFileIds,
+                  }),
       );
     } catch (e) {
       state = state.copyWith(

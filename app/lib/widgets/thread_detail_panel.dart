@@ -179,6 +179,19 @@ class ThreadDetailPanel extends StatefulWidget {
   /// same arrangement [onOpenAttachment] lives under. Null draws no button.
   final void Function(Message message)? onWhatHappened;
 
+  /// Opens the panel naming which of the owner's directories this thread
+  /// reads when a reply is drafted in it. Null hides the action — a host with
+  /// no library behind it.
+  final VoidCallback? onContext;
+
+  /// How many directories this thread links directly. It rides on the
+  /// action's LABEL rather than as a badge, because the label is the tooltip
+  /// on an icon button and a count nobody hovers is a count nobody reads.
+  /// Inherited storyline links are deliberately not counted here: they are
+  /// not this thread's to turn off, and a number that included them would
+  /// promise switches the panel does not draw.
+  final int contextLinked;
+
   const ThreadDetailPanel({
     super.key,
     required this.conversation,
@@ -204,6 +217,8 @@ class ThreadDetailPanel extends StatefulWidget {
     this.onUseInReply,
     this.onOpenLink,
     this.onWhatHappened,
+    this.onContext,
+    this.contextLinked = 0,
   });
 
   @override
@@ -637,6 +652,17 @@ class _ThreadDetailPanelState extends State<ThreadDetailPanel> {
       ),
       onBack: widget.onBack,
       actions: [
+        // First, and before Message: what this room READS is a standing fact
+        // about the room, where writing to it is one thing to do in it.
+        if (widget.onContext != null)
+          RoomAction(
+            icon: Icons.folder_open_outlined,
+            label: widget.contextLinked > 0
+                ? 'Context · ${widget.contextLinked}'
+                : 'Context',
+            onTap: widget.onContext,
+            key: const Key('thread-context'),
+          ),
         // Before the state chip's neighbours, because writing to these people
         // is something to DO with the thread. An icon rather than a labelled
         // button: this header shares its width with the attachment preview in

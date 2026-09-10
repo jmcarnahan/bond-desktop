@@ -99,6 +99,28 @@ void main() {
       expect(await store.workCounts('extract'), {'done': 3});
     });
 
+    test('claims work queued under local as well as the connectors',
+        () async {
+      // Context directories queue under `local`, which is not a connector at
+      // all. `AiWorker._sources` feeds `claimPendingWork`'s `source IN (…)`,
+      // so a source missing from that list is work that is enqueued on every
+      // sync and never runs — silently, because the row stays `pending` and
+      // nothing reports a queue that is never claimed.
+      await store.enqueueWork('context_reconcile', 'local', 'dir-1');
+      await store.enqueueWork('extract', 'email', 'm-1');
+      final reconcile = ScriptedHandler('context_reconcile');
+      final extract = ScriptedHandler('extract');
+
+      await AiWorker(store, handlers: [reconcile, extract]).pump();
+
+      expect(reconcile.seen, ['dir-1']);
+      expect(extract.seen, ['m-1']);
+      expect(
+        await store.workCounts('context_reconcile', sources: const ['local']),
+        {'done': 1},
+      );
+    });
+
     test('stops when nothing is pending, having called nothing', () async {
       await store.enqueueWork('extract', 'email', 'a');
       await store.writeWork('extract', 'email', 'a', status: 'done');

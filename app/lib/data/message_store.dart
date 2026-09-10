@@ -4584,6 +4584,13 @@ FROM storylines s''';
   /// after it has to drop the last one's — a payload that survived would go on
   /// pinning a file the user has stopped asking about, on every draft of that
   /// message for the rest of the mailbox's life.
+  ///
+  /// A revived row starts its attempts afresh, exactly as the read-ack upsert
+  /// and [reviveUnjudgedNeedsYou] do. `attempts` is otherwise monotonic for
+  /// the life of the row, and a handler that reads it to decide whether a
+  /// failure is fatal would treat the first try of new work as the last try
+  /// of old work — a file re-queued after two bad digests would be closed as
+  /// hopeless on the attempt that was going to succeed.
   Future<void> requeueWork(
     String kind,
     String source,
@@ -4598,7 +4605,7 @@ FROM storylines s''';
       "VALUES (?, ?, ?, 'pending', 0, NULL, ?, ?, ?) "
       'ON CONFLICT(task_kind, source, entity_id) DO UPDATE SET '
       "status = 'pending', updated_at = excluded.updated_at, "
-      'payload_json = excluded.payload_json '
+      'payload_json = excluded.payload_json, attempts = 0, error = NULL '
       "WHERE work_items.status IN ('done', 'error')",
       variables: _args([kind, source, entityId, payloadJson, now, now]),
     );
@@ -4758,6 +4765,11 @@ WHERE source IN (${_placeholders(sources.length)})
   /// `options_dismissed` goes back to 0 for the same reason `graph_draft_id`
   /// is nulled: a regenerate is a FRESH suggestion, and the user closing the
   /// last set of short replies must not silence a set they have never seen.
+  ///
+  /// `context_json` is overwritten the same way and with the same rule,
+  /// including with null: it is the inventory of what THIS answer read, and a
+  /// regenerate that read nothing must not leave the previous answer's
+  /// citations under the composer's provenance line.
   Future<void> upsertDraft({
     required String source,
     required String conversationKey,
@@ -4765,6 +4777,7 @@ WHERE source IN (${_placeholders(sources.length)})
     required String body,
     String? evidence,
     String? optionsJson,
+    String? contextJson,
     String status = 'suggested',
   }) async {
     final now = _nowIso();
@@ -4773,8 +4786,8 @@ WHERE source IN (${_placeholders(sources.length)})
 INSERT INTO drafts (
   source, conversation_key, reply_to_message_id, body, evidence, status,
   graph_draft_id, web_link, created_at, updated_at, options_json,
-  options_dismissed
-) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0)
+  options_dismissed, context_json
+) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, 0, ?)
 ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   conversation_key = excluded.conversation_key,
   body = excluded.body,
@@ -4784,7 +4797,8 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
   web_link = NULL,
   updated_at = excluded.updated_at,
   options_json = excluded.options_json,
-  options_dismissed = 0
+  options_dismissed = 0,
+  context_json = excluded.context_json
 ''',
       variables: _args([
         source,
@@ -4796,6 +4810,7 @@ ON CONFLICT(source, reply_to_message_id) DO UPDATE SET
         now,
         now,
         optionsJson,
+        contextJson,
       ]),
     );
   }

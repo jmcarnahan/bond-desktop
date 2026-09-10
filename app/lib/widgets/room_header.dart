@@ -102,13 +102,21 @@ class RoomHeader<T> extends StatelessWidget {
 
   static Key tabKey(Object value) => ValueKey('room-tab-$value');
 
-  /// Below this much room, the faces come off.
+  /// Below this much room, the header gives ground — and it gives it in this
+  /// order.
   ///
-  /// Everything else on this row answers a question the reader asked — the
-  /// title, the state, the actions — while the stack is a picture of people the
-  /// subtitle has already named. So it is the first thing to give when a thread
-  /// is read in the side panel rather than the main pane, and the alternative is
-  /// a header that clips a control.
+  /// **The faces come off first.** Everything else on this row answers a
+  /// question the reader asked — the title, the state, the actions — while the
+  /// stack is a picture of people the subtitle has already named.
+  ///
+  /// **Then a LABELLED action folds into the ⋯ menu**, at the top of it. An
+  /// action with an icon costs the same 52 pixels whatever it says, because
+  /// its words are a tooltip; an action with a label costs whatever its words
+  /// are, which in a side panel makes it the single widest thing on a row of
+  /// controls. The ⋯ is already there and already holds this room's other
+  /// whole-conversation verbs, so folding hides nothing — where the
+  /// alternative, once a room grew a fourth control, is a header that clips
+  /// one.
   static const double _facesFrom = 540;
 
   const RoomHeader({
@@ -142,7 +150,7 @@ class RoomHeader<T> extends StatelessWidget {
         children: [
           LayoutBuilder(
             builder: (context, constraints) =>
-                _identityRow(showFaces: constraints.maxWidth >= _facesFrom),
+                _identityRow(roomy: constraints.maxWidth >= _facesFrom),
           ),
           if (tabs.length > 1) ...[
             const SizedBox(height: BondSpacing.s8),
@@ -153,7 +161,42 @@ class RoomHeader<T> extends StatelessWidget {
     );
   }
 
-  Widget _identityRow({required bool showFaces}) {
+  Widget _identityRow({required bool roomy}) {
+    // What stays on the row, and what goes into the menu instead. Both lists
+    // are the whole set when there is room, which is the ordinary case.
+    final onRow = [
+      for (final action in actions)
+        if (roomy || action.icon != null) action,
+    ];
+    final folded = [
+      for (final action in actions)
+        if (!roomy && action.icon == null)
+          RoomMenuItem(
+            // Keyed by the label, because a folded action has no `value` of
+            // its own and the label is what a reader — and a test — names it
+            // by either way.
+            value: 'action-${action.label}',
+            label: action.label,
+            onTap: action.onTap,
+          ),
+    ];
+    final menu = [
+      ...folded,
+      for (final (index, item) in moreItems.indexed)
+        // The first of the room's own items is divided off from what folded
+        // in above it: those were controls a moment ago and they are not the
+        // same kind of thing as the corrections below them.
+        if (index == 0 && folded.isNotEmpty)
+          RoomMenuItem(
+            value: item.value,
+            label: item.label,
+            onTap: item.onTap,
+            dividerBefore: true,
+          )
+        else
+          item,
+    ];
+
     return Row(
       children: [
         if (onBack != null) ...[
@@ -188,13 +231,13 @@ class RoomHeader<T> extends StatelessWidget {
           ),
         ),
         const SizedBox(width: BondSpacing.s12),
-        if (showFaces && people.isNotEmpty) ...[
+        if (roomy && people.isNotEmpty) ...[
           _faces(),
           const SizedBox(width: BondSpacing.s8),
         ],
         ?stateChip,
-        for (final action in actions) _action(action),
-        if (moreItems.isNotEmpty) _more(),
+        for (final action in onRow) _action(action),
+        if (menu.isNotEmpty) _more(menu),
       ],
     );
   }
@@ -251,14 +294,14 @@ class RoomHeader<T> extends StatelessWidget {
   /// The corrections drawer. A `PopupMenuButton` and not a pane: the no-popups
   /// rule bans dialogs, and a menu hanging off the button that opened it takes
   /// nothing over — the same reasoning the account menu already runs on.
-  Widget _more() {
+  Widget _more(List<RoomMenuItem> items) {
     return PopupMenuButton<String>(
       key: moreKey,
       icon: const Icon(Icons.more_horiz),
       iconSize: 20,
       tooltip: 'More',
       itemBuilder: (context) => [
-        for (final item in moreItems) ...[
+        for (final item in items) ...[
           if (item.dividerBefore) const PopupMenuDivider(),
           PopupMenuItem<String>(
             value: item.value,
@@ -268,7 +311,7 @@ class RoomHeader<T> extends StatelessWidget {
         ],
       ],
       onSelected: (value) {
-        for (final item in moreItems) {
+        for (final item in items) {
           if (item.value == value) {
             item.onTap?.call();
             return;

@@ -2,6 +2,7 @@
 // tables, and this file means the app's own models.
 import 'package:bond_inbox/data/database.dart' show BondDatabase;
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/draft_provenance.dart';
 import 'package:bond_inbox/providers/app_providers.dart';
 import 'package:bond_inbox/providers/draft_provider.dart' show draftProvider;
 import 'package:bond_inbox/providers/prefs_provider.dart';
@@ -134,7 +135,7 @@ void main() {
   /// One mail thread with TWO messages the model answered — the shape the
   /// inline cards exist for. Neither has been replied to, so both suggestions
   /// are still live.
-  Future<void> seedThread() async {
+  Future<void> seedThread({String? contextJson}) async {
     await store.upsertMessage({
       'source_message_id': 'c1-m1',
       'conversation_key': 'c1',
@@ -177,6 +178,7 @@ void main() {
       replyToMessageId: 'c1-m2',
       body: 'Yes, Friday works for me.',
       optionsJson: _newerOptions,
+      contextJson: contextJson,
     );
   }
 
@@ -549,6 +551,39 @@ void main() {
     expect(
       find.text('✨ Suggested reply — drafted from this thread and your past '
           'mail'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a draft that read a directory says so, and names the file',
+      (tester) async {
+    // The constant caption is the FALLBACK. A draft that recorded what went
+    // into its prompt replaces it with the line naming what was read — which
+    // is the only provenance a suggestion can carry.
+    await seedThread(
+      contextJson: const DraftProvenance(
+        documents: [],
+        directories: ['acme'],
+        files: [
+          (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates', fileId: null),
+        ],
+        skills: ['vendor-replies'],
+      ).encode(),
+    );
+    await pumpScreen(tester);
+    await openThread(tester);
+
+    await tester.tap(find.descendant(
+      of: find.byKey(InboxScreen.useSuggestionKey),
+      matching: find.text('Use it'),
+    ));
+    await tester.pump();
+    await tester.pump();
+
+    expect(
+      find.text('✨ Suggested reply — drafted from this thread, your past mail '
+          'and «acme» (docs/pricing.md § Pricing › Q4 rates · '
+          'SKILL vendor-replies)'),
       findsOneWidget,
     );
   });

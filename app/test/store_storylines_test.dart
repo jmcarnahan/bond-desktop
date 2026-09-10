@@ -962,6 +962,23 @@ void main() {
       expect(await statusOf('storyline', 'c2'), 'processing');
     });
 
+    test('a revived row starts its attempts afresh', () async {
+      await store.enqueueWork('storyline', 'email', 'c1');
+      await store.writeWork('storyline', 'email', 'c1',
+          status: 'error', error: 'boom', attempts: 2);
+
+      await store.requeueWork('storyline', 'email', 'c1');
+
+      final row = await db.customSelect(
+        'SELECT attempts, error FROM work_items '
+        "WHERE task_kind = 'storyline' AND entity_id = 'c1'",
+      ).getSingle();
+      // Monotonic attempts would tell the handler that the first try of this
+      // revived row is the last try of the work that already failed.
+      expect(row.data['attempts'], 0);
+      expect(row.data['error'], isNull);
+    });
+
     test('a revived item keeps its place rather than duplicating', () async {
       await store.enqueueWork('storyline', 'email', 'c1');
       await store.writeWork('storyline', 'email', 'c1', status: 'done');

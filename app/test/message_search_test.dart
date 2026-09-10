@@ -1,13 +1,16 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/database.dart';
 import 'package:bond_inbox/data/message_store.dart';
+import 'package:bond_inbox/models/context_models.dart';
 import 'package:bond_inbox/models/home_models.dart';
 import 'package:bond_inbox/models/message_models.dart';
 import 'package:bond_inbox/services/embed_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/message_search.dart';
+import 'package:bond_inbox/services/search_fusion.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -797,5 +800,178 @@ void main() {
         expect(archive.notice, isNull);
       });
     });
+
+    group('the directories beside the messages', () {
+      late ContextStore context;
+
+      setUp(() => context = ContextStore(db));
+
+      /// One file of one registered directory, with one passage embedded on
+      /// [text]'s own axis through the same fake server.
+      Future<int> file(
+        String dirId,
+        String relPath, {
+        required String text,
+        String locator = 'Notes',
+      }) async {
+        final fileId = await context.upsertFile(
+          dirId: dirId,
+          relPath: relPath,
+          size: text.length,
+          mtime: '2026-09-09T09:00:00.000Z',
+          sha256: 'sha-$relPath',
+          kind: 'doc',
+          claudeChain: const [],
+          textChars: text.length,
+        );
+        final ids = await context.replaceChunks(
+          fileId,
+          [(seq: 0, locator: locator, text: text)],
+        );
+        final result = await server.client.embedResult(
+          text,
+          prefix: EmbeddingsClient.documentPrefix,
+        );
+        await context.setChunkEmbedding(
+          ids.single,
+          embedding: encodeEmbedding(result.vector!),
+          dims: result.vector!.length,
+          embedModel: EmbeddingsClient.documentModelTag,
+        );
+        await context.indexPendingChunks();
+        return fileId;
+      }
+
+      Future<String> atlas() =>
+          context.registerDirectory(path: '/w/atlas', displayName: 'atlas');
+
+      test('a passage of the owner\'s own project is a third list', () async {
+        if (!available) return;
+        await seedCorpus();
+        final dirId = await atlas();
+        await file(
+          dirId,
+          'docs/rates.md',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        final result = await MessageSearch(store, server.client,
+                context: context)
+            .search('the escalator clause');
+
+        final directories = (result as MessageSearchHits).directories;
+        expect(directories, hasLength(1));
+        expect(directories.single.dirName, 'atlas');
+        expect(directories.single.relPath, 'docs/rates.md');
+        expect(directories.single.locator, 'Notes');
+        expect(directories.single.distance, closeTo(0, 0.001));
+        expect(directories.single.bm25, isNotNull,
+            reason: 'the words found the same passage');
+        // No message in this corpus says the word, so the project IS the
+        // answer — which is the case the third list exists for.
+        expect(result.documents, isEmpty);
+      });
+
+      test('a digest passage is never a search hit', () async {
+        if (!available) return;
+        await seedCorpus();
+        final dirId = await atlas();
+        // The digest sits ON the query's words, so it is the nearest passage
+        // in the project; the file's own words are further off.
+        await file(
+          dirId,
+          'analysis/model.py',
+          text: 'the escalator clause',
+          locator: 'digest',
+        );
+        await file(
+          dirId,
+          'docs/rates.md',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        final result = await MessageSearch(store, server.client,
+                context: context)
+            .search('the escalator clause');
+
+        // A search result promises the file's OWN words, the rule the
+        // attachment search keeps. A reply is the one place a digest is
+        // quoted.
+        final directories = (result as MessageSearchHits).directories;
+        expect(
+          [for (final hit in directories) hit.locator],
+          ['Notes'],
+        );
+      });
+
+      test('a search built with no library answers an empty list', () async {
+        if (!available) return;
+        await seedCorpus();
+        final dirId = await atlas();
+        await file(
+          dirId,
+          'docs/rates.md',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        // The corpus is indexed and the search was not given a door to it —
+        // every caller that predates the third list gets the two it had.
+        final result = await MessageSearch(store, server.client)
+            .search('the escalator clause');
+
+        expect((result as MessageSearchHits).directories, isEmpty);
+      });
+
+      test('an index that throws costs the third list and nothing else',
+          () async {
+        if (!available) return;
+        await seedCorpus();
+        // A registered directory, so both broken reads are actually reached.
+        final dirId = await atlas();
+        await file(
+          dirId,
+          'docs/rates.md',
+          text: 'Line 14: escalator of three percent each year.',
+        );
+
+        final result = await MessageSearch(
+          store,
+          server.client,
+          context: _ThrowingContextStore(db),
+        ).search('the invoice');
+
+        // A directory index that cannot be read must never make a search of
+        // the MAILBOX report itself unavailable.
+        expect(idsOf(result), ['inv', 'park', 'launch']);
+        expect((result as MessageSearchHits).directories, isEmpty);
+        expect(result.notice, isNull);
+      });
+    });
   });
+}
+
+/// A library whose two reads are both broken. The search above it must still
+/// answer about the mailbox.
+class _ThrowingContextStore extends ContextStore {
+  _ThrowingContextStore(super.db);
+
+  @override
+  Future<List<ContextChunkHit>?> chunkKnn(
+    Uint8List query, {
+    required String embedModel,
+    required List<String> dirIds,
+    List<int>? fileIds,
+    int k = 12,
+    bool excludeDigests = false,
+  }) =>
+      throw StateError('the index is on fire');
+
+  @override
+  Future<List<ContextChunkHit>> keywordChunks(
+    FtsQuery query, {
+    required List<String> dirIds,
+    int limit = SearchTuning.keywordFetch,
+    bool excludeDigests = false,
+  }) =>
+      throw StateError('the word index is on fire');
 }
