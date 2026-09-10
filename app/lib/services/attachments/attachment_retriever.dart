@@ -94,6 +94,14 @@ class AttachmentRetriever {
   /// [pinnedFirst] is the "Use in reply" path: the ids the user named, floated
   /// to the top of the ranking and added to the scope, so a document from
   /// another thread can be cited when — and only when — a person asked for it.
+  ///
+  /// [queryVector] is for a caller that searches TWO corpora with the same
+  /// question — the draft handler asks this index and the directory index
+  /// about one message — and hands both of them one memoised closure so the
+  /// card is embedded once. Null is the ordinary case and means "build it
+  /// yourself", which is exactly what this did before the parameter existed.
+  /// The closure is called only after the `LIMIT 1` guard below, so a thread
+  /// with no documents on it still costs no POST.
   Future<List<AttachmentExcerpt>> excerptsFor({
     required String source,
     required String conversationKey,
@@ -101,6 +109,7 @@ class AttachmentRetriever {
     List<String>? threadMessageIds,
     List<String> storylineIds = const [],
     List<String> pinnedFirst = const [],
+    Future<Uint8List?> Function()? queryVector,
     int budgetChars = 2500,
     int perAttachment = 3,
     int k = 6,
@@ -139,7 +148,9 @@ class AttachmentRetriever {
       return const [];
     }
 
-    final query = await _queryVector(source, replyToId);
+    final query = await (queryVector == null
+        ? replyToQueryVector(_store, _embeddings, source, replyToId)
+        : queryVector());
     // The embedding server is down, or refused the card. Degraded, never
     // thrown: the draft below this is written without citations.
     if (query == null) return const [];
@@ -172,58 +183,6 @@ class AttachmentRetriever {
 
     final ordered = _rank(passages, pinnedFirst, perAttachment, k);
     return _withinBudget(ordered, budgetChars);
-  }
-
-  /// The vector the passages are searched against.
-  ///
-  /// The reply-to message's OWN stored vector when it has one, which it
-  /// usually does — the embed queue reaches inbound mail long before anyone
-  /// asks for a draft of it — and a re-embed of the same card when it does
-  /// not.
-  ///
-  /// Under [EmbeddingsClient.documentPrefix], never the query prefix. This is
-  /// a document-against-documents comparison: the message is a document that
-  /// happens to be the question, and a query-prefixed vector sits in a
-  /// different corner of the space from every chunk it would be compared with.
-  Future<Uint8List?> _queryVector(String source, String replyToId) async {
-    final stored = await _store.messageVectorBlob(
-      source,
-      replyToId,
-      embedModel: EmbeddingsClient.documentModelTag,
-    );
-    if (stored != null) return stored;
-
-    final row = await _store.getMessageRow(source, replyToId);
-    if (row == null) return null;
-
-    // The SAME card `embedMessageRow` builds, deliberately duplicated in shape
-    // rather than shared: this path must produce a vector comparable with the
-    // one the embed queue would have written, so the card's four segments, its
-    // marker strip and its stand-in all have to match. If that function's card
-    // changes, this one changes with it.
-    final stripped = stripAttachmentMarkers(
-      (row['body_text'] as String?)?.isNotEmpty ?? false
-          ? row['body_text'] as String?
-          : row['body_preview'] as String?,
-    );
-    final body = stripped.isEmpty
-        ? attachmentStandIn([
-            for (final attachment
-                in await _store.attachmentsForMessage(source, replyToId))
-              AttachmentRef.fromRow(attachment),
-          ])
-        : stripped;
-    final result = await _embeddings.embedResult(
-      buildMessageCard(
-        subject: row['subject'] as String?,
-        sender: senderLine(Message.fromRow(row)),
-        summary: row['summary'] as String?,
-        body: body,
-      ),
-      prefix: EmbeddingsClient.documentPrefix,
-    );
-    final vector = result.vector;
-    return vector == null ? null : encodeEmbedding(vector);
   }
 
   /// KNN order, with the named documents floated to the front and no one
@@ -308,6 +267,70 @@ class AttachmentRetriever {
     final stamp = receivedAt ?? '';
     return stamp.length >= 10 ? stamp.substring(0, 10) : '';
   }
+}
+
+/// The vector the passages are searched against.
+///
+/// Top-level rather than a method because TWO retrievers ask the same
+/// question of the same message: the documents on the thread and the owner's
+/// own registered directories are both searched against the reply-to
+/// message's vector, and a draft that embedded the same card twice would pay
+/// for one answer twice — and, the day one copy drifted, would compare two
+/// different cards against two different corpora.
+///
+/// The reply-to message's OWN stored vector when it has one, which it
+/// usually does — the embed queue reaches inbound mail long before anyone
+/// asks for a draft of it — and a re-embed of the same card when it does
+/// not.
+///
+/// Under [EmbeddingsClient.documentPrefix], never the query prefix. This is
+/// a document-against-documents comparison: the message is a document that
+/// happens to be the question, and a query-prefixed vector sits in a
+/// different corner of the space from every chunk it would be compared with.
+Future<Uint8List?> replyToQueryVector(
+  MessageStore store,
+  EmbeddingsClient embeddings,
+  String source,
+  String replyToId,
+) async {
+  final stored = await store.messageVectorBlob(
+    source,
+    replyToId,
+    embedModel: EmbeddingsClient.documentModelTag,
+  );
+  if (stored != null) return stored;
+
+  final row = await store.getMessageRow(source, replyToId);
+  if (row == null) return null;
+
+  // The SAME card `embedMessageRow` builds, deliberately duplicated in shape
+  // rather than shared: this path must produce a vector comparable with the
+  // one the embed queue would have written, so the card's four segments, its
+  // marker strip and its stand-in all have to match. If that function's card
+  // changes, this one changes with it.
+  final stripped = stripAttachmentMarkers(
+    (row['body_text'] as String?)?.isNotEmpty ?? false
+        ? row['body_text'] as String?
+        : row['body_preview'] as String?,
+  );
+  final body = stripped.isEmpty
+      ? attachmentStandIn([
+          for (final attachment
+              in await store.attachmentsForMessage(source, replyToId))
+            AttachmentRef.fromRow(attachment),
+        ])
+      : stripped;
+  final result = await embeddings.embedResult(
+    buildMessageCard(
+      subject: row['subject'] as String?,
+      sender: senderLine(Message.fromRow(row)),
+      summary: row['summary'] as String?,
+      body: body,
+    ),
+    prefix: EmbeddingsClient.documentPrefix,
+  );
+  final vector = result.vector;
+  return vector == null ? null : encodeEmbedding(vector);
 }
 
 /// The excerpts as the model reads them, clamped to [cap].

@@ -7,6 +7,7 @@ import '../models/context_models.dart';
 import '../services/attachments/file_dialogs.dart';
 import 'activity_provider.dart' show activityEventsProvider;
 import 'app_providers.dart';
+import 'draft_provider.dart' show DraftTarget;
 
 /// One registered directory, the sentence its brief opens with, and the four
 /// counts the library row reports: how many rooms point at it, how many
@@ -66,6 +67,70 @@ final contextDirectoriesProvider =
   return rows;
 });
 
+/// One room, as the link reads and writes name it.
+///
+/// A record and not three positional arguments, because it is the FAMILY KEY
+/// of two providers: Riverpod compares family arguments by `==`, and a record
+/// of three strings compares by value where a class would have needed one
+/// written by hand — and a key that compared by identity would rebuild the
+/// panel on every frame.
+///
+/// [source] is `''` for a storyline, whose ids are already global.
+typedef ContextScope = ({
+  ContextScopeKind kind,
+  String source,
+  String scopeKey,
+});
+
+/// The directories linked to ONE room — what the panel's switches read.
+///
+/// Re-read on every activity event, exactly as the library is and for the
+/// same reason: a link written by the panel and a directory registered from
+/// inside it both land as activity, and the switch under the reader's finger
+/// has to agree with the row it just wrote.
+final contextLinksProvider =
+    FutureProvider.autoDispose.family<List<String>, ContextScope>(
+  (ref, scope) async {
+    ref.watch(activityEventsProvider);
+    return ref
+        .watch(contextStoreProvider)
+        .dirIdsLinkedTo(scope.kind, scope.source, scope.scopeKey);
+  },
+);
+
+/// What a THREAD reads because of the storylines it is in, named by storyline.
+///
+/// The inheritance is the one pinned documents have, and the panel shows it
+/// rather than folding it into the switches: a directory a thread inherits is
+/// not a directory this thread linked, and a switch that turned itself off
+/// would be a switch that unlinked somebody else's storyline.
+///
+/// Empty for a storyline's own panel, which inherits from nothing.
+final contextInheritedProvider = FutureProvider.autoDispose
+    .family<List<({String storyline, String dirName})>, DraftTarget>(
+  (ref, target) async {
+    ref.watch(activityEventsProvider);
+    final messages = ref.watch(messageStoreProvider);
+    final store = ref.watch(contextStoreProvider);
+    final inherited = <({String storyline, String dirName})>[];
+    for (final storylineId
+        in await messages.storylineIdsFor(target.source, target.conversationKey)) {
+      final storyline = await messages.getStoryline(storylineId);
+      if (storyline == null) continue;
+      for (final dirId in await store.dirIdsLinkedTo(
+        ContextScopeKind.storyline,
+        '',
+        storylineId,
+      )) {
+        final dir = await store.directory(dirId);
+        if (dir == null) continue;
+        inherited.add((storyline: storyline.title, dirName: dir.displayName));
+      }
+    }
+    return inherited;
+  },
+);
+
 /// Every write the Settings library makes, in one place.
 ///
 /// The section and the screen above it stay prop-only: they call these and
@@ -120,6 +185,38 @@ class ContextDirectoriesActions {
     unawaited(_ref.read(aiWorkerProvider).pump());
     _ref.invalidate(contextDirectoriesProvider);
     return (id: id, displayName: displayName);
+  }
+
+  /// Points a room at a directory, or stops pointing it there.
+  ///
+  /// Two invalidations rather than one: the switch's own provider, and the
+  /// library — whose row carries how many rooms point at each directory, and
+  /// that number has just moved.
+  Future<void> setLinked(String dirId, ContextScope scope, bool on) async {
+    final store = _ref.read(contextStoreProvider);
+    if (on) {
+      await store.link(dirId, scope.kind, scope.source, scope.scopeKey);
+    } else {
+      await store.unlink(dirId, scope.kind, scope.source, scope.scopeKey);
+    }
+    _ref.invalidate(contextLinksProvider(scope));
+    _ref.invalidate(contextDirectoriesProvider);
+  }
+
+  /// Registers a directory AND links it to the room the person was standing
+  /// in. Null when they cancelled the open panel.
+  ///
+  /// Two steps and one meaning: pressing **Add directory…** inside a room is
+  /// how a person says "read this here". Registering it and leaving the switch
+  /// off would answer a question nobody asked.
+  Future<({String id, String displayName})?> addDirectoryTo(
+    FileDialogs dialogs,
+    ContextScope scope,
+  ) async {
+    final added = await addDirectory(dialogs);
+    if (added == null) return null;
+    await setLinked(added.id, scope, true);
+    return added;
   }
 
   /// Re-reads one directory now, whatever the freshness rung would have said.

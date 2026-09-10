@@ -137,6 +137,15 @@ class StorylineTimelinePanel extends StatefulWidget {
   /// inert button live.
   final bool auditing;
 
+  /// Opens the panel naming which of the owner's directories this storyline
+  /// reads — and, through it, every thread that belongs to it. Null hides the
+  /// action.
+  final VoidCallback? onContext;
+
+  /// How many directories this storyline links. On the action's label, for
+  /// [ThreadDetailPanel.contextLinked]'s reason.
+  final int contextLinked;
+
   const StorylineTimelinePanel({
     super.key,
     required this.storyline,
@@ -165,6 +174,8 @@ class StorylineTimelinePanel extends StatefulWidget {
     this.onAddBackThread,
     this.onAudit,
     this.auditing = false,
+    this.onContext,
+    this.contextLinked = 0,
   });
 
   static const Key documentsStripKey = ValueKey('storyline-documents-strip');
@@ -714,6 +725,17 @@ class _StorylineTimelinePanelState extends State<StorylineTimelinePanel> {
           '${widget.storyline.openCount} open',
       onBack: widget.onBack,
       actions: [
+        // First, like the thread header's: what this room reads is a standing
+        // fact about it, and adding a thread is one thing to do in it.
+        if (widget.onContext != null)
+          RoomAction(
+            icon: Icons.folder_open_outlined,
+            label: widget.contextLinked > 0
+                ? 'Context · ${widget.contextLinked}'
+                : 'Context',
+            onTap: widget.onContext,
+            key: const Key('storyline-context'),
+          ),
         RoomAction(
           icon: Icons.add,
           label: 'Add thread',

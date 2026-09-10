@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../data/message_store.dart' show MessageStore;
+import '../models/context_models.dart' show ContextScopeKind;
+import '../models/draft_provenance.dart';
 import '../models/attachment_models.dart';
 import '../models/message_models.dart';
 import '../models/open_asks.dart' show latestOutboundAt;
@@ -74,6 +76,7 @@ import '../widgets/preview/preview_kind.dart' show openRefused;
 import '../widgets/quick_replies.dart';
 import '../widgets/room_header.dart';
 import '../widgets/settings_screen.dart';
+import '../widgets/context_panel.dart';
 import '../widgets/side_panel.dart';
 import '../widgets/sort_menu.dart';
 import '../widgets/source_filter.dart';
@@ -2835,6 +2838,23 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         _clearOverlays();
         _selectedStorylineId = null;
       }),
+      onContext: () => _openContextFor(
+        ContextScopeKind.storyline,
+        // A storyline id is already global, and the link row stores no
+        // connector for one.
+        '',
+        storyline.id,
+        storyline.title,
+      ),
+      contextLinked: ref
+              .watch(contextLinksProvider((
+                kind: ContextScopeKind.storyline,
+                source: '',
+                scopeKey: storyline.id,
+              )))
+              .valueOrNull
+              ?.length ??
+          0,
       onRename: (title) => notifier.rename(storyline.id, title),
       onSetCharter: (charter) => notifier.setCharter(storyline.id, charter),
       onAcceptSuggestion: (charter) =>
@@ -3349,6 +3369,26 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       // time, and the row's hover strip is where the question is asked — the
       // fourth button, after Why.
       onWhatHappened: (message) => _openHistory(message.source, message.id),
+      // Offered from a side thread too: the panel REPLACES that thread, the
+      // rule Why already follows. The room's name is the thread panel's own
+      // naming rule — a chat carries no subject and is named by who is on it.
+      onContext: () => _openContextFor(
+        ContextScopeKind.thread,
+        target.source,
+        target.conversationKey,
+        _roomNameFor(selected),
+      ),
+      // Zero for the frame before the read lands, which reads as `Context`
+      // and becomes `Context · 1` when it arrives.
+      contextLinked: ref
+              .watch(contextLinksProvider((
+                kind: ContextScopeKind.thread,
+                source: target.source,
+                scopeKey: target.conversationKey,
+              )))
+              .valueOrNull
+              ?.length ??
+          0,
     );
 
     // The composer sits OUTSIDE the panel, in this column: the panel renders a
@@ -3401,6 +3441,7 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         PersonPanel() => _personPanel(side),
         WhyPanel() => _whyPanel(side),
         HistoryPanel() => _historyPanel(side),
+        ContextPanel() => _contextPanel(side),
       };
 
   /// Why one message got the verdict it did.
@@ -3465,6 +3506,104 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
         conversationKey: target.conversationKey,
         messageId: message.id,
       ));
+
+  /// What a thread is CALLED in a panel header's subtitle.
+  ///
+  /// The thread panel's own naming rule, in one place: a chat carries no
+  /// subject, so it is named by who is on it. [_whyPanel] resolves the same
+  /// thing from a conversation it looked up; this one has the conversation
+  /// already.
+  static String _roomNameFor(Conversation selected) {
+    final subject = selected.subject ?? '';
+    if (subject.isNotEmpty) return subject;
+    return [
+      for (final participant in selected.participants)
+        if (participant.display.isNotEmpty) participant.display,
+    ].join(', ');
+  }
+
+  /// Which of the owner's directories a room reads, beside that room.
+  ///
+  /// From a SIDE thread it replaces that thread, the rule every other panel
+  /// opened from beside follows: the panel shows one thing.
+  void _openContextFor(
+    ContextScopeKind kind,
+    String source,
+    String scopeKey,
+    String title,
+  ) =>
+      _openBeside(ContextPanel(
+        kind: kind,
+        source: source,
+        scopeKey: scopeKey,
+        title: title,
+      ));
+
+  /// The link panel: the whole library with a switch each, and — on a thread
+  /// — what it inherits from its storylines.
+  ///
+  /// No ⤢, for [_whyPanel]'s reason: this is a short list about one room, and
+  /// a list does not improve by being given the whole window.
+  Widget _contextPanel(ContextPanel side) {
+    final scope = (
+      kind: side.kind,
+      source: side.source,
+      scopeKey: side.scopeKey,
+    );
+    final library = ref.watch(contextDirectoriesProvider);
+    final links = ref.watch(contextLinksProvider(scope));
+    // A storyline inherits from nothing, so it is not asked. A thread's
+    // inherited list is keyed on the thread, which is exactly the scope's own
+    // two halves for a thread.
+    final inherited = side.kind == ContextScopeKind.thread
+        ? ref.watch(contextInheritedProvider((
+            source: side.source,
+            conversationKey: side.scopeKey,
+          )))
+        : null;
+    final actions = ref.read(contextDirectoriesActionsProvider);
+
+    Widget message(String text) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(BondSpacing.s24),
+            child: Text(
+              text,
+              style: BondType.small,
+              textAlign: TextAlign.center,
+            ),
+          ),
+        );
+
+    return SidePanelHost(
+      title: 'Context',
+      subtitle: side.title.isEmpty ? null : side.title,
+      leading: const Icon(Icons.folder_open_outlined, size: 18),
+      onClose: _closeSide,
+      child: library.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (_, _) => message('Could not read your directories.'),
+        data: (rows) => links.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (_, _) => message('Could not read what this room links.'),
+          data: (ids) => ContextPanelBody(
+            rows: rows,
+            linked: ids.toSet(),
+            // The frame before the inherited read lands shows the switches
+            // rather than a spinner: the list a person came here to use is
+            // already in hand, and the muted lines under it are context.
+            inherited: inherited?.valueOrNull ?? const [],
+            onToggle: (id, on) =>
+                unawaited(actions.setLinked(id, scope, on)),
+            onAddDirectory: () => unawaited(
+              actions.addDirectoryTo(_fileDialogs, scope),
+            ),
+            onManage: _openSettings,
+            now: DateTime.now(),
+          ),
+        ),
+      ),
+    );
+  }
 
   /// Opens one person beside whatever the reader is looking at, and asks for
   /// the facts the room itself does not carry.
@@ -4047,13 +4186,14 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
 
   /// What the provenance caption says above an untouched suggestion.
   ///
-  /// A CONSTANT, and knowingly less specific than it could be. The `drafts`
-  /// table stores the model's evidence sentence but no inventory of what went
-  /// into the prompt, so a line naming "2 past emails with Eric" would be
-  /// assembled at render time out of guesses. The evidence sentence — which IS
-  /// what the model said it was doing — rides along as the tooltip instead.
-  static const String _provenance =
-      '✨ Suggested reply — drafted from this thread and your past mail';
+  /// The FALLBACK, for a draft that recorded no inventory of what went into
+  /// its prompt — one written before the `context_json` column existed, or
+  /// one written from nothing but the thread. A draft that did record one
+  /// replaces this with the caption naming what was read.
+  ///
+  /// It lives on [DraftProvenance] so that the sentence the caption extends
+  /// and the sentence it falls back to cannot drift apart.
+  static const String _provenance = DraftProvenance.base;
 
   /// One conversation's reply box.
   ///
@@ -4088,7 +4228,11 @@ class _InboxScreenState extends ConsumerState<InboxScreen>
       suggestedBody: stagedBody,
       focusOnMount:
           focusNode == _sideComposerFocus && _focusSideOnMount == target,
-      provenance: _provenance,
+      // What the model actually read, when the handler wrote it down. The
+      // decode is tolerant and the `??` covers every way it can say nothing,
+      // so a malformed column costs the specific line and not the caption.
+      provenance:
+          DraftProvenance.decode(draft.contextJson)?.caption() ?? _provenance,
       generating: draft.generating,
       sending: draft.sending,
       capability: draft.capability,

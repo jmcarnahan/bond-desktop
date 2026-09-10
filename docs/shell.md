@@ -143,7 +143,7 @@ one line — From · Subject · Ask · When, an ask keeping its tone as a dot �
 no bar and no Result cell: the thread beside carries both, and its Why panel's
 `What happened ›` is the door to the history.
 
-`SidePanel` has five kinds, and the panel shows exactly one of them:
+`SidePanel` has six kinds, and the panel shows exactly one of them:
 
 | Kind | What it holds | Opened by |
 |---|---|---|
@@ -152,9 +152,10 @@ no bar and no Result cell: the thread beside carries both, and its Why panel's
 | `WhyPanel` | why one message got its verdict | the hover **Why** on an inbound row, and the CTA banner |
 | `PersonPanel` | one person | the room header's **Profile**, and tapping the faces on a room or a thread |
 | `HistoryPanel` | what happened to one message — every stage, judgement and queue row, with the levers | the hover **What happened** on an inbound row, the Why panel's `What happened ›`, an Inbox row's stage bar or Result cell, an Archive row |
+| `ContextPanel` | which directories a room reads when a reply is drafted | the room header's **Context** on a thread and on a storyline |
 
-Why, Person and History follow the file rule: opened from a thread that is
-itself beside, they REPLACE it. One panel, never two stacked — the Why panel's
+Why, Person, History and Context follow the file rule: opened from a thread
+that is itself beside, they REPLACE it. One panel, never two stacked — the Why panel's
 `What happened ›` swaps the history into the same slot, and its ✕ returns to
 the transcript, not to Why. Neither Why nor History carries ⤢: each is prose
 about one message, and prose does not improve by being given the whole window.
@@ -284,9 +285,18 @@ message lives on that message, never up here.
   `PopupMenuButton` is not a dialog. A menu item with a null `onTap` renders
   disabled, which is what a label like `Syncing…` needs. An item **says what it
   does**: the storyline's sort item names the order it switches TO.
-- **The faces are the first thing to give.** Below `540` of header width the
-  `AvatarStack` comes off, because the subtitle already names those people and
-  the alternative is a clipped control.
+- **Context** is the first action on both rooms — a thread's, before
+  **Message**; a storyline's, before **Add thread** — because what a room
+  READS is a standing fact about it where writing in it is one thing to do.
+  Its label carries the count of directories linked directly to that room
+  (`Context · 2`), and it opens the [`ContextPanel`](#what-opens-where).
+- **The header gives ground in an order.** The faces go first: below `540` of
+  header width the `AvatarStack` comes off, because the subtitle already names
+  those people. Then a LABELLED action folds into the ⋯ menu, at the top of
+  it — an icon action costs the same 52 pixels whatever it says, while a
+  labelled one costs its words, which in a side panel makes it the widest
+  thing on a row of controls. Nothing is hidden either way; the alternative is
+  a header that clips a control.
 
 **The tab row** is a second line of `BondFilterPill`s, drawn only when there is
 more than one tab — one pill is a label pretending to be a choice. Each pill
@@ -684,6 +694,14 @@ the person room's header `AvatarStack`.
   TextInputAction.search)` is Enter. ⌘K is four events —
   `sendKeyDownEvent(metaLeft)`, `sendKeyDownEvent(keyK)`, `sendKeyUpEvent(keyK)`,
   `sendKeyUpEvent(metaLeft)` — then `pump()`.
+- **The Context panel**: `Key('thread-context')` and
+  `Key('storyline-context')` are the two header actions, and the action's
+  tooltip is what carries the count (`Context · 1`). Inside the panel,
+  `ContextPanelBody.toggleKeyFor(dirId)` is one directory's switch,
+  `ContextPanelBody.addKey` is **Add directory…** and
+  `ContextPanelBody.manageKey` is **Manage directories in Settings ›**. A host
+  test that presses Add must override `directoryAccessProvider` with
+  `PlainDirectoryAccess` and `aiWorkerProvider` with a handler-less `AiWorker`.
 - `Key('unread-toggle')` is the Unread only button; find it by that, not by
   tooltip, because the tooltip flips with the state.
 - `Key('needs-you-tabs')` is the Needs You pill row. **Scope pill finders to

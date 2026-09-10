@@ -228,6 +228,71 @@ void main() {
       expect(find.text('Draft written — 312 chars'), findsOneWidget);
     });
 
+    testWidgets('a draft names the owner\'s own files it read', (tester) async {
+      // The log is where a person goes back and asks what the app DID, after
+      // the draft it belongs to has been sent, edited or thrown away. Basenames
+      // rather than rel paths: a log line spends its width on the file, not on
+      // the folders above it.
+      await pump(
+        tester,
+        now: DateTime(2026, 3, 12, 9),
+        events: [
+          _event(
+            kind: 'draft',
+            detail: const {
+              'chars': 120,
+              'directory_files': ['docs/pricing.md', 'reports/analysis.html'],
+            },
+            createdAt: DateTime(2026, 3, 12, 8, 30).toIso8601String(),
+          ),
+        ],
+      );
+
+      expect(
+        find.text('Draft written — 120 chars · read pricing.md, analysis.html'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('and counts them past the third', (tester) async {
+      await pump(
+        tester,
+        now: DateTime(2026, 3, 12, 9),
+        events: [
+          _event(
+            kind: 'draft',
+            detail: const {
+              'chars': 120,
+              'directory_files': ['a.md', 'b.md', 'c.md', 'd.md'],
+            },
+            createdAt: DateTime(2026, 3, 12, 8, 30).toIso8601String(),
+          ),
+        ],
+      );
+
+      expect(
+        find.text('Draft written — 120 chars · read a.md, b.md, c.md, +1 more'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a draft that read none says only how long it is',
+        (tester) async {
+      await pump(
+        tester,
+        now: DateTime(2026, 3, 12, 9),
+        events: [
+          _event(
+            kind: 'draft',
+            detail: const {'chars': 120, 'directory_files': <String>[]},
+            createdAt: DateTime(2026, 3, 12, 8, 30).toIso8601String(),
+          ),
+        ],
+      );
+
+      expect(find.text('Draft written — 120 chars'), findsOneWidget);
+    });
+
     testWidgets('a row names its connector, when, and how long it took',
         (tester) async {
       final now = DateTime(2026, 3, 12, 9);

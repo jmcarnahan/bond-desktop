@@ -1,18 +1,27 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:bond_inbox/data/database.dart';
+import 'package:bond_inbox/data/context_store.dart';
 import 'package:bond_inbox/data/message_store.dart';
 import 'package:bond_inbox/models/attachment_models.dart';
+import 'package:bond_inbox/models/context_models.dart';
+import 'package:bond_inbox/models/draft_provenance.dart';
+import 'package:bond_inbox/services/activity_log.dart';
 import 'package:bond_inbox/services/ai_worker.dart';
 import 'package:bond_inbox/services/attachments/attachment_retriever.dart';
+import 'package:bond_inbox/services/context/context_retriever.dart';
 import 'package:bond_inbox/services/draft_handler.dart';
 import 'package:bond_inbox/services/llm/embeddings_client.dart';
 import 'package:bond_inbox/services/llm/llm_client.dart';
 import 'package:bond_inbox/services/pipeline_progress.dart';
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:sqlite_vec_ffi/sqlite_vec_ffi.dart';
 
+import 'fixtures/fake_embed_server.dart';
 import 'fixtures/test_db.dart';
+import 'fixtures/vec_test_db.dart';
 
 /// An [LlmClient] that answers from a script, records what it was asked, and
 /// never opens a socket.
@@ -80,6 +89,7 @@ class FakeRetriever extends AttachmentRetriever {
     List<String>? threadMessageIds,
     List<String> storylineIds = const [],
     List<String> pinnedFirst = const [],
+    Future<Uint8List?> Function()? queryVector,
     int budgetChars = 2500,
     int perAttachment = 3,
     int k = 6,
@@ -90,6 +100,89 @@ class FakeRetriever extends AttachmentRetriever {
     if (failure != null) throw failure;
     return answer;
   }
+}
+
+/// A directory retriever that answers from a fixture and counts its calls.
+///
+/// [FakeRetriever]'s shape and its reasoning: the seam that matters is the one
+/// method, and `context_retriever_test.dart` is where the scope arithmetic,
+/// the fusion and the budget are pinned.
+class FakeContextRetriever extends ContextRetriever {
+  final ContextPack answer;
+  final Object? throws;
+
+  /// Every `storylineIds` it was handed, in order. The list's LENGTH is the
+  /// "one pack, two prompts" assertion.
+  final List<List<String>> storylinesSeen = [];
+
+  FakeContextRetriever(
+    MessageStore store,
+    ContextStore context, {
+    this.answer = ContextPack.empty,
+    this.throws,
+  }) : super(store, context, _neverDialled);
+
+  int get calls => storylinesSeen.length;
+
+  @override
+  Future<ContextPack> packFor({
+    required String source,
+    required String conversationKey,
+    required String replyToId,
+    required List<String> storylineIds,
+    List<int> consultFirst = const [],
+    Future<Uint8List?> Function()? queryVector,
+    int budgetChars = 2500,
+    int perFile = 3,
+    int k = 6,
+  }) async {
+    storylinesSeen.add(storylineIds);
+    final failure = throws;
+    if (failure != null) throw failure;
+    return answer;
+  }
+}
+
+/// What the owner's own directories hand back, as the retriever ranked them.
+ContextPack directoryPack() => const ContextPack(
+      directories: ['acme'],
+      briefs: [
+        ContextBriefLine(dirName: 'acme', about: 'A renewal pricing model.'),
+      ],
+      guidance: [
+        ContextGuidance(label: 'guidance', text: 'Answer in two lines.'),
+      ],
+      excerpts: [
+        ContextExcerpt(
+          dirName: 'acme',
+          relPath: 'docs/pricing.md',
+          locator: 'Pricing > Q4 rates',
+          modified: '2026-08-30',
+          text: 'Q4 rates hold at nine.',
+          fileId: 1,
+          dirId: 'd1',
+        ),
+        ContextExcerpt(
+          dirName: 'acme',
+          relPath: 'analysis.html',
+          locator: 'digest',
+          modified: '2026-08-31',
+          text: 'What the rung schedule concluded.',
+          fileId: 2,
+          dirId: 'd1',
+        ),
+      ],
+      skills: ['vendor-replies'],
+    );
+
+/// An activity log that keeps what the handler told it.
+class _Recorder extends ActivityLog {
+  _Recorder() : super.disabled();
+
+  final Map<String, Object?> notes = {};
+
+  @override
+  void note(Map<String, Object?> detail) => notes.addAll(detail);
 }
 
 /// Never reached: [FakeRetriever] answers before any of it is used.
@@ -642,6 +735,255 @@ void main() {
 
       // The draft is the product; the citations are what make it better.
       expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
+    });
+  });
+
+  group("the owner's own directories in the prompt", () {
+    test('one pack reaches both the decision and the draft', () async {
+      await seedInbound();
+      final llm = FakeLlm([decision(), answer()]);
+      final directories = FakeContextRetriever(store, ContextStore(db),
+          answer: directoryPack());
+
+      await runOne(DraftHandler(store, llm, contextDirs: directories));
+
+      // ONE call, two prompts. The directories cannot have changed between
+      // the two, so a second pass would buy nothing and cost a vector read.
+      expect(directories.calls, 1);
+      expect(llm.userMessages.length, 2);
+      for (final sent in llm.userMessages) {
+        expect(sent, contains('<untrusted_data source="directory_excerpts">'));
+        expect(sent, contains('Q4 rates hold at nine.'));
+      }
+      // The guidance is the draft's alone: whether an answer is OWED is not a
+      // question about how one should read.
+      expect(llm.userMessages.last, contains('source="directory_guidance"'));
+      expect(llm.userMessages.first,
+          isNot(contains('source="directory_guidance"')));
+    });
+
+    test('the storylines the thread is in reach the retriever', () async {
+      await seedInbound();
+      await store.insertStoryline(
+        id: 'story-7',
+        title: 'Marrowfield renewal',
+        status: 'active',
+        createdBy: 'auto',
+      );
+      await store.addStorylineMember('story-7', 'email', 'conv-1',
+          addedBy: 'auto');
+      final directories = FakeContextRetriever(store, ContextStore(db));
+
+      await runOne(
+        DraftHandler(store, FakeLlm([decision(), answer()]),
+            contextDirs: directories),
+      );
+
+      expect(directories.storylinesSeen.single, ['story-7']);
+    });
+
+    test('what was read is stored on the draft row', () async {
+      await seedInbound();
+      final directories = FakeContextRetriever(store, ContextStore(db),
+          answer: directoryPack());
+
+      await runOne(
+        DraftHandler(
+          store,
+          FakeLlm([decision(), answer()]),
+          attachments: FakeRetriever(store, answer: [excerpt()]),
+          contextDirs: directories,
+        ),
+      );
+
+      final row = (await store.getDraftForMessage('email', 'm2'))!;
+      final provenance =
+          DraftProvenance.decode(row['context_json'] as String?)!;
+      expect(provenance.documents, ['Lease Addendum.pdf']);
+      expect(provenance.directories, ['acme']);
+      expect(provenance.files, [
+        (dir: 'acme', path: 'docs/pricing.md', locator: 'Pricing > Q4 rates'),
+        (dir: 'acme', path: 'analysis.html', locator: 'digest'),
+      ]);
+      expect(provenance.skills, ['vendor-replies']);
+    });
+
+    test('a draft written from nothing but the thread stores no inventory',
+        () async {
+      await seedInbound();
+
+      await runOne(DraftHandler(store, FakeLlm([decision(), answer()])));
+
+      final row = (await store.getDraftForMessage('email', 'm2'))!;
+      // Null rather than an empty object: "nothing was read" and "the column
+      // was never written" are the same thing to the composer, and one of the
+      // two spellings is shorter.
+      expect(row['context_json'], isNull);
+    });
+
+    test('a pack that named a directory and rendered nothing stores no '
+        'inventory', () async {
+      // A room with a directory linked and nothing in it yet. The retriever
+      // is the layer that decides whether a directory contributed, and this
+      // pins the handler's side of that contract: an empty pack writes no
+      // provenance, whatever it says about itself, so the composer cannot
+      // claim the reply was drafted from a project the model never read.
+      await seedInbound();
+
+      await runOne(DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        contextDirs: FakeContextRetriever(
+          store,
+          ContextStore(db),
+          answer: const ContextPack(
+            directories: ['acme'],
+            briefs: [],
+            guidance: [],
+            excerpts: [],
+            skills: [],
+          ),
+        ),
+      ));
+
+      final row = (await store.getDraftForMessage('email', 'm2'))!;
+      expect(row['context_json'], isNull);
+    });
+
+    test('the activity row names the project, the files and the skills',
+        () async {
+      await seedInbound();
+      final log = _Recorder();
+
+      await runOne(DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        activityLog: log,
+        attachments: FakeRetriever(store, answer: [excerpt()]),
+        contextDirs: FakeContextRetriever(store, ContextStore(db),
+            answer: directoryPack()),
+      ));
+
+      expect(log.notes['chars'], isA<int>());
+      expect(log.notes['documents'], ['Lease Addendum.pdf']);
+      expect(log.notes['directories'], ['acme']);
+      expect(log.notes['directory_files'],
+          ['docs/pricing.md', 'analysis.html']);
+      expect(log.notes['skills'], ['vendor-replies']);
+    });
+
+    test('a retriever that throws costs the citations, not the reply',
+        () async {
+      await seedInbound();
+      final log = _Recorder();
+
+      await runOne(DraftHandler(
+        store,
+        FakeLlm([decision(), answer()]),
+        activityLog: log,
+        contextDirs: FakeContextRetriever(store, ContextStore(db),
+            throws: StateError('the index fell over')),
+      ));
+
+      expect(await store.getDraftForMessage('email', 'm2'), isNotNull);
+      expect(log.notes['context_error'], contains('the index fell over'));
+    });
+
+    test('two corpora, one embedding of the message', () async {
+      if (!ensureSqliteVecLoaded()) return;
+      // The real retrievers, over one thread that has BOTH a document on it
+      // and a directory linked to it, answering a message the embed queue has
+      // not reached yet. Each retriever knows how to embed the card itself,
+      // and neither can know the other is about to ask the same question — so
+      // the handler asks it once for the two of them.
+      final vecDb = vecTestDb();
+      addTearDown(vecDb.close);
+      final vecStore = MessageStore(vecDb);
+      final directories = ContextStore(vecDb);
+      final embed = FakeEmbedServer();
+
+      await vecStore.upsertMessage({
+        'source_message_id': 'm2',
+        'conversation_key': 'conv-1',
+        'direction': 'inbound',
+        'subject': 'Re: Renewal quote',
+        'from_name': 'Sarah',
+        'from_address': 'sarah@x.com',
+        'received_at': '2026-08-29T10:00:00Z',
+        'body_text': 'What does the renewal come to?',
+      });
+      // No `upsertMessageVector`: this is the case that costs a POST.
+      await vecStore.upsertAttachments('email', 'm2', [
+        {
+          'attachment_id': 'a1',
+          'ordinal': 0,
+          'kind': 'file',
+          'name': 'Lease.pdf',
+          'content_type': 'application/pdf',
+          'size': 4096,
+        },
+      ]);
+      final chunkIds = await vecStore.replaceChunks('email', 'm2', 'a1', const [
+        (seq: 0, locator: 'part 1', text: 'The tenant pays 2,400 monthly.'),
+      ]);
+      await vecStore.setChunkEmbedding(
+        chunkIds.single,
+        embedding: encodeEmbedding(axes({1: 1.0})),
+        dims: 768,
+        embedModel: EmbeddingsClient.documentModelTag,
+      );
+      await vecStore.indexPendingChunks();
+
+      final dir = await directories.registerDirectory(
+          path: '/a', displayName: 'acme');
+      final fileId = await directories.upsertFile(
+        dirId: dir,
+        relPath: 'docs/pricing.md',
+        size: 400,
+        mtime: '2026-08-30T09:00:00.000Z',
+        sha256: 'sha-a',
+        kind: 'doc',
+        claudeChain: const [],
+        textChars: 400,
+      );
+      final chunkId = await directories.appendChunk(
+        fileId,
+        locator: '',
+        text: 'docs/pricing.md\nQ4 rates hold at nine.',
+      );
+      await directories.setChunkEmbedding(
+        chunkId,
+        embedding: encodeEmbedding(axes({1: 1.0})),
+        dims: 768,
+        embedModel: EmbeddingsClient.documentModelTag,
+      );
+      await directories.indexPendingChunks();
+      await directories.link(dir, ContextScopeKind.thread, 'email', 'conv-1');
+
+      await DraftHandler(
+        vecStore,
+        FakeLlm([decision(), answer()]),
+        attachments: AttachmentRetriever(vecStore, embed.client),
+        contextDirs: ContextRetriever(vecStore, directories, embed.client),
+        embeddings: embed.client,
+      ).run({'task_kind': 'draft', 'source': 'email', 'entity_id': 'm2'});
+
+      expect(await vecStore.getDraftForMessage('email', 'm2'), isNotNull);
+      // One. Two would be the same card, embedded twice, in front of every
+      // draft on a thread that has both.
+      expect(embed.calls, 1);
+    });
+
+    test('a handler built with no retriever drafts exactly as before',
+        () async {
+      await seedInbound();
+      final llm = FakeLlm([decision(), answer()]);
+
+      await runOne(DraftHandler(store, llm));
+
+      for (final sent in llm.userMessages) {
+        expect(sent, isNot(contains('directory_')));
+      }
     });
   });
 

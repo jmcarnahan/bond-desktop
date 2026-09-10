@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/attachment_models.dart';
+import '../models/context_models.dart' show ContextScopeKind;
 import '../providers/draft_provider.dart' show DraftTarget;
 import '../theme/tokens.dart';
 import 'app_rail.dart' show AppRail;
@@ -13,8 +14,10 @@ import 'icon_rail.dart' show IconRail;
 /// second nullable field per kind is how the file preview and the full viewer
 /// drifted apart — one could be set while the other said something else.
 ///
-/// Five kinds: a thread, a file, a person, the reasoning behind one message's
-/// verdict, and the whole story of what the pipeline did to one message.
+/// Six kinds: a thread, a file, a person, the reasoning behind one message's
+/// verdict, the whole story of what the pipeline did to one message, and
+/// which of the owner's own directories a room reads when a reply is drafted
+/// in it.
 sealed class SidePanel {
   const SidePanel();
 }
@@ -84,6 +87,34 @@ final class HistoryPanel extends SidePanel {
   final String id;
 
   const HistoryPanel({required this.source, required this.id});
+}
+
+/// Which directories a room reads when a reply is drafted in it.
+///
+/// The room is carried as its three parts rather than as a [DraftTarget],
+/// because a storyline is a room here too and has no conversation key: its
+/// id is global and its [source] is `''`, exactly as the link row stores it.
+///
+/// [title] is the room's own name, for the host's subtitle. Passed rather
+/// than resolved, because the panel is opened FROM the room and the header
+/// that opened it already knows what it is called.
+final class ContextPanel extends SidePanel {
+  final ContextScopeKind kind;
+
+  /// The connector for a thread; `''` for a storyline.
+  final String source;
+
+  /// The conversation key for a thread, the storyline id for a storyline.
+  final String scopeKey;
+
+  final String title;
+
+  const ContextPanel({
+    required this.kind,
+    required this.source,
+    required this.scopeKey,
+    required this.title,
+  });
 }
 
 /// The chrome around whatever is open beside the main pane: a title, the way

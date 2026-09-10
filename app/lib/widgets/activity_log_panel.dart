@@ -210,9 +210,23 @@ class ActivityLogPanel extends StatefulWidget {
         return parts.isEmpty ? label : '$label — $parts';
       case 'draft':
         final chars = detail['chars'];
-        return chars is num
+        final written = chars is num
             ? 'Draft written — ${chars.toInt()} chars'
             : 'Draft written';
+        // The owner's own files, by BASENAME: the row is a line in a log and
+        // a rel path spends its whole width on the folders above the file.
+        // Three and then a count, for the same reason.
+        final read = detail['directory_files'];
+        if (read is! List || read.isEmpty) return written;
+        final names = [
+          for (final entry in read)
+            if (entry is String && entry.isNotEmpty)
+              entry.split('/').last,
+        ];
+        if (names.isEmpty) return written;
+        final shown = names.take(3).toList();
+        if (names.length > 3) shown.add('+${names.length - 3} more');
+        return '$written · read ${shown.join(', ')}';
       case 'mark_read':
         final count = e.count ?? 0;
         return count == 1

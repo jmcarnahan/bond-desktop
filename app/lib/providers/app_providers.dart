@@ -30,6 +30,7 @@ import '../services/backend/teams_backend.dart';
 import '../services/context/context_brief_handler.dart';
 import '../services/context/context_digest_handler.dart';
 import '../services/context/context_reconcile_handler.dart';
+import '../services/context/context_retriever.dart';
 import '../services/context/directory_access.dart';
 import '../services/draft_handler.dart';
 import '../services/drain_gate.dart';
@@ -604,6 +605,22 @@ final attachmentRetrieverProvider = Provider<AttachmentRetriever>(
   ),
 );
 
+/// What the owner's own registered directories know about the message being
+/// answered.
+///
+/// A plain `Provider` for [messageSearchProvider]'s reason: it holds nothing
+/// and is the pairing of three things that each hold their own state. The
+/// mailbox store is here because the query vector is the reply-to MESSAGE's,
+/// which is the one fact this retrieval needs from the other side of the
+/// store split.
+final contextRetrieverProvider = Provider<ContextRetriever>(
+  (ref) => ContextRetriever(
+    ref.watch(messageStoreProvider),
+    ref.watch(contextStoreProvider),
+    ref.watch(embeddingsClientProvider),
+  ),
+);
+
 /// Restoring one gate-dropped message.
 ///
 /// A plain `Provider` for [messageSearchProvider]'s reason: it holds nothing
@@ -817,6 +834,10 @@ final Provider<AiWorker> aiWorkerProvider = Provider<AiWorker>((ref) {
         ref.watch(llmClientProvider),
         activityLog: ref.watch(activityLogProvider),
         attachments: ref.watch(attachmentRetrieverProvider),
+        contextDirs: ref.watch(contextRetrieverProvider),
+        // The same client both retrievers above hold, handed to the handler
+        // so the message being answered is embedded once for the two of them.
+        embeddings: ref.watch(embeddingsClientProvider),
         progress: ref.watch(pipelineProgressProvider),
       ),
     ],

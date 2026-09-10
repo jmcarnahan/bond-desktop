@@ -16,6 +16,7 @@ enum _Tab { one, two, three }
 void main() {
   Future<void> pumpHeader(
     WidgetTester tester, {
+    Size size = const Size(1000, 400),
     Widget? leading,
     Widget title = const Text('Launch date'),
     String? subtitle,
@@ -29,7 +30,7 @@ void main() {
     _Tab? selectedTab,
     ValueChanged<_Tab>? onTab,
   }) async {
-    await tester.binding.setSurfaceSize(const Size(1000, 400));
+    await tester.binding.setSurfaceSize(size);
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
@@ -197,6 +198,103 @@ void main() {
       await tester.pump();
 
       expect(taps, 1);
+    });
+  });
+
+  group('the narrow fold', () {
+    /// The menu is a route, so it needs the two frames a route transition
+    /// takes rather than a settle: this header is pumped inside screens that
+    /// own a 60 s timer.
+    Future<void> openMenu(WidgetTester tester) async {
+      await tester.tap(find.byKey(RoomHeader.moreKey));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pump(const Duration(milliseconds: 400));
+    }
+
+    const narrow = Size(420, 400);
+
+    testWidgets('a labelled action goes into the ⋯ menu rather than clipping',
+        (tester) async {
+      var taps = 0;
+      await pumpHeader(
+        tester,
+        size: narrow,
+        actions: [RoomAction(label: 'Mark done', onTap: () => taps++)],
+        moreItems: [
+          RoomMenuItem(value: 'file', label: 'Add to storyline…', onTap: () {}),
+          RoomMenuItem(value: 'later', label: 'Send to Later', onTap: () {}),
+        ],
+      );
+
+      // Not on the row: a word costs whatever its letters are, and in a side
+      // panel that makes it the widest thing on a row of controls.
+      expect(find.widgetWithText(TextButton, 'Mark done'), findsNothing);
+
+      await openMenu(tester);
+
+      // At the TOP of the menu — it was a control a moment ago — and divided
+      // off from the room's own corrections below it.
+      final items = find.byType(PopupMenuItem<String>);
+      expect(tester.widgetList<PopupMenuItem<String>>(items).first.value,
+          'action-Mark done');
+      expect(find.byType(PopupMenuDivider), findsOneWidget);
+
+      await tester.tap(find.text('Mark done'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+
+      // Folding moves the control; it does not change what it does.
+      expect(taps, 1);
+    });
+
+    testWidgets('an icon action stays on the row at the same width',
+        (tester) async {
+      // An icon costs a fixed 52 pixels whatever it says, because its words
+      // are a tooltip. There is nothing to save by hiding it.
+      await pumpHeader(
+        tester,
+        size: narrow,
+        actions: [
+          RoomAction(
+            icon: Icons.folder_open_outlined,
+            label: 'Context',
+            onTap: () {},
+            key: const Key('context'),
+          ),
+        ],
+        moreItems: [
+          RoomMenuItem(value: 'later', label: 'Send to Later', onTap: () {}),
+        ],
+      );
+
+      expect(find.byKey(const Key('context')), findsOneWidget);
+
+      await openMenu(tester);
+
+      expect(find.text('Context'), findsNothing);
+      expect(find.byType(PopupMenuDivider), findsNothing);
+    });
+
+    testWidgets('and with room the same labelled action is a button, not an '
+        'item', (tester) async {
+      await pumpHeader(
+        tester,
+        actions: [RoomAction(label: 'Mark done', onTap: () {})],
+        moreItems: [
+          RoomMenuItem(value: 'later', label: 'Send to Later', onTap: () {}),
+        ],
+      );
+
+      expect(find.widgetWithText(TextButton, 'Mark done'), findsOneWidget);
+
+      await openMenu(tester);
+
+      // One item, and it is the room's own. Nothing folded, so nothing is
+      // divided off.
+      expect(find.byType(PopupMenuItem<String>), findsOneWidget);
+      expect(find.text('Send to Later'), findsOneWidget);
+      expect(find.byType(PopupMenuDivider), findsNothing);
     });
   });
 

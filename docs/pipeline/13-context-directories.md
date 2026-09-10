@@ -14,9 +14,10 @@ no MCP tool and no chat model in this stage — it is `dart:io`, a walk, a
 chunker and the embedding server on `:8081`.
 
 > **Live as of schema v15.** Registration, the reconcile pass, the two derived
-> indexes, the sync-tail enqueue, the Claude conventions, the per-file digests
-> and the per-directory brief all run. The linking UI and the retrieval into
-> drafts are later phases of the same round and are documented as they land.
+> indexes, the sync-tail enqueue, the Claude conventions, the per-file digests,
+> the per-directory brief, the linking panel and the retrieval into drafts all
+> run. What is still owed to the round: the other consumers — storylines,
+> recaps, search and naming a file for the next draft.
 
 Everything below calls a per-file summary a **digest**, which is what the
 column, the work kind and the code call it. The Settings switch for this is
@@ -572,6 +573,151 @@ scope answers `const []` before any read at all: a caller that cannot say
 which room it is on must not be handed one client's notes for another client's
 reply.
 
+## Serving: the context pack
+
+Everything above is the index. This is the read a REPLY makes against it —
+`ContextRetriever.packFor` (`app/lib/services/context/context_retriever.dart`),
+run **once** per draft by `DraftHandler` and handed to both model calls, for
+the reason the attachment excerpts are: the decision and the draft ask about
+the same message on the same thread, and a second pass would be a second
+embedding call for an answer that cannot come back different.
+
+It answers a `ContextPack`: a brief line per directory, an ordered list of
+guidance blocks, the passages that fit, the names of the skills that matched,
+and `directories` — the display names of the directories that CONTRIBUTED one
+of those, in scope order and said once each. Contributed, not "in scope": a
+room can link a project registered a minute ago that holds no brief and
+nothing indexed, and `directories` is what the provenance row and the
+composer's caption name. A caption saying a reply was drafted from «acme»
+when not one of acme's words reached the prompt is a claim about the model
+that is not true, so `pack.directories` non-empty implies something rendered.
+
+**Nothing in it throws.** A draft is the product and the directory is what
+makes one better, so every failure returns the pack built so far — a
+directory whose brief was read and whose index then fell over still says what
+the project is. The handler above notes the reason as `context_error`.
+
+The steps, in this order and no other:
+
+1. **Scope.** `dirIdsInScope(source, conversationKey, storylineIds)` — this
+   thread's own links UNION every link on a storyline it belongs to. An empty
+   scope answers `ContextPack.empty` **before any other read**: no query, no
+   vector, no embedding POST. That is the overwhelming majority of rooms.
+2. **The directories.** One row each, skipping a link whose directory was
+   removed between the two reads. Any whose `walked_at` is null or older than
+   `ContextTuning.staleAfter` (10 minutes) is `requeueWork`'d for a reconcile
+   and **never awaited** — the reply being drafted reads what the last pass
+   indexed, and waiting on a file-system walk would put a folder between a
+   person and their draft.
+3. **The briefs.** `ContextBrief.decode` per directory: `about`, `key_facts`
+   and `vocabulary` become the brief line; `reply_guidance` becomes a
+   `guidance` block. With more than one directory in scope every guidance
+   label is suffixed `«name»`, because two projects both carrying standing
+   notes would otherwise hand the model two identically-labelled blocks of
+   contradictory instructions.
+4. **Root `CLAUDE.md`, only when there is no brief.** The brief was compiled
+   FROM those notes (§The brief), so both would be the same instructions
+   twice — once summarised and once whole. Clamped to
+   `ContextTuning.rootClaudeMdCap` (800).
+5. **The `LIMIT 1` guard.** `hasChunksInScope` before any vector work, the
+   same rung `AttachmentRetriever` keeps: a directory registered a minute ago,
+   or one holding nothing but binaries, has a brief and no passages.
+6. **The query vector.** `replyToQueryVector` — the reply-to message's own
+   stored vector under the current model tag, else the same card re-embedded
+   under `documentPrefix`, never the query prefix. It is a top-level function
+   in `attachment_retriever.dart` because the documents and the directories
+   are two corpora searched with ONE question, and a draft that embedded the
+   same card twice would pay for one answer twice. `DraftHandler` makes that
+   literal: it memoises one call to it and passes the closure to both
+   retrievers as `queryVector`, and each of them calls it only after its own
+   `LIMIT 1` guard, so a room with an empty index still costs no POST. A
+   retriever handed no closure builds its own vector. A null vector costs the
+   passages and the skills; the brief still stands.
+7. **Fusion, per PASSAGE.** `chunkKnn(k: k * 2)` and `keywordChunks` are
+   merged on `chunk_id` with the app's own arithmetic —
+   `0.5·vectorRelevance(distance) + 0.5·keywordRelevance(bm25, best,
+   coverage)`, floor `SearchTuning.minScore` — and NOT with RRF, for the
+   reason `05-embeddings.md` gives. Per passage rather than per file is the
+   difference from `fuseDocuments`: a search names documents, and this quotes
+   paragraphs. The keyword text is the extraction's `topics + project +
+   organizations` plus the subject with its reply markers off; a message with
+   neither is answered by the vector half alone. Ties break on `chunk_id`, so
+   two identical drafts read the same prompt.
+8. **The order after the floor**: files the caller named in `consultFirst`
+   float to the front (stable, and exempt from the floor — a person saying
+   "read this" outranks a score), then at most `perFile` passages per file,
+   then the top `k`, then a character budget of 2,500. A passage that does not
+   fit is SKIPPED rather than ending the list, so one long passage cannot hide
+   the three short ones behind it. The 80-character allowance per passage is
+   the bracket line the renderer writes above it.
+9. **The digest passage is NOT dropped** — the one place this differs from the
+   attachment path (D7). An attachment digest summarises a stranger's
+   document and the fence above it promises excerpts; a directory digest
+   summarises the OWNER'S own file and is very often the only passage that
+   answers a question about what an analysis found. It rides, labelled
+   `digest (a model's summary of this file)`.
+10. **Skills.** `ContextStore.skillVectors(dirIds)` returns every `kind =
+    'skill'` row in scope that has a `desc_embedding`, with the blob; the
+    cosine distance from the query vector decides. At most
+    `ContextTuning.maxSkills` (2) within `skillMaxDistance` (0.60) — looser
+    than the passage floor, because a skill's description is one sentence
+    about a KIND of message being compared against a whole message card. The
+    block is the description then the body, clamped to `skillBodyCap` (600):
+    a model reading the steps without the sentence saying when they apply is
+    reading steps for nothing. The NAME is resolved before a slot is spent,
+    not after: a skill with neither a frontmatter name nor a folder above it
+    cannot be rendered, and one that took a slot and then dropped out of it
+    would cost the second-nearest skill its place for a block nobody sees.
+11. **Nested `CLAUDE.md`.** For each kept passage's file, its `claude_chain`
+    minus the root entry, de-duplicated in first-seen order and keyed by
+    directory. Clamped to `nestedClaudeMdCap` (400). Claude Code's own
+    on-demand rule: notes beside a file apply to that file, and are read when
+    it is.
+12. **Rules.** `ContextStore.rulesFor(dirId)` reads the rule rows of a
+    directory as rules — a project is tens of thousands of files of which a
+    handful are rules, and this runs on every draft that kept a passage, so
+    the predicate belongs in the query rather than in Dart. One applies when
+    any glob in its `paths_json` matches any kept passage's rel path **in its
+    own directory** —
+    `docs/**` in one project has nothing to say about another project's
+    `docs/`. A malformed list or a glob `package:glob` will not parse means
+    "this rule does not apply here", never a draft that failed. Clamped to
+    `ruleBodyCap` (400).
+
+**Guidance order in the pack**: the brief's `reply_guidance`, the root notes
+(when there is no brief), the nested notes, the matched skills, the rules.
+Broad to narrow, which is the order a person would read them in.
+
+## Linking
+
+`context_links` is the only table tying a directory to anything, and the panel
+that writes it is the sixth `SidePanel` kind, `ContextPanel`
+(`app/lib/widgets/context_panel.dart`). A **Context** action on the thread
+header and on the storyline header opens it beside the room; from a thread
+that is itself beside, it replaces that thread, the rule every side panel
+follows. The action's label carries the count — `Context · 2` — because it is
+the tooltip on an icon button and a count nobody hovers is a count nobody
+reads.
+
+The body draws the WHOLE library with a switch each, not only what is linked:
+the question a person opens it to answer is "should this room read that
+project?", and a list of the answers cannot be used to answer it. A thread
+also lists, in muted type and with no switch, what it inherits from its
+storylines — that is not this thread's link to turn off, and a switch here
+would unlink somebody else's storyline from inside a room that merely benefits
+from it.
+
+**Add directory… inside a room registers AND links.** Pressing Add there is
+how a person says "read this here"; registering the folder and leaving the
+switch off would answer a question nobody asked
+(`ContextDirectoriesActions.addDirectoryTo`). **Manage directories in
+Settings ›** opens the library, which is where a directory is re-read,
+renamed or removed.
+
+Two providers back the panel, both re-read on every activity event like the
+library is: `contextLinksProvider(scope)` for the switches, and
+`contextInheritedProvider(target)` for the muted lines.
+
 ## Where it sits in the drain
 
 The enqueue is at the tail of the mail sync
@@ -668,6 +814,23 @@ that call.
 - `app/lib/services/llm/context_digest_task.dart`,
   `app/lib/services/llm/context_brief_task.dart` — the two prompts and their
   schemas.
+- `app/lib/services/context/context_retriever.dart` — `ContextTuning`,
+  `ContextPack` and `packFor`: the read a reply makes.
+- `app/lib/services/context/context_pack_render.dart` — the three blocks as
+  the model reads them.
+- `app/lib/models/draft_provenance.dart` — `drafts.context_json` and the
+  composer's caption.
+- `app/lib/services/attachments/attachment_retriever.dart` —
+  `replyToQueryVector`, shared by both retrievals.
+- `app/lib/services/draft_handler.dart` — one pack per draft, both prompts,
+  the stored provenance and the activity keys.
+- `app/lib/services/llm/draft_task.dart`,
+  `app/lib/services/llm/reply_decision_task.dart` — the three fences and the
+  widened invention rule.
+- `app/lib/widgets/context_panel.dart`, `app/lib/widgets/side_panel.dart` —
+  the link panel and the sixth panel kind.
+- `app/lib/widgets/thread_detail_panel.dart`,
+  `app/lib/widgets/storyline_timeline.dart` — the **Context** room action.
 - `app/lib/services/llm/model_slots.dart` — the two fast-slot stage rows.
 - `app/lib/services/sync_service.dart` — the tail enqueue.
 - `app/lib/services/ai_worker.dart` — `local` in `_sources`.

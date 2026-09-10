@@ -648,6 +648,90 @@ void main() {
       );
       expect(await store.skillsNeedingDescEmbedding(atlas), isEmpty);
     });
+
+    test('the skills a reply matches against are the ones with a vector',
+        () async {
+      final ridge = await store.registerDirectory(path: '/r',
+          displayName: 'ridge');
+      final embedded = await store.upsertFile(
+        dirId: atlas,
+        relPath: '.claude/skills/rate-quote/SKILL.md',
+        size: 400,
+        mtime: '2026-09-09T09:00:00.000Z',
+        sha256: 'sha-a',
+        kind: 'skill',
+        claudeChain: const [],
+        description: 'Quote a renewal rate.',
+        textChars: 400,
+      );
+      // A skill still waiting for its vector, a plain document, and a skill
+      // in another project: three ways to be out of this answer.
+      await store.upsertFile(
+        dirId: atlas,
+        relPath: '.claude/skills/blank/SKILL.md',
+        size: 400,
+        mtime: '2026-09-09T09:00:00.000Z',
+        sha256: 'sha-b',
+        kind: 'skill',
+        claudeChain: const [],
+        description: 'Not embedded yet.',
+        textChars: 400,
+      );
+      await seedFile(atlas, 'docs/pricing.md', sha: 'sha-c');
+      final elsewhere = await store.upsertFile(
+        dirId: ridge,
+        relPath: '.claude/skills/other/SKILL.md',
+        size: 400,
+        mtime: '2026-09-09T09:00:00.000Z',
+        sha256: 'sha-d',
+        kind: 'skill',
+        claudeChain: const [],
+        description: 'Another project entirely.',
+        textChars: 400,
+      );
+      await store.setFileDescEmbedding(
+          embedded, Uint8List.fromList([1, 2, 3, 4]));
+      await store.setFileDescEmbedding(
+          elsewhere, Uint8List.fromList([5, 6, 7, 8]));
+
+      final rows = await store.skillVectors([atlas]);
+
+      expect(rows, hasLength(1));
+      expect(rows.single.file.id, embedded);
+      expect(rows.single.file.relPath,
+          '.claude/skills/rate-quote/SKILL.md');
+      expect(rows.single.embedding, Uint8List.fromList([1, 2, 3, 4]));
+
+      // An empty scope is answered before any read, on `chunkKnn`'s rule.
+      expect(await store.skillVectors(const []), isEmpty);
+    });
+
+    test('the rules of a project come back as rules, and nothing else does',
+        () async {
+      // The read a draft makes once it has kept a passage. Filtering a whole
+      // project's file list in Dart is the same answer off a table scan, and
+      // this runs on every draft.
+      final atlas = await store.registerDirectory(path: '/a',
+          displayName: 'atlas');
+      final ridge = await store.registerDirectory(path: '/r',
+          displayName: 'ridge');
+      final pricing = await seedFile(atlas, '.claude/rules/pricing.md',
+          kind: 'rule', sha: 'sha-a');
+      final source = await seedFile(atlas, '.claude/rules/source.md',
+          kind: 'rule', sha: 'sha-b');
+      await seedFile(atlas, 'docs/pricing.md', sha: 'sha-c');
+      await seedFile(atlas, '.claude/skills/rate/SKILL.md',
+          kind: 'skill', sha: 'sha-d');
+      await seedFile(ridge, '.claude/rules/other.md',
+          kind: 'rule', sha: 'sha-e');
+
+      final rules = await store.rulesFor(atlas);
+
+      // Path order, so the guidance a draft is handed reads the same way
+      // twice.
+      expect([for (final rule in rules) rule.id], [pricing, source]);
+      expect([for (final rule in rules) rule.kind], ['rule', 'rule']);
+    });
   });
 
   group('passages', () {

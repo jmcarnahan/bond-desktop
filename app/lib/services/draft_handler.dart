@@ -1,12 +1,16 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import '../data/message_store.dart';
+import '../models/draft_provenance.dart';
 import '../models/message_models.dart';
 import 'activity_log.dart';
 import 'ai_worker.dart';
 import 'attachments/attachment_markers.dart';
 import 'attachments/attachment_retriever.dart';
+import 'context/context_retriever.dart';
 import 'llm/draft_task.dart';
+import 'llm/embeddings_client.dart';
 import 'llm/json_task.dart';
 import 'llm/llm_client.dart';
 import 'llm/reply_decision_task.dart';
@@ -60,6 +64,20 @@ class DraftHandler extends WorkHandler {
   /// predates retrieval, and any future caller with no embedder, gets.
   final AttachmentRetriever? _attachments;
 
+  /// What the owner's own registered directories know about this message, or
+  /// null in a build with none. Nullable on [_attachments]' reasoning: a
+  /// handler built without one drafts exactly as it did before this existed.
+  final ContextRetriever? _contextDirs;
+
+  /// The embedder the two retrievers below are searched with, so that the
+  /// message being answered is turned into a vector ONCE for both of them.
+  ///
+  /// The handler holds it rather than either retriever, because neither of
+  /// them can know the other is about to ask the same question. Null leaves
+  /// each retriever to build its own — which is what a handler assembled
+  /// without an embedder, and every test that predates this, gets.
+  final EmbeddingsClient? _embeddings;
+
   /// Where this stage lands for the home screen. Defaulted to the disabled
   /// recorder, so a test that builds this handler writes nothing extra.
   final PipelineProgress _progress;
@@ -69,8 +87,19 @@ class DraftHandler extends WorkHandler {
     this._client, {
     ActivityLog? activityLog,
     this._attachments,
+    // NAMED `contextDirs` rather than taken as `this._contextDirs`: around
+    // this handler `context`, `contextDirs` and `contextJson` are three
+    // different things, and the call site reads better saying which one it is
+    // handing over.
+    ContextRetriever? contextDirs,
+    EmbeddingsClient? embeddings,
     this._progress = const PipelineProgress.disabled(),
-  }) : _log = activityLog ?? ActivityLog.disabled();
+  })  :
+        // ignore: prefer_initializing_formals
+        _contextDirs = contextDirs,
+        // ignore: prefer_initializing_formals
+        _embeddings = embeddings,
+        _log = activityLog ?? ActivityLog.disabled();
 
   @override
   String get kind => 'draft';
@@ -163,13 +192,30 @@ class DraftHandler extends WorkHandler {
     // The thread's ids are passed rather than left to be read: this thread is
     // the thread AS IT WAS when the message landed, and a document attached
     // after it must not be quoted in the answer to it.
+    //
+    // And ONE embedding, for the same reason again. The two retrievals below
+    // search two different indexes with the SAME question — what is this
+    // message about — and each of them would otherwise embed the card itself
+    // when the queue has not reached it yet. The closure is memoised on the
+    // future rather than the value, so two awaits of it are one POST even
+    // when they overlap; it is passed rather than called here, because each
+    // retriever's cheap `LIMIT 1` guard stands in front of it and a thread
+    // with neither documents nor directories must still cost nothing.
+    final vector = _queryVectorFor(source, id);
+
     final excerpts = await _excerptsFor(
       source,
       key,
       id,
       threadMessageIds: [for (final message in thread) message.id],
       pinnedFirst: _pinnedIdsFrom(item['payload_json']),
+      queryVector: vector,
     );
+
+    // ONE pack, for the same reason there is one retrieval: both calls below
+    // ask about the same message on the same thread, and the directories have
+    // not changed between the two.
+    final pack = await _packFor(source, key, id, queryVector: vector);
 
     final decision = await runTask(
       _client,
@@ -179,6 +225,7 @@ class DraftHandler extends WorkHandler {
         message: replyTo,
         aboutMe: aboutMe,
         attachmentExcerpts: excerpts,
+        directories: pack,
         now: DateTime.now(),
       ),
       // Zero, like every judgement in this app: the same message must get the
@@ -215,6 +262,7 @@ class DraftHandler extends WorkHandler {
         storylineSummary: await _storylineSummaryFor(source, key),
         aboutMe: aboutMe,
         attachmentExcerpts: excerpts,
+        directories: pack,
         now: DateTime.now(),
       ),
       // Zero, like extraction: pressing Regenerate should change the draft
@@ -231,6 +279,41 @@ class DraftHandler extends WorkHandler {
       throw const LlmFormatException('The local model drafted an empty reply.');
     }
 
+    // What this reply was written from, distinct and in ranked order. Three
+    // passages of one contract are one document to a reader, and three
+    // passages of one analysis are three places in one file — so the
+    // documents collapse by name and the directory files collapse by the
+    // triple that names a place.
+    final documents = <String>[];
+    for (final excerpt in excerpts) {
+      final name = excerpt.name.isEmpty ? 'a file' : excerpt.name;
+      if (!documents.contains(name)) documents.add(name);
+    }
+    final files = <({String dir, String path, String locator})>[];
+    final directoryFiles = <String>[];
+    for (final excerpt in pack.excerpts) {
+      final entry = (
+        dir: excerpt.dirName,
+        path: excerpt.relPath,
+        locator: excerpt.locator,
+      );
+      if (!files.contains(entry)) files.add(entry);
+      if (!directoryFiles.contains(excerpt.relPath)) {
+        directoryFiles.add(excerpt.relPath);
+      }
+    }
+    final provenance = DraftProvenance(
+      documents: documents,
+      // A pack that rendered nothing named nothing, whatever its own list
+      // says. The retriever is the layer that decides which directories
+      // contributed and it already answers that way; this is the belt to its
+      // braces, because the one thing the caption must never do is tell a
+      // person their reply was drafted from a project the model never read.
+      directories: pack.isEmpty ? const [] : pack.directories,
+      files: files,
+      skills: pack.skills,
+    );
+
     await _store.upsertDraft(
       source: source,
       conversationKey: key,
@@ -246,20 +329,25 @@ class DraftHandler extends WorkHandler {
               for (final option in result.options)
                 {'stance': option.stance, 'body': option.body},
             ]),
+      // The inventory of what went into the prompt, stored WITH the draft
+      // rather than only in the activity row — the composer's caption names
+      // what was read, and a caption assembled from the activity log would be
+      // a join against a table that gets pruned.
+      contextJson: provenance.isEmpty ? null : provenance.encode(),
       status: 'suggested',
     );
     await _progress.noteDraft(source, id, state: 'done');
-    // The documents this reply was written from. The `drafts` table stores no
-    // inventory of them, so the activity row is where a person can go back and
-    // see which files the model was reading — distinct names, because three
-    // passages of one contract are one document to a reader.
-    final documents = <String>{
-      for (final excerpt in excerpts)
-        excerpt.name.isEmpty ? 'a file' : excerpt.name,
-    };
     _log.note({
       'chars': result.replyBody.length,
-      if (documents.isNotEmpty) 'documents': documents.toList(),
+      // The activity row keeps its own copy, which is not a duplicate of the
+      // stored provenance: a person reading the log is asking what the app
+      // DID, and the row has to answer after the draft it belongs to has been
+      // sent, edited or thrown away.
+      if (provenance.documents.isNotEmpty) 'documents': provenance.documents,
+      if (provenance.directories.isNotEmpty)
+        'directories': provenance.directories,
+      if (directoryFiles.isNotEmpty) 'directory_files': directoryFiles,
+      if (pack.skills.isNotEmpty) 'skills': pack.skills,
     });
   }
 
@@ -276,6 +364,7 @@ class DraftHandler extends WorkHandler {
     String id, {
     required List<String> threadMessageIds,
     required List<String> pinnedFirst,
+    Future<Uint8List?> Function()? queryVector,
   }) async {
     final retriever = _attachments;
     if (retriever == null) return const [];
@@ -287,11 +376,59 @@ class DraftHandler extends WorkHandler {
         threadMessageIds: threadMessageIds,
         storylineIds: await _store.storylineIdsFor(source, key),
         pinnedFirst: pinnedFirst,
+        queryVector: queryVector,
       );
     } catch (e) {
       _log.note({'excerpts_error': '$e'});
       return const [];
     }
+  }
+
+  /// What the owner's own directories know about this message, or an empty
+  /// pack.
+  ///
+  /// [_excerptsFor]'s shape and its reasoning. The retriever swallows its own
+  /// failures and answers with the half it has; this catch is for the ones
+  /// underneath it — a database that went away, a storyline read that threw —
+  /// and it is noted rather than raised because a reply written without the
+  /// project is still a reply.
+  Future<ContextPack> _packFor(
+    String source,
+    String key,
+    String id, {
+    Future<Uint8List?> Function()? queryVector,
+  }) async {
+    final retriever = _contextDirs;
+    if (retriever == null) return ContextPack.empty;
+    try {
+      return await retriever.packFor(
+        source: source,
+        conversationKey: key,
+        replyToId: id,
+        storylineIds: await _store.storylineIdsFor(source, key),
+        queryVector: queryVector,
+      );
+    } catch (e) {
+      _log.note({'context_error': '$e'});
+      return ContextPack.empty;
+    }
+  }
+
+  /// One closure that answers with this message's query vector, however many
+  /// times it is called, or null when there is no embedder to build one with.
+  ///
+  /// The memo holds the FUTURE and not the value, which is what makes it
+  /// correct rather than merely thrifty: two retrievers awaiting the same
+  /// unfinished POST both get that POST's answer, where a memo on the value
+  /// would let the second one start a duplicate before the first had
+  /// returned. A null answer is memoised too — an embedding server that is
+  /// down is down for both corpora, and asking it twice is two timeouts in
+  /// front of one draft.
+  Future<Uint8List?> Function()? _queryVectorFor(String source, String id) {
+    final embeddings = _embeddings;
+    if (embeddings == null) return null;
+    Future<Uint8List?>? cached;
+    return () => cached ??= replyToQueryVector(_store, embeddings, source, id);
   }
 
   /// The documents the user named with "Use in reply", off the work item.

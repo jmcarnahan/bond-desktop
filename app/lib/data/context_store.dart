@@ -424,6 +424,23 @@ class ContextStore {
     return [for (final row in rows) ContextFile.fromRow(row.data)];
   }
 
+  /// Just the rule files of one directory, in path order.
+  ///
+  /// [filesFor] with a `kind` filter in Dart is the same answer and a very
+  /// different read: this runs on every draft that keeps a passage, and a
+  /// registered project is tens of thousands of rows of which four are rules.
+  /// The predicate belongs where the rows are.
+  Future<List<ContextFile>> rulesFor(String dirId) async {
+    final rows = await db
+        .customSelect(
+          "SELECT * FROM context_files WHERE dir_id = ? AND kind = 'rule' "
+          'ORDER BY rel_path',
+          variables: _args([dirId]),
+        )
+        .get();
+    return [for (final row in rows) ContextFile.fromRow(row.data)];
+  }
+
   Future<ContextFile?> fileByPath(String dirId, String relPath) async {
     final rows = await db
         .customSelect(
@@ -692,6 +709,41 @@ class ContextStore {
         (
           id: row.data['id'] as int,
           description: row.data['description'] as String,
+        ),
+    ];
+  }
+
+  /// Every skill in [dirIds] that HAS a description vector, with the vector.
+  ///
+  /// The mirror of [skillsNeedingDescEmbedding], and the read a draft makes:
+  /// the retriever compares the message being answered against each skill's
+  /// description and offers the nearest one or two as guidance. The whole row
+  /// comes back beside the blob because the caller needs the rel path (to
+  /// name the skill and to read its body) as well as the numbers.
+  ///
+  /// The blob is NOT on [ContextFile]. It rides here instead, in the one read
+  /// that wants it, so that every list in the app that hydrates a file row
+  /// does not carry three kilobytes of floats per skill through it.
+  ///
+  /// An empty scope answers `const []` before any read, on [chunkKnn]'s rule.
+  Future<List<({ContextFile file, Uint8List embedding})>> skillVectors(
+    List<String> dirIds,
+  ) async {
+    if (dirIds.isEmpty) return const [];
+    final rows = await db
+        .customSelect(
+          'SELECT * FROM context_files '
+          'WHERE dir_id IN (${_placeholders(dirIds.length)}) '
+          "  AND kind = 'skill' AND desc_embedding IS NOT NULL "
+          'ORDER BY rel_path',
+          variables: _args(dirIds),
+        )
+        .get();
+    return [
+      for (final row in rows)
+        (
+          file: ContextFile.fromRow(row.data),
+          embedding: row.data['desc_embedding']! as Uint8List,
         ),
     ];
   }

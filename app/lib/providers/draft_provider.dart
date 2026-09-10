@@ -224,6 +224,14 @@ class DraftState {
     return text.isEmpty ? null : text;
   }
 
+  /// The stored inventory of what this draft was written from — the D11 JSON
+  /// the handler wrote. Null on a draft written before there was one, which
+  /// is what leaves the composer on its constant caption.
+  String? get contextJson {
+    final value = draft?['context_json'] as String? ?? '';
+    return value.isEmpty ? null : value;
+  }
+
   /// The model's one-sentence account of what this reply answers, for the
   /// provenance tooltip.
   String? get evidence {
